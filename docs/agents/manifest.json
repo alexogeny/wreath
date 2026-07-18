@@ -1,0 +1,256 @@
+{
+  "schema_version": 1,
+  "project": "neo",
+  "python": ">=3.14",
+  "status": "pre-1.0",
+  "entrypoints": {
+    "human_docs": "docs/index.md",
+    "agent_docs": "docs/agents/index.md",
+    "llm_map": "docs/llms.txt",
+    "repository_rules": "AGENTS.md",
+    "site_config": "mkdocs.yml"
+  },
+  "commands": {
+    "tests": "uv run pytest",
+    "lint": "uv run ruff check .",
+    "types": "uv run ty check",
+    "docs_install": "uv sync --group docs",
+    "docs_build": "uv run --group docs mkdocs build --strict",
+    "server_sanitizer_build": "uv run python tools/sanitizers/build_server.py",
+    "core_sanitizer_build": "uv run python tools/sanitizers/build_core.py",
+    "postgres_sanitizer_build": "uv run python tools/sanitizers/build_postgres.py"
+  },
+  "subsystems": [
+    {
+      "name": "application",
+      "guide": "docs/concepts/request-lifecycle.md",
+      "sources": [
+        "src/neo/app.py",
+        "src/neo/router.py",
+        "src/neo/state.py"
+      ],
+      "tests": [
+        "tests/test_app.py"
+      ]
+    },
+    {
+      "name": "http",
+      "guide": "docs/guides/requests-responses.md",
+      "sources": [
+        "src/neo/request.py",
+        "src/neo/response.py",
+        "src/neo/background.py",
+        "src/neo/http.py",
+        "src/neo/http_client.py",
+        "src/neo/webhooks.py",
+        "src/neo/_client_codec.py",
+        "src/neo/_pure/http_client.py",
+        "src/neo/_native/_clientmodule.c",
+        "src/neo/_native/http.c"
+      ],
+      "tests": [
+        "tests/test_request.py",
+        "tests/test_response.py",
+        "tests/test_background.py",
+        "tests/test_http_client.py",
+        "tests/test_http_client_protocol.py",
+        "tests/test_webhooks.py",
+        "tests/test_native_parity.py"
+      ]
+    },
+    {
+      "name": "routing",
+      "guide": "docs/guides/routing.md",
+      "sources": [
+        "src/neo/routing.py",
+        "src/neo/_pure/router.py",
+        "src/neo/_native/router.c",
+        "src/neo/_pure/dtrouter.py",
+        "src/neo/_native/dtrouter.c"
+      ]
+    },
+    {
+      "name": "binding",
+      "guide": "docs/guides/binding.md",
+      "sources": [
+        "src/neo/binding.py",
+        "src/neo/_native/validate.c"
+      ],
+      "tests": [
+        "tests/test_binding.py",
+        "tests/test_native_validate_parity.py"
+      ],
+      "policy": "Native body validation executes a plan compiled once in Python; the pure binding.validate stays the reference and native must match it byte-for-byte (errors included); recursive dataclasses fall back to pure"
+    },
+    {
+      "name": "typegen",
+      "guide": "docs/guides/typegen.md",
+      "sources": [
+        "src/neo/typegen/",
+        "src/neo/_pure/typegen.py",
+        "src/neo/openapi.py"
+      ],
+      "tests": [
+        "tests/test_typegen.py",
+        "tests/test_typegen_cli.py",
+        "tests/test_openapi.py",
+        "tests/typegen/"
+      ],
+      "policy": "Python owns annotation analysis; renderers consume prevalidated tuples and are byte-identical pure/native; generation adds no request-time work; the native renderer is benchmark-gated and currently not justified"
+    },
+    {
+      "name": "configuration",
+      "guide": "docs/guides/configuration.md",
+      "sources": [
+        "src/neo/config.py",
+        "src/neo/_pure/env.py",
+        "src/neo/_native/env.c"
+      ],
+      "tests": [
+        "tests/test_config.py"
+      ]
+    },
+    {
+      "name": "middleware",
+      "guide": "docs/guides/middleware-errors.md",
+      "sources": [
+        "src/neo/middleware/"
+      ],
+      "decision": "docs/decisions/0009-middleware-fusion-execution-model.md"
+    },
+    {
+      "name": "auth",
+      "guide": "docs/guides/auth.md",
+      "sources": [
+        "src/neo/auth/",
+        "src/neo/_pure/authz.py",
+        "src/neo/_native/authz.c"
+      ]
+    },
+    {
+      "name": "postgres",
+      "guide": "docs/guides/postgres.md",
+      "internals": "docs/native/postgres.md",
+      "sources": [
+        "src/neo/postgres.py",
+        "src/neo/_pure/postgres.py",
+        "src/neo/_native/postgres/"
+      ],
+      "tests": [
+        "tests/postgres/"
+      ],
+      "policy": " Connection.map/Statement.map run one Sync-delimited operation per input in input order (no coalescing/dedup); Connection.transaction() orders reads before dependent writes and discards a connection whose synchronization cannot be proven."
+    },
+    {
+      "name": "server",
+      "guide": "docs/guides/server.md",
+      "sources": [
+        "src/neo/server.py",
+        "src/neo/cli.py",
+        "src/neo/_cli.py",
+        "src/neo/_devserver.py",
+        "src/neo/__main__.py",
+        "src/neo/_pure/server.py",
+        "src/neo/_native/server_http1.c",
+        "src/neo/_native/server_http2.c",
+        "src/neo/_native/http3_asgi.c"
+      ],
+      "tests": [
+        "tests/test_cli.py",
+        "tests/test_devserver.py",
+        "tests/test_server.py",
+        "tests/test_server_protocol.py",
+        "tests/test_server_fuzz.py",
+        "tests/test_server_websocket.py"
+      ]
+    },
+    {
+      "name": "testing",
+      "guide": "docs/guides/websockets-static-testing.md",
+      "sources": [
+        "src/neo/testing.py",
+        "src/neo/websocket.py",
+        "src/neo/staticfiles.py"
+      ]
+    },
+    {
+      "name": "orm",
+      "guide": "docs/guides/orm.md",
+      "reference": "docs/reference/orm.md",
+      "sources": [
+        "src/neo/orm/",
+        "src/neo/_native/postgres/model.c",
+        "src/neo/_native/postgres/hydrate.c",
+        "src/neo/_native/orm_shape.c"
+      ],
+      "tests": [
+        "tests/orm/",
+        "tests/orm/test_native_shape_parity.py"
+      ],
+      "policy": "Attribute access never performs I/O; raw SQL and neo.postgres stay unchanged; no migrations or DDL; pure and native storage must match behavior, not representation; the native query cache-key (orm_shape) must produce bytes identical to _shape_of_pure or the plan cache splits"
+    },
+    {
+      "name": "performance",
+      "guide": "docs/internals/performance.md",
+      "sources": [
+        "benchmarks/"
+      ],
+      "policy": "Retain raw repeated trials; bundled generator is development-only"
+    },
+    {
+      "name": "templates",
+      "guide": "docs/guides/templates.md",
+      "sources": [
+        "src/neo/templates.py",
+        "src/neo/_pure/templates.py",
+        "src/neo/_native/templates.c"
+      ],
+      "tests": [
+        "tests/test_template_parity.py"
+      ],
+      "policy": "Safe HTML templates escape by default (Markup opts out). Parsing/compilation is startup-time Python producing a flat opcode tape; the native engine renders the tape byte-identically to _pure.templates.render_tape and raises the same errors. No arbitrary Python evaluation."
+    },
+    {
+      "name": "snapshot",
+      "guide": "docs/guides/caching.md",
+      "sources": [
+        "src/neo/snapshot.py",
+        "src/neo/_pure/snapshot.py"
+      ],
+      "tests": [
+        "tests/test_snapshot_parity.py"
+      ],
+      "policy": "Read-mostly application cache by atomic generation publication. Reads perform no hidden I/O; misses are explicit. Refresh is single-flight and failure preserves the previous generation. Shipped pure-first (dict-backed read path); facade selects a native SnapshotCache only if one is measured in."
+    }
+  ],
+  "invariants": "docs/agents/contracts.md",
+  "playbooks": "docs/agents/playbooks.md",
+  "subsystems[5]": {
+    "tests": [
+      "tests/test_middleware.py",
+      "tests/test_request_pipeline.py",
+      "tests/test_security_middleware.py",
+      "tests/test_csrf_middleware.py",
+      "tests/test_cache_control.py",
+      "tests/test_compression_middleware.py",
+      "tests/test_proxy_middleware.py",
+      "tests/test_ratelimit_middleware.py",
+      "tests/test_request_id_middleware.py",
+      "tests/test_timing_middleware.py",
+      "tests/test_webpolicy_parity.py"
+    ]
+  },
+  "subsystems[0]": {
+    "tests": [
+      "tests/test_app.py",
+      "tests/test_request_pipeline.py"
+    ]
+  },
+  "subsystems[2]": {
+    "tests": [
+      "tests/test_routing_parity.py",
+      "tests/test_auth_pipeline.py",
+      "tests/test_request_pipeline.py"
+    ]
+  }
+}

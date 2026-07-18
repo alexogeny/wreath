@@ -1,0 +1,143 @@
+site_name: Wreath Documentation
+site_description: Guides, cookbook, and API reference for the Wreath ASGI framework and native server
+site_url: https://neo-asgi.dev/
+repo_name: neo
+repo_url: https://github.com/neo-asgi/neo
+strict: true
+# Per-version release notes are generated (docs/release_notes/<version>.md) and
+# linked from release_notes/index.md rather than listed individually in the nav;
+# exempt them from the strict "not in nav" check.
+not_in_nav: |
+  /release_notes/[0-9]*.md
+# Plans and ADRs are hidden (and gitignored) until they stabilise: exclude them
+# from the build so strict mode does not flag them as missing from the nav.
+exclude_docs: |
+  plans/
+  decisions/
+  agents/*.json
+  agents/*.md
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.tabs.link
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            show_signature_annotations: true
+            separate_signature: true
+            members_order: source
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation and first app: getting-started/index.md
+      - Project structure and deployment: getting-started/deployment.md
+  - Guides:
+      - Routing: guides/routing.md
+      - Requests and responses: guides/requests-responses.md
+      - Binding, validation, and dependencies: guides/binding.md
+      - Middleware: guides/middleware.md
+      - Authentication and authorization: guides/auth.md
+      - WebSockets: guides/websockets.md
+      - Native server and protocols: guides/server.md
+      - Outbound HTTP and webhooks: guides/http-client.md
+      - PostgreSQL: guides/postgres.md
+      - ORM: guides/orm.md
+      - Templates: guides/templates.md
+      - Caching: guides/caching.md
+      - Compression: guides/compression.md
+      - Static files: guides/static-files.md
+      - Configuration and state: guides/config-state.md
+      - OpenAPI and typed clients: guides/openapi-typegen.md
+      - Testing: guides/testing.md
+  - Cookbook:
+      - Overview: cookbook/index.md
+      - Deploy behind a proxy: cookbook/recipes/behind-a-proxy.md
+      - Rate-limit an endpoint: cookbook/recipes/rate-limiting.md
+      - Handle file uploads: cookbook/recipes/file-uploads.md
+      - Run work after the response: cookbook/recipes/background-jobs.md
+      - Manage a database pool: cookbook/recipes/database-lifespan.md
+      - For coding agents:
+          - Overview: cookbook/agents/index.md
+          - The gates: cookbook/agents/checks.md
+          - Add an endpoint or model: cookbook/agents/add-an-endpoint.md
+          - Verify a change: cookbook/agents/verify-a-change.md
+          - Documenting a module: cookbook/agents/documenting-a-module.md
+  - API reference:
+      - Application: reference/app.md
+      - Router: reference/router.md
+      - Request: reference/request.md
+      - Responses: reference/response.md
+      - Binding and validation: reference/binding.md
+      - Middleware: reference/middleware.md
+      - Authentication: reference/auth.md
+      - Authorization: reference/authorization.md
+      - WebSockets: reference/websocket.md
+      - Native server: reference/server.md
+      - PostgreSQL: reference/postgres.md
+      - ORM: reference/orm.md
+      - Outbound HTTP client: reference/http_client.md
+      - Webhooks: reference/webhooks.md
+      - Templates: reference/templates.md
+      - Application cache: reference/cache.md
+      - Cache-Control policies: reference/cache_control.md
+      - Compression: reference/compression.md
+      - Background tasks: reference/background.md
+      - Static files: reference/staticfiles.md
+      - Testing: reference/testing.md
+      - Configuration: reference/config.md
+      - State: reference/state.md
+      - OpenAPI: reference/openapi.md
+      - Client type generation: reference/typegen.md
+      - Exceptions: reference/exceptions.md
+      - CLI: reference/cli.md
+      - Reserved modules: reference/roadmap.md
+  - Release notes: release_notes/index.md
+  # Development plans (docs/plans/) and architecture decisions (docs/decisions/)
+  # are omitted from the nav and gitignored while they stabilise; restore their
+  # sections here when they are ready to publish.

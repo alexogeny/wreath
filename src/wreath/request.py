@@ -1,0 +1,451 @@
+"""Lazy ASGI request wrapper."""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any, cast
+
+from ._auth.models import Identity
+from ._codecs import parse_cookies, parse_qs
+from ._headers import build_header_map, find_header
+from ._json import loads as _json_loads
+from ._multipart import parse as multipart_parse
+from .exceptions import PayloadTooLarge
+from .state import State
+
+
+@dataclass(frozen=True, slots=True)
+class RequestLimits:
+    """What one request may buffer in memory before it is refused.
+
+    These bound the framework side of a request, and so apply behind any
+    conforming ASGI server -- `wreath.server`'s own limits stop a body at the
+    socket, but Uvicorn and friends will hand over whatever arrives. They are
+    enforced while receiving, before an oversized body is joined or a part is
+    copied out of it.
+
+    Defaults are conservative but chosen not to break working applications, and
+    are a pre-1.0 decision: they may tighten before 1.0. Raise them on the
+    application (`Wreath(limits=...)`) rather than working around them.
+    """
+
+    #: Total bytes `Request.body()` will buffer. Refused with 413.
+    max_body_bytes: int = 16 * 1024 * 1024
+    #: Parts one multipart form may contain.
+    max_parts: int = 1024
+    #: Header-block bytes per multipart part.
+    max_part_header_bytes: int = 16 * 1024
+    #: Bytes one multipart part (including an uploaded file) may hold in memory.
+    max_part_bytes: int = 8 * 1024 * 1024
+    #: Aggregate bytes all retained multipart parts may hold in memory, bounding
+    #: the payload retained by parsed fields and files independently of the body
+    #: and per-part limits. Defaults to `max_body_bytes`; lower it to bound the
+    #: parse-time amplification (body plus materialized parts) more tightly.
+    max_form_memory_bytes: int = 16 * 1024 * 1024
+    #: Fields one urlencoded form body may contain. A large body is otherwise
+    #: only bounded by `max_body_bytes`, which admits millions of tiny fields;
+    #: this bounds the field count directly, refused while scanning with 413.
+    max_form_fields: int = 1024
+
+    def __post_init__(self) -> None:
+        for name in (
+            "max_body_bytes",
+            "max_parts",
+            "max_part_header_bytes",
+            "max_part_bytes",
+            "max_form_memory_bytes",
+            "max_form_fields",
+        ):
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name} must be positive")
+
+
+DEFAULT_LIMITS = RequestLimits()
+
+
+class UploadedFile:
+    """One file field from a multipart form."""
+
+    __slots__ = ("data", "field_name", "filename", "headers")
+
+    def __init__(
+        self,
+        field_name: str,
+        filename: str,
+        headers: list[tuple[bytes, bytes]],
+        data: bytes,
+    ) -> None:
+        self.field_name = field_name
+        self.filename = filename
+        self.headers = headers
+        self.data = data
+
+    @property
+    def content_type(self) -> str:
+        value = find_header(self.headers, b"content-type")
+        return value.decode("latin-1") if value else "application/octet-stream"
+
+
+class FormData:
+    """Parsed form fields plus uploaded files (first value wins per name)."""
+
+    __slots__ = ("fields", "files")
+
+    def __init__(self, fields: dict[str, str], files: dict[str, UploadedFile]) -> None:
+        self.fields = fields
+        self.files = files
+
+    def __getitem__(self, name: str) -> str:
+        return self.fields[name]
+
+    def get(self, name: str, default: str | None = None) -> str | None:
+        return self.fields.get(name, default)
+
+    def __contains__(self, name: str) -> bool:
+        return name in self.fields
+
+    def __iter__(self) -> Any:
+        return iter(self.fields)
+
+    def __len__(self) -> int:
+        return len(self.fields)
+
+
+def _multipart_boundary(content_type: bytes) -> bytes | None:
+    for fragment in content_type.split(b";"):
+        key, sep, value = fragment.strip(b" \t").partition(b"=")
+        if sep and key.strip(b" \t").lower() == b"boundary":
+            value = value.strip(b" \t")
+            if len(value) >= 2 and value.startswith(b'"') and value.endswith(b'"'):
+                value = value[1:-1]
+            return value or None
+    return None
+
+Receive = Callable[[], Awaitable[dict[str, Any]]]
+_MISSING = object()
+
+
+class Request:
+    """A deliberately small request object backed directly by an ASGI scope."""
+
+    __slots__ = (
+        "_body",
+        "_cookies",
+        "_header_map",
+        "_header_scanned",
+        "_identity",
+        "_limits",
+        "_path_params",
+        "_receive",
+        "_route_outcome",
+        "_state",
+        "_context",
+        "_scope",
+    )
+
+    def __init__(
+        self,
+        scope: Any,
+        receive: Receive,
+        path_params: dict[str, str] | None = None,
+        limits: RequestLimits = DEFAULT_LIMITS,
+    ) -> None:
+        if isinstance(scope, dict):
+            self._scope: dict[str, Any] | None = scope
+            self._context: Any | None = None
+        else:
+            self._scope = None
+            self._context = scope
+        self._receive = receive
+        self._body: bytes | object = _MISSING
+        self._cookies: dict[str, str] | object = _MISSING
+        self._header_map: dict[bytes, bytes] | None = None
+        self._header_scanned = False
+        self._path_params = path_params
+        self._identity: Identity | None = None
+        self._route_outcome: str | None = None
+        self._state: State | None = None
+        self._limits = limits
+
+    @property
+    def identity(self) -> Identity | None:
+        return self._identity
+
+    @property
+    def authenticated(self) -> bool:
+        return self._identity is not None
+
+    def _set_identity(self, identity: Identity | None) -> None:
+        self._identity = identity
+
+    @property
+    def state(self) -> State:
+        state = self._state
+        if state is None:
+            state = self._state = State()
+            # The pipeline tracks the routing outcome in a slot so that
+            # requests whose hooks never touch `state` skip the State
+            # allocation entirely; the first read materializes it here.
+            outcome = self._route_outcome
+            if outcome is not None:
+                state.route_outcome = outcome
+        return state
+
+    def _set_route_outcome(self, outcome: str) -> None:
+        self._route_outcome = outcome
+        state = self._state
+        if state is not None:
+            state.route_outcome = outcome
+
+    def _get_route_outcome(self) -> str | None:
+        # State wins when it exists: a hook may have overwritten the value.
+        state = self._state
+        if state is not None:
+            return cast("str | None", state.get("route_outcome"))
+        return self._route_outcome
+
+    @property
+    def scope(self) -> dict[str, Any]:
+        scope = self._scope
+        if scope is None:
+            context = self._context
+            assert context is not None
+            scope = self._scope = context._asgi_scope()
+        return scope
+
+    @property
+    def method(self) -> str:
+        context = self._context
+        if context is not None:
+            return context.method
+        scope = self._scope
+        assert scope is not None
+        return scope["method"]
+
+    @property
+    def path(self) -> str:
+        context = self._context
+        if context is not None:
+            return context.path
+        scope = self._scope
+        assert scope is not None
+        return scope["path"]
+
+    @property
+    def path_params(self) -> dict[str, str]:
+        params = self._path_params
+        if params is None:
+            params = self._path_params = {}
+        return params
+
+    @path_params.setter
+    def path_params(self, params: dict[str, str]) -> None:
+        self._path_params = params
+
+    @property
+    def client(self) -> tuple[str, int | None] | None:
+        context = self._context
+        if context is not None:
+            return cast("tuple[str, int | None] | None", context.client)
+        scope = self._scope
+        assert scope is not None
+        return scope.get("client")
+
+    @property
+    def scheme(self) -> str:
+        context = self._context
+        if context is not None:
+            return cast(str, context.scheme)
+        scope = self._scope
+        assert scope is not None
+        return scope.get("scheme", "http")
+
+    def _set_client(self, client: tuple[str, int | None]) -> None:
+        # ProxyHeadersMiddleware rewrites the peer from X-Forwarded-For. The
+        # write goes to the context when one backs this request so the ASGI
+        # scope is never materialized just to carry it.
+        context = self._context
+        if context is not None:
+            context._set_client(client)
+            return
+        scope = self._scope
+        assert scope is not None
+        scope["client"] = client
+
+    def _set_scheme(self, scheme: str) -> None:
+        context = self._context
+        if context is not None:
+            context._set_scheme(scheme)
+            return
+        scope = self._scope
+        assert scope is not None
+        scope["scheme"] = scheme
+
+    @property
+    def query_string(self) -> bytes:
+        context = self._context
+        if context is not None:
+            return context.query_string
+        scope = self._scope
+        assert scope is not None
+        return scope.get("query_string", b"")
+
+    @property
+    def headers(self) -> list[tuple[bytes, bytes]]:
+        context = self._context
+        if context is not None:
+            return context.headers
+        scope = self._scope
+        assert scope is not None
+        return scope.get("headers", [])
+
+    @property
+    def cookies(self) -> dict[str, str]:
+        # Parsed once and cached request-locally, like `_body` and
+        # `_header_map`: repeated reads are common (session, CSRF, auth) and
+        # each one otherwise rescanned the header list and rebuilt the dict.
+        cached = self._cookies
+        if cached is not _MISSING:
+            return cast(dict[str, str], cached)
+        header_map = self._header_map
+        value = (
+            find_header(self.headers, b"cookie")
+            if header_map is None
+            else header_map.get(b"cookie")
+        )
+        parsed: dict[str, str] = {} if value is None else parse_cookies(value)
+        self._cookies = parsed
+        return parsed
+
+    def _set_header(self, name: bytes, value: bytes) -> None:
+        # Only ProxyHeadersMiddleware needs this: it rewrites Host from a
+        # trusted X-Forwarded-Host before anything downstream reads it. The
+        # cache maintenance lives here because the caches do.
+        headers = self.headers
+        for index, (existing, _value) in enumerate(headers):
+            if existing == name:
+                headers[index] = (name, value)
+                break
+        else:
+            headers.append((name, value))
+        # Updated rather than dropped. The loop above replaces the first match
+        # and the index holds first-value-wins, so writing the new value keeps
+        # them consistent -- and ProxyHeaders is precisely the caller that has
+        # just built the index, so discarding it here would make the next
+        # consumer rebuild the whole thing.
+        if self._header_map is not None:
+            self._header_map[name] = value
+
+    def _index_headers(self) -> dict[bytes, bytes]:
+        """Materialize the first-value header index for multi-header consumers."""
+        header_map = self._header_map
+        if header_map is None:
+            header_map = self._header_map = build_header_map(self.headers)
+            self._header_scanned = True
+        return header_map
+
+    def header(self, name: str | bytes, default: str | None = None) -> str | None:
+        # ASGI servers must deliver header names already lowercased, so the
+        # raw keys are usable directly; first value wins for duplicates.
+        target = name.encode("latin-1") if isinstance(name, str) else name
+        target = target.lower()
+        header_map = self._header_map
+        if header_map is None:
+            if not self._header_scanned:
+                # A lone lookup is cheaper as a single scan than as a dict
+                # build; the map is only materialized on the second lookup.
+                self._header_scanned = True
+                value = find_header(self.headers, target)
+                return value.decode("latin-1") if value is not None else default
+            header_map = self._header_map = build_header_map(self.headers)
+        value = header_map.get(target)
+        if value is None:
+            return default
+        return value.decode("latin-1")
+
+    async def body(self) -> bytes:
+        cached = self._body
+        if cached is not _MISSING:
+            return cast(bytes, cached)
+
+        limit = self._limits.max_body_bytes
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            message = await self._receive()
+            message_type = message["type"]
+            if message_type == "http.disconnect":
+                break
+            if message_type != "http.request":
+                continue
+            body = message.get("body", b"")
+            if body:
+                # Checked before the chunk is retained and before the join, so
+                # an oversized body is refused while it is still arriving rather
+                # than after the whole thing is in memory twice. A conforming
+                # ASGI server may hand over chunks of any size, and may not
+                # have applied a limit of its own.
+                if len(body) > limit - total:
+                    self._body = b""
+                    raise PayloadTooLarge(
+                        f"request body exceeds {limit} bytes"
+                    )
+                total += len(body)
+                chunks.append(body)
+            if not message.get("more_body", False):
+                break
+
+        result = b"".join(chunks)
+        self._body = result
+        return result
+
+    async def json(self) -> Any:
+        return _json_loads(await self.body())
+
+    async def form(self) -> FormData:
+        """Parse a urlencoded or multipart request body.
+
+        Returns a :class:`FormData` mapping field names to string values,
+        with uploaded files (multipart parts carrying a filename) available
+        via :attr:`FormData.files`.
+        """
+        content_type = find_header(self.scope.get("headers", ()), b"content-type")
+        body = await self.body()
+        if content_type is not None and content_type.startswith(b"multipart/form-data"):
+            boundary = _multipart_boundary(content_type)
+            if boundary is None:
+                raise ValueError("multipart body without a boundary parameter")
+            fields: dict[str, str] = {}
+            files: dict[str, UploadedFile] = {}
+            limits = self._limits
+            retained = 0
+            for part in multipart_parse(
+                body,
+                boundary,
+                limits.max_parts,
+                limits.max_part_header_bytes,
+                limits.max_part_bytes,
+            ):
+                if part.name is None:
+                    continue
+                # Bound the aggregate payload retained across all parts, checked
+                # before this part is kept so the crossing part is refused rather
+                # than materialised into the result.
+                retained += len(part.data)
+                if retained > limits.max_form_memory_bytes:
+                    raise PayloadTooLarge(
+                        f"form parts exceed {limits.max_form_memory_bytes} bytes in memory"
+                    )
+                if part.filename is not None:
+                    files.setdefault(
+                        part.name,
+                        UploadedFile(part.name, part.filename, part.headers, part.data),
+                    )
+                else:
+                    fields.setdefault(part.name, part.data.decode("utf-8", "replace"))
+            return FormData(fields, files)
+        fields = {}
+        for key, value in parse_qs(body, self._limits.max_form_fields):
+            fields.setdefault(key, value)
+        return FormData(fields, {})

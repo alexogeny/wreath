@@ -1,0 +1,91 @@
+# Python bytecode and interpreter caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments and local environment files
+.venv/
+venv/
+/env/
+.env
+.env.*
+!.env.example
+
+# Test, lint, type-check, and coverage artifacts
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dmypy.json
+.pyright/
+.ty_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit.xml
+
+# Packaging and compiled artifacts
+/build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+*.whl
+*.so
+*.dylib
+*.dll
+*.o
+
+# C tooling (compile database and clangd's index/cache)
+compile_commands.json
+.clangd/
+
+# Generated documentation
+/site/
+
+# Work-in-progress planning docs and ADRs (not published or tracked yet)
+/docs/plans/
+/docs/decisions/
+
+# Benchmark results, diagnostics, profiles, and smoke-run output
+/.profiles/
+# Source tree for a locally rebuilt h2load (see benchmarks/README.md): the
+# packaged nghttp2 ships no HTTP/3, so measuring h3 needs a build from source.
+/nghttp2/
+
+/benchmark-results*/
+/benchmark-diagnosis*/
+/benchmark-smoke*/
+*.prof
+*.profraw
+*.profdata
+perf.data
+perf.data.old
+flamegraph*.svg
+
+# Sanitizer build/install roots
+.sanitizers/
+
+# Agent and local tool state
+.pi/
+.cache/
+# Local Claude Code state stays out of the repo entirely. Shareable, tracked
+# skills live in ./skills/ (tool-agnostic), not under .claude/.
+.claude/
+
+# Logs, temporary files, and editor swap/backup files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# IDE and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

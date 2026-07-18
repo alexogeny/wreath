@@ -1,0 +1,12 @@
+# clangd needs the CPython headers the setuptools build passes implicitly;
+# without them every _native/*.c file drowns in "Python.h not found" noise.
+# Headers are parsed as C (not the Objective-C++ clangd guesses for lone .h).
+If:
+  PathMatch: ".*\\.c"
+CompileFlags:
+  Add: ["-std=c11", "-I/usr/include/python3.14"]
+---
+If:
+  PathMatch: ".*\\.h"
+CompileFlags:
+  Add: ["-x", "c-header", "-std=c11", "-I/usr/include/python3.14"]

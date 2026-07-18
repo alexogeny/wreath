@@ -1,0 +1,13 @@
+{
+  "contract": 1,
+  "files": [
+    "client.ts",
+    "index.ts",
+    "models.ts",
+    "react-query.ts"
+  ],
+  "generator": "wreath-typegen",
+  "renderer": "pure",
+  "title": "Fixture API",
+  "version": "2.0.0"
+}

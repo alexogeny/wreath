@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from wreath import Depends, Router, Wreath
+from wreath.auth import Identity
+from wreath.testing import TestClient
+
+
+class HeaderIdentityBackend:
+    def challenge(self, request: Any) -> str:
+        return "Bearer"
+
+    async def authenticate(self, request: Any) -> Identity | None:
+        value = request.header("authorization")
+        if value is None:
+            return None
+        permissions = frozenset(value.removeprefix("Bearer ").split(","))
+        return Identity("test-user", permissions=permissions)
+
+
+@pytest.mark.asyncio
+async def test_nested_router_flattens_prefixes_and_inherits_metadata() -> None:
+    calls: list[str] = []
+
+    async def app_dependency(request: Any) -> None:
+        calls.append("app")
+
+    async def parent_dependency(request: Any) -> None:
+        calls.append("parent")
+
+    async def child_dependency(request: Any) -> None:
+        calls.append("child")
+
+    parent = Router(
+        prefix="/admin",
+        tags=("admin",),
+        dependencies=(Depends(parent_dependency),),
+        permissions=("admin:access",),
+    )
+    child = Router(
+        prefix="/users",
+        tags=("users",),
+        dependencies=(Depends(child_dependency),),
+        permissions=("users:read",),
+    )
+
+    @child.get("/{user_id}")
+    async def user(request: Any, user_id: int) -> dict[str, int]:
+        return {"id": user_id}
+
+    parent.include_router(child)
+    app = Wreath()
+    app.configure_auth(HeaderIdentityBackend())
+    app.include_router(
+        parent,
+        prefix="/v1",
+        tags=("v1",),
+        dependencies=(Depends(app_dependency),),
+        permissions=("api:access",),
+    )
+
+    async with TestClient(app) as client:
+        missing = await client.get("/v1/admin/users/7")
+        assert missing.status == 401
+        denied = await client.get(
+            "/v1/admin/users/7",
+            headers={"authorization": "Bearer api:access,admin:access"},
+        )
+        assert denied.status == 403
+        response = await client.get(
+            "/v1/admin/users/7",
+            headers={
+                "authorization": "Bearer api:access,admin:access,users:read"
+            },
+        )
+
+    assert response.status == 200
+    assert response.json() == {"id": 7}
+    assert calls == ["app", "parent", "child"]
+    definition = app._routes[0]
+    assert definition.path == "/v1/admin/users/{user_id}"
+    assert definition.tags == ("v1", "admin", "users")
+
+
+@pytest.mark.asyncio
+async def test_router_dependencies_share_request_cache_with_handler_dependencies() -> None:
+    calls = 0
+
+    async def shared(request: Any) -> object:
+        nonlocal calls
+        calls += 1
+        return object()
+
+    router = Router(dependencies=(Depends(shared),))
+
+    @router.get("/cached")
+    async def cached(request: Any, value: object = Depends(shared)) -> dict[str, bool]:
+        return {"ok": value is not None}
+
+    app = Wreath()
+    app.include_router(router)
+    async with TestClient(app) as client:
+        response = await client.get("/cached")
+
+    assert response.status == 200
+    assert response.json() == {"ok": True}
+    assert calls == 1
+
+
+def test_router_snapshots_included_routes() -> None:
+    child = Router(prefix="/child")
+
+    @child.get("/first")
+    async def first(request: Any) -> str:
+        return "first"
+
+    parent = Router(prefix="/parent")
+    parent.include_router(child)
+
+    @child.get("/second")
+    async def second(request: Any) -> str:
+        return "second"
+
+    assert [route.path for route in parent.routes] == ["/parent/child/first"]

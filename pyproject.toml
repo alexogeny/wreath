@@ -1,0 +1,143 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wreath"
+version = "0.1.0"
+description = "A Python 3.14-first, dependency-free ASGI framework core"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "MIT"
+authors = [{ name = "Wreath contributors" }]
+dependencies = []
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Framework :: AsyncIO",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+
+[dependency-groups]
+dev = [
+  # Generating the throwaway self-signed certificates the TLS and HTTP/3 tests
+  # need. Declared here deliberately: it used to arrive only as a transitive of
+  # the benchmark group, so any `uv sync` without that group pruned it and 21
+  # HTTP/3 tests plus the TLS transport tests skipped themselves silently.
+  "cryptography>=44",
+  "pytest>=8.4",
+  "pytest-asyncio>=1.0",
+  # Opt-in, never in addopts: the default suite is ~3.5s and worker startup
+  # eats the whole gain there. It pays on the full run (-m ''), where the
+  # network and performance tests are included. See AGENTS.md.
+  "pytest-xdist>=3.6",
+  "ruff>=0.12",
+  # `[build-system] requires` only populates uv's isolated build environment,
+  # never this venv. Rebuilding the extensions in place
+  # (`python setup.py build_ext --inplace`, `tools/sanitizers/build_*.py`)
+  # imports setuptools from the venv, so it has to be a dev dependency too --
+  # otherwise a sync prunes it and the next build fails with
+  # ModuleNotFoundError while the stale .so stays in place.
+  "setuptools>=77",
+  "ty",
+]
+docs = [
+  "mkdocs-material>=9.6",
+  "mkdocstrings[python]>=0.30",
+]
+benchmark = [
+  # Sanic's HTTP/3 backend. Sanic serves h1 and h3 and never implemented h2, so
+  # without this the protocol comparison has no h3 competitor at all -- and
+  # Sanic degrades to HTTP/1.1 silently rather than refusing to start.
+  "aioquic>=1.2",
+  "asyncpg>=0.30",
+  "blacksheep>=2.2",
+  "django>=5.2",
+  "fastapi>=0.116",
+  "flask>=3.1",
+  "litestar>=2.17",
+  "pydantic>=2.11",
+  "sanic>=25.3",
+  "starlette>=0.47",
+  "uvicorn[standard]>=0.35",
+  # Competitor ORMs for benchmarks/postgres/bench_orm_competitors.py. Benchmark
+  # dependencies only, exactly like pydantic: none of these may be imported by
+  # wreath, and SQLAlchemy in particular is a competitor here, never an
+  # integration -- see AGENTS.md.
+  "peewee>=3.17",
+  "psycopg2-binary>=2.9",
+  "sqlalchemy[asyncio]>=2.0",
+  "sqlmodel>=0.0.22",
+  "tortoise-orm>=0.21",
+]
+
+[project.scripts]
+wreath = "wreath.cli:main"
+# Maintenance commands for Wreath's C; see src/neo/_devtools/.
+wreath-native-lint = "wreath._devtools.native_lint:main"
+wreath-native-boundary-lint = "wreath._devtools.native_boundary_lint:main"
+wreath-native-error-lint = "wreath._devtools.native_error_lint:main"
+wreath-native-gil-lint = "wreath._devtools.native_gil_lint:main"
+wreath-native-gil-status = "wreath._devtools.native_gil_status:main"
+wreath-native-memory-lint = "wreath._devtools.native_memory_lint:main"
+wreath-native-profile = "wreath._devtools.native_profile:main"
+wreath-request-trace = "wreath._devtools.request_trace:main"
+wreath-tape-decomp = "wreath._devtools.tape_decomp:main"
+wreath-decomp = "wreath._devtools.decomp:main"
+# Task runners. Each installs the dependency group it needs with
+# `uv sync --inexact`, so switching jobs cannot uninstall the last one.
+wreath-check = "wreath._devtools.tasks:check"
+wreath-docs = "wreath._devtools.tasks:docs"
+wreath-bench = "wreath._devtools.tasks:bench"
+# Renders benchmark result JSON to a local HTML file; see benchmarks/README.md.
+wreath-bench-report = "wreath._devtools.bench_report:main"
+
+[tool.uv]
+# `uv sync` reconciles the venv to exactly the selected groups, removing
+# everything else. Naming dev here keeps it installed for every sync and for
+# `uv run --group docs`/`--group benchmark`, so working on one group cannot
+# quietly uninstall the toolchain the tests and native builds need.
+default-groups = ["dev"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q -m 'not fuzz and not performance and not network'"
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "fuzz: expensive deterministic or randomized fuzz coverage",
+  "performance: repeatable performance-ordering checks",
+  "network: tests using real sockets, TLS, or external clients",
+]
+
+[tool.ty.src]
+include = ["src"]
+exclude = [".sanitizers"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+# Generated sanitizer build roots hold copies of the sources they were built
+# from; linting them reports drift in artifacts rather than in the tree. The
+# nghttp2 tree is a locally built h2load (benchmarks/README.md) and is upstream's
+# source, not ours.
+extend-exclude = [".sanitizers", "nghttp2"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Depends() in parameter defaults is the dependency-injection marker.
+extend-immutable-calls = ["wreath.binding.Depends", "Depends"]
+
+[tool.ruff.lint.per-file-ignores]
+"benchmarks/apps.py" = ["E402"]
+"benchmarks/lifecycle_apps.py" = ["E402"]
+"benchmarks/lifecycle.py" = ["ASYNC220", "ASYNC240"]
+"benchmarks/run.py" = ["ASYNC220", "ASYNC240"]

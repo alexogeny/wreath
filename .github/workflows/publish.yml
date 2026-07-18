@@ -1,0 +1,168 @@
+name: publish
+
+# Cut a versioned release when a commit on main bumps the version in
+# pyproject.toml.
+#
+#   1. detect  - Is the pyproject version valid semver, different from the
+#                previous commit's, and greater? Emits `bumped` + `version`.
+#   2. release - (environment: publish) Guard against a duplicate tag, require a
+#                docs/release_notes/<version>.md file, then cut the
+#                `release/vX.Y.Z` branch from the release commit, push the
+#                `vX.Y.Z` tag, and create the GitHub Release from the notes.
+#   3. pypi    - (environment: publish) Build the sdist and publish to PyPI via
+#                Trusted Publishing (OIDC, no stored token).
+#
+# The `publish` environment gates steps 2 and 3: configure it in the repo
+# settings with whatever reviewers/branch restrictions you want, and register a
+# matching PyPI Trusted Publisher (environment name `publish`).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Release even if no version bump is detected
+        type: boolean
+        default: false
+
+# Read-only by default; the jobs that need to write request it explicitly.
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      bumped: ${{ steps.check.outputs.bumped }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # HEAD and its parent, to diff the version
+      - id: check
+        env:
+          FORCED: ${{ github.event.inputs.force }}
+        run: |
+          set -euo pipefail
+          extract() { grep -m1 -E '^version[[:space:]]*=' "$1" \
+            | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/'; }
+
+          version="$(extract pyproject.toml)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          if ! printf '%s' "$version" \
+            | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::version '$version' is not valid semver"
+            exit 1
+          fi
+
+          prev=""
+          if git cat-file -e 'HEAD~1:pyproject.toml' 2>/dev/null; then
+            prev="$(git show HEAD~1:pyproject.toml \
+              | grep -m1 -E '^version[[:space:]]*=' \
+              | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/' || true)"
+          fi
+
+          if [ "${FORCED:-false}" = "true" ]; then
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+            echo "forced release of $version"
+            exit 0
+          fi
+          if [ "$version" = "$prev" ]; then
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            echo "no version change ($version); nothing to release"
+            exit 0
+          fi
+          if [ -n "$prev" ]; then
+            greater="$(printf '%s\n%s\n' "$prev" "$version" | sort -V | tail -n1)"
+            if [ "$greater" != "$version" ]; then
+              echo "::error::version '$version' does not increase previous '$prev'"
+              exit 1
+            fi
+          fi
+          echo "bumped=true" >> "$GITHUB_OUTPUT"
+          echo "version bump: ${prev:-<none>} -> $version"
+
+  release:
+    needs: detect
+    if: needs.detect.outputs.bumped == 'true'
+    runs-on: ubuntu-latest
+    environment: publish
+    permissions:
+      contents: write # push the release branch/tag and create the release
+    env:
+      VERSION: ${{ needs.detect.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the tag and branch are complete
+
+      - name: Guard against an existing tag
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::tag v$VERSION already exists; bump the version"
+            exit 1
+          fi
+
+      - name: Require release notes
+        run: |
+          set -euo pipefail
+          notes="docs/release_notes/$VERSION.md"
+          if [ ! -f "$notes" ]; then
+            echo "::error::missing $notes — run the release-notes skill to generate it before bumping the version"
+            exit 1
+          fi
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Cut release branch and tag
+        run: |
+          set -euo pipefail
+          branch="release/v$VERSION"
+          git branch -f "$branch" HEAD
+          git tag -a "v$VERSION" -m "neo v$VERSION"
+          git push origin "$branch"
+          git push origin "refs/tags/v$VERSION"
+
+      - name: Create GitHub release
+        run: |
+          set -euo pipefail
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --notes-file "docs/release_notes/$VERSION.md" \
+            --target "v$VERSION"
+
+  pypi:
+    needs: [detect, release]
+    runs-on: ubuntu-latest
+    environment: publish
+    permissions:
+      id-token: write # PyPI Trusted Publishing (OIDC); no stored token needed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Build sdist
+        run: |
+          python -m pip install --upgrade build
+          python -m build --sdist
+          # Binary wheels for the native extension are a follow-up: they need
+          # cibuildwheel plus the vendored nghttp3/ngtcp2 toolchain. Until then
+          # PyPI ships the sdist and installers compile the C extension locally.
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

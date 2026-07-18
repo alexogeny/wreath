@@ -1,0 +1,951 @@
+"""Request-scoped sessions.
+
+A session owns one leased connection, one identity map, and the pending write
+sets. It acquires the connection on first use and returns it exactly once, on
+success, error, or cancellation.
+
+Nothing here loads data implicitly: every statement this module issues is the
+direct result of an awaited call.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
+from typing import Any
+
+from ..postgres import _WORKLOADS, Workload
+from .compiler import (
+    MAX_BIND_PARAMETERS,
+    MAX_SELECTIN_KEYS,
+    CompiledQuery,
+    JoinedStep,
+    SelectinStep,
+    compile_select,
+    qualified,
+    quote,
+)
+from .errors import (
+    DetachedInstanceError,
+    MappingError,
+    MultipleResultsError,
+    ORMError,
+    RegistryError,
+    SessionClosedError,
+    SessionError,
+)
+from .model import DELETED, DETACHED, PERSISTENT, TRANSIENT, Model
+from .query import Select
+from .relations import LoadOption, Relationship, RelationshipExpr
+from .schema import ColumnSpec, ModelSpec, RelationshipSpec
+
+_WRITE_WORKLOADS = frozenset({"write"})
+
+
+def _native_models() -> Any:
+    """The native hydration module, or None when models are stored in Python."""
+    from .model import _native
+
+    if _native is None or not hasattr(_native, "_compile_hydrate_plan"):
+        return None
+    return _native
+
+
+@dataclass(frozen=True, slots=True)
+class FromORM:
+    """Marks a handler parameter as a request-scoped ORM session.
+
+    ``database`` names an ``app.orm()`` registry; it may be omitted when the
+    application has exactly one.
+    """
+
+    database: str | None = None
+    workload: Workload = "read"
+
+    def __post_init__(self) -> None:
+        if self.workload not in _WORKLOADS:
+            raise ValueError(f"unknown PostgreSQL workload: {self.workload}")
+        if self.workload == "security_read":
+            raise ValueError("security_read connections cannot back an ORM session")
+
+
+class RawQuery:
+    """Unmodified SQL, executed on this session's leased connection.
+
+    Wreath does not parse, rewrite, or cache the SQL; results come back as the
+    driver's own ``Record`` objects unless ``models()`` is used.
+    """
+
+    __slots__ = ("_args", "_session", "_sql")
+
+    def __init__(self, session: Session, sql: str, args: tuple[Any, ...]) -> None:
+        self._session = session
+        self._sql = sql
+        self._args = args
+
+    async def execute(self) -> str:
+        connection = await self._session._acquire()
+        return await connection.execute(self._sql, *self._args)
+
+    async def fetch(self) -> list[Any]:
+        connection = await self._session._acquire()
+        return await connection.fetch(self._sql, *self._args)
+
+    async def fetchrow(self) -> Any:
+        connection = await self._session._acquire()
+        return await connection.fetchrow(self._sql, *self._args)
+
+    async def fetchval(self) -> Any:
+        connection = await self._session._acquire()
+        return await connection.fetchval(self._sql, *self._args)
+
+    async def models(self, model: type) -> list[Any]:
+        """Hydrate this result into ``model`` instances.
+
+        The result must contain every column of the model exactly once, named
+        as in the database. Extra or missing columns are rejected rather than
+        silently dropped, so a drifting query fails loudly.
+        """
+        session = self._session
+        spec = session._registry.spec_for(model)
+        connection = await session._acquire()
+        rows = await connection.fetch(self._sql, *self._args)
+        order = _validate_raw_result(connection, self._sql, spec)
+        return [
+            item
+            for item in (session._hydrate(spec, order, row, 0) for row in rows)
+            if item is not None
+        ]
+
+
+def _validate_raw_result(
+    connection: Any, sql: str, spec: ModelSpec
+) -> tuple[ColumnSpec, ...]:
+    plan = getattr(connection, "_plans", {}).get(sql)
+    if plan is None:
+        raise MappingError(
+            "the driver reported no result description for this statement, so its "
+            "columns cannot be checked against " + spec.model_type.__name__
+        )
+    names: tuple[str, ...] = plan.result_names
+    oids: tuple[int, ...] = plan.result_oids
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise MappingError(
+            f"result names {', '.join(duplicates)} appear more than once; "
+            f"{spec.model_type.__name__} needs each column exactly once"
+        )
+    expected = set(spec.by_database_name)
+    returned = set(names)
+    missing = sorted(expected - returned)
+    extra = sorted(returned - expected)
+    if missing or extra:
+        details = []
+        if missing:
+            details.append(f"missing {', '.join(missing)}")
+        if extra:
+            details.append(f"unexpected {', '.join(extra)}")
+        raise MappingError(
+            f"result does not match {spec.model_type.__name__}: {'; '.join(details)}"
+        )
+    order: list[ColumnSpec] = []
+    for name, oid in zip(names, oids, strict=True):
+        column = spec.by_database_name[name]
+        if oid != column.oid:
+            raise MappingError(
+                f"result column {name!r} has OID {oid}, but "
+                f"{spec.model_type.__name__}.{column.python_name} declares "
+                f"{column.pg_type.name} (OID {column.oid})"
+            )
+        order.append(column)
+    return tuple(order)
+
+
+# Test-only: when a counter is installed, the session records each identity
+# membership probe and model-order lookup so tests can assert the work stays
+# linear without timing anything. `None` in production keeps this to one
+# predictable global load per probe.
+_probes: list[int] | None = None
+
+
+@contextmanager
+def _count_probes() -> Iterator[list[int]]:
+    """Count session bookkeeping probes performed inside the block."""
+    global _probes
+    counter = [0]
+    previous, _probes = _probes, counter
+    try:
+        yield counter
+    finally:
+        _probes = previous
+
+
+class Session:
+    """One unit of work over one leased connection."""
+
+    __slots__ = (
+        "_broken",
+        "_closed",
+        "_connection",
+        "_deleted",
+        "_deleted_ids",
+        "_depth",
+        "_identity",
+        "_new_items",
+        "_new_ordinals",
+        "_new_stale",
+        "_ordinal",
+        "_registry",
+        "_workload",
+    )
+
+    def __init__(self, registry: Any, workload: Workload) -> None:
+        self._registry = registry
+        self._workload = workload
+        self._connection: Any = None
+        self._identity: dict[tuple[Any, tuple[Any, ...]], Any] = {}
+        self._new_items: list[Any] = []
+        self._new_stale = False
+        self._new_ordinals: dict[int, int] = {}
+        self._deleted: list[Any] = []
+        self._deleted_ids: set[int] = set()
+        self._ordinal = 0
+        self._depth = 0
+        self._closed = False
+        self._broken = False
+
+    @property
+    def registry(self) -> Any:
+        return self._registry
+
+    @property
+    def workload(self) -> Workload:
+        return self._workload
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._depth > 0
+
+    @property
+    def connection(self) -> Any:
+        """The leased connection, or None while the session is still lazy."""
+        return self._connection
+
+    # -- lifecycle ----------------------------------------------------------
+
+    async def _acquire(self) -> Any:
+        if self._closed:
+            raise SessionClosedError("this ORM session is closed")
+        if self._connection is None:
+            self._connection = await self._registry.database.acquire(self._workload)
+        return self._connection
+
+    async def close(self) -> None:
+        """Roll back any open transaction and return the connection exactly once."""
+        if self._closed:
+            return
+        self._closed = True
+        connection = self._connection
+        self._connection = None
+        for item in self._identity.values():
+            item._orm_state = DETACHED
+            item._orm_owner = None
+        self._identity.clear()
+        self._clear_pending()
+        if connection is None:
+            return
+        try:
+            if self._depth:
+                await self._rollback_all(connection)
+        finally:
+            self._depth = 0
+            if self._broken and not getattr(connection, "closed", False):
+                # The pool discards a closed connection, which is the only safe
+                # outcome when transaction state cannot be proven synchronized.
+                await connection.close()
+            await self._registry.database.release(self._workload, connection)
+
+    async def _rollback_all(self, connection: Any) -> None:
+        try:
+            await connection.execute("ROLLBACK")
+        except BaseException:
+            self._broken = True
+
+    def _check_usable(self) -> None:
+        if self._closed:
+            raise SessionClosedError("this ORM session is closed")
+
+    # -- reads --------------------------------------------------------------
+
+    async def get(self, model: type, primary_key: Any, *, load: Iterable[Any] = ()) -> Any:
+        """Fetch one object by primary key, or None."""
+        self._check_usable()
+        spec = self._registry.spec_for(model)
+        values = _key_tuple(spec, primary_key)
+        query = Select.build(model, ())
+        for column, value in zip(spec.primary_key, values, strict=True):
+            query = query.where(column.column.expression == value)
+        options = tuple(load)
+        if options:
+            query = query.include(*options)
+        return await self.fetch_one(query.limit(1))
+
+    async def fetch(self, query: Select) -> list[Any]:
+        """Run ``query`` and hydrate every row."""
+        self._check_usable()
+        compiled = compile_select(self._registry, query)
+        self._check_locking(query)
+        connection = await self._acquire()
+        objects = await self._fetch_objects(
+            connection, compiled, compiled.sql, compiled.bind_values
+        )
+        await self._run_selectin(compiled.load_plan.selectin, objects)
+        return objects
+
+    async def _fetch_objects(
+        self,
+        connection: Any,
+        compiled: CompiledQuery,
+        sql: str,
+        args: tuple[Any, ...],
+    ) -> list[Any]:
+        """Hydrate ``sql`` into models, natively when the shape allows it.
+
+        Both paths share the identity map and the same cell semantics, so which
+        one runs is not observable beyond allocation counts.
+        """
+        plan = self._hydrate_plan(connection, compiled)
+        if plan is not None:
+            rows = await connection._fetch_into(sql, args, (plan, self._identity, self))
+            # One row per match, so a key that matched twice yields the same
+            # object twice; the object graph is right, the list needs collapsing.
+            seen: set[int] = set()
+            objects = []
+            for item in rows:
+                if id(item) not in seen:
+                    seen.add(id(item))
+                    objects.append(item)
+            return objects
+        records = await connection.fetch(sql, *args)
+        return self._hydrate_rows(compiled, records)
+
+    def _hydrate_plan(self, connection: Any, compiled: CompiledQuery) -> Any:
+        """The native plan for this shape, or None to use the Record path.
+
+        Direct hydration needs both a natively stored model and a connection
+        that can decode into a destination. Anything else -- the reference
+        driver, a test double, a joined load -- takes the Record path, which
+        produces the same objects through the same identity map.
+        """
+        native = _native_models()
+        if native is None or getattr(connection, "_decode_dest", None) is None:
+            return None
+        cached = self._registry.cached_plan(compiled.shape_key)
+        if cached is None:
+            return None
+        if cached.hydrate_plan is not None:
+            return cached.hydrate_plan or None
+        spec = compiled.result_model
+        if (
+            spec is None
+            or compiled.load_plan.joined
+            or spec.storage.kind != "native"
+            or len(compiled.selected_columns) != len(compiled.load_plan.columns)
+        ):
+            # Joined loads span several models per row; that assembly still runs
+            # through the Record path.
+            cached.hydrate_plan = False
+            return None
+        try:
+            plan = native._compile_hydrate_plan(
+                spec.model_type,
+                spec,
+                tuple(item.index for item in compiled.load_plan.columns),
+            )
+        except Exception:
+            cached.hydrate_plan = False
+            return None
+        cached.hydrate_plan = plan
+        return plan
+
+    async def fetch_one(self, query: Select) -> Any:
+        """Run ``query`` and return one object, or None.
+
+        Raises ``MultipleResultsError`` when the query matches more than one
+        row; a stricter limit set by the caller is left alone.
+        """
+        self._check_usable()
+        bounded = query if query.limit_ is not None and query.limit_ <= 2 else query.limit(2)
+        results = await self.fetch(bounded)
+        if len(results) > 1:
+            raise MultipleResultsError(
+                f"fetch_one() matched {len(results)} rows for "
+                f"{query.model.__name__}; use fetch() or narrow the query"
+            )
+        return results[0] if results else None
+
+    def raw(self, sql: str, *args: Any) -> RawQuery:
+        """Run SQL exactly as written on this session's connection."""
+        self._check_usable()
+        if not isinstance(sql, str) or not sql:
+            raise SessionError("raw() requires non-empty SQL")
+        return RawQuery(self, sql, args)
+
+    async def load(self, target: Any, relationship: Any) -> None:
+        """Load ``relationship`` on one object or a sequence, in one batch."""
+        self._check_usable()
+        if isinstance(relationship, RelationshipExpr):
+            declared = relationship.relationship
+        elif isinstance(relationship, Relationship):
+            declared = relationship
+        else:
+            raise TypeError(
+                "load() takes a model relationship such as User.posts, got "
+                f"{relationship!r}"
+            )
+        instances = [target] if isinstance(target, Model) else list(target)
+        if not instances:
+            return
+        owner = declared.owner
+        for item in instances:
+            if type(item) is not owner:
+                raise TypeError(
+                    f"load() got a {type(item).__name__} for a relationship declared "
+                    f"on {owner.__name__}"
+                )
+        spec = self._registry.spec_for(owner)
+        found = spec.relationship(declared.python_name)
+        if found is None:
+            raise RegistryError(
+                f"{owner.__name__}.{declared.python_name} is not registered"
+            )
+        await self._load_relationship(found, instances, ())
+
+    # -- hydration ----------------------------------------------------------
+
+    def _hydrate_rows(self, compiled: CompiledQuery, rows: list[Any]) -> list[Any]:
+        spec = compiled.result_model
+        assert spec is not None
+        plan = compiled.load_plan
+        objects: list[Any] = []
+        seen: set[int] = set()
+        for row in rows:
+            root = self._hydrate(spec, plan.columns, row, 0)
+            if root is None:
+                continue
+            if id(root) not in seen:
+                seen.add(id(root))
+                objects.append(root)
+            self._assemble_joins(plan.joined, root, row)
+        return objects
+
+    def _assemble_joins(
+        self, steps: tuple[JoinedStep, ...], parent: Any, row: Any
+    ) -> None:
+        for step in steps:
+            child = self._hydrate(step.relationship.target, step.columns, row, step.offset)
+            parent._orm_set_relation(step.relationship.index, child)
+            if child is not None:
+                self._assemble_joins(step.nested, child, row)
+
+    def _hydrate(
+        self,
+        spec: ModelSpec,
+        columns: tuple[ColumnSpec, ...],
+        row: Any,
+        offset: int,
+    ) -> Any:
+        positions = {item.python_name: index for index, item in enumerate(columns)}
+        key: list[Any] = []
+        for item in spec.primary_key:
+            index = positions.get(item.python_name)
+            if index is None:
+                raise MappingError(
+                    f"{spec.model_type.__name__} was selected without its primary key"
+                )
+            value = row[offset + index]
+            if value is None:
+                # A LEFT JOIN that matched nothing; not an object.
+                return None
+            key.append(item.pg_type.from_wire(value))
+        identity = (spec, tuple(key))
+        instance = self._identity.get(identity)
+        if instance is None:
+            instance = spec.model_type._orm_new()
+            instance._orm_owner = self
+            instance._orm_state = PERSISTENT
+            self._identity[identity] = instance
+        for index, item in enumerate(columns):
+            # A dirty field is the session's pending change; a later row must
+            # not silently revert it.
+            if instance._orm_is_dirty(item.index):
+                continue
+            instance._orm_set_loaded(
+                item.index, item.pg_type.from_wire(row[offset + index])
+            )
+        return instance
+
+    # -- relationship loading ------------------------------------------------
+
+    async def _run_selectin(
+        self, steps: tuple[SelectinStep, ...], objects: list[Any]
+    ) -> None:
+        if not objects:
+            return
+        for step in steps:
+            await self._load_relationship(step.relationship, objects, step.nested)
+
+    async def _load_relationship(
+        self,
+        relationship: RelationshipSpec,
+        parents: list[Any],
+        nested: tuple[LoadOption, ...],
+    ) -> None:
+        many = relationship.cardinality == "many"
+        local = relationship.local_columns
+        remote = relationship.remote_columns
+        target = relationship.target
+
+        # Deduplicate by key so one identity is fetched once no matter how many
+        # parents share it.
+        keys: dict[tuple[Any, ...], list[Any]] = {}
+        for parent in parents:
+            key = _values_of(parent, local)
+            if key is None:
+                # A null foreign key cannot match anything.
+                parent._orm_set_relation(relationship.index, [] if many else None)
+                continue
+            keys.setdefault(key, []).append(parent)
+            parent._orm_set_relation(relationship.index, [] if many else None)
+        if not keys:
+            return
+
+        children: list[Any] = []
+        for batch in _batches(tuple(keys), len(remote)):
+            sql, values = _selectin_sql(target, remote, batch)
+            connection = await self._acquire()
+            rows = await connection.fetch(sql, *values)
+            for row in rows:
+                child = self._hydrate(target, target.columns, row, 0)
+                if child is None:
+                    continue
+                children.append(child)
+                key = _values_of(child, remote)
+                if key is None:
+                    continue
+                for parent in keys.get(key, ()):
+                    if many:
+                        parent._orm_get_relation(relationship.index).append(child)
+                    else:
+                        parent._orm_set_relation(relationship.index, child)
+        if nested and children:
+            for option in nested:
+                found = target.relationship(option.relationship.python_name)
+                if found is None:
+                    raise RegistryError(
+                        f"{target.model_type.__name__}."
+                        f"{option.relationship.python_name} is not registered"
+                    )
+                await self._load_relationship(found, children, option.nested)
+
+    # -- pending bookkeeping ------------------------------------------------
+    #
+    # `_new` and `_deleted` stay ordered lists because flush order is
+    # observable. Membership and ordering are keyed by `id()`, never by model
+    # `__eq__`/`__hash__`: two distinct unsaved rows may compare equal and must
+    # still be written as two rows. The list holds a strong reference for as
+    # long as the id is a key, so an id cannot be reused while it is scheduled.
+    # Everything that touches these four attributes goes through the helpers
+    # below so they cannot drift apart.
+
+    @property
+    def _new(self) -> list[Any]:
+        """The objects pending insertion, in add() order."""
+        if self._new_stale:
+            ordinals = self._new_ordinals
+            self._new_items = [
+                item for item in self._new_items if id(item) in ordinals
+            ]
+            self._new_stale = False
+        return self._new_items
+
+    def _schedule_new(self, instance: Any) -> None:
+        if _probes is not None:
+            _probes[0] += 1
+        key = id(instance)
+        if key in self._new_ordinals:
+            return
+        self._new_ordinals[key] = self._ordinal
+        self._ordinal += 1
+        # Appending past tombstones is safe: they only ever precede the new
+        # entry, and `_new` compacts before anyone reads the order.
+        self._new_items.append(instance)
+        instance._orm_owner = self
+
+    def _unschedule_new(self, instance: Any) -> bool:
+        if _probes is not None:
+            _probes[0] += 1
+        if self._new_ordinals.pop(id(instance), None) is None:
+            return False
+        # Dropping the ordinal is the removal; compacting the list here would
+        # make unscheduling a whole unit of work quadratic.
+        self._new_stale = True
+        return True
+
+    def _schedule_deleted(self, instance: Any) -> None:
+        if _probes is not None:
+            _probes[0] += 1
+        key = id(instance)
+        if key in self._deleted_ids:
+            return
+        self._deleted_ids.add(key)
+        self._deleted.append(instance)
+
+    def _clear_pending(self) -> None:
+        self._new_items = []
+        self._new_stale = False
+        self._new_ordinals.clear()
+        self._deleted.clear()
+        self._deleted_ids.clear()
+
+    # -- writes -------------------------------------------------------------
+
+    def add(self, instance: Any) -> None:
+        """Schedule ``instance`` for insertion on the next flush."""
+        self._check_usable()
+        _check_owned(self, instance)
+        if instance._orm_state == PERSISTENT:
+            return
+        if instance._orm_state == DELETED:
+            raise SessionError(
+                f"{type(instance).__name__} is scheduled for deletion and cannot be added"
+            )
+        self._registry.spec_for(type(instance))
+        self._schedule_new(instance)
+
+    def delete(self, instance: Any) -> None:
+        """Schedule ``instance`` for deletion on the next flush."""
+        self._check_usable()
+        _check_owned(self, instance)
+        spec = self._registry.spec_for(type(instance))
+        if instance._orm_state == TRANSIENT:
+            self._unschedule_new(instance)
+            return
+        if instance._orm_primary_key() is None:
+            raise SessionError(
+                f"{spec.model_type.__name__} has no loaded primary key and cannot be "
+                "deleted"
+            )
+        instance._orm_state = DELETED
+        self._schedule_deleted(instance)
+
+    async def flush(self) -> None:
+        """Write pending inserts, updates, and deletes in a deterministic order.
+
+        Outside an explicit transaction this opens one for the flush and
+        commits or rolls it back atomically.
+        """
+        self._check_usable()
+        if not self._has_pending():
+            return
+        if self._depth:
+            await self._flush_inner()
+            return
+        async with self.begin():
+            await self._flush_inner()
+
+    def _has_pending(self) -> bool:
+        # The ordinal map answers this without compacting the pending list.
+        return bool(self._new_ordinals or self._deleted or self._dirty_objects())
+
+    def _dirty_objects(self) -> list[Any]:
+        return [
+            item
+            for item in self._identity.values()
+            if item._orm_has_changes() and item._orm_state == PERSISTENT
+        ]
+
+    def _order(self, model: type) -> int:
+        if _probes is not None:
+            _probes[0] += 1
+        try:
+            return self._registry.order_of(model)
+        except RegistryError:
+            raise RegistryError(f"{model.__name__} is not registered") from None
+
+    async def _flush_inner(self) -> None:
+        ordinals = self._new_ordinals
+        for instance in sorted(
+            self._new, key=lambda item: (self._order(type(item)), ordinals[id(item)])
+        ):
+            await self._insert(instance)
+        updates = sorted(
+            self._dirty_objects(),
+            key=lambda item: (self._order(type(item)), _sort_key(item)),
+        )
+        for instance in updates:
+            await self._update(instance)
+        for instance in sorted(
+            self._deleted,
+            key=lambda item: (-self._order(type(item)), _sort_key(item)),
+        ):
+            await self._delete(instance)
+        self._clear_pending()
+
+    async def _insert(self, instance: Any) -> None:
+        spec = self._registry.spec_for(type(instance))
+        columns = [
+            item
+            for item in spec.columns
+            if instance._orm_is_loaded(item.index) and item.server_default is None
+        ]
+        returning = [item for item in spec.columns if item not in columns]
+        names = ", ".join(quote(item.database_name) for item in columns)
+        placeholders = ", ".join(f"${index}" for index in range(1, len(columns) + 1))
+        sql = f"INSERT INTO {qualified(spec)}"
+        sql += f" ({names}) VALUES ({placeholders})" if columns else " DEFAULT VALUES"
+        if returning:
+            sql += " RETURNING " + ", ".join(
+                quote(item.database_name) for item in returning
+            )
+        values = [_wire_value(instance, item) for item in columns]
+        connection = await self._acquire()
+        if returning:
+            row = await connection.fetchrow(sql, *values)
+            if row is None:
+                raise ORMError(
+                    f"INSERT into {spec.qualified_name} returned no row for "
+                    f"{spec.model_type.__name__}"
+                )
+            for index, item in enumerate(returning):
+                instance._orm_set_loaded(item.index, item.pg_type.from_wire(row[index]))
+        else:
+            await connection.execute(sql, *values)
+        instance._orm_state = PERSISTENT
+        instance._orm_clear_dirty()
+        key = instance._orm_primary_key()
+        if key is None:
+            raise ORMError(
+                f"{spec.model_type.__name__} has no primary key after INSERT; declare "
+                "the key column so RETURNING can fill it"
+            )
+        self._identity[(spec, key)] = instance
+
+    async def _update(self, instance: Any) -> None:
+        spec = self._registry.spec_for(type(instance))
+        columns = [
+            item
+            for item in spec.columns
+            if instance._orm_is_dirty(item.index) and not item.primary_key
+        ]
+        if not columns:
+            return
+        assignments = ", ".join(
+            f"{quote(item.database_name)} = ${index}"
+            for index, item in enumerate(columns, start=1)
+        )
+        predicate, key_values = _key_predicate(spec, instance, len(columns) + 1)
+        sql = f"UPDATE {qualified(spec)} SET {assignments} WHERE {predicate}"
+        values = [_wire_value(instance, item) for item in columns] + key_values
+        connection = await self._acquire()
+        await connection.execute(sql, *values)
+        instance._orm_clear_dirty()
+
+    async def _delete(self, instance: Any) -> None:
+        spec = self._registry.spec_for(type(instance))
+        predicate, values = _key_predicate(spec, instance, 1)
+        sql = f"DELETE FROM {qualified(spec)} WHERE {predicate}"
+        connection = await self._acquire()
+        await connection.execute(sql, *values)
+        key = instance._orm_primary_key()
+        if key is not None:
+            self._identity.pop((spec, key), None)
+        instance._orm_state = DETACHED
+        instance._orm_owner = None
+
+    # -- transactions --------------------------------------------------------
+
+    @asynccontextmanager
+    async def begin(self) -> Any:
+        """Open a transaction, or a savepoint when one is already open."""
+        self._check_usable()
+        connection = await self._acquire()
+        depth = self._depth
+        savepoint = f"wreath_sp_{depth}"
+        await connection.execute("BEGIN" if depth == 0 else f"SAVEPOINT {savepoint}")
+        self._depth = depth + 1
+        try:
+            yield self
+        except BaseException:
+            self._depth = depth
+            await self._unwind(connection, depth, savepoint, commit=False)
+            raise
+        else:
+            self._depth = depth
+            await self._unwind(connection, depth, savepoint, commit=True)
+
+    async def _unwind(
+        self, connection: Any, depth: int, savepoint: str, *, commit: bool
+    ) -> None:
+        if self._closed:
+            # close() already unwound the transaction and returned the
+            # connection. A statement now would run against whoever holds the
+            # lease next, so this block's exit is a no-op.
+            return
+        if commit:
+            statement = "COMMIT" if depth == 0 else f"RELEASE SAVEPOINT {savepoint}"
+        else:
+            statement = "ROLLBACK" if depth == 0 else f"ROLLBACK TO SAVEPOINT {savepoint}"
+        try:
+            await connection.execute(statement)
+        except BaseException:
+            # Transaction state can no longer be proven; force the pool to
+            # discard the connection rather than lease out a dirty one.
+            self._broken = True
+            raise
+
+    def _check_locking(self, query: Select) -> None:
+        if not query.for_update_:
+            return
+        if self._workload not in _WRITE_WORKLOADS:
+            raise SessionError(
+                "for_update() needs a write-workload session; this session is "
+                f"{self._workload!r}"
+            )
+        if not self._depth:
+            raise SessionError(
+                "for_update() needs an explicit transaction; wrap the query in "
+                "async with session.begin()"
+            )
+
+    def __repr__(self) -> str:
+        state = "closed" if self._closed else "open"
+        return (
+            f"<Session {self._registry.database.name!r} {self._workload} {state} "
+            f"identity={len(self._identity)}>"
+        )
+
+
+def _sort_key(instance: Any) -> tuple[Any, ...]:
+    key = instance._orm_primary_key()
+    # Sort by identity so a flush order never depends on dict iteration; the
+    # repr fallback keeps unkeyed objects deterministic within one process.
+    return tuple(str(item) for item in key) if key is not None else (repr(instance),)
+
+
+def _check_owned(session: Session, instance: Any) -> None:
+    if not isinstance(instance, Model):
+        raise TypeError(f"expected a model instance, got {instance!r}")
+    owner = instance._orm_owner
+    if owner is not None and owner is not session:
+        raise DetachedInstanceError(
+            f"{type(instance).__name__} is owned by another session; an object "
+            "cannot belong to two sessions"
+        )
+
+
+def _values_of(instance: Any, columns: tuple[ColumnSpec, ...]) -> tuple[Any, ...] | None:
+    values: list[Any] = []
+    for item in columns:
+        if not instance._orm_is_loaded(item.index) or instance._orm_is_null(item.index):
+            return None
+        values.append(instance._orm_get(item.index))
+    return tuple(values)
+
+
+def _wire_value(instance: Any, column: ColumnSpec) -> Any:
+    if instance._orm_is_null(column.index):
+        return None
+    return column.pg_type.to_wire(instance._orm_get(column.index))
+
+
+def _key_predicate(
+    spec: ModelSpec, instance: Any, start: int
+) -> tuple[str, list[Any]]:
+    parts = []
+    values = []
+    for offset, item in enumerate(spec.primary_key):
+        parts.append(f"{quote(item.database_name)} = ${start + offset}")
+        values.append(_wire_value(instance, item))
+    return " AND ".join(parts), values
+
+
+def _key_tuple(spec: ModelSpec, primary_key: Any) -> tuple[Any, ...]:
+    values = primary_key if isinstance(primary_key, tuple) else (primary_key,)
+    if len(values) != len(spec.primary_key):
+        raise TypeError(
+            f"{spec.model_type.__name__} has a {len(spec.primary_key)}-column primary "
+            f"key; got {len(values)} value(s)"
+        )
+    return values
+
+
+def _batches(keys: tuple[tuple[Any, ...], ...], width: int) -> list[tuple[Any, ...]]:
+    """Split identities into batches bounded by keys and by bind parameters."""
+    limit = min(MAX_SELECTIN_KEYS, max(1, MAX_BIND_PARAMETERS // max(width, 1)))
+    return [keys[start : start + limit] for start in range(0, len(keys), limit)]
+
+
+def _selectin_sql(
+    target: ModelSpec, remote: tuple[ColumnSpec, ...], batch: tuple[tuple[Any, ...], ...]
+) -> tuple[str, list[Any]]:
+    """Build the batched relationship query Wreath issues on its own behalf.
+
+    Wreath owns this statement, so it adds a primary-key tiebreaker for a stable
+    order. User queries are never reordered.
+    """
+    values: list[Any] = []
+    columns = ", ".join(
+        f"{quote('t0')}.{quote(item.database_name)}" for item in target.columns
+    )
+    sql = f"SELECT {columns} FROM {qualified(target)} AS {quote('t0')} WHERE "
+    if len(remote) == 1:
+        column = remote[0]
+        placeholders = []
+        for key in batch:
+            values.append(column.pg_type.to_wire(key[0]))
+            placeholders.append(f"${len(values)}")
+        sql += f"{quote('t0')}.{quote(column.database_name)} IN ({', '.join(placeholders)})"
+    else:
+        left = ", ".join(
+            f"{quote('t0')}.{quote(item.database_name)}" for item in remote
+        )
+        rows = []
+        for key in batch:
+            placeholders = []
+            for item, value in zip(remote, key, strict=True):
+                values.append(item.pg_type.to_wire(value))
+                placeholders.append(f"${len(values)}")
+            rows.append(f"({', '.join(placeholders)})")
+        sql += f"({left}) IN ({', '.join(rows)})"
+    order = ", ".join(
+        f"{quote('t0')}.{quote(item.database_name)}" for item in target.primary_key
+    )
+    return sql + f" ORDER BY {order}", values
+
+
+def compile_session_binding(
+    registries: Any, marker: FromORM
+) -> tuple[str, Any]:
+    """Resolve ``marker`` to a registry at route-compile time."""
+    name = marker.database
+    if name is None:
+        if len(registries) != 1:
+            raise TypeError(
+                "Session injection requires FromORM(<database>) when the "
+                "application registers more than one ORM registry"
+            )
+        name = next(iter(registries))
+    try:
+        registry = registries[name]
+    except KeyError:
+        raise TypeError(f"unknown ORM registry: {name}") from None
+    return name, registry
+
+
+__all__ = ["FromORM", "RawQuery", "Session", "compile_session_binding"]

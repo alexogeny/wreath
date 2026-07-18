@@ -1,0 +1,61 @@
+name: ci
+
+# Pull-request and main validation: the fast test suite and a strict docs
+# build. Benchmarks are not run here — they live in benchmarks/, are never
+# collected by pytest (testpaths = ["tests"]), and are regenerated on the
+# maintainer's host, not in CI.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Supersede an in-progress run when new commits land on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync (default 'dev' group; builds the native extension)
+        run: uv sync --frozen
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Ty
+        run: uv run ty check
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync (default 'dev' group; builds the native extension)
+        run: uv sync --frozen
+      - name: Fast tests
+        # Default marks exclude fuzz/performance/network (~3.5s); AGENTS.md says
+        # run this suite serially — worker startup outweighs the gain here.
+        run: uv run pytest
+
+  docs-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install docs dependencies
+        # Only the docs group; the C extension is not needed (static docstrings).
+        run: uv sync --frozen --only-group docs --no-install-project
+      - name: Build site (strict)
+        run: uv run --no-sync mkdocs build --strict
