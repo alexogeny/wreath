@@ -21,6 +21,21 @@ static int drive_chunk_trailers(WreathHttpProtocol *self);
 
 /* --- transport / loop calls ---------------------------------------------- */
 
+static const WreathTransportCAPI *transport_capi = NULL;
+
+static void
+load_transport_capi(void)
+{
+    if (transport_capi != NULL) {
+        return;
+    }
+    /* native-lint: allow NC004 -- one-time sibling-extension C API resolution */
+    transport_capi = PyCapsule_Import(WREATH_TRANSPORT_CAPI_NAME, 0);
+    if (transport_capi == NULL) {
+        PyErr_Clear();
+    }
+}
+
 static int
 transport_method0(WreathHttpProtocol *self, const char *name)
 {
@@ -51,7 +66,32 @@ transport_write(WreathHttpProtocol *self, PyObject *data)
     if (self->nfr_worker != NULL && PyBytes_Check(data)) {
         self->nfr_bytes_out += (uint64_t)PyBytes_GET_SIZE(data);
     }
+    if (self->native_transport && transport_capi != NULL) {
+        return transport_capi->write(self->transport, data);
+    }
     result = PyObject_CallOneArg(self->transport_write_fn, data);
+    if (result == NULL) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+
+static int
+transport_writelines(WreathHttpProtocol *self, PyObject *parts)
+{
+    if (self->transport == NULL || self->closing) {
+        return 0;
+    }
+    if (self->native_transport && transport_capi != NULL) {
+        return transport_capi->writelines(self->transport, parts);
+    }
+    if (self->transport_writelines_fn == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "transport writelines callable is unavailable");
+        return -1;
+    }
+    PyObject *result = PyObject_CallOneArg(self->transport_writelines_fn, parts);
     if (result == NULL) {
         return -1;
     }
@@ -1214,7 +1254,6 @@ decide_framing_and_write_head(WreathHttpProtocol *self, PyObject *first_body, in
     if (pair_write) {
         if (self->transport != NULL && !self->closing) {
             PyObject *pair = PyTuple_Pack(2, output, first_body);
-            PyObject *result;
             if (self->nfr_worker != NULL) {
                 self->nfr_bytes_out += (uint64_t)PyBytes_GET_SIZE(output) +
                                        (uint64_t)first_body_size;
@@ -1223,12 +1262,11 @@ decide_framing_and_write_head(WreathHttpProtocol *self, PyObject *first_body, in
             if (pair == NULL) {
                 return -1;
             }
-            result = PyObject_CallOneArg(self->transport_writelines_fn, pair);
-            Py_DECREF(pair);
-            if (result == NULL) {
+            if (transport_writelines(self, pair) < 0) {
+                Py_DECREF(pair);
                 return -1;
             }
-            Py_DECREF(result);
+            Py_DECREF(pair);
         }
         else {
             Py_DECREF(output);
@@ -2558,7 +2596,6 @@ ws_write_frame(WreathHttpProtocol *self, int opcode, const char *payload, Py_ssi
         self->transport != NULL && !self->closing) {
         PyObject *head_bytes = PyBytes_FromStringAndSize((const char *)header, header_len);
         PyObject *pair;
-        PyObject *result;
         if (head_bytes == NULL) {
             return -1;
         }
@@ -2567,12 +2604,11 @@ ws_write_frame(WreathHttpProtocol *self, int opcode, const char *payload, Py_ssi
         if (pair == NULL) {
             return -1;
         }
-        result = PyObject_CallOneArg(self->transport_writelines_fn, pair);
-        Py_DECREF(pair);
-        if (result == NULL) {
+        if (transport_writelines(self, pair) < 0) {
+            Py_DECREF(pair);
             return -1;
         }
-        Py_DECREF(result);
+        Py_DECREF(pair);
         return 0;
     }
     self->out_len = 0;
@@ -3297,6 +3333,14 @@ http_connection_made(WreathHttpProtocol *self, PyObject *transport)
     }
     Py_INCREF(transport);
     Py_XSETREF(self->transport, transport);
+    self->native_transport = 0;
+    if (strcmp(Py_TYPE(transport)->tp_name,
+               "wreath._native._reactor.SocketTransport") == 0) {
+        load_transport_capi();
+        self->native_transport = transport_capi != NULL &&
+            transport_capi->version == WREATH_TRANSPORT_CAPI_VERSION &&
+            transport_capi->check(transport);
+    }
     write_fn = PyObject_GetAttrString(transport, "write");
     {
         PyObject *writelines_fn = PyObject_GetAttrString(transport, "writelines");
@@ -3425,36 +3469,71 @@ http_protocol_releasebuffer(WreathHttpProtocol *self, Py_buffer *Py_UNUSED(view)
 }
 
 
-static PyObject *
-http_get_buffer(WreathHttpProtocol *self, PyObject *arg)
+static int
+http_prepare_read(WreathHttpProtocol *self, Py_ssize_t sizehint,
+                  char **buffer, Py_ssize_t *capacity)
 {
-    Py_ssize_t sizehint;
     Py_ssize_t target;
-    PyObject *view;
-
-    sizehint = PyLong_AsSsize_t(arg);
-    if (sizehint == -1 && PyErr_Occurred()) {
-        return NULL;
-    }
     if (self->read_offer_size > 0 || self->read_exports > 0) {
         PyErr_SetString(PyExc_RuntimeError,
                         "get_buffer() called while a previous read offer is live");
-        return NULL;
+        return -1;
     }
     apply_deferred_compaction(self);
     target = (sizehint > 0 && sizehint < WREATH_RECV_CHUNK) ? sizehint : WREATH_RECV_CHUNK;
     if (buf_reserve(self, target) < 0) {
-        return NULL;
+        return -1;
     }
-    /* Offer the whole writable tail (>= target, so never empty: asyncio
-     * treats a zero-length buffer as a fatal protocol error). */
     self->read_offer_offset = self->buf_len;
     self->read_offer_size = self->buf_cap - self->buf_len;
+    *buffer = self->buf + self->read_offer_offset;
+    *capacity = self->read_offer_size;
+    return 0;
+}
+
+
+static int
+http_commit_read_buffer(WreathHttpProtocol *self, Py_ssize_t nbytes)
+{
+    if (self->read_offer_size <= 0) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "buffer_updated() without an active read offer");
+        return -1;
+    }
+    if (nbytes < 0 || nbytes > self->read_offer_size) {
+        self->read_offer_size = 0;
+        self->read_offer_offset = 0;
+        PyErr_SetString(PyExc_ValueError,
+                        "buffer_updated() byte count is out of range");
+        return -1;
+    }
+    self->buf_len = self->read_offer_offset + nbytes;
+    self->read_offer_size = 0;
+    self->read_offer_offset = 0;
+    if (nbytes == 0 || self->closing) {
+        return 0;
+    }
+    return run_drive(self);
+}
+
+
+static PyObject *
+http_get_buffer(WreathHttpProtocol *self, PyObject *arg)
+{
+    Py_ssize_t sizehint = PyLong_AsSsize_t(arg);
+    char *buffer;
+    Py_ssize_t capacity;
+    PyObject *view;
+    if (sizehint == -1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    if (http_prepare_read(self, sizehint, &buffer, &capacity) < 0) {
+        return NULL;
+    }
     view = PyMemoryView_FromObject((PyObject *)self);
     if (view == NULL) {
         self->read_offer_offset = 0;
         self->read_offer_size = 0;
-        return NULL;
     }
     return view;
 }
@@ -3464,35 +3543,48 @@ static PyObject *
 http_buffer_updated(WreathHttpProtocol *self, PyObject *arg)
 {
     Py_ssize_t nbytes = PyLong_AsSsize_t(arg);
-    if (nbytes == -1 && PyErr_Occurred()) {
-        return NULL;
-    }
-    if (self->read_offer_size <= 0) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "buffer_updated() without an active read offer");
-        return NULL;
-    }
-    if (nbytes < 0 || nbytes > self->read_offer_size) {
-        /* The transport's accounting is wrong; drop the offer and raise so
-         * asyncio's fatal-error path closes the connection. */
-        self->read_offer_size = 0;
-        self->read_offer_offset = 0;
-        PyErr_SetString(PyExc_ValueError,
-                        "buffer_updated() byte count is out of range");
-        return NULL;
-    }
-    /* read_offer_offset == buf_len by invariant (data_received refuses and
-     * do_consume defers while the offer is active). */
-    self->buf_len = self->read_offer_offset + nbytes;
-    self->read_offer_size = 0;
-    self->read_offer_offset = 0;
-    if (nbytes == 0 || self->closing) {
-        Py_RETURN_NONE;
-    }
-    if (run_drive(self) < 0) {
+    if ((nbytes == -1 && PyErr_Occurred()) ||
+        http_commit_read_buffer(self, nbytes) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
+}
+
+
+static PyTypeObject *http1_protocol_type = NULL;
+
+void
+wreath_http1_protocol_set_type(PyObject *type)
+{
+    http1_protocol_type = type == NULL ? NULL : (PyTypeObject *)type;
+}
+
+int
+wreath_http1_protocol_check(PyObject *protocol)
+{
+    return http1_protocol_type != NULL &&
+           PyObject_TypeCheck(protocol, http1_protocol_type);
+}
+
+int
+wreath_http1_acquire_read_buffer(PyObject *protocol, char **buffer,
+                                 Py_ssize_t *capacity)
+{
+    if (!wreath_http1_protocol_check(protocol)) {
+        PyErr_SetString(PyExc_TypeError, "expected native Http1Protocol");
+        return -1;
+    }
+    return http_prepare_read((WreathHttpProtocol *)protocol, -1, buffer, capacity);
+}
+
+int
+wreath_http1_commit_read(PyObject *protocol, Py_ssize_t nbytes)
+{
+    if (!wreath_http1_protocol_check(protocol)) {
+        PyErr_SetString(PyExc_TypeError, "expected native Http1Protocol");
+        return -1;
+    }
+    return http_commit_read_buffer((WreathHttpProtocol *)protocol, nbytes);
 }
 
 

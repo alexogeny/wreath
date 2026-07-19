@@ -44,14 +44,16 @@ def _metal_loop(timers: str | None = None):
     return r.metal_event_loop()
 
 
-def test_metal_defaults_to_heap_timers():
-    # The default is the heap: the native H1 server keeps ~one live timer per
-    # connection, so the wheel's churn advantage never materialises and its 1 ms
-    # bridge heartbeat would keep an otherwise-idle loop awake. The wheel stays
-    # opt-in via WREATH_METAL_TIMERS=wheel.
+def test_metal_defaults_to_poller_driven_wheel_without_bridge_heartbeat():
     loop = _metal_loop()
+    fired: list[bool] = []
     try:
-        assert loop.reactor_timers() == "heap"
+        assert loop.reactor_timers() == "wheel"
+        loop.call_later(0.005, fired.append, True)
+        assert loop._wheel_tick_handle is None
+        loop.run_until_complete(asyncio.sleep(0.02))
+        assert fired == [True]
+        assert loop._wheel_tick_handle is None
     finally:
         loop.close()
 
@@ -137,6 +139,9 @@ def test_native_transport_fuses_http1_ingress_without_python_buffer_callbacks():
         assert b"200 OK" in response
         assert b"metal-http" in response
         assert callbacks == []
+        assert transport._direct_read_dispatches >= 1
+        assert transport._direct_protocol_writes >= 1
+        assert transport._zero_copy_cork_writes >= 1
         transport.close()
         loop.run_until_complete(asyncio.sleep(0))
     finally:

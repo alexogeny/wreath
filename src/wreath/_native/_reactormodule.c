@@ -49,6 +49,7 @@ typedef struct WheelTimer {
     PyObject *args;             /* owned tuple, or NULL (loop-timer dispatch) */
     PyObject *context;          /* owned contextvars.Context, or NULL */
     int64_t rounds;             /* full wheel rotations remaining */
+    int64_t deadline;           /* absolute wheel tick */
     int slot;                   /* bucket index, or -1 if unlinked */
     struct WheelTimer *prev;    /* intrusive slot list */
     struct WheelTimer *next;
@@ -62,11 +63,40 @@ typedef struct TimingWheel {
     double resolution;          /* seconds per tick */
     double base;                /* loop-clock value at construction */
     int64_t cursor;             /* ticks swept so far */
+    int64_t next_deadline;      /* earliest absolute tick, INT64_MAX if empty */
+    int next_dirty;             /* earliest timer was removed; rescan lazily */
     Py_ssize_t count;           /* live timers */
 } TimingWheel;
 
 static PyTypeObject WheelTimerType;
 static PyTypeObject TimingWheelType;
+
+static void
+wheel_refresh_next(TimingWheel *w)
+{
+    int64_t next = INT64_MAX;
+    for (int slot = 0; slot < w->nslots; slot++) {
+        for (WheelTimer *t = w->slots[slot]; t != NULL; t = t->next) {
+            if (t->callback != NULL && t->deadline < next) {
+                next = t->deadline;
+            }
+        }
+    }
+    w->next_deadline = next;
+    w->next_dirty = 0;
+}
+
+static double
+wheel_next_when(TimingWheel *w)
+{
+    if (w->next_dirty) {
+        wheel_refresh_next(w);
+    }
+    if (w->next_deadline == INT64_MAX) {
+        return Py_HUGE_VAL;
+    }
+    return w->base + (double)w->next_deadline * w->resolution;
+}
 
 /* --- WheelTimer ---------------------------------------------------------- */
 
@@ -84,9 +114,13 @@ timer_unlink(WheelTimer *t)
     if (t->next != NULL) {
         t->next->prev = t->prev;
     }
+    TimingWheel *w = t->wheel;
+    if (t->deadline == w->next_deadline) {
+        w->next_dirty = 1;
+    }
     t->prev = t->next = NULL;
     t->slot = -1;
-    t->wheel->count--;
+    w->count--;
 }
 
 static PyObject *
@@ -169,6 +203,8 @@ wheel_init(PyObject *op, PyObject *args, PyObject *kwds)
     w->resolution = resolution;
     w->base = base;
     w->cursor = 0;
+    w->next_deadline = INT64_MAX;
+    w->next_dirty = 0;
     w->count = 0;
     return 0;
 }
@@ -223,6 +259,7 @@ wheel_schedule(PyObject *op, PyObject *args)
     t->args = NULL;
     t->context = NULL;
     t->rounds = rounds;
+    t->deadline = deadline;
     t->slot = slot;
     t->wheel = w;
     t->prev = NULL;
@@ -232,6 +269,10 @@ wheel_schedule(PyObject *op, PyObject *args)
     }
     w->slots[slot] = t;
     w->count++;
+    if (deadline < w->next_deadline) {
+        w->next_deadline = deadline;
+        w->next_dirty = 0;
+    }
     return Py_NewRef((PyObject *)t);  /* caller holds a ref; wheel holds one */
 }
 
@@ -273,6 +314,7 @@ wheel_schedule_call(PyObject *op, PyObject *const *fastargs, Py_ssize_t nargs)
      * skipping context.run and the per-timer copy_context the caller would pay. */
     t->context = (fastargs[3] == Py_None) ? NULL : Py_NewRef(fastargs[3]);
     t->rounds = (ticks - 1) / w->nslots;  /* fire on first arrival at the slot */
+    t->deadline = deadline;
     t->slot = slot;
     t->wheel = w;
     t->prev = NULL;
@@ -282,6 +324,10 @@ wheel_schedule_call(PyObject *op, PyObject *const *fastargs, Py_ssize_t nargs)
     }
     w->slots[slot] = t;
     w->count++;
+    if (deadline < w->next_deadline) {
+        w->next_deadline = deadline;
+        w->next_dirty = 0;
+    }
     return Py_NewRef((PyObject *)t);
 }
 
@@ -323,19 +369,17 @@ wheel_advance(PyObject *op, PyObject *arg)
             t = nxt;
         }
     }
+    if (w->next_dirty) {
+        wheel_refresh_next(w);
+    }
     return due;
 }
 
-/* advance_run(now_seconds) -> count of timers fired, each dispatched in C via
- * context.run(callback, *args). No Python round-trip per fired timer. */
-static PyObject *
-wheel_advance_run(PyObject *op, PyObject *arg)
+/* Dispatch due timers without allocating an argument object. ReactorPoller uses
+ * this directly, while advance_run() remains the Python-visible wrapper. */
+static Py_ssize_t
+wheel_run_due(TimingWheel *w, double now)
 {
-    TimingWheel *w = (TimingWheel *)op;
-    double now = PyFloat_AsDouble(arg);
-    if (now == -1.0 && PyErr_Occurred()) {
-        return NULL;
-    }
     int64_t target = (int64_t)((now - w->base) / w->resolution);
     Py_ssize_t fired = 0;
     while (w->cursor < target) {
@@ -367,7 +411,6 @@ wheel_advance_run(PyObject *op, PyObject *arg)
                             Py_DECREF(run);
                         }
                     } else {
-                        /* no context: call the callback directly with its args */
                         result = PyObject_CallObject(t->callback, t->args);
                     }
                     if (result == NULL) {
@@ -383,7 +426,22 @@ wheel_advance_run(PyObject *op, PyObject *arg)
             t = nxt;
         }
     }
-    return PyLong_FromSsize_t(fired);
+    if (w->next_dirty) {
+        wheel_refresh_next(w);
+    }
+    return fired;
+}
+
+/* advance_run(now_seconds) -> count of timers fired, each dispatched in C via
+ * context.run(callback, *args). No Python round-trip per fired timer. */
+static PyObject *
+wheel_advance_run(PyObject *op, PyObject *arg)
+{
+    double now = PyFloat_AsDouble(arg);
+    if (now == -1.0 && PyErr_Occurred()) {
+        return NULL;
+    }
+    return PyLong_FromSsize_t(wheel_run_due((TimingWheel *)op, now));
 }
 
 static PyObject *
@@ -1016,10 +1074,14 @@ typedef struct {
     PyObject *read_ready, *write_ready, *conn_lost_cb;  /* our own bound methods */
     /* write buffer: contiguous bytearray with an advancing head */
     PyObject *wbuf;
+    PyObject *cork_obj;          /* retained exact bytes; sent directly at flush */
     Py_ssize_t whead;
     int writing;                /* writer registered */
     int cork;                   /* buffer writes during synchronous request drive */
     Py_ssize_t direct_writelines; /* diagnostic count of sendmsg fast-path writes */
+    Py_ssize_t direct_read_dispatches; /* poller called st_read_ready directly */
+    Py_ssize_t direct_protocol_writes; /* server called transport C API directly */
+    Py_ssize_t zero_copy_cork_writes; /* exact bytes retained instead of copied */
     /* flow control + lifecycle */
     Py_ssize_t high_water, low_water;
     int protocol_paused;
@@ -1091,6 +1153,7 @@ st_force_close(SocketTransport *t, PyObject *exc)
     if (t->conn_lost) {
         return;
     }
+    Py_CLEAR(t->cork_obj);
     if (st_wsize(t) > 0) {
         if (PyByteArray_Resize(t->wbuf, 0) == 0) {
             t->whead = 0;
@@ -1152,8 +1215,36 @@ st_flush_cork(SocketTransport *t)
     if (t->conn_lost) {
         return;
     }
+    int pending_partial = 0;
+    if (t->cork_obj != NULL) {
+        const char *p = PyBytes_AS_STRING(t->cork_obj);
+        Py_ssize_t size = PyBytes_GET_SIZE(t->cork_obj);
+        ssize_t n;
+        do {
+            n = send(t->fd, p, (size_t)size, 0);
+        } while (n < 0 && errno == EINTR);
+        if (n < 0) {
+            if (!(errno == EAGAIN || errno == EWOULDBLOCK)) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                st_fatal(t, "write error");
+                return;
+            }
+            n = 0;
+        }
+        if (n < size) {
+            Py_ssize_t remaining = size - n;
+            if (PyByteArray_Resize(t->wbuf, remaining) < 0) {
+                st_fatal(t, "write buffer allocation failed");
+                return;
+            }
+            memcpy(PyByteArray_AS_STRING(t->wbuf), p + n, (size_t)remaining);
+            t->whead = 0;
+            pending_partial = 1;
+        }
+        Py_CLEAR(t->cork_obj);
+    }
     Py_ssize_t size = st_wsize(t);
-    if (size > 0) {
+    if (size > 0 && !pending_partial) {
         const char *p = PyByteArray_AS_STRING(t->wbuf) + t->whead;
         ssize_t n;
         do {
@@ -1420,6 +1511,24 @@ st_write(PyObject *op, PyObject *data)
         PyBuffer_Release(&view);
         Py_RETURN_NONE;
     }
+    if (t->cork && t->cork_obj == NULL && st_wsize(t) == 0 &&
+        PyBytes_CheckExact(data)) {
+        t->cork_obj = Py_NewRef(data);
+        t->zero_copy_cork_writes++;
+        PyBuffer_Release(&view);
+        Py_RETURN_NONE;
+    }
+    if (t->cork_obj != NULL) {
+        Py_ssize_t pending = PyBytes_GET_SIZE(t->cork_obj);
+        if (PyByteArray_Resize(t->wbuf, pending) < 0) {
+            PyBuffer_Release(&view);
+            return NULL;
+        }
+        memcpy(PyByteArray_AS_STRING(t->wbuf),
+               PyBytes_AS_STRING(t->cork_obj), (size_t)pending);
+        Py_CLEAR(t->cork_obj);
+        t->whead = 0;
+    }
     Py_ssize_t off = 0;
     if (!t->cork && st_wsize(t) == 0) {
         /* nothing buffered: try to send straight away */
@@ -1607,7 +1716,7 @@ st_close(PyObject *op, PyObject *Py_UNUSED(ignored))
         PyObject *r = PyObject_CallFunction(t->m_remove_reader, "i", t->fd);
         Py_XDECREF(r);
     }
-    if (st_wsize(t) == 0) {
+    if (st_wsize(t) == 0 && t->cork_obj == NULL) {
         t->conn_lost++;
         if (t->writing) {
             PyObject *r = PyObject_CallFunction(t->m_remove_writer, "i", t->fd);
@@ -1907,9 +2016,13 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
         return -1;
     }
     t->whead = 0;
+    t->cork_obj = NULL;
     t->writing = 0;
     t->cork = 0;
     t->direct_writelines = 0;
+    t->direct_read_dispatches = 0;
+    t->direct_protocol_writes = 0;
+    t->zero_copy_cork_writes = 0;
     t->high_water = 65536;
     t->low_water = 16384;
     t->protocol_paused = 0;
@@ -1922,10 +2035,15 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
     st_bind_protocol_methods(t);
 
     /* populate get_extra_info like asyncio does */
-    PyDict_SetItemString(t->extra, "socket", sock);
+    if (PyDict_SetItemString(t->extra, "socket", sock) < 0) {
+        return -1;
+    }
     PyObject *sn = PyObject_CallMethod(sock, "getsockname", NULL);
     if (sn != NULL) {
-        PyDict_SetItemString(t->extra, "sockname", sn);
+        if (PyDict_SetItemString(t->extra, "sockname", sn) < 0) {
+            Py_DECREF(sn);
+            return -1;
+        }
         Py_DECREF(sn);
     } else {
         PyErr_Clear();
@@ -1933,7 +2051,10 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
     if (PyDict_GetItemString(t->extra, "peername") == NULL) {
         PyObject *pn = PyObject_CallMethod(sock, "getpeername", NULL);
         if (pn != NULL) {
-            PyDict_SetItemString(t->extra, "peername", pn);
+            if (PyDict_SetItemString(t->extra, "peername", pn) < 0) {
+                Py_DECREF(pn);
+                return -1;
+            }
             Py_DECREF(pn);
         } else {
             PyErr_Clear();
@@ -1983,6 +2104,7 @@ st_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(t->server);
     Py_VISIT(t->extra);
     Py_VISIT(t->wbuf);
+    Py_VISIT(t->cork_obj);
     /* The bound methods below close a reference cycle back to the transport
      * (read_ready/write_ready/conn_lost_cb are bound to self); GC must see them
      * or a closed connection is never collected. */
@@ -2010,6 +2132,7 @@ st_clear(PyObject *op)
     Py_CLEAR(t->server);
     Py_CLEAR(t->extra);
     Py_CLEAR(t->wbuf);
+    Py_CLEAR(t->cork_obj);
     Py_CLEAR(t->m_add_reader);
     Py_CLEAR(t->m_remove_reader);
     Py_CLEAR(t->m_add_writer);
@@ -2044,11 +2167,65 @@ st_direct_writelines_get(PyObject *op, void *Py_UNUSED(closure))
     return PyLong_FromSsize_t(((SocketTransport *)op)->direct_writelines);
 }
 
+static int
+transport_capi_check(PyObject *op)
+{
+    return PyObject_TypeCheck(op, &SocketTransportType);
+}
+
+static int
+transport_capi_write(PyObject *op, PyObject *data)
+{
+    PyObject *result = st_write(op, data);
+    if (result == NULL) {
+        return -1;
+    }
+    Py_DECREF(result);
+    ((SocketTransport *)op)->direct_protocol_writes++;
+    return 0;
+}
+
+static int
+transport_capi_writelines(PyObject *op, PyObject *parts)
+{
+    PyObject *result = st_writelines(op, parts);
+    if (result == NULL) {
+        return -1;
+    }
+    Py_DECREF(result);
+    ((SocketTransport *)op)->direct_protocol_writes++;
+    return 0;
+}
+
+static PyObject *
+st_direct_read_dispatches_get(PyObject *op, void *Py_UNUSED(closure))
+{
+    return PyLong_FromSsize_t(((SocketTransport *)op)->direct_read_dispatches);
+}
+
+static PyObject *
+st_direct_protocol_writes_get(PyObject *op, void *Py_UNUSED(closure))
+{
+    return PyLong_FromSsize_t(((SocketTransport *)op)->direct_protocol_writes);
+}
+
+static PyObject *
+st_zero_copy_cork_writes_get(PyObject *op, void *Py_UNUSED(closure))
+{
+    return PyLong_FromSsize_t(((SocketTransport *)op)->zero_copy_cork_writes);
+}
+
 static PyGetSetDef st_getset[] = {
     {"_fused_http1", st_fused_http1_get, NULL,
      "whether ingress uses the private native HTTP/1 C API", NULL},
     {"_direct_writelines", st_direct_writelines_get, NULL,
      "number of large writelines emitted through sendmsg", NULL},
+    {"_direct_read_dispatches", st_direct_read_dispatches_get, NULL,
+     "number of readiness callbacks dispatched as direct C calls", NULL},
+    {"_direct_protocol_writes", st_direct_protocol_writes_get, NULL,
+     "number of protocol writes entering through the transport C API", NULL},
+    {"_zero_copy_cork_writes", st_zero_copy_cork_writes_get, NULL,
+     "number of immutable writes retained for direct post-drive send", NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
@@ -2098,6 +2275,8 @@ typedef struct {
     PyObject *reader_args;  /* tuple, or NULL for no-arg fast call */
     PyObject *writer;
     PyObject *writer_args;
+    int native_reader;
+    int native_writer;
     uint32_t mask;          /* epoll mask currently registered (0 => not in epoll) */
 } FdEntry;
 
@@ -2110,6 +2289,8 @@ typedef struct {
     PyObject *ready;        /* loop._ready (collections.deque) */
     PyObject *scheduled;    /* loop._scheduled (heapq list) */
     PyObject *exc_handler;  /* loop.call_exception_handler (bound) */
+    PyObject *wheel_obj;    /* TimingWheel or None */
+    TimingWheel *wheel;     /* borrowed from wheel_obj */
     struct epoll_event *evbuf;
     int evcap;
     double clock_res;       /* loop._clock_resolution */
@@ -2217,6 +2398,10 @@ rp_add_reader(PyObject *op, PyObject *const *args, Py_ssize_t nargs)
     FdEntry *e = &p->fds[fd];
     Py_XSETREF(e->reader, Py_NewRef(args[1]));
     Py_XSETREF(e->reader_args, cb_args);
+    e->native_reader = PyCFunction_Check(args[1]) &&
+        PyCFunction_GET_SELF(args[1]) != NULL &&
+        PyObject_TypeCheck(PyCFunction_GET_SELF(args[1]), &SocketTransportType) &&
+        PyCFunction_GET_FUNCTION(args[1]) == (PyCFunction)st_read_ready;
     if (rp_apply(p, fd, e->mask | EPOLLIN) < 0) {
         return NULL;
     }
@@ -2245,6 +2430,10 @@ rp_add_writer(PyObject *op, PyObject *const *args, Py_ssize_t nargs)
     FdEntry *e = &p->fds[fd];
     Py_XSETREF(e->writer, Py_NewRef(args[1]));
     Py_XSETREF(e->writer_args, cb_args);
+    e->native_writer = PyCFunction_Check(args[1]) &&
+        PyCFunction_GET_SELF(args[1]) != NULL &&
+        PyObject_TypeCheck(PyCFunction_GET_SELF(args[1]), &SocketTransportType) &&
+        PyCFunction_GET_FUNCTION(args[1]) == (PyCFunction)st_write_ready;
     if (rp_apply(p, fd, e->mask | EPOLLOUT) < 0) {
         return NULL;
     }
@@ -2268,6 +2457,7 @@ rp_remove_reader(PyObject *op, PyObject *arg)
     }
     Py_CLEAR(e->reader);
     Py_CLEAR(e->reader_args);
+    e->native_reader = 0;
     Py_RETURN_TRUE;
 }
 
@@ -2288,7 +2478,32 @@ rp_remove_writer(PyObject *op, PyObject *arg)
     }
     Py_CLEAR(e->writer);
     Py_CLEAR(e->writer_args);
+    e->native_writer = 0;
     Py_RETURN_TRUE;
+}
+
+static void
+rp_report_callback_error(ReactorPoller *p)
+{
+    /* Swallow into the loop's exception handler (never propagate out of poll). */
+    PyObject *exc = PyErr_GetRaisedException();
+    if (exc == NULL) {
+        return;
+    }
+    PyObject *ctx = PyDict_New();
+    PyObject *message = PyUnicode_FromString("Exception in callback");
+    if (ctx != NULL && message != NULL &&
+        PyDict_SetItemString(ctx, "message", message) == 0 &&
+        PyDict_SetItemString(ctx, "exception", exc) == 0) {
+        PyObject *hr = PyObject_CallOneArg(p->exc_handler, ctx);
+        Py_XDECREF(hr);
+    }
+    Py_XDECREF(message);
+    Py_XDECREF(ctx);
+    if (PyErr_Occurred()) {
+        PyErr_WriteUnraisable(p->exc_handler);
+    }
+    Py_DECREF(exc);
 }
 
 /* Call a readiness callback; on error route to loop.call_exception_handler,
@@ -2302,30 +2517,36 @@ rp_dispatch(ReactorPoller *p, PyObject *cb, PyObject *cb_args)
         Py_DECREF(r);
         return;
     }
-    /* Swallow into the loop's exception handler (never propagate out of poll). */
-    PyObject *exc = PyErr_GetRaisedException();
-    if (exc == NULL) {
-        return;
+    rp_report_callback_error(p);
+}
+
+static void
+rp_dispatch_native_transport(ReactorPoller *p, PyObject *cb, int reader)
+{
+    PyObject *transport = PyCFunction_GET_SELF(cb);
+    PyObject *r;
+    if (reader) {
+        ((SocketTransport *)transport)->direct_read_dispatches++;
+        r = st_read_ready(transport, NULL);
+    } else {
+        r = st_write_ready(transport, NULL);
     }
-    PyObject *ctx = PyDict_New();
-    if (ctx != NULL) {
-        PyDict_SetItemString(ctx, "message",
-                             PyUnicode_FromString("Exception in callback"));
-        PyDict_SetItemString(ctx, "exception", exc);
-        PyObject *hr = PyObject_CallOneArg(p->exc_handler, ctx);
-        Py_XDECREF(hr);
-        Py_DECREF(ctx);
+    if (r != NULL) {
+        Py_DECREF(r);
+    } else {
+        rp_report_callback_error(p);
     }
-    if (PyErr_Occurred()) {
-        PyErr_WriteUnraisable(p->exc_handler);
-    }
-    Py_DECREF(exc);
 }
 
 static PyObject *
 rp_run_once(PyObject *op, PyObject *Py_UNUSED(ignored))
 {
     ReactorPoller *p = (ReactorPoller *)op;
+    double loop_now = mono_seconds();
+    if (p->wheel != NULL && p->wheel->count > 0) {
+        wheel_run_due(p->wheel, loop_now);
+    }
+    int blocked = 0;
 
     /* --- 1. poll -------------------------------------------------------- */
     /* Non-blocking probe with the GIL held: a saturated server returns work on
@@ -2342,33 +2563,41 @@ rp_run_once(PyObject *op, PyObject *Py_UNUSED(ignored))
         int block_ms = -1;
         if (nready > 0) {
             block_ms = 0;
-        } else if (PyList_GET_SIZE(p->scheduled) > 0) {
-            PyObject *h0 = PyList_GET_ITEM(p->scheduled, 0);  /* borrowed */
-            PyObject *whenobj = PyObject_GetAttr(h0, g_s_when);
-            if (whenobj == NULL) {
-                return NULL;
+        } else {
+            double delay = Py_HUGE_VAL;
+            if (PyList_GET_SIZE(p->scheduled) > 0) {
+                PyObject *h0 = PyList_GET_ITEM(p->scheduled, 0);  /* borrowed */
+                PyObject *whenobj = PyObject_GetAttr(h0, g_s_when);
+                if (whenobj == NULL) {
+                    return NULL;
+                }
+                delay = PyFloat_AsDouble(whenobj) - loop_now;
+                Py_DECREF(whenobj);
             }
-            double delay = PyFloat_AsDouble(whenobj) - mono_seconds();
-            Py_DECREF(whenobj);
-            /* Round the block up (ceil): a positive sub-millisecond delay must
-             * never floor to 0, which would turn the poll non-blocking and make
-             * the loop busy-spin until the timer expires (a full core burned
-             * idle while any recurring timer keeps the schedule non-empty). */
-            if (delay <= 0.0) {
-                block_ms = 0;
-            } else {
-                double ms = delay * 1000.0;
-                if (ms >= 2147483646.0) {
-                    block_ms = 2147483646;
+            if (p->wheel != NULL && p->wheel->count > 0) {
+                double wheel_delay = wheel_next_when(p->wheel) - loop_now;
+                if (wheel_delay < delay) {
+                    delay = wheel_delay;
+                }
+            }
+            if (!isinf(delay)) {
+                if (delay <= 0.0) {
+                    block_ms = 0;
                 } else {
-                    block_ms = (int)ms;
-                    if ((double)block_ms < ms) {
-                        block_ms += 1;
+                    double ms = delay * 1000.0;
+                    if (ms >= 2147483646.0) {
+                        block_ms = 2147483646;
+                    } else {
+                        block_ms = (int)ms;
+                        if ((double)block_ms < ms) {
+                            block_ms += 1;
+                        }
                     }
                 }
             }
         }
         if (block_ms != 0) {
+            blocked = 1;
             Py_BEGIN_ALLOW_THREADS
             n = epoll_wait(p->epfd, p->evbuf, p->evcap, block_ms);
             Py_END_ALLOW_THREADS
@@ -2393,24 +2622,41 @@ rp_run_once(PyObject *op, PyObject *Py_UNUSED(ignored))
         FdEntry *e = &p->fds[fd];
         if ((ev & (EPOLLIN | EPOLLERR | EPOLLHUP)) && e->reader != NULL) {
             PyObject *cb = Py_NewRef(e->reader);
-            PyObject *ca = e->reader_args ? Py_NewRef(e->reader_args) : NULL;
-            rp_dispatch(p, cb, ca);
+            if (e->native_reader) {
+                rp_dispatch_native_transport(p, cb, 1);
+            } else {
+                PyObject *ca = e->reader_args ? Py_NewRef(e->reader_args) : NULL;
+                rp_dispatch(p, cb, ca);
+                Py_XDECREF(ca);
+            }
             Py_DECREF(cb);
-            Py_XDECREF(ca);
         }
         /* Re-load: the reader may have closed the fd / removed the writer. */
         e = &p->fds[fd];
         if ((ev & (EPOLLOUT | EPOLLERR | EPOLLHUP)) && e->writer != NULL) {
             PyObject *cb = Py_NewRef(e->writer);
-            PyObject *ca = e->writer_args ? Py_NewRef(e->writer_args) : NULL;
-            rp_dispatch(p, cb, ca);
+            if (e->native_writer) {
+                rp_dispatch_native_transport(p, cb, 0);
+            } else {
+                PyObject *ca = e->writer_args ? Py_NewRef(e->writer_args) : NULL;
+                rp_dispatch(p, cb, ca);
+                Py_XDECREF(ca);
+            }
             Py_DECREF(cb);
-            Py_XDECREF(ca);
         }
     }
 
+    /* The wheel is driven by the poll deadline itself: no recurring bridge
+     * timer, no idle 1 kHz wakeup, and no Python frame between poll and expiry. */
+    if (p->wheel != NULL && p->wheel->count > 0) {
+        if (blocked) {
+            loop_now = mono_seconds();
+        }
+        wheel_run_due(p->wheel, loop_now);
+    }
+
     /* --- 4. due timers -> ready ----------------------------------------- */
-    double end_time = mono_seconds() + p->clock_res;
+    double end_time = loop_now + p->clock_res;
     while (PyList_GET_SIZE(p->scheduled) > 0) {
         PyObject *h0 = PyList_GET_ITEM(p->scheduled, 0);  /* borrowed */
         PyObject *whenobj = PyObject_GetAttr(h0, g_s_when);
@@ -2419,6 +2665,9 @@ rp_run_once(PyObject *op, PyObject *Py_UNUSED(ignored))
         }
         double when = PyFloat_AsDouble(whenobj);
         Py_DECREF(whenobj);
+        if (when == -1.0 && PyErr_Occurred()) {
+            return NULL;
+        }
         if (when >= end_time) {
             break;
         }
@@ -2496,8 +2745,8 @@ static int
 rp_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwds))
 {
     ReactorPoller *p = (ReactorPoller *)op;
-    PyObject *loop;
-    if (!PyArg_ParseTuple(args, "O", &loop)) {
+    PyObject *loop, *wheel = Py_None;
+    if (!PyArg_ParseTuple(args, "O|O", &loop, &wheel)) {
         return -1;
     }
     p->epfd = epoll_create1(EPOLL_CLOEXEC);
@@ -2514,6 +2763,9 @@ rp_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwds))
     p->fds = NULL;
     p->fdcap = 0;
     p->loop = Py_NewRef(loop);
+    p->wheel_obj = Py_NewRef(wheel);
+    p->wheel = PyObject_TypeCheck(wheel, &TimingWheelType)
+                   ? (TimingWheel *)wheel : NULL;
     p->ready = PyObject_GetAttrString(loop, "_ready");
     p->scheduled = PyObject_GetAttrString(loop, "_scheduled");
     p->exc_handler = PyObject_GetAttrString(loop, "call_exception_handler");
@@ -2547,6 +2799,7 @@ rp_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(p->ready);
     Py_VISIT(p->scheduled);
     Py_VISIT(p->exc_handler);
+    Py_VISIT(p->wheel_obj);
     for (int i = 0; i < p->fdcap; i++) {
         Py_VISIT(p->fds[i].reader);
         Py_VISIT(p->fds[i].reader_args);
@@ -2564,6 +2817,8 @@ rp_clear(PyObject *op)
     Py_CLEAR(p->ready);
     Py_CLEAR(p->scheduled);
     Py_CLEAR(p->exc_handler);
+    Py_CLEAR(p->wheel_obj);
+    p->wheel = NULL;
     if (p->fds != NULL) {
         for (int i = 0; i < p->fdcap; i++) {
             Py_CLEAR(p->fds[i].reader);
@@ -2619,6 +2874,13 @@ static PyTypeObject ReactorPollerType = {
     .tp_new = PyType_GenericNew,
 };
 
+static WreathTransportCAPI transport_capi = {
+    WREATH_TRANSPORT_CAPI_VERSION,
+    transport_capi_check,
+    transport_capi_write,
+    transport_capi_writelines,
+};
+
 static PyModuleDef reactormodule = {
     PyModuleDef_HEAD_INIT,
     .m_name = "wreath._native._reactor",
@@ -2658,6 +2920,14 @@ PyInit__reactor(void)
     }
     PyObject *m = PyModule_Create(&reactormodule);
     if (m == NULL) {
+        return NULL;
+    }
+    PyObject *transport_capsule = PyCapsule_New(
+        &transport_capi, WREATH_TRANSPORT_CAPI_NAME, NULL);
+    if (transport_capsule == NULL ||
+        PyModule_AddObject(m, "_TRANSPORT_C_API", transport_capsule) < 0) {
+        Py_XDECREF(transport_capsule);
+        Py_DECREF(m);
         return NULL;
     }
     if (PyModule_AddObjectRef(m, "TimingWheel", (PyObject *)&TimingWheelType) < 0 ||

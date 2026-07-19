@@ -75,6 +75,7 @@ typedef struct {
     PyObject *transport;  /* set on connection_made, cleared on connection_lost */
     PyObject *transport_write_fn;
     PyObject *transport_writelines_fn;  /* NULL when the transport lacks it */
+    int native_transport;               /* direct WreathTransportCAPI available */
     PyObject *server_address;
     PyObject *client_address;
     PyObject *scheme;
@@ -253,6 +254,36 @@ typedef struct {
      * before releasing this reference, turning escaped markers into no-ops. */
     PyObject *nfr_http_scope;
 } WreathHttpProtocol;
+
+/* Private zero-allocation ingress API shared with wreath._native._reactor.
+ * The capsule keeps the server and reactor extensions link-independent while
+ * allowing the metal transport to recv directly into the HTTP/1 parser buffer. */
+#define WREATH_HTTP1_CAPI_NAME "wreath._native._server._HTTP1_C_API"
+#define WREATH_HTTP1_CAPI_VERSION 1
+
+typedef struct {
+    uint32_t version;
+    int (*check)(PyObject *);
+    int (*acquire_read_buffer)(PyObject *, char **, Py_ssize_t *);
+    int (*commit_read)(PyObject *, Py_ssize_t);
+} WreathHttp1CAPI;
+
+void wreath_http1_protocol_set_type(PyObject *);
+int wreath_http1_protocol_check(PyObject *);
+int wreath_http1_acquire_read_buffer(PyObject *, char **, Py_ssize_t *);
+int wreath_http1_commit_read(PyObject *, Py_ssize_t);
+
+/* Reverse private API: the native HTTP/1 protocol emits directly through the
+ * metal transport without a PyObject_Call boundary. */
+#define WREATH_TRANSPORT_CAPI_NAME "wreath._native._reactor._TRANSPORT_C_API"
+#define WREATH_TRANSPORT_CAPI_VERSION 1
+
+typedef struct {
+    uint32_t version;
+    int (*check)(PyObject *);
+    int (*write)(PyObject *, PyObject *);
+    int (*writelines)(PyObject *, PyObject *);
+} WreathTransportCAPI;
 
 
 /* --- shared module globals (defined in server_common.c) ------------------ */
