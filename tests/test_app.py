@@ -5,6 +5,23 @@ from typing import Any
 import pytest
 
 from wreath import JSONResponse, Wreath
+from wreath.app import _StaticMatcher
+
+
+def test_static_matcher_preserves_first_registration_precedence() -> None:
+    async def first(request):
+        return None
+
+    async def second(request):
+        return None
+
+    matcher = _StaticMatcher()
+    matcher.add("/assets/", first)
+    matcher.add("/assets/private/", second)
+
+    assert matcher.match("/other/file.txt") is None
+    assert matcher.match("/assets/site.css") == (first, {"path": "site.css"})
+    assert matcher.match("/assets/private/key.txt") == (first, {"path": "private/key.txt"})
 
 
 async def invoke(

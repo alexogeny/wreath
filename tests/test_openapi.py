@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import wreath.binding as binding
 from wreath import Wreath
 from wreath.openapi import generate_openapi
 
@@ -17,6 +18,34 @@ class Widget:
     name: str
     weight: float
     labels: list[str] = field(default_factory=list)
+
+
+def test_application_image_shares_one_binding_inspection(monkeypatch) -> None:
+    calls = 0
+    target = None
+    real_signature = binding.inspect.signature
+
+    def counting_signature(*args, **kwargs):
+        nonlocal calls
+        if args and args[0] is target:
+            calls += 1
+        return real_signature(*args, **kwargs)
+
+    monkeypatch.setattr(binding.inspect, "signature", counting_signature)
+    app = Wreath()
+
+    @app.get("/items/{item_id}")
+    async def item(request: Any, item_id: int) -> str:
+        return str(item_id)
+
+    target = item
+    app._compile_routes()
+    generate_openapi(app)
+    from wreath.typegen import build_api_model
+
+    build_api_model(app, allow_unknown=True)
+
+    assert calls == 1
 
 
 def build_app() -> Wreath:

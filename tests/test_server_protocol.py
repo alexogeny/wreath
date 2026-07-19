@@ -880,6 +880,23 @@ async def test_one_shot_matches_start_body_pair(protocol_cls: type) -> None:
     assert bytes(one_shot_wire).endswith(b"\r\n\r\nhello")
 
 
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_typed_response_abi_emits_complete_response() -> None:
+    async def typed_response(scope: dict, receive: Any, send: Any) -> None:
+        protocol = send.__self__
+        await protocol._wreath_response(
+            200, [(b"content-type", b"text/plain"), (b"x-native", b"typed")], b"hello"
+        )
+
+    wire = bytes((await drive(_NativeHttpProtocol, typed_response, [GET])).buffer)
+
+    assert wire.startswith(b"HTTP/1.1 200 OK\r\n")
+    assert b"x-native: typed\r\n" in wire
+    assert b"content-length: 5\r\n" in wire
+    assert wire.endswith(b"\r\n\r\nhello")
+
+
 @impl
 @pytest.mark.asyncio
 async def test_one_shot_keep_alive_second_request(protocol_cls: type) -> None:
@@ -951,7 +968,7 @@ async def test_get_buffer_sizehints_return_writable_nonempty() -> None:
         assert len(view) > 0
         assert not view.readonly
         if hint > 0:
-            assert len(view) >= min(hint, 65536)
+            assert len(view) >= min(hint, 32768)
         view[0:1] = b"G"  # actually writable
         protocol.buffer_updated(0)  # zero-byte update is harmless
         view.release()

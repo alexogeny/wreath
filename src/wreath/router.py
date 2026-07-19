@@ -1,8 +1,8 @@
-"""Composable route modules flattened into :class:`wreath.Wreath` at inclusion time."""
+"""Composable route modules flattened when their definitions are consumed."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -58,6 +58,66 @@ class RouteDefinition:
     operation_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _IncludedRoutes:
+    """An immutable snapshot edge flattened only when routes are consumed."""
+
+    entries: tuple[RouteDefinition | _IncludedRoutes, ...]
+    parent_prefix: str
+    include_prefix: str
+    tags: tuple[str, ...]
+    middleware: tuple[Middleware, ...]
+    dependencies: tuple[Depends, ...]
+    requirement: AuthRequirement
+
+
+def _flatten_routes(
+    entries: tuple[RouteDefinition | _IncludedRoutes, ...],
+) -> tuple[RouteDefinition, ...]:
+    flattened: list[RouteDefinition] = []
+    stack: list[
+        tuple[
+            Iterator[RouteDefinition | _IncludedRoutes],
+            tuple[_IncludedRoutes, ...],
+        ]
+    ] = [(iter(entries), ())]
+    while stack:
+        iterator, wrappers = stack[-1]
+        try:
+            entry = next(iterator)
+        except StopIteration:
+            stack.pop()
+            continue
+        if isinstance(entry, _IncludedRoutes):
+            stack.append((iter(entry.entries), (*wrappers, entry)))
+            continue
+
+        path = entry.path
+        tags: list[str] = []
+        middleware: list[Middleware] = []
+        dependencies: list[Depends] = []
+        requirements: list[AuthRequirement] = []
+        for wrapper in wrappers:
+            tags.extend(wrapper.tags)
+            middleware.extend(wrapper.middleware)
+            dependencies.extend(wrapper.dependencies)
+            requirements.append(wrapper.requirement)
+        for wrapper in reversed(wrappers):
+            path = _path(wrapper.include_prefix, path)
+            path = _path(wrapper.parent_prefix, path)
+        flattened.append(
+            replace(
+                entry,
+                path=path,
+                tags=(*tags, *entry.tags),
+                middleware=(*middleware, *entry.middleware),
+                dependencies=(*dependencies, *entry.dependencies),
+                requirement=merge_requirements(*requirements, entry.requirement),
+            )
+        )
+    return tuple(flattened)
+
+
 class Router:
     """A reusable collection of routes and inherited route metadata.
 
@@ -89,11 +149,11 @@ class Router:
         self._middleware = tuple(middleware)
         self._dependencies = tuple(dependencies)
         self._requirement = _permission_requirement(permissions)
-        self._routes: list[RouteDefinition] = []
+        self._routes: list[RouteDefinition | _IncludedRoutes] = []
 
     @property
     def routes(self) -> tuple[RouteDefinition, ...]:
-        return tuple(self._routes)
+        return _flatten_routes(tuple(self._routes))
 
     def route(
         self,
@@ -164,27 +224,17 @@ class Router:
         include_middleware = tuple(middleware)
         include_dependencies = tuple(dependencies)
         include_requirement = _permission_requirement(permissions)
-        parent_prefix = self._prefix
-        for definition in router._routes:
-            child_path = _path(include_prefix, definition.path)
-            self._routes.append(
-                replace(
-                    definition,
-                    path=_path(parent_prefix, child_path),
-                    tags=self._tags + include_tags + definition.tags,
-                    middleware=self._middleware
-                    + include_middleware
-                    + definition.middleware,
-                    dependencies=self._dependencies
-                    + include_dependencies
-                    + definition.dependencies,
-                    requirement=merge_requirements(
-                        self._requirement,
-                        include_requirement,
-                        definition.requirement,
-                    ),
-                )
+        self._routes.append(
+            _IncludedRoutes(
+                tuple(router._routes),
+                self._prefix,
+                include_prefix,
+                self._tags + include_tags,
+                self._middleware + include_middleware,
+                self._dependencies + include_dependencies,
+                merge_requirements(self._requirement, include_requirement),
             )
+        )
 
 
 __all__ = ["RouteDefinition", "Router"]

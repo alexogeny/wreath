@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
+from sys import getsizeof
 from typing import Any, Literal
 
 from .errors import DeclarationError, RegistryError
@@ -31,6 +32,19 @@ ValidateSchema = Literal["off", "warn", "error"]
 _VALIDATE_MODES = frozenset({"off", "warn", "error"})
 
 
+def _cache_entry_bytes(shape_key: bytes, plan: Any) -> int:
+    """Price allocations directly retained by one cached plan.
+
+    Registry metadata referenced by a plan is shared application state, so only
+    the plan, its key, and its immediate slot values belong to this budget.
+    """
+    size = getsizeof(shape_key) + getsizeof(plan)
+    for slot in getattr(type(plan), "__slots__", ()):
+        if isinstance(slot, str) and hasattr(plan, slot):
+            size += getsizeof(getattr(plan, slot))
+    return size
+
+
 class Registry:
     """Compiled models for one database."""
 
@@ -38,11 +52,13 @@ class Registry:
         "_by_name",
         "_by_table",
         "_cache",
+        "_cache_bytes",
         "_lock",
         "_model_order",
         "_specs",
         "database",
         "fingerprint",
+        "query_cache_bytes",
         "query_cache_size",
         "specs",
         "validate_schema",
@@ -55,6 +71,7 @@ class Registry:
         *,
         validate_schema: ValidateSchema = "error",
         query_cache_size: int = 512,
+        query_cache_bytes: int = 8 * 1024 * 1024,
     ) -> None:
         if validate_schema not in _VALIDATE_MODES:
             raise RegistryError(
@@ -63,9 +80,12 @@ class Registry:
             )
         if not isinstance(query_cache_size, int) or query_cache_size < 1:
             raise RegistryError("query_cache_size must be a positive integer")
+        if not isinstance(query_cache_bytes, int) or query_cache_bytes < 1:
+            raise RegistryError("query_cache_bytes must be a positive integer")
         self.database = database
         self.validate_schema: ValidateSchema = validate_schema
         self.query_cache_size = query_cache_size
+        self.query_cache_bytes = query_cache_bytes
         self._specs: dict[type[Model], ModelSpec] = {}
         self._by_table: dict[tuple[str, str], ModelSpec] = {}
         # Class name -> spec, or None when the name is ambiguous (two models
@@ -76,7 +96,8 @@ class Registry:
         self.fingerprint = b""
         # Plan cache insertion and eviction must stay correct without the GIL.
         self._lock = threading.Lock()
-        self._cache: OrderedDict[bytes, Any] = OrderedDict()
+        self._cache: OrderedDict[bytes, tuple[Any, int]] = OrderedDict()
+        self._cache_bytes = 0
         self.compile(tuple(models))
 
     # -- compilation --------------------------------------------------------
@@ -112,6 +133,11 @@ class Registry:
             # Relationship graphs are cyclic (User.posts <-> Post.author), so
             # the specs are completed in place here and never mutated again.
             object.__setattr__(spec, "relationships", relationships)
+            object.__setattr__(
+                spec,
+                "by_relationship_name",
+                {item.name: item for item in reversed(relationships)},
+            )
         for spec in self._specs.values():
             object.__setattr__(
                 spec,
@@ -384,10 +410,11 @@ class Registry:
 
     def cached_plan(self, shape_key: bytes) -> Any:
         with self._lock:
-            plan = self._cache.get(shape_key)
-            if plan is not None:
+            entry = self._cache.get(shape_key)
+            if entry is not None:
                 self._cache.move_to_end(shape_key)
-            return plan
+                return entry[0]
+            return None
 
     def store_plan(self, shape_key: bytes, plan: Any) -> Any:
         with self._lock:
@@ -396,10 +423,16 @@ class Registry:
                 # Another thread compiled the same shape; keep one plan so
                 # callers cannot observe two objects for one key.
                 self._cache.move_to_end(shape_key)
-                return existing
-            self._cache[shape_key] = plan
-            while len(self._cache) > self.query_cache_size:
-                self._cache.popitem(last=False)
+                return existing[0]
+            retained = _cache_entry_bytes(shape_key, plan)
+            self._cache[shape_key] = (plan, retained)
+            self._cache_bytes += retained
+            while (
+                len(self._cache) > self.query_cache_size
+                or self._cache_bytes > self.query_cache_bytes
+            ):
+                _, (_, evicted_bytes) = self._cache.popitem(last=False)
+                self._cache_bytes -= evicted_bytes
             return plan
 
     @property
@@ -429,6 +462,7 @@ def _column_ref(item: Column) -> ColumnRef | None:
         schema=owner.__wreath_schema__,
         table=owner.__wreath_table__,
         column=target.database_name,
+        position=target.index + 1,
         model_type=owner,
     )
 

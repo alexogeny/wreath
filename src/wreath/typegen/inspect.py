@@ -14,7 +14,6 @@ import types
 import typing
 from typing import Any
 
-from ..binding import inspect_handler
 from .model import (
     BOOLEAN,
     INTEGER,
@@ -336,13 +335,15 @@ def build_api_model(
     annotation is unsupported, or on any operation-id collision regardless of
     strictness.
     """
-    routes = list(app._routes)
+    image = app._application_image
+    routes = list(image.routes())
+    binding_specs = image.binding_specs()
     resolved_ids, id_diagnostics = resolve_operation_ids(routes)
     builder = _Builder(allow_unknown)
     operations: list[Operation] = []
 
     for index, definition in enumerate(routes):
-        spec = inspect_handler(definition.endpoint, definition.path)
+        spec = binding_specs[index]
         # inspect_handler returns None for request-only handlers, so the return
         # annotation is resolved independently here -- a param-less handler still
         # has a typed response worth generating.

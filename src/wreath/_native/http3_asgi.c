@@ -993,6 +993,16 @@ recv_data_cb(nghttp3_conn *conn, int64_t stream_id, const uint8_t *data,
     }
     s->body_received = total;
 
+    /* Credit the DATA payload to QUIC flow control. nghttp3_conn_read_stream's
+     * consumed count excludes application DATA bytes (see its docs), so without
+     * this the receive window is never extended and an upload past the initial
+     * window (~64 KiB) stalls. This is bounded by the max_body_bytes check
+     * above, so crediting as the bytes arrive cannot grow the window unbounded. */
+    if (c != NULL && c->conn != NULL) {
+        ngtcp2_conn_extend_max_stream_offset(c->conn, stream_id, datalen);
+        ngtcp2_conn_extend_max_offset(c->conn, datalen);
+    }
+
     if (s->receive_waiter != NULL) {
         PyObject *body = PyBytes_FromStringAndSize((const char *)data, (Py_ssize_t)datalen);
         if (body == NULL) return NGHTTP3_ERR_CALLBACK_FAILURE;

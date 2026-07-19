@@ -10,7 +10,7 @@ import threading
 from collections.abc import AsyncIterable, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 from ._json import dumps as _json_dumps
@@ -335,7 +335,7 @@ async def _send_from_descriptor(
         finally:
             os.close(fd)
 
-    worker = asyncio.ensure_future(asyncio.to_thread(_reader))
+    worker = loop.run_in_executor(None, _reader)
     try:
         while True:
             item = await queue.get()
@@ -352,7 +352,28 @@ async def _send_from_descriptor(
         # Unblock a reader parked on a full queue so it can observe stop.
         while not queue.empty():
             queue.get_nowait()
-        await asyncio.wrap_future(worker)
+        await worker
+
+
+async def _send_native_descriptor(
+    fd: int, size: int, status: int, headers: list[tuple[bytes, bytes]], send: Send
+) -> bool:
+    protocol: Any = getattr(cast(Any, send), "__self__", None)
+    start = getattr(protocol, "_wreath_file_start", None)
+    if start is None:
+        return False
+    file = os.fdopen(fd, "rb", closefd=True)
+    try:
+        await start(
+            status,
+            [*headers, (_CONTENT_LENGTH, _content_length(size))],
+            file,
+            size,
+        )
+    finally:
+        file.close()
+    await protocol._wreath_file_finish()
+    return True
 
 
 def _open_fd(path: str) -> tuple[int, int]:
@@ -431,9 +452,14 @@ class FileResponse:
             # Already opened beneath a trusted root (see wreath.staticfiles);
             # serve the descriptor we hold rather than reopening a pathname.
             size = self._stat.st_size if self._stat is not None else 0
-            await _send_from_descriptor(self._fd, size, self.status, self.headers, send)
+            fd, self._fd = self._fd, None
+            if await _send_native_descriptor(fd, size, self.status, self.headers, send):
+                return
+            await _send_from_descriptor(fd, size, self.status, self.headers, send)
             return
         # Open once (open + fstat in a single worker), then stream through the
         # same single-submission reader. A missing file raises here.
         fd, size = await asyncio.to_thread(_open_fd, self.path)
+        if await _send_native_descriptor(fd, size, self.status, self.headers, send):
+            return
         await _send_from_descriptor(fd, size, self.status, self.headers, send)

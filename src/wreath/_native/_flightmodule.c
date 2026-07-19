@@ -436,6 +436,17 @@ RECORDER_U64_GETTER(capture_in_use, wreath_nfr_capture_in_use(self->worker))
 RECORDER_U64_GETTER(capture_high_water, wreath_nfr_capture_high_water(self->worker))
 RECORDER_U64_GETTER(capture_committed, wreath_nfr_capture_committed(self->worker))
 
+/* (epoch_mono_ns, epoch_unix_ns): the clock calibration the projector uses to
+ * map a completion's end_offset_ms to Unix time. */
+static PyObject *
+recorder_get_clock_calibration(RecorderObject *self, void *c)
+{
+    (void)c;
+    return Py_BuildValue("(KK)",
+                         (unsigned long long)wreath_nfr_worker_epoch_mono_ns(self->worker),
+                         (unsigned long long)wreath_nfr_worker_epoch_unix_ns(self->worker));
+}
+
 static PyObject *
 recorder_get_mode(RecorderObject *self, void *Py_UNUSED(closure))
 {
@@ -501,6 +512,7 @@ static PyGetSetDef recorder_getset[] = {
     {"phase_capacity", (getter)recorder_get_phase_capacity, NULL, NULL, NULL},
     {"phase_in_use", (getter)recorder_get_phase_in_use, NULL, NULL, NULL},
     {"phase_high_water", (getter)recorder_get_phase_high_water, NULL, NULL, NULL},
+    {"clock_calibration", (getter)recorder_get_clock_calibration, NULL, NULL, NULL},
     {"capture_capacity", (getter)recorder_get_capture_capacity, NULL, NULL, NULL},
     {"capture_slab_bytes", (getter)recorder_get_capture_slab_bytes, NULL, NULL, NULL},
     {"capture_in_use", (getter)recorder_get_capture_in_use, NULL, NULL, NULL},

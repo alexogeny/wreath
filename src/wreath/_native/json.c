@@ -421,11 +421,15 @@ wreath_json_dumps(PyObject *Py_UNUSED(self), PyObject *obj)
 /* Decoder                                                            */
 /* ------------------------------------------------------------------ */
 
+#define WREATH_KEY_CACHE_SIZE 512
+#define WREATH_KEY_CACHE_MAX_LEN 48
+
 typedef struct {
     const char *start;
     const char *cur;
     const char *end;
     Py_ssize_t tokens;
+    PyObject *key_cache[WREATH_KEY_CACHE_SIZE];
 } Parser;
 
 static PyObject *
@@ -447,12 +451,8 @@ skip_ws(Parser *p)
 }
 
 /* Repeated object keys resolve to shared str objects through a small
- * direct-mapped cache, so documents with arrays of similar objects do not
- * re-decode the same key text per element.  Entries live for the process,
- * like interned strings; the GIL serializes access. */
-#define WREATH_KEY_CACHE_SIZE 512
-#define WREATH_KEY_CACHE_MAX_LEN 48
-static PyObject *wreath_key_cache[WREATH_KEY_CACHE_SIZE];
+ * parser-local direct map. Similar objects within one document avoid repeated
+ * decoding without allowing unrelated clients to evict one another's keys. */
 
 /* p->cur points just past the opening quote on entry, just past the closing
  * quote on success. */
@@ -499,7 +499,7 @@ parse_string_ex(Parser *p, int as_key)
                     h *= 1099511628211ULL;
                 }
                 size_t slot = (size_t)(h & (WREATH_KEY_CACHE_SIZE - 1));
-                PyObject *entry = wreath_key_cache[slot];
+                PyObject *entry = p->key_cache[slot];
                 if (entry != NULL) {
                     Py_ssize_t entry_len;
                     const char *entry_data = PyUnicode_AsUTF8AndSize(entry, &entry_len);
@@ -519,7 +519,7 @@ parse_string_ex(Parser *p, int as_key)
                     memcpy(PyUnicode_1BYTE_DATA(s), start, (size_t)n);
                 }
                 p->cur = cur + 1;
-                Py_XSETREF(wreath_key_cache[slot], Py_NewRef(s));
+                Py_XSETREF(p->key_cache[slot], Py_NewRef(s));
                 return s;
             }
             if (ascii) {
@@ -941,19 +941,32 @@ parse_value(Parser *p)
     }
 }
 
+static void
+parser_clear(Parser *p)
+{
+    for (size_t i = 0; i < WREATH_KEY_CACHE_SIZE; i++) {
+        Py_XDECREF(p->key_cache[i]);
+    }
+}
+
 static PyObject *
 parse_document(const char *data, Py_ssize_t len)
 {
-    Parser p = {data, data, data + len, 0};
+    Parser p = {0};
+    p.start = data;
+    p.cur = data;
+    p.end = data + len;
     PyObject *value = parse_value(&p);
     if (value == NULL) {
+        parser_clear(&p);
         return NULL;
     }
     skip_ws(&p);
     if (p.cur != p.end) {
         Py_DECREF(value);
-        return decode_error(&p, p.cur, "Extra data");
+        value = decode_error(&p, p.cur, "Extra data");
     }
+    parser_clear(&p);
     return value;
 }
 

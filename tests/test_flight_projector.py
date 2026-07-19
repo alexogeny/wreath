@@ -118,6 +118,28 @@ def test_completion_only_settles_after_a_cycle() -> None:
     assert trace.phases == ()
 
 
+class _CalibratedRecorder(FakeRecorder):
+    """A FakeRecorder that also advertises a clock calibration, like a real one."""
+
+    def __init__(self, epoch_mono_ns: int, epoch_unix_ns: int) -> None:
+        super().__init__()
+        self.clock_calibration = (epoch_mono_ns, epoch_unix_ns)
+
+
+def test_span_time_is_derived_from_the_clock_calibration() -> None:
+    # epoch_unix is a fixed wall instant; a completion whose monotonic end offset
+    # is 5000 ms must map to epoch_unix + 5000 ms, drift-free -- not the wall clock
+    # at finalize.
+    epoch_unix = 1_700_000_000_000_000_000  # a fixed ns wall instant
+    rec = _CalibratedRecorder(epoch_mono_ns=42, epoch_unix_ns=epoch_unix)
+    rec.feed(completion(1, end_offset_ms=5000, duration_us=1000))
+    proj = Projector(rec)
+    proj.poll()
+    proj.poll()
+    (trace,) = proj.snapshot().recent
+    assert trace.observed_unix_nano == epoch_unix + 5000 * 1_000_000
+
+
 def test_completion_correlation_phases_join_in_order() -> None:
     rec = FakeRecorder()
     # The real ring order: completion, then correlation, then phase batch.

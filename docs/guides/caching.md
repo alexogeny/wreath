@@ -7,7 +7,9 @@ there are two modules, each doing exactly what its name says.
 **`wreath.cache`** is an actual in-process application cache — `SnapshotCache`.
 It is read-mostly and bounded, refreshed as a whole and published atomically, so
 readers always see a consistent snapshot. Reads never touch I/O, and a miss is
-explicit rather than a silent fetch:
+explicit rather than a silent fetch. A cache defaults to 65,536 entries and a
+64 MiB shallow retained-size budget; pass `max_entries=None` or `max_bytes=None`
+only when another layer supplies a tighter bound:
 
 ```python
 from wreath.cache import SnapshotCache

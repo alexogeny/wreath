@@ -10,12 +10,42 @@ static PyObject *connection_type = NULL;
 static PyObject *buffered_protocol_type = NULL;
 
 static PyObject *
-postgres_connect(PyObject *module, PyObject *dsn)
+postgres_connect(PyObject *module, PyObject *args, PyObject *kwargs)
 {
+    static char *kwlist[] = {
+        "dsn", "statement_cache_size", "statement_cache_bytes", NULL
+    };
+    PyObject *dsn;
+    Py_ssize_t cache_size = 100;
+    Py_ssize_t cache_bytes = 4 * 1024 * 1024;
     (void)module;
-    return PyObject_CallFunctionObjArgs(
-        connect_buffered, dsn, connection_type, buffered_protocol_type, NULL
-    );
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwargs, "U|nn:connect", kwlist,
+            &dsn, &cache_size, &cache_bytes)) {
+        return NULL;
+    }
+
+    PyObject *call_args = PyTuple_Pack(
+        3, dsn, connection_type, buffered_protocol_type);
+    if (call_args == NULL) return NULL;
+    PyObject *call_kwargs = PyDict_New();
+    PyObject *size_obj = PyLong_FromSsize_t(cache_size);
+    PyObject *bytes_obj = PyLong_FromSsize_t(cache_bytes);
+    if (call_kwargs == NULL || size_obj == NULL || bytes_obj == NULL ||
+        PyDict_SetItemString(call_kwargs, "statement_cache_size", size_obj) < 0 ||
+        PyDict_SetItemString(call_kwargs, "statement_cache_bytes", bytes_obj) < 0) {
+        Py_DECREF(call_args);
+        Py_XDECREF(call_kwargs);
+        Py_XDECREF(size_obj);
+        Py_XDECREF(bytes_obj);
+        return NULL;
+    }
+    Py_DECREF(size_obj);
+    Py_DECREF(bytes_obj);
+    PyObject *result = PyObject_Call(connect_buffered, call_args, call_kwargs);
+    Py_DECREF(call_kwargs);
+    Py_DECREF(call_args);
+    return result;
 }
 
 static PyObject *str_reader_attr = NULL;
@@ -40,7 +70,8 @@ static PyMethodDef connection_type_methods[] = {
 };
 
 static PyMethodDef connection_methods[] = {
-    {"connect", postgres_connect, METH_O, "Open a native PostgreSQL connection."},
+    {"connect", (PyCFunction)(void (*)(void))postgres_connect,
+     METH_VARARGS | METH_KEYWORDS, "Open a native PostgreSQL connection."},
     {NULL, NULL, 0, NULL}
 };
 

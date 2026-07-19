@@ -258,7 +258,59 @@ def build_parser() -> argparse.ArgumentParser:
         help="print versioned JSON instead of tables",
     )
     _add_capture_parser(commands)
+    _add_replay_parser(commands)
     return parser
+
+
+def _add_replay_parser(commands: Any) -> None:
+    """`wreath replay {transport,plan}` -- replay a recording through the owned
+    pipeline. Unlike inspect/capture this loads the target application, because
+    replay drives the app's own protocol and endpoint code in-process."""
+    replay_parser = commands.add_parser(
+        "replay", help="replay a recording through the owned protocol/endpoint pipeline"
+    )
+    replay_parser.add_argument(
+        "--factory", action="store_true",
+        help="the target is a zero-argument callable returning the application",
+    )
+    replay_parser.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="print versioned JSON instead of a human summary",
+    )
+    actions = replay_parser.add_subparsers(dest="replay_action", required=True)
+
+    transport = actions.add_parser(
+        "transport", help="feed a recorded connection into the owned HTTP/1 driver"
+    )
+    transport.add_argument("target", metavar="MODULE[:ATTRIBUTE]")
+    transport.add_argument("recording", metavar="RECORDING", help="path to a .wtr1 recording")
+    transport.add_argument(
+        "--inject", metavar="SCHEDULE", default=None,
+        help="apply a .wfs1 fault schedule before the bytes reach the parser",
+    )
+    transport.add_argument(
+        "--record-faults", metavar="PATH", default=None,
+        help="write the realized fault schedule that this run applied",
+    )
+    transport.add_argument("--pure", action="store_true", help="use the pure protocol driver")
+
+    plan = actions.add_parser(
+        "plan", help="replay a canonical request through routing/binding/serialization"
+    )
+    plan.add_argument("target", metavar="MODULE[:ATTRIBUTE]")
+    plan.add_argument("--method", default="GET")
+    plan.add_argument("--path", required=True)
+    plan.add_argument("--query", default="", help="raw query string")
+    plan.add_argument("--body", default="", help="request body (utf-8)")
+    plan.add_argument(
+        "--header", action="append", default=[], metavar="NAME:VALUE",
+        help="a request header (repeatable)",
+    )
+    plan.add_argument(
+        "--mode", choices=("invoke", "replace", "skip"), default="invoke",
+        help="handler boundary: run it, use --replace-body, or resolve only",
+    )
+    plan.add_argument("--replace-body", default=None, help="REPLACE mode: recorded return string")
 
 
 def _add_capture_parser(commands: Any) -> None:
@@ -284,9 +336,18 @@ def _add_capture_parser(commands: Any) -> None:
                      metavar="NAME", help="header captured as a keyed hash (repeatable)")
     arm.add_argument("--mask-header", action="append", dest="mask_headers", default=[],
                      metavar="NAME", help="header captured as length only (repeatable)")
+    arm.add_argument("--allow-query", action="append", dest="allow_query", default=[],
+                     metavar="NAME", help="query parameter captured verbatim (repeatable)")
+    arm.add_argument("--hash-query", action="append", dest="hash_query", default=[],
+                     metavar="NAME", help="query parameter captured as a keyed hash (repeatable)")
+    arm.add_argument("--mask-query", action="append", dest="mask_query", default=[],
+                     metavar="NAME", help="query parameter captured as length only (repeatable)")
     arm.add_argument("--body", default=None,
                      choices=("none", "metadata", "hashed", "structured"),
-                     help="body capture mode")
+                     help="request/response body capture mode")
+    arm.add_argument("--dependency", default=None,
+                     choices=("none", "metadata", "hashed", "structured"),
+                     help="dependency (DB params/rows, outbound bodies) capture mode")
     arm.add_argument("--max-body-bytes", type=int, default=0)
     arm.add_argument("--max-fields", type=int, default=0)
     arm.add_argument("--max-depth", type=int, default=0)
@@ -563,8 +624,16 @@ def execute_capture(namespace: argparse.Namespace) -> int:
                 redaction["header_hash"] = namespace.hash_headers
             if namespace.mask_headers:
                 redaction["header_mask"] = namespace.mask_headers
+            if namespace.allow_query:
+                redaction["query_allowlist"] = namespace.allow_query
+            if namespace.hash_query:
+                redaction["query_hash"] = namespace.hash_query
+            if namespace.mask_query:
+                redaction["query_mask"] = namespace.mask_query
             if namespace.body is not None:
                 redaction["body"] = namespace.body
+            if namespace.dependency is not None:
+                redaction["dependency"] = namespace.dependency
             if namespace.max_body_bytes:
                 redaction["max_body_bytes"] = namespace.max_body_bytes
             if namespace.max_fields:
@@ -707,6 +776,92 @@ def _print_projector_loss(loss: dict | None) -> None:
         print(f"  projector loss: {nonzero}")
 
 
+def execute_replay(namespace: argparse.Namespace) -> int:
+    """Run a transport or endpoint-plan replay and print the owned outcome.
+
+    Unlike inspect/capture, replay loads the target application: it drives the
+    app's own protocol and endpoint code in-process over fake transports. It
+    never opens a socket and cannot broaden any capture policy.
+    """
+    import asyncio
+    import json as _json
+
+    from . import replay as rp
+
+    app = load_application(namespace.target, factory=namespace.factory)
+    action = namespace.replay_action
+
+    if action == "transport":
+        recording = rp.open_recording(namespace.recording)
+        schedule = None
+        if namespace.inject:
+            schedule = rp.FaultSchedule.from_bytes(_read_bytes(namespace.inject))
+        protocol_cls = None
+        if namespace.pure:
+            from ._pure.server import Http1Protocol as protocol_cls  # noqa: N813
+        result = asyncio.run(
+            rp.replay_transport(app, recording, protocol_cls=protocol_cls, faults=schedule)
+        )
+        if namespace.record_faults:
+            _write_bytes(namespace.record_faults, (schedule or rp.FaultSchedule()).to_bytes())
+        if namespace.as_json:
+            print(_json.dumps({
+                "version": 1, "kind": "transport",
+                "terminal": result.terminal, "write_count": result.write_count,
+                "segments_fed": result.segments_fed,
+                "status_line": result.response.split(b"\r\n", 1)[0].decode("latin-1", "replace"),
+                "response_bytes": len(result.response),
+            }))
+        else:
+            status = result.response.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+            print(f"terminal={result.terminal} writes={result.write_count} "
+                  f"segments_fed={result.segments_fed}")
+            print(status or "(no response bytes)")
+        return 0
+
+    headers = tuple(_split_header(h) for h in namespace.header)
+    canonical = rp.CanonicalRequest(
+        method=namespace.method, path=namespace.path,
+        headers=headers, query_string=namespace.query.encode("utf-8"),
+        body=namespace.body.encode("utf-8"),
+    )
+    mode = rp.PlanMode(namespace.mode)
+    result = asyncio.run(rp.replay_endpoint_plan(
+        app, canonical, mode=mode,
+        recorded_return=namespace.replace_body if mode is rp.PlanMode.REPLACE else None,
+    ))
+    if namespace.as_json:
+        print(_json.dumps({
+            "version": 1, "kind": "plan", "mode": result.mode,
+            "status": result.status, "body_bytes": len(result.body),
+            "best_effort": result.best_effort, "deterministic": result.deterministic,
+            "note": result.note,
+        }))
+    else:
+        print(f"mode={result.mode} status={result.status} "
+              f"deterministic={result.deterministic} best_effort={result.best_effort}")
+        if result.note:
+            print(result.note)
+        if result.body:
+            print(result.body.decode("utf-8", "replace"))
+    return 0
+
+
+def _split_header(raw: str) -> tuple[bytes, bytes]:
+    name, _, value = raw.partition(":")
+    return name.strip().lower().encode("latin-1"), value.strip().encode("latin-1")
+
+
+def _read_bytes(path: str) -> bytes:
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+def _write_bytes(path: str, data: bytes) -> None:
+    with open(path, "wb") as handle:
+        handle.write(data)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     namespace = build_parser().parse_args(argv)
     try:
@@ -716,6 +871,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return execute_inspect(namespace)
         if namespace.command == "capture":
             return execute_capture(namespace)
+        if namespace.command == "replay":
+            return execute_replay(namespace)
         options = options_from_namespace(namespace)
         execute(options)
     except CliError as error:

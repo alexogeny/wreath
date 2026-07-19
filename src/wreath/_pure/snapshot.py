@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
+from sys import getsizeof
 from time import time
 from typing import Any
 
@@ -27,6 +28,10 @@ class _Generation[K, V]:
         self.refreshed_at = refreshed_at
 
 
+_DEFAULT_MAX_ENTRIES = 65_536
+_DEFAULT_MAX_BYTES = 64 * 1024 * 1024
+
+
 class SnapshotCache[K, V]:
     """A read-mostly cache with atomic snapshot publication.
 
@@ -36,12 +41,20 @@ class SnapshotCache[K, V]:
     the previous generation survives intact.
     """
 
-    __slots__ = ("_current", "_max_entries", "_refresh_lock")
+    __slots__ = ("_current", "_max_bytes", "_max_entries", "_refresh_lock")
 
-    def __init__(self, *, max_entries: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        max_entries: int | None = _DEFAULT_MAX_ENTRIES,
+        max_bytes: int | None = _DEFAULT_MAX_BYTES,
+    ) -> None:
         if max_entries is not None and max_entries < 0:
             raise ValueError("max_entries must be non-negative")
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be non-negative")
         self._max_entries = max_entries
+        self._max_bytes = max_bytes
         self._current: _Generation[K, V] = _Generation({}, 0, time())
         self._refresh_lock = asyncio.Lock()
 
@@ -72,9 +85,10 @@ class SnapshotCache[K, V]:
         return len(self._current.data)
 
     def __iter__(self) -> Iterator[tuple[K, V]]:
-        # Iterate a snapshot of the current generation; a concurrent replace
-        # publishes a different dict and never mutates this one.
-        return iter(tuple(self._current.data.items()))
+        # The dict-items iterator retains this generation's dict. A concurrent
+        # replace publishes a different dict and never mutates this one, so no
+        # O(N) tuple copy is needed for snapshot isolation.
+        return iter(self._current.data.items())
 
     @property
     def generation(self) -> int:
@@ -98,6 +112,14 @@ class SnapshotCache[K, V]:
                 f"snapshot has {len(data)} entries, exceeding max_entries "
                 f"{self._max_entries}"
             )
+        if self._max_bytes is not None:
+            retained = getsizeof(data)
+            retained += sum(getsizeof(key) + getsizeof(value) for key, value in data.items())
+            if retained > self._max_bytes:
+                raise ValueError(
+                    f"snapshot retains approximately {retained} shallow bytes, "
+                    f"exceeding max_bytes {self._max_bytes}"
+                )
         generation = self._current.generation + 1
         # Single-reference swap: readers see either the old or new generation.
         self._current = _Generation(data, generation, time())

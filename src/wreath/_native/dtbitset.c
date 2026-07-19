@@ -94,6 +94,7 @@ typedef struct {
     Py_ssize_t nwords;
     int nseg;
     BRoute **routes;   /* priority order; bit i is routes[i] */
+    BRoute *owned_routes; /* compact immutable records owned by this group */
     MaskMap *literal;  /* [nseg] */
     uint64_t *pool;    /* literal mask words, nwords each */
     Py_ssize_t pool_len;
@@ -132,6 +133,7 @@ typedef struct {
     MethodGroups *cached_mg;
     PyObject *get_method; /* owned per table; avoids process-global Python state */
     int dirty;
+    int sealed;
 } BitsetRouteTable;
 
 typedef struct {
@@ -642,6 +644,60 @@ maskmap_get(const MaskMap *m, const char *key, Py_ssize_t len)
 }
 
 static void
+broute_clear(BRoute *route)
+{
+    PyMem_Free(route->segs);
+    PyMem_Free(route->cmasks);
+    Py_XDECREF(route->method);
+    Py_XDECREF(route->param_names);
+    Py_XDECREF(route->handler);
+    Py_XDECREF(route->access_clauses);
+    memset(route, 0, sizeof(*route));
+}
+
+static int
+broute_clone(BRoute *target, const BRoute *source)
+{
+    *target = *source;
+    target->segs = NULL;
+    target->cmasks = NULL;
+    target->method = Py_XNewRef(source->method);
+    target->param_names = Py_XNewRef(source->param_names);
+    target->handler = Py_XNewRef(source->handler);
+    target->access_clauses = Py_XNewRef(source->access_clauses);
+
+    Py_ssize_t bytes_needed = 0;
+    for (int i = 0; i < source->nseg; i++) bytes_needed += source->segs[i].len;
+    target->segs = PyMem_Malloc(
+        (size_t)source->nseg * sizeof(BSeg) + (size_t)bytes_needed);
+    if (target->segs == NULL) goto fail;
+    char *blob = (char *)(target->segs + source->nseg);
+    for (int i = 0; i < source->nseg; i++) {
+        target->segs[i].len = source->segs[i].len;
+        if (source->segs[i].bytes == NULL) {
+            target->segs[i].bytes = NULL;
+        }
+        else {
+            memcpy(blob, source->segs[i].bytes, (size_t)source->segs[i].len);
+            target->segs[i].bytes = blob;
+            blob += source->segs[i].len;
+        }
+    }
+    if (source->ncmasks > 0 && source->cmasks != NULL) {
+        target->cmasks = PyMem_Malloc(
+            (size_t)source->ncmasks * sizeof(unsigned long long));
+        if (target->cmasks == NULL) goto fail;
+        memcpy(target->cmasks, source->cmasks,
+               (size_t)source->ncmasks * sizeof(unsigned long long));
+    }
+    return 0;
+
+fail:
+    broute_clear(target);
+    return -1;
+}
+
+static void
 bgroup_free(BGroup *g)
 {
     if (g == NULL) return;
@@ -653,6 +709,10 @@ bgroup_free(BGroup *g)
     PyMem_Free(g->param);
     PyMem_Free(g->public_mask);
     PyMem_Free(g->order);
+    if (g->owned_routes != NULL) {
+        for (Py_ssize_t i = 0; i < g->nroutes; i++) broute_clear(&g->owned_routes[i]);
+        PyMem_Free(g->owned_routes);
+    }
     PyMem_Free(g->routes);
     PyMem_Free(g);
 }
@@ -767,9 +827,14 @@ bgroup_build(BRoute **cands, Py_ssize_t ncand, int nseg)
     g->nwords = (ncand + 63) / 64;
 
     g->routes = PyMem_Malloc((size_t)ncand * sizeof(BRoute *));
-    if (g->routes == NULL) goto fail;
+    g->owned_routes = PyMem_Calloc((size_t)ncand, sizeof(BRoute));
+    if (g->routes == NULL || g->owned_routes == NULL) goto fail;
     memcpy(g->routes, cands, (size_t)ncand * sizeof(BRoute *));
     qsort(g->routes, (size_t)ncand, sizeof(BRoute *), route_priority_cmp);
+    for (Py_ssize_t i = 0; i < ncand; i++) {
+        if (broute_clone(&g->owned_routes[i], g->routes[i]) < 0) goto fail;
+        g->routes[i] = &g->owned_routes[i];
+    }
 
     g->literal = PyMem_Calloc((size_t)nseg, sizeof(MaskMap));
     g->param = PyMem_Calloc((size_t)nseg * (size_t)g->nwords, sizeof(uint64_t));
@@ -858,6 +923,7 @@ brt_new(PyTypeObject *type, PyObject *Py_UNUSED(a), PyObject *Py_UNUSED(k))
         return NULL;
     }
     self->dirty = 1;
+    self->sealed = 0;
     return (PyObject *)self;
 }
 
@@ -865,12 +931,7 @@ static void
 brt_dealloc(BitsetRouteTable *self)
 {
     for (Py_ssize_t i = 0; i < self->nroutes; i++) {
-        PyMem_Free(self->routes[i].segs);
-        PyMem_Free(self->routes[i].cmasks);
-        Py_XDECREF(self->routes[i].method);
-        Py_XDECREF(self->routes[i].param_names);
-        Py_XDECREF(self->routes[i].handler);
-        Py_XDECREF(self->routes[i].access_clauses);
+        broute_clear(&self->routes[i]);
     }
     PyMem_Free(self->routes);
     Py_XDECREF(self->cached_method);
@@ -883,6 +944,10 @@ brt_dealloc(BitsetRouteTable *self)
 static PyObject *
 brt_add(BitsetRouteTable *self, PyObject *args)
 {
+    if (self->sealed) {
+        PyErr_SetString(PyExc_RuntimeError, "compiled route tables are immutable");
+        return NULL;
+    }
     PyObject *path_obj, *method_obj, *handler, *clauses = NULL;
     if (!PyArg_ParseTuple(args, "UUO|O:add", &path_obj, &method_obj, &handler,
                           &clauses)) {
@@ -1188,6 +1253,16 @@ brt_compile_groups(BitsetRouteTable *self)
         if (mg == NULL) return -1;
         memset(mg->built, 1, sizeof(mg->built));
     }
+
+    /* Compiled groups own their route records and static dictionaries. Release
+     * registration-only storage so the request lifetime retains one shape. */
+    PyDict_Clear(self->statics);
+    for (Py_ssize_t i = 0; i < self->nroutes; i++) broute_clear(&self->routes[i]);
+    PyMem_Free(self->routes);
+    self->routes = NULL;
+    self->nroutes = 0;
+    self->routes_cap = 0;
+    self->sealed = 1;
     return 0;
 }
 

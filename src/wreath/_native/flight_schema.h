@@ -138,7 +138,7 @@ typedef struct {
     uint8_t terminal;       /* offset 57 */
     uint8_t error_class;    /* offset 58 */
     uint8_t worker_id;      /* offset 59 */
-    uint32_t reserved;      /* offset 60 */
+    uint32_t end_offset_ms; /* offset 60: monotonic end, ms from the worker epoch */
 } wreath_nfr_completion_cell;
 
 /* A correlation cell. Mirrors CorrelationCell in _flight_schema.py. */

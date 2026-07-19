@@ -319,20 +319,20 @@ h2_flush(PyObject *proto)
     if (n == 0) {
         return 0;
     }
-    PyObject *chunk = PyBytes_FromStringAndSize(PyByteArray_AS_STRING(self->out), n);
-    if (chunk == NULL) {
-        return -1;
-    }
-    /* reset out buffer */
-    if (PyByteArray_Resize(self->out, 0) < 0) {
-        Py_DECREF(chunk);
-        return -1;
-    }
+    /* Transfer the completed buffer to transport and continue with a fresh
+     * bytearray. asyncio transports consume bytes-like objects synchronously,
+     * so this removes a full output-sized bytes copy from every flush. */
+    PyObject *replacement = PyByteArray_FromStringAndSize(NULL, 0);
+    if (replacement == NULL) return -1;
+    PyObject *chunk = self->out;
+    self->out = replacement;
     PyObject *r = PyObject_CallOneArg(self->transport_write_fn, chunk);
-    Py_DECREF(chunk);
     if (r == NULL) {
+        Py_DECREF(self->out);
+        self->out = chunk;
         return -1;
     }
+    Py_DECREF(chunk);
     Py_DECREF(r);
     return 0;
 }
@@ -1806,7 +1806,7 @@ dispatch_frame(Http2Protocol *self, int type, int flags, uint32_t sid,
 static void
 shrink_idle_input_buffer(Http2Protocol *self)
 {
-    const Py_ssize_t retained = 65536;
+    const Py_ssize_t retained = 32768;
     if (self->buf_len != 0 || self->cursor != 0 || self->buf_cap <= retained) return;
     char *shrunk = PyMem_Realloc(self->buf, (size_t)retained);
     if (shrunk != NULL) {

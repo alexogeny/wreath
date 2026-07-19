@@ -1,5 +1,15 @@
 /* wreath._native._server module definition and initialization. */
 #include "server.h"
+#include "server_request_capi.h"
+
+static WreathRequestCAPI request_capi = {
+    WREATH_REQUEST_CAPI_VERSION,
+    wreath_request_context_new,
+    wreath_request_context_check,
+    wreath_request_context_set_flight,
+    wreath_request_context_set_armed,
+    wreath_request_context_sever,
+};
 
 static PyModuleDef server_module = {
     PyModuleDef_HEAD_INIT,
@@ -46,6 +56,7 @@ PyInit__server(void)
 {
     PyObject *module;
     PyObject *protocol_type;
+    PyObject *request_capsule;
 
     module = PyModule_Create(&server_module);
     if (module == NULL) {
@@ -68,6 +79,16 @@ PyInit__server(void)
         return NULL;
     }
     if (wreath_request_context_ready(module) < 0) {
+        server_module_free(NULL);
+        Py_DECREF(module);
+        return NULL;
+    }
+    request_capsule = PyCapsule_New(
+        &request_capi, WREATH_REQUEST_CAPI_NAME, NULL
+    );
+    if (request_capsule == NULL ||
+        PyModule_AddObject(module, "_REQUEST_C_API", request_capsule) < 0) {
+        Py_XDECREF(request_capsule);
         server_module_free(NULL);
         Py_DECREF(module);
         return NULL;

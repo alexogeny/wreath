@@ -14,6 +14,7 @@ from ._auth.requirements import (
     merge_requirements,
     requirement_for,
 )
+from ._codecs import parse_qs as _parse_qs
 from ._flight_markers import capture_marker as _capture_marker
 from ._flight_markers import phase_marker as _phase_marker
 from ._flight_schema import CaptureDisposition as _CaptureDisposition
@@ -66,6 +67,7 @@ _COV_PYTHON = int(_PhaseCoverage.PYTHON)
 # capture arm ever reaches the capture scan, so this stays off every common path.
 _CAP_REQUEST_HEADER = int(_CaptureFieldClass.REQUEST_HEADER)
 _CAP_RESPONSE_HEADER = int(_CaptureFieldClass.RESPONSE_HEADER)
+_CAP_QUERY_PARAM = int(_CaptureFieldClass.QUERY_PARAM)
 _CAP_REQUEST_BODY = int(_CaptureFieldClass.REQUEST_BODY)
 _CAP_RESPONSE_BODY = int(_CaptureFieldClass.RESPONSE_BODY)
 _FC_REQUEST_BODY = _CaptureFieldClass.REQUEST_BODY
@@ -98,6 +100,16 @@ def _narrow_header(arms: Any, name: str) -> Any:
     best = None
     for arm in arms:
         rule = arm.compiled.header(name)
+        if rule is not None and (best is None or rule.disposition.value < best.value):
+            best = rule.disposition
+    return best
+
+
+def _narrow_query(arms: Any, name: str) -> Any:
+    """The most-revealing query-param disposition any active arm grants, or None."""
+    best = None
+    for arm in arms:
+        rule = arm.compiled.query(name)
         if rule is not None and (best is None or rule.disposition.value < best.value):
             best = rule.disposition
     return best
@@ -1188,10 +1200,32 @@ class Wreath:
         arms = registry.active() if registry is not None else ()
         if not arms:
             return None
-        self._capture_headers(scope._flight_capture, arms, request.headers, _CAP_REQUEST_HEADER)
+        capture = scope._flight_capture
+        self._capture_headers(capture, arms, request.headers, _CAP_REQUEST_HEADER)
+        self._capture_query(capture, arms, request)
         for arm in arms:
             registry.note_match(arm.arm_id)
         return arms
+
+    def _capture_query(self, capture: Any, arms: Any, request: Request) -> None:
+        """Capture policy-approved query parameters, in their own descriptor
+        namespace. Deny-by-default: an unlisted parameter is never captured. Same
+        ceiling-descriptor / arm-narrowing rule as headers."""
+        query_string = request.query_string
+        if not query_string:
+            return
+        ceiling_query = self._flight_capture_plan.query
+        for name, value in _parse_qs(query_string, 0):
+            ceiling_rule = ceiling_query(name)
+            if ceiling_rule is None:
+                continue
+            disposition = _narrow_query(arms, name)
+            if disposition is None:
+                continue
+            capture(
+                _CAP_QUERY_PARAM, ceiling_rule.descriptor_id, int(disposition),
+                value.encode("utf-8"),
+            )
 
     def _capture_completion(
         self, scope: Any, request: Request, response: Any, arms: Any

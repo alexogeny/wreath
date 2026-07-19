@@ -11,13 +11,13 @@ fully unit-testable; a concrete transport (the optional adapter/dependency group
 and the server-lifespan wiring) rides slice 4c on top of the :class:`SpanExporter`
 protocol and :class:`BoundedExportQueue` defined here.
 
-**Timestamps.** A completion cell carries only a duration, so a span's wall clock
-is anchored on the projector's observation time
-(:attr:`ProjectedTrace.observed_unix_nano`): ``end = observed`` and
-``start = observed - duration``. This is later than the true completion instant by
-at most one drain interval -- acceptable for spans, and the precise monotonic/wall
-calibration the plan describes is a later refinement that needs a per-cell
-monotonic stamp (a schema change), noted as deferred.
+**Timestamps.** A span's wall clock is anchored on
+:attr:`ProjectedTrace.observed_unix_nano`: ``end = observed`` and
+``start = observed - duration``. Each completion cell carries its monotonic end
+instant (``end_offset_ms`` from the worker's clock epoch), and the projector maps
+it to Unix time through the recorder's calibration pair -- so ``observed`` is the
+request's true completion instant, drift-free (no wall-clock jumps, no
+drain-latency skew), to millisecond precision.
 
 **Cardinality.** Span names and attributes come only from route *metadata* -- the
 method and the route *template* (``/users/{id}``), never the concrete path, query

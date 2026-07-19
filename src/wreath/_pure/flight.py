@@ -14,6 +14,7 @@ truncated or corrupted stream is rejected rather than guessed.
 from __future__ import annotations
 
 import struct
+import time
 import zlib
 from dataclasses import dataclass
 
@@ -458,6 +459,10 @@ class PureRecorder:
             raise ValueError("detailed_sample_rate must be in [0, 1]")
         self.mode = int(mode)
         self._worker_id = worker_id
+        # Clock calibration captured at creation, mirroring the native worker: the
+        # monotonic base the server's now_ns shares, paired with the wall clock.
+        self._epoch_mono_ns = time.monotonic_ns()
+        self._epoch_unix_ns = time.time_ns()
         self._detailed_sample_threshold = int(detailed_sample_rate * 4294967296.0 + 0.5)
         self._slow_threshold_us = detailed_slow_us
         # Phase scratch pool: only present in a mode that arms phases.
@@ -498,6 +503,11 @@ class PureRecorder:
     @property
     def completions(self) -> int:
         return self._completions
+
+    @property
+    def clock_calibration(self) -> tuple[int, int]:
+        """(epoch_mono_ns, epoch_unix_ns): maps a cell's end_offset_ms to Unix."""
+        return (self._epoch_mono_ns, self._epoch_unix_ns)
 
     @property
     def active_count(self) -> int:
@@ -803,6 +813,7 @@ class PureRecorder:
             error_class=error_class,
             worker_id=self._worker_id,
             flags=ctx.get("flags", 0),
+            end_offset_ms=min(max(now_ns - self._epoch_mono_ns, 0) // 1_000_000, 0xFFFFFFFF),
         ).encode()
         published = self._publish(cell)
         self._commit_phases(ctx, published)

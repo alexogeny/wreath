@@ -9,6 +9,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #if defined(__linux__)
 #include <sys/random.h>
@@ -215,6 +216,13 @@ struct wreath_nfr_worker {
     /* span/trace id generation stream (single writer). */
     uint64_t rng_state;
 
+    /* Clock calibration captured once at creation, so the off-path projector can
+     * map each completion's monotonic end offset to Unix time without a per-cell
+     * wall stamp. epoch_mono_ns is the CLOCK_MONOTONIC_RAW base that the server's
+     * `now_ns` timestamps share; epoch_unix_ns is the wall clock at that instant. */
+    uint64_t epoch_mono_ns;
+    uint64_t epoch_unix_ns;
+
     /* Detailed-mode arming: a request is armed when a 32-bit draw from the
      * finalizer of its request id is below this threshold. threshold =
      * round(rate * 2^32), so 0 arms none and 2^32 arms all. Only consulted in
@@ -335,6 +343,15 @@ wreath_nfr_worker_new(uint8_t mode, uint32_t worker_id, uint32_t ring_records,
     worker->worker_id = worker_id;
     worker->next_request_id = 1;
     worker->rng_state = seed_entropy();
+    {
+        /* CLOCK_MONOTONIC_RAW is the base PyTime_MonotonicRaw uses on Linux, so
+         * this pairs with the server's `now_ns`; CLOCK_REALTIME is the wall pair. */
+        struct timespec mono, wall;
+        clock_gettime(CLOCK_MONOTONIC_RAW, &mono);
+        clock_gettime(CLOCK_REALTIME, &wall);
+        worker->epoch_mono_ns = (uint64_t)mono.tv_sec * 1000000000ULL + (uint64_t)mono.tv_nsec;
+        worker->epoch_unix_ns = (uint64_t)wall.tv_sec * 1000000000ULL + (uint64_t)wall.tv_nsec;
+    }
     worker->detailed_sample_threshold = detailed_sample_threshold;
     worker->slow_threshold_us = slow_threshold_us;
     worker->ring_records = ring_records;
@@ -1034,7 +1051,15 @@ wreath_nfr_context_end(wreath_nfr_worker *worker, wreath_nfr_context *ctx,
     cell.terminal = terminal;
     cell.error_class = error_class;
     cell.worker_id = (uint8_t)worker->worker_id;
-    cell.reserved = 0;  /* the only field not carrying data; must be zeroed */
+    /* Monotonic end instant as ms from the worker's epoch, so the off-path
+     * projector maps it to Unix time via the worker's calibration -- no per-cell
+     * wall stamp needed. Clamp at u32 (~49 days of uptime) rather than wrap. */
+    {
+        uint64_t end_ms = now_ns >= worker->epoch_mono_ns
+            ? (now_ns - worker->epoch_mono_ns) / 1000000ULL
+            : 0;  /* a synthetic clock before the epoch clamps to 0, like the oracle */
+        cell.end_offset_ms = end_ms > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)end_ms;
+    }
     int published = ring_publish(worker, &cell);
     /* A paired correlation cell carries the 128-bit trace when propagation was
      * received (never a variable-length record). */
@@ -1218,6 +1243,18 @@ wreath_nfr_capture_drain(wreath_nfr_worker *worker, uint8_t *out, uint32_t *leng
                         slot);
     }
     return copied;
+}
+
+uint64_t
+wreath_nfr_worker_epoch_mono_ns(const wreath_nfr_worker *worker)
+{
+    return worker->epoch_mono_ns;
+}
+
+uint64_t
+wreath_nfr_worker_epoch_unix_ns(const wreath_nfr_worker *worker)
+{
+    return worker->epoch_unix_ns;
 }
 
 uint64_t

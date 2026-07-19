@@ -118,6 +118,19 @@ def test_static_match_is_repeatable(name: str) -> None:
         assert table.match("HEAD", "/health") == ("h", None)
 
 
+@pytest.mark.skipif("c-bitset" not in IMPLS, reason="native extension unavailable")
+def test_compiled_native_bitset_is_sealed_and_keeps_both_route_shapes() -> None:
+    table = IMPLS["c-bitset"]()
+    table.add("/health", "GET", "static")
+    table.add("/users/{uid}", "GET", "dynamic")
+    table.compile()
+
+    assert table.match("GET", "/health") == ("static", None)
+    assert table.match("GET", "/users/42") == ("dynamic", {"uid": "42"})
+    with pytest.raises(RuntimeError, match="immutable"):
+        table.add("/late", "GET", "late")
+
+
 @pytest.mark.parametrize("name", list(IMPLS))
 def test_head_falls_back_after_dynamic_verification_miss(name: str) -> None:
     # Regression: an explicit dynamic HEAD route that reaches a leaf but fails

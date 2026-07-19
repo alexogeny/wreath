@@ -204,6 +204,9 @@ class CompletionCell:
     error_class: int = 0
     worker_id: int = 0
     flags: int = 0
+    #: Monotonic end instant as milliseconds from the worker's clock epoch. The
+    #: projector maps it to Unix time via the recorder's clock calibration.
+    end_offset_ms: int = 0
 
     def encode(self) -> bytes:
         return _COMPLETION.pack(
@@ -222,7 +225,7 @@ class CompletionCell:
             int(self.terminal) & 0xFF,
             self.error_class & 0xFF,
             self.worker_id & 0xFF,
-            0,
+            self.end_offset_ms & 0xFFFFFFFF,
         )
 
     @classmethod
@@ -245,7 +248,7 @@ class CompletionCell:
             terminal,
             error_class,
             worker_id,
-            _reserved,
+            end_offset_ms,
         ) = _COMPLETION.unpack(data[:CELL_SIZE])
         if version != SCHEMA_VERSION:
             raise SchemaError(f"unsupported schema version {version}")
@@ -267,6 +270,7 @@ class CompletionCell:
             error_class=error_class,
             worker_id=worker_id,
             flags=flags,
+            end_offset_ms=end_offset_ms,
         )
 
 

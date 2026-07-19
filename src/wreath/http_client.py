@@ -17,8 +17,11 @@ from urllib.parse import SplitResult, urljoin, urlsplit
 
 from . import _client_codec
 from ._flight_markers import (
+    CAP_OUTBOUND_REQUEST as _CAP_OUTBOUND_REQUEST,
+    CAP_OUTBOUND_RESPONSE as _CAP_OUTBOUND_RESPONSE,
     COV_EXTERNAL as _COV_EXTERNAL,
     PH_HTTP_CLIENT as _PH_HTTP_CLIENT,
+    capture_marker as _capture_marker,
     phase_marker as _phase_marker,
 )
 from time import monotonic_ns as _monotonic_ns
@@ -418,15 +421,27 @@ class HTTPClient:
                 method, target, headers=headers, body=body,
                 idempotency_key=idempotency_key,
             )
+        # Forensic dependency capture rides inside the phase gate (Detailed-armed
+        # requests only) and fires only when a Forensic arm bound the capturer.
+        # The outbound request body is captured before the call; the response
+        # body in the finally, so a failed/timed-out call still records what it
+        # sent. Both are redacted natively per the arm's dependency disposition.
+        capture = _capture_marker.get(None)
+        if capture is not None and body:
+            capture(_CAP_OUTBOUND_REQUEST, bytes(body))
         start = _monotonic_ns()
+        response = None
         try:
-            return await self._request_timed(
+            response = await self._request_timed(
                 method, target, headers=headers, body=body,
                 idempotency_key=idempotency_key,
             )
+            return response
         finally:
             marker(_PH_HTTP_CLIENT, self._flight_dep_id, _COV_EXTERNAL,
                    _monotonic_ns() - start)
+            if capture is not None and response is not None and response.body:
+                capture(_CAP_OUTBOUND_RESPONSE, response.body)
 
     async def _request_timed(
         self,

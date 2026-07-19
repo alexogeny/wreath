@@ -278,11 +278,29 @@ context_flight_capture(WreathRequestContext *self, PyObject *const *args,
     Py_RETURN_NONE;
 }
 
+/* The owned trace/span this request carries: the incoming 128-bit trace id and
+ * the *generated* server span id (a child of the incoming parent). The OTel
+ * bridge uses this to parent app-created spans under the owned server span rather
+ * than the incoming remote parent. Returns (trace_id_hi, trace_id_lo, span_id),
+ * all zero when no recorder is attached (or Off, which leaves the context zeroed). */
+static PyObject *
+context_flight_server_span(WreathRequestContext *self, PyObject *Py_UNUSED(ignored))
+{
+    if (self->nfr_ctx == NULL) {
+        return Py_BuildValue("(KKK)", 0ULL, 0ULL, 0ULL);
+    }
+    return Py_BuildValue("(KKK)",
+                         (unsigned long long)self->nfr_ctx->trace_id_hi,
+                         (unsigned long long)self->nfr_ctx->trace_id_lo,
+                         (unsigned long long)self->nfr_ctx->span_id);
+}
+
 static PyMethodDef context_methods[] = {
     {"_asgi_scope", (PyCFunction)context_scope, METH_NOARGS, NULL},
     {"_flight_stamp", (PyCFunction)context_flight_stamp, METH_FASTCALL, NULL},
     {"_flight_phase", (PyCFunction)context_flight_phase, METH_FASTCALL, NULL},
     {"_flight_capture", (PyCFunction)context_flight_capture, METH_FASTCALL, NULL},
+    {"_flight_server_span", (PyCFunction)context_flight_server_span, METH_NOARGS, NULL},
     {"_set_client", (PyCFunction)context_set_client, METH_O, NULL},
     {"_set_scheme", (PyCFunction)context_set_scheme, METH_O, NULL},
     {NULL, NULL, 0, NULL},

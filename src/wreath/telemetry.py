@@ -44,6 +44,7 @@ __all__ = [
     "MemoryBudget",
     "TelemetryConfigError",
     "SpanContextView",
+    "server_span",
     "current_span",
     "activate_otel",
 ]
@@ -55,7 +56,7 @@ _MAX_ACTIVE_REQUESTS = 1 << 20
 _MAX_PHASE_SLOTS = 1 << 20
 _MAX_ROUTE_HISTOGRAMS = 1 << 16
 _MAX_CAPTURE_SLABS = 1 << 16
-_MAX_CAPTURE_BYTES = 1 << 34  # 16 GiB
+_MAX_CAPTURE_BYTES = 1 << 30  # 1 GiB per recorder/worker
 _MAX_EXPORT_QUEUE = 1 << 20
 #: Per-active-slot bookkeeping (context + generation/seqlock), provisional.
 _ACTIVE_SLOT_BYTES = 128
@@ -333,17 +334,40 @@ def current_span(request: object) -> SpanContextView:
     return SpanContextView(trace_id=(hi << 64) | lo, span_id=span, sampled=sampled)
 
 
+def server_span(request: object) -> SpanContextView:
+    """The request's *owned server span* — the span the recorder generated for
+    this request (a child of the incoming parent), within the incoming trace.
+
+    On the native server this reads the generated span id straight from the
+    request's flight context, so an app that parents its own spans here gets the
+    same server span the recorder exports over OTLP. When no recorder is attached
+    (or on the pure/bare-ASGI path where the id is not exposed) it falls back to
+    the incoming remote context.
+    """
+    context = getattr(request, "_context", None)
+    reader = getattr(context, "_flight_server_span", None)
+    if callable(reader):
+        hi, lo, span = reader()
+        trace_id = (hi << 64) | lo
+        if trace_id != 0 and span != 0:
+            incoming = current_span(request)
+            sampled = incoming.sampled if incoming.is_valid else True
+            return SpanContextView(trace_id=trace_id, span_id=span, sampled=sampled)
+    return current_span(request)
+
+
 def activate_otel(request: object) -> object:
     """Lazily hand the request's trace context to the OpenTelemetry API.
 
     When the OTel API is importable and the request carries a valid context, this
-    returns an OTel ``Context`` holding a non-recording remote span (so
-    instrumentation parents its spans correctly). When OTel is absent, or the
-    request is unpropagated, it returns the native :class:`SpanContextView`. It
-    creates an SDK object only here, at the call site -- never on the request
-    path -- so an app that never calls it pays nothing.
+    returns an OTel ``Context`` holding the request's *owned server span* (see
+    :func:`server_span`), so app instrumentation parents its spans under the same
+    server span the recorder exports -- not the incoming remote parent. When OTel
+    is absent, or the request is unpropagated, it returns the native
+    :class:`SpanContextView`. It creates an SDK object only here, at the call site
+    -- never on the request path -- so an app that never calls it pays nothing.
     """
-    view = current_span(request)
+    view = server_span(request)
     if not view.is_valid:
         return view
     import importlib
@@ -352,10 +376,14 @@ def activate_otel(request: object) -> object:
         otel_trace = importlib.import_module("opentelemetry.trace")
     except ImportError:
         return view
+    # The owned server span is a *local* span (in-process), so instrumentation
+    # creates children under it; a bare incoming context (the fallback) stays
+    # remote. `_context` is present exactly when we resolved the owned span.
+    is_owned = getattr(getattr(request, "_context", None), "_flight_server_span", None) is not None
     context = otel_trace.SpanContext(
         trace_id=view.trace_id,
         span_id=view.span_id,
-        is_remote=True,
+        is_remote=not is_owned,
         trace_flags=otel_trace.TraceFlags(0x01 if view.sampled else 0x00),
     )
     return otel_trace.set_span_in_context(otel_trace.NonRecordingSpan(context))

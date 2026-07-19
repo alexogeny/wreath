@@ -46,13 +46,58 @@ NEVER_CAPTURE_HEADERS = frozenset(
     }
 )
 
-_MAX_CAPTURE_BYTES = 1 << 34  # 16 GiB, matches telemetry's ceiling
+_MAX_CAPTURE_BYTES = 1 << 30  # 1 GiB, matches telemetry's ceiling
 _MAX_FIELDS = 1 << 16
 _MAX_DEPTH = 64
 
 
 class RecordingPolicyError(ValueError):
     """A recording/capture policy is invalid or would exceed a bound."""
+
+
+def _validate_dispositions(
+    allow: frozenset[str], hashed: frozenset[str], masked: frozenset[str],
+    *, kind: str, forbidden: frozenset[str],
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """Lower-case and validate a name -> single-disposition mapping (headers or
+    query parameters): forbidden names are refused, and a name may sit in at most
+    one of the allow/hash/mask sets."""
+    allow = frozenset(n.lower() for n in allow)
+    hashed = frozenset(n.lower() for n in hashed)
+    masked = frozenset(n.lower() for n in masked)
+    banned = (allow | hashed | masked) & forbidden
+    if banned:
+        raise RecordingPolicyError(
+            f"{kind}s {sorted(banned)} are never capturable and cannot be added to "
+            "any redaction set"
+        )
+    for a, b, label in (
+        (allow, hashed, "allowlist/hash"),
+        (allow, masked, "allowlist/mask"),
+        (hashed, masked, "hash/mask"),
+    ):
+        overlap = a & b
+        if overlap:
+            raise RecordingPolicyError(
+                f"{kind}s {sorted(overlap)} appear in both the {label} sets; a "
+                f"{kind} needs one disposition"
+            )
+    return allow, hashed, masked
+
+
+def _within_sets(
+    arm: tuple[frozenset[str], frozenset[str], frozenset[str]],
+    ceiling: tuple[frozenset[str], frozenset[str], frozenset[str]],
+) -> bool:
+    """Whether an arm's (allow, hash, mask) name sets stay inside the ceiling's:
+    an arm may hash/mask any name the ceiling reveals more of, never one it drops."""
+    a_allow, a_hash, a_mask = arm
+    c_allow, c_hash, c_mask = ceiling
+    return (
+        a_allow <= c_allow
+        and a_hash <= (c_allow | c_hash)
+        and a_mask <= (c_allow | c_hash | c_mask)
+    )
 
 
 class BodyCapture(StrEnum):
@@ -77,38 +122,40 @@ class RedactionPolicy:
     header_hash: frozenset[str] = frozenset()
     #: Lower-cased header names retained as length only (constant mask).
     header_mask: frozenset[str] = frozenset()
+    #: Query-parameter names captured verbatim / hashed / length-only. Same
+    #: deny-by-default, single-disposition model as headers, in their own
+    #: namespace (a param named ``authorization`` is not a header).
+    query_allowlist: frozenset[str] = frozenset()
+    query_hash: frozenset[str] = frozenset()
+    query_mask: frozenset[str] = frozenset()
     body: BodyCapture = BodyCapture.METADATA
+    #: How dependency payloads (DB parameters, outbound request/response bodies)
+    #: are retained. Deny-by-default: dependencies are captured only when an
+    #: operator opts in, independently of the request/response body knob.
+    dependency: BodyCapture = BodyCapture.NONE
     max_body_bytes: int = 0
     max_fields: int = 0
     max_depth: int = 0
 
     def __post_init__(self) -> None:
-        allow = frozenset(h.lower() for h in self.header_allowlist)
-        hashed = frozenset(h.lower() for h in self.header_hash)
-        masked = frozenset(h.lower() for h in self.header_mask)
-        forbidden = (allow | hashed | masked) & NEVER_CAPTURE_HEADERS
-        if forbidden:
-            raise RecordingPolicyError(
-                f"headers {sorted(forbidden)} are never capturable and cannot be "
-                "added to any redaction set"
-            )
-        # A header must have a single, unambiguous disposition.
-        for a, b, label in (
-            (allow, hashed, "allowlist/hash"),
-            (allow, masked, "allowlist/mask"),
-            (hashed, masked, "hash/mask"),
-        ):
-            overlap = a & b
-            if overlap:
-                raise RecordingPolicyError(
-                    f"headers {sorted(overlap)} appear in both the {label} sets; a "
-                    "header needs one disposition"
-                )
+        allow, hashed, masked = _validate_dispositions(
+            self.header_allowlist, self.header_hash, self.header_mask,
+            kind="header", forbidden=NEVER_CAPTURE_HEADERS,
+        )
         object.__setattr__(self, "header_allowlist", allow)
         object.__setattr__(self, "header_hash", hashed)
         object.__setattr__(self, "header_mask", masked)
+        q_allow, q_hash, q_mask = _validate_dispositions(
+            self.query_allowlist, self.query_hash, self.query_mask,
+            kind="query parameter", forbidden=frozenset(),
+        )
+        object.__setattr__(self, "query_allowlist", q_allow)
+        object.__setattr__(self, "query_hash", q_hash)
+        object.__setattr__(self, "query_mask", q_mask)
         if not isinstance(self.body, BodyCapture):
             object.__setattr__(self, "body", BodyCapture(self.body))
+        if not isinstance(self.dependency, BodyCapture):
+            object.__setattr__(self, "dependency", BodyCapture(self.dependency))
         _require(self.max_body_bytes >= 0, "max_body_bytes must be >= 0")
         _require(self.max_body_bytes <= _MAX_CAPTURE_BYTES, "max_body_bytes too large")
         _require(0 <= self.max_fields <= _MAX_FIELDS, "max_fields out of range")
@@ -133,10 +180,18 @@ class RedactionPolicy:
             header_allowlist=self.header_allowlist & other.header_allowlist,
             header_hash=self.header_hash & other.header_hash,
             header_mask=self.header_mask & other.header_mask,
+            query_allowlist=self.query_allowlist & other.query_allowlist,
+            query_hash=self.query_hash & other.query_hash,
+            query_mask=self.query_mask & other.query_mask,
             body=(
                 self.body
                 if _BODY_ORDER[self.body.value] <= _BODY_ORDER[other.body.value]
                 else other.body
+            ),
+            dependency=(
+                self.dependency
+                if _BODY_ORDER[self.dependency.value] <= _BODY_ORDER[other.dependency.value]
+                else other.dependency
             ),
             max_body_bytes=min(self.max_body_bytes, other.max_body_bytes),
             max_fields=min(self.max_fields, other.max_fields),
@@ -235,18 +290,24 @@ class RecordingPolicy:
         ceiling = self.redaction
         arm = capture.redaction
         within_bytes = capture.budget.total_bytes <= self.max_capture_bytes
-        within_headers = (
-            arm.header_allowlist <= ceiling.header_allowlist
-            # A hashed/masked arm is allowed against any header the ceiling would
-            # reveal *more* of (allow >= hash >= mask), never one it drops.
-            and arm.header_hash <= (ceiling.header_allowlist | ceiling.header_hash)
-            and arm.header_mask
-            <= (ceiling.header_allowlist | ceiling.header_hash | ceiling.header_mask)
+        within_headers = _within_sets(
+            (arm.header_allowlist, arm.header_hash, arm.header_mask),
+            (ceiling.header_allowlist, ceiling.header_hash, ceiling.header_mask),
+        )
+        within_query = _within_sets(
+            (arm.query_allowlist, arm.query_hash, arm.query_mask),
+            (ceiling.query_allowlist, ceiling.query_hash, ceiling.query_mask),
         )
         within_body = arm.body.value in _BODY_ORDER and (
             _BODY_ORDER[arm.body.value] <= _BODY_ORDER[ceiling.body.value]
         )
-        return within_bytes and within_headers and within_body
+        within_dependency = arm.dependency.value in _BODY_ORDER and (
+            _BODY_ORDER[arm.dependency.value] <= _BODY_ORDER[ceiling.dependency.value]
+        )
+        return (
+            within_bytes and within_headers and within_query
+            and within_body and within_dependency
+        )
 
 
 # Ordering so a runtime arm cannot ask for a more revealing body than the ceiling.
@@ -302,11 +363,20 @@ class CompiledRedaction:
     header_names: tuple[str, ...]
     request_body: CaptureDisposition | None
     response_body: CaptureDisposition | None
+    #: Disposition for dependency payloads (DB params, outbound bodies), or None.
+    dependency_body: CaptureDisposition | None
     max_body_bytes: int
+    #: Query-parameter rules, in their own descriptor namespace (like headers).
+    query_rules: Mapping[str, HeaderRule] = field(default_factory=dict)
+    query_names: tuple[str, ...] = ()
 
     def header(self, name: str) -> HeaderRule | None:
         """The capture decision for a header, or ``None`` to drop it (default)."""
         return self.header_rules.get(name.lower())
+
+    def query(self, name: str) -> HeaderRule | None:
+        """The capture decision for a query parameter, or ``None`` to drop it."""
+        return self.query_rules.get(name.lower())
 
     def body(self, field_class: CaptureFieldClass) -> tuple[CaptureDisposition, int] | None:
         """The (disposition, max_bytes) for a body field class, or ``None``."""
@@ -316,6 +386,19 @@ class CompiledRedaction:
             disposition = self.response_body
         else:
             return None
+        return self._bound(disposition)
+
+    def dependency(self) -> tuple[CaptureDisposition, int] | None:
+        """The (disposition, max_bytes) for dependency payloads, or ``None``.
+
+        One knob covers every dependency field class (DB_PARAM, OUTBOUND_REQUEST,
+        OUTBOUND_RESPONSE): they are all opaque payloads redacted the same way.
+        """
+        return self._bound(self.dependency_body)
+
+    def _bound(
+        self, disposition: CaptureDisposition | None
+    ) -> tuple[CaptureDisposition, int] | None:
         if disposition is None:
             return None
         # LENGTH/HASHED ignore the byte bound (they retain no raw prefix).
@@ -330,33 +413,48 @@ def compile_redaction(policy: RedactionPolicy) -> CompiledRedaction:
     so the same policy always produces the same ids regardless of set iteration
     order. Runs once at startup; never on the request path.
     """
-    # Sorted union across dispositions gives stable, order-independent ids.
-    ordered = sorted(
-        policy.header_allowlist | policy.header_hash | policy.header_mask
+    header_rules, header_names = _compile_sets(
+        policy.header_allowlist, policy.header_hash, policy.header_mask, kind="header"
     )
+    query_rules, query_names = _compile_sets(
+        policy.query_allowlist, policy.query_hash, policy.query_mask,
+        kind="query parameter",
+    )
+    body = _BODY_DISPOSITION[policy.body.value]
+    return CompiledRedaction(
+        header_rules=header_rules,
+        header_names=header_names,
+        request_body=body,
+        response_body=body,
+        dependency_body=_BODY_DISPOSITION[policy.dependency.value],
+        max_body_bytes=policy.max_body_bytes,
+        query_rules=query_rules,
+        query_names=query_names,
+    )
+
+
+def _compile_sets(
+    allow: frozenset[str], hashed: frozenset[str], masked: frozenset[str], *, kind: str,
+) -> tuple[dict[str, HeaderRule], tuple[str, ...]]:
+    """Intern a name -> disposition mapping to deterministic descriptor ids
+    (sorted union, 1-based) so the same policy always compiles to the same ids."""
+    ordered = sorted(allow | hashed | masked)
     if len(ordered) >= _MAX_FIELDS:
         raise RecordingPolicyError(
-            f"{len(ordered)} capturable headers exceed the {_MAX_FIELDS} descriptor cap"
+            f"{len(ordered)} capturable {kind}s exceed the {_MAX_FIELDS} descriptor cap"
         )
     rules: dict[str, HeaderRule] = {}
     names: list[str] = []
     for name in ordered:
-        if name in policy.header_allowlist:
+        if name in allow:
             disposition = CaptureDisposition.RAW
-        elif name in policy.header_hash:
+        elif name in hashed:
             disposition = CaptureDisposition.HASHED
         else:
             disposition = CaptureDisposition.MASKED
         names.append(name)
         rules[name] = HeaderRule(descriptor_id=len(names), disposition=disposition)
-    body = _BODY_DISPOSITION[policy.body.value]
-    return CompiledRedaction(
-        header_rules=rules,
-        header_names=tuple(names),
-        request_body=body,
-        response_body=body,
-        max_body_bytes=policy.max_body_bytes,
-    )
+    return rules, tuple(names)
 
 
 # --- runtime arm registry ---------------------------------------------------

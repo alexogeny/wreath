@@ -193,7 +193,7 @@ async def test_large_native_result_releases_slabs_at_batch_boundaries(
         assert len(rows) == 600
         stats = connection._reader._receive_stats()
         assert stats["active_slabs"] == 0
-        assert stats["idle_slabs"] <= 4
+        assert stats["idle_slabs"] <= 1
         assert stats["retired_slabs"] <= 2
     finally:
         await connection.close()

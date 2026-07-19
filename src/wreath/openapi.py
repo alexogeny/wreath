@@ -17,7 +17,6 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-from .binding import inspect_handler
 from .typegen.inspect import _Builder, _return_annotation, resolve_operation_ids
 from .typegen.model import Model, TypeRef
 
@@ -88,12 +87,15 @@ def generate_openapi(
     def schema(annotation: Any) -> dict[str, Any]:
         return _openapi_schema(builder.type_ref(annotation))
 
-    resolved_ids, _diagnostics = resolve_operation_ids(list(app._routes))
+    image = app._application_image
+    routes = list(image.routes())
+    binding_specs = image.binding_specs()
+    resolved_ids, _diagnostics = resolve_operation_ids(routes)
     paths: dict[str, dict[str, Any]] = {}
 
-    for index, definition in enumerate(app._routes):
+    for index, definition in enumerate(routes):
         operations = paths.setdefault(definition.path, {})
-        spec = inspect_handler(definition.endpoint, definition.path)
+        spec = binding_specs[index]
         returns = _return_annotation(definition.endpoint)
         for method in definition.methods:
             operation: dict[str, Any] = {

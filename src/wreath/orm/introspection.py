@@ -246,18 +246,23 @@ async def _validate_constraints(
                     "or index on it",
                 )
             )
-    # Index the actual foreign keys by (local columns, schema, table) so each
-    # declared reference is validated with an O(1) lookup rather than a full
-    # scan of every constraint -- O(C + F) instead of O(C * F).
-    foreign_keys = {(item[0], item[1], item[2]) for item in foreign}
+    # Index corresponding local/remote column pairs so each declared reference
+    # validates both ends with one lookup. Flattening composite constraints here
+    # preserves O(C + F) behavior while checking each paired target position.
+    foreign_keys = {
+        (local_name, schema, table, remote_position)
+        for local_names, schema, table, remote_positions in foreign
+        for local_name, remote_position in zip(local_names, remote_positions, strict=True)
+    }
     for column in spec.columns:
         reference = column.reference
         if reference is None:
             continue
         if (
-            (column.database_name,),
+            column.database_name,
             reference.schema,
             reference.table,
+            reference.position,
         ) not in foreign_keys:
             issues.append(
                 SchemaIssue(

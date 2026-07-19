@@ -187,6 +187,7 @@ class Projector:
 
     __slots__ = (
         "_recorder",
+        "_epoch_unix_ns",
         "_interval",
         "_max_cells",
         "_on_trace",
@@ -221,6 +222,12 @@ class Projector:
         if max_cells <= 0:
             raise ValueError("max_cells must be positive")
         self._recorder = recorder
+        # Clock calibration: (epoch_mono_ns, epoch_unix_ns). A completion's
+        # end_offset_ms maps to Unix time as epoch_unix + end_offset_ms*1e6, which
+        # is drift-free (no wall-clock jumps, no drain-latency skew). Recorders
+        # without the accessor fall back to stamping the wall clock at finalize.
+        calibration = getattr(recorder, "clock_calibration", None)
+        self._epoch_unix_ns = calibration[1] if calibration else 0
         self._interval = interval
         self._max_cells = max_cells
         self._on_trace = on_trace
@@ -392,7 +399,13 @@ class Projector:
             span_id=corr.span_id if corr is not None else 0,
             parent_span_id=corr.parent_span_id if corr is not None else 0,
             phases=phases,
-            observed_unix_nano=time.time_ns(),
+            # Precise, drift-free wall time from the recorder's calibration and
+            # the cell's monotonic end offset; fall back to stamping now.
+            observed_unix_nano=(
+                self._epoch_unix_ns + completion.end_offset_ms * 1_000_000
+                if self._epoch_unix_ns
+                else time.time_ns()
+            ),
         )
         self._assembled += 1
         self._record_metric(trace)

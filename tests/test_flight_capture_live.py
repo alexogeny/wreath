@@ -86,7 +86,14 @@ async def test_armed_forensic_request_captures_headers_to_wfr1(tmp_path) -> None
         async with InspectorClient(sock) as client:
             await client.arm_capture(
                 token=TOKEN,
-                redaction={"header_allowlist": ["x-trace"]},
+                # The arm requests exactly what it asserts below; per-arm
+                # narrowing means an arm captures only its own subset of the
+                # ceiling, not the whole ceiling.
+                redaction={
+                    "header_allowlist": ["x-trace"],
+                    "header_hash": ["x-request-id"],
+                    "body": "hashed",
+                },
                 expiry_seconds=60,
             )
         # A request carrying an allowlisted header, a hashed header, a forbidden
@@ -206,6 +213,114 @@ async def test_armed_request_captures_response_headers(tmp_path) -> None:
     # Deny-by-default holds for the response side too: the unlisted content-type
     # header never entered the file.
     assert b"text/plain" not in _read(wfr1)
+
+
+def _query_config(sock: str, wfr1: str) -> ServerConfig:
+    return ServerConfig(
+        host="127.0.0.1", port=0, lifespan="off",
+        telemetry=TelemetryConfig(
+            mode=Mode.FORENSIC, ring_records=256, active_requests=32,
+            detailed=SamplingPolicy(rate=1.0), capture_slabs=16, slab_bytes=4096,
+        ),
+        inspector=InspectorConfig(path=sock, capture_token=TOKEN),
+        recording=RecordingPolicy(
+            capture_slabs=16, max_capture_bytes=1 << 20,
+            redaction=RedactionPolicy(
+                query_allowlist=frozenset({"user"}),
+                query_hash=frozenset({"session"}),
+                body=BodyCapture.NONE,
+            ),
+        ),
+        recording_path=wfr1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_armed_request_captures_query_parameters(tmp_path) -> None:
+    sock = str(tmp_path / "wfi.sock")
+    wfr1 = str(tmp_path / "flight.wfr1")
+    server = await serve(_app(), _query_config(sock, wfr1))
+    port = server.sockets[0].getsockname()[1]
+    try:
+        async with InspectorClient(sock) as client:
+            await client.arm_capture(
+                token=TOKEN,
+                redaction={
+                    "query_allowlist": ["user"], "query_hash": ["session"], "body": "none",
+                },
+                expiry_seconds=60,
+            )
+        assert b"pong" in await _get(port, "/ping?user=alice&session=deadbeef&secret=nope")
+    finally:
+        await server.close()
+        await server.wait_closed()
+
+    decoded = read_recording(_read(wfr1))
+    assert decoded.clean
+    params = [
+        f for slab in decoded.slabs for f in slab.fields
+        if f.field_class is CaptureFieldClass.QUERY_PARAM
+    ]
+    raw = {f.payload for f in params if f.disposition is CaptureDisposition.RAW}
+    hashed = [f for f in params if f.disposition is CaptureDisposition.HASHED]
+    assert b"alice" in raw
+    assert hashed and all(len(f.payload) == 8 for f in hashed)
+    # Deny-by-default: the unlisted and hashed values never appear verbatim.
+    blob = _read(wfr1)
+    assert b"nope" not in blob
+    assert b"deadbeef" not in blob
+
+
+def _narrowing_config(sock: str, wfr1: str) -> ServerConfig:
+    return ServerConfig(
+        host="127.0.0.1", port=0, lifespan="off",
+        telemetry=TelemetryConfig(
+            mode=Mode.FORENSIC, ring_records=256, active_requests=32,
+            detailed=SamplingPolicy(rate=1.0), capture_slabs=16, slab_bytes=4096,
+        ),
+        inspector=InspectorConfig(path=sock, capture_token=TOKEN),
+        recording=RecordingPolicy(
+            capture_slabs=16, max_capture_bytes=1 << 20,
+            # The ceiling permits BOTH headers; the arm below narrows to one.
+            redaction=RedactionPolicy(
+                header_allowlist=frozenset({"x-one", "x-two"}),
+                body=BodyCapture.NONE,
+            ),
+        ),
+        recording_path=wfr1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_arm_narrows_below_the_ceiling(tmp_path) -> None:
+    sock = str(tmp_path / "wfi.sock")
+    wfr1 = str(tmp_path / "flight.wfr1")
+    server = await serve(_app(), _narrowing_config(sock, wfr1))
+    port = server.sockets[0].getsockname()[1]
+    try:
+        async with InspectorClient(sock) as client:
+            # Arm only x-one, though the ceiling would allow x-two too.
+            await client.arm_capture(
+                token=TOKEN,
+                redaction={"header_allowlist": ["x-one"], "body": "none"},
+                expiry_seconds=60,
+            )
+        assert b"pong" in await _get(
+            port, "/ping", "X-One: keep-me\r\nX-Two: drop-me\r\n"
+        )
+    finally:
+        await server.close()
+        await server.wait_closed()
+
+    decoded = read_recording(_read(wfr1))
+    assert decoded.clean
+    raw = {
+        f.payload for slab in decoded.slabs for f in slab.fields
+        if f.field_class is CaptureFieldClass.REQUEST_HEADER
+    }
+    # The arm's header is captured; the ceiling-permitted but un-armed one is not.
+    assert b"keep-me" in raw
+    assert b"drop-me" not in _read(wfr1)
 
 
 def _body_config(sock: str, wfr1: str) -> ServerConfig:

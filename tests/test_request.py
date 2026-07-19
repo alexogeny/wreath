@@ -66,7 +66,9 @@ async def test_json_uses_wreath_decoder() -> None:
         return next(messages)
 
     request = Request({"type": "http", "method": "POST", "path": "/"}, receive)
-    assert await request.json() == {"k": [1, 2.5, None]}
+    decoded = await request.json()
+    assert decoded == {"k": [1, 2.5, None]}
+    assert await request.json() is decoded
 
 
 @pytest.mark.asyncio
@@ -251,6 +253,7 @@ async def test_a_valid_multipart_form_still_yields_exact_bytes() -> None:
         [(b"content-type", b"multipart/form-data; boundary=B")],
     )
     form = await request.form()
+    assert await request.form() is form
     assert form.files["f"].data == b"hello"
     assert type(form.files["f"].data) is bytes
     assert form["g"] == "v"

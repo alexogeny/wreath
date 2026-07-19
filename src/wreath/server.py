@@ -269,7 +269,7 @@ class ServerConfig:
     max_request_line: int = 8 * 1024
     max_header_count: int = 100
     max_header_bytes: int = 32 * 1024
-    max_body_bytes: int = 16 * 1024 * 1024
+    max_body_bytes: int = 1 * 1024 * 1024
     read_high_water: int = 256 * 1024
     # Queued ASGI messages may each carry zero payload bytes (an empty
     # WebSocket message, an empty chunk), so `read_high_water` alone cannot
@@ -284,7 +284,7 @@ class ServerConfig:
     max_ws_fragments: int = 4096
     lifespan: Literal["auto", "on", "off"] = "auto"
     protocols: tuple[HttpProtocolName, ...] = ("http/1.1",)
-    max_concurrent_streams: int = 100
+    max_concurrent_streams: int = 64
     initial_stream_window: int = 65_535
     initial_connection_window: int = 1_048_576
     max_header_list_bytes: int = 32 * 1024

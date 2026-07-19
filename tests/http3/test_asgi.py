@@ -288,3 +288,35 @@ async def test_h3_pulse_records_a_completion_with_bytes() -> None:
         assert cell.bytes_out == 14        # "h3-flight-body"
     finally:
         await server.close()
+
+
+@requires_curl_h3
+@pytest.mark.network
+async def test_large_request_body_uploads_past_the_flow_control_window() -> None:
+    """A request body larger than the initial QUIC stream window (~64 KiB) must
+    upload fully. Without crediting DATA payload to flow control the upload
+    stalls once the initial window fills; this drives ~1 MiB through."""
+
+    async def app(scope, receive, send):
+        body = b""
+        while True:
+            message = await receive()
+            body += message.get("body", b"")
+            if not message.get("more_body"):
+                break
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": str(len(body)).encode()})
+
+    server, port = await _serve_h3(app)
+    try:
+        import tempfile
+
+        payload = b"a" * (1024 * 1024 + 7)  # well past the initial window
+        path = tempfile.mktemp()
+        with open(path, "wb") as fh:
+            fh.write(payload)
+        rc, out = await curl_http3(port, "/upload", "-X", "POST", "--data-binary", f"@{path}")
+        assert rc == 0, f"curl failed rc={rc} (upload stalled?)"
+        assert out == str(len(payload)).encode()
+    finally:
+        await server.close()

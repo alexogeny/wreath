@@ -8,10 +8,17 @@ import importlib
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from time import monotonic_ns as _monotonic_ns
 from types import ModuleType
 from typing import Any, Literal, cast
 
+from ._flight_markers import (
+    CAP_DB_PARAM as _CAP_DB_PARAM,
+)
+from ._flight_markers import (
+    CAP_DB_ROW as _CAP_DB_ROW,
+)
 from ._flight_markers import (
     COV_EXTERNAL as _COV_EXTERNAL,
 )
@@ -23,6 +30,9 @@ from ._flight_markers import (
 )
 from ._flight_markers import (
     PH_DB_QUERY as _PH_DB_QUERY,
+)
+from ._flight_markers import (
+    capture_marker as _capture_marker,
 )
 from ._flight_markers import (
     phase_marker as _phase_marker,
@@ -71,6 +81,8 @@ class PoolConfig:
     #: shape beyond this evicts the least-recently-used plan and closes its
     #: server-side statement, bounding per-connection and backend memory.
     statement_cache_size: int = 100
+    #: Approximate retained bytes for automatic plans on each connection.
+    statement_cache_bytes: int = 4 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if self.min_size < 0:
@@ -83,6 +95,8 @@ class PoolConfig:
             raise ValueError("pool timeouts must be positive")
         if self.statement_cache_size < 1:
             raise ValueError("pool statement_cache_size must be positive")
+        if self.statement_cache_bytes < 1:
+            raise ValueError("pool statement_cache_bytes must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +267,28 @@ class Pool:
                 await connection.close()
 
 
+def _encode_db_params(params: Any) -> bytes:
+    """A deterministic byte encoding of query parameters for forensic capture.
+
+    Only reached on the Forensic-armed, dependency-permitting path. ``repr`` is
+    stable for a given argument set and handles every parameter type; the native
+    capture then redacts it (hash/mask/bounded-raw) per the arm's dependency
+    disposition, so raw values only ever persist when the policy allowed it.
+    """
+    return repr(params).encode("utf-8", "replace")
+
+
+def _encode_db_rows(rows: Any) -> bytes:
+    """A deterministic byte encoding of a query's result for forensic capture.
+
+    Only reached on the Forensic-armed, dependency-permitting path (rows are
+    dependency data, redacted by the arm's dependency disposition). ``repr`` is
+    stable and handles rows, a single row, a scalar, or ``None``; the native
+    capture bounds/redacts it, so raw values persist only when policy allowed it.
+    """
+    return repr(rows).encode("utf-8", "replace")
+
+
 class Statement:
     __slots__ = ("database", "name", "sql", "workload")
 
@@ -268,9 +304,20 @@ class Statement:
             marker = _phase_marker.get(None)
             if marker is None:
                 return await getattr(connection, method)(self.sql, *args)
+            # Forensic dependency capture rides inside the phase gate: only a
+            # Detailed-armed request has a phase marker at all, and only a
+            # Forensic arm that permits dependencies binds the capturer. Params
+            # are captured before the call so a failing statement still records
+            # what it was asked to run; result rows are captured after it returns.
+            capture = _capture_marker.get(None)
+            if capture is not None and args:
+                capture(_CAP_DB_PARAM, _encode_db_params(args))
             start = _monotonic_ns()
             try:
-                return await getattr(connection, method)(self.sql, *args)
+                result = await getattr(connection, method)(self.sql, *args)
+                if capture is not None and method != "execute":
+                    capture(_CAP_DB_ROW, _encode_db_rows(result))
+                return result
             finally:
                 # Recorded in a finally so a failed statement still shows the
                 # time it spent at the database before raising.
@@ -311,11 +358,24 @@ class Statement:
                 return await connection.map(
                     method, self.sql, argument_sets, max_in_flight=max_in_flight
                 )
+            # Capture the fan-out's argument sets only when they are already
+            # materialized -- never drain a generator, which would change what
+            # the query runs (same rule as request-body capture).
+            capture = _capture_marker.get(None)
+            if (
+                capture is not None
+                and isinstance(argument_sets, (list, tuple))
+                and argument_sets
+            ):
+                capture(_CAP_DB_PARAM, _encode_db_params(argument_sets))
             start = _monotonic_ns()
             try:
-                return await connection.map(
+                results = await connection.map(
                     method, self.sql, argument_sets, max_in_flight=max_in_flight
                 )
+                if capture is not None:
+                    capture(_CAP_DB_ROW, _encode_db_rows(results))
+                return results
             finally:
                 # One DB_QUERY for the whole fan-out: it is one acquisition and
                 # one Sync-delimited pipeline from the request's point of view.
@@ -383,8 +443,12 @@ class Database:
     async def start(self) -> None:
         if self.started:
             return
-        connector = self._connector or connect
         for workload, config in self._configs.items():
+            connector = self._connector or partial(
+                connect,
+                statement_cache_size=config.statement_cache_size,
+                statement_cache_bytes=config.statement_cache_bytes,
+            )
             pool = Pool(
                 self._workload_dsns.get(workload, self._dsn),
                 config,

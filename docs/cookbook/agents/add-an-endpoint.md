@@ -8,6 +8,12 @@ The smallest correct endpoint is three small things, in order:
    so it validates its input and appears in the OpenAPI document for free.
 2. Return a `dict` for JSON, or a `wreath.response` type when you need control.
 3. Add a `TestClient` test that drives it through the real pipeline.
+4. Add at least one **adversarial** test that fuzzes it — a malformed body, a
+   truncated connection, or a failing dependency — through
+   [`wreath.replay`](../../reference/replay.md), and assert an owned outcome (a
+   `422`, not a `500`; a released connection, not a leak). See
+   [Fuzz your own routes](../recipes/fuzz-your-routes.md). A new endpoint is not
+   done until you know how it fails.
 
 ```python
 from wreath import Router, Request

@@ -102,6 +102,7 @@ nav:
       - Handle file uploads: cookbook/recipes/file-uploads.md
       - Run work after the response: cookbook/recipes/background-jobs.md
       - Manage a database pool: cookbook/recipes/database-lifespan.md
+      - Fuzz your own routes: cookbook/recipes/fuzz-your-routes.md
       - For coding agents:
           - Overview: cookbook/agents/index.md
           - The gates: cookbook/agents/checks.md
@@ -132,6 +133,7 @@ nav:
       - Testing: reference/testing.md
       - Configuration: reference/config.md
       - Inspector: reference/inspector.md
+      - Replay and fault injection: reference/replay.md
       - State: reference/state.md
       - OpenAPI: reference/openapi.md
       - Client type generation: reference/typegen.md

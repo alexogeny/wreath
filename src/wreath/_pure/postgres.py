@@ -11,6 +11,7 @@ import hmac
 import os
 import secrets
 import struct
+import sys
 import uuid
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Iterator, Sequence
@@ -76,6 +77,19 @@ class Plan:
     parameter_oids: tuple[int, ...]
     result_oids: tuple[int, ...]
     result_names: tuple[str, ...]
+
+
+def _plan_retained_bytes(sql: str, plan: Plan) -> int:
+    size = sys.getsizeof(sql) + sys.getsizeof(plan)
+    for value in (
+        plan.statement_name,
+        plan.parameter_oids,
+        plan.result_oids,
+        plan.result_names,
+    ):
+        size += sys.getsizeof(value)
+    size += sum(sys.getsizeof(name) for name in plan.result_names)
+    return size
 
 
 class Record(Sequence[object]):
@@ -754,11 +768,14 @@ class Connection:
         "_info",
         "_loop",
         "_pending_closes",
+        "_plan_costs",
         "_plans",
+        "_plans_bytes",
         "_reader",
         "_reader_task",
         "_register_operations",
         "_sequence",
+        "_statement_cache_bytes",
         "_statement_cache_size",
         "_statement_id",
         "_transaction_barrier",
@@ -779,6 +796,7 @@ class Connection:
         backend_key: int,
         *,
         statement_cache_size: int = 100,
+        statement_cache_bytes: int = 4 * 1024 * 1024,
     ) -> None:
         self._reader = reader
         self._writer = writer
@@ -792,7 +810,10 @@ class Connection:
         # first; bounded by statement_cache_size to cap per-connection (and,
         # via the Close on eviction, backend) prepared-statement memory.
         self._plans: OrderedDict[str, Plan] = OrderedDict()
+        self._plan_costs: dict[str, int] = {}
+        self._plans_bytes = 0
         self._statement_cache_size = statement_cache_size
+        self._statement_cache_bytes = statement_cache_bytes
         # Statement names retired by eviction, closed on the wire (Close 'S')
         # ahead of the next operation once no in-flight operation still uses them.
         self._pending_closes: list[bytes] = []
@@ -847,6 +868,8 @@ class Connection:
             with contextlib.suppress(ConnectionError):
                 await self._writer.wait_closed()
         self._plans.clear()
+        self._plan_costs.clear()
+        self._plans_bytes = 0
 
     async def execute(self, sql: str, *args: object) -> str:
         return await self._submit("execute", sql, args)
@@ -1248,15 +1271,23 @@ class Connection:
     def _finish_operation(self, operation: Operation) -> None:
         operation.state = "completed"
         if operation.cold and operation.error is None:
-            self._plans[operation.sql] = self._plan_type(
+            plan = self._plan_type(
                 operation.statement_name,
                 operation.parameter_oids,
                 operation.result_oids,
                 operation.result_names,
             )
+            retained = _plan_retained_bytes(operation.sql, plan)
+            self._plans[operation.sql] = plan
+            self._plan_costs[operation.sql] = retained
+            self._plans_bytes += retained
             self._plans.move_to_end(operation.sql)
-            while len(self._plans) > self._statement_cache_size:
-                _, evicted = self._plans.popitem(last=False)
+            while (
+                len(self._plans) > self._statement_cache_size
+                or self._plans_bytes > self._statement_cache_bytes
+            ):
+                evicted_sql, evicted = self._plans.popitem(last=False)
+                self._plans_bytes -= self._plan_costs.pop(evicted_sql)
                 self._pending_closes.append(evicted.statement_name)
         if self._transaction_barrier and _is_transaction_sql(operation.sql):
             self._transaction_barrier = False
@@ -1418,7 +1449,11 @@ async def _authenticate(
 
 
 async def _connect_with_type(
-    dsn: str, connection_type: type[Connection], *, statement_cache_size: int = 100
+    dsn: str,
+    connection_type: type[Connection],
+    *,
+    statement_cache_size: int = 100,
+    statement_cache_bytes: int = 4 * 1024 * 1024,
 ) -> Connection:
     info = _parse_dsn(dsn)
     try:
@@ -1438,6 +1473,7 @@ async def _connect_with_type(
     return connection_type(
         reader, writer, info, backend_pid, backend_key,
         statement_cache_size=statement_cache_size,
+        statement_cache_bytes=statement_cache_bytes,
     )
 
 
@@ -1461,7 +1497,12 @@ class _BufferedStartupReader:
 
 
 async def _connect_buffered(
-    dsn: str, connection_type: type[Connection], protocol_type: type[Any]
+    dsn: str,
+    connection_type: type[Connection],
+    protocol_type: type[Any],
+    *,
+    statement_cache_size: int = 100,
+    statement_cache_bytes: int = 4 * 1024 * 1024,
 ) -> Connection:
     info = _parse_dsn(dsn)
     loop = asyncio.get_running_loop()
@@ -1477,14 +1518,30 @@ async def _connect_buffered(
     except BaseException:
         protocol.close()
         raise
-    return connection_type(protocol, protocol, info, backend_pid, backend_key)
+    return connection_type(
+        protocol,
+        protocol,
+        info,
+        backend_pid,
+        backend_key,
+        statement_cache_size=statement_cache_size,
+        statement_cache_bytes=statement_cache_bytes,
+    )
 
 
-async def connect(dsn: str, *, statement_cache_size: int = 100) -> Connection:
+async def connect(
+    dsn: str,
+    *,
+    statement_cache_size: int = 100,
+    statement_cache_bytes: int = 4 * 1024 * 1024,
+) -> Connection:
     """Open one asynchronous PostgreSQL connection."""
 
     return await _connect_with_type(
-        dsn, Connection, statement_cache_size=statement_cache_size
+        dsn,
+        Connection,
+        statement_cache_size=statement_cache_size,
+        statement_cache_bytes=statement_cache_bytes,
     )
 
 

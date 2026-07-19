@@ -585,6 +585,14 @@ reclaim_retired(WreathPgBufferedProtocol *self, Py_ssize_t budget)
 }
 
 static int
+trim_idle_spares(WreathPgBufferedProtocol *self)
+{
+    Py_ssize_t size = PyList_GET_SIZE(self->spares);
+    if (size <= 1) return 0;
+    return PyList_SetSlice(self->spares, 1, size, NULL);
+}
+
+static int
 ensure_spares(WreathPgBufferedProtocol *self)
 {
     /* Only look for reclaimable slabs when there is no spare to hand out, and
@@ -1036,6 +1044,10 @@ parse_messages(WreathPgBufferedProtocol *self)
             queue_len(self->operations, self->operations_head) > 0) {
             invalidate_context_cache(self);
             if (operations_advance(self) < 0) return -1;
+            if (queue_len(self->operations, self->operations_head) == 0 &&
+                trim_idle_spares(self) < 0) {
+                return -1;
+            }
         }
     }
 }

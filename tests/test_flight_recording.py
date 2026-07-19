@@ -111,6 +111,72 @@ def test_body_modes_compile_to_dispositions() -> None:
     assert structured.body(FC.REQUEST_HEADER) is None
 
 
+def test_dependency_is_deny_by_default_and_independent_of_body() -> None:
+    # Dependency payloads (DB params, outbound bodies) are off unless opted in,
+    # regardless of the request/response body knob.
+    body_only = compile_redaction(RedactionPolicy(body=BodyCapture.STRUCTURED,
+                                                  max_body_bytes=4096, max_fields=8, max_depth=4))
+    assert body_only.dependency() is None
+    hashed_dep = compile_redaction(RedactionPolicy(dependency=BodyCapture.HASHED))
+    assert hashed_dep.dependency() == (D.HASHED, 0)
+    raw_dep = compile_redaction(
+        RedactionPolicy(dependency=BodyCapture.STRUCTURED, max_body_bytes=256,
+                        max_fields=8, max_depth=4)
+    )
+    assert raw_dep.dependency() == (D.RAW, 256)
+
+
+def test_query_params_compile_narrow_and_bound_like_headers() -> None:
+    policy = RedactionPolicy(
+        query_allowlist=frozenset({"user"}), query_hash=frozenset({"token"})
+    )
+    plan = compile_redaction(policy)
+    assert plan.query("user").disposition is D.RAW
+    assert plan.query("token").disposition is D.HASHED
+    assert plan.query("secret") is None  # deny-by-default
+    # A query param lives in its own descriptor namespace, not the header one.
+    assert plan.header("user") is None
+    # narrow: an override keeps only the shared params, least-revealing.
+    narrowed = policy.narrow(RedactionPolicy(query_allowlist=frozenset({"user"})))
+    assert narrowed.query_allowlist == frozenset({"user"})
+    assert narrowed.query_hash == frozenset()
+    # ceiling bounds an arm: it may not capture a param the ceiling drops.
+    ceiling = RecordingPolicy(capture_slabs=8, max_capture_bytes=1 << 20, redaction=policy)
+    ok = CapturePolicy(
+        redaction=RedactionPolicy(query_hash=frozenset({"user"})),
+        budget=CaptureBudget(slabs=1, slab_bytes=4096),
+    )
+    over = CapturePolicy(
+        redaction=RedactionPolicy(query_allowlist=frozenset({"secret"})),
+        budget=CaptureBudget(slabs=1, slab_bytes=4096),
+    )
+    assert ceiling.permits(ok)
+    assert not ceiling.permits(over)
+
+
+def test_dependency_narrows_and_the_ceiling_bounds_it() -> None:
+    base = RedactionPolicy(dependency=BodyCapture.STRUCTURED, max_body_bytes=4096,
+                           max_fields=8, max_depth=4)
+    override = RedactionPolicy(dependency=BodyCapture.HASHED)  # less revealing
+    assert base.narrow(override).dependency is BodyCapture.HASHED
+    ceiling = RecordingPolicy(
+        capture_slabs=8, max_capture_bytes=1 << 20,
+        redaction=RedactionPolicy(dependency=BodyCapture.HASHED),
+    )
+    within = CapturePolicy(
+        redaction=RedactionPolicy(dependency=BodyCapture.HASHED),
+        budget=CaptureBudget(slabs=1, slab_bytes=4096),
+    )
+    assert ceiling.permits(within)
+    # A more-revealing dependency disposition than the ceiling is refused.
+    over = CapturePolicy(
+        redaction=RedactionPolicy(dependency=BodyCapture.STRUCTURED, max_body_bytes=64,
+                                  max_fields=8, max_depth=4),
+        budget=CaptureBudget(slabs=1, slab_bytes=4096),
+    )
+    assert not ceiling.permits(over)
+
+
 # --- layered narrowing ------------------------------------------------------
 
 

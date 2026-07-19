@@ -1281,6 +1281,17 @@ class HttpProtocol(asyncio.Protocol):
             return
         self._send_error(408)
 
+    def _replay_fire_timeout(self) -> None:
+        """Replay/test only: fire the currently-armed timeout's owned handler,
+        bypassing the clock so a virtual-clock TIMEOUT fault is deterministic.
+        Mirrors the native ``_replay_fire_timeout``."""
+        if self._request_timer is not None:
+            self._cancel_request_timer()
+            self._on_request_timeout()
+        elif self._keep_alive_timer is not None:
+            self._cancel_keep_alive_timer()
+            self._on_keep_alive_timeout()
+
     # --- graceful shutdown hook (called by the facade) ----------------------
 
     def stop_accepting(self) -> None:

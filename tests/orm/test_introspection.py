@@ -8,7 +8,7 @@ import pytest
 
 from wreath.orm import Mapped, Model, column
 from wreath.orm.errors import SchemaMismatchError
-from wreath.orm.introspection import validate_registry
+from wreath.orm.introspection import _validate_constraints, validate_registry
 from wreath.orm.registry import Registry
 from wreath.orm.types import Int64, Text
 
@@ -21,6 +21,37 @@ class Account(Model, table="accounts"):
     id: Mapped[int] = column(Int64, primary_key=True)
     email: Mapped[str] = column(Text, unique=True)
     note: Mapped[str] = column(Text, nullable=True)
+
+
+class Parent(Model, table="parents"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    alternate_id: Mapped[int] = column(Int64, unique=True)
+
+
+class Child(Model, table="children"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    parent_id: Mapped[int] = column(Int64, references=Parent.id)
+
+
+async def test_foreign_key_validation_checks_the_referenced_column() -> None:
+    database = FakeDatabase()
+    registry = Registry(database, [Parent, Child], validate_schema="off")
+    spec = registry.spec_for(Child)
+    database.connection.script(
+        "pg_constraint",
+        [
+            ["p", "{1}", None, "", ""],
+            # The local column is correct, but this FK targets Parent.alternate_id
+            # (position 2) rather than the declared Parent.id (position 1).
+            ["f", "{2}", "{2}", "public", "parents"],
+        ],
+    )
+
+    issues = await _validate_constraints(
+        database.connection, spec, {1: "id", 2: "parent_id"}
+    )
+
+    assert [issue.issue_code for issue in issues] == ["missing_foreign_key"]
 
 
 def catalog_row(

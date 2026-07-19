@@ -3267,7 +3267,7 @@ run_drive(WreathHttpProtocol *self)
 static void
 shrink_idle_input_buffer(WreathHttpProtocol *self)
 {
-    const Py_ssize_t retained = 65536;
+    const Py_ssize_t retained = 32768;
     if (self->buf_cap <= retained || self->buf_len != 0 || self->cursor != 0 ||
         self->read_exports > 0 || self->read_offer_size > 0) {
         return;
@@ -3410,7 +3410,7 @@ http_data_received(WreathHttpProtocol *self, PyObject *data)
 /* Bounded per-read receive target. asyncio passes sizehint=-1; smaller
  * positive hints are honored, larger ones are capped (the transport simply
  * performs another read cycle). Private until measurements justify config. */
-#define WREATH_RECV_CHUNK 65536
+#define WREATH_RECV_CHUNK 32768
 
 /* Buffer-protocol exporter backing get_buffer(). The exported region is only
  * the unused writable tail buf[buf_len:buf_cap] recorded by the active offer;
@@ -3605,6 +3605,21 @@ http_shutdown(WreathHttpProtocol *self, PyObject *Py_UNUSED(ignored))
 
 /* --- timeouts ------------------------------------------------------------ */
 
+/* The owned enforcement for the currently-armed deadline: a keep-alive deadline
+ * closes; a request deadline aborts a started response or answers 408. Shared by
+ * the real timer callback and the replay trigger. */
+static int
+enforce_deadline(WreathHttpProtocol *self)
+{
+    if (!self->deadline_is_request) {
+        return protocol_close(self);
+    }
+    if (self->response_started) {
+        return protocol_abort(self);
+    }
+    return send_error(self, 408);
+}
+
 static PyObject *
 http_on_deadline(WreathHttpProtocol *self, PyObject *Py_UNUSED(ignored))
 {
@@ -3623,17 +3638,23 @@ http_on_deadline(WreathHttpProtocol *self, PyObject *Py_UNUSED(ignored))
         }
         Py_RETURN_NONE;
     }
-    if (!self->deadline_is_request) {
-        if (protocol_close(self) < 0) {
-            return NULL;
-        }
+    if (enforce_deadline(self) < 0) {
+        return NULL;
     }
-    else if (self->response_started) {
-        if (protocol_abort(self) < 0) {
-            return NULL;
-        }
+    Py_RETURN_NONE;
+}
+
+/* Replay/test only: force the currently-armed deadline's owned enforcement,
+ * bypassing the wall clock so a virtual-clock TIMEOUT fault fires the real timeout
+ * path deterministically. A no-op when no finite deadline is armed. */
+static PyObject *
+http_replay_fire_timeout(WreathHttpProtocol *self, PyObject *Py_UNUSED(ignored))
+{
+    if (self->closing || isinf(self->deadline)) {
+        Py_RETURN_NONE;
     }
-    else if (send_error(self, 408) < 0) {
+    Py_CLEAR(self->timer_handle);
+    if (enforce_deadline(self) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -4132,6 +4153,8 @@ static PyMethodDef http_protocol_methods[] = {
      "Finalize a completed application task."},
     {"_on_deadline", (PyCFunction)http_on_deadline, METH_NOARGS,
      "Enforce or re-arm the connection's timeout deadline."},
+    {"_replay_fire_timeout", (PyCFunction)http_replay_fire_timeout, METH_NOARGS,
+     "Replay only: force the armed deadline's owned enforcement."},
     {NULL, NULL, 0, NULL},
 };
 

@@ -361,7 +361,11 @@ class InspectorServer:
                 "header_allowlist": sorted(ceiling.redaction.header_allowlist),
                 "header_hash": sorted(ceiling.redaction.header_hash),
                 "header_mask": sorted(ceiling.redaction.header_mask),
+                "query_allowlist": sorted(ceiling.redaction.query_allowlist),
+                "query_hash": sorted(ceiling.redaction.query_hash),
+                "query_mask": sorted(ceiling.redaction.query_mask),
                 "body": ceiling.redaction.body.value,
+                "dependency": ceiling.redaction.dependency.value,
             },
             "arms": [
                 {
@@ -615,12 +619,21 @@ def _capture_policy_from_payload(payload: dict[str, Any]) -> Any:
         body = BodyCapture(body_value)
     except ValueError as exc:
         raise InspectorError(f"unknown body capture mode {body_value!r}") from exc
+    dependency_value = redaction.get("dependency", BodyCapture.NONE.value)
+    try:
+        dependency = BodyCapture(dependency_value)
+    except ValueError as exc:
+        raise InspectorError(f"unknown dependency capture mode {dependency_value!r}") from exc
     return CapturePolicy(
         redaction=RedactionPolicy(
             header_allowlist=_str_set(redaction, "header_allowlist"),
             header_hash=_str_set(redaction, "header_hash"),
             header_mask=_str_set(redaction, "header_mask"),
+            query_allowlist=_str_set(redaction, "query_allowlist"),
+            query_hash=_str_set(redaction, "query_hash"),
+            query_mask=_str_set(redaction, "query_mask"),
             body=body,
+            dependency=dependency,
             max_body_bytes=_page_int(redaction, "max_body_bytes", 0),
             max_fields=_page_int(redaction, "max_fields", 0),
             max_depth=_page_int(redaction, "max_depth", 0),

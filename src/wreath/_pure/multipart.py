@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 RawPart = tuple[list[tuple[bytes, bytes]], bytes]
+PartFactory = Callable[[list[tuple[bytes, bytes]], bytes], Any]
 
 
 def _parse_part_headers(block: bytes) -> list[tuple[bytes, bytes]]:
@@ -23,7 +27,8 @@ def multipart_parse(
     max_parts: int = -1,
     max_part_header_bytes: int = -1,
     max_part_bytes: int = -1,
-) -> list[RawPart]:
+    part_factory: PartFactory | None = None,
+) -> list[Any]:
     """Split a complete multipart body. A negative limit means no limit.
 
     The limits must reject exactly what the native parser rejects, with the
@@ -42,7 +47,7 @@ def multipart_parse(
             raise ValueError("multipart boundary not found")
         pos = first + len(delimiter)
 
-    parts: list[RawPart] = []
+    parts: list[Any] = []
     while True:
         if body[pos : pos + 2] == b"--":
             break
@@ -79,6 +84,10 @@ def multipart_parse(
             raise ValueError(f"multipart part exceeds {max_part_bytes} bytes")
 
         header_block = body[pos:headers_end]
-        parts.append((_parse_part_headers(header_block), body[body_start:next_boundary]))
+        headers = _parse_part_headers(header_block)
+        content = body[body_start:next_boundary]
+        parts.append(
+            (headers, content) if part_factory is None else part_factory(headers, content)
+        )
         pos = next_boundary + len(delimiter)
     return parts

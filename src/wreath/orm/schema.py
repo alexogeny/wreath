@@ -7,7 +7,7 @@ immutable: once ``Registry.compile()` returns, nothing re-derives them.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from .fields import Column, encode_default
@@ -28,6 +28,7 @@ class ColumnRef:
     schema: str
     table: str
     column: str
+    position: int
     model_type: type[Model]
 
 
@@ -93,6 +94,7 @@ class ModelSpec:
     by_name: dict[str, ColumnSpec]
     by_database_name: dict[str, ColumnSpec]
     #: Filled in by Registry.compile() once relationships resolve.
+    by_relationship_name: dict[str, RelationshipSpec] = field(default_factory=dict)
     fingerprint: bytes = b""
 
     @property
@@ -100,10 +102,7 @@ class ModelSpec:
         return f"{self.schema}.{self.table}"
 
     def relationship(self, name: str) -> RelationshipSpec | None:
-        for item in self.relationships:
-            if item.name == name:
-                return item
-        return None
+        return self.by_relationship_name.get(name)
 
 
 def _encode_column(spec: ColumnSpec) -> bytes:

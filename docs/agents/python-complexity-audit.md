@@ -3,7 +3,17 @@
 **Date:** 2026-07-17  
 **Scope:** `src/wreath/**/*.py`, prioritizing large Python-owned surfaces without a C implementation of the same orchestration  
 **Method:** static adversarial review; every loop, recursive expansion, repeated slice, linear lookup, and cross-product was treated as quadratic until bounded or disproved  
-**Status:** five source-confirmed scaling hazards; proposed tests below have **not** been added or run
+**Status:** resolved with focused regressions; full default test suite passes as of 2026-07-19
+
+## Resolution
+
+- **QPY-001:** dependency compilation memoizes shared callables and uses O(1) active-path membership; covered by `tests/test_binding_complexity.py`.
+- **QPY-002:** registry model names and `ModelSpec` relationship names are compiled into lookup indexes; covered by `tests/orm/test_complexity.py`.
+- **QPY-003:** router inclusion stores immutable snapshot edges and flattens each final route once; covered by `tests/test_router_complexity.py`.
+- **QPY-004:** default normalization peels parentheses with indices and slices once; covered by `tests/orm/test_complexity.py`.
+- **QPY-005:** introspected foreign keys are indexed by paired local and remote positions, preserving linear validation and checking the referenced column; covered by `tests/orm/test_introspection.py`.
+
+The findings below retain the original red-test reasoning and predicted failure modes as historical context.
 
 ## Confidence scale
 

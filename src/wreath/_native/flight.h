@@ -23,12 +23,12 @@
 
 /* Capsule name for the versioned C API other extensions resolve once. */
 #define WREATH_FLIGHT_CAPI_NAME "wreath._native._flight._C_API"
-/* v2 appended context_phase for Stage 3 Detailed phase capture; v3 appended
- * context_capture for Stage 5 forensic capture; v4 gave context_capture a
- * policy max_bytes cap so a bounded RAW field records its true original length.
- * Consumers check exact equality and rebuild from this header, so the bump stays
- * in lockstep. */
-#define WREATH_FLIGHT_CAPI_VERSION 4
+/* The C API the other native extensions resolve from the _flight capsule. All
+ * the native extensions are built together from this header and check exact
+ * equality, so this is an internal ABI guard against a stale mixed build, not a
+ * compatibility promise to any external consumer. Bump it in lockstep only if a
+ * later change reorders or removes a vtable entry. */
+#define WREATH_FLIGHT_CAPI_VERSION 1
 
 /* Capsule name wrapping a single recorder's wreath_nfr_worker* (no ownership). */
 #define WREATH_FLIGHT_WORKER_CAPSULE "wreath._native._flight.worker"
@@ -130,6 +130,12 @@ void wreath_nfr_context_capture(wreath_nfr_worker *worker, wreath_nfr_context *c
  * reader (the recording sink / tests). */
 Py_ssize_t wreath_nfr_capture_drain(wreath_nfr_worker *worker, uint8_t *out,
                                     uint32_t *lengths, Py_ssize_t max_slabs);
+
+/* The clock calibration captured at worker creation: the CLOCK_MONOTONIC_RAW and
+ * Unix (ns) instants of the same moment. The projector maps a completion's
+ * `end_offset_ms` to Unix time as epoch_unix_ns + end_offset_ms * 1e6. */
+uint64_t wreath_nfr_worker_epoch_mono_ns(const wreath_nfr_worker *worker);
+uint64_t wreath_nfr_worker_epoch_unix_ns(const wreath_nfr_worker *worker);
 
 uint64_t wreath_nfr_capture_capacity(const wreath_nfr_worker *worker);
 uint64_t wreath_nfr_capture_slab_bytes(const wreath_nfr_worker *worker);

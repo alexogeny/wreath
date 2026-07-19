@@ -5,6 +5,23 @@ from __future__ import annotations
 import pytest
 
 from wreath.orm.introspection import _normalize_default
+from wreath.orm.registry import Registry
+
+from .conftest import User
+
+
+class _TrapRelationship:
+    @property
+    def name(self) -> str:
+        raise AssertionError("relationship lookup scanned the relationship tuple")
+
+
+def test_relationship_lookup_uses_compiled_name_index(registry: Registry) -> None:
+    spec = registry.spec_for(User)
+    expected = spec.relationships[0]
+    object.__setattr__(spec, "relationships", (_TrapRelationship(), *spec.relationships))
+
+    assert spec.relationship(expected.name) is expected
 
 
 def _old_normalize(value: str) -> str:

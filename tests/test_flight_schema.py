@@ -251,6 +251,8 @@ def test_forensic_requires_capture_slabs() -> None:
         TelemetryConfig(mode=Mode.FORENSIC, capture_slabs=0)
     ok = TelemetryConfig(mode=Mode.FORENSIC, capture_slabs=8, slab_bytes=4096)
     assert ok.memory_budget().capture == 8 * 4096
+    with pytest.raises(TelemetryConfigError, match="capture budget"):
+        TelemetryConfig(mode=Mode.FORENSIC, capture_slabs=32_768, slab_bytes=65_536)
 
 
 def test_capped_histograms_reject_excess_cardinality() -> None:

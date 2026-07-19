@@ -35,6 +35,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from ._codecs import parse_qs
+from ._json import loads as _json_loads
 from ._native import _core
 from .exceptions import BadRequest, UnprocessableEntity
 from .request import Request
@@ -43,6 +44,7 @@ Handler = Callable[..., Awaitable[Any]]
 
 _MISSING = dataclasses.MISSING
 _NONE_TYPE = type(None)
+_BINDING_SPEC_UNSET = object()
 
 # Body-validation plan opcodes. These mirror the enum in
 # src/wreath/_native/validate.c; the native validator executes a plan compiled
@@ -516,7 +518,61 @@ def _is_model(annotation: Any) -> bool:
     return issubclass(annotation, Model) and annotation.__wreath_table__ is not None
 
 
-def _body_validator(annotation: Any) -> Callable[[Any, tuple[Any, ...]], Any]:
+class _BodyValidator:
+    __slots__ = ("_decode_json", "_validate")
+
+    def __init__(
+        self,
+        validate_fn: Callable[[Any, tuple[Any, ...]], Any],
+        decode_json: Callable[[bytes, tuple[Any, ...]], Any] | None = None,
+    ) -> None:
+        self._validate = validate_fn
+        self._decode_json = decode_json
+
+    def __call__(self, payload: Any, loc: tuple[Any, ...]) -> Any:
+        return self._validate(payload, loc)
+
+    def decode_json_validation_tape(self, data: bytes, loc: tuple[Any, ...]) -> Any:
+        decode_json = self._decode_json
+        if decode_json is not None:
+            return decode_json(data, loc)
+        return self._validate(_json_loads(data), loc)
+
+
+class _MultipartValidationTape:
+    __slots__ = ("_fields", "_files")
+
+    def __init__(self, fields: tuple[Any, ...], files: tuple[Any, ...]) -> None:
+        self._fields = fields
+        self._files = files
+
+    async def decode_multipart_validation_tape(
+        self, request: Request, kwargs: dict[str, Any]
+    ) -> None:
+        parsed = await request.form()
+        for name, alias, annotation, default in self._fields:
+            raw = parsed.fields.get(alias)
+            if raw is None:
+                if default is inspect.Parameter.empty:
+                    raise ValidationError(
+                        [_error(("form", alias), "field is required", "missing")]
+                    )
+                kwargs[name] = default
+            else:
+                kwargs[name] = _convert_scalar(annotation, raw, ("form", alias))
+        for name, alias, _annotation, default in self._files:
+            upload = parsed.files.get(alias)
+            if upload is None:
+                if default is inspect.Parameter.empty:
+                    raise ValidationError(
+                        [_error(("file", alias), "file is required", "missing")]
+                    )
+                kwargs[name] = default
+            else:
+                kwargs[name] = upload
+
+
+def _body_validator(annotation: Any) -> _BodyValidator:
     """Compile the body checker once, at route-compile time.
 
     A model validates a payload against its own columns in a single pass, so the
@@ -526,7 +582,7 @@ def _body_validator(annotation: Any) -> Callable[[Any, tuple[Any, ...]], Any]:
     if _is_model(annotation):
         from .orm.validation import compile_model_validator
 
-        return compile_model_validator(annotation)
+        return _BodyValidator(compile_model_validator(annotation))
 
     if _core is not None:
         # Compile the annotation into a flat plan once; the native validator
@@ -538,19 +594,26 @@ def _body_validator(annotation: Any) -> Callable[[Any, tuple[Any, ...]], Any]:
             plan = None
         if plan is not None:
             run_validation = _core.run_validation
+            decode_json = _core.decode_json_validation_tape
 
-            def native_validate(payload: Any, loc: tuple[Any, ...]) -> Any:
-                result, errors = run_validation(plan, payload, loc)
+            def checked(result_and_errors: tuple[Any, list[Any]]) -> Any:
+                result, errors = result_and_errors
                 if errors:
                     raise ValidationError(errors)
                 return result
 
-            return native_validate
+            def native_validate(payload: Any, loc: tuple[Any, ...]) -> Any:
+                return checked(run_validation(plan, payload, loc))
+
+            def native_decode(data: bytes, loc: tuple[Any, ...]) -> Any:
+                return checked(decode_json(data, plan, loc))
+
+            return _BodyValidator(native_validate, native_decode)
 
     def validate_annotation(payload: Any, loc: tuple[Any, ...]) -> Any:
         return validate(annotation, payload, loc)
 
-    return validate_annotation
+    return _BodyValidator(validate_annotation)
 
 
 def _path_placeholders(path: str) -> frozenset[str]:
@@ -709,12 +772,17 @@ def compile_binder(
     databases: Mapping[str, Any] | None = None,
     orm_registries: Mapping[str, Any] | None = None,
     dependencies: tuple[Depends, ...] = (),
+    binding_spec: BindingSpec | None | object = _BINDING_SPEC_UNSET,
 ) -> Handler:
     """Wrap ``handler`` so typed parameters are bound per request.
 
     Handlers whose signature is exactly ``(request)`` are returned unchanged.
     """
-    spec = inspect_handler(handler, path)
+    spec = (
+        inspect_handler(handler, path)
+        if binding_spec is _BINDING_SPEC_UNSET
+        else typing.cast(BindingSpec | None, binding_spec)
+    )
     if spec is None and not dependencies:
         return handler
     path_specs = () if spec is None else spec.path_params
@@ -724,6 +792,7 @@ def compile_binder(
     cookie_specs = () if spec is None else spec.cookie_params
     form_specs = () if spec is None else spec.form_params
     file_specs = () if spec is None else spec.file_params
+    form_tape = _MultipartValidationTape(form_specs, file_specs)
     body_spec = None if spec is None else spec.body
     # Compiled here, never per request: a model body resolves to a validator
     # over its own columns.
@@ -815,34 +884,14 @@ def compile_binder(
                 else:
                     kwargs[name] = _convert_scalar(annotation, raw, ("cookie", alias))
         if form_specs or file_specs:
-            form = await request.form()
-            for name, alias, annotation, default in form_specs:
-                raw = form.fields.get(alias)
-                if raw is None:
-                    if default is inspect.Parameter.empty:
-                        raise ValidationError(
-                            [_error(("form", alias), "field is required", "missing")]
-                        )
-                    kwargs[name] = default
-                else:
-                    kwargs[name] = _convert_scalar(annotation, raw, ("form", alias))
-            for name, alias, _annotation, default in file_specs:
-                upload = form.files.get(alias)
-                if upload is None:
-                    if default is inspect.Parameter.empty:
-                        raise ValidationError(
-                            [_error(("file", alias), "file is required", "missing")]
-                        )
-                    kwargs[name] = default
-                else:
-                    kwargs[name] = upload
+            await form_tape.decode_multipart_validation_tape(request, kwargs)
         if body_spec is not None and body_validator is not None:
             name, _annotation = body_spec
             try:
-                payload = await request.json()
+                body = await request.body()
+                kwargs[name] = body_validator.decode_json_validation_tape(body, ("body",))
             except ValueError as exc:
                 raise BadRequest(f"invalid JSON body: {exc}") from None
-            kwargs[name] = body_validator(payload, ("body",))
         cache: dict[Any, Any] = {}
         cleanups: list[Any] = []
         borrowed: list[tuple[Any, Any, str]] = []

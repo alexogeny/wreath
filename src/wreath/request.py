@@ -132,9 +132,11 @@ class Request:
     __slots__ = (
         "_body",
         "_cookies",
+        "_form",
         "_header_map",
         "_header_scanned",
         "_identity",
+        "_json",
         "_limits",
         "_path_params",
         "_receive",
@@ -160,6 +162,8 @@ class Request:
         self._receive = receive
         self._body: bytes | object = _MISSING
         self._cookies: dict[str, str] | object = _MISSING
+        self._json: Any = _MISSING
+        self._form: FormData | object = _MISSING
         self._header_map: dict[bytes, bytes] | None = None
         self._header_scanned = False
         self._path_params = path_params
@@ -370,7 +374,8 @@ class Request:
             return cast(bytes, cached)
 
         limit = self._limits.max_body_bytes
-        chunks: list[bytes] = []
+        first_chunk: bytes | None = None
+        buffer: bytearray | None = None
         total = 0
         while True:
             message = await self._receive()
@@ -392,16 +397,34 @@ class Request:
                         f"request body exceeds {limit} bytes"
                     )
                 total += len(body)
-                chunks.append(body)
+                if first_chunk is None and buffer is None:
+                    first_chunk = body
+                else:
+                    if buffer is None:
+                        assert first_chunk is not None
+                        buffer = bytearray(first_chunk)
+                        first_chunk = None
+                    buffer.extend(body)
             if not message.get("more_body", False):
                 break
 
-        result = b"".join(chunks)
+        if buffer is not None:
+            result = bytes(buffer)
+        elif first_chunk is not None:
+            # The common one-chunk request reuses the ASGI bytes object directly.
+            result = first_chunk
+        else:
+            result = b""
         self._body = result
         return result
 
     async def json(self) -> Any:
-        return _json_loads(await self.body())
+        cached = self._json
+        if cached is not _MISSING:
+            return cached
+        result = _json_loads(await self.body())
+        self._json = result
+        return result
 
     async def form(self) -> FormData:
         """Parse a urlencoded or multipart request body.
@@ -410,6 +433,9 @@ class Request:
         with uploaded files (multipart parts carrying a filename) available
         via :attr:`FormData.files`.
         """
+        cached = self._form
+        if cached is not _MISSING:
+            return cast(FormData, cached)
         content_type = find_header(self.scope.get("headers", ()), b"content-type")
         body = await self.body()
         if content_type is not None and content_type.startswith(b"multipart/form-data"):
@@ -444,8 +470,12 @@ class Request:
                     )
                 else:
                     fields.setdefault(part.name, part.data.decode("utf-8", "replace"))
-            return FormData(fields, files)
+            result = FormData(fields, files)
+            self._form = result
+            return result
         fields = {}
         for key, value in parse_qs(body, self._limits.max_form_fields):
             fields.setdefault(key, value)
-        return FormData(fields, {})
+        result = FormData(fields, {})
+        self._form = result
+        return result

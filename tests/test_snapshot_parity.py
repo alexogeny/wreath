@@ -61,6 +61,14 @@ def test_capacity_violation_preserves_previous(cache_type) -> None:
 
 
 @pytest.mark.parametrize("cache_type", BACKENDS)
+def test_byte_capacity_violation_preserves_previous(cache_type) -> None:
+    cache = cache_type(max_bytes=1)
+    with pytest.raises(ValueError, match="max_bytes"):
+        cache.replace({1: "a"})
+    assert cache.generation == 0
+
+
+@pytest.mark.parametrize("cache_type", BACKENDS)
 def test_membership_and_iteration(cache_type) -> None:
     cache = cache_type()
     cache.replace({1: "a", 2: "b"})

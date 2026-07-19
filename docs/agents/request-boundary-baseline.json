@@ -1,46 +1,46 @@
 {
-  "note": "Python/native boundary crossings for one request through each scenario, measured by `uv run neo-request-trace`. Neo's intended shape is that ingress, routing, authentication, and authorization stay native, so `pre_activation` -- work done before a route handler is activated -- is the number that matters. Regenerate with `uv run neo-request-trace --update-baseline`; `--check` fails when a scenario grows. Growth is a trade-off, not automatically a defect: an app-visible feature may be worth crossings. Justify it in the commit message that raises these numbers, and prefer paying in `handler` over `pre_activation`.",
+  "note": "Python/native boundary crossings for one request through each scenario, measured by `uv run wreath-request-trace`. Wreath's intended shape is that ingress, routing, authentication, and authorization stay native, so `pre_activation` -- work done before a route handler is activated -- is the number that matters. Regenerate with `uv run wreath-request-trace --update-baseline`; `--check` fails when a scenario grows. Growth is a trade-off, not automatically a defect: an app-visible feature may be worth crossings. Justify it in the commit message that raises these numbers, and prefer paying in `handler` over `pre_activation`.",
   "scenarios": {
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 131,
-        "python": 137
+        "c": 126,
+        "python": 2
       },
       "pre_activation": {
         "c": 37,
-        "python": 50
+        "python": 1
       },
       "phases": {
         "ingress": {
           "c": 2,
-          "python": 6
+          "python": 1
         },
         "middleware": {
           "c": 24,
-          "python": 29
+          "python": 0
         },
         "routing": {
           "c": 4,
-          "python": 5
+          "python": 0
         },
         "auth": {
           "c": 7,
-          "python": 10
+          "python": 0
         },
         "handler": {
-          "c": 62,
-          "python": 62
+          "c": 57,
+          "python": 1
         },
         "egress": {
           "c": 32,
-          "python": 25
+          "python": 0
         }
       },
       "c_calls": {
         "dict.get": 38,
-        "list.append": 13,
         "builtins.isinstance": 12,
+        "list.append": 9,
         "str.encode": 5,
         "builtins.len": 4,
         "TracedUser._orm_is_dirty": 4,
@@ -53,7 +53,7 @@
         "builtins.id": 2,
         "dict.clear": 2,
         "TrustedNetworks.contains": 1,
-        "neo._native._core.build_header_map": 1,
+        "wreath._native._core.build_header_map": 1,
         "TrustedNetworks.forwarded_client": 1,
         "bytes.split": 1,
         "bytes.strip": 1,
@@ -61,121 +61,36 @@
         "time.monotonic": 1,
         "TokenBucket.acquire": 1,
         "time.time": 1,
-        "neo._native._core.csrf_new_token": 1,
-        "neo._native._core.find_header": 1,
+        "wreath._native._core.csrf_new_token": 1,
+        "wreath._native._core.find_header": 1,
         "posix.urandom": 1,
         "bytes.hex": 1,
         "DecisionRouteTable.classify": 1,
         "str.partition": 1,
-        "neo._native._core.build_capability_mask": 1,
+        "wreath._native._core.build_capability_mask": 1,
         "DecisionRouteTable.resolve": 1,
-        "neo._native._core.orm_shape": 1,
+        "wreath._native._core.orm_shape": 1,
         "lock.__enter__": 1,
         "OrderedDict.get": 1,
         "OrderedDict.move_to_end": 1,
         "lock.__exit__": 1,
-        "neo._native._core.orm_collect_values": 1,
         "builtins.hasattr": 1,
         "TracedUser._orm_new": 1,
         "set.add": 1,
         "dict.values": 1,
         "list.clear": 1,
         "set.clear": 1,
-        "neo._native._core.json_dumps": 1,
-        "neo._native._core.format_server_timing": 1,
-        "neo._native._core.append_missing_headers": 1,
+        "wreath._native._core.json_dumps": 1,
+        "wreath._native._core.format_server_timing": 1,
+        "wreath._native._core.append_missing_headers": 1,
         "str.capitalize": 1,
         "str.join": 1,
-        "neo._native._core.find_response_header": 1,
+        "wreath._native._core.find_response_header": 1,
         "list.extend": 1
       },
       "python_frames": {
-        "request.py:state": 12,
-        "orm/schema.py:index": 8,
-        "state.py:__setattr__": 7,
-        "app.py:_coerce_response": 6,
-        "state.py:get": 5,
-        "orm/types.py:from_wire": 5,
-        "request.py:scope": 4,
-        "orm/query.py:__init__": 3,
-        "request.py:headers": 2,
-        "request.py:method": 2,
-        "request.py:header": 2,
-        "request.py:path_params": 2,
-        "request.py:identity": 2,
-        "orm/expressions.py:__init__": 2,
-        "orm/query.py:_replace": 2,
-        "orm/session.py:_check_usable": 2,
-        "response.py:__init__": 2,
-        "app.py:__call__": 1,
-        "app.py:_handle_http": 1,
-        "request.py:__init__": 1,
-        "state.py:__init__": 1,
-        "middleware/proxy.py:before": 1,
-        "middleware/proxy.py:_peer_trusted": 1,
-        "request.py:_index_headers": 1,
-        "middleware/ratelimit.py:_before_local": 1,
-        "middleware/ratelimit.py:_identify": 1,
-        "middleware/ratelimit.py:_client_key": 1,
-        "middleware/ratelimit.py:try_acquire": 1,
-        "middleware/cors.py:before": 1,
-        "middleware/csrf.py:before": 1,
-        "request.py:cookies": 1,
-        "middleware/csrf.py:_new_token": 1,
-        "middleware/request_id.py:before": 1,
-        "middleware/request_id.py:_inbound": 1,
-        "middleware/timing.py:before": 1,
-        "auth/backends.py:authenticate": 1,
-        "_devtools/sample_app.py:verify": 1,
-        "request.py:_set_identity": 1,
-        "app.py:_identity_mask": 1,
-        "app.py:_authorize_request": 1,
-        "app.py:_check_set": 1,
-        "_devtools/sample_app.py:authorize": 1,
-        "_devtools/sample_app.py:get_user": 1,
-        "orm/session.py:__init__": 1,
-        "orm/model.py:select": 1,
-        "orm/query.py:build": 1,
-        "orm/query.py:<genexpr>": 1,
-        "orm/expressions.py:__eq__": 1,
-        "orm/expressions.py:_compare": 1,
-        "orm/expressions.py:_bind": 1,
-        "orm/types.py:coerce": 1,
-        "orm/types.py:check": 1,
-        "orm/query.py:where": 1,
-        "orm/session.py:fetch_one": 1,
-        "orm/query.py:limit": 1,
-        "orm/query.py:_check_bound": 1,
-        "orm/session.py:fetch": 1,
-        "orm/compiler.py:compile_select": 1,
-        "orm/registry.py:spec_for": 1,
-        "orm/registry.py:cached_plan": 1,
-        "orm/compiler.py:_collect_binds_native": 1,
-        "orm/types.py:to_wire": 1,
-        "orm/session.py:_check_locking": 1,
-        "orm/session.py:_acquire": 1,
-        "_devtools/sample_app.py:acquire": 1,
-        "orm/session.py:_fetch_objects": 1,
-        "orm/session.py:_hydrate_plan": 1,
-        "orm/session.py:_native_models": 1,
-        "_devtools/sample_app.py:fetch": 1,
-        "_devtools/sample_app.py:_result": 1,
-        "orm/session.py:_hydrate_rows": 1,
-        "orm/session.py:_hydrate": 1,
-        "orm/session.py:_assemble_joins": 1,
-        "orm/session.py:_run_selectin": 1,
-        "orm/session.py:close": 1,
-        "orm/session.py:_clear_pending": 1,
-        "_devtools/sample_app.py:release": 1,
-        "response.py:_content_length": 1,
-        "app.py:_finish_http": 1,
-        "middleware/timing.py:after": 1,
-        "middleware/request_id.py:after": 1,
-        "middleware/security.py:after": 1,
-        "middleware/csrf.py:after": 1,
-        "middleware/cors.py:after": 1,
-        "middleware/cors.py:_origin_header": 1,
-        "response.py:__call__": 1
+        "src/wreath/app.py:__call__": 1,
+        "src/wreath/orm/types.py:to_wire": 1
       },
       "request": {
         "method": "GET",
@@ -186,28 +101,28 @@
       "status": 200,
       "totals": {
         "c": 8,
-        "python": 10
+        "python": 1
       },
       "pre_activation": {
         "c": 4,
-        "python": 3
+        "python": 1
       },
       "phases": {
         "ingress": {
           "c": 1,
-          "python": 2
+          "python": 1
         },
         "routing": {
           "c": 3,
-          "python": 1
+          "python": 0
         },
         "handler": {
           "c": 3,
-          "python": 5
+          "python": 0
         },
         "egress": {
           "c": 1,
-          "python": 2
+          "python": 0
         }
       },
       "c_calls": {
@@ -215,19 +130,11 @@
         "dict.get": 2,
         "DecisionRouteTable.classify": 1,
         "builtins.isinstance": 1,
-        "neo._native._core.json_dumps": 1,
+        "wreath._native._core.json_dumps": 1,
         "list.append": 1
       },
       "python_frames": {
-        "response.py:__init__": 2,
-        "app.py:__call__": 1,
-        "app.py:_handle_http": 1,
-        "request.py:__init__": 1,
-        "_devtools/sample_app.py:health": 1,
-        "app.py:_coerce_response": 1,
-        "response.py:_content_length": 1,
-        "app.py:_finish_http": 1,
-        "response.py:__call__": 1
+        "src/wreath/app.py:__call__": 1
       },
       "request": {
         "method": "GET",

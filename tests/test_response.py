@@ -9,12 +9,42 @@ from __future__ import annotations
 import pytest
 
 from wreath.response import (
+    FileResponse,
     JSONResponse,
     PreparedResponse,
     Response,
     StreamingResponse,
     TextResponse,
 )
+
+
+@pytest.mark.asyncio
+async def test_file_response_prefers_native_descriptor_path(tmp_path) -> None:
+    path = tmp_path / "asset.bin"
+    path.write_bytes(b"native-file")
+
+    class Protocol:
+        def __init__(self) -> None:
+            self.started = False
+            self.finished = False
+            self.payload = b""
+
+        async def _asgi_send(self, message) -> None:
+            raise AssertionError("native file response used generic ASGI send")
+
+        async def _wreath_file_start(self, status, headers, file, size) -> None:
+            self.started = status == 200 and (b"content-length", b"11") in headers
+            assert size == 11
+            self.payload = file.read()
+
+        async def _wreath_file_finish(self) -> None:
+            self.finished = True
+
+    protocol = Protocol()
+    await FileResponse(path)(protocol._asgi_send)
+
+    assert protocol.started and protocol.finished
+    assert protocol.payload == b"native-file"
 
 
 def test_default_headers() -> None:

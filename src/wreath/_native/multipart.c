@@ -71,11 +71,14 @@ wreath_multipart_parse(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwds
     Py_ssize_t max_parts = -1;
     Py_ssize_t max_part_header_bytes = -1;
     Py_ssize_t max_part_bytes = -1;
+    PyObject *part_factory = Py_None;
     static char *kwlist[] = {"body", "boundary", "max_parts",
-                             "max_part_header_bytes", "max_part_bytes", NULL};
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "y*y*|nnn:multipart_parse", kwlist,
+                             "max_part_header_bytes", "max_part_bytes",
+                             "part_factory", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "y*y*|nnnO:multipart_parse", kwlist,
                                      &body, &boundary, &max_parts,
-                                     &max_part_header_bytes, &max_part_bytes)) {
+                                     &max_part_header_bytes, &max_part_bytes,
+                                     &part_factory)) {
         return NULL;
     }
     if (boundary.len < 1 || boundary.len > 70) {
@@ -196,7 +199,12 @@ wreath_multipart_parse(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwds
         }
         PyObject *content = PySequence_GetSlice(
             body_view, body_start - data, next - data);
-        PyObject *part = (content != NULL) ? PyTuple_Pack(2, headers, content) : NULL;
+        PyObject *part = NULL;
+        if (content != NULL) {
+            part = part_factory == Py_None
+                ? PyTuple_Pack(2, headers, content)
+                : PyObject_CallFunctionObjArgs(part_factory, headers, content, NULL);
+        }
         Py_DECREF(headers);
         Py_XDECREF(content);
         if (part == NULL || PyList_Append(parts, part) < 0) {

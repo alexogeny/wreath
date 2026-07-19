@@ -1022,6 +1022,10 @@ endpoint_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwargs))
                          ? wreath_h3_worker_from(recorder)
                          : NULL;
     ep->app = Py_NewRef(app);
+    ep->native_app = PyObject_GetAttrString(app, "_wreath_http");
+    if (ep->native_app == NULL) {
+        PyErr_Clear();
+    }
     ep->config = Py_NewRef(config);
     ep->loop = Py_NewRef(loop);
     ep->registry = Py_NewRef(registry);
@@ -1067,6 +1071,7 @@ endpoint_traverse(PyObject *op, visitproc visit, void *arg)
 {
     WreathH3Endpoint *ep = (WreathH3Endpoint *)op;
     Py_VISIT(ep->app);
+    Py_VISIT(ep->native_app);
     Py_VISIT(ep->config);
     Py_VISIT(ep->loop);
     Py_VISIT(ep->registry);
@@ -1088,6 +1093,7 @@ endpoint_clear(PyObject *op)
         ep->reap_cap = 0;
     }
     Py_CLEAR(ep->app);
+    Py_CLEAR(ep->native_app);
     Py_CLEAR(ep->config);
     Py_CLEAR(ep->loop);
     Py_CLEAR(ep->registry);

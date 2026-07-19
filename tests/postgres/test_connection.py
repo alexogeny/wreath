@@ -431,3 +431,16 @@ async def test_connection_plan_cache_evicts_oldest_and_closes_statement(
     assert conn.prepared_plan_count <= 2
     # Some flight carried a frontend Close ('C') for the evicted statement.
     assert any(b"C" in flight for flight in server.flights), server.flights
+
+
+@pytest.mark.asyncio
+async def test_connection_plan_cache_evicts_to_its_byte_budget(
+    database: tuple[FakePostgres, str],
+) -> None:
+    _, dsn = database
+    conn = await pure_postgres.connect(dsn, statement_cache_bytes=1)
+    try:
+        await conn.fetchval("select $1::int4", 1)
+        assert conn.prepared_plan_count == 0
+    finally:
+        await conn.close()

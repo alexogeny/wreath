@@ -12,6 +12,7 @@ of the data and the number of round trips.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -98,6 +99,7 @@ class _CachedPlan:
 
     sql: str
     bind_oids: tuple[int, ...]
+    bind_program: Callable[[Select], tuple[Any, ...]]
     result_model: ModelSpec
     selected_columns: tuple[ColumnSpec, ...]
     load_plan: LoadPlan
@@ -143,6 +145,66 @@ class _Builder:
         return "".join(self.parts)
 
 
+def _append_bind_paths(
+    node: Expression,
+    path: tuple[str | int, ...],
+    program: list[tuple[str | int, ...]],
+) -> None:
+    if isinstance(node, ValueExpr):
+        program.append(path)
+        return
+    if isinstance(node, BinaryExpr):
+        _append_bind_paths(node.left, (*path, "left"), program)
+        _append_bind_paths(node.right, (*path, "right"), program)
+        return
+    if isinstance(node, InExpr):
+        _append_bind_paths(node.left, (*path, "left"), program)
+        for index, item in enumerate(node.values):
+            _append_bind_paths(item, (*path, "values", index), program)
+        return
+    if isinstance(node, BooleanExpr):
+        for index, operand in enumerate(node.operands):
+            _append_bind_paths(operand, (*path, "operands", index), program)
+        return
+    if isinstance(node, UnaryExpr):
+        _append_bind_paths(node.operand, (*path, "operand"), program)
+        return
+    if isinstance(node, ColumnExpr):
+        return
+    raise ORMError(f"cannot compile bind extraction for {type(node).__name__}")
+
+
+def _compile_bind_program(select: Select) -> Callable[[Select], tuple[Any, ...]]:
+    """Generate one fixed attribute program for a query shape.
+
+    Paths contain only compiler-selected attribute names and integer indexes;
+    no SQL, identifier, or user value enters the generated source. The resulting
+    function uses attribute/index bytecodes on cache hits instead of repeatedly
+    classifying the expression tree or calling ``getattr`` per path component.
+    """
+    paths: list[tuple[str | int, ...]] = []
+    for index, predicate in enumerate(select.predicates):
+        _append_bind_paths(predicate, ("predicates", index), paths)
+
+    expressions: list[str] = []
+    for path in paths:
+        expression = "select"
+        for step in path:
+            expression += f"[{step}]" if isinstance(step, int) else f".{step}"
+        expressions.append(f"{expression}.pg_type.to_wire({expression}.value)")
+    if select.limit_ is not None:
+        expressions.append("select.limit_")
+    if select.offset_ is not None:
+        expressions.append("select.offset_")
+
+    body = ", ".join(expressions)
+    if len(expressions) == 1:
+        body += ","
+    namespace: dict[str, Any] = {}
+    exec(f"def extract(select):\n    return ({body})", {}, namespace)
+    return namespace["extract"]
+
+
 def compile_select(registry: Any, select: Select) -> CompiledQuery:
     """Compile ``select`` against ``registry``, using its bounded plan cache."""
     spec = registry.spec_for(select.model)
@@ -150,7 +212,7 @@ def compile_select(registry: Any, select: Select) -> CompiledQuery:
     plan = registry.cached_plan(shape_key)
     if plan is None:
         plan = registry.store_plan(shape_key, _build_plan(registry, select, spec))
-    values, oids = _collect_binds(select)
+    values = plan.bind_program(select)
     if len(values) > MAX_BIND_PARAMETERS:
         raise ORMError(
             f"query needs {len(values)} bind parameters, above PostgreSQL's "
@@ -211,6 +273,7 @@ def _build_plan(registry: Any, select: Select, spec: ModelSpec) -> _CachedPlan:
     return _CachedPlan(
         sql=builder.sql(),
         bind_oids=tuple(builder.oids),
+        bind_program=_compile_bind_program(select),
         result_model=spec,
         selected_columns=tuple(selected),
         load_plan=LoadPlan(

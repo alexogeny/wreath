@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from wreath.orm import and_, not_, or_
+from wreath.orm import compiler as compiler_module
 from wreath.orm.compiler import _collect_binds, compile_select, shape_of
 from wreath.orm.errors import DeclarationError, ORMError
 from wreath.orm.registry import Registry
@@ -270,6 +271,17 @@ def test_the_plan_cache_is_bounded_and_evicts_the_oldest() -> None:
     assert registry.cached_plan_count == 2
 
 
+def test_the_plan_cache_also_obeys_its_byte_budget() -> None:
+    registry = Registry(
+        FakeDatabase(),
+        [User, Post, Membership],
+        validate_schema="off",
+        query_cache_bytes=1,
+    )
+    compile_select(registry, User.select(User.id).where(User.id == 1))
+    assert registry.cached_plan_count == 0
+
+
 def test_a_cache_hit_still_extracts_this_query_s_values(registry: Registry) -> None:
     # Skipping SQL generation must not skip reading the values, and the walk
     # that collects them must agree with the one that emitted placeholders.
@@ -277,6 +289,18 @@ def test_a_cache_hit_still_extracts_this_query_s_values(registry: Registry) -> N
     fresh = compile_select(registry, query)
     hit = compile_select(registry, User.select(User.id).where(User.name == "B").limit(9))
     assert fresh.sql == hit.sql
+    assert hit.bind_values == ("B", 9)
+
+
+def test_cache_hit_executes_compiled_bind_program(monkeypatch, registry: Registry) -> None:
+    compile_select(registry, User.select(User.id).where(User.name == "A").limit(5))
+
+    def fail_collect(_select):
+        raise AssertionError("cache hit traversed the expression tree")
+
+    monkeypatch.setattr(compiler_module, "_collect_value_nodes", fail_collect)
+    hit = compile_select(registry, User.select(User.id).where(User.name == "B").limit(9))
+
     assert hit.bind_values == ("B", 9)
 
 

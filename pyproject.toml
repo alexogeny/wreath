@@ -106,7 +106,7 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.pytest.ini_options]
-addopts = "-q -m 'not fuzz and not performance and not network'"
+addopts = "-q -m 'not fuzz and not performance and not network and not thesis'"
 pythonpath = ["."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -114,6 +114,7 @@ markers = [
   "fuzz: expensive deterministic or randomized fuzz coverage",
   "performance: repeatable performance-ordering checks",
   "network: tests using real sockets, TLS, or external clients",
+  "thesis: intentionally red deterministic architecture checklist",
 ]
 
 [tool.ty.src]

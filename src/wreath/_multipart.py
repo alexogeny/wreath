@@ -7,7 +7,7 @@ per part.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from ._headers import find_header
 from ._native import _core
@@ -37,6 +37,15 @@ def _disposition_param(value: bytes, param: bytes) -> str | None:
     return None
 
 
+def _make_part(headers: list[tuple[bytes, bytes]], data: Any) -> Part:
+    disposition = find_header(headers, b"content-disposition")
+    name = filename = None
+    if disposition is not None:
+        name = _disposition_param(disposition, b"name")
+        filename = _disposition_param(disposition, b"filename")
+    return Part(name, filename, headers, bytes(data))
+
+
 def parse(
     body: bytes,
     boundary: bytes,
@@ -50,20 +59,16 @@ def parse(
     copied out of the body, and behave identically in the native and pure
     parsers.
     """
-    parts = []
-    for headers, data in _raw_parse(
-        body, boundary, max_parts, max_part_header_bytes, max_part_bytes
-    ):
-        disposition = find_header(headers, b"content-disposition")
-        name = filename = None
-        if disposition is not None:
-            name = _disposition_param(disposition, b"name")
-            filename = _disposition_param(disposition, b"filename")
-        # The native splitter returns an owned view into the complete body so
-        # scanning does not duplicate every part. This public API promises
-        # bytes, so materialize only at its boundary.
-        parts.append(Part(name, filename, headers, bytes(data)))
-    return parts
+    # Convert each part while the low-level scanner owns it. This avoids a
+    # second list of body views and a second Python pass over all parts.
+    return _raw_parse(
+        body,
+        boundary,
+        max_parts,
+        max_part_header_bytes,
+        max_part_bytes,
+        _make_part,
+    )
 
 
 __all__ = ["Part", "parse"]

@@ -13,7 +13,8 @@ points you at the source, tests, and benchmarks for every subsystem.
 - **[Add an endpoint or model](add-an-endpoint.md)** — the smallest correct
   change, from route to test.
 - **[Verify a change](verify-a-change.md)** — how to prove behaviour, not just
-  green tests.
+  green tests, including red-teaming the failure paths with
+  [replay and fault injection](../recipes/fuzz-your-routes.md).
 - **[Documenting a module](documenting-a-module.md)** — the docs a new public
   module or feature must ship with, and the voice they must be in.
 
