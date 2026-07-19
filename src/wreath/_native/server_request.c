@@ -226,10 +226,63 @@ context_flight_phase(WreathRequestContext *self, PyObject *const *args,
     Py_RETURN_NONE;
 }
 
+/* Capture one policy-approved field from the request path into the Forensic
+ * slab. Dispatch calls this only for an armed request whose compiled capture plan
+ * produced a rule, so the common paths never reach here; the native
+ * context_capture is deny-by-default (a no-op unless FLAG_FORENSIC_ARMED) and
+ * bounds/redacts the bytes itself, so a stale call after the context is severed
+ * is an inert no-op, never a stale write. `data` is any bytes-like (a header
+ * value); the disposition (RAW/HASHED/MASKED/LENGTH) was decided by the plan. */
+static PyObject *
+context_flight_capture(WreathRequestContext *self, PyObject *const *args,
+                       Py_ssize_t nargs)
+{
+    if (nargs != 4 && nargs != 5) {
+        PyErr_SetString(
+            PyExc_TypeError,
+            "_flight_capture expects (field_class, descriptor_id, disposition, data"
+            "[, max_bytes])");
+        return NULL;
+    }
+    unsigned long field_class = PyLong_AsUnsignedLong(args[0]);
+    if (field_class == (unsigned long)-1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    unsigned long descriptor_id = PyLong_AsUnsignedLong(args[1]);
+    if (descriptor_id == (unsigned long)-1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    unsigned long disposition = PyLong_AsUnsignedLong(args[2]);
+    if (disposition == (unsigned long)-1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    unsigned long max_bytes = 0;
+    if (nargs == 5) {
+        max_bytes = PyLong_AsUnsignedLong(args[4]);
+        if (max_bytes == (unsigned long)-1 && PyErr_Occurred()) {
+            return NULL;
+        }
+    }
+    if (self->nfr_ctx != NULL && self->nfr_worker != NULL && flight_capi != NULL &&
+        flight_capi->context_capture != NULL) {
+        Py_buffer view;
+        if (PyObject_GetBuffer(args[3], &view, PyBUF_SIMPLE) < 0) {
+            return NULL;
+        }
+        flight_capi->context_capture(self->nfr_worker, self->nfr_ctx,
+                                     (uint16_t)field_class, (uint16_t)descriptor_id,
+                                     (uint8_t)disposition, (const uint8_t *)view.buf,
+                                     view.len, (uint32_t)max_bytes);
+        PyBuffer_Release(&view);
+    }
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef context_methods[] = {
     {"_asgi_scope", (PyCFunction)context_scope, METH_NOARGS, NULL},
     {"_flight_stamp", (PyCFunction)context_flight_stamp, METH_FASTCALL, NULL},
     {"_flight_phase", (PyCFunction)context_flight_phase, METH_FASTCALL, NULL},
+    {"_flight_capture", (PyCFunction)context_flight_capture, METH_FASTCALL, NULL},
     {"_set_client", (PyCFunction)context_set_client, METH_O, NULL},
     {"_set_scheme", (PyCFunction)context_set_scheme, METH_O, NULL},
     {NULL, NULL, 0, NULL},
@@ -339,7 +392,7 @@ wreath_request_context_set_flight(PyObject *object, wreath_nfr_context *nfr_ctx,
  * must gate this, not phase_slot alone: an Off worker's context_start returns
  * before initializing the context, so its zeroed phase_slot (0 -- a valid slot
  * index) would otherwise read as armed. */
-void
+int
 wreath_request_context_set_armed(PyObject *object)
 {
     WreathRequestContext *self = (WreathRequestContext *)object;
@@ -347,5 +400,21 @@ wreath_request_context_set_armed(PyObject *object)
         (self->nfr_ctx->flags & WREATH_NFR_FLAG_DETAILED_ARMED) != 0 &&
         self->nfr_ctx->phase_slot >= 0) {
         self->flight = 2;
+        return 1;
     }
+    return 0;
+}
+
+/* Null the borrowed recorder pointers once the request's completion has been
+ * published. The context object itself may outlive the request (a bound
+ * `_flight_phase` stored in a ContextVar escapes into spawned tasks and
+ * background hooks); after this, such escaped markers are inert no-ops instead
+ * of writes through pointers into a protocol that may already be gone. */
+void
+wreath_request_context_sever(PyObject *object)
+{
+    WreathRequestContext *self = (WreathRequestContext *)object;
+    self->nfr_ctx = NULL;
+    self->nfr_worker = NULL;
+    self->flight = 0;
 }

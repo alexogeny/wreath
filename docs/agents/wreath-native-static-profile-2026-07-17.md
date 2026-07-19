@@ -66,12 +66,8 @@ The phrase “all of a sudden” suggests a change-point. This investigation del
 | Any one finding caused the benchmark regression | 35% |
 | Combined steady-state crossings/object churn materially affect small-response throughput | 70% |
 
-### Red proof tests
+### Source-regression proofs
 
-`tests/test_native_hot_path_red.py` contains three intentionally failing source-regression tests:
+`tests/test_native_hot_path_red.py` began with three red source-regression tests and now remains as the regression suite for the resolved properties. It covers single-pass HTTP head scanning, linear decision-router distinctness, the eager-task state path, bitset startup compilation and allocation shape, native protocol queues, buffer-capacity decay, multipart payload views, and HPACK reclamation.
 
-1. one complete HTTP head must have only one terminator scan across driver and parser;
-2. decision-router compilation must not contain the pairwise distinctness loop;
-3. eager completion must not cross back to Python solely to call `Task.done()`.
-
-These tests establish the source properties without running a benchmark. They do not establish wall-clock effect. Keep them red while selecting an implementation, then make each green with focused correctness tests and only afterward run the project's ablation-based measurement workflow.
+These tests establish source properties rather than wall-clock effects. Every property is now green and is backed by focused behavior tests; performance claims still require the project's ablation-based measurement workflow.

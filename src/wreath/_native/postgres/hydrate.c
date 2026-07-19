@@ -12,6 +12,8 @@
 
 #include "hydrate.h"
 
+#define hydrate_batch_budget 128  /* rows between cancellation checks */
+
 #include "codec.h"
 #include "decode.h"
 #include "model.h"
@@ -610,6 +612,10 @@ wreath_pg_hydrate_models(PyObject *decoder_plan, PyObject *tape_object,
 
     start = PyList_GET_SIZE(dest);
     for (Py_ssize_t row = 0; row < rows; row++) {
+        if (row > 0 && row % hydrate_batch_budget == 0 && PyErr_CheckSignals() < 0) {
+            result = -1;
+            break;
+        }
         if (hydrate_row(plan, decoder, tape, buffers, row, dest, identity_map, owner) < 0) {
             result = -1;
             break;

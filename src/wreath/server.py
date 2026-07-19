@@ -35,6 +35,7 @@ from email.utils import formatdate
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from .config import read_osenv
+from .inspector import InspectorConfig, InspectorServer, serve_inspector
 from .telemetry import Mode, TelemetryConfig
 
 if TYPE_CHECKING:
@@ -55,6 +56,10 @@ def _create_recorder(config: ServerConfig) -> Any:
         flight = importlib.import_module("wreath._native._flight")
     except ImportError:
         return None
+    # A Forensic recorder preallocates the capture-slab pool; every other mode
+    # passes capture_slabs=0 and reserves nothing (deny-by-default all the way
+    # down to the allocation).
+    capture_slabs = telemetry.capture_slabs if telemetry.mode is Mode.FORENSIC else 0
     return flight.Recorder(
         int(telemetry.mode),
         ring_records=telemetry.ring_records,
@@ -64,7 +69,78 @@ def _create_recorder(config: ServerConfig) -> Any:
         detailed_sample_rate=telemetry.detailed.rate,
         phase_slots=telemetry.phase_slots,
         detailed_slow_us=telemetry.detailed_slow_us,
+        capture_slabs=capture_slabs,
+        slab_bytes=telemetry.slab_bytes,
     )
+
+
+def _create_projector(recorder: Any, config: ServerConfig, app: Any) -> tuple[Any, Any]:
+    """Build the off-path projector for a run (and its OTLP export pipeline).
+
+    Returns ``(projector, export)`` where either may be None. The projector is
+    the ring's only consumer: without it a running recorder's completion cells
+    accumulate and drop, so one is created whenever a recorder exists. The export
+    pipeline is added only when OTLP is enabled and given an endpoint; otherwise
+    the projector just feeds the Inspector's projection-backed commands.
+    """
+    if recorder is None:
+        return None, None
+    from ._projector import Projector
+
+    telemetry = config.telemetry
+    export = None
+    on_trace = None
+    if (
+        telemetry is not None
+        and telemetry.otlp.enabled
+        and telemetry.otlp.endpoint
+    ):
+        from ._export import ExportPipeline, OtlpHttpExporter
+        from ._flight_metadata import build_metadata_image
+
+        transport = OtlpHttpExporter(
+            telemetry.otlp.endpoint, timeout=telemetry.otlp.timeout_seconds
+        )
+        export = ExportPipeline(
+            transport,
+            image=build_metadata_image(app),
+            queue_capacity=telemetry.otlp.export_queue or 4096,
+            batch_size=telemetry.otlp.batch_size or 512,
+        )
+        on_trace = export.on_trace
+    projector = Projector(recorder, on_trace=on_trace)
+    if export is not None:
+        export.set_snapshot_provider(projector.snapshot)
+    return projector, export
+
+
+def _create_recording(recorder: Any, config: ServerConfig, app: Any) -> tuple[Any, Any]:
+    """Build the forensic recording sink and runtime arm registry for a run.
+
+    Returns ``(sink, arm_registry)``, either of which may be None. Both are
+    Forensic-only: a `RecordingPolicy` is the redaction/memory ceiling the runtime
+    arm registry cannot exceed, and (when a path is configured) the async `WFR1`
+    sink drains committed capture slabs to an owner-only file off the loop.
+    """
+    telemetry = config.telemetry
+    if (
+        recorder is None
+        or telemetry is None
+        or telemetry.mode is not Mode.FORENSIC
+        or config.recording is None
+    ):
+        return None, None
+    from ._flight_metadata import build_metadata_image
+    from ._recording_format import RecordingSink
+    from .recording import ArmRegistry
+
+    arm_registry = ArmRegistry(config.recording)
+    sink = None
+    if config.recording_path is not None:
+        sink = RecordingSink(
+            recorder, build_metadata_image(app), config.recording_path
+        )
+    return sink, arm_registry
 
 Scope = dict[str, Any]
 Message = dict[str, Any]
@@ -220,6 +296,17 @@ class ServerConfig:
     #: creates one recorder and the native protocols emit a completion cell per
     #: request. None (the default) keeps every recorder hook a not-taken branch.
     telemetry: TelemetryConfig | None = None
+    #: Optional read-only Inspector socket. Only honored when telemetry created
+    #: a recorder; None (the default) binds nothing.
+    inspector: InspectorConfig | None = None
+    #: Optional forensic recording policy: the startup redaction/memory ceiling.
+    #: Only honored under a Forensic recorder; it starts the async WFR1 recording
+    #: sink (when ``recording_path`` is set) and the runtime capture-arm registry
+    #: the Inspector's capture-control commands install into.
+    recording: Any = None
+    #: Where the async recording sink writes the owner-only WFR1 file. None keeps
+    #: capture in memory only (drained slabs are still recycled, just not stored).
+    recording_path: str | None = None
     _default_response_headers: _DefaultResponseHeaders = field(
         init=False, repr=False, compare=False
     )
@@ -527,6 +614,11 @@ class Server:
         self._config = config
         self._loop = loop
         self._recorder = _create_recorder(config)
+        self._projector: Any = None
+        self._export: Any = None
+        self._recording_sink: Any = None
+        self._arm_registry: Any = None
+        self._inspector: InspectorServer | None = None
         self._protocols: set[Any] = set()
         self._asyncio_server: asyncio.AbstractServer | None = None
         self._datagram_transport: asyncio.DatagramTransport | None = None
@@ -599,6 +691,34 @@ class Server:
             if wants_udp:
                 assert tls is not None  # enforced by _resolve_tls
                 self._datagram_transport = await self._bind_datagram(tls, port)
+            if self._recorder is not None:
+                self._projector, self._export = _create_projector(
+                    self._recorder, config, self._app
+                )
+                if self._projector is not None:
+                    self._projector.start()
+                if self._export is not None:
+                    self._export.start()
+                self._recording_sink, self._arm_registry = _create_recording(
+                    self._recorder, config, self._app
+                )
+                if self._recording_sink is not None:
+                    self._recording_sink.start()
+                # Install the compiled capture plan + arm registry on the app so
+                # its request-path seam can capture per policy. Only a Wreath app
+                # carries the seam; a bare ASGI app simply lacks the method.
+                setter = getattr(self._app, "_set_flight_recording", None)
+                if setter is not None and self._arm_registry is not None:
+                    from .recording import compile_redaction
+
+                    setter(compile_redaction(config.recording.redaction),
+                           self._arm_registry)
+            if config.inspector is not None and self._recorder is not None:
+                self._inspector = await serve_inspector(
+                    self._recorder, self._app, config.inspector,
+                    projector=self._projector,
+                    arm_registry=self._arm_registry,
+                )
         except BaseException:
             await self._abort_startup()
             raise
@@ -630,8 +750,34 @@ class Server:
             self._date_timer.cancel()
             self._date_timer = None
 
+    async def _stop_projection(self) -> None:
+        """Stop the export pipeline then the projector, joining their threads off
+        the event loop. The export pipeline goes first so its final flush can
+        still pull from a projector that is about to do its own last drain."""
+        export, self._export = self._export, None
+        if export is not None:
+            await self._loop.run_in_executor(None, export.stop)
+        projector, self._projector = self._projector, None
+        if projector is not None:
+            await self._loop.run_in_executor(None, projector.stop)
+        # Clear the app's capture seam first so no request captures into a slab
+        # pool that is about to be torn down.
+        clearer = getattr(self._app, "_set_flight_recording", None)
+        if clearer is not None and self._arm_registry is not None:
+            clearer(None, None)
+        # The recording sink is an independent capture-slab consumer; stop it off
+        # the loop too, so its final drain + WFR1 footer land before teardown.
+        sink, self._recording_sink = self._recording_sink, None
+        self._arm_registry = None
+        if sink is not None:
+            await self._loop.run_in_executor(None, sink.stop)
+
     async def _abort_startup(self) -> None:
         self._cancel_date_timer()
+        if self._inspector is not None:
+            await self._inspector.close()
+            self._inspector = None
+        await self._stop_projection()
         if self._asyncio_server is not None:
             self._asyncio_server.close()
             try:
@@ -653,6 +799,11 @@ class Server:
         self._closing = True
         self._cancel_date_timer()
         config = self._config
+
+        # 0. The Inspector goes first: no reads of a recorder mid-teardown.
+        if self._inspector is not None:
+            await self._inspector.close()
+            self._inspector = None
 
         # 1. Stop accepting connections (TCP) and reject new QUIC connections.
         server = self._asyncio_server
@@ -688,6 +839,10 @@ class Server:
         if self._datagram_transport is not None:
             self._datagram_transport.close()
             self._datagram_transport = None
+
+        # 5c. Stop the projector/export threads. Requests have drained, so a final
+        # drain here captures the last completions before their ring is dropped.
+        await self._stop_projection()
 
         # 6. Run lifespan shutdown.
         if self._lifespan is not None:

@@ -29,6 +29,12 @@
 #define WREATH_NFR_HISTOGRAM_BUCKETS 64
 #define WREATH_NFR_IMAGE_HASH_BYTES 16
 
+/* Forensic capture (Stage 5). Slabs are self-identifying blocks off the ring. */
+#define WREATH_NFR_CAPTURE_HASH_BYTES 8
+#define WREATH_NFR_CAPTURE_FIELD_ALIGN 4
+#define WREATH_NFR_CAPTURE_SLAB_HEADER_SIZE 24
+#define WREATH_NFR_CAPTURE_FIELD_HEADER_SIZE 12
+
 /* Reserved: 0 always means none/unknown in every metadata table. */
 #define WREATH_NFR_ID_NONE 0
 
@@ -38,7 +44,30 @@ enum {
     WREATH_NFR_KIND_COMPLETION = 1,
     WREATH_NFR_KIND_CORRELATION = 2,
     WREATH_NFR_KIND_PHASE = 3,
-    WREATH_NFR_KIND_CONTROL = 4
+    WREATH_NFR_KIND_CONTROL = 4,
+    WREATH_NFR_KIND_CAPTURE = 5
+};
+
+/* CaptureFieldClass: the boundary a captured field came from. */
+enum {
+    WREATH_NFR_CAP_CLASS_UNKNOWN = 0,
+    WREATH_NFR_CAP_CLASS_REQUEST_HEADER = 1,
+    WREATH_NFR_CAP_CLASS_RESPONSE_HEADER = 2,
+    WREATH_NFR_CAP_CLASS_REQUEST_BODY = 3,
+    WREATH_NFR_CAP_CLASS_RESPONSE_BODY = 4,
+    WREATH_NFR_CAP_CLASS_QUERY_PARAM = 5,
+    WREATH_NFR_CAP_CLASS_DB_PARAM = 6,
+    WREATH_NFR_CAP_CLASS_DB_ROW = 7,
+    WREATH_NFR_CAP_CLASS_OUTBOUND_REQUEST = 8,
+    WREATH_NFR_CAP_CLASS_OUTBOUND_RESPONSE = 9
+};
+
+/* CaptureDisposition: how a field is reduced before it enters a slab. */
+enum {
+    WREATH_NFR_CAP_RAW = 0,     /* verbatim bytes, bounded by the slab       */
+    WREATH_NFR_CAP_HASHED = 1,  /* 8-byte keyed hash, never the bytes        */
+    WREATH_NFR_CAP_MASKED = 2,  /* constant mask; only the length is kept    */
+    WREATH_NFR_CAP_LENGTH = 3   /* length only (bytes dropped)               */
 };
 
 /* Mode. Off performs zero request-path work. */
@@ -152,6 +181,33 @@ typedef struct {
     wreath_nfr_phase_cell records[WREATH_NFR_PHASE_RECORDS_PER_BATCH]; /* 16,32,48 */
 } wreath_nfr_phase_batch_cell;
 
+/* A capture-slab header. Mirrors CaptureSlab's header in _flight_schema.py.
+ * A slab holds one armed Forensic request's retained fields; used_bytes covers
+ * this header plus every field record, so the sink copies exactly that much. */
+typedef struct {
+    uint64_t request_id;    /* offset 0  (self-identifying)                */
+    uint32_t used_bytes;    /* offset 8  (header + all field records)      */
+    uint16_t field_count;   /* offset 12                                   */
+    uint8_t schema_version; /* offset 14                                   */
+    uint8_t kind;           /* offset 15 (WREATH_NFR_KIND_CAPTURE)         */
+    uint8_t worker_id;      /* offset 16                                   */
+    uint8_t flags;          /* offset 17 (FLAG_BODY_TRUNCATED bit 6)       */
+    uint16_t reserved;      /* offset 18                                   */
+    uint32_t reserved2;     /* offset 20                                   */
+} wreath_nfr_capture_slab_header;
+
+/* A capture-field header. Mirrors CaptureField's header in _flight_schema.py.
+ * Followed by stored_length payload bytes, padded up to CAPTURE_FIELD_ALIGN so
+ * the next record header stays naturally aligned. */
+typedef struct {
+    uint16_t field_class;      /* offset 0  (CaptureFieldClass)            */
+    uint16_t descriptor_id;    /* offset 2  (compiled metadata id)         */
+    uint8_t disposition;       /* offset 4  (CaptureDisposition)           */
+    uint8_t reserved;          /* offset 5                                 */
+    uint16_t stored_length;    /* offset 6  (payload bytes in the slab)    */
+    uint32_t original_length;  /* offset 8  (true length before redaction) */
+} wreath_nfr_capture_field;
+
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(wreath_nfr_completion_cell) == WREATH_NFR_CELL_SIZE,
                "completion cell must be 64 bytes");
@@ -163,6 +219,10 @@ _Static_assert(sizeof(wreath_nfr_phase_batch_cell) == WREATH_NFR_CELL_SIZE,
                "phase batch cell must be 64 bytes");
 _Static_assert(WREATH_NFR_PHASE_CELL_BUDGET % WREATH_NFR_PHASE_RECORDS_PER_BATCH == 0,
                "phase budget must be a whole number of batches");
+_Static_assert(sizeof(wreath_nfr_capture_slab_header) == WREATH_NFR_CAPTURE_SLAB_HEADER_SIZE,
+               "capture slab header must be 24 bytes");
+_Static_assert(sizeof(wreath_nfr_capture_field) == WREATH_NFR_CAPTURE_FIELD_HEADER_SIZE,
+               "capture field header must be 12 bytes");
 #endif
 
 /* Histogram bucket for a microsecond duration: log2, clamped to a valid bin.

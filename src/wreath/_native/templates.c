@@ -6,6 +6,8 @@
  */
 #include "wreathcore.h"
 
+#define template_render_chunks 256  /* tape instructions between cancellation checks */
+
 /* Owned references installed by template_configure(); the module never imports
  * wreath.templates itself. */
 static PyObject *T_Markup = NULL;      /* the Markup type object */
@@ -265,6 +267,10 @@ wreath_template_render(PyObject *self, PyObject *args)
     int failed = 0;
 
     while (ip < n) {
+        if (ip > 0 && ip % template_render_chunks == 0 && PyErr_CheckSignals() < 0) {
+            failed = 1;
+            break;
+        }
         PyObject *instr = PyTuple_GET_ITEM(tape, ip);
         long op = PyLong_AsLong(PyTuple_GET_ITEM(instr, 0));
         if (op == -1 && PyErr_Occurred()) {

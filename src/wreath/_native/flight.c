@@ -42,6 +42,68 @@ mix64(uint64_t x)
     return x ^ (x >> 31);
 }
 
+/* --- keyed redaction hash ------------------------------------------------- */
+/* SipHash-2-4 over a byte string with a 128-bit process-local key. Forensic
+ * capture stores this fingerprint for a HASHED field: a stable, non-reversible
+ * 64-bit value that correlates repeated occurrences without disclosing the
+ * bytes. The key is seeded once from the OS CSPRNG at worker creation. Word
+ * loads are little-endian (the whole schema targets LP64 little-endian); the
+ * pure oracle mirrors this exactly for byte-identical HASHED slabs under a
+ * shared key. */
+static inline uint64_t
+rotl64(uint64_t x, int b)
+{
+    return (x << b) | (x >> (64 - b));
+}
+
+#define SIPROUND                                                          \
+    do {                                                                  \
+        v0 += v1; v1 = rotl64(v1, 13); v1 ^= v0; v0 = rotl64(v0, 32);     \
+        v2 += v3; v3 = rotl64(v3, 16); v3 ^= v2;                          \
+        v0 += v3; v3 = rotl64(v3, 21); v3 ^= v0;                          \
+        v2 += v1; v1 = rotl64(v1, 17); v1 ^= v2; v2 = rotl64(v2, 32);     \
+    } while (0)
+
+static uint64_t
+siphash24(const uint8_t *data, size_t len, uint64_t k0, uint64_t k1)
+{
+    uint64_t v0 = 0x736f6d6570736575ULL ^ k0;
+    uint64_t v1 = 0x646f72616e646f6dULL ^ k1;
+    uint64_t v2 = 0x6c7967656e657261ULL ^ k0;
+    uint64_t v3 = 0x7465646279746573ULL ^ k1;
+    const uint8_t *end = data + (len & ~(size_t)7);
+    uint64_t b = (uint64_t)len << 56;
+    for (; data != end; data += 8) {
+        uint64_t m;
+        memcpy(&m, data, 8);  /* little-endian word load on the target ABI */
+        v3 ^= m;
+        SIPROUND;
+        SIPROUND;
+        v0 ^= m;
+    }
+    switch (len & 7) {
+        case 7: b |= (uint64_t)data[6] << 48; /* fall through */
+        case 6: b |= (uint64_t)data[5] << 40; /* fall through */
+        case 5: b |= (uint64_t)data[4] << 32; /* fall through */
+        case 4: b |= (uint64_t)data[3] << 24; /* fall through */
+        case 3: b |= (uint64_t)data[2] << 16; /* fall through */
+        case 2: b |= (uint64_t)data[1] << 8;  /* fall through */
+        case 1: b |= (uint64_t)data[0];       /* fall through */
+        case 0: break;
+    }
+    v3 ^= b;
+    SIPROUND;
+    SIPROUND;
+    v0 ^= b;
+    v2 ^= 0xff;
+    SIPROUND;
+    SIPROUND;
+    SIPROUND;
+    SIPROUND;
+    return v0 ^ v1 ^ v2 ^ v3;
+}
+#undef SIPROUND
+
 static uint64_t
 seed_entropy(void)
 {
@@ -198,6 +260,37 @@ struct wreath_nfr_worker {
     uint32_t phase_capacity;    /* number of scratch blocks */
     uint32_t *phase_free_stack;
     uint32_t phase_free_top;
+    /* Pressure gauges for the Inspector: like ring_high_water, atomics so an
+     * out-of-thread reader sees coherent values while the writer owns the pool. */
+    _Atomic uint32_t phase_in_use;
+    _Atomic uint32_t phase_high_water;
+
+    /* --- forensic capture-slab pool (Forensic mode; armed requests only) ---
+     * Preallocated fixed slabs, a writer-owned free stack, and two SPSC index
+     * rings: a commit ring (writer -> sink, slabs ready to serialize) and a
+     * return ring (sink -> writer, slabs the sink has copied out). The writer
+     * reclaims returned slabs onto its free stack before reserving, so the free
+     * stack stays single-writer-owned. Redaction happens as bytes are written,
+     * so a disallowed field's raw bytes never live here. Off/Pulse/Detailed
+     * reserve nothing. */
+    uint8_t *capture_pool;          /* capture_capacity * slab_bytes, or NULL */
+    uint32_t capture_capacity;      /* number of slabs */
+    uint32_t slab_bytes;
+    uint32_t *capture_free_stack;   /* writer-owned free list of slab indices */
+    uint32_t capture_free_top;
+    uint32_t capture_ring_mask;     /* masks the two index rings (pow2 slots) */
+    uint32_t *capture_commit_ring;  /* SPSC writer -> sink */
+    uint32_t *capture_return_ring;  /* SPSC sink -> writer */
+    _Alignas(CACHELINE) _Atomic uint64_t capture_commit_head;
+    _Alignas(CACHELINE) _Atomic uint64_t capture_commit_tail;
+    _Alignas(CACHELINE) _Atomic uint64_t capture_return_head;
+    _Alignas(CACHELINE) _Atomic uint64_t capture_return_tail;
+    /* process-local keyed hash for redacted-field fingerprints (SipHash-2-4). */
+    uint64_t hash_k0;
+    uint64_t hash_k1;
+    /* pressure gauges (relaxed atomics, like the ring/phase gauges). */
+    _Atomic uint32_t capture_in_use;
+    _Atomic uint32_t capture_high_water;
 };
 
 /* One scratch block is a whole number of 64-byte batch cells covering the phase
@@ -221,7 +314,9 @@ wreath_nfr_worker *
 wreath_nfr_worker_new(uint8_t mode, uint32_t worker_id, uint32_t ring_records,
                       uint32_t active_requests, uint32_t histogram_count,
                       int completion_summaries, uint64_t detailed_sample_threshold,
-                      uint32_t phase_slots, uint64_t slow_threshold_us)
+                      uint32_t phase_slots, uint64_t slow_threshold_us,
+                      uint32_t capture_slabs, uint32_t slab_bytes,
+                      uint64_t hash_key0, uint64_t hash_key1)
 {
     if (ring_records != 0 && (ring_records & (ring_records - 1)) != 0) {
         PyErr_SetString(PyExc_ValueError, "ring_records must be a power of two");
@@ -248,6 +343,14 @@ wreath_nfr_worker_new(uint8_t mode, uint32_t worker_id, uint32_t ring_records,
     atomic_init(&worker->ring_head, 0);
     atomic_init(&worker->ring_tail, 0);
     atomic_init(&worker->ring_high_water, 0);
+    atomic_init(&worker->phase_in_use, 0);
+    atomic_init(&worker->phase_high_water, 0);
+    atomic_init(&worker->capture_commit_head, 0);
+    atomic_init(&worker->capture_commit_tail, 0);
+    atomic_init(&worker->capture_return_head, 0);
+    atomic_init(&worker->capture_return_tail, 0);
+    atomic_init(&worker->capture_in_use, 0);
+    atomic_init(&worker->capture_high_water, 0);
     atomic_init(&worker->requests, 0);
     atomic_init(&worker->completions, 0);
     atomic_init(&worker->active_count, 0);
@@ -294,6 +397,40 @@ wreath_nfr_worker_new(uint8_t mode, uint32_t worker_id, uint32_t ring_records,
         }
         worker->phase_free_top = phase_slots;
     }
+    /* The capture pool is only meaningful in Forensic mode. */
+    if (capture_slabs != 0 && slab_bytes >= WREATH_NFR_CAPTURE_SLAB_HEADER_SIZE &&
+        mode >= WREATH_NFR_MODE_FORENSIC) {
+        worker->capture_capacity = capture_slabs;
+        worker->slab_bytes = slab_bytes;
+        /* Index rings sized to a power of two strictly greater than the slab
+         * count, so a ring can hold every slab and never reports full. */
+        uint32_t slots = 1;
+        while (slots <= capture_slabs) {
+            slots <<= 1;
+        }
+        worker->capture_ring_mask = slots - 1;
+        worker->capture_pool = PyMem_Calloc(capture_slabs, slab_bytes);
+        worker->capture_free_stack = PyMem_Calloc(capture_slabs, sizeof(uint32_t));
+        worker->capture_commit_ring = PyMem_Calloc(slots, sizeof(uint32_t));
+        worker->capture_return_ring = PyMem_Calloc(slots, sizeof(uint32_t));
+        if (worker->capture_pool == NULL || worker->capture_free_stack == NULL ||
+            worker->capture_commit_ring == NULL || worker->capture_return_ring == NULL) {
+            goto no_memory;
+        }
+        for (uint32_t i = 0; i < capture_slabs; i++) {
+            worker->capture_free_stack[i] = capture_slabs - 1 - i;
+        }
+        worker->capture_free_top = capture_slabs;
+    }
+    /* A shared explicit key makes HASHED slabs reproducible for differential
+     * tests; the default (0, 0) draws a process-local key from the CSPRNG. */
+    if (hash_key0 == 0 && hash_key1 == 0) {
+        worker->hash_k0 = seed_entropy();
+        worker->hash_k1 = seed_entropy();
+    } else {
+        worker->hash_k0 = hash_key0;
+        worker->hash_k1 = hash_key1;
+    }
     return worker;
 
 no_memory:
@@ -314,6 +451,10 @@ wreath_nfr_worker_free(wreath_nfr_worker *worker)
     PyMem_Free(worker->free_stack);
     PyMem_Free(worker->phase_scratch);
     PyMem_Free(worker->phase_free_stack);
+    PyMem_Free(worker->capture_pool);
+    PyMem_Free(worker->capture_free_stack);
+    PyMem_Free(worker->capture_commit_ring);
+    PyMem_Free(worker->capture_return_ring);
     free(worker);  /* paired with aligned_alloc in wreath_nfr_worker_new */
 }
 
@@ -379,7 +520,16 @@ phase_reserve(wreath_nfr_worker *worker)
         note_loss(worker, WREATH_NFR_LOSS_PHASE_SCRATCH_FULL);
         return -1;
     }
-    return (int32_t)worker->phase_free_stack[--worker->phase_free_top];
+    int32_t slot = (int32_t)worker->phase_free_stack[--worker->phase_free_top];
+    uint32_t in_use = worker->phase_capacity - worker->phase_free_top;
+    atomic_store_explicit(&worker->phase_in_use, in_use, memory_order_relaxed);
+    uint32_t hw = atomic_load_explicit(&worker->phase_high_water,
+                                       memory_order_relaxed);
+    if (in_use > hw) {
+        atomic_store_explicit(&worker->phase_high_water, in_use,
+                              memory_order_relaxed);
+    }
+    return slot;
 }
 
 static void
@@ -390,6 +540,9 @@ phase_release(wreath_nfr_worker *worker, int32_t slot)
     }
     if (worker->phase_free_top < worker->phase_capacity) {
         worker->phase_free_stack[worker->phase_free_top++] = (uint32_t)slot;
+        atomic_store_explicit(&worker->phase_in_use,
+                              worker->phase_capacity - worker->phase_free_top,
+                              memory_order_relaxed);
     }
 }
 
@@ -422,6 +575,139 @@ phase_finish(wreath_nfr_worker *worker, wreath_nfr_context *ctx, int completion_
     }
     phase_release(worker, ctx->phase_slot);
     ctx->phase_slot = -1;
+}
+
+/* --- forensic capture-slab pool (writer-owned free-list + SPSC index rings) */
+
+/* Push/pop a uint32 slab index through one SPSC index ring. Occupancy is
+ * head - tail; the ring holds mask+1 slots, sized above the slab count so a push
+ * never fails in practice. The producer release-stores head; the consumer
+ * acquire-loads it, so the slab bytes a producer wrote are visible after a pop. */
+static int
+index_ring_push(uint32_t *ring, uint32_t mask, _Atomic uint64_t *head,
+                _Atomic uint64_t *tail, uint32_t value)
+{
+    uint64_t h = atomic_load_explicit(head, memory_order_relaxed);
+    uint64_t t = atomic_load_explicit(tail, memory_order_acquire);
+    if (h - t > mask) {
+        return 0;  /* full */
+    }
+    ring[h & mask] = value;
+    atomic_store_explicit(head, h + 1, memory_order_release);
+    return 1;
+}
+
+static int
+index_ring_pop(uint32_t *ring, uint32_t mask, _Atomic uint64_t *head,
+               _Atomic uint64_t *tail, uint32_t *out)
+{
+    uint64_t t = atomic_load_explicit(tail, memory_order_relaxed);
+    uint64_t h = atomic_load_explicit(head, memory_order_acquire);
+    if (t == h) {
+        return 0;  /* empty */
+    }
+    *out = ring[t & mask];
+    atomic_store_explicit(tail, t + 1, memory_order_release);
+    return 1;
+}
+
+static uint8_t *
+capture_slab_ptr(wreath_nfr_worker *worker, int32_t slot)
+{
+    return worker->capture_pool + (size_t)slot * worker->slab_bytes;
+}
+
+static void
+capture_gauge(wreath_nfr_worker *worker)
+{
+    uint32_t in_use = worker->capture_capacity - worker->capture_free_top;
+    atomic_store_explicit(&worker->capture_in_use, in_use, memory_order_relaxed);
+    uint32_t hw = atomic_load_explicit(&worker->capture_high_water,
+                                       memory_order_relaxed);
+    if (in_use > hw) {
+        atomic_store_explicit(&worker->capture_high_water, in_use,
+                              memory_order_relaxed);
+    }
+}
+
+/* Drain slabs the sink has returned back onto the writer-owned free stack. Run
+ * by the writer just before it reserves, so the free stack stays single-writer. */
+static void
+capture_reclaim(wreath_nfr_worker *worker)
+{
+    uint32_t slot;
+    while (index_ring_pop(worker->capture_return_ring, worker->capture_ring_mask,
+                          &worker->capture_return_head, &worker->capture_return_tail,
+                          &slot)) {
+        if (worker->capture_free_top < worker->capture_capacity) {
+            worker->capture_free_stack[worker->capture_free_top++] = slot;
+        }
+    }
+    capture_gauge(worker);
+}
+
+/* Reserve a slab for an armed request's first captured field. Returns its index
+ * or -1 (CAPTURE_POOL_FULL). Lays down the self-identifying slab header. */
+static int32_t
+capture_reserve(wreath_nfr_worker *worker, wreath_nfr_context *ctx)
+{
+    capture_reclaim(worker);
+    if (worker->capture_free_top == 0) {
+        note_loss(worker, WREATH_NFR_LOSS_CAPTURE_POOL_FULL);
+        return -1;
+    }
+    int32_t slot = (int32_t)worker->capture_free_stack[--worker->capture_free_top];
+    capture_gauge(worker);
+    wreath_nfr_capture_slab_header *hdr =
+        (wreath_nfr_capture_slab_header *)capture_slab_ptr(worker, slot);
+    memset(hdr, 0, sizeof(*hdr));
+    hdr->schema_version = WREATH_NFR_SCHEMA_VERSION;
+    hdr->kind = WREATH_NFR_KIND_CAPTURE;
+    hdr->worker_id = (uint8_t)worker->worker_id;
+    hdr->request_id = ctx->request_id;
+    ctx->capture_used = WREATH_NFR_CAPTURE_SLAB_HEADER_SIZE;
+    return slot;
+}
+
+/* Return a slab straight to the writer-owned free stack (nothing to commit). */
+static void
+capture_release(wreath_nfr_worker *worker, int32_t slot)
+{
+    if (slot < 0 || (uint32_t)slot >= worker->capture_capacity) {
+        return;
+    }
+    if (worker->capture_free_top < worker->capture_capacity) {
+        worker->capture_free_stack[worker->capture_free_top++] = (uint32_t)slot;
+        capture_gauge(worker);
+    }
+}
+
+/* Commit an armed request's slab behind a published completion (like phases), or
+ * release it when there is no completion / nothing was captured. */
+static void
+capture_finish(wreath_nfr_worker *worker, wreath_nfr_context *ctx,
+               int completion_published)
+{
+    if (ctx->capture_slot < 0) {
+        return;
+    }
+    wreath_nfr_capture_slab_header *hdr =
+        (wreath_nfr_capture_slab_header *)capture_slab_ptr(worker, ctx->capture_slot);
+    if (completion_published && hdr->field_count > 0) {
+        hdr->used_bytes = ctx->capture_used;
+        if (!index_ring_push(worker->capture_commit_ring, worker->capture_ring_mask,
+                             &worker->capture_commit_head, &worker->capture_commit_tail,
+                             (uint32_t)ctx->capture_slot)) {
+            /* Rings are sized to hold every slab, so this is unreachable; count it
+             * and reclaim rather than leak the slab if the invariant ever breaks. */
+            note_loss(worker, WREATH_NFR_LOSS_CAPTURE_POOL_FULL);
+            capture_release(worker, ctx->capture_slot);
+        }
+    } else {
+        capture_release(worker, ctx->capture_slot);
+    }
+    ctx->capture_slot = -1;
+    ctx->capture_used = 0;
 }
 
 /* --- ring (single writer / single reader) --------------------------------- */
@@ -491,16 +777,22 @@ wreath_nfr_context_start(wreath_nfr_worker *worker, wreath_nfr_context *ctx,
     ctx->protocol = protocol;
     ctx->connection_id = connection_id;
     ctx->start_ns = start_ns;
-    ctx->phase_slot = -1;  /* 0 is a valid slot; unarmed requests hold none */
+    ctx->phase_slot = -1;    /* 0 is a valid slot; unarmed requests hold none */
+    ctx->capture_slot = -1;  /* a slab is reserved lazily on the first capture */
     ctx->request_id = worker->next_request_id++;
     ctx->span_id = splitmix64(&worker->rng_state);  /* this request's span */
     /* Detailed-mode arming: a cheap, deterministic per-request sample. Pulse
      * never arms, so this branch and its flag are absent from the Pulse cell. An
      * armed request reserves a phase-scratch block (or drops phases + counts the
-     * loss if the pool is exhausted). */
+     * loss if the pool is exhausted). In Forensic mode the same sample also arms
+     * payload capture (a nested subset of the phase-armed set), gating the
+     * deny-by-default capture path; the slab itself is reserved lazily. */
     if (worker->mode >= WREATH_NFR_MODE_DETAILED &&
         (mix64(ctx->request_id) & 0xFFFFFFFFULL) < worker->detailed_sample_threshold) {
         ctx->flags |= WREATH_NFR_FLAG_DETAILED_ARMED;
+        if (worker->mode >= WREATH_NFR_MODE_FORENSIC) {
+            ctx->flags |= WREATH_NFR_FLAG_FORENSIC_ARMED;
+        }
         ctx->phase_slot = phase_reserve(worker);
     }
     atomic_fetch_add_explicit(&worker->requests, 1, memory_order_relaxed);
@@ -564,6 +856,103 @@ wreath_nfr_context_phase(wreath_nfr_worker *worker, wreath_nfr_context *ctx,
 }
 
 void
+wreath_nfr_context_capture(wreath_nfr_worker *worker, wreath_nfr_context *ctx,
+                           uint16_t field_class, uint16_t descriptor_id,
+                           uint8_t disposition, const uint8_t *data, Py_ssize_t len,
+                           uint32_t max_bytes)
+{
+    /* Deny-by-default: only a Forensic-armed request captures. Every other path
+     * (Off/Pulse/Detailed/unarmed) is a single predicted branch on the flag. */
+    if (!(ctx->flags & WREATH_NFR_FLAG_FORENSIC_ARMED) ||
+        worker->capture_capacity == 0) {
+        return;
+    }
+    if (ctx->capture_slot < 0) {
+        ctx->capture_slot = capture_reserve(worker, ctx);
+        if (ctx->capture_slot < 0) {
+            return;  /* pool exhausted: loss already counted */
+        }
+    }
+    if (len < 0) {
+        len = 0;
+    }
+    uint64_t original_length = (uint64_t)len;
+
+    /* Decide the retained bytes by disposition, redacting *before* anything
+     * enters the slab. RAW keeps a bounded prefix; HASHED keeps only a keyed
+     * fingerprint; MASKED/LENGTH keep no bytes at all. */
+    uint32_t stored = 0;
+    uint8_t hash_buf[WREATH_NFR_CAPTURE_HASH_BYTES];
+    const uint8_t *payload = NULL;
+    if (disposition == WREATH_NFR_CAP_RAW) {
+        stored = original_length > 0xFFFFu ? 0xFFFFu : (uint32_t)original_length;
+        /* Policy byte cap (max_bytes): a longer body keeps only a prefix and is
+         * marked truncated below, its true original length preserved. */
+        if (max_bytes != 0 && stored > max_bytes) {
+            stored = max_bytes;
+        }
+        payload = data;
+    } else if (disposition == WREATH_NFR_CAP_HASHED) {
+        uint64_t h = siphash24(data, (size_t)len, worker->hash_k0, worker->hash_k1);
+        memcpy(hash_buf, &h, sizeof(h));
+        stored = WREATH_NFR_CAPTURE_HASH_BYTES;
+        payload = hash_buf;
+    }
+
+    uint8_t *slab = capture_slab_ptr(worker, ctx->capture_slot);
+    uint32_t used = ctx->capture_used;
+    /* Not even a field header fits: drop the field whole (CAPTURE_POOL_FULL). */
+    if (used + WREATH_NFR_CAPTURE_FIELD_HEADER_SIZE > worker->slab_bytes) {
+        note_loss(worker, WREATH_NFR_LOSS_CAPTURE_POOL_FULL);
+        return;
+    }
+    uint32_t room = worker->slab_bytes - used - WREATH_NFR_CAPTURE_FIELD_HEADER_SIZE;
+    uint32_t padded = (stored + (WREATH_NFR_CAPTURE_FIELD_ALIGN - 1)) &
+                      ~(uint32_t)(WREATH_NFR_CAPTURE_FIELD_ALIGN - 1);
+    if (padded > room) {
+        if (disposition == WREATH_NFR_CAP_RAW) {
+            /* Clip a raw body to the largest aligned chunk that fits. */
+            stored = room & ~(uint32_t)(WREATH_NFR_CAPTURE_FIELD_ALIGN - 1);
+            padded = stored;
+        } else {
+            /* A fixed-size hash that will not fit is dropped, not clipped. */
+            note_loss(worker, WREATH_NFR_LOSS_CAPTURE_POOL_FULL);
+            return;
+        }
+    }
+
+    wreath_nfr_capture_field field;
+    field.field_class = field_class;
+    field.descriptor_id = descriptor_id;
+    field.disposition = disposition;
+    field.reserved = 0;
+    field.stored_length = (uint16_t)stored;
+    field.original_length =
+        original_length > 0xFFFFFFFFULL ? 0xFFFFFFFFu : (uint32_t)original_length;
+    memcpy(slab + used, &field, sizeof(field));
+    used += WREATH_NFR_CAPTURE_FIELD_HEADER_SIZE;
+    if (stored > 0 && payload != NULL) {
+        memcpy(slab + used, payload, stored);
+    }
+    /* Zero the alignment pad so a recycled slab never leaks stale bytes and the
+     * serialized slab is reproducible. */
+    if (padded > stored) {
+        memset(slab + used + stored, 0, padded - stored);
+    }
+    used += padded;
+    ctx->capture_used = used;
+
+    wreath_nfr_capture_slab_header *hdr = (wreath_nfr_capture_slab_header *)slab;
+    hdr->field_count++;
+    /* A raw field that kept fewer bytes than it had was truncated. */
+    if (disposition == WREATH_NFR_CAP_RAW && stored < original_length) {
+        hdr->flags |= (uint8_t)WREATH_NFR_FLAG_BODY_TRUNCATED;
+        ctx->flags |= WREATH_NFR_FLAG_BODY_TRUNCATED;
+        note_loss(worker, WREATH_NFR_LOSS_BODY_TRUNCATED);
+    }
+}
+
+void
 wreath_nfr_context_propagate(wreath_nfr_worker *worker, wreath_nfr_context *ctx,
                              const uint8_t *traceparent, Py_ssize_t len)
 {
@@ -620,9 +1009,10 @@ wreath_nfr_context_end(wreath_nfr_worker *worker, wreath_nfr_context *ctx,
     }
 
     if (!worker->completion_summaries) {
-        /* No completion cell to anchor phases to: drop them, but still return the
-         * scratch block so the pool is not leaked. */
+        /* No completion cell to anchor phases/slab to: drop them, but still
+         * return the scratch block and capture slab so the pools are not leaked. */
         phase_finish(worker, ctx, 0);
+        capture_finish(worker, ctx, 0);
         return;
     }
     /* The cell is exactly 64 bytes with no padding (static-asserted in the
@@ -661,8 +1051,10 @@ wreath_nfr_context_end(wreath_nfr_worker *worker, wreath_nfr_context *ctx,
         corr.span_id = ctx->span_id;
         ring_publish(worker, &corr);  /* a dropped correlation is counted by the ring */
     }
-    /* Detailed phase batches follow the completion they belong to (armed only). */
+    /* Detailed phase batches and the Forensic capture slab follow the completion
+     * they belong to (armed only); a dropped completion drops both. */
     phase_finish(worker, ctx, published);
+    capture_finish(worker, ctx, published);
 }
 
 void
@@ -675,8 +1067,10 @@ wreath_nfr_context_abandon(wreath_nfr_worker *worker, wreath_nfr_context *ctx)
         active_release(worker, ctx->active_slot);
         ctx->active_slot = -1;
     }
-    /* Return an armed request's scratch block without committing anything. */
+    /* Return an armed request's scratch block and capture slab without
+     * committing anything. */
     phase_finish(worker, ctx, 0);
+    capture_finish(worker, ctx, 0);
     ctx->mode = WREATH_NFR_MODE_OFF;  /* idempotent: a later end() is a no-op */
 }
 
@@ -717,6 +1111,69 @@ wreath_nfr_ring_high_water(const wreath_nfr_worker *worker)
     return atomic_load_explicit(&worker->ring_high_water, memory_order_relaxed);
 }
 
+/* Phase-scratch pressure gauges for the Inspector (Stage 3 slice 3b). Zero for
+ * a worker whose mode reserves no pool (Off/Pulse). */
+uint64_t
+wreath_nfr_phase_capacity(const wreath_nfr_worker *worker)
+{
+    return worker->phase_capacity;
+}
+
+uint64_t
+wreath_nfr_phase_in_use(const wreath_nfr_worker *worker)
+{
+    return atomic_load_explicit(&worker->phase_in_use, memory_order_relaxed);
+}
+
+uint64_t
+wreath_nfr_phase_high_water(const wreath_nfr_worker *worker)
+{
+    return atomic_load_explicit(&worker->phase_high_water, memory_order_relaxed);
+}
+
+uint64_t
+wreath_nfr_active_capacity(const wreath_nfr_worker *worker)
+{
+    return worker->active_capacity;
+}
+
+uint32_t
+wreath_nfr_active_snapshot(const wreath_nfr_worker *worker,
+                           wreath_nfr_active_entry *out, uint32_t max)
+{
+    uint32_t written = 0;
+    for (uint32_t i = 0; i < worker->active_capacity && written < max; i++) {
+        const wreath_nfr_active_slot *entry = &worker->active[i];
+        /* Seqlock read: retry while the writer is mid-update (odd) or the
+         * generation moved under us; give up on a slot after a few spins so a
+         * reader can never be pinned by writer traffic. */
+        for (int attempt = 0; attempt < 4; attempt++) {
+            uint32_t before = atomic_load_explicit(&entry->generation,
+                                                   memory_order_acquire);
+            if (before & 1u) {
+                continue;
+            }
+            wreath_nfr_active_entry row = {
+                .request_id = entry->request_id,
+                .start_ns = entry->start_ns,
+                .route_id = entry->route_id,
+                .protocol = entry->protocol,
+            };
+            int in_use = entry->in_use;
+            uint32_t after = atomic_load_explicit(&entry->generation,
+                                                  memory_order_acquire);
+            if (after != before) {
+                continue;
+            }
+            if (in_use) {
+                out[written++] = row;
+            }
+            break;
+        }
+    }
+    return written;
+}
+
 uint64_t
 wreath_nfr_active_count(const wreath_nfr_worker *worker)
 {
@@ -727,4 +1184,72 @@ void
 wreath_nfr_histogram_global(const wreath_nfr_worker *worker, uint64_t *out)
 {
     memcpy(out, worker->histograms, WREATH_NFR_HISTOGRAM_BUCKETS * sizeof(uint64_t));
+}
+
+/* --- forensic capture drain / gauges (reader side) ------------------------ */
+
+Py_ssize_t
+wreath_nfr_capture_drain(wreath_nfr_worker *worker, uint8_t *out, uint32_t *lengths,
+                         Py_ssize_t max_slabs)
+{
+    if (worker->capture_capacity == 0 || max_slabs <= 0) {
+        return 0;
+    }
+    Py_ssize_t copied = 0;
+    uint32_t slot;
+    while (copied < max_slabs &&
+           index_ring_pop(worker->capture_commit_ring, worker->capture_ring_mask,
+                          &worker->capture_commit_head, &worker->capture_commit_tail,
+                          &slot)) {
+        uint8_t *slab = capture_slab_ptr(worker, slot);
+        const wreath_nfr_capture_slab_header *hdr =
+            (const wreath_nfr_capture_slab_header *)slab;
+        uint32_t used = hdr->used_bytes;
+        if (used > worker->slab_bytes) {
+            used = worker->slab_bytes;  /* defensive clamp against a bad header */
+        }
+        memcpy(out + (size_t)copied * worker->slab_bytes, slab, used);
+        lengths[copied] = used;
+        copied++;
+        /* Hand the slab back to the writer (SPSC sink -> writer); the writer
+         * reclaims it onto the free stack on its next reserve. */
+        index_ring_push(worker->capture_return_ring, worker->capture_ring_mask,
+                        &worker->capture_return_head, &worker->capture_return_tail,
+                        slot);
+    }
+    return copied;
+}
+
+uint64_t
+wreath_nfr_capture_capacity(const wreath_nfr_worker *worker)
+{
+    return worker->capture_capacity;
+}
+
+uint64_t
+wreath_nfr_capture_slab_bytes(const wreath_nfr_worker *worker)
+{
+    return worker->slab_bytes;
+}
+
+uint64_t
+wreath_nfr_capture_in_use(const wreath_nfr_worker *worker)
+{
+    return atomic_load_explicit(&worker->capture_in_use, memory_order_relaxed);
+}
+
+uint64_t
+wreath_nfr_capture_high_water(const wreath_nfr_worker *worker)
+{
+    return atomic_load_explicit(&worker->capture_high_water, memory_order_relaxed);
+}
+
+uint64_t
+wreath_nfr_capture_committed(const wreath_nfr_worker *worker)
+{
+    uint64_t head = atomic_load_explicit(&worker->capture_commit_head,
+                                         memory_order_relaxed);
+    uint64_t tail = atomic_load_explicit(&worker->capture_commit_tail,
+                                         memory_order_relaxed);
+    return head - tail;
 }

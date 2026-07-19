@@ -393,6 +393,10 @@ def test_c_header_defines_match_python() -> None:
     assert define("WREATH_NFR_PHASE_RECORDS_PER_BATCH") == fs.PHASE_RECORDS_PER_BATCH
     assert define("WREATH_NFR_HISTOGRAM_BUCKETS") == fs.HISTOGRAM_BUCKETS
     assert define("WREATH_NFR_IMAGE_HASH_BYTES") == fs.IMAGE_HASH_BYTES
+    assert define("WREATH_NFR_CAPTURE_HASH_BYTES") == fs.CAPTURE_HASH_BYTES
+    assert define("WREATH_NFR_CAPTURE_FIELD_ALIGN") == fs.CAPTURE_FIELD_ALIGN
+    assert define("WREATH_NFR_CAPTURE_SLAB_HEADER_SIZE") == fs.CAPTURE_SLAB_HEADER_SIZE
+    assert define("WREATH_NFR_CAPTURE_FIELD_HEADER_SIZE") == fs.CAPTURE_FIELD_HEADER_SIZE
 
     # Flag bits: `#define NAME (1u << n)`.
     def flag(name: str) -> int:
@@ -414,10 +418,16 @@ def test_c_enums_match_python() -> None:
 
     assert enum_value("WREATH_NFR_KIND_COMPLETION") == fs.EventKind.COMPLETION
     assert enum_value("WREATH_NFR_KIND_CORRELATION") == fs.EventKind.CORRELATION
+    assert enum_value("WREATH_NFR_KIND_CAPTURE") == fs.EventKind.CAPTURE
     assert enum_value("WREATH_NFR_MODE_FORENSIC") == fs.Mode.FORENSIC
     assert enum_value("WREATH_NFR_PROTO_HTTP3") == fs.Protocol.HTTP3
     assert enum_value("WREATH_NFR_TERM_TIMEOUT") == fs.TerminalStatus.TIMEOUT
     assert enum_value("WREATH_NFR_LOSS_BODY_TRUNCATED") == fs.LossReason.BODY_TRUNCATED
+    assert enum_value("WREATH_NFR_CAP_CLASS_REQUEST_BODY") == fs.CaptureFieldClass.REQUEST_BODY
+    assert enum_value("WREATH_NFR_CAP_CLASS_DB_ROW") == fs.CaptureFieldClass.DB_ROW
+    assert enum_value("WREATH_NFR_CAP_RAW") == fs.CaptureDisposition.RAW
+    assert enum_value("WREATH_NFR_CAP_HASHED") == fs.CaptureDisposition.HASHED
+    assert enum_value("WREATH_NFR_CAP_LENGTH") == fs.CaptureDisposition.LENGTH
 
 
 def test_c_struct_layout_matches_python(tmp_path: Path) -> None:

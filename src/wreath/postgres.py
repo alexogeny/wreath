@@ -8,8 +8,25 @@ import importlib
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from time import monotonic_ns as _monotonic_ns
 from types import ModuleType
 from typing import Any, Literal, cast
+
+from ._flight_markers import (
+    COV_EXTERNAL as _COV_EXTERNAL,
+)
+from ._flight_markers import (
+    COV_PYTHON as _COV_PYTHON,
+)
+from ._flight_markers import (
+    PH_DB_POOL_WAIT as _PH_DB_POOL_WAIT,
+)
+from ._flight_markers import (
+    PH_DB_QUERY as _PH_DB_QUERY,
+)
+from ._flight_markers import (
+    phase_marker as _phase_marker,
+)
 
 Workload = Literal["security_read", "read", "write"]
 _READ_ONLY = frozenset({"security_read", "read"})
@@ -248,7 +265,17 @@ class Statement:
     async def _call(self, method: str, args: tuple[object, ...]) -> Any:
         connection = await self.database.acquire(self.workload)
         try:
-            return await getattr(connection, method)(self.sql, *args)
+            marker = _phase_marker.get(None)
+            if marker is None:
+                return await getattr(connection, method)(self.sql, *args)
+            start = _monotonic_ns()
+            try:
+                return await getattr(connection, method)(self.sql, *args)
+            finally:
+                # Recorded in a finally so a failed statement still shows the
+                # time it spent at the database before raising.
+                marker(_PH_DB_QUERY, self.database._flight_dep_id,
+                       _COV_EXTERNAL, _monotonic_ns() - start)
         finally:
             await self.database.release(self.workload, connection)
 
@@ -279,9 +306,21 @@ class Statement:
         """
         connection = await self.database.acquire(self.workload)
         try:
-            return await connection.map(
-                method, self.sql, argument_sets, max_in_flight=max_in_flight
-            )
+            marker = _phase_marker.get(None)
+            if marker is None:
+                return await connection.map(
+                    method, self.sql, argument_sets, max_in_flight=max_in_flight
+                )
+            start = _monotonic_ns()
+            try:
+                return await connection.map(
+                    method, self.sql, argument_sets, max_in_flight=max_in_flight
+                )
+            finally:
+                # One DB_QUERY for the whole fan-out: it is one acquisition and
+                # one Sync-delimited pipeline from the request's point of view.
+                marker(_PH_DB_QUERY, self.database._flight_dep_id,
+                       _COV_EXTERNAL, _monotonic_ns() - start)
         finally:
             await self.database.release(self.workload, connection)
 
@@ -290,8 +329,8 @@ class Database:
     """One logical database with independently bounded workload pools."""
 
     __slots__ = (
-        "_configs", "_connector", "_dsn", "_name", "_pools", "_statements",
-        "_workload_dsns", "shutdown_timeout", "started",
+        "_configs", "_connector", "_dsn", "_flight_dep_id", "_name", "_pools",
+        "_statements", "_workload_dsns", "shutdown_timeout", "started",
     )
 
     def __init__(
@@ -316,6 +355,9 @@ class Database:
         self._connector = connector
         self._pools: dict[Workload, Pool] = {}
         self._statements: dict[str, Statement] = {}
+        # Metadata-image ID for phase attribution; stamped by the app when the
+        # flight recorder joins live objects to the image (0 = unattributed).
+        self._flight_dep_id = 0
         self.shutdown_timeout = shutdown_timeout
         self.started = False
 
@@ -387,7 +429,17 @@ class Database:
         raise InterfaceError("PostgreSQL pool has not started")
 
     async def acquire(self, workload: Workload = "read") -> Any:
-        return await self.pool(workload).acquire()
+        # Armed-request pool-wait phase; every other request pays exactly the
+        # ContextVar read. This is the one acquisition seam, so Statement,
+        # Statement.map, and direct acquire callers are all covered.
+        marker = _phase_marker.get(None)
+        if marker is None:
+            return await self.pool(workload).acquire()
+        start = _monotonic_ns()
+        connection = await self.pool(workload).acquire()
+        marker(_PH_DB_POOL_WAIT, self._flight_dep_id, _COV_PYTHON,
+               _monotonic_ns() - start)
+        return connection
 
     async def release(self, workload: Workload, connection: Any) -> None:
         await self.pool(workload).release(connection)

@@ -5,6 +5,36 @@
  */
 #include "wreathcore.h"
 
+
+static PyObject *
+wreath_decode_json_validation_tape(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *data;
+    PyObject *plan;
+    PyObject *loc;
+    PyObject *payload;
+    PyObject *validation_args;
+    PyObject *result;
+
+    if (!PyArg_UnpackTuple(
+            args, "decode_json_validation_tape", 3, 3, &data, &plan, &loc)) {
+        return NULL;
+    }
+    payload = wreath_json_loads(NULL, data);
+    if (payload == NULL) {
+        return NULL;
+    }
+    validation_args = PyTuple_Pack(3, plan, payload, loc);
+    Py_DECREF(payload);
+    if (validation_args == NULL) {
+        return NULL;
+    }
+    result = wreath_run_validation(NULL, validation_args);
+    Py_DECREF(validation_args);
+    return result;
+}
+
+
 static PyMethodDef core_methods[] = {
     {"parse_dotenv", wreath_parse_dotenv, METH_O,
      "parse_dotenv(data) -> dict[str, str]"},
@@ -12,6 +42,8 @@ static PyMethodDef core_methods[] = {
      "read_osenv() -> dict[str, str]"},
     {"run_validation", wreath_run_validation, METH_VARARGS,
      "run_validation(plan, value, loc) -> (result, errors)"},
+    {"decode_json_validation_tape", wreath_decode_json_validation_tape, METH_VARARGS,
+     "decode_json_validation_tape(data, plan, loc) -> (result, errors)"},
     {"orm_shape", wreath_orm_shape, METH_VARARGS,
      "orm_shape(registry, select) -> bytes\nORM query cache key."},
     {"orm_shape_configure", wreath_orm_shape_configure, METH_VARARGS,
@@ -124,7 +156,8 @@ PyInit__core(void)
         wreath_register_router(module) < 0 || wreath_register_dtrouter(module) < 0 ||
         wreath_register_dtbitset(module) < 0 ||
         wreath_register_webpolicy(module) < 0 || wreath_register_proxy(module) < 0 ||
-        wreath_register_ratelimit(module) < 0) {
+        wreath_register_ratelimit(module) < 0 ||
+        wreath_register_scheduler(module) < 0) {
         Py_DECREF(module);
         return NULL;
     }

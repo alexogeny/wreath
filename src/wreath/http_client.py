@@ -16,6 +16,12 @@ from typing import cast
 from urllib.parse import SplitResult, urljoin, urlsplit
 
 from . import _client_codec
+from ._flight_markers import (
+    COV_EXTERNAL as _COV_EXTERNAL,
+    PH_HTTP_CLIENT as _PH_HTTP_CLIENT,
+    phase_marker as _phase_marker,
+)
+from time import monotonic_ns as _monotonic_ns
 
 
 type _AddressInfo = tuple[int, int, int, str, tuple[object, ...]]
@@ -251,6 +257,7 @@ class HTTPClient:
         "_dns_addresses",
         "_dns_expires_at",
         "_dns_lock",
+        "_flight_dep_id",
         "_host",
         "_idle",
         "_limits",
@@ -298,6 +305,9 @@ class HTTPClient:
         self._destination = destination
         self._condition = asyncio.Condition()
         self._dns_lock = asyncio.Lock()
+        # Metadata-image ID for phase attribution; stamped by the app when the
+        # flight recorder joins live objects to the image (0 = unattributed).
+        self._flight_dep_id = 0
         self._dns_addresses: tuple[_AddressInfo, ...] = ()
         self._dns_expires_at = 0.0
         self._ssl_context: ssl.SSLContext | None = None
@@ -398,6 +408,34 @@ class HTTPClient:
         headers: tuple[tuple[bytes, bytes], ...] = (),
         body: bytes | bytearray | memoryview = b"",
         idempotency_key: str | None = None,
+    ) -> ClientResponse:
+        # Armed-request outbound phase; every other request pays exactly the
+        # ContextVar read. A finally records failed and timed-out calls too —
+        # their duration is precisely what the Inspector wants to see.
+        marker = _phase_marker.get(None)
+        if marker is None:
+            return await self._request_timed(
+                method, target, headers=headers, body=body,
+                idempotency_key=idempotency_key,
+            )
+        start = _monotonic_ns()
+        try:
+            return await self._request_timed(
+                method, target, headers=headers, body=body,
+                idempotency_key=idempotency_key,
+            )
+        finally:
+            marker(_PH_HTTP_CLIENT, self._flight_dep_id, _COV_EXTERNAL,
+                   _monotonic_ns() - start)
+
+    async def _request_timed(
+        self,
+        method: str,
+        target: str,
+        *,
+        headers: tuple[tuple[bytes, bytes], ...],
+        body: bytes | bytearray | memoryview,
+        idempotency_key: str | None,
     ) -> ClientResponse:
         if self._timeout.total is None:
             return await self._request_flow(

@@ -1,12 +1,12 @@
-"""Routing with two interchangeable compiled backends.
+"""Routing with three interchangeable compiled backends.
 
-The default ``"decision"`` backend compiles the route set into a decision tree
-that tests the cheapest, most-discriminating feature first (HTTP method, then
-segment count, then selected segment values) so a request classifies in a few
-hash lookups and only one route is fully verified. The ``"trie"`` backend keeps
-the earlier left-to-right segment trie.
+The ``"decision"`` backend compiles the route set into a decision tree that
+tests the cheapest, most-discriminating feature first (HTTP method, then segment
+count, then selected segment values) so a request classifies in a few hash
+lookups and only one route is fully verified. The ``"trie"`` backend keeps the
+earlier left-to-right segment trie.
 
-The ``"bitset"`` backend gives every route in a (method, segment-count) group a
+The default ``"bitset"`` backend gives every route in a (method, segment-count) group a
 bit and intersects one mask per segment position, so a parameter route no longer
 folds into every literal branch the way the decision tree needs it to. That
 folding is what makes the tree grow super-linearly with the parameter fraction;
@@ -55,13 +55,19 @@ _CLASSIFYING = frozenset({"decision", "bitset"})
 class Router:
     __slots__ = ("_mode", "_table")
 
-    def __init__(self, mode: RoutingMode = "decision") -> None:
+    def __init__(self, mode: RoutingMode = "bitset") -> None:
         try:
             table_type = _TABLES[mode]
         except KeyError:
             raise ValueError(f"unknown routing mode: {mode!r}") from None
         self._mode = mode
         self._table = table_type()
+
+    def compile(self) -> None:
+        """Eagerly compile a backend that exposes a startup compiler."""
+        compiler = getattr(self._table, "compile", None)
+        if compiler is not None:
+            compiler()
 
     def add(
         self,

@@ -8,20 +8,24 @@ from typing import Any, Literal, cast
 
 from ._auth.backends import AuthenticationBackend, AuthorizationProvider
 from ._auth.models import Identity
-from ._flight_schema import PhaseCoverage as _PhaseCoverage
-from ._flight_schema import PhaseKind as _PhaseKind
 from ._auth.requirements import (
     AuthRequirement,
     SetRequirement,
     merge_requirements,
     requirement_for,
 )
+from ._flight_markers import capture_marker as _capture_marker
+from ._flight_markers import phase_marker as _phase_marker
+from ._flight_schema import CaptureDisposition as _CaptureDisposition
+from ._flight_schema import CaptureFieldClass as _CaptureFieldClass
+from ._flight_schema import PhaseCoverage as _PhaseCoverage
+from ._flight_schema import PhaseKind as _PhaseKind
 from ._json import dumps as _json_dumps
 from ._native import _core
 from ._pure.authz import build_capability_mask as _pure_build_capability_mask
 from ._routing import _CLASSIFYING, Handler, RoutingMode
 from ._routing import Router as CompiledRouter
-from .binding import Depends, ValidationError, compile_binder
+from .binding import BindingSpec, Depends, ValidationError, compile_binder, inspect_handler
 from .cache_control import CacheControl
 from .exceptions import Forbidden, HTTPException, Unauthorized
 from .middleware.base import Middleware, MiddlewareRoute, compile_middleware
@@ -57,9 +61,158 @@ _PH_HANDLER = int(_PhaseKind.HANDLER)
 _PH_SERIALIZE = int(_PhaseKind.SERIALIZE)
 _COV_PYTHON = int(_PhaseCoverage.PYTHON)
 
+# Forensic capture field classes, pre-resolved to plain ints. Only a Forensic
+# server sets `_flight_capture_plan`, and only an armed request with an active
+# capture arm ever reaches the capture scan, so this stays off every common path.
+_CAP_REQUEST_HEADER = int(_CaptureFieldClass.REQUEST_HEADER)
+_CAP_RESPONSE_HEADER = int(_CaptureFieldClass.RESPONSE_HEADER)
+_CAP_REQUEST_BODY = int(_CaptureFieldClass.REQUEST_BODY)
+_CAP_RESPONSE_BODY = int(_CaptureFieldClass.RESPONSE_BODY)
+_FC_REQUEST_BODY = _CaptureFieldClass.REQUEST_BODY
+_FC_RESPONSE_BODY = _CaptureFieldClass.RESPONSE_BODY
+_CAP_DISP_RAW = _CaptureDisposition.RAW
+
+
+def _capture_body(
+    capture: Any, field_class: int, rule: tuple[Any, int], data: bytes | bytearray
+) -> None:
+    """Hand a body to the native capture with its policy byte cap. The full body
+    goes in so the native side records the true original length (and marks a RAW
+    field truncated when the cap clips it); HASHED/LENGTH store only a digest or
+    the length, never the bytes."""
+    disposition, limit = rule
+    max_bytes = limit if disposition is _CAP_DISP_RAW else 0
+    capture(field_class, 0, int(disposition), bytes(data), max_bytes)
+
+
+# Per-arm narrowing: each active arm carries its own compiled plan, already
+# bounded by the startup ceiling. The effective decision for a field is the
+# union across the active arms -- the *most-revealing* disposition any of them
+# grants, which stays within the ceiling because every arm does. Descriptor ids
+# still come from the ceiling plan (that is the numbering the recording's name
+# table was written with); only the disposition and the capture set narrow.
+
+
+def _narrow_header(arms: Any, name: str) -> Any:
+    """The most-revealing header disposition any active arm grants, or None."""
+    best = None
+    for arm in arms:
+        rule = arm.compiled.header(name)
+        if rule is not None and (best is None or rule.disposition.value < best.value):
+            best = rule.disposition
+    return best
+
+
+def _narrow_body(arms: Any, field_class: Any) -> tuple[Any, int] | None:
+    """The most-revealing (disposition, max_bytes) for a body field class, or None."""
+    best: tuple[Any, int] | None = None
+    for arm in arms:
+        rule = arm.compiled.body(field_class)
+        if rule is not None and (best is None or rule[0].value < best[0].value):
+            best = rule
+    return best
+
+
+def _narrow_dependency(arms: Any) -> tuple[Any, int] | None:
+    """The most-revealing (disposition, max_bytes) for dependency payloads, or None."""
+    best: tuple[Any, int] | None = None
+    for arm in arms:
+        rule = arm.compiled.dependency()
+        if rule is not None and (best is None or rule[0].value < best[0].value):
+            best = rule
+    return best
+
+
+def _make_dependency_capturer(scope: Any, rule: tuple[Any, int]) -> Any:
+    """Bind a dependency capturer over the request's native context and the
+    narrowed dependency rule. Called only for a Forensic-armed request whose
+    active arms permit dependency payloads; the returned callable takes
+    ``(field_class, data)`` and is propagated via ``capture_marker`` to the
+    PostgreSQL and HTTP-client seams."""
+    disposition, limit = rule
+    disposition_int = int(disposition)
+    max_bytes = limit if disposition is _CAP_DISP_RAW else 0
+    capture = scope._flight_capture
+
+    def _capture_dependency(field_class: int, data: bytes | bytearray) -> None:
+        capture(field_class, 0, disposition_int, bytes(data), max_bytes)
+
+    return _capture_dependency
+
 ExceptionHandler = Callable[[Request, Exception], Awaitable[Any]]
 WebSocketHandler = Callable[[WebSocket], Awaitable[None]]
 LifespanHandler = Callable[["Wreath"], Awaitable[None]]
+
+
+class _ApplicationImage:
+    """Immutable-route analysis shared by runtime and control-plane consumers."""
+
+    __slots__ = ("_analyzed", "_binding_specs", "_owner", "_routes")
+
+    def __init__(self, owner: Wreath) -> None:
+        self._owner = owner
+        self._routes: tuple[RouteDefinition, ...] = ()
+        self._binding_specs: tuple[BindingSpec | None, ...] = ()
+        self._analyzed = False
+
+    def routes(self) -> tuple[RouteDefinition, ...]:
+        current = tuple(self._owner._routes)
+        if current != self._routes:
+            self._routes = current
+            self._binding_specs = ()
+            self._analyzed = False
+        return self._routes
+
+    def binding_specs(self) -> tuple[BindingSpec | None, ...]:
+        routes = self.routes()
+        if not self._analyzed:
+            self._binding_specs = tuple(
+                inspect_handler(definition.endpoint, definition.path)
+                for definition in routes
+            )
+            self._analyzed = True
+        return self._binding_specs
+
+
+class _StaticNode:
+    __slots__ = ("children", "mount")
+
+    def __init__(self) -> None:
+        self.children: dict[str, _StaticNode] = {}
+        self.mount: tuple[int, str, Handler] | None = None
+
+
+class _StaticMatcher:
+    """Prefix trie preserving the previous first-registration precedence."""
+
+    __slots__ = ("_next_order", "_root")
+
+    def __init__(self) -> None:
+        self._root = _StaticNode()
+        self._next_order = 0
+
+    def add(self, prefix: str, handler: Handler) -> None:
+        node = self._root
+        for character in prefix:
+            node = node.children.setdefault(character, _StaticNode())
+        if node.mount is None:
+            node.mount = (self._next_order, prefix, handler)
+        self._next_order += 1
+
+    def match(self, path: str) -> tuple[Handler, dict[str, str]] | None:
+        node = self._root
+        best: tuple[int, str, Handler] | None = None
+        for character in path:
+            node = node.children.get(character)
+            if node is None:
+                break
+            mount = node.mount
+            if mount is not None and (best is None or mount[0] < best[0]):
+                best = mount
+        if best is None:
+            return None
+        _order, prefix, handler = best
+        return handler, {"path": path[len(prefix):]}
 
 
 class Wreath:
@@ -67,6 +220,7 @@ class Wreath:
 
     __slots__ = (
         "_all_capability_mask",
+        "_application_image",
         "_auth_backend",
         "_authorizer",
         "_capabilities",
@@ -76,6 +230,8 @@ class Wreath:
         "_exception_handlers",
         "_flight_route_ids",
         "_flight_route_keys",
+        "_flight_capture_plan",
+        "_flight_arm_registry",
         "_limits",
         "_fallback_exception_handler",
         "_global_hooks",
@@ -94,7 +250,7 @@ class Wreath:
         "_shutdown_handlers",
         "_startup_handlers",
         "_stage_hooks",
-        "_static_mounts",
+        "_static_matcher",
         "_status_handlers",
         "_webhook_hubs",
         "_ws_router",
@@ -108,7 +264,7 @@ class Wreath:
         self,
         *,
         debug: bool = False,
-        routing: RoutingMode = "decision",
+        routing: RoutingMode = "bitset",
         limits: RequestLimits = DEFAULT_LIMITS,
     ) -> None:
         self._routing = routing
@@ -134,10 +290,11 @@ class Wreath:
         #: router so telemetry can enumerate WS routes for the metadata image and
         #: join matched handlers to their route IDs.
         self._ws_routes: list[tuple[str, WebSocketHandler]] = []
-        self._static_mounts: tuple[tuple[str, Handler], ...] = ()
+        self._static_matcher = _StaticMatcher()
         self._startup_handlers: list[LifespanHandler] = []
         self._shutdown_handlers: list[LifespanHandler] = []
         self._routes: list[RouteDefinition] = []
+        self._application_image = _ApplicationImage(self)
         self._middleware: list[tuple[int, int, Middleware]] = []
         self._global_middleware: list[tuple[int, int, Middleware]] = []
         self._global_hooks: tuple[tuple[Any, Any], ...] = ()
@@ -148,6 +305,11 @@ class Wreath:
         # then, and reset on every route recompile so it never goes stale.
         self._flight_route_ids: dict[Any, tuple[int, int]] | None = None
         self._flight_route_keys: dict[Any, tuple[str, str]] = {}
+        # Forensic capture: the compiled redaction plan (the startup ceiling) and
+        # the runtime arm registry, both set by the server under a Forensic
+        # recorder. None keeps the capture seam a single not-taken branch.
+        self._flight_capture_plan: Any = None
+        self._flight_arm_registry: Any = None
         self._stage_hooks: dict[str, tuple[Any, ...]] = {}
         self._middleware_order = 0
         self._exception_handlers: dict[type[Exception], ExceptionHandler] = {}
@@ -409,7 +571,7 @@ class Wreath:
         handler = StaticFiles(
             directory, html_index=html_index, cache_control=cache_control
         )
-        self._static_mounts = (*self._static_mounts, (normalized, cast("Handler", handler)))
+        self._static_matcher.add(normalized, cast("Handler", handler))
 
     def websocket(self, path: str) -> Callable[[WebSocketHandler], WebSocketHandler]:
         """Register a WebSocket handler; it receives one WebSocket per connection."""
@@ -620,12 +782,11 @@ class Wreath:
                         active_global,
                     )
                     return
-            for mount_prefix, static_handler in self._static_mounts:
-                if path.startswith(mount_prefix):
-                    matched = (static_handler, {"path": path[len(mount_prefix):]})
-                    if global_hooks:
-                        request._set_route_outcome("static")
-                    break
+            static_match = self._static_matcher.match(path)
+            if static_match is not None:
+                matched = static_match
+                if global_hooks:
+                    request._set_route_outcome("static")
             else:
                 response = ProblemResponse(status=404, detail="Not Found")
                 await self._finish_http(
@@ -655,8 +816,14 @@ class Wreath:
                     scope._flight_stamp(attribution[0], attribution[1])
                 if flight == 2:
                     # Armed for Detailed capture: bind the phase marker once so
-                    # the handler/serialize timing below is a plain local call.
+                    # the handler/serialize timing below is a plain local call,
+                    # and propagate it so dependency seams (PostgreSQL, HTTP
+                    # client) can record their phases from inside the handler.
+                    # Set-without-reset is safe: the request task's context dies
+                    # with it, and the protocol severs the context at completion
+                    # so an escaped binding no-ops instead of writing stale.
                     flight_phase = scope._flight_phase
+                    _phase_marker.set(flight_phase)
         elif "_wreath_flight" in scope:
             ids = self._flight_route_ids or self._build_flight_route_ids()
             attribution = ids.get(handler)
@@ -666,6 +833,22 @@ class Wreath:
             request = Request(scope, receive, path_params, self._limits)
         else:
             request.path_params = path_params or {}
+        # Forensic capture (native armed path only): flight_phase is non-None
+        # exactly when flight == 2, and the plan is set only under a Forensic
+        # recorder, so this is one predicted branch for every other request.
+        # Request-header capture (and the per-arm match count) happens here and
+        # returns the active-arm snapshot; the response headers and request/
+        # response bodies are captured at completion under that same snapshot,
+        # and any DB/outbound seam consults the bound dependency capturer.
+        flight_arms = (
+            self._capture_request(scope, request)
+            if flight_phase is not None and self._flight_capture_plan is not None
+            else None
+        )
+        if flight_arms is not None:
+            dep_rule = _narrow_dependency(flight_arms)
+            if dep_rule is not None:
+                _capture_marker.set(_make_dependency_capturer(scope, dep_rule))
         if global_hooks and request._get_route_outcome() in (None, "ingress"):
             request._set_route_outcome("route")
         requirement = self._handler_requirements.get(handler)
@@ -724,6 +907,12 @@ class Wreath:
         except Exception as error:
             response = await self._handle_exception(request, error)
 
+        # Forensic response-side capture: the response now exists (handler result,
+        # coerced response, or error response). Only fires when request-header
+        # capture found active arms, so it rides the same match already counted.
+        if flight_arms is not None:
+            self._capture_completion(scope, request, response, flight_arms)
+
         await self._finish_http(
             request, response, send, method, scope, native_response, active_global
         )
@@ -749,8 +938,12 @@ class Wreath:
         extensions = None if native_response else scope.get("extensions")
         if method == "HEAD":
             await response(_head_send(send))
+        elif type(response).__call__ is _RESPONSE_CALL and native_response:
+            plain = cast(Response, response)
+            protocol = cast(Any, send).__self__
+            await protocol._wreath_response(plain.status, plain.headers, plain.body)
         elif type(response).__call__ is _RESPONSE_CALL and (
-            native_response or (extensions is not None and "wreath.response" in extensions)
+            extensions is not None and "wreath.response" in extensions
         ):
             plain = cast(Response, response)
             await send(
@@ -825,6 +1018,7 @@ class Wreath:
         return ProblemResponse(status=500, detail="Internal Server Error")
 
     def _compile_routes(self) -> None:
+        binding_specs = self._application_image.binding_specs()
         router = CompiledRouter(self._routing)
         app_middleware = tuple(
             item[2] for item in sorted(self._middleware, key=lambda item: (item[0], item[1]))
@@ -855,7 +1049,9 @@ class Wreath:
         # Compiled handler -> (method, path) so a later telemetry join can map
         # each route to its metadata-image IDs without re-walking the router.
         flight_route_keys: dict[Any, tuple[str, str]] = {}
-        for definition, requirement in zip(self._routes, requirements, strict=True):
+        for definition, requirement, binding_spec in zip(
+            self._routes, requirements, binding_specs, strict=True
+        ):
             # Typed-signature binding compiles once here; request-only
             # handlers come back unchanged.
             endpoint = compile_binder(
@@ -864,6 +1060,7 @@ class Wreath:
                 databases=self._databases,
                 orm_registries=self._orm_registries,
                 dependencies=definition.dependencies,
+                binding_spec=binding_spec,
             )
             chain = app_middleware + definition.middleware
             if chain:
@@ -894,6 +1091,9 @@ class Wreath:
         # WEBSOCKET route in the metadata image. They carry no HTTP plan.
         for ws_path, ws_handler in self._ws_routes:
             flight_route_keys[ws_handler] = ("WEBSOCKET", ws_path)
+        router.compile()
+        if self._ws_router is not None:
+            self._ws_router.compile()
         self._handler_requirements = handler_requirements
         self._flight_route_keys = flight_route_keys
         self._flight_route_ids = None  # rebuilt lazily against the new routes
@@ -925,8 +1125,102 @@ class Wreath:
             for handler, key in self._flight_route_keys.items()
             if (ids := by_route.get(key)) is not None
         }
+        # Stamp each dependency's metadata-image ID onto the live object so
+        # phase markers can attribute DB_QUERY/HTTP_CLIENT phases without a
+        # per-call name lookup. Runs before any armed request reaches a
+        # handler: dispatch builds this mapping in the attribution block.
+        for named in image.databases:
+            database = self._databases.get(named.name)
+            if database is not None:
+                database._flight_dep_id = named.entry_id
+        for named in image.clients:
+            client = self._http_clients.get(named.name)
+            if client is not None:
+                client._flight_dep_id = named.entry_id
         self._flight_route_ids = mapping
         return mapping
+
+    def _set_flight_recording(self, plan: Any, registry: Any) -> None:
+        """Install (or clear) the forensic capture plan + runtime arm registry.
+
+        The server calls this at startup under a Forensic recorder, and clears it
+        on shutdown. With ``plan`` None the request-path capture seam stays a
+        single not-taken branch (every non-Forensic server, and Forensic before a
+        recording policy is compiled).
+        """
+        self._flight_capture_plan = plan
+        self._flight_arm_registry = registry
+
+    def _capture_headers(
+        self, capture: Any, arms: Any, headers: Any, field_class: int
+    ) -> None:
+        """Capture the headers both the ceiling and an active arm permit.
+
+        The descriptor id comes from the startup ceiling plan (that is the
+        numbering the recording's name table was written with); the disposition
+        narrows to what the active arms actually grant. A header the ceiling drops
+        can never be broadened by an arm, so it is skipped before the arm lookup.
+        """
+        ceiling_header = self._flight_capture_plan.header
+        for name, value in headers:
+            decoded = name.decode("latin-1")
+            ceiling_rule = ceiling_header(decoded)
+            if ceiling_rule is None:
+                continue
+            disposition = _narrow_header(arms, decoded)
+            if disposition is None:
+                continue
+            capture(field_class, ceiling_rule.descriptor_id, int(disposition), value)
+
+    def _capture_request(self, scope: Any, request: Request) -> Any:
+        """Capture policy-approved request headers for an armed Forensic request.
+
+        Reached only when the native context reported ``flight == 2`` (armed) and
+        a capture plan is installed -- i.e. only on the Forensic-sampled subset of
+        requests. Capture is gated on *active* runtime arms, narrows to each arm's
+        compiled plan (within the startup ceiling), and counts one match per
+        active arm. The native ``_flight_capture`` is deny-by-default and redacts
+        each field, so a header no arm permits never leaves recorder memory.
+        Returns the active-arm snapshot (shared with the completion and dependency
+        seams) or ``None`` when nothing is armed.
+        """
+        registry = self._flight_arm_registry
+        arms = registry.active() if registry is not None else ()
+        if not arms:
+            return None
+        self._capture_headers(scope._flight_capture, arms, request.headers, _CAP_REQUEST_HEADER)
+        for arm in arms:
+            registry.note_match(arm.arm_id)
+        return arms
+
+    def _capture_completion(
+        self, scope: Any, request: Request, response: Any, arms: Any
+    ) -> None:
+        """Capture policy-approved response headers and request/response bodies.
+
+        Called only when :meth:`_capture_request` found active arms, so the match
+        is already counted; this adds the response side under the same arm
+        snapshot. Response headers resolve against the same direction-agnostic
+        redaction rules as the request headers. The request body is captured only
+        from what the handler already buffered -- never a fresh read that would
+        consume the stream or change behavior -- and only plain-``bytes``
+        responses are captured (streaming/file bodies fall back to nothing, never
+        raw, per the redaction rules).
+        """
+        capture = scope._flight_capture
+        headers = getattr(response, "headers", None)
+        if headers is not None:
+            self._capture_headers(capture, arms, headers, _CAP_RESPONSE_HEADER)
+        request_body = _narrow_body(arms, _FC_REQUEST_BODY)
+        if request_body is not None:
+            buffered = request._body
+            if isinstance(buffered, (bytes, bytearray)):
+                _capture_body(capture, _CAP_REQUEST_BODY, request_body, buffered)
+        response_body = _narrow_body(arms, _FC_RESPONSE_BODY)
+        if response_body is not None:
+            body = getattr(response, "body", None)
+            if isinstance(body, (bytes, bytearray)):
+                _capture_body(capture, _CAP_RESPONSE_BODY, response_body, body)
 
     def _route_match(self, method: str, path: str, caller_mask: int) -> Any:
         match: Any = self._match

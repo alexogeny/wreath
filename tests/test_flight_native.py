@@ -521,3 +521,58 @@ def test_invalid_slow_threshold_config_is_rejected() -> None:
 
     with pytest.raises(Exception):  # noqa: B017 - TelemetryConfigError
         TelemetryConfig(mode=TMode.DETAILED, detailed_slow_us=-1)
+
+
+def test_phase_pool_pressure_gauges_track_reserve_and_release() -> None:
+    # Slice 3b: occupancy and high-water for the phase-scratch pool, mirrored by
+    # the pure oracle. High water is sticky; occupancy falls as requests finish.
+    rec = _flight.Recorder(
+        _flight.MODE_DETAILED, ring_records=64, active_requests=8,
+        detailed_sample_rate=1.0, phase_slots=4,
+    )
+    pure = PureRecorder(
+        fs.Mode.DETAILED, ring_records=64, active_requests=8,
+        detailed_sample_rate=1.0, phase_slots=4,
+    )
+    for r in (rec, pure):
+        assert (r.phase_capacity, r.phase_in_use, r.phase_high_water) == (4, 0, 0)
+
+    native_reqs = [rec.begin(start_ns=0) for _ in range(3)]
+    pure_reqs = [pure.begin(start_ns=0) for _ in range(3)]
+    for r in (rec, pure):
+        assert (r.phase_in_use, r.phase_high_water) == (3, 3)
+
+    for req in (*native_reqs, *pure_reqs):
+        req.finish(now_ns=1000, status=200)
+    for r in (rec, pure):
+        assert (r.phase_in_use, r.phase_high_water) == (0, 3)
+
+
+def test_phase_pool_gauges_saturate_at_capacity_on_exhaustion() -> None:
+    rec = _flight.Recorder(
+        _flight.MODE_DETAILED, ring_records=64, active_requests=8,
+        detailed_sample_rate=1.0, phase_slots=2,
+    )
+    pure = PureRecorder(
+        fs.Mode.DETAILED, ring_records=64, active_requests=8,
+        detailed_sample_rate=1.0, phase_slots=2,
+    )
+    native_reqs = [rec.begin(start_ns=0) for _ in range(4)]  # two past the pool
+    pure_reqs = [pure.begin(start_ns=0) for _ in range(4)]
+    for r in (rec, pure):
+        assert (r.phase_in_use, r.phase_high_water) == (2, 2)
+        assert r.loss(int(fs.LossReason.PHASE_SCRATCH_FULL)) == 2
+    for req in (*native_reqs, *pure_reqs):
+        req.finish(now_ns=1000, status=200)
+    for r in (rec, pure):
+        assert r.phase_in_use == 0
+
+
+def test_phase_pool_gauges_are_zero_for_pulse() -> None:
+    # Pulse reserves no pool: every gauge stays 0 no matter the traffic.
+    rec = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=8)
+    pure = PureRecorder(fs.Mode.PULSE, ring_records=64, active_requests=8)
+    for r in (rec, pure):
+        req = r.begin(start_ns=0)
+        req.finish(now_ns=1000, status=200)
+        assert (r.phase_capacity, r.phase_in_use, r.phase_high_water) == (0, 0, 0)

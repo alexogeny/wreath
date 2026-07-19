@@ -1,9 +1,10 @@
-/* wreath._native._flight — Native Flight Recorder extension (Stage 1).
+/* wreath._native._flight — Native Flight Recorder extension.
  *
  * Exposes a Recorder object wrapping one native worker (ring, counters,
- * histograms, active table) plus a _Request handle for driving the
- * start/route/end lifecycle from tests and, later, from the server via the
- * versioned C capsule this module exports.
+ * histograms, active table, phase scratch) plus a _Request handle for driving
+ * the start/route/phase/end lifecycle. The server extension drives the same
+ * worker on the request path by resolving the versioned C capsule this module
+ * exports; tests drive it directly through the same handle.
  */
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
@@ -97,6 +98,34 @@ request_phase_count(RequestObject *self, void *Py_UNUSED(closure))
 }
 
 static PyObject *
+request_capture(RequestObject *self, PyObject *args, PyObject *kwds)
+{
+    static char *kwlist[] = {"field_class", "descriptor_id", "disposition", "data",
+                             "max_bytes", NULL};
+    unsigned int field_class, descriptor_id = 0, disposition = 0, max_bytes = 0;
+    Py_buffer view = {0};
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "I|IIy*I:capture", kwlist,
+                                     &field_class, &descriptor_id, &disposition,
+                                     &view, &max_bytes)) {
+        return NULL;
+    }
+    wreath_nfr_context_capture(self->recorder->worker, &self->ctx,
+                               (uint16_t)field_class, (uint16_t)descriptor_id,
+                               (uint8_t)disposition, (const uint8_t *)view.buf,
+                               view.len, max_bytes);
+    if (view.obj != NULL) {
+        PyBuffer_Release(&view);
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+request_get_capture_slot(RequestObject *self, void *Py_UNUSED(closure))
+{
+    return PyLong_FromLong(self->ctx.capture_slot);
+}
+
+static PyObject *
 request_propagate(RequestObject *self, PyObject *arg)
 {
     Py_buffer view;
@@ -134,6 +163,7 @@ request_get_request_id(RequestObject *self, void *Py_UNUSED(closure))
 static PyMethodDef request_methods[] = {
     {"route", (PyCFunction)request_route, METH_VARARGS, NULL},
     {"phase", (PyCFunction)request_phase, METH_VARARGS | METH_KEYWORDS, NULL},
+    {"capture", (PyCFunction)request_capture, METH_VARARGS | METH_KEYWORDS, NULL},
     {"propagate", (PyCFunction)request_propagate, METH_O, NULL},
     {"finish", (PyCFunction)request_finish, METH_VARARGS | METH_KEYWORDS, NULL},
     {"abandon", (PyCFunction)request_abandon, METH_NOARGS, NULL},
@@ -144,6 +174,7 @@ static PyGetSetDef request_getset[] = {
     {"active_slot", (getter)request_get_slot, NULL, NULL, NULL},
     {"request_id", (getter)request_get_request_id, NULL, NULL, NULL},
     {"phase_count", (getter)request_phase_count, NULL, NULL, NULL},
+    {"capture_slot", (getter)request_get_capture_slot, NULL, NULL, NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
@@ -165,22 +196,37 @@ recorder_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     static char *kwlist[] = {"mode", "worker_id", "ring_records", "active_requests",
                              "histogram_count", "completion_summaries",
                              "detailed_sample_rate", "phase_slots",
-                             "detailed_slow_us", NULL};
+                             "detailed_slow_us", "capture_slabs", "slab_bytes",
+                             "capture_hash_key", NULL};
     unsigned int mode, worker_id = 0, ring_records = 16384, active_requests = 2048,
-                       histogram_count = 1, phase_slots = 256;
+                       histogram_count = 1, phase_slots = 256, capture_slabs = 0,
+                       slab_bytes = 65536;
     int completion_summaries = 1;
     double detailed_sample_rate = 0.0;
     unsigned long long detailed_slow_us = 0;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "I|IIIIpdIK:Recorder", kwlist, &mode,
-                                     &worker_id, &ring_records, &active_requests,
+    PyObject *hash_key = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "I|IIIIpdIKIIO:Recorder", kwlist,
+                                     &mode, &worker_id, &ring_records, &active_requests,
                                      &histogram_count, &completion_summaries,
                                      &detailed_sample_rate, &phase_slots,
-                                     &detailed_slow_us)) {
+                                     &detailed_slow_us, &capture_slabs, &slab_bytes,
+                                     &hash_key)) {
         return NULL;
     }
     if (detailed_sample_rate < 0.0 || detailed_sample_rate > 1.0) {
         PyErr_SetString(PyExc_ValueError, "detailed_sample_rate must be in [0, 1]");
         return NULL;
+    }
+    /* An optional (k0, k1) key makes HASHED capture reproducible for tests; the
+     * default draws a process-local key from the CSPRNG inside the worker. */
+    uint64_t hash_key0 = 0, hash_key1 = 0;
+    if (hash_key != NULL && hash_key != Py_None) {
+        if (!PyTuple_Check(hash_key) ||
+            !PyArg_ParseTuple(hash_key, "KK", &hash_key0, &hash_key1)) {
+            PyErr_SetString(PyExc_TypeError,
+                            "capture_hash_key must be a (k0, k1) tuple");
+            return NULL;
+        }
     }
     /* threshold = round(rate * 2^32): a 32-bit draw < threshold arms. rate 1.0
      * yields 2^32 so every draw (< 2^32) arms; rate 0.0 arms none. */
@@ -194,7 +240,8 @@ recorder_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
                                          active_requests, histogram_count,
                                          completion_summaries,
                                          detailed_sample_threshold, phase_slots,
-                                         detailed_slow_us);
+                                         detailed_slow_us, capture_slabs, slab_bytes,
+                                         hash_key0, hash_key1);
     if (self->worker == NULL) {
         Py_DECREF(self);
         return NULL;
@@ -280,6 +327,55 @@ recorder_drain(RecorderObject *self, PyObject *args)
     return buffer;
 }
 
+/* Drain committed forensic capture slabs: a list of bytes, each one slab's
+ * used_bytes (self-identifying header + typed field records). The sink and tests
+ * consume this; each drained slab is returned to the free pool. */
+static PyObject *
+recorder_drain_captures(RecorderObject *self, PyObject *args)
+{
+    Py_ssize_t max_slabs = 256;
+    if (!PyArg_ParseTuple(args, "|n:drain_captures", &max_slabs)) {
+        return NULL;
+    }
+    uint64_t capacity = wreath_nfr_capture_capacity(self->worker);
+    if (capacity == 0 || max_slabs <= 0) {
+        return PyList_New(0);
+    }
+    if ((uint64_t)max_slabs > capacity) {
+        max_slabs = (Py_ssize_t)capacity;  /* at most `capacity` are ever committed */
+    }
+    uint64_t slab_bytes = wreath_nfr_capture_slab_bytes(self->worker);
+    uint8_t *buffer = PyMem_Malloc((size_t)max_slabs * (size_t)slab_bytes);
+    uint32_t *lengths = PyMem_Malloc((size_t)max_slabs * sizeof(uint32_t));
+    if (buffer == NULL || lengths == NULL) {
+        PyMem_Free(buffer);
+        PyMem_Free(lengths);
+        return PyErr_NoMemory();
+    }
+    Py_ssize_t drained =
+        wreath_nfr_capture_drain(self->worker, buffer, lengths, max_slabs);
+    PyObject *result = PyList_New(drained);
+    if (result == NULL) {
+        PyMem_Free(buffer);
+        PyMem_Free(lengths);
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < drained; i++) {
+        PyObject *slab = PyBytes_FromStringAndSize(
+            (const char *)(buffer + (size_t)i * (size_t)slab_bytes), lengths[i]);
+        if (slab == NULL) {
+            Py_DECREF(result);
+            PyMem_Free(buffer);
+            PyMem_Free(lengths);
+            return NULL;
+        }
+        PyList_SET_ITEM(result, i, slab);
+    }
+    PyMem_Free(buffer);
+    PyMem_Free(lengths);
+    return result;
+}
+
 static PyObject *
 recorder_loss(RecorderObject *self, PyObject *arg)
 {
@@ -331,6 +427,14 @@ RECORDER_U64_GETTER(completions, wreath_nfr_counter_completions(self->worker))
 RECORDER_U64_GETTER(active_count, wreath_nfr_active_count(self->worker))
 RECORDER_U64_GETTER(ring_occupancy, wreath_nfr_ring_occupancy(self->worker))
 RECORDER_U64_GETTER(ring_high_water, wreath_nfr_ring_high_water(self->worker))
+RECORDER_U64_GETTER(phase_capacity, wreath_nfr_phase_capacity(self->worker))
+RECORDER_U64_GETTER(phase_in_use, wreath_nfr_phase_in_use(self->worker))
+RECORDER_U64_GETTER(phase_high_water, wreath_nfr_phase_high_water(self->worker))
+RECORDER_U64_GETTER(capture_capacity, wreath_nfr_capture_capacity(self->worker))
+RECORDER_U64_GETTER(capture_slab_bytes, wreath_nfr_capture_slab_bytes(self->worker))
+RECORDER_U64_GETTER(capture_in_use, wreath_nfr_capture_in_use(self->worker))
+RECORDER_U64_GETTER(capture_high_water, wreath_nfr_capture_high_water(self->worker))
+RECORDER_U64_GETTER(capture_committed, wreath_nfr_capture_committed(self->worker))
 
 static PyObject *
 recorder_get_mode(RecorderObject *self, void *Py_UNUSED(closure))
@@ -338,10 +442,49 @@ recorder_get_mode(RecorderObject *self, void *Py_UNUSED(closure))
     return PyLong_FromLong(wreath_nfr_worker_mode(self->worker));
 }
 
+/* Snapshot the active table for the Inspector: a list of
+ * (request_id, start_ns, protocol, route_id) tuples for in-use slots. */
+static PyObject *
+recorder_active_snapshot(RecorderObject *self, PyObject *Py_UNUSED(ignored))
+{
+    uint64_t capacity = wreath_nfr_active_capacity(self->worker);
+    if (capacity == 0) {
+        return PyList_New(0);
+    }
+    wreath_nfr_active_entry *rows =
+        PyMem_Malloc((size_t)capacity * sizeof(wreath_nfr_active_entry));
+    if (rows == NULL) {
+        return PyErr_NoMemory();
+    }
+    uint32_t written =
+        wreath_nfr_active_snapshot(self->worker, rows, (uint32_t)capacity);
+    PyObject *result = PyList_New(written);
+    if (result == NULL) {
+        PyMem_Free(rows);
+        return NULL;
+    }
+    for (uint32_t i = 0; i < written; i++) {
+        PyObject *row = Py_BuildValue(
+            "(KKBI)", (unsigned long long)rows[i].request_id,
+            (unsigned long long)rows[i].start_ns, rows[i].protocol,
+            rows[i].route_id);
+        if (row == NULL) {
+            Py_DECREF(result);
+            PyMem_Free(rows);
+            return NULL;
+        }
+        PyList_SET_ITEM(result, i, row);
+    }
+    PyMem_Free(rows);
+    return result;
+}
+
 static PyMethodDef recorder_methods[] = {
+    {"active_snapshot", (PyCFunction)recorder_active_snapshot, METH_NOARGS, NULL},
     {"begin", (PyCFunction)recorder_begin, METH_VARARGS | METH_KEYWORDS, NULL},
     {"record", (PyCFunction)recorder_record, METH_VARARGS | METH_KEYWORDS, NULL},
     {"drain", (PyCFunction)recorder_drain, METH_VARARGS, NULL},
+    {"drain_captures", (PyCFunction)recorder_drain_captures, METH_VARARGS, NULL},
     {"worker_capsule", (PyCFunction)recorder_worker_capsule, METH_NOARGS, NULL},
     {"loss", (PyCFunction)recorder_loss, METH_O, NULL},
     {"histogram", (PyCFunction)recorder_histogram, METH_NOARGS, NULL},
@@ -355,6 +498,14 @@ static PyGetSetDef recorder_getset[] = {
     {"active_count", (getter)recorder_get_active_count, NULL, NULL, NULL},
     {"ring_occupancy", (getter)recorder_get_ring_occupancy, NULL, NULL, NULL},
     {"ring_high_water", (getter)recorder_get_ring_high_water, NULL, NULL, NULL},
+    {"phase_capacity", (getter)recorder_get_phase_capacity, NULL, NULL, NULL},
+    {"phase_in_use", (getter)recorder_get_phase_in_use, NULL, NULL, NULL},
+    {"phase_high_water", (getter)recorder_get_phase_high_water, NULL, NULL, NULL},
+    {"capture_capacity", (getter)recorder_get_capture_capacity, NULL, NULL, NULL},
+    {"capture_slab_bytes", (getter)recorder_get_capture_slab_bytes, NULL, NULL, NULL},
+    {"capture_in_use", (getter)recorder_get_capture_in_use, NULL, NULL, NULL},
+    {"capture_high_water", (getter)recorder_get_capture_high_water, NULL, NULL, NULL},
+    {"capture_committed", (getter)recorder_get_capture_committed, NULL, NULL, NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
@@ -380,6 +531,7 @@ static WreathFlightCAPI capi = {
     .context_abandon = wreath_nfr_context_abandon,
     .worker_mode = wreath_nfr_worker_mode,
     .context_phase = wreath_nfr_context_phase,
+    .context_capture = wreath_nfr_context_capture,
 };
 
 /* --- module --------------------------------------------------------------- */
@@ -448,7 +600,13 @@ PyInit__flight(void)
         add_int(module, "CELL_SIZE", WREATH_NFR_CELL_SIZE) < 0 ||
         add_int(module, "HISTOGRAM_BUCKETS", WREATH_NFR_HISTOGRAM_BUCKETS) < 0 ||
         add_int(module, "LOSS_RING_FULL", WREATH_NFR_LOSS_RING_FULL) < 0 ||
-        add_int(module, "LOSS_ACTIVE_TABLE_FULL", WREATH_NFR_LOSS_ACTIVE_TABLE_FULL) < 0) {
+        add_int(module, "LOSS_ACTIVE_TABLE_FULL", WREATH_NFR_LOSS_ACTIVE_TABLE_FULL) < 0 ||
+        add_int(module, "LOSS_CAPTURE_POOL_FULL", WREATH_NFR_LOSS_CAPTURE_POOL_FULL) < 0 ||
+        add_int(module, "LOSS_BODY_TRUNCATED", WREATH_NFR_LOSS_BODY_TRUNCATED) < 0 ||
+        add_int(module, "CAP_RAW", WREATH_NFR_CAP_RAW) < 0 ||
+        add_int(module, "CAP_HASHED", WREATH_NFR_CAP_HASHED) < 0 ||
+        add_int(module, "CAP_MASKED", WREATH_NFR_CAP_MASKED) < 0 ||
+        add_int(module, "CAP_LENGTH", WREATH_NFR_CAP_LENGTH) < 0) {
         goto error;
     }
 

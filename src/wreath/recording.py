@@ -11,8 +11,12 @@ be enabled through this API at all, and every budget is bounded.
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+
+from ._flight_schema import CaptureDisposition, CaptureFieldClass
 
 __all__ = [
     "BodyCapture",
@@ -23,6 +27,11 @@ __all__ = [
     "Trigger",
     "RecordingPolicy",
     "RecordingPolicyError",
+    "HeaderRule",
+    "CompiledRedaction",
+    "compile_redaction",
+    "ActiveArm",
+    "ArmRegistry",
 ]
 
 #: Header/field classes that are never captured, regardless of policy. This set
@@ -57,26 +66,47 @@ class BodyCapture(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class RedactionPolicy:
-    """Header/body redaction rules. Deny-by-default: an empty allowlist keeps
-    everything sensitive out."""
+    """Header/body redaction rules. Deny-by-default: an unlisted header keeps
+    everything sensitive out. A header appears in at most one disposition set --
+    allow (verbatim, bounded), hash (keyed fingerprint), or mask (length only) --
+    and never in the forbidden classes above."""
 
-    #: Lower-cased header names explicitly allowed through (never the forbidden
-    #: classes above).
+    #: Lower-cased header names captured verbatim (bounded by the slab).
     header_allowlist: frozenset[str] = frozenset()
+    #: Lower-cased header names retained as a process-local keyed hash.
+    header_hash: frozenset[str] = frozenset()
+    #: Lower-cased header names retained as length only (constant mask).
+    header_mask: frozenset[str] = frozenset()
     body: BodyCapture = BodyCapture.METADATA
     max_body_bytes: int = 0
     max_fields: int = 0
     max_depth: int = 0
 
     def __post_init__(self) -> None:
-        lowered = frozenset(h.lower() for h in self.header_allowlist)
-        forbidden = lowered & NEVER_CAPTURE_HEADERS
+        allow = frozenset(h.lower() for h in self.header_allowlist)
+        hashed = frozenset(h.lower() for h in self.header_hash)
+        masked = frozenset(h.lower() for h in self.header_mask)
+        forbidden = (allow | hashed | masked) & NEVER_CAPTURE_HEADERS
         if forbidden:
             raise RecordingPolicyError(
                 f"headers {sorted(forbidden)} are never capturable and cannot be "
-                "added to an allowlist"
+                "added to any redaction set"
             )
-        object.__setattr__(self, "header_allowlist", lowered)
+        # A header must have a single, unambiguous disposition.
+        for a, b, label in (
+            (allow, hashed, "allowlist/hash"),
+            (allow, masked, "allowlist/mask"),
+            (hashed, masked, "hash/mask"),
+        ):
+            overlap = a & b
+            if overlap:
+                raise RecordingPolicyError(
+                    f"headers {sorted(overlap)} appear in both the {label} sets; a "
+                    "header needs one disposition"
+                )
+        object.__setattr__(self, "header_allowlist", allow)
+        object.__setattr__(self, "header_hash", hashed)
+        object.__setattr__(self, "header_mask", masked)
         if not isinstance(self.body, BodyCapture):
             object.__setattr__(self, "body", BodyCapture(self.body))
         _require(self.max_body_bytes >= 0, "max_body_bytes must be >= 0")
@@ -92,6 +122,26 @@ class RedactionPolicy:
     @classmethod
     def deny_by_default(cls) -> RedactionPolicy:
         return cls()
+
+    def narrow(self, other: RedactionPolicy) -> RedactionPolicy:
+        """Combine two layers, keeping only what *both* permit. A lower config
+        layer may narrow an inherited policy but never broaden it -- the compiled
+        result is the intersection of the header sets, the least-revealing body,
+        and the smaller byte bound (see the Stage-2 layered configuration model).
+        """
+        return RedactionPolicy(
+            header_allowlist=self.header_allowlist & other.header_allowlist,
+            header_hash=self.header_hash & other.header_hash,
+            header_mask=self.header_mask & other.header_mask,
+            body=(
+                self.body
+                if _BODY_ORDER[self.body.value] <= _BODY_ORDER[other.body.value]
+                else other.body
+            ),
+            max_body_bytes=min(self.max_body_bytes, other.max_body_bytes),
+            max_fields=min(self.max_fields, other.max_fields),
+            max_depth=min(self.max_depth, other.max_depth),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,14 +229,22 @@ class RecordingPolicy:
         )
 
     def permits(self, capture: CapturePolicy) -> bool:
-        """Whether a runtime capture stays inside this startup ceiling."""
+        """Whether a runtime capture stays inside this startup ceiling. A runtime
+        arm may only capture headers/bodies the compiled ceiling already allows,
+        with no more revealing a disposition and no larger a byte budget."""
+        ceiling = self.redaction
+        arm = capture.redaction
         within_bytes = capture.budget.total_bytes <= self.max_capture_bytes
-        within_headers = capture.redaction.header_allowlist <= (
-            self.redaction.header_allowlist
+        within_headers = (
+            arm.header_allowlist <= ceiling.header_allowlist
+            # A hashed/masked arm is allowed against any header the ceiling would
+            # reveal *more* of (allow >= hash >= mask), never one it drops.
+            and arm.header_hash <= (ceiling.header_allowlist | ceiling.header_hash)
+            and arm.header_mask
+            <= (ceiling.header_allowlist | ceiling.header_hash | ceiling.header_mask)
         )
-        within_body = capture.redaction.body.value in _BODY_ORDER and (
-            _BODY_ORDER[capture.redaction.body.value]
-            <= _BODY_ORDER[self.redaction.body.value]
+        within_body = arm.body.value in _BODY_ORDER and (
+            _BODY_ORDER[arm.body.value] <= _BODY_ORDER[ceiling.body.value]
         )
         return within_bytes and within_headers and within_body
 
@@ -198,6 +256,233 @@ _BODY_ORDER = {
     BodyCapture.HASHED.value: 2,
     BodyCapture.STRUCTURED.value: 3,
 }
+
+
+# --- compiled capture plan --------------------------------------------------
+#
+# A RedactionPolicy is the human-facing rule set; the request-path capture seam
+# needs a fast, immutable lookup from a field's identity to a native capture
+# decision (deny, or a (disposition, descriptor_id) pair). Compilation happens
+# once at startup -- never on the request path -- and interns header names to
+# deterministic small integer descriptor ids (sorted, 1-based; 0 = none) so a
+# captured field carries only an id and the reader resolves the name.
+
+
+@dataclass(frozen=True, slots=True)
+class HeaderRule:
+    """The compiled capture decision for one header name."""
+
+    descriptor_id: int
+    disposition: CaptureDisposition
+
+
+#: Native capture disposition per BodyCapture mode. METADATA keeps only the
+#: length; HASHED keeps a keyed digest; STRUCTURED retains bounded raw content
+#: (per-field structural selection is a later refinement); NONE drops the body.
+_BODY_DISPOSITION: Mapping[str, CaptureDisposition | None] = {
+    BodyCapture.NONE.value: None,
+    BodyCapture.METADATA.value: CaptureDisposition.LENGTH,
+    BodyCapture.HASHED.value: CaptureDisposition.HASHED,
+    BodyCapture.STRUCTURED.value: CaptureDisposition.RAW,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledRedaction:
+    """An immutable, deny-by-default capture plan compiled from a RedactionPolicy.
+
+    The request-path seam looks a header name up here to get its native capture
+    decision (or ``None`` to drop it), and reads a direction's body disposition
+    and byte bound. This is the startup ceiling: a runtime arm resolves against
+    the same plan and can only narrow it.
+    """
+
+    header_rules: Mapping[str, HeaderRule]
+    #: descriptor_id (1-based) -> lower-cased header name, for the reader.
+    header_names: tuple[str, ...]
+    request_body: CaptureDisposition | None
+    response_body: CaptureDisposition | None
+    max_body_bytes: int
+
+    def header(self, name: str) -> HeaderRule | None:
+        """The capture decision for a header, or ``None`` to drop it (default)."""
+        return self.header_rules.get(name.lower())
+
+    def body(self, field_class: CaptureFieldClass) -> tuple[CaptureDisposition, int] | None:
+        """The (disposition, max_bytes) for a body field class, or ``None``."""
+        if field_class is CaptureFieldClass.REQUEST_BODY:
+            disposition = self.request_body
+        elif field_class is CaptureFieldClass.RESPONSE_BODY:
+            disposition = self.response_body
+        else:
+            return None
+        if disposition is None:
+            return None
+        # LENGTH/HASHED ignore the byte bound (they retain no raw prefix).
+        limit = self.max_body_bytes if disposition is CaptureDisposition.RAW else 0
+        return disposition, limit
+
+
+def compile_redaction(policy: RedactionPolicy) -> CompiledRedaction:
+    """Compile a RedactionPolicy into an immutable capture plan.
+
+    Header names are interned to deterministic descriptor ids (sorted, 1-based)
+    so the same policy always produces the same ids regardless of set iteration
+    order. Runs once at startup; never on the request path.
+    """
+    # Sorted union across dispositions gives stable, order-independent ids.
+    ordered = sorted(
+        policy.header_allowlist | policy.header_hash | policy.header_mask
+    )
+    if len(ordered) >= _MAX_FIELDS:
+        raise RecordingPolicyError(
+            f"{len(ordered)} capturable headers exceed the {_MAX_FIELDS} descriptor cap"
+        )
+    rules: dict[str, HeaderRule] = {}
+    names: list[str] = []
+    for name in ordered:
+        if name in policy.header_allowlist:
+            disposition = CaptureDisposition.RAW
+        elif name in policy.header_hash:
+            disposition = CaptureDisposition.HASHED
+        else:
+            disposition = CaptureDisposition.MASKED
+        names.append(name)
+        rules[name] = HeaderRule(descriptor_id=len(names), disposition=disposition)
+    body = _BODY_DISPOSITION[policy.body.value]
+    return CompiledRedaction(
+        header_rules=rules,
+        header_names=tuple(names),
+        request_body=body,
+        response_body=body,
+        max_body_bytes=policy.max_body_bytes,
+    )
+
+
+# --- runtime arm registry ---------------------------------------------------
+#
+# A runtime capture arm is bounded and cannot broaden the startup ceiling. The
+# Inspector installs arms into this registry (behind a capability token); the
+# request-path capture seam consults the active arms and reports a match, which
+# counts against the arm's budget and expiry. Both live on the event loop
+# thread, so the registry is deliberately lock-free -- an arm swap happens at an
+# event-loop-safe point, per the Stage-2 configuration model.
+
+
+@dataclass(slots=True)
+class _ArmState:
+    arm_id: int
+    capture: CapturePolicy
+    compiled: CompiledRedaction
+    expiry_monotonic: float
+    max_matches: int  # 0 = unbounded (still bounded by expiry + the ceiling)
+    matches: int = 0
+
+    def is_live(self, now: float) -> bool:
+        if now >= self.expiry_monotonic:
+            return False
+        return self.max_matches == 0 or self.matches < self.max_matches
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveArm:
+    """A read-only view of one installed arm, for the seam and CAPTURE_STATUS."""
+
+    arm_id: int
+    compiled: CompiledRedaction
+    remaining_matches: int  # -1 = unbounded
+    expires_in: float
+
+
+class ArmRegistry:
+    """Bounded set of live runtime capture arms, each inside the startup ceiling.
+
+    ``arm`` refuses anything the compiled :class:`RecordingPolicy` ceiling does
+    not permit, requires a positive expiry (no "retain forever" runtime arm), and
+    caps the number of concurrent arms. Expired or match-exhausted arms are
+    pruned lazily on every read. Owned by the event-loop thread.
+    """
+
+    __slots__ = ("_ceiling", "_max_arms", "_arms", "_next_id", "_clock")
+
+    def __init__(
+        self,
+        ceiling: RecordingPolicy,
+        *,
+        max_arms: int = 16,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._ceiling = ceiling
+        self._max_arms = max_arms
+        self._arms: dict[int, _ArmState] = {}
+        self._next_id = 1
+        self._clock = clock
+
+    @property
+    def ceiling(self) -> RecordingPolicy:
+        return self._ceiling
+
+    def arm(self, capture: CapturePolicy) -> ActiveArm:
+        """Install a runtime arm, or raise if it would exceed the ceiling/limits."""
+        if capture.expiry_seconds <= 0:
+            raise RecordingPolicyError("a runtime capture arm must have expiry_seconds > 0")
+        if not self._ceiling.permits(capture):
+            raise RecordingPolicyError(
+                "capture arm exceeds the startup redaction/memory ceiling"
+            )
+        now = self._clock()
+        self._prune(now)
+        if len(self._arms) >= self._max_arms:
+            raise RecordingPolicyError(
+                f"too many concurrent capture arms (max {self._max_arms})"
+            )
+        arm_id = self._next_id
+        self._next_id += 1
+        state = _ArmState(
+            arm_id=arm_id,
+            capture=capture,
+            compiled=compile_redaction(capture.redaction),
+            expiry_monotonic=now + capture.expiry_seconds,
+            max_matches=capture.max_matches,
+        )
+        self._arms[arm_id] = state
+        return self._view(state, now)
+
+    def disarm(self, arm_id: int) -> bool:
+        """Remove an arm. Returns whether it existed."""
+        return self._arms.pop(arm_id, None) is not None
+
+    def active(self, now: float | None = None) -> list[ActiveArm]:
+        """The live arms, pruning any that expired or exhausted their matches."""
+        now = self._clock() if now is None else now
+        self._prune(now)
+        return [self._view(state, now) for state in self._arms.values()]
+
+    def note_match(self, arm_id: int) -> bool:
+        """Record that an arm matched a request (the seam calls this). Returns
+        whether the arm is still live afterward; a match-exhausted arm is removed."""
+        state = self._arms.get(arm_id)
+        if state is None:
+            return False
+        state.matches += 1
+        if not state.is_live(self._clock()):
+            del self._arms[arm_id]
+            return False
+        return True
+
+    def _prune(self, now: float) -> None:
+        dead = [aid for aid, state in self._arms.items() if not state.is_live(now)]
+        for aid in dead:
+            del self._arms[aid]
+
+    def _view(self, state: _ArmState, now: float) -> ActiveArm:
+        remaining = -1 if state.max_matches == 0 else state.max_matches - state.matches
+        return ActiveArm(
+            arm_id=state.arm_id,
+            compiled=state.compiled,
+            remaining_matches=remaining,
+            expires_in=max(0.0, state.expiry_monotonic - now),
+        )
 
 
 def _require(condition: bool, message: str) -> None:

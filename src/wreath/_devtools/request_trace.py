@@ -150,7 +150,18 @@ class _Tracer:
                 self._phase = "middleware"
         elif code.co_name == "_finish_http":
             self._phase = "egress"
-        if _is_wreath_frame(code) or code in self._handler_codes:
+        # A Python-to-Python call is not a native boundary crossing. Record only
+        # entries whose caller is outside the traced application (typically a
+        # task, protocol, or other C-owned callback). Phase landmarks above must
+        # still observe every frame so attribution remains exact.
+        caller = frame.f_back
+        caller_is_traced_python = caller is not None and (
+            _is_wreath_frame(caller.f_code) or caller.f_code in self._handler_codes
+        )
+        if (
+            (_is_wreath_frame(code) or code in self._handler_codes)
+            and not caller_is_traced_python
+        ):
             self._record("PY", f"{_short_path(code)}:{code.co_name}")
 
 
@@ -289,7 +300,7 @@ def _render_text(trace: Trace, status: int, verbose: bool) -> None:
     print(f"{'total':12s} {total_c:8d} {total_py:14d}")
 
     print(
-        f"\nBefore the route handler is activated: {pre_py} Python frame(s) "
+        f"\nBefore the route handler is activated: {pre_py} Python entry boundary/boundaries "
         f"and {pre_c} call(s) into C."
     )
     if pre_py:

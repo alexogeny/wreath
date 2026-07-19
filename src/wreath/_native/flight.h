@@ -23,9 +23,12 @@
 
 /* Capsule name for the versioned C API other extensions resolve once. */
 #define WREATH_FLIGHT_CAPI_NAME "wreath._native._flight._C_API"
-/* v2 appended context_phase for Stage 3 Detailed phase capture. Consumers check
- * exact equality and rebuild from this header, so the bump stays in lockstep. */
-#define WREATH_FLIGHT_CAPI_VERSION 2
+/* v2 appended context_phase for Stage 3 Detailed phase capture; v3 appended
+ * context_capture for Stage 5 forensic capture; v4 gave context_capture a
+ * policy max_bytes cap so a bounded RAW field records its true original length.
+ * Consumers check exact equality and rebuild from this header, so the bump stays
+ * in lockstep. */
+#define WREATH_FLIGHT_CAPI_VERSION 4
 
 /* Capsule name wrapping a single recorder's wreath_nfr_worker* (no ownership). */
 #define WREATH_FLIGHT_WORKER_CAPSULE "wreath._native._flight.worker"
@@ -45,6 +48,8 @@ typedef struct {
     uint32_t plan_id;
     int32_t active_slot;    /* index into the active table, or -1 */
     int32_t phase_slot;     /* index into the phase-scratch pool, or -1 (armed only) */
+    int32_t capture_slot;   /* index into the capture-slab pool, or -1 (Forensic armed) */
+    uint32_t capture_used;  /* bytes written into the reserved slab (header + fields) */
     uint16_t flags;         /* WREATH_NFR_FLAG_* */
     uint8_t mode;           /* WREATH_NFR_MODE_* captured at start */
     uint8_t protocol;       /* WREATH_NFR_PROTO_* */
@@ -74,7 +79,11 @@ wreath_nfr_worker *wreath_nfr_worker_new(uint8_t mode, uint32_t worker_id,
                                          int completion_summaries,
                                          uint64_t detailed_sample_threshold,
                                          uint32_t phase_slots,
-                                         uint64_t slow_threshold_us);
+                                         uint64_t slow_threshold_us,
+                                         uint32_t capture_slabs,
+                                         uint32_t slab_bytes,
+                                         uint64_t hash_key0,
+                                         uint64_t hash_key1);
 void wreath_nfr_worker_free(wreath_nfr_worker *worker);
 uint8_t wreath_nfr_worker_mode(const wreath_nfr_worker *worker);
 
@@ -99,6 +108,34 @@ void wreath_nfr_context_phase(wreath_nfr_worker *worker, wreath_nfr_context *ctx
                               uint16_t phase_id, uint16_t dependency_id,
                               uint8_t coverage, uint32_t start_offset_us,
                               uint32_t duration_us);
+
+/* Capture one policy-approved field into the request's forensic slab. A no-op
+ * unless the request is Forensic-armed. The slab is reserved lazily on the first
+ * captured field (a request that captures nothing costs no slab). The
+ * disposition (WREATH_NFR_CAP_*) is enforced here as the bytes are written:
+ * RAW copies up to the slab's remaining room (truncating with BODY_TRUNCATED);
+ * HASHED writes an 8-byte keyed hash and never the bytes; MASKED/LENGTH retain
+ * only the original length. `max_bytes` is a policy byte cap for RAW (0 = none):
+ * a RAW field longer than it keeps a `max_bytes` prefix and records the true
+ * original length as truncated, distinct from the slab-overflow bound.
+ * Exhaustion counts CAPTURE_POOL_FULL. Single writer. */
+void wreath_nfr_context_capture(wreath_nfr_worker *worker, wreath_nfr_context *ctx,
+                                uint16_t field_class, uint16_t descriptor_id,
+                                uint8_t disposition, const uint8_t *data,
+                                Py_ssize_t len, uint32_t max_bytes);
+
+/* Pop up to max_slabs committed capture slabs into `out` (a caller buffer of
+ * max_slabs * slab_bytes), returning each slab's used_bytes in `lengths` and the
+ * count of slabs copied. Each copied slab is returned to the free pool. Single
+ * reader (the recording sink / tests). */
+Py_ssize_t wreath_nfr_capture_drain(wreath_nfr_worker *worker, uint8_t *out,
+                                    uint32_t *lengths, Py_ssize_t max_slabs);
+
+uint64_t wreath_nfr_capture_capacity(const wreath_nfr_worker *worker);
+uint64_t wreath_nfr_capture_slab_bytes(const wreath_nfr_worker *worker);
+uint64_t wreath_nfr_capture_in_use(const wreath_nfr_worker *worker);
+uint64_t wreath_nfr_capture_high_water(const wreath_nfr_worker *worker);
+uint64_t wreath_nfr_capture_committed(const wreath_nfr_worker *worker);
 
 /* Apply a W3C `traceparent`. Strictly parses it; a malformed value is dropped
  * (counted as PROPAGATION_INVALID) and never reflected. On success the context
@@ -138,6 +175,25 @@ uint64_t wreath_nfr_loss(const wreath_nfr_worker *worker, int reason);
 uint64_t wreath_nfr_ring_occupancy(const wreath_nfr_worker *worker);
 uint64_t wreath_nfr_ring_high_water(const wreath_nfr_worker *worker);
 uint64_t wreath_nfr_active_count(const wreath_nfr_worker *worker);
+uint64_t wreath_nfr_phase_capacity(const wreath_nfr_worker *worker);
+uint64_t wreath_nfr_phase_in_use(const wreath_nfr_worker *worker);
+uint64_t wreath_nfr_phase_high_water(const wreath_nfr_worker *worker);
+
+/* One row of an active-table snapshot (Stage 3 Inspector). route_id is 0 until
+ * asynchronous projection stamps live attribution (stage 4); completion cells
+ * carry the authoritative route/plan ids. */
+typedef struct {
+    uint64_t request_id;
+    uint64_t start_ns;
+    uint32_t route_id;
+    uint8_t protocol;
+} wreath_nfr_active_entry;
+
+uint64_t wreath_nfr_active_capacity(const wreath_nfr_worker *worker);
+/* Copy up to `max` in-use active slots into `out`, seqlock-consistent per slot
+ * (a slot mid-write is retried briefly, then skipped). Returns rows written. */
+uint32_t wreath_nfr_active_snapshot(const wreath_nfr_worker *worker,
+                                    wreath_nfr_active_entry *out, uint32_t max);
 
 /* Copy the global histogram (HISTOGRAM_BUCKETS uint64 counters) into out. */
 void wreath_nfr_histogram_global(const wreath_nfr_worker *worker, uint64_t *out);
@@ -157,6 +213,9 @@ typedef struct {
     uint8_t (*worker_mode)(const wreath_nfr_worker *);
     void (*context_phase)(wreath_nfr_worker *, wreath_nfr_context *, uint16_t,
                           uint16_t, uint8_t, uint32_t, uint32_t);
+    void (*context_capture)(wreath_nfr_worker *, wreath_nfr_context *, uint16_t,
+                            uint16_t, uint8_t, const uint8_t *, Py_ssize_t,
+                            uint32_t);
 } WreathFlightCAPI;
 
 #endif /* WREATH_FLIGHT_H */

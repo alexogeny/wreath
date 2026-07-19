@@ -82,3 +82,136 @@ def test_well_known_name_matching_does_not_strlen_constants_per_request() -> Non
 
     assert "strlen(" not in method, "method_object recomputes strlen on every request"
     assert "strlen(" not in header, "header_name_object recomputes strlen on every header"
+
+
+def test_default_bitset_router_matches_literals_without_python_segment_objects() -> None:
+    """The default matcher must compare literal UTF-8 slices without Unicode keys."""
+    source = (_NATIVE / "dtbitset.c").read_text()
+    match = _function(source, "brt_match_impl", "brt_dispatch")
+
+    assert "PyUnicode_FromStringAndSize(" not in match
+    assert "PyUnicode_DecodeUTF8(" not in match
+
+
+def test_decision_router_has_no_process_global_python_objects() -> None:
+    """Cached Python objects must belong to module state for subinterpreters and nogil."""
+    source = (_NATIVE / "dtrouter.c").read_text()
+
+    assert "static PyObject *public_caller_mask" not in source
+    assert "static PyObject *get_method" not in source
+
+
+def test_bitset_hot_methods_use_fastcall() -> None:
+    """The default router must not allocate argument tuples for each hot call."""
+    source = (_NATIVE / "dtbitset.c").read_text()
+    methods = source[source.index("static PyMethodDef brt_methods[]"):]
+
+    for name in ("match", "classify", "resolve", "probe"):
+        row = next(line for line in methods.splitlines() if f'{{"{name}"' in line)
+        assert "METH_FASTCALL" in row, f"bitset {name} still uses METH_VARARGS"
+
+
+def test_bitset_groups_are_compiled_before_the_first_match() -> None:
+    """A request must never compile a route group lazily."""
+    source = (_NATIVE / "dtbitset.c").read_text()
+    match = _function(source, "brt_match_impl", "brt_dispatch")
+
+    assert "brt_group_build(" not in match, "first match pays route-group compilation"
+
+
+def test_bitset_common_large_groups_do_not_spill_survivors_to_heap() -> None:
+    """Groups through 4096 routes should use bounded stack scratch."""
+    source = (_NATIVE / "dtbitset.c").read_text()
+    size = re.search(r"uint64_t stack_words\[(\d+)\]", source)
+
+    assert size is not None and int(size.group(1)) >= 64, (
+        "bitset groups above 1024 routes allocate survivor scratch per match"
+    )
+
+
+def test_bitset_path_parameters_are_lazy_native_slices() -> None:
+    """Matching should not eagerly allocate a dict and Unicode object per capture."""
+    source = (_NATIVE / "dtbitset.c").read_text()
+    build = _function(source, "build_match", "brt_match_impl")
+
+    assert "PyDict_New(" not in build
+    assert "PyUnicode_DecodeUTF8(" not in build
+
+
+def test_bitset_has_no_process_global_python_objects() -> None:
+    """The default router's cached objects must be held by module state."""
+    source = (_NATIVE / "dtbitset.c").read_text()
+
+    assert "static PyObject *brt_zero" not in source
+    assert "static PyObject *get" not in source
+
+
+def test_http1_idle_keepalive_releases_spike_capacity() -> None:
+    """A large read must not pin its input allocation for the connection lifetime."""
+    source = (_NATIVE / "server_http1.c").read_text()
+
+    assert "shrink_idle_input_buffer" in source
+
+
+def test_http2_idle_connection_releases_spike_capacity() -> None:
+    """HTTP/2 must decay an oversized connection input allocation after draining."""
+    source = (_NATIVE / "server_http2.c").read_text()
+
+    assert "shrink_idle_input_buffer" in source
+
+
+def test_multipart_parser_does_not_copy_every_part_payload() -> None:
+    """Parsing a complete multipart body should not duplicate all payload bytes."""
+    source = (_NATIVE / "multipart.c").read_text()
+
+    assert "PyBytes_FromStringAndSize((const char *)body_start" not in source
+
+
+def test_http1_receive_queue_stores_native_descriptors() -> None:
+    """Buffered body chunks should not allocate a Python list entry and ASGI dict."""
+    source = (_NATIVE / "server_http1.c").read_text()
+
+    assert "PyList_Append(self->receive_queue" not in source
+
+
+def test_http2_receive_queue_stores_native_descriptors() -> None:
+    """Each HTTP/2 DATA frame should not become a separately queued Python object."""
+    source = (_NATIVE / "server_http2.c").read_text()
+
+    assert "PyList_Append(st->body_chunks" not in source
+
+
+def test_http3_response_queue_is_a_native_ack_ring() -> None:
+    """Acknowledgement bookkeeping should not retain a Python list geometry."""
+    source = (_NATIVE / "http3_asgi.c").read_text()
+
+    assert "PyList_Append(s->resp_chunks" not in source
+
+
+def test_http_parser_builds_asgi_headers_without_generic_python_calls() -> None:
+    """Portable ASGI needs Python pairs, but parsing must not call Python code."""
+    source = (_NATIVE / "http.c").read_text()
+    parse = _function(source, "wreath_http_parse_request_parts", "wreath_http_parse_request")
+
+    assert "PyObject_Call" not in parse
+    assert "PyObject_CallMethod" not in parse
+    assert "Py_BuildValue" not in parse
+
+
+def test_hpack_hard_limit_reclaims_entries_and_capacity_immediately() -> None:
+    """A SETTINGS table reduction must not retain the old table watermark."""
+    source = (_NATIVE / "server_hpack.c").read_text()
+    setter = _function(source, "wreath_hpack_table_set_hard_max", "table_evict_to")
+
+    assert "table_evict_to(" in setter
+    assert "t->cap" in setter
+
+
+def test_eager_http1_task_uses_direct_eager_constructor_without_done_probe() -> None:
+    """Task remains the correctness owner, but synchronous completion stays eager."""
+    source = (_NATIVE / "server_http1.c").read_text()
+    spawn = _function(source, "spawn_app_task", "is_upgrade_request")
+
+    assert "PyObject_Vectorcall(task_class" in spawn
+    assert "Py_True" in spawn
+    assert "task_done_fn" not in spawn

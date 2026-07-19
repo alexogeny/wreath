@@ -156,13 +156,11 @@ typedef struct {
     int pending_empty_request;
     int disconnected;
 
-    /* ASGI receive plumbing.
-     *
-     * The queue is an owned list plus a head index: taking the front is O(1)
-     * and the consumed prefix is dropped in one slice, rather than deleting
-     * index 0 and shifting every remaining message on every receive. The
-     * logical length is always PyList_GET_SIZE(receive_queue) - receive_head. */
-    PyObject *receive_queue;   /* list[dict] */
+    /* ASGI receive plumbing. The queue owns one reference per entry and uses a
+     * head index, so taking the front is O(1) without a Python list allocation. */
+    PyObject **receive_queue;
+    Py_ssize_t receive_queue_cap;
+    Py_ssize_t receive_queue_len;
     Py_ssize_t receive_head;   /* first undelivered message */
     Py_ssize_t queued_messages;/* logical queue length, maintained per op */
     PyObject *receive_waiter;  /* Future or NULL */
@@ -248,6 +246,12 @@ typedef struct {
      * dict). Telemetry stamps route/plan attribution into it during dispatch and
      * the completion cell reads it back; owned, GC-tracked, cleared on teardown. */
     PyObject *nfr_ws_scope;
+    /* The armed HTTP request's native _RequestContext, retained only when the
+     * request was sampled into Detailed. Its bound `_flight_phase` may escape
+     * into tasks that outlive the request (ContextVar propagation to dependency
+     * seams), so completion severs the context's borrowed recorder pointers
+     * before releasing this reference, turning escaped markers into no-ops. */
+    PyObject *nfr_http_scope;
 } WreathHttpProtocol;
 
 
@@ -322,7 +326,8 @@ PyObject *wreath_request_context_new(
 );
 void wreath_request_context_set_flight(PyObject *object, wreath_nfr_context *nfr_ctx,
                                        wreath_nfr_worker *nfr_worker);
-void wreath_request_context_set_armed(PyObject *object);
+int wreath_request_context_set_armed(PyObject *object);
+void wreath_request_context_sever(PyObject *object);
 
 /* --- shared helpers (server_common.c) ------------------------------------ */
 PyObject *completed_none(void);

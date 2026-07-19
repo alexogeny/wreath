@@ -324,12 +324,20 @@ wreath_hpack_table_clear(WreathHpackTable *t)
     t->size = 0;
 }
 
+static void table_evict_to(WreathHpackTable *t, size_t target);
+static void table_shrink_capacity(WreathHpackTable *t);
+
 void
 wreath_hpack_table_set_hard_max(WreathHpackTable *t, size_t hard_max)
 {
     t->hard_max = hard_max;
     if (t->cur_max > hard_max) {
         t->cur_max = hard_max;
+    }
+    table_evict_to(t, t->cur_max);
+    if ((hard_max == 0 && t->cap > 0) ||
+        (t->cap > 16 && t->count <= t->cap / 4)) {
+        table_shrink_capacity(t);
     }
 }
 
@@ -343,6 +351,30 @@ table_evict_to(WreathHpackTable *t, size_t target)
         Py_CLEAR(t->entries[oldest].value);
         t->count--;
     }
+}
+
+static void
+table_shrink_capacity(WreathHpackTable *t)
+{
+    Py_ssize_t target = t->cur_max == 0 ? 0 : 16;
+    while (target < t->count) target *= 2;
+    if (target >= t->cap) return;
+    if (target == 0) {
+        PyMem_Free(t->entries);
+        t->entries = NULL;
+        t->cap = t->head = 0;
+        return;
+    }
+    WreathHpackEntry *fresh = PyMem_Calloc(
+        (size_t)target, sizeof(WreathHpackEntry));
+    if (fresh == NULL) return;  /* reclamation is best effort */
+    for (Py_ssize_t k = 0; k < t->count; k++) {
+        fresh[t->count - 1 - k] = t->entries[ring_index(t, k)];
+    }
+    PyMem_Free(t->entries);
+    t->entries = fresh;
+    t->cap = target;
+    t->head = t->count == 0 ? 0 : t->count - 1;
 }
 
 /* Insert (name, value) as the newest entry (steals a reference to each). */

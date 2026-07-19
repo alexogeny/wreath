@@ -64,6 +64,7 @@ class EventKind(IntEnum):
     CORRELATION = 2  # paired trace/span carrier for a completion
     PHASE = 3  # a promoted detail phase (Detailed mode)
     CONTROL = 4  # bounded arm/disarm/export control event
+    CAPTURE = 5  # a forensic capture slab (Forensic mode; off the completion ring)
 
 
 class Mode(IntEnum):
@@ -458,6 +459,177 @@ _COVERAGES = frozenset(int(c) for c in PhaseCoverage)
 
 class SchemaError(ValueError):
     """A cell or metadata image failed to decode against this schema."""
+
+
+# --- forensic capture (Stage 5) --------------------------------------------
+#
+# Forensic mode is the only mode that ever copies application bytes, and it does
+# so under a deny-by-default policy: a field is captured only when a compiled
+# rule produces it, and every byte is redacted (hashed/masked/length-only) or
+# bounded (truncated) *before* it enters a slab. Captured fields for one armed
+# request accumulate in a preallocated slab -- a self-identifying block tagged
+# with the request id, laid out as a fixed header followed by typed field
+# records -- which the off-path sink copies out and serializes. Slabs never
+# travel the 64-byte completion ring; they have their own commit/return path.
+
+
+class CaptureFieldClass(IntEnum):
+    """The boundary a captured field came from. Stable wire identifiers targeted
+    by the request-path capture seams (server, PostgreSQL, HTTP client)."""
+
+    UNKNOWN = 0
+    REQUEST_HEADER = 1
+    RESPONSE_HEADER = 2
+    REQUEST_BODY = 3
+    RESPONSE_BODY = 4
+    QUERY_PARAM = 5
+    DB_PARAM = 6
+    DB_ROW = 7
+    OUTBOUND_REQUEST = 8
+    OUTBOUND_RESPONSE = 9
+
+
+class CaptureDisposition(IntEnum):
+    """How a field was reduced before retention. The policy decides which; the
+    native core enforces it as the bytes are written, so a disallowed field's
+    raw bytes never exist in recorder memory."""
+
+    RAW = 0  # policy-approved verbatim bytes, bounded by the slab (may truncate)
+    HASHED = 1  # an 8-byte process-local keyed hash, never the bytes
+    MASKED = 2  # a constant mask; only the original length is retained
+    LENGTH = 3  # length only (bytes dropped)
+
+
+#: Bytes of a keyed redaction hash (SipHash-2-4 output, truncated to 64 bits).
+CAPTURE_HASH_BYTES: Final = 8
+
+#: Record alignment inside a slab, so each field header stays naturally aligned.
+CAPTURE_FIELD_ALIGN: Final = 4
+
+# 24-byte capture-slab header (little-endian):
+#   0  u64  request_id       (self-identifying, like a phase batch)
+#   8  u32  used_bytes       (header + all field records, for the sink)
+#  12  u16  field_count
+#  14  u8   schema_version
+#  15  u8   kind (EventKind.CAPTURE)
+#  16  u8   worker_id
+#  17  u8   flags            (FLAG_BODY_TRUNCATED when any field was truncated)
+#  18  u16  reserved (zero)
+#  20  u32  reserved2 (zero)
+_CAPTURE_SLAB_HEADER = struct.Struct(BYTE_ORDER + "QIHBBBBHI")
+CAPTURE_SLAB_HEADER_SIZE: Final = _CAPTURE_SLAB_HEADER.size
+assert CAPTURE_SLAB_HEADER_SIZE == 24, CAPTURE_SLAB_HEADER_SIZE
+
+# 12-byte capture-field header (little-endian), followed by ``stored_length``
+# payload bytes padded up to CAPTURE_FIELD_ALIGN:
+#   0  u16  field_class (CaptureFieldClass)
+#   2  u16  descriptor_id  (compiled metadata id: header/column/client, 0 = none)
+#   4  u8   disposition (CaptureDisposition)
+#   5  u8   reserved (zero)
+#   6  u16  stored_length  (payload bytes retained in the slab)
+#   8  u32  original_length  (the field's true length before redaction/truncation)
+_CAPTURE_FIELD_HEADER = struct.Struct(BYTE_ORDER + "HHBBHI")
+CAPTURE_FIELD_HEADER_SIZE: Final = _CAPTURE_FIELD_HEADER.size
+assert CAPTURE_FIELD_HEADER_SIZE == 12, CAPTURE_FIELD_HEADER_SIZE
+
+
+def _pad4(n: int) -> int:
+    """Round a byte count up to the slab record alignment."""
+    return (n + CAPTURE_FIELD_ALIGN - 1) & ~(CAPTURE_FIELD_ALIGN - 1)
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureField:
+    """One captured field decoded from a slab."""
+
+    field_class: CaptureFieldClass
+    descriptor_id: int
+    disposition: CaptureDisposition
+    original_length: int
+    payload: bytes = b""  # stored bytes (raw prefix, or the 8-byte keyed hash)
+
+    @property
+    def truncated(self) -> bool:
+        """True when a RAW field was clipped to fit the slab."""
+        return (
+            self.disposition is CaptureDisposition.RAW
+            and len(self.payload) < self.original_length
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureSlab:
+    """A decoded capture slab: one armed request's retained forensic fields."""
+
+    request_id: int
+    fields: tuple[CaptureField, ...]
+    worker_id: int = 0
+    flags: int = 0
+
+    @classmethod
+    def decode(cls, data: bytes) -> CaptureSlab:
+        if len(data) < CAPTURE_SLAB_HEADER_SIZE:
+            raise SchemaError(
+                f"capture slab needs {CAPTURE_SLAB_HEADER_SIZE} bytes, got {len(data)}"
+            )
+        (
+            request_id,
+            used_bytes,
+            field_count,
+            version,
+            kind,
+            worker_id,
+            flags,
+            _r0,
+            _r1,
+        ) = _CAPTURE_SLAB_HEADER.unpack_from(data, 0)
+        if version != SCHEMA_VERSION:
+            raise SchemaError(f"unsupported schema version {version}")
+        if kind != EventKind.CAPTURE:
+            raise SchemaError(f"expected capture kind, got {kind}")
+        if used_bytes > len(data):
+            raise SchemaError("capture slab used_bytes exceeds the buffer")
+        fields: list[CaptureField] = []
+        offset = CAPTURE_SLAB_HEADER_SIZE
+        for _ in range(field_count):
+            if offset + CAPTURE_FIELD_HEADER_SIZE > used_bytes:
+                raise SchemaError("capture slab truncated reading a field header")
+            fc, descriptor_id, disposition, _res, stored_length, original_length = (
+                _CAPTURE_FIELD_HEADER.unpack_from(data, offset)
+            )
+            offset += CAPTURE_FIELD_HEADER_SIZE
+            end = offset + stored_length
+            if end > used_bytes:
+                raise SchemaError("capture slab truncated reading a field payload")
+            payload = bytes(data[offset:end])
+            offset += _pad4(stored_length)
+            fields.append(
+                CaptureField(
+                    field_class=(
+                        CaptureFieldClass(fc)
+                        if fc in _CAPTURE_CLASSES
+                        else CaptureFieldClass.UNKNOWN
+                    ),
+                    descriptor_id=descriptor_id,
+                    disposition=(
+                        CaptureDisposition(disposition)
+                        if disposition in _CAPTURE_DISPOSITIONS
+                        else CaptureDisposition.LENGTH
+                    ),
+                    original_length=original_length,
+                    payload=payload,
+                )
+            )
+        return cls(
+            request_id=request_id,
+            fields=tuple(fields),
+            worker_id=worker_id,
+            flags=flags,
+        )
+
+
+_CAPTURE_CLASSES = frozenset(int(c) for c in CaptureFieldClass)
+_CAPTURE_DISPOSITIONS = frozenset(int(d) for d in CaptureDisposition)
 
 
 # --- deterministic metadata image ------------------------------------------

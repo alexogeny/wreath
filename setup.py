@@ -109,17 +109,19 @@ ext_modules = [
                 "src/wreath/_native/observability.c",
                 "src/wreath/_native/proxy.c",
                 "src/wreath/_native/ratelimit.c",
+                "src/wreath/_native/scheduler.c",
             ],
-            depends=["src/wreath/_native/neocore.h"],
+            depends=["src/wreath/_native/wreathcore.h"],
             extra_compile_args=extra_compile_args,
         ),
         Extension(
             "wreath._native._client",
             sources=[
                 "src/wreath/_native/_clientmodule.c",
+                "src/wreath/_native/client_http1.c",
                 "src/wreath/_native/http.c",
             ],
-            depends=["src/wreath/_native/neocore.h"],
+            depends=["src/wreath/_native/wreathcore.h"],
             extra_compile_args=extra_compile_args,
         ),
         Extension(
@@ -135,7 +137,7 @@ ext_modules = [
             ],
             depends=[
                 "src/wreath/_native/server.h",
-                "src/wreath/_native/neocore.h",
+                "src/wreath/_native/wreathcore.h",
                 "src/wreath/_native/server_request.c",
             ],
             extra_compile_args=extra_compile_args,

@@ -65,6 +65,8 @@ typedef struct {
     Py_ssize_t nroutes;
     Py_ssize_t routes_cap;
     PyObject *trees;         /* dict: method -> dict: nseg -> _DNodeRef(DNode*) */
+    PyObject *public_caller_mask;
+    PyObject *get_method;
     int dirty;
 } DecisionRouteTable;
 
@@ -1048,14 +1050,7 @@ drt_match(DecisionRouteTable *self, PyObject *args)
         return NULL;
     }
     if (caller_mask == NULL) {
-        static PyObject *public_caller_mask = NULL;
-        if (public_caller_mask == NULL) {
-            public_caller_mask = PyLong_FromLong(0);
-            if (public_caller_mask == NULL) {
-                return NULL;
-            }
-        }
-        caller_mask = public_caller_mask;
+        caller_mask = self->public_caller_mask;
     }
     if (!PyLong_CheckExact(caller_mask)) {
         PyErr_SetString(PyExc_ValueError, "caller capability mask must be a non-negative integer");
@@ -1084,15 +1079,9 @@ drt_match(DecisionRouteTable *self, PyObject *args)
         }
     }
     int is_head = PyUnicode_CompareWithASCIIString(method_obj, "HEAD") == 0;
-    static PyObject *get_method = NULL;
     if (is_head) {
-        if (get_method == NULL) {
-            get_method = PyUnicode_InternFromString("GET");
-            if (get_method == NULL) {
-                return NULL;
-            }
-        }
-        PyObject *get_paths = PyDict_GetItemWithError(self->static_routes, get_method);
+        PyObject *get_paths = PyDict_GetItemWithError(
+            self->static_routes, self->get_method);
         if (get_paths == NULL && PyErr_Occurred()) {
             return NULL;
         }
@@ -1143,7 +1132,8 @@ drt_match(DecisionRouteTable *self, PyObject *args)
         /* A leaf that fails verification reports Py_None; like a missing
          * group (NULL), HEAD must still fall back to the GET tree. */
         Py_XDECREF(result);
-        result = match_group(self, get_method, segs, nseg, seg_objs, caller_mask);
+        result = match_group(
+            self, self->get_method, segs, nseg, seg_objs, caller_mask);
     }
 
     for (Py_ssize_t k = 0; k < nseg; k++) {
@@ -1501,7 +1491,10 @@ drt_new(PyTypeObject *type, PyObject *Py_UNUSED(a), PyObject *Py_UNUSED(k))
     self->static_routes = PyDict_New();
     self->seen = PySet_New(NULL);
     self->trees = PyDict_New();
-    if (self->static_routes == NULL || self->seen == NULL || self->trees == NULL) {
+    self->public_caller_mask = PyLong_FromLong(0);
+    self->get_method = PyUnicode_InternFromString("GET");
+    if (self->static_routes == NULL || self->seen == NULL || self->trees == NULL ||
+        self->public_caller_mask == NULL || self->get_method == NULL) {
         Py_DECREF(self);
         return NULL;
     }
@@ -1512,6 +1505,8 @@ static void
 drt_dealloc(DecisionRouteTable *self)
 {
     Py_XDECREF(self->trees); /* frees all DNodes via capsule destructors */
+    Py_XDECREF(self->public_caller_mask);
+    Py_XDECREF(self->get_method);
     Py_XDECREF(self->static_routes);
     Py_XDECREF(self->seen);
     for (Py_ssize_t i = 0; i < self->nroutes; i++) {

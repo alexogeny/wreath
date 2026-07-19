@@ -131,6 +131,7 @@ nav:
       - Static files: reference/staticfiles.md
       - Testing: reference/testing.md
       - Configuration: reference/config.md
+      - Inspector: reference/inspector.md
       - State: reference/state.md
       - OpenAPI: reference/openapi.md
       - Client type generation: reference/typegen.md

@@ -1,6 +1,8 @@
 /* multipart/form-data parsing for complete (non-streaming) bodies. */
 #include "wreathcore.h"
 
+#define multipart_span_tape 64  /* parts between cancellation checks */
+
 /* Limits are Py_ssize_t counts of bytes/parts; a negative value means the caller
  * imposes no limit. Every check is written as a subtraction against a known
  * non-negative bound rather than an addition, so no length arithmetic here can
@@ -101,6 +103,7 @@ wreath_multipart_parse(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwds
     const uint8_t *data = body.buf;
     Py_ssize_t len = body.len;
     PyObject *parts = NULL;
+    PyObject *body_view = NULL;
 
     const uint8_t *pos;
     if (len >= delim_len - 2 && memcmp(data, delim + 2, (size_t)(delim_len - 2)) == 0) {
@@ -116,7 +119,9 @@ wreath_multipart_parse(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwds
     }
 
     parts = PyList_New(0);
-    if (parts == NULL) {
+    body_view = PyMemoryView_FromObject(body.obj);
+    if (parts == NULL || body_view == NULL) {
+        Py_CLEAR(parts);
         goto done;
     }
 
@@ -173,21 +178,24 @@ wreath_multipart_parse(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwds
                          max_part_header_bytes);
             goto fail;
         }
-        /* Refuse before building the bytes object, so an over-budget part is
-         * never copied even once. */
+        /* Refuse before building the payload view, so an over-budget part is
+         * never retained even once. */
         if (max_part_bytes >= 0 && next - body_start > max_part_bytes) {
             PyErr_Format(PyExc_ValueError,
                          "multipart part exceeds %zd bytes", max_part_bytes);
             goto fail;
         }
         part_count++;
+        if (part_count % multipart_span_tape == 0 && PyErr_CheckSignals() < 0) {
+            goto fail;
+        }
 
         PyObject *headers = parse_part_headers(pos, headers_end);
         if (headers == NULL) {
             goto fail;
         }
-        PyObject *content =
-            PyBytes_FromStringAndSize((const char *)body_start, next - body_start);
+        PyObject *content = PySequence_GetSlice(
+            body_view, body_start - data, next - data);
         PyObject *part = (content != NULL) ? PyTuple_Pack(2, headers, content) : NULL;
         Py_DECREF(headers);
         Py_XDECREF(content);
@@ -203,6 +211,7 @@ wreath_multipart_parse(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwds
 fail:
     Py_CLEAR(parts);
 done:
+    Py_XDECREF(body_view);
     PyMem_Free(delim);
     PyBuffer_Release(&body);
     PyBuffer_Release(&boundary);

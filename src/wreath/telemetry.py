@@ -1,10 +1,16 @@
 """Wreath telemetry — native metrics, tracing configuration, and OpenTelemetry integration.
 
-Stage 0 of the Native Flight Recorder (NFR) exposes *configuration and value
-types only*. There is no recorder, ring, exporter, or request-path behavior yet:
-constructing a :class:`TelemetryConfig` validates it and lets you compute its
-exact fixed memory budget, nothing more. The runtime spine lands in later stages
-behind ``wreath._native._flight``.
+This module carries the Native Flight Recorder's public configuration and value
+types (:class:`TelemetryConfig` and friends): constructing one validates it and
+lets you compute its exact fixed memory budget. Passing it to ``wreath.server``
+creates a native recorder and starts the off-path projector that drains its ring.
+
+It also hosts the lazy OpenTelemetry bridge (:func:`current_span`,
+:func:`activate_otel`): the request path never constructs a Python OTel object,
+so these let user code opt in only at the call site, degrading to an immutable
+:class:`SpanContextView` when no OTel packages are installed. The runtime spine
+(worker, ring, projector, exporter) lives behind ``wreath._native._flight``,
+``wreath._projector``, ``wreath._otlp``, and ``wreath._export``.
 
 See ``docs/plans/native-flight-recorder-stage-1.md`` (modes, sizing) and
 ``docs/decisions/0021-native-flight-recorder-provisional-parameters.md``.
@@ -37,6 +43,9 @@ __all__ = [
     "TelemetryConfig",
     "MemoryBudget",
     "TelemetryConfigError",
+    "SpanContextView",
+    "current_span",
+    "activate_otel",
 ]
 
 #: Hard ceilings so a misconfiguration cannot ask for unbounded memory. These are
@@ -256,3 +265,97 @@ class TelemetryConfig:
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise TelemetryConfigError(message)
+
+
+# --- lazy OpenTelemetry bridge (Stage 4c) -----------------------------------
+#
+# The recorder generates and carries trace/span IDs in native code; the request
+# path never constructs a Python OpenTelemetry object. These helpers let user
+# code or third-party instrumentation *opt in* to the OTel API when it wants to,
+# creating an SDK object only at the call site -- never merely by entering a
+# handler. With no OTel packages installed they degrade to an immutable native
+# view. The native recorder never reads a Python context variable.
+
+
+@dataclass(frozen=True, slots=True)
+class SpanContextView:
+    """An immutable, dependency-free view of a request's W3C trace context.
+
+    This is what the bridge returns when the OpenTelemetry API is absent, and the
+    correlation source when it is present. It reflects the *incoming* (remote)
+    context parsed from ``traceparent``; exposing the server's own generated span
+    id to Python needs a native read seam and is deferred, so instrumentation
+    treats this as the remote parent to child-span under.
+    """
+
+    trace_id: int = 0  # 128-bit; 0 when the request is unpropagated
+    span_id: int = 0  # incoming parent span; 0 when unpropagated
+    sampled: bool = False
+
+    @property
+    def is_valid(self) -> bool:
+        return self.trace_id != 0 and self.span_id != 0
+
+    @property
+    def trace_id_hex(self) -> str:
+        return format(self.trace_id, "032x")
+
+    @property
+    def span_id_hex(self) -> str:
+        return format(self.span_id, "016x")
+
+    def traceparent(self) -> str | None:
+        """The W3C ``traceparent`` string for this context, or None if invalid."""
+        if not self.is_valid:
+            return None
+        return f"00-{self.trace_id_hex}-{self.span_id_hex}-{'01' if self.sampled else '00'}"
+
+
+def current_span(request: object) -> SpanContextView:
+    """The current request's W3C trace context as an immutable view.
+
+    Reads only the incoming ``traceparent`` header and constructs no
+    OpenTelemetry object; returns an empty (invalid) view for an unpropagated or
+    malformed request. Safe to call whether or not telemetry is enabled.
+    """
+    header = None
+    getter = getattr(request, "header", None)
+    if callable(getter):
+        header = getter("traceparent")
+    if not header:
+        return SpanContextView()
+    from ._pure.flight import parse_traceparent
+
+    parsed = parse_traceparent(header.encode("ascii", "ignore"))
+    if parsed is None:
+        return SpanContextView()
+    hi, lo, span, sampled = parsed
+    return SpanContextView(trace_id=(hi << 64) | lo, span_id=span, sampled=sampled)
+
+
+def activate_otel(request: object) -> object:
+    """Lazily hand the request's trace context to the OpenTelemetry API.
+
+    When the OTel API is importable and the request carries a valid context, this
+    returns an OTel ``Context`` holding a non-recording remote span (so
+    instrumentation parents its spans correctly). When OTel is absent, or the
+    request is unpropagated, it returns the native :class:`SpanContextView`. It
+    creates an SDK object only here, at the call site -- never on the request
+    path -- so an app that never calls it pays nothing.
+    """
+    view = current_span(request)
+    if not view.is_valid:
+        return view
+    import importlib
+
+    try:
+        otel_trace = importlib.import_module("opentelemetry.trace")
+    except ImportError:
+        return view
+    context = otel_trace.SpanContext(
+        trace_id=view.trace_id,
+        span_id=view.span_id,
+        is_remote=True,
+        trace_flags=otel_trace.TraceFlags(0x01 if view.sampled else 0x00),
+    )
+    return otel_trace.set_span_in_context(otel_trace.NonRecordingSpan(context))

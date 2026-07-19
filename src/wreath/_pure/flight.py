@@ -309,12 +309,22 @@ def parse_traceparent(data: bytes) -> tuple[int, int, int, bool] | None:
 # and the native Recorder and assert identical drained cells and counters.
 
 from .._flight_schema import (  # noqa: E402 - grouped with the oracle it serves
+    _CAPTURE_FIELD_HEADER,
+    _CAPTURE_SLAB_HEADER,
+    CAPTURE_FIELD_ALIGN,
+    CAPTURE_FIELD_HEADER_SIZE,
+    CAPTURE_HASH_BYTES,
+    CAPTURE_SLAB_HEADER_SIZE,
+    FLAG_BODY_TRUNCATED,
     FLAG_DETAILED_ARMED,
     FLAG_ERROR_PROMOTED,
+    FLAG_FORENSIC_ARMED,
     FLAG_SLOW_PROMOTED,
     HISTOGRAM_BUCKETS,
     PHASE_CELL_BUDGET,
     PHASE_RECORDS_PER_BATCH,
+    CaptureDisposition,
+    EventKind,
     LossReason,
     Mode,
     PhaseBatchCell,
@@ -323,6 +333,7 @@ from .._flight_schema import (  # noqa: E402 - grouped with the oracle it serves
     PhaseRecord,
     Protocol,
     TerminalStatus,
+    _pad4,
     histogram_bucket,
 )
 
@@ -334,6 +345,55 @@ def _mix64(x: int) -> int:
     x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _U64
     x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & _U64
     return x ^ (x >> 31)
+
+
+def _rotl64(x: int, b: int) -> int:
+    return ((x << b) | (x >> (64 - b))) & _U64
+
+
+def siphash24(data: bytes, k0: int, k1: int) -> int:
+    """SipHash-2-4, the pure twin of siphash24() in flight.c. The recorder's
+    keyed redaction hash; the differential tests share a key so HASHED capture
+    slabs compare byte-for-byte. Word loads are little-endian."""
+    v0 = 0x736F6D6570736575 ^ k0
+    v1 = 0x646F72616E646F6D ^ k1
+    v2 = 0x6C7967656E657261 ^ k0
+    v3 = 0x7465646279746573 ^ k1
+
+    def _round() -> None:
+        nonlocal v0, v1, v2, v3
+        v0 = (v0 + v1) & _U64
+        v1 = _rotl64(v1, 13) ^ v0
+        v0 = _rotl64(v0, 32)
+        v2 = (v2 + v3) & _U64
+        v3 = _rotl64(v3, 16) ^ v2
+        v0 = (v0 + v3) & _U64
+        v3 = _rotl64(v3, 21) ^ v0
+        v2 = (v2 + v1) & _U64
+        v1 = _rotl64(v1, 17) ^ v2
+        v2 = _rotl64(v2, 32)
+
+    length = len(data)
+    end = length - (length % 8)
+    for off in range(0, end, 8):
+        m = int.from_bytes(data[off : off + 8], "little")
+        v3 ^= m
+        _round()
+        _round()
+        v0 ^= m
+    b = (length & 0xFF) << 56
+    for i in range(length - end):
+        b |= data[end + i] << (8 * i)
+    v3 ^= b
+    _round()
+    _round()
+    v0 ^= b
+    v2 ^= 0xFF
+    _round()
+    _round()
+    _round()
+    _round()
+    return v0 ^ v1 ^ v2 ^ v3
 
 
 class _PureRequest:
@@ -359,6 +419,15 @@ class _PureRequest:
     def phase_count(self) -> int:
         return len(self._ctx.get("phases", ()))
 
+    def capture(self, field_class: int, descriptor_id: int = 0,
+                disposition: int = 0, data: bytes = b"", max_bytes: int = 0) -> None:
+        self._worker._capture(self._ctx, field_class, descriptor_id, disposition,
+                              data, max_bytes)
+
+    @property
+    def capture_slot(self) -> int:
+        return self._ctx.get("capture_slot", -1)
+
     def finish(self, now_ns: int, status: int = 0, terminal: int = 0,
                error_class: int = 0, bytes_in: int = 0, bytes_out: int = 0) -> None:
         if self._finished:
@@ -380,7 +449,9 @@ class PureRecorder:
                  active_requests: int = 2048, histogram_count: int = 1,
                  completion_summaries: bool = True,
                  detailed_sample_rate: float = 0.0, phase_slots: int = 256,
-                 detailed_slow_us: int = 0) -> None:
+                 detailed_slow_us: int = 0, capture_slabs: int = 0,
+                 slab_bytes: int = 65536,
+                 capture_hash_key: tuple[int, int] | None = None) -> None:
         if ring_records and (ring_records & (ring_records - 1)):
             raise ValueError("ring_records must be a power of two")
         if not 0.0 <= detailed_sample_rate <= 1.0:
@@ -392,6 +463,18 @@ class PureRecorder:
         # Phase scratch pool: only present in a mode that arms phases.
         self._phase_capacity = phase_slots if self.mode >= Mode.DETAILED else 0
         self._phase_free = list(range(self._phase_capacity - 1, -1, -1))
+        self._phase_high_water = 0
+        # Forensic capture-slab pool: only present in Forensic mode. Mirrors the
+        # native free-stack + commit/return rings via three Python lists.
+        forensic = self.mode >= Mode.FORENSIC and capture_slabs > 0
+        self._capture_capacity = capture_slabs if forensic else 0
+        self._slab_bytes = slab_bytes if forensic else 0
+        self._capture_free = list(range(self._capture_capacity - 1, -1, -1))
+        self._capture_committed: list[bytes] = []  # committed slabs, FIFO
+        self._capture_returned: list[int] = []  # sink -> writer return queue
+        self._capture_high_water = 0
+        k = capture_hash_key or (0, 0)
+        self._hash_k0, self._hash_k1 = k[0] & _U64, k[1] & _U64
         self._ring_records = ring_records
         self._completion_summaries = completion_summaries
         self._ring: list[bytes] = []
@@ -403,7 +486,9 @@ class PureRecorder:
         self._next_request_id = 1
         self._active_capacity = active_requests
         self._free = list(range(active_requests - 1, -1, -1))
-        self._active: set[int] = set()
+        #: slot -> (request_id, start_ns, protocol, route_id) for the Inspector
+        #: snapshot; route_id stays 0 until stage-4 projection, like native.
+        self._active: dict[int, tuple[int, int, int, int]] = {}
 
     # counters / snapshots ----------------------------------------------------
     @property
@@ -426,11 +511,48 @@ class PureRecorder:
     def ring_high_water(self) -> int:
         return self._high_water
 
+    @property
+    def phase_capacity(self) -> int:
+        return self._phase_capacity
+
+    @property
+    def phase_in_use(self) -> int:
+        return self._phase_capacity - len(self._phase_free)
+
+    @property
+    def phase_high_water(self) -> int:
+        return self._phase_high_water
+
+    @property
+    def capture_capacity(self) -> int:
+        return self._capture_capacity
+
+    @property
+    def capture_slab_bytes(self) -> int:
+        return self._slab_bytes
+
+    @property
+    def capture_in_use(self) -> int:
+        return self._capture_capacity - len(self._capture_free)
+
+    @property
+    def capture_high_water(self) -> int:
+        return self._capture_high_water
+
+    @property
+    def capture_committed(self) -> int:
+        return len(self._capture_committed)
+
     def loss(self, reason: int) -> int:
         return self._losses[int(reason)] if 0 <= int(reason) < len(self._losses) else 0
 
     def histogram(self) -> tuple[int, ...]:
         return tuple(self._histogram)
+
+    def active_snapshot(self) -> list[tuple[int, int, int, int]]:
+        """In-flight requests as (request_id, start_ns, protocol, route_id)
+        rows, in slot order like the native snapshot."""
+        return [row for _slot, row in sorted(self._active.items())]
 
     # lifecycle ---------------------------------------------------------------
     def _start(self, connection_id: int, protocol: int, start_ns: int) -> dict:
@@ -442,7 +564,7 @@ class PureRecorder:
         slot = -1
         if self._free:
             slot = self._free.pop()
-            self._active.add(slot)
+            self._active[slot] = (request_id, start_ns, protocol, 0)
         else:
             self._losses[LossReason.ACTIVE_TABLE_FULL] += 1
         # Detailed-mode arming mirrors the native worker exactly (same finalizer,
@@ -454,8 +576,13 @@ class PureRecorder:
             _mix64(request_id) & 0xFFFFFFFF
         ) < self._detailed_sample_threshold:
             flags |= FLAG_DETAILED_ARMED
+            if self.mode >= Mode.FORENSIC:
+                flags |= FLAG_FORENSIC_ARMED  # capture is a nested subset of Detailed
             if self._phase_free:
                 phase_slot = self._phase_free.pop()
+                in_use = self._phase_capacity - len(self._phase_free)
+                if in_use > self._phase_high_water:
+                    self._phase_high_water = in_use
             else:
                 self._losses[LossReason.PHASE_SCRATCH_FULL] += 1
         return {
@@ -470,12 +597,16 @@ class PureRecorder:
             "flags": flags,
             "phase_slot": phase_slot,
             "phases": [],
+            "capture_slot": -1,  # a slab is reserved lazily on the first capture
+            "capture_used": 0,
+            "capture_fields": [],  # encoded field records, joined at commit
+            "capture_flags": 0,
         }
 
     def _release(self, ctx: dict) -> None:
         slot = ctx.get("slot", -1)
         if slot >= 0 and slot in self._active:
-            self._active.discard(slot)
+            del self._active[slot]
             if len(self._free) < self._active_capacity:
                 self._free.append(slot)
             ctx["slot"] = -1
@@ -505,6 +636,106 @@ class PureRecorder:
             if len(self._phase_free) < self._phase_capacity:
                 self._phase_free.append(slot)
             ctx["phase_slot"] = -1
+
+    # forensic capture ---------------------------------------------------------
+    def _capture_reserve(self, ctx: dict) -> int:
+        # Reclaim slabs the sink returned, keeping the free stack writer-owned.
+        while self._capture_returned:
+            self._capture_free.append(self._capture_returned.pop(0))
+        if not self._capture_free:
+            self._losses[LossReason.CAPTURE_POOL_FULL] += 1
+            return -1
+        slot = self._capture_free.pop()
+        in_use = self._capture_capacity - len(self._capture_free)
+        if in_use > self._capture_high_water:
+            self._capture_high_water = in_use
+        ctx["capture_used"] = CAPTURE_SLAB_HEADER_SIZE
+        ctx["capture_fields"] = []
+        ctx["capture_flags"] = 0
+        return slot
+
+    def _capture(self, ctx: dict, field_class: int, descriptor_id: int,
+                 disposition: int, data: bytes, max_bytes: int = 0) -> None:
+        # Deny-by-default: only a Forensic-armed request captures anything.
+        if not (ctx.get("flags", 0) & FLAG_FORENSIC_ARMED) or self._capture_capacity == 0:
+            return
+        if ctx.get("capture_slot", -1) < 0:
+            ctx["capture_slot"] = self._capture_reserve(ctx)
+            if ctx["capture_slot"] < 0:
+                return
+        data = bytes(data)
+        original_length = len(data)
+        # Redact before retention, mirroring context_capture in flight.c.
+        if disposition == CaptureDisposition.RAW:
+            stored = min(original_length, 0xFFFF)
+            if max_bytes and stored > max_bytes:
+                stored = max_bytes  # policy byte cap; original_length preserved
+            payload = data[:stored]
+        elif disposition == CaptureDisposition.HASHED:
+            digest = siphash24(data, self._hash_k0, self._hash_k1)
+            payload = digest.to_bytes(CAPTURE_HASH_BYTES, "little")
+            stored = CAPTURE_HASH_BYTES
+        else:  # MASKED / LENGTH: no bytes retained
+            stored = 0
+            payload = b""
+
+        used = ctx["capture_used"]
+        if used + CAPTURE_FIELD_HEADER_SIZE > self._slab_bytes:
+            self._losses[LossReason.CAPTURE_POOL_FULL] += 1
+            return
+        room = self._slab_bytes - used - CAPTURE_FIELD_HEADER_SIZE
+        padded = _pad4(stored)
+        if padded > room:
+            if disposition == CaptureDisposition.RAW:
+                stored = room & ~(CAPTURE_FIELD_ALIGN - 1)
+                padded = stored
+                payload = payload[:stored]
+            else:
+                self._losses[LossReason.CAPTURE_POOL_FULL] += 1
+                return
+        record = _CAPTURE_FIELD_HEADER.pack(
+            field_class & 0xFFFF,
+            descriptor_id & 0xFFFF,
+            disposition & 0xFF,
+            0,
+            stored & 0xFFFF,
+            original_length & 0xFFFFFFFF,
+        ) + payload + b"\x00" * (padded - stored)
+        ctx["capture_fields"].append(record)
+        ctx["capture_used"] = used + CAPTURE_FIELD_HEADER_SIZE + padded
+        if disposition == CaptureDisposition.RAW and stored < original_length:
+            ctx["capture_flags"] |= FLAG_BODY_TRUNCATED & 0xFF
+            ctx["flags"] = ctx.get("flags", 0) | FLAG_BODY_TRUNCATED
+            self._losses[LossReason.BODY_TRUNCATED] += 1
+
+    def _capture_release(self, ctx: dict) -> None:
+        slot = ctx.get("capture_slot", -1)
+        if slot >= 0 and len(self._capture_free) < self._capture_capacity:
+            self._capture_free.append(slot)
+        ctx["capture_slot"] = -1
+
+    def _capture_finish(self, ctx: dict, published: bool) -> None:
+        slot = ctx.get("capture_slot", -1)
+        if slot < 0:
+            return
+        fields = ctx["capture_fields"]
+        if published and fields:
+            body = b"".join(fields)
+            header = _CAPTURE_SLAB_HEADER.pack(
+                ctx["request_id"] & _U64,
+                (CAPTURE_SLAB_HEADER_SIZE + len(body)) & 0xFFFFFFFF,  # used_bytes
+                len(fields) & 0xFFFF,  # field_count
+                SCHEMA_VERSION,
+                EventKind.CAPTURE,
+                self._worker_id & 0xFF,
+                ctx["capture_flags"] & 0xFF,
+                0,
+                0,
+            )
+            self._capture_committed.append(header + body)
+            ctx["capture_slot"] = -1
+        else:
+            self._capture_release(ctx)
 
     def _publish(self, cell: bytes) -> bool:
         """Append a 64-byte cell to the ring, or count a RING_FULL loss."""
@@ -536,6 +767,7 @@ class PureRecorder:
             return
         self._release(ctx)
         self._phase_release(ctx)
+        self._capture_finish(ctx, False)
         ctx["mode"] = Mode.OFF
 
     def _end(self, ctx: dict, now_ns: int, status: int, terminal: int,
@@ -554,7 +786,8 @@ class PureRecorder:
         self._histogram[histogram_bucket(duration_us)] += 1
         self._release(ctx)
         if not self._completion_summaries:
-            self._phase_release(ctx)  # no completion to anchor phases to
+            self._phase_release(ctx)  # no completion to anchor phases/slab to
+            self._capture_finish(ctx, False)
             return
         cell = CompletionCell(
             request_id=ctx["request_id"],
@@ -573,6 +806,7 @@ class PureRecorder:
         ).encode()
         published = self._publish(cell)
         self._commit_phases(ctx, published)
+        self._capture_finish(ctx, published)
 
     # public API mirroring the native Recorder --------------------------------
     def begin(self, connection_id: int = 0, protocol: int = 0, start_ns: int = 0) -> _PureRequest:
@@ -593,6 +827,20 @@ class PureRecorder:
         taken = self._ring[:max_cells]
         self._ring = self._ring[max_cells:]
         return b"".join(taken)
+
+    def drain_captures(self, max_slabs: int = 256) -> list[bytes]:
+        """Pop committed capture slabs (bytes), returning each to the pool. The
+        pure twin of Recorder.drain_captures on the sink/test side."""
+        if self._capture_capacity == 0 or max_slabs <= 0:
+            return []
+        taken = self._capture_committed[:max_slabs]
+        self._capture_committed = self._capture_committed[max_slabs:]
+        # The sink hands each slab back to the writer via the return queue; the
+        # writer reclaims it on its next reserve. A slab header carries the
+        # request id (stamped at reserve), never the slot index, so only the
+        # *count* of returned slots is observable -- track that, not identities.
+        self._capture_returned.extend(0 for _ in taken)
+        return taken
 
 
 _PROTO = frozenset(int(p) for p in Protocol)

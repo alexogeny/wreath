@@ -51,7 +51,7 @@ def _build(mode: RoutingMode) -> Wreath:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["decision", "trie"])
+@pytest.mark.parametrize("mode", ["decision", "trie", "bitset"])
 async def test_static_and_dynamic(mode: RoutingMode) -> None:
     app = _build(mode)
     assert (await invoke(app, "/"))[1]["body"] == b'{"page":"home"}'
@@ -61,12 +61,18 @@ async def test_static_and_dynamic(mode: RoutingMode) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["decision", "trie"])
+@pytest.mark.parametrize("mode", ["decision", "trie", "bitset"])
 async def test_head_uses_get(mode: RoutingMode) -> None:
     app = _build(mode)
     sent = await invoke(app, "/users/42", method="HEAD")
     assert sent[0]["status"] == 200
     assert sent[1]["body"] == b""
+
+
+def test_default_routing_mode_is_bitset() -> None:
+    app = Wreath()
+    assert app._routing == "bitset"
+    assert app.router._mode == "bitset"
 
 
 def test_unknown_mode_rejected() -> None:

@@ -33,6 +33,7 @@ int wreath_register_proxy(PyObject *module);
 
 /* ratelimit.c: adds the TokenBucket type; returns -1 on failure. */
 int wreath_register_ratelimit(PyObject *module);
+int wreath_register_scheduler(PyObject *module);
 
 /* headers.c */
 PyObject *wreath_find_header(PyObject *self, PyObject *args);
@@ -104,6 +105,7 @@ int wreath_http_parse_request_parts(
 PyObject *wreath_http_parse_request(PyObject *self, PyObject *args);
 PyObject *wreath_http_parse_response(PyObject *self, PyObject *args);
 PyObject *wreath_http_serialize_request(PyObject *self, PyObject *args);
+int wreath_register_http_client_protocol(PyObject *module);
 
 /* webpolicy.c */
 PyObject *wreath_select_content_encoding(PyObject *self, PyObject *arg);

@@ -25,5 +25,11 @@ static PyModuleDef client_module = {
 PyMODINIT_FUNC
 PyInit__client(void)
 {
-    return PyModule_Create(&client_module);
+    PyObject *module = PyModule_Create(&client_module);
+    if (module == NULL) return NULL;
+    if (wreath_register_http_client_protocol(module) < 0) {
+        Py_DECREF(module);
+        return NULL;
+    }
+    return module;
 }

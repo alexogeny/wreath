@@ -42,11 +42,11 @@ def test_a_bare_route_crosses_far_less_than_a_full_stack() -> None:
 
     def pre_activation(trace: request_trace.Trace) -> int:
         return sum(
-            1
-            for event in trace.events
-            if event.phase in request_trace._PRE_ACTIVATION and event.kind == "PY"
+            1 for event in trace.events if event.phase in request_trace._PRE_ACTIVATION
         )
 
+    # The full stack has the same single Python entry but substantially more
+    # Python-to-C boundaries for routing, policy, and authorization.
     assert pre_activation(minimal) < pre_activation(realistic)
 
 

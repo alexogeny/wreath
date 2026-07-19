@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import inspect
+import os
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -230,7 +231,76 @@ def build_parser() -> argparse.ArgumentParser:
     typegen_parser.add_argument("--pure", action="store_true")
     typegen_parser.add_argument("--factory", action="store_true",
                                 help="invoke the target as a zero-argument application factory")
+    inspect_parser = commands.add_parser(
+        "inspect", help="query a running server's read-only telemetry Inspector"
+    )
+    inspect_parser.add_argument(
+        "socket", help="path to the Inspector's Unix-domain socket"
+    )
+    inspect_parser.add_argument(
+        "topic", nargs="?", default="summary",
+        choices=("summary", "active", "routes", "explain-route", "explain-plan",
+                 "metadata", "timeline", "failures", "distributions"),
+        help="what to show (default: summary = workers + pressure)",
+    )
+    inspect_parser.add_argument("--route-id", type=int, default=None)
+    inspect_parser.add_argument("--method", default=None)
+    inspect_parser.add_argument("--path", default=None)
+    inspect_parser.add_argument("--plan-id", type=int, default=None)
+    inspect_parser.add_argument(
+        "--table", default=None,
+        help="metadata table name for the metadata topic",
+    )
+    inspect_parser.add_argument("--offset", type=int, default=0)
+    inspect_parser.add_argument("--limit", type=int, default=50)
+    inspect_parser.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="print versioned JSON instead of tables",
+    )
+    _add_capture_parser(commands)
     return parser
+
+
+def _add_capture_parser(commands: Any) -> None:
+    """`wreath capture {arm,status,disarm}` -- the token-gated capture control."""
+    capture_parser = commands.add_parser(
+        "capture", help="arm/disarm forensic capture on a running server"
+    )
+    capture_parser.add_argument("socket", help="path to the Inspector's Unix socket")
+    capture_parser.add_argument(
+        "--token", default=None,
+        help="capability token (or the WREATH_CAPTURE_TOKEN environment variable)",
+    )
+    capture_parser.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="print JSON instead of a human summary",
+    )
+    actions = capture_parser.add_subparsers(dest="capture_action", required=True)
+
+    arm = actions.add_parser("arm", help="install a bounded, expiring capture arm")
+    arm.add_argument("--allow-header", action="append", dest="allow_headers", default=[],
+                     metavar="NAME", help="header captured verbatim (repeatable)")
+    arm.add_argument("--hash-header", action="append", dest="hash_headers", default=[],
+                     metavar="NAME", help="header captured as a keyed hash (repeatable)")
+    arm.add_argument("--mask-header", action="append", dest="mask_headers", default=[],
+                     metavar="NAME", help="header captured as length only (repeatable)")
+    arm.add_argument("--body", default=None,
+                     choices=("none", "metadata", "hashed", "structured"),
+                     help="body capture mode")
+    arm.add_argument("--max-body-bytes", type=int, default=0)
+    arm.add_argument("--max-fields", type=int, default=0)
+    arm.add_argument("--max-depth", type=int, default=0)
+    arm.add_argument("--slabs", type=int, default=0, help="capture budget: slab count")
+    arm.add_argument("--slab-bytes", type=int, default=64 * 1024)
+    arm.add_argument("--expiry", type=float, required=True, metavar="SECONDS",
+                     help="how long the arm stays live (required; no forever arms)")
+    arm.add_argument("--max-matches", type=int, default=0,
+                     help="stop after this many matches (0 = only expiry bounds it)")
+
+    actions.add_parser("status", help="list the active capture arms and the ceiling")
+
+    disarm = actions.add_parser("disarm", help="remove a capture arm by id")
+    disarm.add_argument("--arm-id", type=int, required=True)
 
 
 def options_from_namespace(namespace: argparse.Namespace) -> RunOptions:
@@ -394,14 +464,261 @@ def execute_typegen(namespace: argparse.Namespace) -> int:
         return error.exit_code
 
 
+def execute_inspect(namespace: argparse.Namespace) -> int:
+    # The CLI is a protocol client only: it never imports the application it
+    # inspects. Everything it shows arrived over the Inspector socket.
+    import asyncio
+    import json as _json
+
+    from .inspector import Command, InspectorClient, InspectorError
+
+    async def query() -> dict:
+        async with InspectorClient(namespace.socket) as client:
+            topic = namespace.topic
+            if topic == "summary":
+                hello = await client.hello()
+                workers = await client.call(Command.WORKERS)
+                return {
+                    "server": hello,
+                    "workers": workers["workers"],
+                    "generation": workers["generation"],
+                }
+            if topic == "active":
+                return await client.call(
+                    Command.ACTIVE_REQUESTS,
+                    {"offset": namespace.offset, "limit": namespace.limit},
+                )
+            if topic == "routes":
+                return await client.metadata(
+                    "routes", offset=namespace.offset, limit=namespace.limit
+                )
+            if topic == "explain-route":
+                return await client.explain_route(
+                    route_id=namespace.route_id,
+                    method=namespace.method,
+                    path=namespace.path,
+                )
+            if topic == "explain-plan":
+                if namespace.plan_id is None:
+                    raise CliError("explain-plan needs --plan-id", exit_code=2)
+                return await client.explain_plan(namespace.plan_id)
+            if topic == "timeline":
+                return await client.timeline(
+                    offset=namespace.offset, limit=namespace.limit
+                )
+            if topic == "failures":
+                return await client.recent_failures(
+                    offset=namespace.offset, limit=namespace.limit
+                )
+            if topic == "distributions":
+                return await client.route_distributions()
+            if namespace.table is None:
+                raise CliError("metadata needs --table", exit_code=2)
+            return await client.metadata(
+                namespace.table, offset=namespace.offset, limit=namespace.limit
+            )
+
+    try:
+        body = asyncio.run(query())
+    except InspectorError as error:
+        print(f"wreath inspect: error: {error}", file=sys.stderr)
+        return 1
+    except (ConnectionError, FileNotFoundError) as error:
+        print(f"wreath inspect: cannot reach inspector: {error}", file=sys.stderr)
+        return 1
+    if namespace.as_json:
+        print(_json.dumps({"version": 1, "topic": namespace.topic, "data": body}))
+        return 0
+    _print_inspect(namespace.topic, body)
+    return 0
+
+
+def execute_capture(namespace: argparse.Namespace) -> int:
+    # A protocol client, like `inspect`: it never imports the application. The
+    # token comes from --token or the environment so it stays off the process
+    # table when supplied that way.
+    import asyncio
+    import json as _json
+
+    from .inspector import InspectorClient, InspectorError
+
+    token = namespace.token or os.environ.get("WREATH_CAPTURE_TOKEN")
+    if not token:
+        raise CliError(
+            "a capability token is required (--token or WREATH_CAPTURE_TOKEN)",
+            exit_code=2,
+        )
+
+    async def run() -> dict:
+        async with InspectorClient(namespace.socket) as client:
+            action = namespace.capture_action
+            if action == "status":
+                return await client.capture_status(token=token)
+            if action == "disarm":
+                return await client.disarm_capture(token=token, arm_id=namespace.arm_id)
+            redaction: dict[str, Any] = {}
+            if namespace.allow_headers:
+                redaction["header_allowlist"] = namespace.allow_headers
+            if namespace.hash_headers:
+                redaction["header_hash"] = namespace.hash_headers
+            if namespace.mask_headers:
+                redaction["header_mask"] = namespace.mask_headers
+            if namespace.body is not None:
+                redaction["body"] = namespace.body
+            if namespace.max_body_bytes:
+                redaction["max_body_bytes"] = namespace.max_body_bytes
+            if namespace.max_fields:
+                redaction["max_fields"] = namespace.max_fields
+            if namespace.max_depth:
+                redaction["max_depth"] = namespace.max_depth
+            budget: dict[str, Any] = {"slab_bytes": namespace.slab_bytes}
+            if namespace.slabs:
+                budget["slabs"] = namespace.slabs
+            return await client.arm_capture(
+                token=token,
+                redaction=redaction or None,
+                budget=budget,
+                expiry_seconds=namespace.expiry,
+                max_matches=namespace.max_matches,
+            )
+
+    try:
+        body = asyncio.run(run())
+    except InspectorError as error:
+        print(f"wreath capture: error: {error}", file=sys.stderr)
+        return 1
+    except (ConnectionError, FileNotFoundError) as error:
+        print(f"wreath capture: cannot reach inspector: {error}", file=sys.stderr)
+        return 1
+    if namespace.as_json:
+        print(_json.dumps({"version": 1, "action": namespace.capture_action, "data": body}))
+        return 0
+    _print_capture(namespace.capture_action, body)
+    return 0
+
+
+def _print_capture(action: str, body: dict) -> None:
+    if action == "arm":
+        print(
+            f"armed capture #{body['arm_id']}: expires in {body['expires_in']}s, "
+            f"{'unlimited' if body['remaining_matches'] < 0 else body['remaining_matches']}"
+            " matches"
+        )
+        print(f"  headers: {', '.join(body['headers']) if body['headers'] else 'none'}")
+        return
+    if action == "disarm":
+        print("disarmed" if body["disarmed"] else "no such arm")
+        return
+    # status
+    ceiling = body["ceiling"]
+    print(
+        f"ceiling: {ceiling['capture_slabs']} slabs, "
+        f"{ceiling['max_capture_bytes']} bytes, body={ceiling['body']}"
+    )
+    arms = body["arms"]
+    print(f"{len(arms)} active arm(s)")
+    for arm in arms:
+        remaining = "unlimited" if arm["remaining_matches"] < 0 else arm["remaining_matches"]
+        print(
+            f"  #{arm['arm_id']}: expires in {arm['expires_in']}s, {remaining} matches, "
+            f"headers {', '.join(arm['headers']) if arm['headers'] else 'none'}"
+        )
+
+
+def _print_inspect(topic: str, body: dict) -> None:
+    if topic == "summary":
+        server = body["server"]
+        print(f"wreath inspector (protocol {server['protocol']}, pid {server['pid']})")
+        print(f"capabilities: {', '.join(server['capabilities'])}")
+        for worker in body["workers"]:
+            print(
+                f"worker: mode={worker['mode']} requests={worker['requests']} "
+                f"completions={worker['completions']} active={worker['active_count']}"
+            )
+            print(
+                f"  ring: {worker['ring_occupancy']} occupied "
+                f"(high water {worker['ring_high_water']})"
+            )
+            print(
+                f"  phases: {worker['phase_in_use']}/{worker['phase_capacity']} "
+                f"in use (high water {worker['phase_high_water']})"
+            )
+            losses = {k: v for k, v in worker["losses"].items() if v}
+            print(f"  losses: {losses if losses else 'none'}")
+        return
+    if topic == "active":
+        print(f"{body['total']} active request(s)"
+              + (" [truncated page]" if body.get("truncated") else ""))
+        for row in body["requests"]:
+            print(
+                f"  #{row['request_id']}  {row['protocol']:9s} "
+                f"age {row['age_us']}us  route {row['route_id']}"
+            )
+        return
+    if topic in ("routes", "metadata"):
+        print(f"{body['table']}: {body['total']} row(s)"
+              + (" [truncated page]" if body.get("truncated") else ""))
+        for row in body["rows"]:
+            if "method" in row:
+                print(f"  {row['id']:4d}  {row['method']:7s} {row['path']}")
+            else:
+                print(f"  {row['id']:4d}  {row.get('name', row)}")
+        return
+    if topic in ("timeline", "failures"):
+        label = "failure" if topic == "failures" else "trace"
+        print(
+            f"{body['total']} {label}(s), {body['assembled']} assembled"
+            + (" [truncated page]" if body.get("truncated") else "")
+        )
+        for row in body["traces"]:
+            flag = "!" if row["is_failure"] else " "
+            print(
+                f" {flag}#{row['request_id']}  {row['protocol']:9s} "
+                f"status {row['status']:>3}  {row['terminal']:12s} "
+                f"{row['duration_us']}us  route {row['route_id']}"
+                + (f"  phases={len(row['phases'])}" if row["phases"] else "")
+            )
+        _print_projector_loss(body.get("loss"))
+        return
+    if topic == "distributions":
+        print(f"route distributions ({body['assembled']} assembled)")
+        for row in body["routes"]:
+            where = (
+                f"{row['method']} {row['path']}"
+                if row.get("path")
+                else f"route {row['route_id']}"
+            )
+            avg = row["duration_us_sum"] // row["count"] if row["count"] else 0
+            print(
+                f"  {where}: {row['count']} req, {row['errors']} err, "
+                f"avg {avg}us, max {row['duration_us_max']}us"
+            )
+        _print_projector_loss(body.get("loss"))
+        return
+    for key, value in body.items():
+        print(f"{key}: {value}")
+
+
+def _print_projector_loss(loss: dict | None) -> None:
+    if not loss:
+        return
+    nonzero = {k: v for k, v in loss.items() if v}
+    if nonzero:
+        print(f"  projector loss: {nonzero}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     namespace = build_parser().parse_args(argv)
     try:
         if namespace.command == "typegen":
             return execute_typegen(namespace)
+        if namespace.command == "inspect":
+            return execute_inspect(namespace)
+        if namespace.command == "capture":
+            return execute_capture(namespace)
         options = options_from_namespace(namespace)
         execute(options)
     except CliError as error:
-        print(f"neo: error: {error}", file=sys.stderr)
+        print(f"wreath: error: {error}", file=sys.stderr)
         return error.exit_code
     return 0

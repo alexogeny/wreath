@@ -7,7 +7,6 @@ they export nothing.
 | Module | Planned surface |
 |---|---|
 | `wreath.telemetry` | Native metrics, tracing configuration, and OpenTelemetry integration. |
-| `wreath.inspector` | Live runtime inspection and control surfaces. |
 | `wreath.recording` | Request capture and recording policies. |
 | `wreath.replay` | Transport and endpoint-plan replay. |
 | `wreath.migrations` | Database migration generation and running over `wreath.orm` / `wreath.postgres`. |

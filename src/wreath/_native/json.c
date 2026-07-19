@@ -17,6 +17,7 @@
 #endif
 
 #define WREATH_JSON_MAX_DEPTH 1000
+#define json_token_tape 256  /* signal/cancellation boundary in decoded tokens */
 
 /* ------------------------------------------------------------------ */
 /* Encoder                                                            */
@@ -424,6 +425,7 @@ typedef struct {
     const char *start;
     const char *cur;
     const char *end;
+    Py_ssize_t tokens;
 } Parser;
 
 static PyObject *
@@ -864,6 +866,9 @@ fail:
 static PyObject *
 parse_value(Parser *p)
 {
+    if (++p->tokens % json_token_tape == 0 && PyErr_CheckSignals() < 0) {
+        return NULL;
+    }
     skip_ws(p);
     if (p->cur >= p->end) {
         return decode_error(p, p->cur, "Expecting value");
@@ -939,7 +944,7 @@ parse_value(Parser *p)
 static PyObject *
 parse_document(const char *data, Py_ssize_t len)
 {
-    Parser p = {data, data, data + len};
+    Parser p = {data, data, data + len, 0};
     PyObject *value = parse_value(&p);
     if (value == NULL) {
         return NULL;

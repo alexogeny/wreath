@@ -51,6 +51,8 @@ def build_metadata_image(app: Any) -> MetadataImage:
     databases_table = _Interner()
     for name in databases:
         databases_table.intern(str(name))
+    for name in getattr(app, "_http_clients", {}) or {}:
+        clients.intern(str(name))
     models_table = _Interner()
     for registry in orm_registries.values():
         for model_name in _model_names(registry):

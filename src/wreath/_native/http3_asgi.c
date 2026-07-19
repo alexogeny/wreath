@@ -44,6 +44,20 @@ resolved_future(PyObject *loop, PyObject *value)
 static PyObject *endpoint_loop(WreathH3Conn *c) { return c->endpoint->loop; }
 static PyObject *endpoint_app(WreathH3Conn *c) { return c->endpoint->app; }
 
+static PyObject *
+wreath_request_context_new(
+    PyObject *scope_type, PyObject *asgi, PyObject *http_version,
+    PyObject *method, PyObject *scheme, PyObject *path, PyObject *raw_path,
+    PyObject *query, PyObject *headers, PyObject *server, PyObject *client,
+    PyObject *root_path
+)
+{
+    return wreath_h3_request_capi->new_context(
+        scope_type, asgi, http_version, method, scheme, path, raw_path,
+        query, headers, server, client, root_path
+    );
+}
+
 /* Interned ASGI message keys, resolved once.
  *
  * PyDict_GetItemString builds a fresh str for its key on every call, so reading
@@ -217,9 +231,16 @@ h3_stream_send(PyObject *op, PyObject *message)
             }
             /* Retain the app's exact bytes; never concatenate into a bytearray
              * whose reallocation would move addresses nghttp3 still holds. */
-            if (PyBytes_GET_SIZE(body) > 0 &&
-                PyList_Append(s->resp_chunks, body) < 0) {
-                return NULL;
+            if (PyBytes_GET_SIZE(body) > 0) {
+                if (s->resp_chunks_len == s->resp_chunks_cap) {
+                    Py_ssize_t cap = s->resp_chunks_cap ? s->resp_chunks_cap * 2 : 16;
+                    PyObject **grown = PyMem_Realloc(
+                        s->resp_chunks, (size_t)cap * sizeof(PyObject *));
+                    if (grown == NULL) return PyErr_NoMemory();
+                    s->resp_chunks = grown;
+                    s->resp_chunks_cap = cap;
+                }
+                s->resp_chunks[s->resp_chunks_len++] = Py_NewRef(body);
             }
             if (s->nfr_active) {
                 s->nfr_bytes_out += (uint64_t)PyBytes_GET_SIZE(body);
@@ -253,10 +274,10 @@ read_response_data(nghttp3_conn *conn, int64_t stream_id, nghttp3_vec *vec,
     (void)stream_id;
     (void)conn_user_data;
     WreathH3Stream *s = (WreathH3Stream *)stream_user_data;
-    Py_ssize_t size = s->resp_chunks ? PyList_GET_SIZE(s->resp_chunks) : 0;
+    Py_ssize_t size = s->resp_chunks_len;
     size_t n = 0;
     while (n < veccnt && s->resp_read_index < size) {
-        PyObject *seg = PyList_GET_ITEM(s->resp_chunks, s->resp_read_index);
+        PyObject *seg = s->resp_chunks[s->resp_read_index];
         Py_ssize_t avail = PyBytes_GET_SIZE(seg) - s->resp_read_offset;
         if (avail <= 0) {
             /* An empty chunk is not end-of-body: skip it. */
@@ -299,21 +320,16 @@ h3_release_acked(WreathH3Stream *s, uint64_t datalen)
         return;
     }
     s->resp_payload_acked += datalen;
-    Py_ssize_t size = PyList_GET_SIZE(s->resp_chunks);
+    Py_ssize_t size = s->resp_chunks_len;
     while (s->resp_head < size) {
-        PyObject *seg = PyList_GET_ITEM(s->resp_chunks, s->resp_head);
+        PyObject *seg = s->resp_chunks[s->resp_head];
         uint64_t n = (uint64_t)PyBytes_GET_SIZE(seg);
         if (n > s->resp_payload_acked) {
             break;  /* only partially acknowledged: still exposed */
         }
         s->resp_payload_acked -= n;
-        /* Drop the payload reference now. Retained storage has to fall as
-         * acknowledgements arrive, so it cannot wait for the next compaction;
-         * the emptied slot only holds the list geometry until then. */
-        if (PyList_SetItem(s->resp_chunks, s->resp_head, Py_NewRef(Py_None)) < 0) {
-            PyErr_Clear();
-            return;
-        }
+        /* Drop the payload reference as soon as acknowledgement covers it. */
+        Py_CLEAR(s->resp_chunks[s->resp_head]);
         s->resp_head++;
     }
     /* Compact the released prefix occasionally: the payload is already gone, so
@@ -325,10 +341,12 @@ h3_release_acked(WreathH3Stream *s, uint64_t datalen)
         return;
     }
     if (drop >= size || (drop >= 64 && drop * 2 >= size)) {
-        if (PyList_SetSlice(s->resp_chunks, 0, drop, NULL) < 0) {
-            PyErr_Clear();
-            return;
+        Py_ssize_t live = size - drop;
+        if (live > 0) {
+            memmove(s->resp_chunks, s->resp_chunks + drop,
+                    (size_t)live * sizeof(PyObject *));
         }
+        s->resp_chunks_len = live;
         s->resp_read_index -= drop;
         s->resp_head = 0;
     }
@@ -490,7 +508,7 @@ h3_stream_done(PyObject *op, PyObject *task)
         s->nfr_active = 0;
         /* Route/plan attribution stamped by Python dispatch into the scope dict
          * as a (route_id, plan_id) tuple; left as None for unattributed routes. */
-        if (s->scope != NULL) {
+        if (s->scope != NULL && PyDict_Check(s->scope)) {
             PyObject *attr = PyDict_GetItemString(s->scope, "_wreath_flight");
             if (attr != NULL && PyTuple_CheckExact(attr) &&
                 PyTuple_GET_SIZE(attr) == 2) {
@@ -508,6 +526,9 @@ h3_stream_done(PyObject *op, PyObject *task)
             s->conn->endpoint->nfr_worker, &s->nfr_ctx, wreath_h3_timestamp(),
             (uint32_t)(s->status ? s->status : 200), nfr_terminal, 0,
             (uint64_t)s->body_received, s->nfr_bytes_out);
+        if (wreath_h3_request_capi->check(s->scope)) {
+            wreath_h3_request_capi->sever(s->scope);
+        }
     }
     Py_CLEAR(s->task);
     Py_RETURN_NONE;
@@ -572,7 +593,9 @@ h3_stream_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(s->body_chunks);
     Py_VISIT(s->receive_waiter);
     Py_VISIT(s->resp_headers);
-    Py_VISIT(s->resp_chunks);
+    for (Py_ssize_t i = s->resp_head; i < s->resp_chunks_len; i++) {
+        Py_VISIT(s->resp_chunks[i]);
+    }
     return 0;
 }
 
@@ -591,7 +614,12 @@ h3_stream_clear(PyObject *op)
     s->body_head = 0;
     Py_CLEAR(s->receive_waiter);
     Py_CLEAR(s->resp_headers);
-    Py_CLEAR(s->resp_chunks);
+    for (Py_ssize_t i = s->resp_head; i < s->resp_chunks_len; i++) {
+        Py_XDECREF(s->resp_chunks[i]);
+    }
+    PyMem_Free(s->resp_chunks);
+    s->resp_chunks = NULL;
+    s->resp_chunks_cap = s->resp_chunks_len = 0;
     s->resp_head = 0;
     s->resp_read_index = 0;
     s->resp_read_offset = 0;
@@ -607,9 +635,44 @@ h3_stream_dealloc(PyObject *op)
     Py_TYPE(op)->tp_free(op);
 }
 
+static PyObject *
+h3_stream_wreath_response(
+    WreathH3Stream *self, PyObject *const *args, Py_ssize_t nargs
+)
+{
+    PyObject *start;
+    PyObject *body;
+    PyObject *result;
+    if (nargs != 3) {
+        PyErr_Format(
+            PyExc_TypeError, "_wreath_response expected 3 arguments, got %zd", nargs
+        );
+        return NULL;
+    }
+    start = Py_BuildValue(
+        "{s:s,s:O,s:O}", "type", "http.response.start",
+        "status", args[0], "headers", args[1]
+    );
+    if (start == NULL) return NULL;
+    result = h3_stream_send((PyObject *)self, start);
+    Py_DECREF(start);
+    if (result == NULL) return NULL;
+    Py_DECREF(result);
+    body = Py_BuildValue(
+        "{s:s,s:O}", "type", "http.response.body", "body", args[2]
+    );
+    if (body == NULL) return NULL;
+    result = h3_stream_send((PyObject *)self, body);
+    Py_DECREF(body);
+    return result;
+}
+
+
 static PyMethodDef h3_stream_methods[] = {
     {"_receive", h3_stream_receive, METH_NOARGS, NULL},
     {"_send", h3_stream_send, METH_O, NULL},
+    {"_wreath_response", (PyCFunction)(void (*)(void))h3_stream_wreath_response,
+     METH_FASTCALL, NULL},
     {"_done", h3_stream_done, METH_O, NULL},
     {NULL, NULL, 0, NULL},
 };
@@ -660,7 +723,8 @@ begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     s->receive_waiter = NULL;
     s->request_ended = s->disconnected = 0;
     s->response_started = s->response_ended = 0;
-    s->resp_chunks = PyList_New(0);
+    s->resp_chunks = NULL;
+    s->resp_chunks_cap = s->resp_chunks_len = 0;
     s->resp_head = 0;
     s->resp_read_index = 0;
     s->resp_read_offset = 0;
@@ -671,7 +735,7 @@ begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     s->nfr_active = 0;
     s->nfr_bytes_out = 0;
     PyObject_GC_Track((PyObject *)s);
-    if (s->header_list == NULL || s->body_chunks == NULL || s->resp_chunks == NULL) {
+    if (s->header_list == NULL || s->body_chunks == NULL) {
         Py_DECREF(s);
         return NGHTTP3_ERR_CALLBACK_FAILURE;
     }
@@ -773,12 +837,36 @@ start_request(WreathH3Stream *s)
         Py_XDECREF(method_str); Py_XDECREF(scheme_str); Py_DECREF(scope_headers);
         return -1;
     }
-    PyObject *scope = Py_BuildValue(
-        "{s:s,s:s,s:N,s:N,s:N,s:N,s:N,s:O}",
-        "type", "http", "http_version", "3",
-        "scheme", scheme_str, "method", method_str, "path", path_str,
-        "raw_path", raw_path, "query_string", query, "headers", scope_headers);
-    Py_DECREF(scope_headers);
+    PyObject *scope;
+    if (c->endpoint->native_app != NULL) {
+        PyObject *scope_type = PyUnicode_FromString("http");
+        PyObject *asgi = Py_BuildValue("{s:s,s:s}", "version", "3.0", "spec_version", "2.5");
+        PyObject *http_version = PyUnicode_FromString("3");
+        PyObject *root_path = PyUnicode_FromString("");
+        if (scope_type == NULL || asgi == NULL || http_version == NULL || root_path == NULL) {
+            Py_XDECREF(scope_type); Py_XDECREF(asgi); Py_XDECREF(http_version);
+            Py_XDECREF(root_path); Py_DECREF(path_str); Py_DECREF(raw_path);
+            Py_DECREF(query); Py_DECREF(method_str); Py_DECREF(scheme_str);
+            Py_DECREF(scope_headers);
+            return -1;
+        }
+        scope = wreath_request_context_new(
+            scope_type, asgi, http_version, method_str, scheme_str, path_str,
+            raw_path, query, scope_headers, Py_None, Py_None, root_path
+        );
+        Py_DECREF(scope_type); Py_DECREF(asgi); Py_DECREF(http_version);
+        Py_DECREF(root_path); Py_DECREF(path_str); Py_DECREF(raw_path);
+        Py_DECREF(query); Py_DECREF(method_str); Py_DECREF(scheme_str);
+        Py_DECREF(scope_headers);
+    }
+    else {
+        scope = Py_BuildValue(
+            "{s:s,s:s,s:N,s:N,s:N,s:N,s:N,s:O}",
+            "type", "http", "http_version", "3",
+            "scheme", scheme_str, "method", method_str, "path", path_str,
+            "raw_path", raw_path, "query_string", query, "headers", scope_headers);
+        Py_DECREF(scope_headers);
+    }
     if (scope == NULL) return -1;
     s->scope = scope;
 
@@ -799,7 +887,11 @@ start_request(WreathH3Stream *s)
         /* Signal Python dispatch that a recorder is attached so it stamps
          * route/plan attribution back into the scope; read at completion in
          * h3_stream_done. Absent on the pure-ASGI path (no recorder). */
-        if (PyDict_SetItemString(scope, "_wreath_flight", Py_None) < 0) {
+        if (wreath_h3_request_capi->check(scope)) {
+            wreath_h3_request_capi->set_flight(scope, &s->nfr_ctx, w);
+            wreath_h3_request_capi->set_armed(scope);
+        }
+        else if (PyDict_SetItemString(scope, "_wreath_flight", Py_None) < 0) {
             PyErr_Clear();
         }
         /* Correlate with the incoming W3C traceparent captured above, if any. */
@@ -811,7 +903,9 @@ start_request(WreathH3Stream *s)
     }
 
     PyObject *app_args[3] = {scope, s->receive_callable, s->send_callable};
-    PyObject *coro = PyObject_Vectorcall(endpoint_app(c), app_args, 3, NULL);
+    PyObject *target = c->endpoint->native_app != NULL
+        ? c->endpoint->native_app : endpoint_app(c);
+    PyObject *coro = PyObject_Vectorcall(target, app_args, 3, NULL);
     if (coro == NULL) return -1;
     PyObject *create_task = PyObject_GetAttrString(endpoint_loop(c), "create_task");
     if (create_task == NULL) { Py_DECREF(coro); return -1; }

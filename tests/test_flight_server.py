@@ -501,3 +501,62 @@ async def test_armed_protected_request_emits_an_auth_phase() -> None:
     assert kinds[0] is fs.PhaseKind.AUTH
     assert fs.PhaseKind.HANDLER in kinds and fs.PhaseKind.SERIALIZE in kinds
     assert [r.sequence for r in records] == list(range(len(records)))
+
+
+@pytest.mark.asyncio
+async def test_armed_request_propagates_marker_and_severs_it_at_completion() -> None:
+    # Dispatch binds the ContextVar marker for an armed request so dependency
+    # seams can record phases; completion severs the context, so a binding that
+    # escaped the request is an inert no-op instead of a stale write.
+    from wreath import Response, Wreath
+    from wreath._flight_markers import phase_marker
+
+    app = Wreath()
+    seen: dict = {}
+
+    @app.get("/x")
+    async def handler(request) -> Response:
+        seen["marker"] = phase_marker.get(None)
+        seen["context"] = request._context
+        return Response(b"ok")
+
+    app._compile_routes()
+    recorder = _flight.Recorder(
+        _flight.MODE_DETAILED, ring_records=64, active_requests=8,
+        detailed_sample_rate=1.0, phase_slots=4,
+    )
+    await _drive_app(
+        recorder, app, b"GET /x HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n"
+    )
+
+    assert seen["marker"] is not None  # the seam-visible binding existed
+    context = seen["context"]
+    assert context.flight == 0  # severed at completion
+    before = recorder.drain()
+    records = [r for b in _phase_cells(before) for r in b.records]
+    assert len(records) == 2  # HANDLER + SERIALIZE from dispatch
+    # The escaped binding no-ops: no crash, no new cells, no gauge movement.
+    seen["marker"](int(fs.PhaseKind.DB_QUERY), 0, 0, 1000)
+    assert recorder.drain() == b""
+    assert recorder.phase_in_use == 0
+
+
+@pytest.mark.asyncio
+async def test_pulse_request_does_not_bind_the_marker() -> None:
+    from wreath import Response, Wreath
+    from wreath._flight_markers import phase_marker
+
+    app = Wreath()
+    seen: dict = {}
+
+    @app.get("/x")
+    async def handler(request) -> Response:
+        seen["marker"] = phase_marker.get(None)
+        return Response(b"ok")
+
+    app._compile_routes()
+    recorder = _flight.Recorder(_flight.MODE_PULSE, ring_records=64, active_requests=8)
+    await _drive_app(
+        recorder, app, b"GET /x HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n"
+    )
+    assert seen["marker"] is None

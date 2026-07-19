@@ -59,7 +59,10 @@ def parse(
         if disposition is not None:
             name = _disposition_param(disposition, b"name")
             filename = _disposition_param(disposition, b"filename")
-        parts.append(Part(name, filename, headers, data))
+        # The native splitter returns an owned view into the complete body so
+        # scanning does not duplicate every part. This public API promises
+        # bytes, so materialize only at its boundary.
+        parts.append(Part(name, filename, headers, bytes(data)))
     return parts
 
 

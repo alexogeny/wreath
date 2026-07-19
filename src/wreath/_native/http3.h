@@ -30,6 +30,7 @@
 #include <openssl/ssl.h>
 
 #include "flight.h"
+#include "server_request_capi.h"
 
 struct WreathH3Endpoint;
 struct WreathH3Conn;
@@ -38,6 +39,7 @@ struct WreathH3Conn;
  * same optional capsule _server resolves). NULL leaves every hook a not-taken
  * branch, so a default build pays nothing. Defined in http3_connection.c. */
 extern const WreathFlightCAPI *wreath_h3_flight_capi;
+extern const WreathRequestCAPI *wreath_h3_request_capi;
 uint64_t wreath_h3_next_connection_id(void);
 
 /* Per request stream: ASGI plumbing, mirrors the HTTP/2 stream object. */
@@ -69,7 +71,9 @@ typedef struct {
     /* Response body as immutable segments with stable addresses. nghttp3 is
      * handed pointers into these bytes objects and may reference them until the
      * peer acknowledges them, so a segment is released only once fully acked. */
-    PyObject *resp_chunks;       /* list[bytes] */
+    PyObject **resp_chunks;      /* C-owned vector of bytes references */
+    Py_ssize_t resp_chunks_cap;
+    Py_ssize_t resp_chunks_len;
     Py_ssize_t resp_head;        /* first segment still retained */
     Py_ssize_t resp_read_index;  /* segment currently offered to nghttp3 */
     Py_ssize_t resp_read_offset; /* offset inside that segment */
@@ -111,6 +115,7 @@ typedef struct WreathH3Conn {
 typedef struct WreathH3Endpoint {
     PyObject_HEAD
     PyObject *app;
+    PyObject *native_app;               /* bound Wreath._wreath_http, or NULL */
     PyObject *config;
     PyObject *loop;
     PyObject *registry;

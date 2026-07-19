@@ -576,40 +576,59 @@ receive_pressure_resume(WreathHttpProtocol *self)
     return 0;
 }
 
-/* Append to the queue tail, maintaining the logical length. */
+static void
+receive_queue_clear(WreathHttpProtocol *self, int release_storage)
+{
+    for (Py_ssize_t i = self->receive_head; i < self->receive_queue_len; i++) {
+        Py_XDECREF(self->receive_queue[i]);
+        self->receive_queue[i] = NULL;
+    }
+    self->receive_head = 0;
+    self->receive_queue_len = 0;
+    self->queued_messages = 0;
+    if (release_storage) {
+        PyMem_Free(self->receive_queue);
+        self->receive_queue = NULL;
+        self->receive_queue_cap = 0;
+    }
+}
+
+/* Append to the native queue tail, retaining one message reference. */
 static int
 receive_queue_push(WreathHttpProtocol *self, PyObject *msg)
 {
-    if (PyList_Append(self->receive_queue, msg) < 0) {
-        return -1;
+    if (self->receive_queue_len == self->receive_queue_cap) {
+        if (self->receive_head > 0) {
+            Py_ssize_t live = self->receive_queue_len - self->receive_head;
+            memmove(self->receive_queue, self->receive_queue + self->receive_head,
+                    (size_t)live * sizeof(PyObject *));
+            self->receive_queue_len = live;
+            self->receive_head = 0;
+        }
+        if (self->receive_queue_len == self->receive_queue_cap) {
+            Py_ssize_t cap = self->receive_queue_cap ? self->receive_queue_cap * 2 : 16;
+            PyObject **grown = PyMem_Realloc(
+                self->receive_queue, (size_t)cap * sizeof(PyObject *));
+            if (grown == NULL) return PyErr_NoMemory(), -1;
+            self->receive_queue = grown;
+            self->receive_queue_cap = cap;
+        }
     }
+    self->receive_queue[self->receive_queue_len++] = Py_NewRef(msg);
     self->queued_messages++;
     return 0;
 }
 
-/* Take a strong reference to the front message, then advance and maybe compact.
- * The reference is taken before any compaction, so the returned object is never
- * a borrowed pointer into a prefix that is about to be released. */
+/* Transfer the queue's owned reference to the caller. */
 static PyObject *
 receive_queue_pop(WreathHttpProtocol *self)
 {
-    PyObject *msg = Py_NewRef(PyList_GET_ITEM(self->receive_queue, self->receive_head));
-    self->receive_head++;
+    PyObject *msg = self->receive_queue[self->receive_head];
+    self->receive_queue[self->receive_head++] = NULL;
     self->queued_messages--;
-    Py_ssize_t size = PyList_GET_SIZE(self->receive_queue);
-    if (self->receive_head >= size) {
-        if (PyList_SetSlice(self->receive_queue, 0, size, NULL) < 0) {
-            Py_DECREF(msg);
-            return NULL;
-        }
+    if (self->receive_head == self->receive_queue_len) {
         self->receive_head = 0;
-    }
-    else if (self->receive_head >= 64 && self->receive_head * 2 >= size) {
-        if (PyList_SetSlice(self->receive_queue, 0, self->receive_head, NULL) < 0) {
-            Py_DECREF(msg);
-            return NULL;
-        }
-        self->receive_head = 0;
+        self->receive_queue_len = 0;
     }
     return msg;
 }
@@ -965,10 +984,8 @@ parse_content_length_header(PyObject *value, Py_ssize_t *out)
 
 
 static int
-begin_response(WreathHttpProtocol *self, PyObject *message)
+begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *headers)
 {
-    PyObject *status_obj = PyDict_GetItem(message, s_status);
-    PyObject *headers = PyDict_GetItem(message, s_headers);
     PyObject *items = NULL;
     long status;
     Py_ssize_t reason_size;
@@ -1107,6 +1124,15 @@ error:
     Py_XDECREF(items);
     clear_response_builder(self);
     return -1;
+}
+
+
+static int
+begin_response(WreathHttpProtocol *self, PyObject *message)
+{
+    return begin_response_parts(
+        self, PyDict_GetItem(message, s_status), PyDict_GetItem(message, s_headers)
+    );
 }
 
 
@@ -1254,10 +1280,8 @@ finish_response(WreathHttpProtocol *self, int keep_alive)
 
 
 static PyObject *
-write_body(WreathHttpProtocol *self, PyObject *message)
+write_body_parts(WreathHttpProtocol *self, PyObject *body, PyObject *more_obj)
 {
-    PyObject *body = PyDict_GetItem(message, s_body);
-    PyObject *more_obj = PyDict_GetItem(message, s_more_body);
     Py_ssize_t body_size;
     int more;
     int suppress = self->response_suppress_body;
@@ -1350,6 +1374,129 @@ write_body(WreathHttpProtocol *self, PyObject *message)
         return completed_none();
     }
     return maybe_drain(self);
+}
+
+
+static PyObject *
+write_body(WreathHttpProtocol *self, PyObject *message)
+{
+    return write_body_parts(
+        self, PyDict_GetItem(message, s_body), PyDict_GetItem(message, s_more_body)
+    );
+}
+
+
+static PyObject *
+http_wreath_response(
+    WreathHttpProtocol *self, PyObject *const *args, Py_ssize_t nargs
+)
+{
+    if (nargs != 3) {
+        PyErr_Format(
+            PyExc_TypeError, "_wreath_response expected 3 arguments, got %zd", nargs
+        );
+        return NULL;
+    }
+    if (self->disconnected && self->response_started) {
+        PyErr_SetString(disconnect_error, "peer disconnected");
+        return NULL;
+    }
+    if (self->ws_mode) {
+        PyErr_SetString(PyExc_RuntimeError, "HTTP response used for WebSocket request");
+        return NULL;
+    }
+    if (self->response_started) {
+        PyErr_SetString(PyExc_RuntimeError, "response already started");
+        return NULL;
+    }
+    if (begin_response_parts(self, args[0], args[1]) < 0) {
+        return NULL;
+    }
+    return write_body_parts(self, args[2], NULL);
+}
+
+
+static PyObject *
+http_wreath_file_start(
+    WreathHttpProtocol *self, PyObject *const *args, Py_ssize_t nargs
+)
+{
+    PyObject *empty;
+    PyObject *sendfile;
+    PyObject *offset;
+    PyObject *count;
+    PyObject *awaitable;
+    Py_ssize_t size;
+    int body_coalesced = 0;
+
+    if (nargs != 4) {
+        PyErr_Format(
+            PyExc_TypeError, "_wreath_file_start expected 4 arguments, got %zd", nargs
+        );
+        return NULL;
+    }
+    if (self->response_started || self->ws_mode) {
+        PyErr_SetString(PyExc_RuntimeError, "response already started");
+        return NULL;
+    }
+    size = PyLong_AsSsize_t(args[3]);
+    if (size < 0 || (size == -1 && PyErr_Occurred())) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_ValueError, "wreath.file size cannot be negative");
+        }
+        return NULL;
+    }
+    if (begin_response_parts(self, args[0], args[1]) < 0) {
+        return NULL;
+    }
+    if (!self->resp_has_length || self->resp_content_length != size) {
+        PyErr_SetString(PyExc_RuntimeError, "wreath.file content-length mismatch");
+        return NULL;
+    }
+    empty = PyBytes_FromStringAndSize("", 0);
+    if (empty == NULL) {
+        return NULL;
+    }
+    if (decide_framing_and_write_head(self, empty, 1, &body_coalesced) < 0) {
+        Py_DECREF(empty);
+        return NULL;
+    }
+    Py_DECREF(empty);
+    if (size == 0) {
+        return completed_none();
+    }
+
+    sendfile = PyObject_GetAttrString(self->loop, "sendfile");
+    offset = PyLong_FromLong(0);
+    count = PyLong_FromSsize_t(size);
+    if (sendfile == NULL || offset == NULL || count == NULL) {
+        Py_XDECREF(sendfile);
+        Py_XDECREF(offset);
+        Py_XDECREF(count);
+        return NULL;
+    }
+    awaitable = PyObject_CallFunctionObjArgs(
+        sendfile, self->transport, args[2], offset, count, NULL
+    );
+    Py_DECREF(sendfile);
+    Py_DECREF(offset);
+    Py_DECREF(count);
+    return awaitable;
+}
+
+
+static PyObject *
+http_wreath_file_finish(WreathHttpProtocol *self, PyObject *Py_UNUSED(ignored))
+{
+    if (!self->response_started || self->response_complete) {
+        PyErr_SetString(PyExc_RuntimeError, "wreath.file response is not active");
+        return NULL;
+    }
+    self->response_body_sent = self->resp_content_length;
+    if (finish_response(self, self->response_keep_alive) < 0) {
+        return NULL;
+    }
+    return completed_none();
 }
 
 
@@ -2054,7 +2201,6 @@ begin_websocket(WreathHttpProtocol *self, PyObject *method, long minor, PyObject
     PyObject *scope = NULL;
     PyObject *scheme;
     PyObject *connect_msg = NULL;
-    PyObject *queue = NULL;
     Py_ssize_t n = PyList_GET_SIZE(headers);
     int result = -1;
 
@@ -2180,17 +2326,13 @@ begin_websocket(WreathHttpProtocol *self, PyObject *method, long minor, PyObject
     self->ws_frag_count = 0;
 
     connect_msg = PyDict_New();
-    queue = PyList_New(0);
-    if (connect_msg == NULL || queue == NULL ||
+    receive_queue_clear(self, 0);
+    if (connect_msg == NULL ||
         PyDict_SetItem(connect_msg, s_type, s_ws_connect) < 0 ||
-        PyList_Append(queue, connect_msg) < 0) {
+        receive_queue_push(self, connect_msg) < 0) {
         goto done;
     }
-    Py_XSETREF(self->receive_queue, queue);
-    queue = NULL;
     Py_CLEAR(self->receive_waiter);
-    self->receive_head = 0;
-    self->queued_messages = 1;  /* the websocket.connect message just queued */
     self->queued_bytes = 0;
     self->disconnected = 0;
     self->pending_empty_request = 0;
@@ -2238,7 +2380,6 @@ done:
     Py_XDECREF(protocols);
     Py_XDECREF(scope);
     Py_XDECREF(connect_msg);
-    Py_XDECREF(queue);
     return result;
 }
 
@@ -2303,16 +2444,8 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
     }
 
     reset_response_state(self, headers);
-    {
-        PyObject *queue = PyList_New(0);
-        if (queue == NULL) {
-            goto done;
-        }
-        Py_XSETREF(self->receive_queue, queue);
-    }
+    receive_queue_clear(self, 0);
     Py_CLEAR(self->receive_waiter);
-    self->receive_head = 0;
-    self->queued_messages = 0;
     self->queued_bytes = 0;
     self->disconnected = 0;
     self->request_more_body = 1;
@@ -2385,9 +2518,13 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
         }
         /* The arming decision (and its scratch slot) is made by context_start,
          * after build_scope attached the recorder context, so the armed state is
-         * promoted onto the context here — before dispatch reads `flight`. */
-        if (wreath_request_context_check(scope)) {
-            wreath_request_context_set_armed(scope);
+         * promoted onto the context here — before dispatch reads `flight`. An
+         * armed context is retained so completion can sever its borrowed
+         * recorder pointers; unarmed requests retain nothing. */
+        if (wreath_request_context_check(scope) &&
+            wreath_request_context_set_armed(scope)) {
+            Py_INCREF(scope);
+            Py_XSETREF(self->nfr_http_scope, scope);
         }
     }
 
@@ -3127,13 +3264,25 @@ run_drive(WreathHttpProtocol *self)
 }
 
 
+static void
+shrink_idle_input_buffer(WreathHttpProtocol *self)
+{
+    const Py_ssize_t retained = 65536;
+    if (self->buf_cap <= retained || self->buf_len != 0 || self->cursor != 0 ||
+        self->read_exports > 0 || self->read_offer_size > 0) {
+        return;
+    }
+    char *shrunk = PyMem_Realloc(self->buf, (size_t)retained);
+    if (shrunk != NULL) {
+        self->buf = shrunk;
+        self->buf_cap = retained;
+    }
+}
+
 static int
 reset_request(WreathHttpProtocol *self)
 {
-    Py_ssize_t queued = PyList_GET_SIZE(self->receive_queue);
-    if (queued > 0 && PyList_SetSlice(self->receive_queue, 0, queued, NULL) < 0) {
-        return -1;
-    }
+    receive_queue_clear(self, 0);
     Py_CLEAR(self->receive_waiter);
     self->pending_empty_request = 0;
     self->receive_head = 0;
@@ -3149,6 +3298,7 @@ reset_request(WreathHttpProtocol *self)
         }
         self->reading_paused = 0;
     }
+    shrink_idle_input_buffer(self);
     return 0;
 }
 
@@ -3680,6 +3830,12 @@ advance:
                                  nfr_terminal, 0, self->nfr_bytes_in,
                                  self->nfr_bytes_out);
     }
+    /* The armed context (if any) is spent with its completion: sever its
+     * recorder pointers so any escaped `_flight_phase` binding goes inert. */
+    if (self->nfr_http_scope != NULL) {
+        wreath_request_context_sever(self->nfr_http_scope);
+        Py_CLEAR(self->nfr_http_scope);
+    }
     if (self->want_next && !self->closing) {
         self->want_next = 0;
         if (reset_request(self) < 0) {
@@ -3734,7 +3890,9 @@ http_protocol_traverse(WreathHttpProtocol *self, visitproc visit, void *arg)
     Py_VISIT(self->loop_create_task);
     Py_VISIT(self->loop_call_later);
     Py_VISIT(self->deadline_callable);
-    Py_VISIT(self->receive_queue);
+    for (Py_ssize_t i = self->receive_head; i < self->receive_queue_len; i++) {
+        Py_VISIT(self->receive_queue[i]);
+    }
     Py_VISIT(self->receive_waiter);
     Py_VISIT(self->drain_waiter);
     Py_VISIT(self->task);
@@ -3743,6 +3901,7 @@ http_protocol_traverse(WreathHttpProtocol *self, visitproc visit, void *arg)
     Py_VISIT(self->ws_frag_buffer);
     Py_VISIT(self->ws_key);
     Py_VISIT(self->nfr_ws_scope);
+    Py_VISIT(self->nfr_http_scope);
     return 0;
 }
 
@@ -3773,9 +3932,7 @@ http_protocol_clear(WreathHttpProtocol *self)
     Py_CLEAR(self->loop_create_task);
     Py_CLEAR(self->loop_call_later);
     Py_CLEAR(self->deadline_callable);
-    Py_CLEAR(self->receive_queue);
-    self->receive_head = 0;
-    self->queued_messages = 0;
+    receive_queue_clear(self, 1);
     Py_CLEAR(self->receive_waiter);
     Py_CLEAR(self->drain_waiter);
     Py_CLEAR(self->task);
@@ -3784,6 +3941,12 @@ http_protocol_clear(WreathHttpProtocol *self)
     Py_CLEAR(self->ws_frag_buffer);
     Py_CLEAR(self->ws_key);
     Py_CLEAR(self->nfr_ws_scope);
+    if (self->nfr_http_scope != NULL) {
+        /* The context may be kept alive elsewhere (an escaped marker binding);
+         * sever before dropping so it cannot reach the dying protocol. */
+        wreath_request_context_sever(self->nfr_http_scope);
+        Py_CLEAR(self->nfr_http_scope);
+    }
     return 0;
 }
 
@@ -3906,9 +4069,6 @@ http_protocol_init(WreathHttpProtocol *self, PyObject *args, PyObject *kwargs)
         return -1;
     }
 
-    if (self->receive_queue == NULL) {
-        self->receive_queue = PyList_New(0);
-    }
     if (self->receive_callable == NULL) {
         self->receive_callable = PyObject_GetAttrString((PyObject *)self, "_asgi_receive");
         self->send_callable = PyObject_GetAttrString((PyObject *)self, "_asgi_send");
@@ -3924,8 +4084,8 @@ http_protocol_init(WreathHttpProtocol *self, PyObject *args, PyObject *kwargs)
         self->loop_call_later = PyObject_GetAttrString(loop, "call_later");
         self->deadline_callable = PyObject_GetAttrString((PyObject *)self, "_on_deadline");
     }
-    if (self->receive_queue == NULL || self->receive_callable == NULL ||
-        self->send_callable == NULL || self->done_callable == NULL ||
+    if (self->receive_callable == NULL || self->send_callable == NULL ||
+        self->done_callable == NULL ||
         self->asgi_metadata == NULL || self->scope_type == NULL ||
         self->http_version_10 == NULL || self->http_version_11 == NULL ||
         self->root_path == NULL || self->loop_create_future == NULL ||
@@ -3962,6 +4122,12 @@ static PyMethodDef http_protocol_methods[] = {
      "ASGI receive callable (returns an awaitable)."},
     {"_asgi_send", (PyCFunction)http_asgi_send, METH_O,
      "ASGI send callable (returns an awaitable)."},
+    {"_wreath_response", (PyCFunction)(void (*)(void))http_wreath_response,
+     METH_FASTCALL, "Emit one complete Wreath response without an ASGI message dict."},
+    {"_wreath_file_start", (PyCFunction)(void (*)(void))http_wreath_file_start,
+     METH_FASTCALL, "Start a private wreath.file descriptor response."},
+    {"_wreath_file_finish", (PyCFunction)http_wreath_file_finish, METH_NOARGS,
+     "Finish a private wreath.file descriptor response."},
     {"_on_app_done", (PyCFunction)http_on_app_done, METH_O,
      "Finalize a completed application task."},
     {"_on_deadline", (PyCFunction)http_on_deadline, METH_NOARGS,

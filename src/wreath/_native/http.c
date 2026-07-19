@@ -90,6 +90,15 @@ header_name_object(const uint8_t *lowered, Py_ssize_t len)
     return PyBytes_FromStringAndSize((const char *)lowered, len);
 }
 
+/* Header construction is a replaceable parser sink. Keeping allocation outside
+ * the request-line/state machine lets the server substitute a lazy raw-header
+ * sink without duplicating syntax validation. */
+static PyObject *
+new_request_header_sink(void)
+{
+    return PyList_New(0);
+}
+
 int
 wreath_http_parse_request_parts(
     const uint8_t *data, Py_ssize_t len, Py_ssize_t head_end_off,
@@ -145,7 +154,7 @@ wreath_http_parse_request_parts(
     }
     minor_version = p[7] - '0';
     p += 10;
-    headers = PyList_New(0);
+    headers = new_request_header_sink();
     if (headers == NULL) goto error;
     while (p < end) {
         const uint8_t *name_start;

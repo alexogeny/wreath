@@ -56,9 +56,11 @@ typedef struct {
     PyObject *send_callable;   /* bound _send */
     PyObject *done_callable;   /* bound _done */
 
-    /* request body plumbing */
-    PyObject *body_chunks;     /* list[bytes] buffered until receive() */
-    Py_ssize_t body_head;      /* first unconsumed chunk; see the queue rule */
+    /* request body plumbing: C-owned queue of bytes objects */
+    PyObject **body_chunks;
+    Py_ssize_t body_cap;
+    Py_ssize_t body_len;
+    Py_ssize_t body_head;
     PyObject *receive_waiter;  /* Future or NULL */
     int request_ended;         /* END_STREAM seen for the request */
     int disconnected;          /* reset/closed: deliver http.disconnect */
@@ -106,6 +108,7 @@ static void h2_abort_pending_send(Http2Stream *st);
 typedef struct {
     PyObject_HEAD
     PyObject *app;
+    PyObject *native_app;       /* bound Wreath._wreath_http, or NULL */
     PyObject *loop;
     PyObject *registry;
     PyObject *config;
@@ -192,41 +195,57 @@ h2_future_set_result(PyObject *future, PyObject *result)
     return 0;
 }
 
-/* --- indexed queue ------------------------------------------------------- */
-/* An owned list plus a head index. Taking the front is O(1) and the consumed
- * prefix is dropped in one slice, rather than PySequence_DelItem(list, 0)
- * shifting every remaining element on every single take. The logical length is
- * always size - head; the raw list length is never the answer. */
-
+/* --- native request-body queue ------------------------------------------ */
 static Py_ssize_t
-queue_len(PyObject *list, Py_ssize_t head)
+body_queue_len(Http2Stream *self)
 {
-    return list == NULL ? 0 : PyList_GET_SIZE(list) - head;
+    return self->body_len - self->body_head;
 }
 
-/* Take a strong reference to the front item, then advance and maybe compact.
- * The reference is taken before any compaction, so the returned object is never
- * a borrowed pointer into a prefix that is about to be released. */
-static PyObject *
-queue_pop(PyObject *list, Py_ssize_t *head)
+static void
+body_queue_clear(Http2Stream *self)
 {
-    PyObject *item = Py_NewRef(PyList_GET_ITEM(list, *head));
-    (*head)++;
-    Py_ssize_t size = PyList_GET_SIZE(list);
-    if (*head >= size) {
-        if (PyList_SetSlice(list, 0, size, NULL) < 0) {
-            Py_DECREF(item);
-            return NULL;
-        }
-        *head = 0;
-    } else if (*head >= 64 && *head * 2 >= size) {
-        if (PyList_SetSlice(list, 0, *head, NULL) < 0) {
-            Py_DECREF(item);
-            return NULL;
-        }
-        *head = 0;
+    for (Py_ssize_t i = self->body_head; i < self->body_len; i++) {
+        Py_XDECREF(self->body_chunks[i]);
     }
-    return item;
+    PyMem_Free(self->body_chunks);
+    self->body_chunks = NULL;
+    self->body_cap = self->body_len = self->body_head = 0;
+}
+
+static int
+body_queue_push(Http2Stream *self, PyObject *body)
+{
+    if (self->body_len == self->body_cap) {
+        if (self->body_head > 0) {
+            Py_ssize_t live = body_queue_len(self);
+            memmove(self->body_chunks, self->body_chunks + self->body_head,
+                    (size_t)live * sizeof(PyObject *));
+            self->body_len = live;
+            self->body_head = 0;
+        }
+        if (self->body_len == self->body_cap) {
+            Py_ssize_t cap = self->body_cap ? self->body_cap * 2 : 16;
+            PyObject **grown = PyMem_Realloc(
+                self->body_chunks, (size_t)cap * sizeof(PyObject *));
+            if (grown == NULL) return PyErr_NoMemory(), -1;
+            self->body_chunks = grown;
+            self->body_cap = cap;
+        }
+    }
+    self->body_chunks[self->body_len++] = body; /* steals */
+    return 0;
+}
+
+static PyObject *
+body_queue_pop(Http2Stream *self)
+{
+    PyObject *body = self->body_chunks[self->body_head];
+    self->body_chunks[self->body_head++] = NULL;
+    if (self->body_head == self->body_len) {
+        self->body_head = self->body_len = 0;
+    }
+    return body; /* transfers */
 }
 
 static int
@@ -406,13 +425,12 @@ stream_receive(PyObject *op, PyObject *Py_UNUSED(ignored))
         return aw;
     }
     /* buffered body? */
-    if (queue_len(self->body_chunks, self->body_head) > 0) {
-        PyObject *body = queue_pop(self->body_chunks, &self->body_head);
+    if (body_queue_len(self) > 0) {
+        PyObject *body = body_queue_pop(self);
         if (body == NULL) {
             return NULL;
         }
-        int more = (queue_len(self->body_chunks, self->body_head) > 0)
-                   || !self->request_ended;
+        int more = body_queue_len(self) > 0 || !self->request_ended;
         PyObject *msg = Py_BuildValue("{s:s,s:O,s:O}", "type", "http.request",
                                       "body", body, "more_body",
                                       more ? Py_True : Py_False);
@@ -797,6 +815,46 @@ stream_send(PyObject *op, PyObject *message)
     return completed_none();
 }
 
+
+static PyObject *
+stream_wreath_response(Http2Stream *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *start;
+    PyObject *body;
+    PyObject *result;
+
+    if (nargs != 3) {
+        PyErr_Format(
+            PyExc_TypeError, "_wreath_response expected 3 arguments, got %zd", nargs
+        );
+        return NULL;
+    }
+    start = Py_BuildValue(
+        "{s:s,s:O,s:O}", "type", "http.response.start",
+        "status", args[0], "headers", args[1]
+    );
+    if (start == NULL) {
+        return NULL;
+    }
+    result = stream_send((PyObject *)self, start);
+    Py_DECREF(start);
+    if (result == NULL) {
+        return NULL;
+    }
+    Py_DECREF(result);
+
+    body = Py_BuildValue(
+        "{s:s,s:O}", "type", "http.response.body", "body", args[2]
+    );
+    if (body == NULL) {
+        return NULL;
+    }
+    result = stream_send((PyObject *)self, body);
+    Py_DECREF(body);
+    return result;
+}
+
+
 static void
 h2_maybe_close_stream(PyObject *proto, Http2Stream *st)
 {
@@ -849,7 +907,7 @@ stream_done(PyObject *op, PyObject *task)
         self->nfr_active = 0;
         /* Route/plan attribution stamped by Python dispatch into the scope dict
          * as a (route_id, plan_id) tuple; left as None for unattributed routes. */
-        if (self->scope != NULL) {
+        if (self->scope != NULL && PyDict_Check(self->scope)) {
             PyObject *attr = PyDict_GetItemString(self->scope, "_wreath_flight");
             if (attr != NULL && PyTuple_CheckExact(attr) &&
                 PyTuple_GET_SIZE(attr) == 2) {
@@ -867,6 +925,9 @@ stream_done(PyObject *op, PyObject *task)
                                  wreath_flight_now_ns(), (uint32_t)self->nfr_status,
                                  nfr_terminal, 0, (uint64_t)self->body_received,
                                  self->nfr_bytes_out);
+        if (wreath_request_context_check(self->scope)) {
+            wreath_request_context_sever(self->scope);
+        }
     }
     if (exc != NULL && exc != Py_None) {
         /* Application raised. */
@@ -908,6 +969,8 @@ stream_done(PyObject *op, PyObject *task)
 static PyMethodDef stream_methods[] = {
     {"_receive", stream_receive, METH_NOARGS, NULL},
     {"_send", stream_send, METH_O, NULL},
+    {"_wreath_response", (PyCFunction)(void (*)(void))stream_wreath_response,
+     METH_FASTCALL, NULL},
     {"_done", stream_done, METH_O, NULL},
     {NULL, NULL, 0, NULL},
 };
@@ -922,7 +985,9 @@ stream_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->receive_callable);
     Py_VISIT(self->send_callable);
     Py_VISIT(self->done_callable);
-    Py_VISIT(self->body_chunks);
+    for (Py_ssize_t i = self->body_head; i < self->body_len; i++) {
+        Py_VISIT(self->body_chunks[i]);
+    }
     Py_VISIT(self->receive_waiter);
     Py_VISIT(self->pending_body);
     Py_VISIT(self->send_waiter);
@@ -939,8 +1004,7 @@ stream_clear(PyObject *op)
     Py_CLEAR(self->receive_callable);
     Py_CLEAR(self->send_callable);
     Py_CLEAR(self->done_callable);
-    Py_CLEAR(self->body_chunks);
-    self->body_head = 0;
+    body_queue_clear(self);
     Py_CLEAR(self->receive_waiter);
     Py_CLEAR(self->pending_body);
     self->pending_offset = 0;
@@ -1115,17 +1179,43 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope)
         Py_XDECREF(method_str); Py_DECREF(scope_headers);
         return -2;
     }
-    PyObject *scope = Py_BuildValue(
-        "{s:s,s:s,s:s,s:N,s:N,s:N,s:N,s:O}",
-        "type", "http",
-        "http_version", "2",
-        "scheme", "https",
-        "method", method_str,
-        "path", path_str,
-        "raw_path", raw_path,
-        "query_string", query,
-        "headers", scope_headers);
-    Py_DECREF(scope_headers);
+    PyObject *scope;
+    if (self->native_app != NULL) {
+        PyObject *scope_type = PyUnicode_FromString("http");
+        PyObject *asgi = Py_BuildValue("{s:s,s:s}", "version", "3.0", "spec_version", "2.5");
+        PyObject *http_version = PyUnicode_FromString("2");
+        PyObject *scheme = PyUnicode_FromString("https");
+        PyObject *root_path = PyUnicode_FromString("");
+        if (scope_type == NULL || asgi == NULL || http_version == NULL ||
+            scheme == NULL || root_path == NULL) {
+            Py_XDECREF(scope_type); Py_XDECREF(asgi); Py_XDECREF(http_version);
+            Py_XDECREF(scheme); Py_XDECREF(root_path);
+            Py_DECREF(method_str); Py_DECREF(path_str); Py_DECREF(raw_path);
+            Py_DECREF(query); Py_DECREF(scope_headers);
+            return -2;
+        }
+        scope = wreath_request_context_new(
+            scope_type, asgi, http_version, method_str, scheme, path_str,
+            raw_path, query, scope_headers, Py_None, Py_None, root_path
+        );
+        Py_DECREF(scope_type); Py_DECREF(asgi); Py_DECREF(http_version);
+        Py_DECREF(scheme); Py_DECREF(root_path); Py_DECREF(method_str);
+        Py_DECREF(path_str); Py_DECREF(raw_path); Py_DECREF(query);
+        Py_DECREF(scope_headers);
+    }
+    else {
+        scope = Py_BuildValue(
+            "{s:s,s:s,s:s,s:N,s:N,s:N,s:N,s:O}",
+            "type", "http",
+            "http_version", "2",
+            "scheme", "https",
+            "method", method_str,
+            "path", path_str,
+            "raw_path", raw_path,
+            "query_string", query,
+            "headers", scope_headers);
+        Py_DECREF(scope_headers);
+    }
     if (scope == NULL) {
         return -2;
     }
@@ -1171,8 +1261,8 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     st->receive_callable = NULL;
     st->send_callable = NULL;
     st->done_callable = NULL;
-    st->body_chunks = PyList_New(0);
-    st->body_head = 0;
+    st->body_chunks = NULL;
+    st->body_cap = st->body_len = st->body_head = 0;
     st->receive_waiter = NULL;
     st->request_ended = end_stream;
     st->disconnected = 0;
@@ -1190,10 +1280,6 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     st->nfr_active = 0;
     st->nfr_bytes_out = 0;
     PyObject_GC_Track((PyObject *)st);
-    if (st->body_chunks == NULL) {
-        Py_DECREF(st);
-        return -1;
-    }
 
     /* content-length from headers */
     Py_ssize_t hc = PyList_GET_SIZE(header_list);
@@ -1240,7 +1326,13 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
         /* Signal Python dispatch that a recorder is attached to this request so
          * it stamps route/plan attribution back into the scope; read at
          * completion below. Absent on the pure-ASGI path (no recorder). */
-        if (PyDict_SetItemString(st->scope, "_wreath_flight", Py_None) < 0) {
+        if (wreath_request_context_check(st->scope)) {
+            wreath_request_context_set_flight(
+                st->scope, &st->nfr_ctx, self->nfr_worker
+            );
+            wreath_request_context_set_armed(st->scope);
+        }
+        else if (PyDict_SetItemString(st->scope, "_wreath_flight", Py_None) < 0) {
             PyErr_Clear();
         }
         for (Py_ssize_t i = 0; i < PyList_GET_SIZE(header_list); i++) {
@@ -1259,7 +1351,8 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
 
     /* spawn task: loop.create_task(app(scope, receive, send)) */
     PyObject *app_args[3] = {scope, st->receive_callable, st->send_callable};
-    PyObject *coro = PyObject_Vectorcall(self->app, app_args, 3, NULL);
+    PyObject *target = self->native_app != NULL ? self->native_app : self->app;
+    PyObject *coro = PyObject_Vectorcall(target, app_args, 3, NULL);
     if (coro == NULL) {
         Py_DECREF(st);
         return -1;
@@ -1335,11 +1428,10 @@ deliver_body(Http2Protocol *self, Http2Stream *st, const uint8_t *data,
     }
     if (len > 0) {
         PyObject *body = PyBytes_FromStringAndSize((const char *)data, len);
-        if (body == NULL || PyList_Append(st->body_chunks, body) < 0) {
+        if (body == NULL || body_queue_push(st, body) < 0) {
             Py_XDECREF(body);
             return -1;
         }
-        Py_DECREF(body);
     }
     return 0;
 }
@@ -1711,6 +1803,18 @@ dispatch_frame(Http2Protocol *self, int type, int flags, uint32_t sid,
     }
 }
 
+static void
+shrink_idle_input_buffer(Http2Protocol *self)
+{
+    const Py_ssize_t retained = 65536;
+    if (self->buf_len != 0 || self->cursor != 0 || self->buf_cap <= retained) return;
+    char *shrunk = PyMem_Realloc(self->buf, (size_t)retained);
+    if (shrunk != NULL) {
+        self->buf = shrunk;
+        self->buf_cap = retained;
+    }
+}
+
 /* Parse and dispatch all complete frames in the input buffer. */
 static int
 parse_frames(Http2Protocol *self)
@@ -1745,6 +1849,7 @@ parse_frames(Http2Protocol *self)
         self->buf_len = remaining;
         self->cursor = 0;
     }
+    shrink_idle_input_buffer(self);
     return 0;
 }
 
@@ -1987,6 +2092,7 @@ h2_traverse(PyObject *op, visitproc visit, void *arg)
 {
     Http2Protocol *self = (Http2Protocol *)op;
     Py_VISIT(self->app);
+    Py_VISIT(self->native_app);
     Py_VISIT(self->loop);
     Py_VISIT(self->registry);
     Py_VISIT(self->config);
@@ -2005,6 +2111,7 @@ h2_clear(PyObject *op)
 {
     Http2Protocol *self = (Http2Protocol *)op;
     Py_CLEAR(self->app);
+    Py_CLEAR(self->native_app);
     Py_CLEAR(self->loop);
     Py_CLEAR(self->registry);
     Py_CLEAR(self->config);
@@ -2053,6 +2160,10 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
     self->nfr_connection_id =
         self->nfr_worker != NULL ? wreath_flight_next_connection_id() : 0;
     self->app = Py_NewRef(app);
+    self->native_app = PyObject_GetAttrString(app, "_wreath_http");
+    if (self->native_app == NULL) {
+        PyErr_Clear();
+    }
     self->config = Py_NewRef(config);
     self->loop = Py_NewRef(loop);
     self->registry = Py_NewRef(registry);
