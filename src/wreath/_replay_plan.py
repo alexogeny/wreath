@@ -28,10 +28,11 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Iterator
+from typing import Any
 
 from .request import DEFAULT_LIMITS, Request
 

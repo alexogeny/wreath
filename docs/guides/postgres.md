@@ -25,6 +25,11 @@ Tie the pool's lifetime to your application lifespan (the
 pattern), and declare `DATABASE_URL` as a boot-critical variable so a missing or
 malformed DSN is caught at startup rather than on the first query.
 
+Each connection's automatic prepared-plan LRU is bounded twice: by
+`PoolConfig.statement_cache_size` and by the approximate retained-byte limit
+`PoolConfig.statement_cache_bytes`. Keep both finite when SQL text or result
+metadata can vary by tenant.
+
 Because the exact signatures for pooling, transactions, workloads, and result
 types come straight from the driver, the reference is the authoritative place for
 them.

@@ -262,11 +262,9 @@ extern PyObject *immediate_none;  /* stateless completed awaitable */
 
 
 /* Cached callables for the per-request hot path. */
-extern PyObject *task_class;  /* asyncio.Task */
-extern PyObject *task_kwnames;  /* ("loop", "eager_start") */
 extern PyObject *task_add_done_callback;  /* unbound Task.add_done_callback */
 extern PyObject *task_exception_fn;  /* unbound Task.exception */
-extern PyObject *invalid_state_error;  /* asyncio.InvalidStateError */
+extern PyObject *resume_started_coroutine;  /* Python continuation trampoline */
 
 /* Interned key/value constants so hot dict operations skip per-call string
  * creation and hashing. */

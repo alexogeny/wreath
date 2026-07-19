@@ -433,12 +433,13 @@ async def test_connection_plan_cache_evicts_oldest_and_closes_statement(
     assert any(b"C" in flight for flight in server.flights), server.flights
 
 
+@pytest.mark.parametrize("backend", POSTGRES_BACKENDS)
 @pytest.mark.asyncio
 async def test_connection_plan_cache_evicts_to_its_byte_budget(
-    database: tuple[FakePostgres, str],
+    database: tuple[FakePostgres, str], backend: Any,
 ) -> None:
     _, dsn = database
-    conn = await pure_postgres.connect(dsn, statement_cache_bytes=1)
+    conn = await backend.connect(dsn, statement_cache_bytes=1)
     try:
         await conn.fetchval("select $1::int4", 1)
         assert conn.prepared_plan_count == 0

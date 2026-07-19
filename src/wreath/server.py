@@ -42,6 +42,29 @@ if TYPE_CHECKING:
     from ssl import SSLContext
 
 
+async def _resume_started_coroutine(coroutine: Any, awaited: Any) -> Any:
+    """Resume a coroutine whose first step was run by the native HTTP driver."""
+    while True:
+        try:
+            if awaited is None:
+                await asyncio.sleep(0)
+                result = None
+            else:
+                if getattr(awaited, "_asyncio_future_blocking", False):
+                    awaited._asyncio_future_blocking = False
+                result = await awaited
+        except BaseException as error:
+            try:
+                awaited = coroutine.throw(error)
+            except StopIteration as completed:
+                return completed.value
+        else:
+            try:
+                awaited = coroutine.send(result)
+            except StopIteration as completed:
+                return completed.value
+
+
 def _create_recorder(config: ServerConfig) -> Any:
     """Build one native Flight Recorder for a server run, or None.
 

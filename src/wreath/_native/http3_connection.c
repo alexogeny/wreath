@@ -493,7 +493,9 @@ create_conn(WreathH3Endpoint *ep, const ngtcp2_pkt_hd *hd, const ngtcp2_path *pa
     params.initial_max_stream_data_bidi_local = (uint64_t)ep->initial_stream_window;
     params.initial_max_stream_data_bidi_remote = (uint64_t)ep->initial_stream_window;
     params.initial_max_stream_data_uni = (uint64_t)ep->initial_stream_window;
-    params.initial_max_data = (uint64_t)ep->initial_connection_window;
+    params.initial_max_data = (uint64_t)(
+        ep->initial_connection_window < ep->read_high_water
+            ? ep->initial_connection_window : ep->read_high_water);
     params.initial_max_streams_bidi = (uint64_t)ep->max_concurrent_streams;
     params.initial_max_streams_uni = 3;
     params.max_idle_timeout = 30 * NGTCP2_SECONDS;
@@ -1041,6 +1043,8 @@ endpoint_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwargs))
     ep->local_addrlen_store = 0;
     if (read_ssize(config, "max_concurrent_streams", &ep->max_concurrent_streams) < 0 ||
         read_ssize(config, "max_body_bytes", &ep->max_body_bytes) < 0 ||
+        read_ssize(config, "read_high_water", &ep->read_high_water) < 0 ||
+        read_ssize(config, "read_high_water_messages", &ep->read_high_water_messages) < 0 ||
         read_ssize(config, "max_header_list_bytes", &ep->max_header_list_bytes) < 0 ||
         read_ssize(config, "initial_stream_window", &ep->initial_stream_window) < 0 ||
         read_ssize(config, "initial_connection_window", &ep->initial_connection_window) < 0 ||

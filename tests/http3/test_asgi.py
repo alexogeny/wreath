@@ -49,6 +49,7 @@ async def test_connection_close_propagates_disconnect(h3_module) -> None:
 # wire while the app is still producing. These drive a real QUIC client.
 
 import asyncio  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 from wreath.server import ServerConfig, TLSConfig, serve  # noqa: E402
 
@@ -313,8 +314,7 @@ async def test_large_request_body_uploads_past_the_flow_control_window() -> None
 
         payload = b"a" * (1024 * 1024 + 7)  # well past the initial window
         path = tempfile.mktemp()
-        with open(path, "wb") as fh:
-            fh.write(payload)
+        await asyncio.to_thread(Path(path).write_bytes, payload)
         rc, out = await curl_http3(port, "/upload", "-X", "POST", "--data-binary", f"@{path}")
         assert rc == 0, f"curl failed rc={rc} (upload stalled?)"
         assert out == str(len(payload)).encode()

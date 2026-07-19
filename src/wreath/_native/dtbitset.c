@@ -121,7 +121,8 @@ typedef struct {
 typedef struct {
     PyObject_HEAD
     BRoute *routes;
-    Py_ssize_t nroutes;
+    Py_ssize_t nroutes;    /* mutable registration records still present */
+    Py_ssize_t route_count; /* diagnostic count retained after sealing */
     Py_ssize_t routes_cap;
     PyObject *groups;  /* dict: method -> capsule of MethodGroups */
     PyObject *statics; /* dict: method -> dict: path -> (match_result, clauses) */
@@ -1124,6 +1125,7 @@ brt_add(BitsetRouteTable *self, PyObject *args)
         if (r->cmasks != NULL) r->ncmasks = ncl;
     }
     self->nroutes++;
+    self->route_count++;
     self->dirty = 1;
     Py_RETURN_NONE;
 }
@@ -1645,7 +1647,7 @@ brt_stats(BitsetRouteTable *self, PyObject *Py_UNUSED(a))
         }
     }
     return Py_BuildValue("{s:n,s:n,s:n,s:n}", "groups", groups, "mask_words",
-                         words, "literal_keys", keys, "routes", self->nroutes);
+                         words, "literal_keys", keys, "routes", self->route_count);
 }
 
 static PyObject *

@@ -57,8 +57,7 @@ typedef struct {
     PyObject *done_callable;
 
     PyObject *header_list;       /* list[(name,value)] during header assembly */
-    PyObject *body_chunks;       /* list[bytes] buffered request body */
-    Py_ssize_t body_head;        /* first unconsumed chunk; see the queue rule */
+    PyObject *body_buffer;       /* bytearray coalescing queued request DATA */
     Py_ssize_t body_received;    /* request payload bytes accepted for this stream */
     PyObject *receive_waiter;    /* Future or NULL */
     int request_ended;
@@ -105,6 +104,8 @@ typedef struct WreathH3Conn {
     PyObject *streams;                /* dict {int64 stream_id: WreathH3Stream} */
     PyObject *cids;                   /* list[bytes]: every routing CID */
     PyObject *capsule;                /* borrowed self-capsule (no destructor) */
+    Py_ssize_t queued_body_bytes;     /* application DATA not consumed by ASGI */
+    Py_ssize_t queued_body_messages;  /* streams with a nonempty body buffer */
     uint64_t nfr_connection_id;       /* 0 when telemetry is off */
     int handshake_done;
     int closed;
@@ -139,6 +140,8 @@ typedef struct WreathH3Endpoint {
     /* limits (from ServerConfig) */
     Py_ssize_t max_concurrent_streams;
     Py_ssize_t max_body_bytes;
+    Py_ssize_t read_high_water;
+    Py_ssize_t read_high_water_messages;
     Py_ssize_t max_header_list_bytes;
     Py_ssize_t initial_stream_window;
     Py_ssize_t initial_connection_window;

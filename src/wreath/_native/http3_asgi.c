@@ -88,46 +88,32 @@ wreath_h3_init_message_keys(void)
     return 0;
 }
 
-/* --- indexed queue ------------------------------------------------------- */
-/* An owned list plus a head index. Taking the front is O(1) and the consumed
- * prefix is dropped in one slice, rather than PySequence_DelItem(list, 0)
- * shifting every remaining element on every single take. The logical length is
- * always size - head; the raw list length is never the answer. */
-
-static Py_ssize_t
-queue_len(PyObject *list, Py_ssize_t head)
-{
-    return list == NULL ? 0 : PyList_GET_SIZE(list) - head;
-}
-
-/* Take a strong reference to the front item, then advance and maybe compact.
- * The reference is taken before any compaction, so the returned object is never
- * a borrowed pointer into a prefix that is about to be released. */
-static PyObject *
-queue_pop(PyObject *list, Py_ssize_t *head)
-{
-    PyObject *item = Py_NewRef(PyList_GET_ITEM(list, *head));
-    (*head)++;
-    Py_ssize_t size = PyList_GET_SIZE(list);
-    if (*head >= size) {
-        if (PyList_SetSlice(list, 0, size, NULL) < 0) {
-            Py_DECREF(item);
-            return NULL;
-        }
-        *head = 0;
-    } else if (*head >= 64 && *head * 2 >= size) {
-        if (PyList_SetSlice(list, 0, *head, NULL) < 0) {
-            Py_DECREF(item);
-            return NULL;
-        }
-        *head = 0;
-    }
-    return item;
-}
-
 /* --- Http3Stream: ASGI plumbing ------------------------------------------ */
 
 static int submit_response(WreathH3Stream *s, int default_status);
+
+static PyObject *
+h3_take_buffered_body(WreathH3Stream *s)
+{
+    Py_ssize_t size = PyByteArray_GET_SIZE(s->body_buffer);
+    PyObject *body = PyBytes_FromStringAndSize(
+        PyByteArray_AS_STRING(s->body_buffer), size);
+    if (body == NULL) return NULL;
+    if (PyByteArray_Resize(s->body_buffer, 0) < 0) {
+        Py_DECREF(body);
+        return NULL;
+    }
+    WreathH3Conn *c = s->conn;
+    if (c != NULL) {
+        c->queued_body_bytes -= size;
+        if (size > 0 && c->queued_body_messages > 0) c->queued_body_messages--;
+        if (c->conn != NULL) {
+            ngtcp2_conn_extend_max_stream_offset(c->conn, s->stream_id, (uint64_t)size);
+            ngtcp2_conn_extend_max_offset(c->conn, (uint64_t)size);
+        }
+    }
+    return body;
+}
 
 static PyObject *
 h3_stream_receive(PyObject *op, PyObject *Py_UNUSED(ignored))
@@ -145,10 +131,14 @@ h3_stream_receive(PyObject *op, PyObject *Py_UNUSED(ignored))
         Py_DECREF(msg);
         return f;
     }
-    if (queue_len(s->body_chunks, s->body_head) > 0) {
-        PyObject *body = queue_pop(s->body_chunks, &s->body_head);
+    if (PyByteArray_GET_SIZE(s->body_buffer) > 0) {
+        PyObject *body = h3_take_buffered_body(s);
         if (body == NULL) return NULL;
-        int more = (queue_len(s->body_chunks, s->body_head) > 0) || !s->request_ended;
+        if (s->conn != NULL && wreath_h3_flush(s->conn) < 0) {
+            Py_DECREF(body);
+            return NULL;
+        }
+        int more = !s->request_ended;
         PyObject *msg = Py_BuildValue("{s:s,s:O,s:O}", "type", "http.request",
                                       "body", body, "more_body",
                                       more ? Py_True : Py_False);
@@ -565,6 +555,13 @@ void
 wreath_h3_stream_disconnect(WreathH3Stream *s)
 {
     s->disconnected = 1;
+    if (s->conn != NULL && s->body_buffer != NULL) {
+        Py_ssize_t queued = PyByteArray_GET_SIZE(s->body_buffer);
+        s->conn->queued_body_bytes -= queued;
+        if (queued > 0 && s->conn->queued_body_messages > 0) {
+            s->conn->queued_body_messages--;
+        }
+    }
     h3_release_receiver(s);
     /* Release the recorder's active slot while the worker is still reachable
      * (conn is about to detach). A request torn down by connection loss emits no
@@ -590,7 +587,7 @@ h3_stream_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(s->send_callable);
     Py_VISIT(s->done_callable);
     Py_VISIT(s->header_list);
-    Py_VISIT(s->body_chunks);
+    Py_VISIT(s->body_buffer);
     Py_VISIT(s->receive_waiter);
     Py_VISIT(s->resp_headers);
     for (Py_ssize_t i = s->resp_head; i < s->resp_chunks_len; i++) {
@@ -610,8 +607,7 @@ h3_stream_clear(PyObject *op)
     Py_CLEAR(s->send_callable);
     Py_CLEAR(s->done_callable);
     Py_CLEAR(s->header_list);
-    Py_CLEAR(s->body_chunks);
-    s->body_head = 0;
+    Py_CLEAR(s->body_buffer);
     Py_CLEAR(s->receive_waiter);
     Py_CLEAR(s->resp_headers);
     for (Py_ssize_t i = s->resp_head; i < s->resp_chunks_len; i++) {
@@ -693,16 +689,6 @@ PyType_Spec wreath_h3_stream_spec = {
 
 /* --- request assembly + ASGI dispatch ------------------------------------ */
 
-static WreathH3Stream *
-find_stream(WreathH3Conn *c, int64_t stream_id)
-{
-    PyObject *key = PyLong_FromLongLong(stream_id);
-    if (key == NULL) return NULL;
-    PyObject *s = PyDict_GetItemWithError(c->streams, key);
-    Py_DECREF(key);
-    return (WreathH3Stream *)s;
-}
-
 static int
 begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
 {
@@ -717,8 +703,7 @@ begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     s->task = NULL;
     s->receive_callable = s->send_callable = s->done_callable = NULL;
     s->header_list = PyList_New(0);
-    s->body_chunks = PyList_New(0);
-    s->body_head = 0;
+    s->body_buffer = PyByteArray_FromStringAndSize(NULL, 0);
     s->body_received = 0;
     s->receive_waiter = NULL;
     s->request_ended = s->disconnected = 0;
@@ -735,7 +720,7 @@ begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     s->nfr_active = 0;
     s->nfr_bytes_out = 0;
     PyObject_GC_Track((PyObject *)s);
-    if (s->header_list == NULL || s->body_chunks == NULL) {
+    if (s->header_list == NULL || s->body_buffer == NULL) {
         Py_DECREF(s);
         return NGHTTP3_ERR_CALLBACK_FAILURE;
     }
@@ -950,14 +935,15 @@ h3_reject_stream(WreathH3Stream *s, uint64_t app_error)
             nghttp3_conn_shutdown_stream_read(c->h3, s->stream_id);
         }
     }
-    /* Rejected bytes must not stay reachable: drop everything queued. */
-    if (s->body_chunks != NULL) {
-        if (PyList_SetSlice(s->body_chunks, 0, PyList_GET_SIZE(s->body_chunks),
-                            NULL) < 0) {
-            PyErr_Clear();
+    /* Rejected bytes must not stay reachable or consume connection budget. */
+    if (s->body_buffer != NULL) {
+        Py_ssize_t queued = PyByteArray_GET_SIZE(s->body_buffer);
+        if (c != NULL) {
+            c->queued_body_bytes -= queued;
+            if (queued > 0 && c->queued_body_messages > 0) c->queued_body_messages--;
         }
+        if (PyByteArray_Resize(s->body_buffer, 0) < 0) PyErr_Clear();
     }
-    s->body_head = 0;
     s->request_ended = 1;
     s->disconnected = 1;
     /* Stay attached: the stream is torn down by the nghttp3 close callback. Only
@@ -993,18 +979,33 @@ recv_data_cb(nghttp3_conn *conn, int64_t stream_id, const uint8_t *data,
     }
     s->body_received = total;
 
-    /* Credit the DATA payload to QUIC flow control. nghttp3_conn_read_stream's
-     * consumed count excludes application DATA bytes (see its docs), so without
-     * this the receive window is never extended and an upload past the initial
-     * window (~64 KiB) stalls. This is bounded by the max_body_bytes check
-     * above, so crediting as the bytes arrive cannot grow the window unbounded. */
-    if (c != NULL && c->conn != NULL) {
-        ngtcp2_conn_extend_max_stream_offset(c->conn, stream_id, datalen);
-        ngtcp2_conn_extend_max_offset(c->conn, datalen);
+    Py_ssize_t chunk_bytes = (Py_ssize_t)datalen;
+    Py_ssize_t queued_body_bytes = c != NULL ? c->queued_body_bytes : 0;
+    Py_ssize_t read_high_water = c != NULL ? c->endpoint->read_high_water : PY_SSIZE_T_MAX;
+    int was_empty = PyByteArray_GET_SIZE(s->body_buffer) == 0;
+    if (chunk_bytes > read_high_water - queued_body_bytes ||
+        (c != NULL && was_empty && chunk_bytes > 0 &&
+         c->queued_body_messages >= c->endpoint->read_high_water_messages)) {
+        h3_reject_stream(s, NGHTTP3_H3_EXCESSIVE_LOAD);
+        return 0;
+    }
+
+    Py_ssize_t old_size = PyByteArray_GET_SIZE(s->body_buffer);
+    /* native-lint: allow NC004 -- connection read_high_water is a hard cap */
+    if (PyByteArray_Resize(s->body_buffer, old_size + chunk_bytes) < 0) {
+        return NGHTTP3_ERR_CALLBACK_FAILURE;
+    }
+    if (chunk_bytes > 0) {
+        memcpy(PyByteArray_AS_STRING(s->body_buffer) + old_size,
+               data, (size_t)chunk_bytes);
+        if (c != NULL) {
+            c->queued_body_bytes += chunk_bytes;
+            if (was_empty) c->queued_body_messages++;
+        }
     }
 
     if (s->receive_waiter != NULL) {
-        PyObject *body = PyBytes_FromStringAndSize((const char *)data, (Py_ssize_t)datalen);
+        PyObject *body = h3_take_buffered_body(s);
         if (body == NULL) return NGHTTP3_ERR_CALLBACK_FAILURE;
         PyObject *msg = Py_BuildValue("{s:s,s:O,s:O}", "type", "http.request",
                                       "body", body, "more_body", Py_True);
@@ -1016,14 +1017,7 @@ recv_data_cb(nghttp3_conn *conn, int64_t stream_id, const uint8_t *data,
         Py_XDECREF(r);
         Py_DECREF(w);
         Py_DECREF(msg);
-        return 0;
     }
-    PyObject *body = PyBytes_FromStringAndSize((const char *)data, (Py_ssize_t)datalen);
-    if (body == NULL || PyList_Append(s->body_chunks, body) < 0) {
-        Py_XDECREF(body);
-        return NGHTTP3_ERR_CALLBACK_FAILURE;
-    }
-    Py_DECREF(body);
     return 0;
 }
 

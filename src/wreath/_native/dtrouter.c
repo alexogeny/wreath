@@ -38,10 +38,19 @@ typedef struct {
     int all_native;
 } DRoute;
 
+typedef struct {
+    const char *bytes;          /* borrowed from the branches dict's Unicode key */
+    Py_ssize_t len;
+    uint64_t hash;
+    struct DNode *child;        /* borrowed; branches owns the _DNodeRef */
+} DRawBranch;
+
 typedef struct DNode {
     int is_leaf;
     int position;
-    PyObject *branches; /* dict: str -> _DNodeRef(DNode*) */
+    PyObject *branches; /* owns key storage and child _DNodeRef objects */
+    DRawBranch *raw_branches; /* open-addressed UTF-8 map for allocation-free match */
+    Py_ssize_t raw_branch_cap;
     struct DNode *wildcard;
     DRoute **candidates; /* borrowed pointers into table->routes */
     Py_ssize_t ncand;
@@ -80,6 +89,7 @@ dnode_free(DNode *node)
     if (node == NULL) {
         return;
     }
+    PyMem_Free(node->raw_branches);
     Py_XDECREF(node->branches); /* frees the child nodes via _DNodeRef */
     Py_XDECREF(node->access_clauses);
     PyMem_Free(node->clause_words);
@@ -360,6 +370,61 @@ seg_equal(const DSeg *a, const char *bytes, Py_ssize_t len)
     return a->bytes != NULL && a->len == len && memcmp(a->bytes, bytes, (size_t)len) == 0;
 }
 
+static uint64_t
+raw_segment_hash(const char *bytes, Py_ssize_t len)
+{
+    uint64_t hash = 1469598103934665603ULL;
+    for (Py_ssize_t i = 0; i < len; i++) {
+        hash ^= (uint8_t)bytes[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static int
+dnode_build_raw_branches(DNode *node)
+{
+    Py_ssize_t count = PyDict_GET_SIZE(node->branches);
+    Py_ssize_t cap = 8;
+    while (cap < count * 2) cap *= 2;
+    node->raw_branches = PyMem_Calloc((size_t)cap, sizeof(DRawBranch));
+    if (node->raw_branches == NULL) return PyErr_NoMemory(), -1;
+    node->raw_branch_cap = cap;
+
+    PyObject *key;
+    PyObject *value;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(node->branches, &pos, &key, &value)) {
+        Py_ssize_t len;
+        const char *bytes = PyUnicode_AsUTF8AndSize(key, &len);
+        DNode *child = DNODE_OF(value);
+        if (bytes == NULL || child == NULL) return -1;
+        uint64_t hash = raw_segment_hash(bytes, len);
+        Py_ssize_t slot = (Py_ssize_t)(hash & (uint64_t)(cap - 1));
+        while (node->raw_branches[slot].bytes != NULL) {
+            slot = (slot + 1) & (cap - 1);
+        }
+        node->raw_branches[slot] = (DRawBranch){bytes, len, hash, child};
+    }
+    return 0;
+}
+
+static DNode *
+dnode_raw_branch(DNode *node, const DSeg *segment)
+{
+    uint64_t hash = raw_segment_hash(segment->bytes, segment->len);
+    Py_ssize_t slot = (Py_ssize_t)(hash & (uint64_t)(node->raw_branch_cap - 1));
+    for (;;) {
+        DRawBranch *branch = &node->raw_branches[slot];
+        if (branch->bytes == NULL) return NULL;
+        if (branch->hash == hash && branch->len == segment->len &&
+            memcmp(branch->bytes, segment->bytes, (size_t)segment->len) == 0) {
+            return branch->child;
+        }
+        slot = (slot + 1) & (node->raw_branch_cap - 1);
+    }
+}
+
 /* Recursively compile a candidate set into a decision (sub)tree. */
 static DNode *
 dnode_build(DRoute **cands, Py_ssize_t ncand, char *used, int nseg)
@@ -508,6 +573,10 @@ dnode_build(DRoute **cands, Py_ssize_t ncand, char *used, int nseg)
     result->branches = branches; /* steal reference */
     result->wildcard = wildcard;
     branches = NULL;
+    if (dnode_build_raw_branches(result) < 0) {
+        dnode_free(result);
+        result = NULL;
+    }
 
 fail:
     used[p] = 0;
@@ -1012,21 +1081,11 @@ match_group(DecisionRouteTable *self, PyObject *method, DSeg *segs, Py_ssize_t n
     }
 
     while (!node->is_leaf) {
-        PyObject *key = seg_obj(segs, seg_objs, node->position);
-        if (key == NULL) {
-            return NULL;
-        }
-        PyObject *branch = PyDict_GetItemWithError(node->branches, key);
+        DNode *branch = dnode_raw_branch(node, &segs[node->position]);
         if (branch != NULL) {
-            node = DNODE_OF(branch);
-            if (node == NULL) {
-                return NULL;
-            }
+            node = branch;
         }
         else {
-            if (PyErr_Occurred()) {
-                return NULL;
-            }
             if (node->wildcard == NULL) {
                 return NULL; /* clean miss */
             }

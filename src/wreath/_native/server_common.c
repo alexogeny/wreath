@@ -7,11 +7,9 @@ PyObject *immediate_none = NULL;       /* stateless completed awaitable */
 
 
 /* Cached callables for the per-request hot path. */
-PyObject *task_class = NULL;               /* asyncio.Task */
-PyObject *task_kwnames = NULL;             /* ("loop", "eager_start") */
 PyObject *task_add_done_callback = NULL;   /* unbound Task.add_done_callback */
 PyObject *task_exception_fn = NULL;        /* unbound Task.exception */
-PyObject *invalid_state_error = NULL;      /* asyncio.InvalidStateError */
+PyObject *resume_started_coroutine = NULL; /* Python continuation trampoline */
 
 /* Interned key/value constants so hot dict operations skip per-call string
  * creation and hashing. */
@@ -373,11 +371,9 @@ void
 server_module_free(void *Py_UNUSED(module))
 {
     Py_CLEAR(immediate_none);
-    Py_CLEAR(task_class);
-    Py_CLEAR(task_kwnames);
     Py_CLEAR(task_add_done_callback);
-    Py_CLEAR(invalid_state_error);
     Py_CLEAR(task_exception_fn);
+    Py_CLEAR(resume_started_coroutine);
     Py_CLEAR(header_host);
     Py_CLEAR(s_type);
     Py_CLEAR(s_body);
@@ -530,24 +526,21 @@ init_cached_constants(void)
         }
     }
     asyncio = PyImport_ImportModule("asyncio");
-    if (asyncio == NULL) {
-        return -1;
-    }
-    task_class = PyObject_GetAttrString(asyncio, "Task");
-    invalid_state_error = PyObject_GetAttrString(asyncio, "InvalidStateError");
+    if (asyncio == NULL) return -1;
+    PyObject *task_type = PyObject_GetAttrString(asyncio, "Task");
     Py_DECREF(asyncio);
-    if (task_class == NULL || invalid_state_error == NULL) {
-        return -1;
-    }
-    task_add_done_callback = PyObject_GetAttrString(task_class, "add_done_callback");
-    task_exception_fn = PyObject_GetAttrString(task_class, "exception");
-    if (task_add_done_callback == NULL || task_exception_fn == NULL) {
-        return -1;
-    }
-    task_kwnames = Py_BuildValue("(ss)", "loop", "eager_start");
-    if (task_kwnames == NULL) {
-        return -1;
-    }
+    if (task_type == NULL) return -1;
+    task_add_done_callback = PyObject_GetAttrString(task_type, "add_done_callback");
+    task_exception_fn = PyObject_GetAttrString(task_type, "exception");
+    Py_DECREF(task_type);
+    if (task_add_done_callback == NULL || task_exception_fn == NULL) return -1;
+
+    PyObject *server_module = PyImport_ImportModule("wreath.server");
+    if (server_module == NULL) return -1;
+    resume_started_coroutine = PyObject_GetAttrString(
+        server_module, "_resume_started_coroutine");
+    Py_DECREF(server_module);
+    if (resume_started_coroutine == NULL) return -1;
     /* One shared extensions mapping for every scope; consumers treat scope
      * contents as read-only, matching the pure twin's module-level constant. */
     extensions_dict = Py_BuildValue("{s:{}}", "wreath.response");

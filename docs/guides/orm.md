@@ -24,6 +24,11 @@ once and can be emitted two ways: raised as an exception when you want to stop, 
 collected into a validation response when you want to tell the caller everything
 that's wrong at once. One source of truth, two honest presentations.
 
+A `Registry` owns an access-ordered compiled-query cache. Its
+`query_cache_size` and `query_cache_bytes` limits constrain both shape count and
+approximate retained plan storage; insertion evicts the oldest plans until both
+budgets hold.
+
 The precise field, query, and session APIs are generated from the code, so reach
 for the reference when you need exact signatures.
 

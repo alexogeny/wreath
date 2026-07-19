@@ -44,6 +44,21 @@ enum {
 /* Http2Stream                                                              */
 /* ======================================================================== */
 
+#define H2_BODY_COALESCE_MAX (16 * 1024)
+
+/* Frame-flood defence: a peer that keeps sending frames which make no request
+ * progress (empty DATA, PING, SETTINGS, WINDOW_UPDATE, PRIORITY, RST_STREAM) is
+ * spending our CPU for nothing. We count consecutive unproductive frames and
+ * GOAWAY(ENHANCE_YOUR_CALM) past this budget; any productive frame (a new
+ * request, real body bytes, or response DATA framed toward the peer) resets it,
+ * so ordinary interleaved control traffic never trips. */
+#define H2_MAX_UNPRODUCTIVE_FRAMES 100
+
+typedef struct {
+    PyObject *body;             /* bytearray, mutable only while queued */
+    Py_ssize_t flow_bytes;      /* DATA frame bytes represented by this chunk */
+} H2BodyChunk;
+
 typedef struct {
     PyObject_HEAD
     PyObject *protocol;        /* owned; the Http2Protocol (borrowed logically) */
@@ -56,8 +71,8 @@ typedef struct {
     PyObject *send_callable;   /* bound _send */
     PyObject *done_callable;   /* bound _done */
 
-    /* request body plumbing: C-owned queue of bytes objects */
-    PyObject **body_chunks;
+    /* request body plumbing: C-owned queue of coalesced chunks */
+    H2BodyChunk *body_chunks;
     Py_ssize_t body_cap;
     Py_ssize_t body_len;
     Py_ssize_t body_head;
@@ -75,6 +90,8 @@ typedef struct {
     /* flow control */
     int64_t send_window;       /* peer receive window for this stream */
     int64_t recv_window;       /* our advertised receive window */
+    int64_t recv_consumed_pending;
+    int64_t recv_credit_threshold;
     /* One outstanding ASGI body message. The application's own immutable bytes
      * are retained and framed from `pending_offset` onward; they are never
      * copied into a staging buffer, and `await send()` completes only once the
@@ -83,6 +100,7 @@ typedef struct {
     Py_ssize_t pending_offset; /* next unsent payload byte */
     PyObject *send_waiter;     /* Future returned by _send, or NULL */
     int pending_end_stream;
+    int in_conn_blocked;       /* queued in protocol->conn_blocked */
 
     /* Native Flight Recorder per-stream context (one request). */
     wreath_nfr_context nfr_ctx;
@@ -119,6 +137,7 @@ typedef struct {
     PyObject *loop_create_task;
 
     PyObject *streams;         /* dict {int stream_id: Http2Stream} */
+    PyObject *conn_blocked;    /* list of streams blocked on the connection window */
     PyObject *out;             /* bytearray: pending outbound bytes */
 
     WreathHpackTable hpack;       /* inbound header decode table */
@@ -143,10 +162,13 @@ typedef struct {
 
     uint32_t last_stream_id;   /* highest client stream id processed */
     int active_requests;       /* streams not yet closed */
+    int idle_frames;           /* consecutive frames making no request progress */
 
     /* settings / limits */
     int64_t conn_send_window;  /* our sending window toward the peer */
     int64_t conn_recv_window;  /* our receive window */
+    int64_t conn_consumed_pending;
+    int64_t conn_credit_threshold;
     int64_t peer_initial_window;
     int64_t our_initial_window;
     Py_ssize_t peer_max_frame;
@@ -206,7 +228,7 @@ static void
 body_queue_clear(Http2Stream *self)
 {
     for (Py_ssize_t i = self->body_head; i < self->body_len; i++) {
-        Py_XDECREF(self->body_chunks[i]);
+        Py_XDECREF(self->body_chunks[i].body);
     }
     PyMem_Free(self->body_chunks);
     self->body_chunks = NULL;
@@ -214,38 +236,62 @@ body_queue_clear(Http2Stream *self)
 }
 
 static int
-body_queue_push(Http2Stream *self, PyObject *body)
+body_queue_coalesce(Http2Stream *self, const uint8_t *data, Py_ssize_t len,
+                    Py_ssize_t flow_bytes)
 {
+    if (self->body_len > self->body_head) {
+        H2BodyChunk *tail = &self->body_chunks[self->body_len - 1];
+        Py_ssize_t old_size = PyByteArray_GET_SIZE(tail->body);
+        if (len <= H2_BODY_COALESCE_MAX - old_size) {
+            /* native-lint: allow NC004 -- growth is capped at one 16 KiB chunk */
+            if (PyByteArray_Resize(tail->body, old_size + len) < 0) return -1;
+            if (len > 0) {
+                memcpy(PyByteArray_AS_STRING(tail->body) + old_size, data, (size_t)len);
+            }
+            tail->flow_bytes += flow_bytes;
+            return 0;
+        }
+    }
     if (self->body_len == self->body_cap) {
         if (self->body_head > 0) {
             Py_ssize_t live = body_queue_len(self);
             memmove(self->body_chunks, self->body_chunks + self->body_head,
-                    (size_t)live * sizeof(PyObject *));
+                    (size_t)live * sizeof(H2BodyChunk));
             self->body_len = live;
             self->body_head = 0;
         }
         if (self->body_len == self->body_cap) {
             Py_ssize_t cap = self->body_cap ? self->body_cap * 2 : 16;
-            PyObject **grown = PyMem_Realloc(
-                self->body_chunks, (size_t)cap * sizeof(PyObject *));
+            H2BodyChunk *grown = PyMem_Realloc(
+                self->body_chunks, (size_t)cap * sizeof(H2BodyChunk));
             if (grown == NULL) return PyErr_NoMemory(), -1;
             self->body_chunks = grown;
             self->body_cap = cap;
         }
     }
-    self->body_chunks[self->body_len++] = body; /* steals */
+    PyObject *body = PyByteArray_FromStringAndSize((const char *)data, len);
+    if (body == NULL) return -1;
+    H2BodyChunk *chunk = &self->body_chunks[self->body_len++];
+    chunk->body = body;
+    chunk->flow_bytes = flow_bytes;
     return 0;
 }
 
 static PyObject *
-body_queue_pop(Http2Stream *self)
+body_queue_pop(Http2Stream *self, Py_ssize_t *flow_bytes)
 {
-    PyObject *body = self->body_chunks[self->body_head];
-    self->body_chunks[self->body_head++] = NULL;
+    H2BodyChunk *chunk = &self->body_chunks[self->body_head];
+    PyObject *body = PyBytes_FromStringAndSize(
+        PyByteArray_AS_STRING(chunk->body), PyByteArray_GET_SIZE(chunk->body));
+    if (body == NULL) return NULL;
+    *flow_bytes = chunk->flow_bytes;
+    Py_CLEAR(chunk->body);
+    chunk->flow_bytes = 0;
+    self->body_head++;
     if (self->body_head == self->body_len) {
         self->body_head = self->body_len = 0;
     }
-    return body; /* transfers */
+    return body;
 }
 
 static int
@@ -334,6 +380,37 @@ h2_flush(PyObject *proto)
     }
     Py_DECREF(chunk);
     Py_DECREF(r);
+    return 0;
+}
+
+static int
+body_credit_consumed(Http2Protocol *self, Http2Stream *st, Py_ssize_t amount)
+{
+    if (amount <= 0) return 0;
+    self->conn_consumed_pending += amount;
+    st->recv_consumed_pending += amount;
+
+    if (self->conn_consumed_pending >= self->conn_credit_threshold) {
+        uint8_t increment[4];
+        put_u32(increment, (uint32_t)self->conn_consumed_pending);
+        if (h2_write_frame((PyObject *)self, FRAME_WINDOW_UPDATE, 0, 0,
+                           increment, 4) < 0) {
+            return -1;
+        }
+        self->conn_recv_window += self->conn_consumed_pending;
+        self->conn_consumed_pending = 0;
+    }
+    if (!st->request_ended &&
+        st->recv_consumed_pending >= st->recv_credit_threshold) {
+        uint8_t increment[4];
+        put_u32(increment, (uint32_t)st->recv_consumed_pending);
+        if (h2_write_frame((PyObject *)self, FRAME_WINDOW_UPDATE, 0, st->id,
+                           increment, 4) < 0) {
+            return -1;
+        }
+        st->recv_window += st->recv_consumed_pending;
+        st->recv_consumed_pending = 0;
+    }
     return 0;
 }
 
@@ -426,8 +503,15 @@ stream_receive(PyObject *op, PyObject *Py_UNUSED(ignored))
     }
     /* buffered body? */
     if (body_queue_len(self) > 0) {
-        PyObject *body = body_queue_pop(self);
+        Py_ssize_t flow_bytes = 0;
+        PyObject *body = body_queue_pop(self, &flow_bytes);
         if (body == NULL) {
+            return NULL;
+        }
+        Http2Protocol *protocol = (Http2Protocol *)self->protocol;
+        if (body_credit_consumed(protocol, self, flow_bytes) < 0 ||
+            h2_flush((PyObject *)protocol) < 0) {
+            Py_DECREF(body);
             return NULL;
         }
         int more = body_queue_len(self) > 0 || !self->request_ended;
@@ -616,6 +700,43 @@ h2_abort_pending_send(Http2Stream *st)
     Py_DECREF(w);
 }
 
+/* A productive frame arrived (new request, real body bytes, or we framed
+ * response data toward the peer): forgive accumulated unproductive frames. */
+static void
+h2_note_progress(Http2Protocol *self)
+{
+    self->idle_frames = 0;
+}
+
+/* Charge one unproductive frame. Returns 0 to continue, or the result of
+ * h2_connection_error once the budget is exceeded (which sets self->fatal, so
+ * callers should re-check it before doing any more work for this frame). */
+static int
+h2_note_unproductive(Http2Protocol *self)
+{
+    if (++self->idle_frames <= H2_MAX_UNPRODUCTIVE_FRAMES) {
+        return 0;
+    }
+    return h2_connection_error(self, H2_ENHANCE_YOUR_CALM);
+}
+
+/* Record that a stream is blocked on the *connection* send window, so a later
+ * connection-level WINDOW_UPDATE can flush exactly the blocked streams instead
+ * of scanning the whole open-stream table. The list holds a strong reference,
+ * so a stream queued here is never freed out from under us. */
+static int
+mark_conn_blocked(Http2Protocol *self, Http2Stream *st)
+{
+    if (st->in_conn_blocked) {
+        return 0;
+    }
+    if (PyList_Append(self->conn_blocked, (PyObject *)st) < 0) {
+        return -1;
+    }
+    st->in_conn_blocked = 1;
+    return 0;
+}
+
 /* Frame as much of the retained body as the flow-control windows allow.
  *
  * Bytes are framed straight out of the application's own bytes object starting
@@ -635,7 +756,14 @@ h2_flush_stream_pending(PyObject *proto, Http2Stream *st)
             window = self->conn_send_window;
         }
         if (window <= 0) {
-            return 0;  /* blocked: keep the body and leave the waiter pending */
+            /* blocked: keep the body and leave the waiter pending. If the
+             * connection window is the binding constraint, remember this stream
+             * so a connection WINDOW_UPDATE can find it without a full scan. */
+            if (self->conn_send_window <= 0 && st->send_window > 0
+                && mark_conn_blocked(self, st) < 0) {
+                return -1;
+            }
+            return 0;
         }
         Py_ssize_t chunk = total - st->pending_offset;
         if ((int64_t)chunk > window) {
@@ -654,6 +782,7 @@ h2_flush_stream_pending(PyObject *proto, Http2Stream *st)
         st->pending_offset += chunk;
         st->send_window -= chunk;
         self->conn_send_window -= chunk;
+        h2_note_progress(self);  /* framing response data is real progress */
         if (self->nfr_worker != NULL) {
             st->nfr_bytes_out += (uint64_t)chunk;
         }
@@ -986,7 +1115,7 @@ stream_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->send_callable);
     Py_VISIT(self->done_callable);
     for (Py_ssize_t i = self->body_head; i < self->body_len; i++) {
-        Py_VISIT(self->body_chunks[i]);
+        Py_VISIT(self->body_chunks[i].body);
     }
     Py_VISIT(self->receive_waiter);
     Py_VISIT(self->pending_body);
@@ -1273,10 +1402,15 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     st->trailers_expected = 0;
     st->send_window = self->peer_initial_window;
     st->recv_window = self->our_initial_window;
+    st->recv_consumed_pending = 0;
+    st->recv_credit_threshold = self->our_initial_window / 2;
+    if (st->recv_credit_threshold > 16 * 1024) st->recv_credit_threshold = 16 * 1024;
+    if (st->recv_credit_threshold < 1) st->recv_credit_threshold = 1;
     st->pending_body = NULL;
     st->pending_offset = 0;
     st->send_waiter = NULL;
     st->pending_end_stream = 0;
+    st->in_conn_blocked = 0;
     st->nfr_active = 0;
     st->nfr_bytes_out = 0;
     PyObject_GC_Track((PyObject *)st);
@@ -1377,7 +1511,7 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
 /* Deliver a DATA payload to a stream's body buffer / waiter. */
 static int
 deliver_body(Http2Protocol *self, Http2Stream *st, const uint8_t *data,
-             Py_ssize_t len, int end_stream)
+             Py_ssize_t len, Py_ssize_t flow_bytes, int end_stream)
 {
     st->body_received += len;
     if (st->content_length >= 0 && st->body_received > st->content_length) {
@@ -1393,22 +1527,13 @@ deliver_body(Http2Protocol *self, Http2Stream *st, const uint8_t *data,
             return h2_stream_error((PyObject *)self, st->id, H2_PROTOCOL_ERROR);
         }
     }
-    /* replenish receive windows (flow control credit) */
-    if (len > 0) {
-        uint8_t inc[4];
-        put_u32(inc, (uint32_t)len);
-        if (h2_write_frame((PyObject *)self, FRAME_WINDOW_UPDATE, 0, 0, inc, 4) < 0) {
-            return -1;
-        }
-        if (st->state != S_CLOSED) {
-            if (h2_write_frame((PyObject *)self, FRAME_WINDOW_UPDATE, 0, st->id, inc, 4) < 0) {
-                return -1;
-            }
-        }
-    }
     if (st->receive_waiter != NULL) {
         PyObject *body = PyBytes_FromStringAndSize((const char *)data, len);
         if (body == NULL) {
+            return -1;
+        }
+        if (body_credit_consumed(self, st, flow_bytes) < 0) {
+            Py_DECREF(body);
             return -1;
         }
         int more = !st->request_ended;
@@ -1426,12 +1551,8 @@ deliver_body(Http2Protocol *self, Http2Stream *st, const uint8_t *data,
         Py_DECREF(msg);
         return rc;
     }
-    if (len > 0) {
-        PyObject *body = PyBytes_FromStringAndSize((const char *)data, len);
-        if (body == NULL || body_queue_push(st, body) < 0) {
-            Py_XDECREF(body);
-            return -1;
-        }
+    if (len > 0 || flow_bytes > 0) {
+        if (body_queue_coalesce(st, data, len, flow_bytes) < 0) return -1;
     }
     return 0;
 }
@@ -1457,6 +1578,13 @@ process_settings(Http2Protocol *self, int flags, uint32_t sid,
     }
     if (len % 6 != 0) {
         return h2_connection_error(self, H2_FRAME_SIZE_ERROR);
+    }
+    /* Every non-ACK SETTINGS forces a reflected ACK; a flood is amplification. */
+    if (h2_note_unproductive(self) < 0) {
+        return -1;
+    }
+    if (self->fatal) {
+        return 0;
     }
     for (Py_ssize_t i = 0; i < len; i += 6) {
         uint16_t ident = (uint16_t)((payload[i] << 8) | payload[i + 1]);
@@ -1541,6 +1669,7 @@ process_headers(Http2Protocol *self, int flags, uint32_t sid,
     if (sid == 0 || (sid % 2) == 0) {
         return h2_connection_error(self, H2_PROTOCOL_ERROR);
     }
+    h2_note_progress(self);  /* a new request (or trailers) is forward progress */
     if (sid <= self->last_stream_id) {
         /* already-seen or lower stream id: new stream must be strictly higher */
         PyObject *key = PyLong_FromUnsignedLong(sid);
@@ -1645,12 +1774,26 @@ process_data(Http2Protocol *self, int flags, uint32_t sid,
         if (pad > end - off) return h2_connection_error(self, H2_PROTOCOL_ERROR);
         end -= pad;
     }
-    /* connection receive flow control */
+    /* A zero-length DATA frame consumes no flow-control credit, so flow control
+     * cannot bound a flood of them: charge it against the unproductive budget.
+     * A frame carrying real bytes (or padding, which does cost window) is
+     * progress and forgives the counter. END_STREAM is always legitimate. */
+    if (len == 0 && !(flags & FLAG_END_STREAM)) {
+        if (h2_note_unproductive(self) < 0) return -1;
+        if (self->fatal) return 0;
+    } else if (end - off > 0) {
+        h2_note_progress(self);
+    }
+    /* DATA frame length, including padding, consumes both receive windows. */
     self->conn_recv_window -= len;
     if (self->conn_recv_window < 0) {
         return h2_connection_error(self, H2_FLOW_CONTROL_ERROR);
     }
-    return deliver_body(self, st, payload + off, end - off,
+    st->recv_window -= len;
+    if (st->recv_window < 0) {
+        return h2_stream_error((PyObject *)self, sid, H2_FLOW_CONTROL_ERROR);
+    }
+    return deliver_body(self, st, payload + off, end - off, len,
                         (flags & FLAG_END_STREAM) ? 1 : 0);
 }
 
@@ -1661,6 +1804,13 @@ process_window_update(Http2Protocol *self, uint32_t sid,
     if (len != 4) {
         return h2_connection_error(self, H2_FRAME_SIZE_ERROR);
     }
+    /* WINDOW_UPDATE carries no request progress; a flood of them is abusive. */
+    if (h2_note_unproductive(self) < 0) {
+        return -1;
+    }
+    if (self->fatal) {
+        return 0;
+    }
     uint32_t inc = get_u32(payload) & 0x7FFFFFFF;
     if (sid == 0) {
         if (inc == 0) {
@@ -1670,14 +1820,27 @@ process_window_update(Http2Protocol *self, uint32_t sid,
         if (self->conn_send_window > WINDOW_MAX) {
             return h2_connection_error(self, H2_FLOW_CONTROL_ERROR);
         }
-        /* flush any stream blocked on connection window */
-        PyObject *k, *v; Py_ssize_t pos = 0;
-        while (PyDict_Next(self->streams, &pos, &k, &v)) {
-            if (h2_flush_stream_pending((PyObject *)self, (Http2Stream *)v) < 0) {
-                return -1;
+        /* Flush exactly the streams blocked on the connection window -- O(blocked)
+         * rather than O(open streams). Swap in a fresh queue and let each flush
+         * re-enqueue the stream if it is still connection-blocked afterward. */
+        PyObject *blocked = self->conn_blocked;
+        PyObject *fresh = PyList_New(0);
+        if (fresh == NULL) {
+            return -1;
+        }
+        self->conn_blocked = fresh;
+        Py_ssize_t nb = PyList_GET_SIZE(blocked);
+        int rc = 0;
+        for (Py_ssize_t i = 0; i < nb; i++) {
+            Http2Stream *bs = (Http2Stream *)PyList_GET_ITEM(blocked, i);
+            bs->in_conn_blocked = 0;
+            if (h2_flush_stream_pending((PyObject *)self, bs) < 0) {
+                rc = -1;
+                break;
             }
         }
-        return 0;
+        Py_DECREF(blocked);
+        return rc;
     }
     /* A zero increment on a stream is a stream error regardless of the stream's
      * current state (RFC 9113 s6.9); an idle stream id is a connection error. */
@@ -1713,6 +1876,13 @@ process_rst_stream(Http2Protocol *self, uint32_t sid, const uint8_t *payload,
     if (len != 4) {
         return h2_connection_error(self, H2_FRAME_SIZE_ERROR);
     }
+    /* A reset makes no forward progress; a flood of them is abusive. */
+    if (h2_note_unproductive(self) < 0) {
+        return -1;
+    }
+    if (self->fatal) {
+        return 0;
+    }
     PyObject *key = PyLong_FromUnsignedLong(sid);
     if (key == NULL) return -1;
     PyObject *stobj = PyDict_GetItemWithError(self->streams, key);
@@ -1729,8 +1899,9 @@ process_rst_stream(Http2Protocol *self, uint32_t sid, const uint8_t *payload,
     st->state = S_CLOSED;
     /* The stream can never send again: release a blocked send() too. */
     h2_abort_pending_send(st);
-    /* wake receive with disconnect */
     if (st->receive_waiter != NULL) {
+        /* The app is parked in receive(): it is not burning CPU, so honour the
+         * ASGI contract and hand it http.disconnect to unwind cooperatively. */
         PyObject *msg = Py_BuildValue("{s:s}", "type", "http.disconnect");
         if (msg != NULL) {
             PyObject *w = st->receive_waiter;
@@ -1739,10 +1910,19 @@ process_rst_stream(Http2Protocol *self, uint32_t sid, const uint8_t *payload,
             Py_DECREF(w);
             Py_DECREF(msg);
         }
+    } else if (st->task != NULL) {
+        /* The app is doing work off-stream (a slow handler, a DB call): the peer
+         * has thrown the request away, so cancel the task to reclaim the CPU it
+         * would otherwise spend producing a response no one will read. A handler
+         * that catches CancelledError still unwinds; stream_done treats the
+         * cancelled task as a completed stream. */
+        PyObject *r = PyObject_CallMethod(st->task, "cancel", NULL);
+        Py_XDECREF(r);
+        if (r == NULL) {
+            Py_DECREF(key);
+            return -1;
+        }
     }
-    /* Do not cancel the task: the ASGI contract is that receive() returns
-     * http.disconnect and the application unwinds on its own. If it is not
-     * awaiting receive, it will observe the disconnect on its next call. */
     Py_DECREF(key);
     return 0;
 }
@@ -1759,6 +1939,13 @@ process_ping(Http2Protocol *self, int flags, uint32_t sid,
     }
     if (flags & FLAG_ACK) {
         return 0;  /* ignore */
+    }
+    /* Each PING forces a reflected ACK; a flood is pure CPU/output amplification. */
+    if (h2_note_unproductive(self) < 0) {
+        return -1;
+    }
+    if (self->fatal) {
+        return 0;
     }
     return h2_write_frame((PyObject *)self, FRAME_PING, FLAG_ACK, 0, payload, 8);
 }
@@ -1791,6 +1978,9 @@ dispatch_frame(Http2Protocol *self, int type, int flags, uint32_t sid,
     case FRAME_PRIORITY:
         if (len != 5) {
             return h2_connection_error(self, H2_FRAME_SIZE_ERROR);
+        }
+        if (h2_note_unproductive(self) < 0) {  /* ignored, but still costs us */
+            return -1;
         }
         return 0;  /* ignore priority */
     case FRAME_GOAWAY:
@@ -2101,6 +2291,7 @@ h2_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->loop_create_future);
     Py_VISIT(self->loop_create_task);
     Py_VISIT(self->streams);
+    Py_VISIT(self->conn_blocked);
     Py_VISIT(self->out);
     Py_VISIT(self->header_block);
     return 0;
@@ -2120,6 +2311,7 @@ h2_clear(PyObject *op)
     Py_CLEAR(self->loop_create_future);
     Py_CLEAR(self->loop_create_task);
     Py_CLEAR(self->streams);
+    Py_CLEAR(self->conn_blocked);
     Py_CLEAR(self->out);
     Py_CLEAR(self->header_block);
     wreath_hpack_table_clear(&self->hpack);
@@ -2175,9 +2367,10 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
         return -1;
     }
     self->streams = PyDict_New();
+    self->conn_blocked = PyList_New(0);
     self->out = PyByteArray_FromStringAndSize("", 0);
     self->header_block = PyByteArray_FromStringAndSize("", 0);
-    if (!self->streams || !self->out || !self->header_block) {
+    if (!self->streams || !self->conn_blocked || !self->out || !self->header_block) {
         return -1;
     }
     self->buf = NULL;
@@ -2192,6 +2385,7 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
     self->header_end_stream = 0;
     self->last_stream_id = 0;
     self->active_requests = 0;
+    self->idle_frames = 0;
     self->write_paused = 0;
 
     Py_ssize_t v;
@@ -2204,6 +2398,12 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
         return -1;
     }
     self->conn_recv_window = v;
+    self->conn_consumed_pending = 0;
+    self->conn_credit_threshold = v / 2;
+    if (self->conn_credit_threshold > 64 * 1024) {
+        self->conn_credit_threshold = 64 * 1024;
+    }
+    if (self->conn_credit_threshold < 1) self->conn_credit_threshold = 1;
     if (read_ssize(config, "max_header_list_bytes", &self->max_header_list) < 0 ||
         read_ssize(config, "max_body_bytes", &self->max_body_bytes) < 0 ||
         read_ssize(config, "hpack_table_bytes", &self->hpack_max) < 0) {

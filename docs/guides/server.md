@@ -21,6 +21,11 @@ config = ServerConfig(host="0.0.0.0", port=8000, protocols=("http/1.1", "h2"))
 run(app, config=config, tls=TLSConfig("cert.pem", "key.pem"))
 ```
 
+The defaults cap request bodies at 1 MiB and multiplexed concurrency at 64
+streams, keeping the nominal per-connection body budget at 64 MiB. Raise either
+explicitly only alongside application-consumption flow control and an observed
+workload that needs it.
+
 ## Choosing protocols
 
 HTTP/2 and HTTP/3 need the native extension. A listener that offers both

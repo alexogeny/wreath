@@ -66,6 +66,7 @@ PostgresError = _backend.PostgresError
 ProtocolError = _backend.ProtocolError
 Record = _backend.Record
 connect = _backend.connect
+_DEFAULT_CONNECTOR = connect
 
 Connector = Callable[[str], Awaitable[Any]]
 
@@ -444,11 +445,13 @@ class Database:
         if self.started:
             return
         for workload, config in self._configs.items():
-            connector = self._connector or partial(
-                connect,
-                statement_cache_size=config.statement_cache_size,
-                statement_cache_bytes=config.statement_cache_bytes,
-            )
+            connector = self._connector or connect
+            if connector is _DEFAULT_CONNECTOR:
+                connector = partial(
+                    connector,
+                    statement_cache_size=config.statement_cache_size,
+                    statement_cache_bytes=config.statement_cache_bytes,
+                )
             pool = Pool(
                 self._workload_dsns.get(workload, self._dsn),
                 config,

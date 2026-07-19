@@ -207,11 +207,11 @@ def test_hpack_hard_limit_reclaims_entries_and_capacity_immediately() -> None:
     assert "t->cap" in setter
 
 
-def test_eager_http1_task_uses_direct_eager_constructor_without_done_probe() -> None:
-    """Task remains the correctness owner, but synchronous completion stays eager."""
+def test_eager_http1_completion_only_allocates_a_task_after_suspension() -> None:
+    """The synchronous path completes inline; loop task ownership starts on yield."""
     source = (_NATIVE / "server_http1.c").read_text()
     spawn = _function(source, "spawn_app_task", "is_upgrade_request")
 
-    assert "PyObject_Vectorcall(task_class" in spawn
-    assert "Py_True" in spawn
-    assert "task_done_fn" not in spawn
+    assert "PyIter_Send(" in spawn
+    assert "loop_create_task" in spawn
+    assert "task_class" not in spawn

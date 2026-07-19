@@ -2076,6 +2076,8 @@ static int
 spawn_app_task(WreathHttpProtocol *self, PyObject *scope)
 {
     PyObject *coro = NULL;
+    PyObject *yielded = NULL;
+    PyObject *continuation = NULL;
     PyObject *task = NULL;
     PyObject *ignored = NULL;
     int result = -1;
@@ -2086,68 +2088,42 @@ spawn_app_task(WreathHttpProtocol *self, PyObject *scope)
             ? self->native_app : self->app,
         app_args, 3, NULL
     );
-    if (coro == NULL) {
+    if (coro == NULL) goto done;
+
+    /* Most Wreath handlers only await completed receive/send objects. Step the
+     * coroutine directly so that path owns no asyncio Task at all. */
+    PySendResult state = PyIter_Send(coro, Py_None, &yielded);
+    if (state == PYGEN_RETURN) {
+        if (apply_app_outcome(self, Py_NewRef(Py_None), 0) < 0) goto done;
+        result = 0;
         goto done;
     }
-    /* Eager start: the first coroutine step runs here, synchronously.  A
-     * handler whose awaits all resolve immediately (our receive/send
-     * awaitables) completes without ever being scheduled on the loop; only
-     * genuinely suspending applications pay for scheduling.  Completion
-     * handling still goes through add_done_callback, so a finished task
-     * unwinds via call_soon exactly as before. */
-    {
-        PyObject *task_args[3] = {coro, self->loop, Py_True};
-        task = PyObject_Vectorcall(task_class, task_args, 1, task_kwnames);
-    }
-    if (task == NULL) {
+    if (state == PYGEN_ERROR) {
+        PyObject *error = PyErr_GetRaisedException();
+        if (error == NULL) goto done;
+        if (apply_app_outcome(self, error, 0) < 0) goto done; /* steals error */
+        result = 0;
         goto done;
     }
-    /* Eagerly completed tasks are finalized inline: the coroutine has fully
-     * unwound by the time Task() returns, so nothing is on the stack that a
-     * deferred done-callback would have protected.  This skips the
-     * add_done_callback + call_soon round-trip per request.  Buffered
-     * pipelined bytes stay untouched: the outer run_drive() loop that led
-     * here resumes parsing them once the state machine is reset.
-     *
-     * Completion is detected by asking for the task's exception directly
-     * rather than probing Task.done() first: a still-pending task raises
-     * InvalidStateError, while a finished one hands back its exception (or
-     * None) that apply_app_outcome consumes.  The synchronous fast path thus
-     * crosses into Python once here, not once to probe and again to finalize. */
-    {
-        PyObject *exc_args[1] = {task};
-        PyObject *exc = PyObject_Vectorcall(task_exception_fn, exc_args, 1, NULL);
-        if (exc != NULL) {
-            if (apply_app_outcome(self, exc, 0) < 0) {
-                goto done;
-            }
-            result = 0;
-            goto done;
-        }
-        if (!PyErr_ExceptionMatches(invalid_state_error)) {
-            /* Done and cancelled: exception() raised CancelledError. */
-            PyErr_Clear();
-            if (apply_app_outcome(self, NULL, 0) < 0) {
-                goto done;
-            }
-            result = 0;
-            goto done;
-        }
-        /* Still pending: the application genuinely suspended. */
-        PyErr_Clear();
-    }
-    {
-        PyObject *cb_args[2] = {task, self->done_callable};
-        ignored = PyObject_Vectorcall(task_add_done_callback, cb_args, 2, NULL);
-    }
-    if (ignored == NULL) {
-        goto done;
-    }
+
+    /* A real suspension needs loop ownership. The trampoline adopts the value
+     * already yielded by the first step and forwards results, errors and
+     * cancellation into the original coroutine. */
+    continuation = PyObject_CallFunctionObjArgs(
+        resume_started_coroutine, coro, yielded, NULL);
+    if (continuation == NULL) goto done;
+    task = PyObject_CallOneArg(self->loop_create_task, continuation);
+    if (task == NULL) goto done;
+    PyObject *cb_args[2] = {task, self->done_callable};
+    ignored = PyObject_Vectorcall(task_add_done_callback, cb_args, 2, NULL);
+    if (ignored == NULL) goto done;
     Py_XSETREF(self->task, task);
     task = NULL;
     result = 0;
 done:
     Py_XDECREF(coro);
+    Py_XDECREF(yielded);
+    Py_XDECREF(continuation);
     Py_XDECREF(task);
     Py_XDECREF(ignored);
     return result;

@@ -272,12 +272,11 @@ async def _queue_driver(make_driver, chunks: list[bytes]):
     return d, seen
 
 
-async def test_queued_body_chunks_drain_in_exact_order(make_driver):
-    # 300 chunks crosses the head>=64 compaction threshold several times over.
+async def test_queued_body_chunks_coalesce_without_losing_order(make_driver):
     chunks = [f"{i:04d}".encode() for i in range(300)]
     _d, seen = await _queue_driver(make_driver, chunks)
     assert b"".join(seen["parts"]) == b"".join(chunks)
-    assert seen["parts"] == chunks  # exact framing order, nothing merged or lost
+    assert len(seen["parts"]) < len(chunks)
 
 
 async def test_queued_body_more_body_tracks_logical_queue_length(make_driver):
@@ -289,11 +288,12 @@ async def test_queued_body_more_body_tracks_logical_queue_length(make_driver):
     assert seen["more"][-1] is False
 
 
-async def test_delivery_is_correct_after_the_queue_compacts(make_driver):
-    """A chunk queued after compaction must still arrive, in order."""
-    chunks = [f"{i:04d}".encode() for i in range(256)]
+async def test_delivery_is_correct_across_coalescing_boundaries(make_driver):
+    """Chunks larger than one coalescing block still arrive in exact byte order."""
+    chunks = [bytes([index % 251]) * 1024 for index in range(32)]
     d, seen = await _queue_driver(make_driver, chunks)
-    assert seen["parts"] == chunks
+    assert b"".join(seen["parts"]) == b"".join(chunks)
+    assert len(seen["parts"]) >= 2
     # The stream completed normally, so the drained queue was reusable rather
     # than left holding consumed references.
     streams = _decode_response(d)

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import benchmarks.h2load as h2load
 from benchmarks.report import (
     _chart,
     generate_report,
@@ -193,6 +195,40 @@ def test_report_is_self_contained() -> None:
     html = render(document)
     assert "https://" not in html and "http://" not in html
     assert "<script" not in html
+
+
+def test_h2load_warmup_is_a_separate_unmeasured_run(monkeypatch) -> None:
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        h2load, "capabilities", lambda: h2load.Capabilities("h2load", True)
+    )
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        for item in command:
+            if item.startswith("--log-file="):
+                Path(item.partition("=")[2]).write_text(
+                    "0\t200\t10\n", encoding="utf-8"
+                )
+        count = int(command[command.index("-n") + 1])
+        output = (
+            f"finished in 1s, {count}.00 req/s\n"
+            f"requests: {count} total, {count} started, {count} done, "
+            "0 succeeded, 0 failed, 0 errored, 0 timeout\n"
+        )
+        # The parser reads the second requests field as successful requests.
+        output = output.replace("0 succeeded", f"{count} succeeded")
+        return SimpleNamespace(returncode=0, stdout=output, stderr="")
+
+    monkeypatch.setattr(h2load.subprocess, "run", fake_run)
+    result = h2load.measure(
+        "127.0.0.1", 8000, "/", "http/1.1",
+        requests=10, warmup_requests=3, connections=1, tls=False,
+    )
+
+    assert [command[command.index("-n") + 1] for command in commands] == ["3", "10"]
+    assert result.requests == 10
 
 
 def test_raw_trials_are_preserved_and_aggregates_derive_from_them() -> None:

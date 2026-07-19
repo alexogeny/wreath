@@ -1,6 +1,8 @@
 """Flow control and concurrency (RFC 9113 s5.2, s6.9, s5.1.2)."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from . import support
@@ -74,16 +76,58 @@ async def test_window_overflow_is_flow_control_error(make_driver):
 
 # --- request-body flow control ---------------------------------------------
 
-async def test_server_emits_window_update_after_consuming_body(make_driver):
+async def test_server_batches_window_update_after_consuming_body(make_driver):
     d = await _echo_request(make_driver)
+    body = b"x" * (16 * 1024)
     headers = support.build_headers_frame(1, support.request_headers(
-        method=b"POST", extra=[(b"content-length", b"5")]), end_stream=False)
+        method=b"POST", extra=[(b"content-length", str(len(body)).encode())]),
+        end_stream=False)
     await d.feed_and_settle(headers)
-    await d.feed_and_settle(support.encode_frame(support.DATA,
-                                                 support.FLAG_END_STREAM, 1, b"hello"))
-    # After consuming DATA, the server replenishes the connection window.
+    for offset in range(0, len(body), 4096):
+        await d.feed_and_settle(support.encode_frame(
+            support.DATA, 0, 1, body[offset:offset + 4096]))
+    await d.feed_and_settle(support.encode_frame(
+        support.DATA, support.FLAG_END_STREAM, 1, b""))
     wus = [f for f in d.frames() if f.type == support.WINDOW_UPDATE]
-    assert wus, "server should send WINDOW_UPDATE after consuming request body"
+    assert wus, "consumed body credit should be replenished in a batch"
+    assert len(wus) < len(body) // 4096
+
+
+async def test_slow_application_withholds_receive_credit(make_driver):
+    gate = asyncio.Event()
+    consumed = asyncio.Event()
+
+    async def slow(scope, receive, send):
+        await gate.wait()
+        while True:
+            message = await receive()
+            consumed.set()
+            if not message.get("more_body", False):
+                break
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    d = make_driver(slow)
+    await d.preface()
+    await d.feed_and_settle(support.build_headers_frame(
+        1,
+        support.request_headers(
+            method=b"POST", extra=[(b"content-length", b"16384")]
+        ),
+        end_stream=False,
+    ))
+    for _ in range(4):
+        d.feed(support.encode_frame(support.DATA, 0, 1, b"x" * 4096))
+    await d.settle()
+    assert not [frame for frame in d.frames() if frame.type == support.WINDOW_UPDATE]
+
+    gate.set()
+    await asyncio.wait_for(consumed.wait(), timeout=1)
+    await d.settle()
+    assert [frame for frame in d.frames() if frame.type == support.WINDOW_UPDATE]
+    await d.feed_and_settle(support.encode_frame(
+        support.DATA, support.FLAG_END_STREAM, 1, b""
+    ))
 
 
 async def test_data_exceeding_declared_content_length_is_protocol_error(make_driver):
