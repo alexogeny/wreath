@@ -77,44 +77,89 @@ Every activation remains capped by the existing stream and byte budgets. Legacy
 RFC 7540 dependency-tree `PRIORITY` frames remain ignored. This policy is selected
 only by metal; stock asyncio and uvloop scheduling is unchanged.
 
-## Selecting the metal HTTP/1 operation backend
+## Metal HTTP/1 native ownership
 
-The explicitly selected metal loop owns a separate HTTP/1 socket-operation path.
-Its per-worker runtime uses bounded generational connection and operation slabs;
-every recv/send completion validates both the operation token and its connection
-token before delivery. The stock asyncio and uvloop transports used by
-`wreath-native` do not enter this path and retain their existing behavior.
+The metal loop owns its HTTP/1 sockets through io_uring. Its per-worker runtime
+uses bounded generational connection and operation slabs; every recv/send
+completion validates both the operation token and its connection token before
+delivery. There is no metal backend switch and no asyncio/uvloop transport beneath
+this path. Ring setup failure is reported as `OSError` rather than changing the
+execution architecture. The stock asyncio and uvloop transports belong only to
+`wreath-native` and retain their separate behavior.
 
-Metal defaults to the direct epoll readiness adapter. An ordinary io_uring
-recv/send arm is available as an explicit experiment:
-
-```python
-from wreath.reactor import metal_event_loop
-
-loop = metal_event_loop(worker_id=0, io_backend="io_uring")
-```
-
-The equivalent process-level selection is `WREATH_METAL_IO=io_uring`. Ring setup
-failure is reported as `OSError`; explicit selection never silently falls back to
-epoll. The io_uring arm owns plaintext listener accept. It requests multishot accept,
+The io_uring runtime owns plaintext listener accept. It requests multishot accept,
 falls back to one-shot accept when the kernel rejects that opcode, and drains
 accepted descriptors from the CQ in bounded batches. Accepted descriptors are
 validated against the listener generation before connection construction, so a
 completion from a closed or reused listener is discarded.
 
 Plaintext socket ingress uses a separate receive ring with sixteen registered
-16-KiB provided buffers. Wreath requests multishot receive, recycles each selected
-buffer only after protocol delivery, and falls back to one-shot receive if the
-kernel rejects multishot. CQ draining is capped at 64 completions per loop turn.
-Connection tokens are generation-validated before touching a transport; stale
-completions recycle their buffer without protocol delivery. `pause_reading()`
-cancels the outstanding receive and `resume_reading()` rearms it, preserving
-asyncio flow-control behavior with a bounded cancellation race. If provided-buffer
-registration is unavailable, that loop retains the existing epoll receive path.
-Socket sends still use the synchronous operation wrapper.
+16-KiB provided buffers. Each offered buffer owns a generational descriptor token;
+a CQE's kernel buffer ID must claim the current token before protocol code accesses
+the memory. Duplicate and stale ownership epochs are rejected in O(1), with slab
+occupancy, high-water, exhaustion, stale-token, and wrap diagnostics. Wreath
+requests multishot receive, recycles each selected buffer only after protocol
+delivery, and falls back to one-shot receive if the kernel rejects multishot. CQ
+draining is capped at 64 completions per loop turn. Connection tokens are
+generation-validated before touching a transport; stale completions recycle their
+buffer without protocol delivery. `pause_reading()`
+cancels the outstanding receive and `resume_reading()` rearms it, preserving the
+transport flow-control contract with a bounded cancellation race. If the kernel
+reports provided-buffer exhaustion, it ends that receive epoch; Wreath records the
+exhaustion and rearms only at the bounded post-drain retry point, after selected
+buffers have been recycled. If provided-buffer registration is unavailable, metal
+loop startup fails instead of changing the transport architecture.
+
+Plaintext output uses a third ring. Each send SQE carries a generational operation
+token and retains an immutable payload until its final CQE. Partial sends advance
+a cursor and resubmit the remaining bytes; writes that arrive behind an active
+send enter the transport's bounded flow-control buffer. Completion releases the
+operation slot, resumes a paused producer at the low watermark, and submits the
+next payload. `close()` waits for all accepted bytes to complete, while abort and
+stale-connection paths discard callbacks without releasing kernel-visible memory
+early. Send CQ draining is also capped at 64 completions per loop turn. Failure to
+initialize asynchronous send ownership fails metal startup.
+
+Async SQEs are gathered in userspace and submitted per ring once at bounded loop
+phase boundaries rather than entering the kernel for every operation. The poller
+reports submitted SQEs separately from submission batches.
+
+After an empty completion probe, the adaptive polling controller learns an EWMA
+of empty-CQ-to-arrival time and its absolute deviation. It spins only after eight
+samples, only below a 50-microsecond prediction, and suppresses spinning when
+deviation exceeds 75% of the mean. Every spin is clamped to 50 microseconds,
+releases the GIL, and falls through to ordinary blocking on a miss. Timers, ready
+Python callbacks, and immediate control work bypass spinning. Telemetry exposes
+attempts, hits, misses, spin time, blocking entries, samples, EWMA, and deviation.
+Cross-thread scheduling writes a native eventfd whose poll request and wake are
+owned by io_uring; the completion is drained and rearmed without scheduling the
+inherited Python self-pipe callback. The inherited socketpair remains only for
+CPython signal wake bytes until signal notification joins the unified completion
+domain. Adaptive polling is part of the metal runtime rather than a product
+selection.
+Completion-trace capture is separately opt-in through
+`WREATH_METAL_TRACE=1`; the default allocates no trace ring and performs no
+per-completion trace write, avoiding diagnostic cache and RSS cost on production
+workers.
 
 Each loop is one ownership domain. `worker_id` labels that domain and operations
 from another OS thread are rejected rather than reaching its connection table.
+Metal allocates its hot ownership tables once, before serving, and never grows
+them on the request path. Tune per-worker baseline RSS and concurrency limits with
+`WREATH_METAL_CONNECTION_CAPACITY` (default 4096),
+`WREATH_METAL_OPERATION_CAPACITY` (default 16 for synchronous epoll and 4096 for
+io_uring in-flight ownership), and `WREATH_METAL_RECV_BUFFERS` (default 16).
+Values must be at least 16; receive
+buffer count must be a power of two. Invalid or excessive values fail loop startup
+rather than being rounded or triggering hidden dynamic growth. The poller exposes
+`native_mapped_bytes`, `native_heap_bytes`, and `native_ring_count` alongside SQE,
+submission-enter, and blocking-entry counters. Metal owns one 512-entry io_uring
+for listener accept, provided-buffer receive, asynchronous send, cancellation,
+and eventfd wake. Two high token bits select the completion class while the lower
+62 bits retain the generational ownership payload. Focused tests bound those
+values and the kernel-entry deltas for one real HTTP/1 request so RSS or syscall
+growth must
+be an explicit baseline change.
 Set `reuse_port=True` (or `WREATH_METAL_REUSEPORT=1`) when separately managed
 metal workers should bind one `SO_REUSEPORT` listener group:
 
@@ -130,8 +175,15 @@ generation:
 wreath run example:app --loop metal --workers 4
 ```
 
-Workers share TCP and UDP listeners through `SO_REUSEPORT`. `SIGTERM` and
-`SIGINT` stop accepting and use the configured shutdown timeout to drain active
+Workers share TCP and UDP listeners through `SO_REUSEPORT`. Set
+`WREATH_METAL_AFFINITY=auto` to pin worker `N` deterministically to available CPU
+`N % cpu_count` before its metal loop allocates rings and slabs, giving those
+worker-owned pages affinity-local first touch. This is the metal default; an
+invalid policy or unsupported affinity API fails worker startup rather than
+silently changing placement. `WREATH_METAL_AFFINITY=off` exists only for
+constrained container operation, not as an alternate scheduler implementation.
+`SIGTERM` and `SIGINT` stop accepting and use the configured shutdown timeout to
+drain active
 work. `SIGHUP` starts a complete replacement generation, waits for an explicit
 post-bind and post-lifespan readiness byte from each child, and only then signals
 the previous generation. A failed replacement leaves the current generation in

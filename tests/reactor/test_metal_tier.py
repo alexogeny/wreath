@@ -12,7 +12,9 @@ import asyncio
 import datetime
 import errno
 import importlib
+import json
 import os
+import selectors
 import shutil
 import socket
 import ssl
@@ -27,22 +29,94 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1]))  # tests/http2 codec
 
 
-def _metal_loop(timers: str | None = None):
-    import os
-
+def _metal_loop():
     import wreath.reactor as r
 
-    if timers is not None:
-        prev = os.environ.get("WREATH_METAL_TIMERS")
-        os.environ["WREATH_METAL_TIMERS"] = timers
-        try:
-            return r.metal_event_loop()
-        finally:
-            if prev is None:
-                os.environ.pop("WREATH_METAL_TIMERS", None)
-            else:
-                os.environ["WREATH_METAL_TIMERS"] = prev
     return r.metal_event_loop()
+
+
+def _metal_component_loop(*, io_backend: str, adaptive_polling: bool = True):
+    import wreath.reactor as r
+
+    return r.EventLoop(
+        selectors.EpollSelector(),
+        backend="epoll",
+        timers="wheel",
+        tasks="auto",
+        stats=False,
+        native_transport=True,
+        native_loop=True,
+        direct_task_steps=True,
+        io_backend=io_backend,
+        adaptive_polling=adaptive_polling,
+    )
+
+
+def test_wreath_execution_tier_process_memory_comparison() -> None:
+    script = r'''
+import asyncio
+import gc
+import json
+import sys
+import tracemalloc
+
+tracemalloc.start()
+mode = sys.argv[1]
+if mode == "wreath":
+    from wreath import Wreath
+    app = Wreath()
+    loop = asyncio.new_event_loop()
+elif mode == "wreath-native":
+    import wreath.reactor as reactor
+    app = None
+    loop = reactor.new_event_loop()
+else:
+    import wreath.reactor as reactor
+    app = None
+    loop = reactor.metal_event_loop()
+loop.run_until_complete(asyncio.sleep(0))
+gc.collect()
+status = {}
+with open("/proc/self/status") as source:
+    for line in source:
+        name, separator, value = line.partition(":")
+        if separator and name in {"VmSize", "VmRSS", "RssAnon", "RssFile"}:
+            status[name] = int(value.split()[0]) * 1024
+current, peak = tracemalloc.get_traced_memory()
+poller = getattr(loop, "_poller", None)
+print(json.dumps({
+    "mode": mode,
+    **status,
+    "python_traced_heap": current,
+    "python_traced_peak": peak,
+    "native_mapped": getattr(poller, "native_mapped_bytes", 0),
+    "native_heap": getattr(poller, "native_heap_bytes", 0),
+    "native_rings": getattr(poller, "native_ring_count", 0),
+}))
+loop.close()
+del app
+'''
+    rows = []
+    for mode in ("wreath", "wreath-native", "wreath-metal"):
+        completed = subprocess.run(
+            [sys.executable, "-c", script, mode],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        rows.append(json.loads(completed.stdout))
+
+    print(json.dumps(rows, indent=2, sort_keys=True))
+    by_mode = {row["mode"]: row for row in rows}
+    assert set(by_mode) == {"wreath", "wreath-native", "wreath-metal"}
+    for row in rows:
+        assert 0 < row["VmRSS"] < 200 * 1024 * 1024, rows
+        assert 0 < row["python_traced_heap"] < 64 * 1024 * 1024, rows
+    assert by_mode["wreath"]["native_rings"] == 0
+    assert by_mode["wreath-native"]["native_rings"] == 0
+    assert by_mode["wreath-metal"]["native_rings"] == 1
+    assert 256 * 1024 <= by_mode["wreath-metal"]["native_mapped"] <= 320 * 1024
+    assert 300 * 1024 <= by_mode["wreath-metal"]["native_heap"] <= 330 * 1024
 
 
 def test_metal_defaults_to_poller_driven_wheel_without_bridge_heartbeat():
@@ -50,6 +124,9 @@ def test_metal_defaults_to_poller_driven_wheel_without_bridge_heartbeat():
     fired: list[bool] = []
     try:
         assert loop.reactor_timers() == "wheel"
+        assert loop._poller.connection_capacity == 4096
+        assert loop._poller.operation_capacity == 4096
+        assert loop._poller.completion_trace() == []
         loop.call_later(0.005, fired.append, True)
         assert loop._wheel_tick_handle is None
         loop.run_until_complete(asyncio.sleep(0.02))
@@ -57,6 +134,69 @@ def test_metal_defaults_to_poller_driven_wheel_without_bridge_heartbeat():
         assert loop._wheel_tick_handle is None
     finally:
         loop.close()
+
+
+def test_metal_native_memory_and_kernel_object_baseline() -> None:
+    loop = _metal_loop()
+    try:
+        poller = loop._poller
+        assert poller.native_ring_count == 1
+        assert 256 * 1024 <= poller.native_mapped_bytes <= 320 * 1024
+        assert 300 * 1024 <= poller.native_heap_bytes <= 330 * 1024
+        with pytest.raises(ValueError, match="closed epoll"):
+            loop._selector.fileno()
+        assert poller.submission_batches == 0
+        assert poller.submitted_sqes == 0
+    finally:
+        loop.close()
+
+
+def test_metal_close_releases_native_mappings_and_kernel_rings() -> None:
+    loop = _metal_loop()
+    poller = loop._poller
+    assert poller.native_ring_count == 1
+    assert poller.native_mapped_bytes > 0
+    loop.close()
+    assert poller.native_ring_count == 0
+    assert poller.native_mapped_bytes == 0
+
+
+def test_metal_cross_thread_wake_is_an_io_uring_completion() -> None:
+    loop = _metal_loop()
+    future = loop.create_future()
+
+    def resolve() -> None:
+        import time
+
+        time.sleep(0.01)
+        loop.call_soon_threadsafe(future.set_result, "awake")
+
+    thread = threading.Thread(target=resolve)
+    try:
+        thread.start()
+        assert loop.run_until_complete(asyncio.wait_for(future, 1.0)) == "awake"
+        thread.join()
+        assert loop._poller.wake_requests >= 1
+        assert loop._poller.wake_completions >= 1
+        assert loop._poller.wake_submissions == loop._poller.wake_completions + 1
+    finally:
+        loop.close()
+
+
+def test_metal_trace_memory_is_absent_unless_diagnostics_are_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = _metal_loop()
+    baseline = loop._poller.native_heap_bytes
+    loop.close()
+
+    monkeypatch.setenv("WREATH_METAL_TRACE", "1")
+    traced = _metal_loop()
+    try:
+        trace_bytes = traced._poller.native_heap_bytes - baseline
+        assert 4 * 1024 <= trace_bytes <= 8 * 1024
+    finally:
+        traced.close()
 
 
 def test_metal_directly_dispatches_c_task_steps_with_their_context(monkeypatch):
@@ -84,11 +224,11 @@ def test_metal_directly_dispatches_c_task_steps_with_their_context(monkeypatch):
         loop.close()
 
 
-def test_metal_task_step_dispatch_has_a_handle_ablation(monkeypatch):
+def test_metal_task_step_dispatch_is_not_runtime_selectable(monkeypatch):
     monkeypatch.setenv("WREATH_METAL_TASK_STEPS", "handle")
     loop = _metal_loop()
     try:
-        assert loop._direct_task_steps is False
+        assert loop._direct_task_steps is True
     finally:
         loop.close()
 
@@ -169,6 +309,11 @@ def test_native_transport_fuses_http1_ingress_without_python_buffer_callbacks():
         assert transport._fused_http1 is True
         assert transport._metal_connection_token != 0
         assert transport._metal_worker_id == 0
+        submissions_before = loop._poller.submitted_sqes
+        enters_before = loop._poller.submission_batches
+        blocks_before = loop._poller.blocking_enters
+        receives_before = loop._poller.receive_completions
+        sends_before = loop._poller.send_completions
         client.sendall(b"GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
         loop.run_until_complete(asyncio.sleep(0.01))
         response = client.recv(4096)
@@ -176,11 +321,13 @@ def test_native_transport_fuses_http1_ingress_without_python_buffer_callbacks():
         assert b"200 OK" in response
         assert b"metal-http" in response
         assert callbacks == []
-        assert transport._direct_read_dispatches >= 1
+        assert 1 <= loop._poller.receive_completions - receives_before <= 2
+        assert loop._poller.send_completions - sends_before == 1
+        assert 1 <= loop._poller.submitted_sqes - submissions_before <= 3
+        assert 1 <= loop._poller.submission_batches - enters_before <= 3
+        assert 1 <= loop._poller.blocking_enters - blocks_before <= 4
         assert transport._direct_protocol_writes >= 1
         assert transport._zero_copy_cork_writes >= 1
-        assert transport._metal_submissions >= 2
-        assert transport._metal_completions == transport._metal_submissions
         assert transport._metal_operation_high_water >= 1
         assert transport._metal_operation_exhaustions == 0
         assert transport._metal_cross_worker_rejections == 0
@@ -230,7 +377,7 @@ def test_metal_io_uring_owns_listener_accept_and_drains_cqes():
     from wreath.server import Server, ServerConfig
 
     try:
-        loop = reactor.metal_event_loop(io_backend="io_uring")
+        loop = reactor.metal_event_loop()
     except OSError as exc:
         assert exc.errno in {errno.ENOSYS, errno.EPERM, errno.EACCES, errno.ENOMEM}
         return
@@ -251,24 +398,143 @@ def test_metal_io_uring_owns_listener_accept_and_drains_cqes():
                 writer.write(
                     b"GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
                 )
+            wake_seen = []
+            wake_thread = threading.Thread(
+                target=lambda: loop.call_soon_threadsafe(wake_seen.append, True)
+            )
+            wake_thread.start()
             await asyncio.gather(*(writer.drain() for _reader, writer in clients))
             responses = await asyncio.gather(*(reader.read() for reader, _writer in clients))
             for _reader, writer in clients:
                 writer.close()
             await asyncio.gather(*(writer.wait_closed() for _reader, writer in clients))
+            wake_thread.join()
+            await asyncio.sleep(0)
+            assert wake_seen == [True]
             assert all(b"200 OK" in response for response in responses)
             assert all(b"metal-http" in response for response in responses)
+            assert loop._poller.native_ring_count == 1
             assert loop._poller.accept_submissions >= 1
             assert loop._poller.accept_completions >= 4
+            assert loop._poller.wake_completions >= 1
             if loop._poller.receive_enabled:
                 assert loop._poller.provided_buffer_count == 16
                 assert loop._poller.receive_completions >= 4
                 assert loop._poller.provided_buffer_recycles >= 4
+                assert loop._poller.buffer_descriptor_occupancy == 16
+                assert loop._poller.buffer_descriptor_high_water == 16
+                assert loop._poller.buffer_descriptor_exhaustions == 0
+                assert loop._poller.provided_buffer_exhaustions == 0
+                assert loop._poller.buffer_descriptor_stale == 0
+                assert loop._poller.buffer_descriptor_generation_wraps == 0
+            if loop._poller.send_enabled:
+                assert loop._poller.send_submissions >= 4
+                assert loop._poller.send_completions >= 4
+            assert loop._poller.submitted_sqes > loop._poller.submission_batches
         finally:
             await server.close()
 
     try:
         loop.run_until_complete(exercise())
+    finally:
+        loop.close()
+
+
+def test_epoll_and_io_uring_http1_completion_traces_are_equivalent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WREATH_METAL_TRACE", "1")
+    import wreath.reactor as reactor
+
+    Http1Protocol = importlib.import_module("wreath._native._server").Http1Protocol
+    ServerConfig = importlib.import_module("wreath.server").ServerConfig
+
+    def exercise(io_backend):
+        loop = (
+            reactor.metal_event_loop()
+            if io_backend == "io_uring"
+            else _metal_component_loop(io_backend=io_backend)
+        )
+        client, server = socket.socketpair()
+        client.setblocking(False)
+        try:
+            protocol = Http1Protocol(
+                _echo, ServerConfig(lifespan="off"), loop, set()
+            )
+            loop._make_socket_transport(server, protocol)
+            loop.run_until_complete(asyncio.sleep(0))
+            request = b"GET /trace HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
+            client.sendall(request)
+            loop.run_until_complete(asyncio.sleep(0.01))
+            response = client.recv(4096)
+            trace = loop._poller.completion_trace()
+            return request, response, trace
+        finally:
+            client.close()
+            loop.close()
+
+    request, epoll_response, epoll_trace = exercise("epoll")
+    try:
+        _request, uring_response, uring_trace = exercise("io_uring")
+    except OSError as exc:
+        assert exc.errno in {errno.ENOSYS, errno.EPERM, errno.EACCES, errno.ENOMEM}
+        return
+
+    def normalized(trace):
+        rows = [(kind, result, flags) for _seq, _token, result, kind, _backend, flags in trace
+                if kind in (1, 2) and result >= 0]
+        return [kind for kind, _result, _flags in rows], {
+            kind: sum(result for row_kind, result, _flags in rows if row_kind == kind)
+            for kind in (1, 2)
+        }
+
+    epoll_kinds, epoll_totals = normalized(epoll_trace)
+    uring_kinds, uring_totals = normalized(uring_trace)
+    assert epoll_response == uring_response
+    assert epoll_kinds[:2] == [1, 2]
+    assert uring_kinds[:2] == [1, 2]
+    assert epoll_totals[1] == uring_totals[1] == len(request)
+    assert epoll_totals[2] == uring_totals[2] == len(epoll_response)
+
+
+def test_metal_native_arena_capacities_are_bounded_and_configurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import wreath.reactor as reactor
+
+    monkeypatch.setenv("WREATH_METAL_CONNECTION_CAPACITY", "32")
+    monkeypatch.setenv("WREATH_METAL_OPERATION_CAPACITY", "64")
+    monkeypatch.setenv("WREATH_METAL_RECV_BUFFERS", "32")
+    loop = reactor.metal_event_loop()
+    try:
+        assert loop._poller.connection_capacity == 32
+        assert loop._poller.operation_capacity == 64
+        assert loop._poller.buffer_descriptor_capacity == 32
+        assert loop._poller.native_heap_bytes < 64 * 1024
+        assert 512 * 1024 <= loop._poller.native_mapped_bytes <= 640 * 1024
+    finally:
+        loop.close()
+
+    monkeypatch.setenv("WREATH_METAL_RECV_BUFFERS", "24")
+    with pytest.raises(ValueError, match="power of two"):
+        reactor.metal_event_loop()
+
+
+def test_adaptive_polling_component_can_be_disabled_for_differential_coverage():
+    try:
+        loop = _metal_component_loop(
+            io_backend="io_uring", adaptive_polling=False
+        )
+    except OSError as exc:
+        assert exc.errno in {errno.ENOSYS, errno.EPERM, errno.EACCES, errno.ENOMEM}
+        return
+    try:
+        loop.run_until_complete(asyncio.sleep(0.002))
+        assert loop._poller.adaptive_polling is False
+        assert loop._poller.spin_attempts == 0
+        assert loop._poller.spin_hits == 0
+        assert loop._poller.spin_nanoseconds == 0
+        assert loop._poller.blocking_enters >= 1
     finally:
         loop.close()
 
@@ -290,7 +556,7 @@ def test_metal_io_uring_receive_pause_cancels_and_resume_rearms():
                 self.transport.pause_reading()
 
     try:
-        loop = reactor.metal_event_loop(io_backend="io_uring")
+        loop = reactor.metal_event_loop()
     except OSError as exc:
         assert exc.errno in {errno.ENOSYS, errno.EPERM, errno.EACCES, errno.ENOMEM}
         return
@@ -320,6 +586,65 @@ def test_metal_io_uring_receive_pause_cancels_and_resume_rearms():
         assert loop._poller.provided_buffer_recycles >= 2
         transport.close()
         loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        client.close()
+        loop.close()
+
+
+def test_metal_io_uring_send_completion_retains_payload_and_drains_before_close():
+    import wreath.reactor as reactor
+
+    class Protocol(asyncio.Protocol):
+        def __init__(self):
+            self.lost = False
+
+        def connection_lost(self, exc):
+            assert exc is None
+            self.lost = True
+
+    try:
+        loop = reactor.metal_event_loop()
+    except OSError as exc:
+        assert exc.errno in {errno.ENOSYS, errno.EPERM, errno.EACCES, errno.ENOMEM}
+        return
+    if not loop._poller.send_enabled:
+        loop.close()
+        return
+
+    client, server = socket.socketpair()
+    client.setblocking(False)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+    protocol = Protocol()
+    first = b"a" * (256 * 1024)
+    second = b"b" * (64 * 1024)
+    received = bytearray()
+    try:
+        transport = loop._make_socket_transport(server, protocol)
+        loop.run_until_complete(asyncio.sleep(0))
+        transport.write(first)
+        transport.write(second)
+        assert transport.get_write_buffer_size() > 0
+        transport.close()
+        assert not protocol.lost
+
+        for _ in range(1000):
+            loop.run_until_complete(asyncio.sleep(0.001))
+            while True:
+                try:
+                    chunk = client.recv(64 * 1024)
+                except BlockingIOError:
+                    break
+                if not chunk:
+                    break
+                received.extend(chunk)
+            if protocol.lost:
+                break
+
+        assert bytes(received) == first + second
+        assert protocol.lost
+        assert transport.get_write_buffer_size() == 0
+        assert loop._poller.send_submissions >= 2
+        assert loop._poller.send_completions >= 2
     finally:
         client.close()
         loop.close()
@@ -367,7 +692,7 @@ def test_metal_http1_io_uring_arm_is_explicit_and_operational_when_available():
     Http1Protocol = importlib.import_module("wreath._native._server").Http1Protocol
     ServerConfig = importlib.import_module("wreath.server").ServerConfig
     try:
-        loop = reactor.metal_event_loop(io_backend="io_uring")
+        loop = reactor.metal_event_loop()
     except OSError as exc:
         # Explicit selection reports host/kernel policy; it must never fall back
         # silently to epoll.
@@ -464,7 +789,7 @@ def test_native_transport_is_collected_after_close():
 
 
 def test_metal_serves_http1_on_the_wheel():
-    loop = _metal_loop(timers="wheel")
+    loop = _metal_loop()
     try:
         assert loop.reactor_timers() == "wheel"
         srv = _serve(loop, ("http/1.1",))

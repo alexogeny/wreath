@@ -532,6 +532,22 @@ def run_server(
     run(app, config, tls=tls, loop_factory=loop_factory)
 
 
+def _apply_metal_worker_affinity(worker_id: int) -> int | None:
+    policy = os.environ.get("WREATH_METAL_AFFINITY", "off").strip().lower()
+    if policy == "off":
+        return None
+    if policy != "auto":
+        raise ValueError("WREATH_METAL_AFFINITY must be 'auto' or 'off'")
+    if not hasattr(os, "sched_getaffinity") or not hasattr(os, "sched_setaffinity"):
+        raise RuntimeError("WREATH_METAL_AFFINITY=auto requires Linux CPU affinity")
+    available = sorted(os.sched_getaffinity(0))
+    if not available:
+        raise RuntimeError("the worker affinity mask contains no CPUs")
+    cpu = available[worker_id % len(available)]
+    os.sched_setaffinity(0, {cpu})
+    return cpu
+
+
 def _spawn_metal_worker(
     app: ASGIApplication,
     config: ServerConfig,
@@ -555,6 +571,7 @@ def _spawn_metal_worker(
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
         os.environ["_WREATH_WORKER_READY_FD"] = str(ready_write)
+        _apply_metal_worker_affinity(worker_id)
         reactor = importlib.import_module("wreath.reactor")
         loop_factory = functools.partial(
             reactor.metal_event_loop,

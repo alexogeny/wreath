@@ -39,6 +39,30 @@ def test_run_parser_defaults_are_safe_and_deterministic() -> None:
     assert options.date_header is True
 
 
+def test_metal_worker_affinity_is_explicit_and_deterministic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_module = importlib.import_module("wreath._cli")
+
+    monkeypatch.delenv("WREATH_METAL_AFFINITY", raising=False)
+    assert cli_module._apply_metal_worker_affinity(3) is None
+
+    monkeypatch.setenv("WREATH_METAL_AFFINITY", "auto")
+    monkeypatch.setattr(cli_module.os, "sched_getaffinity", lambda _pid: {2, 6})
+    applied: list[tuple[int, set[int]]] = []
+    monkeypatch.setattr(
+        cli_module.os,
+        "sched_setaffinity",
+        lambda pid, cpus: applied.append((pid, cpus)),
+    )
+    assert cli_module._apply_metal_worker_affinity(3) == 6
+    assert applied == [(0, {6})]
+
+    monkeypatch.setenv("WREATH_METAL_AFFINITY", "sometimes")
+    with pytest.raises(ValueError, match="must be 'auto' or 'off'"):
+        cli_module._apply_metal_worker_affinity(0)
+
+
 def test_multiple_workers_are_explicitly_metal_only() -> None:
     namespace = build_parser().parse_args(
         ["run", "example:app", "--loop", "metal", "--workers", "3"]

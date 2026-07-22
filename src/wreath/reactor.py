@@ -243,7 +243,7 @@ class EventLoop(asyncio.SelectorEventLoop):
                  native_transport: bool = False, native_loop: bool = False,
                  direct_task_steps: bool = True, worker_id: int = 0,
                  io_backend: str = "epoll", reuse_port: bool = False,
-                 wheel_slots: int = 4096,
+                 adaptive_polling: bool = True, wheel_slots: int = 4096,
                  wheel_resolution: float = 0.001):
         super().__init__(selector)
         self._backend = backend
@@ -258,6 +258,7 @@ class EventLoop(asyncio.SelectorEventLoop):
         if io_backend not in ("epoll", "io_uring"):
             raise ValueError("io_backend must be 'epoll' or 'io_uring'")
         self._io_backend = io_backend
+        self._adaptive_polling = adaptive_polling
         self._wreath_reuse_port = reuse_port
         self._poller = None
         self._reactor_stats = _stats_template()
@@ -290,12 +291,14 @@ class EventLoop(asyncio.SelectorEventLoop):
         self-pipe -- registered on the base selector by super().__init__() -- onto
         the poller, or call_soon_threadsafe and signals could never wake us.
         """
+        inherited_selector = self._selector
         poller = _wheel_ext.ReactorPoller(
             self,
             self._wheel if self._wheel is not None else None,
             self._direct_task_steps,
             self._worker_id,
             1 if self._io_backend == "io_uring" else 0,
+            1 if self._adaptive_polling else 0,
         )
         self._poller = poller
         self._add_reader = poller._add_reader
@@ -305,7 +308,15 @@ class EventLoop(asyncio.SelectorEventLoop):
         self._run_once = poller._run_once
         ssock = getattr(self, "_ssock", None)
         if ssock is not None:
+            # CPython's signal wakeup fd still targets the inherited socketpair;
+            # ordinary cross-thread scheduling uses the native eventfd below.
             poller._add_reader(ssock.fileno(), self._read_from_self)
+        self._write_to_self = poller._wake
+        # SelectorEventLoop construction creates an epoll fd before the native
+        # poller can be installed. Metal never dispatches through it: close that
+        # inherited kernel object now instead of retaining duplicate ownership
+        # and RSS until loop teardown. Base close is idempotent.
+        inherited_selector.close()
 
     def close(self) -> None:
         if self._poller is not None:
@@ -464,32 +475,28 @@ def new_event_loop(backend: str | None = None, *, timers: str = "heap") -> Event
 
 
 def metal_event_loop(
-    *, worker_id: int = 0, io_backend: str | None = None,
-    reuse_port: bool | None = None,
+    *, worker_id: int = 0, reuse_port: bool | None = None,
 ) -> EventLoop:
     """The event loop for the ``metal`` tier: native C poller + transport.
 
-    Configurable for ablation via env (WREATH_METAL_TASKS=inline|auto,
-    WREATH_METAL_TASK_STEPS=direct|handle, WREATH_METAL_TIMERS=heap|wheel);
-    introspection stats are off on the runtime path so no per-callback counter
-    is paid.
+    Metal always owns socket I/O through io_uring, uses the native timing wheel,
+    native transport, direct native poller dispatch, adaptive polling, and no
+    callback-statistics bookkeeping. Backend selection belongs to other Wreath
+    execution tiers, not to metal.
 
-    Timers default to the native wheel. ReactorPoller reads its exact next
-    deadline and uses that as the epoll timeout, so there is no recurring bridge
-    tick and an idle server actually sleeps. The heap remains available as an
-    ablation and as the generic fallback outside the native poller.
+    ReactorPoller reads the wheel's exact next deadline, so there is no recurring
+    bridge tick and an idle server sleeps until native work or a real deadline.
     """
     import os
 
     # Default to CPython's C Task: the Python inline-drive WreathTask measured as
     # a net loss on the runtime path (it needs a C implementation to pay off), so
     # metal's win is the native poller+transport fusion, not the Python task driver.
-    tasks = os.environ.get("WREATH_METAL_TASKS", "auto")
-    timers = os.environ.get("WREATH_METAL_TIMERS", "wheel")
-    transport = os.environ.get("WREATH_METAL_TRANSPORT", "native") == "native"
-    native_loop = os.environ.get("WREATH_METAL_LOOP", "native") == "native"
-    direct_task_steps = os.environ.get("WREATH_METAL_TASK_STEPS", "direct") == "direct"
-    io_backend = io_backend or os.environ.get("WREATH_METAL_IO", "epoll")
+    tasks = "auto"
+    timers = "wheel"
+    transport = True
+    native_loop = True
+    direct_task_steps = True
     if reuse_port is None:
         reuse_port = os.environ.get("WREATH_METAL_REUSEPORT", "0") == "1"
     backend = _default_backend()
@@ -497,7 +504,8 @@ def metal_event_loop(
                      timers=timers, tasks=tasks, stats=False,
                      native_transport=transport, native_loop=native_loop,
                      direct_task_steps=direct_task_steps, worker_id=worker_id,
-                     io_backend=io_backend, reuse_port=reuse_port)
+                      io_backend="io_uring", reuse_port=reuse_port,
+                      adaptive_polling=True)
 
 
 class _ServerHandle:
