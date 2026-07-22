@@ -38,7 +38,6 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import dataclasses
-import functools
 import selectors
 import socket
 from asyncio import events as _events
@@ -242,8 +241,8 @@ class EventLoop(asyncio.SelectorEventLoop):
                  timers: str = "heap", tasks: str = "inline", stats: bool = True,
                  native_transport: bool = False, native_loop: bool = False,
                  direct_task_steps: bool = True, worker_id: int = 0,
-                 io_backend: str = "epoll", reuse_port: bool = False,
-                 adaptive_polling: bool = True, wheel_slots: int = 4096,
+                 reuse_port: bool = False, adaptive_polling: bool = True,
+                 wheel_slots: int = 4096,
                  wheel_resolution: float = 0.001):
         super().__init__(selector)
         self._backend = backend
@@ -255,9 +254,6 @@ class EventLoop(asyncio.SelectorEventLoop):
         if worker_id < 0:
             raise ValueError("worker_id must be non-negative")
         self._worker_id = worker_id
-        if io_backend not in ("epoll", "io_uring"):
-            raise ValueError("io_backend must be 'epoll' or 'io_uring'")
-        self._io_backend = io_backend
         self._adaptive_polling = adaptive_polling
         self._wreath_reuse_port = reuse_port
         self._poller = None
@@ -283,9 +279,9 @@ class EventLoop(asyncio.SelectorEventLoop):
     def _install_native_loop(self) -> None:
         """Replace the selector I/O core with the C ReactorPoller.
 
-        The poller owns its own epoll and fd->callback registry and dispatches
-        readable/writable sockets to the transport's C read_ready/write_ready
-        directly -- no selector.select() wrapper, no _process_events, no
+        The poller owns a tagged io_uring completion domain and fd-to-callback
+        registry. It dispatches readiness CQEs directly -- no selector.select()
+        wrapper, no _process_events, no
         per-event Handle. We rebind the loop's own low-level I/O methods to the
         poller's C methods (so transports and sock_* reach it), then move the
         self-pipe -- registered on the base selector by super().__init__() -- onto
@@ -297,7 +293,7 @@ class EventLoop(asyncio.SelectorEventLoop):
             self._wheel if self._wheel is not None else None,
             self._direct_task_steps,
             self._worker_id,
-            1 if self._io_backend == "io_uring" else 0,
+            1,
             1 if self._adaptive_polling else 0,
         )
         self._poller = poller
@@ -308,9 +304,9 @@ class EventLoop(asyncio.SelectorEventLoop):
         self._run_once = poller._run_once
         ssock = getattr(self, "_ssock", None)
         if ssock is not None:
-            # CPython's signal wakeup fd still targets the inherited socketpair;
-            # ordinary cross-thread scheduling uses the native eventfd below.
-            poller._add_reader(ssock.fileno(), self._read_from_self)
+            # CPython writes signal wake bytes to this socket; the unified ring
+            # invokes the drain callback from its control CQ path.
+            poller._set_signal_reader(ssock.fileno(), self._read_from_self)
         self._write_to_self = poller._wake
         # SelectorEventLoop construction creates an epoll fd before the native
         # poller can be installed. Metal never dispatches through it: close that
@@ -320,7 +316,7 @@ class EventLoop(asyncio.SelectorEventLoop):
 
     def close(self) -> None:
         if self._poller is not None:
-            # Break the loop<->poller cycle promptly and free epoll/registry.
+            # Break the loop<->poller cycle and free the ring/registry promptly.
             self._poller.close()
         super().close()
 
@@ -378,16 +374,9 @@ class EventLoop(asyncio.SelectorEventLoop):
         self, protocol_factory, sock, sslcontext=None, server=None, backlog=100,
         ssl_handshake_timeout=None, ssl_shutdown_timeout=None,
     ):
-        if self._io_backend == "io_uring" and sslcontext is None:
-            callback = functools.partial(
-                self._metal_accept_connection,
-                protocol_factory,
-                sslcontext,
-                server,
-                ssl_handshake_timeout,
-                ssl_shutdown_timeout,
-            )
-            self._poller._add_uring_listener(sock.fileno(), callback)
+        if self._poller is not None and sslcontext is None:
+            native_server = (protocol_factory, server, socket.socket)
+            self._poller._add_uring_listener(sock.fileno(), native_server)
             return
         return super()._start_serving(
             protocol_factory,
@@ -399,32 +388,9 @@ class EventLoop(asyncio.SelectorEventLoop):
             ssl_shutdown_timeout,
         )
 
-    def _metal_accept_connection(
-        self, protocol_factory, sslcontext, server, ssl_handshake_timeout,
-        ssl_shutdown_timeout, accepted_fd,
-    ):
-        conn = socket.socket(fileno=accepted_fd)
-        conn.setblocking(False)
-        try:
-            address = conn.getpeername()
-        except OSError:
-            conn.close()
-            return
-        accept = self._accept_connection2(
-            protocol_factory,
-            conn,
-            {"peername": address},
-            sslcontext,
-            server,
-            ssl_handshake_timeout,
-            ssl_shutdown_timeout,
-        )
-        self.create_task(accept)
-
     def _stop_serving(self, sock):
         if (
-            self._io_backend == "io_uring"
-            and self._poller is not None
+            self._poller is not None
             and self._poller._remove_uring_listener(sock.fileno())
         ):
             sock.close()
@@ -504,8 +470,7 @@ def metal_event_loop(
                      timers=timers, tasks=tasks, stats=False,
                      native_transport=transport, native_loop=native_loop,
                      direct_task_steps=direct_task_steps, worker_id=worker_id,
-                      io_backend="io_uring", reuse_port=reuse_port,
-                      adaptive_polling=True)
+                     reuse_port=reuse_port, adaptive_polling=True)
 
 
 class _ServerHandle:

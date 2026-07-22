@@ -140,6 +140,8 @@ nav:
       - Exceptions: reference/exceptions.md
       - CLI: reference/cli.md
       - Reserved modules: reference/roadmap.md
+  - Explorations:
+      - The timer that wouldn't settle: explorations/the-timer-that-wouldnt-settle.md
   - Release notes: release_notes/index.md
   # Development plans (docs/plans/) and architecture decisions (docs/decisions/)
   # are omitted from the nav and gitignored while they stabilise; restore their

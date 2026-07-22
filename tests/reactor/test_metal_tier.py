@@ -16,6 +16,7 @@ import json
 import os
 import selectors
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
@@ -35,7 +36,7 @@ def _metal_loop():
     return r.metal_event_loop()
 
 
-def _metal_component_loop(*, io_backend: str, adaptive_polling: bool = True):
+def _metal_component_loop(*, adaptive_polling: bool = True):
     import wreath.reactor as r
 
     return r.EventLoop(
@@ -47,7 +48,6 @@ def _metal_component_loop(*, io_backend: str, adaptive_polling: bool = True):
         native_transport=True,
         native_loop=True,
         direct_task_steps=True,
-        io_backend=io_backend,
         adaptive_polling=adaptive_polling,
     )
 
@@ -116,7 +116,259 @@ del app
     assert by_mode["wreath-native"]["native_rings"] == 0
     assert by_mode["wreath-metal"]["native_rings"] == 1
     assert 256 * 1024 <= by_mode["wreath-metal"]["native_mapped"] <= 320 * 1024
-    assert 300 * 1024 <= by_mode["wreath-metal"]["native_heap"] <= 330 * 1024
+    assert 190 * 1024 <= by_mode["wreath-metal"]["native_heap"] <= 195 * 1024
+
+
+def test_wreath_execution_tier_request_work_comparison() -> None:
+    """Count interpreter work for one equivalent request; this is not a timer."""
+    script = r'''
+import asyncio
+import collections
+import json
+import socket
+import sys
+import threading
+
+from wreath.server import Server, ServerConfig
+
+mode = sys.argv[1]
+if mode == "wreath":
+    loop = asyncio.new_event_loop()
+elif mode == "wreath-native":
+    import wreath.reactor as reactor
+    loop = reactor.new_event_loop()
+else:
+    import wreath.reactor as reactor
+    loop = reactor.metal_event_loop()
+asyncio.set_event_loop(loop)
+app_calls = 0
+
+async def app(scope, receive, send):
+    global app_calls
+    app_calls += 1
+    await send({"type": "http.response.start", "status": 200, "headers": []})
+    await send({"type": "http.response.body", "body": b"work"})
+
+server = Server(
+    app,
+    ServerConfig(host="127.0.0.1", port=0, lifespan="off"),
+    loop,
+)
+loop.run_until_complete(server._start(ssl=None))
+port = server.sockets[0].getsockname()[1]
+done = loop.create_future()
+responses = []
+counts = collections.Counter({
+    "python_calls": 0,
+    "asyncio_calls": 0,
+    "wreath_calls": 0,
+    "accept_handoff_calls": 0,
+    "handle_run_calls": 0,
+    "future_calls": 0,
+    "task_calls": 0,
+})
+poller = getattr(loop, "_poller", None)
+ring_fields = (
+    "submitted_sqes",
+    "submission_batches",
+    "sq_tail_publications",
+    "cq_head_publications",
+    "enter_calls",
+    "accept_completions",
+    "accept_native_activations",
+    "receive_completions",
+    "direct_receive_completions",
+    "direct_receive_bytes",
+    "send_completions",
+    "send_zc_notifications",
+    "send_zc_copied",
+    "blocking_enters",
+    "uring_waits",
+    "readiness_callbacks",
+)
+ring_before = {name: getattr(poller, name, 0) for name in ring_fields}
+zero_counts = dict(counts)
+first_done = threading.Event()
+second_done = threading.Event()
+phase_rows = []
+
+
+def capture(scenario):
+    global app_calls, ring_before
+    row = {
+        "mode": mode,
+        "scenario": scenario,
+        **counts,
+        "app_calls": app_calls,
+        "response_bytes": len(responses[-1]),
+    }
+    for name in ring_fields:
+        row["ring_" + name] = getattr(poller, name, 0) - ring_before[name]
+    counts.clear()
+    counts.update(zero_counts)
+    app_calls = 0
+    ring_before = {name: getattr(poller, name, 0) for name in ring_fields}
+    return row
+
+
+def checkpoint_first_request():
+    sys.setprofile(None)
+    phase_rows.append(capture("fresh_connection"))
+    first_done.set()
+    sys.setprofile(profile)
+
+
+def checkpoint_keepalive_request():
+    sys.setprofile(None)
+    phase_rows.append(capture("keepalive_increment"))
+    second_done.set()
+
+
+def profile(frame, event, arg):
+    if event != "call":
+        return
+    module = frame.f_globals.get("__name__", "")
+    name = frame.f_code.co_name
+    counts["python_calls"] += 1
+    if module == "asyncio" or module.startswith("asyncio."):
+        counts["asyncio_calls"] += 1
+    if module == "wreath" or module.startswith("wreath."):
+        counts["wreath_calls"] += 1
+    if name in {"_metal_accept_connection", "_accept_connection2"}:
+        counts["accept_handoff_calls"] += 1
+    if name == "_run" and module.startswith("asyncio"):
+        counts["handle_run_calls"] += 1
+    if "future" in module:
+        counts["future_calls"] += 1
+    if "task" in module:
+        counts["task_calls"] += 1
+
+
+def read_response(sock):
+    data = bytearray()
+    while b"\r\n\r\n" not in data:
+        data.extend(sock.recv(4096))
+    header, body = bytes(data).split(b"\r\n\r\n", 1)
+    length = None
+    chunked = False
+    for line in header.split(b"\r\n")[1:]:
+        name, _, value = line.partition(b":")
+        if name.lower() == b"content-length":
+            length = int(value.strip())
+        elif name.lower() == b"transfer-encoding" and b"chunked" in value.lower():
+            chunked = True
+    if length is not None:
+        while len(body) < length:
+            body += sock.recv(4096)
+        return header + b"\r\n\r\n" + body[:length]
+    if chunked:
+        while b"\r\n0\r\n\r\n" not in body:
+            body += sock.recv(4096)
+        end = body.index(b"\r\n0\r\n\r\n") + 7
+        return header + b"\r\n\r\n" + body[:end]
+    raise AssertionError("keep-alive response has no explicit body boundary")
+
+
+def client():
+    with socket.create_connection(("127.0.0.1", port), timeout=2.0) as sock:
+        sock.sendall(
+            b"GET /work HTTP/1.1\r\nHost: test\r\nConnection: keep-alive\r\n\r\n"
+        )
+        responses.append(read_response(sock))
+        loop.call_soon_threadsafe(checkpoint_first_request)
+        if not first_done.wait(2.0):
+            raise TimeoutError("first request checkpoint was not dispatched")
+        sock.sendall(
+            b"GET /work HTTP/1.1\r\nHost: test\r\nConnection: keep-alive\r\n\r\n"
+        )
+        responses.append(read_response(sock))
+        loop.call_soon_threadsafe(checkpoint_keepalive_request)
+        if not second_done.wait(2.0):
+            raise TimeoutError("keep-alive checkpoint was not dispatched")
+        sock.sendall(
+            b"GET /work HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
+        )
+        read_response(sock)
+    loop.call_soon_threadsafe(done.set_result, None)
+
+thread = threading.Thread(target=client)
+sys.setprofile(profile)
+thread.start()
+loop.run_until_complete(done)
+sys.setprofile(None)
+thread.join()
+loop.run_until_complete(server.close())
+print(json.dumps(phase_rows))
+loop.close()
+'''
+    rows = []
+    for mode in ("wreath", "wreath-native", "wreath-metal"):
+        completed = subprocess.run(
+            [sys.executable, "-c", script, mode],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        rows.extend(json.loads(completed.stdout))
+
+    print(json.dumps(rows, indent=2, sort_keys=True))
+    print("FLOW_SUMMARY " + json.dumps([
+        {
+            "mode": row["mode"],
+            "scenario": row["scenario"],
+            "python": row["python_calls"],
+            "asyncio": row["asyncio_calls"],
+            "wreath": row["wreath_calls"],
+            "accept": row["accept_handoff_calls"],
+            "native_accept": row["ring_accept_native_activations"],
+            "handles": row["handle_run_calls"],
+            "futures": row["future_calls"],
+            "tasks": row["task_calls"],
+            "sqes": row["ring_submitted_sqes"],
+            "enters": row["ring_enter_calls"],
+            "blocking_enters": row["ring_blocking_enters"],
+            "receives": row["ring_receive_completions"],
+            "sends": row["ring_send_completions"],
+        }
+        for row in rows
+    ], sort_keys=True))
+    by_mode = {(row["mode"], row["scenario"]): row for row in rows}
+    assert all(row["app_calls"] == 1 for row in rows)
+    assert len({row["response_bytes"] for row in rows
+                if row["scenario"] == "fresh_connection"}) == 1
+    for scenario in ("fresh_connection", "keepalive_increment"):
+        assert (
+            by_mode["wreath-metal", scenario]["python_calls"]
+            < by_mode["wreath", scenario]["python_calls"]
+        )
+        assert (
+            by_mode["wreath-metal", scenario]["asyncio_calls"]
+            < by_mode["wreath-native", scenario]["asyncio_calls"]
+        )
+    metal = by_mode["wreath-metal", "fresh_connection"]
+    assert by_mode["wreath", "fresh_connection"]["accept_handoff_calls"] == 2
+    assert by_mode["wreath-native", "fresh_connection"]["accept_handoff_calls"] == 2
+    assert metal["accept_handoff_calls"] == 0
+    assert metal["ring_accept_native_activations"] == 1
+    assert metal["handle_run_calls"] <= 2
+    assert metal["ring_submitted_sqes"] > 0
+    assert metal["ring_enter_calls"] == metal["ring_blocking_enters"]
+    assert metal["ring_sq_tail_publications"] <= metal["ring_enter_calls"]
+    assert metal["ring_cq_head_publications"] <= metal["ring_enter_calls"]
+    assert metal["ring_receive_completions"] >= 1
+    assert metal["ring_direct_receive_completions"] == 1
+    assert metal["ring_direct_receive_bytes"] > 0
+    assert metal["ring_send_completions"] >= 1
+    keepalive = by_mode["wreath-metal", "keepalive_increment"]
+    assert keepalive["python_calls"] <= 4
+    assert keepalive["asyncio_calls"] <= 2
+    assert keepalive["ring_enter_calls"] == keepalive["ring_blocking_enters"]
+    assert keepalive["ring_sq_tail_publications"] <= keepalive["ring_enter_calls"]
+    assert keepalive["accept_handoff_calls"] == 0
+    assert keepalive["ring_receive_completions"] == 1
+    assert keepalive["ring_direct_receive_completions"] == 1
+    assert keepalive["ring_direct_receive_bytes"] > 0
+    assert keepalive["ring_send_completions"] >= 1
 
 
 def test_metal_defaults_to_poller_driven_wheel_without_bridge_heartbeat():
@@ -132,6 +384,80 @@ def test_metal_defaults_to_poller_driven_wheel_without_bridge_heartbeat():
         loop.run_until_complete(asyncio.sleep(0.02))
         assert fired == [True]
         assert loop._wheel_tick_handle is None
+        assert loop._poller.uring_waits >= 1
+        assert loop._poller.uring_timeouts >= 1
+        assert loop._poller.epoll_active is False
+    finally:
+        loop.close()
+
+
+def test_metal_source_has_no_epoll_aggregation_path() -> None:
+    source = Path("src/wreath/_native/_reactormodule.c").read_text()
+    assert "<sys/epoll.h>" not in source
+    assert "epoll_create1(" not in source
+    assert "epoll_ctl(" not in source
+    assert "epoll_wait(" not in source
+
+
+def test_metal_udp_readiness_is_owned_by_the_unified_ring() -> None:
+    loop = _metal_loop()
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    receiver.setblocking(False)
+    receiver.bind(("127.0.0.1", 0))
+    received: list[bytes] = []
+    try:
+        submissions_before = loop._poller.poll_submissions
+        completions_before = loop._poller.poll_completions
+        callbacks_before = loop._poller.readiness_callbacks
+
+        async def exercise() -> None:
+            done = loop.create_future()
+
+            def readable() -> None:
+                payload, _address = receiver.recvfrom(2048)
+                received.append(payload)
+                loop.remove_reader(receiver.fileno())
+                done.set_result(None)
+
+            loop.add_reader(receiver.fileno(), readable)
+            sender.sendto(b"quic-datagram", receiver.getsockname())
+            await asyncio.wait_for(done, 1.0)
+
+        loop.run_until_complete(exercise())
+        assert received == [b"quic-datagram"]
+        assert loop._poller.poll_submissions > submissions_before
+        assert loop._poller.poll_completions > completions_before
+        assert loop._poller.poll_cancellations >= 1
+        assert loop._poller.readiness_callbacks == callbacks_before + 1
+        assert loop._poller.epoll_active is False
+    finally:
+        receiver.close()
+        sender.close()
+        loop.close()
+
+
+def test_metal_negative_fd_removal_is_a_safe_noop() -> None:
+    loop = _metal_loop()
+    try:
+        assert loop._poller._remove_reader(-1) is False
+        assert loop._poller._remove_writer(-1) is False
+    finally:
+        loop.close()
+
+
+def test_metal_coalesces_pending_eventfd_wakes() -> None:
+    loop = _metal_loop()
+    try:
+        before_requests = loop._poller.wake_requests
+        before_writes = loop._poller.wake_writes
+        before_coalesced = loop._poller.wake_coalesced
+        for _ in range(8):
+            loop._poller._wake()
+        assert loop._poller.wake_requests - before_requests == 8
+        assert loop._poller.wake_writes - before_writes == 1
+        assert loop._poller.wake_coalesced - before_coalesced == 7
+        loop.run_until_complete(asyncio.sleep(0))
     finally:
         loop.close()
 
@@ -142,7 +468,7 @@ def test_metal_native_memory_and_kernel_object_baseline() -> None:
         poller = loop._poller
         assert poller.native_ring_count == 1
         assert 256 * 1024 <= poller.native_mapped_bytes <= 320 * 1024
-        assert 300 * 1024 <= poller.native_heap_bytes <= 330 * 1024
+        assert 190 * 1024 <= poller.native_heap_bytes <= 195 * 1024
         with pytest.raises(ValueError, match="closed epoll"):
             loop._selector.fileno()
         assert poller.submission_batches == 0
@@ -180,6 +506,24 @@ def test_metal_cross_thread_wake_is_an_io_uring_completion() -> None:
         assert loop._poller.wake_completions >= 1
         assert loop._poller.wake_submissions == loop._poller.wake_completions + 1
     finally:
+        loop.close()
+
+
+def test_metal_signal_wake_is_an_io_uring_completion() -> None:
+    loop = _metal_loop()
+    seen = []
+    try:
+        loop.add_signal_handler(signal.SIGUSR1, seen.append, signal.SIGUSR1)
+        os.kill(os.getpid(), signal.SIGUSR1)
+        loop.run_until_complete(asyncio.sleep(0.01))
+        assert seen == [signal.SIGUSR1]
+        assert loop._poller.signal_completions >= 1
+        assert (
+            loop._poller.signal_submissions
+            == loop._poller.signal_completions + 1
+        )
+    finally:
+        loop.remove_signal_handler(signal.SIGUSR1)
         loop.close()
 
 
@@ -430,6 +774,10 @@ def test_metal_io_uring_owns_listener_accept_and_drains_cqes():
             if loop._poller.send_enabled:
                 assert loop._poller.send_submissions >= 4
                 assert loop._poller.send_completions >= 4
+                assert loop._poller.send_copy_bytes > 0
+                assert loop._poller.send_zc_bytes == 0
+                assert loop._poller.send_zc_notifications == 0
+                assert loop._poller.send_zc_copied == 0
             assert loop._poller.submitted_sqes > loop._poller.submission_batches
         finally:
             await server.close()
@@ -440,61 +788,87 @@ def test_metal_io_uring_owns_listener_accept_and_drains_cqes():
         loop.close()
 
 
-def test_epoll_and_io_uring_http1_completion_traces_are_equivalent(
+def test_metal_send_zc_threshold_retains_large_immutable_body() -> None:
+    from wreath.server import Server, ServerConfig
+
+    body = b"x" * (32 * 1024)
+
+    async def app(scope, receive, send):
+        await receive()
+        await send({"type": "http.response.start", "status": 200})
+        await send({"type": "http.response.body", "body": body})
+
+    loop = _metal_loop()
+
+    async def exercise() -> None:
+        server = Server(
+            app,
+            ServerConfig(host="127.0.0.1", port=0, lifespan="off"),
+            loop,
+        )
+        await server._start(ssl=None)
+        try:
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1", server.sockets[0].getsockname()[1]
+            )
+            writer.write(
+                b"GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
+            )
+            await writer.drain()
+            response = await reader.read()
+            writer.close()
+            await writer.wait_closed()
+            assert response.endswith(body)
+            assert loop._poller.send_copy_bytes > 0
+            assert loop._poller.send_zc_bytes >= len(body)
+            assert loop._poller.retained_send_enqueues >= 1
+        finally:
+            await server.close()
+
+    try:
+        loop.run_until_complete(exercise())
+    finally:
+        loop.close()
+
+
+def test_io_uring_http1_completion_trace_accounts_for_request_and_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("WREATH_METAL_TRACE", "1")
-    import wreath.reactor as reactor
-
     Http1Protocol = importlib.import_module("wreath._native._server").Http1Protocol
     ServerConfig = importlib.import_module("wreath.server").ServerConfig
-
-    def exercise(io_backend):
-        loop = (
-            reactor.metal_event_loop()
-            if io_backend == "io_uring"
-            else _metal_component_loop(io_backend=io_backend)
-        )
-        client, server = socket.socketpair()
-        client.setblocking(False)
-        try:
-            protocol = Http1Protocol(
-                _echo, ServerConfig(lifespan="off"), loop, set()
-            )
-            loop._make_socket_transport(server, protocol)
-            loop.run_until_complete(asyncio.sleep(0))
-            request = b"GET /trace HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
-            client.sendall(request)
-            loop.run_until_complete(asyncio.sleep(0.01))
-            response = client.recv(4096)
-            trace = loop._poller.completion_trace()
-            return request, response, trace
-        finally:
-            client.close()
-            loop.close()
-
-    request, epoll_response, epoll_trace = exercise("epoll")
+    loop = _metal_loop()
+    client, server = socket.socketpair()
+    client.setblocking(False)
     try:
-        _request, uring_response, uring_trace = exercise("io_uring")
-    except OSError as exc:
-        assert exc.errno in {errno.ENOSYS, errno.EPERM, errno.EACCES, errno.ENOMEM}
-        return
-
-    def normalized(trace):
-        rows = [(kind, result, flags) for _seq, _token, result, kind, _backend, flags in trace
-                if kind in (1, 2) and result >= 0]
-        return [kind for kind, _result, _flags in rows], {
-            kind: sum(result for row_kind, result, _flags in rows if row_kind == kind)
+        protocol = Http1Protocol(
+            _echo, ServerConfig(lifespan="off"), loop, set()
+        )
+        loop._make_socket_transport(server, protocol)
+        loop.run_until_complete(asyncio.sleep(0))
+        request = b"GET /trace HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
+        client.sendall(request)
+        loop.run_until_complete(asyncio.sleep(0.01))
+        response = client.recv(4096)
+        rows = [
+            (kind, result, flags)
+            for _seq, _token, result, kind, _backend, flags
+            in loop._poller.completion_trace()
+            if kind in (1, 2) and result >= 0
+        ]
+        kinds = [kind for kind, _result, _flags in rows]
+        totals = {
+            kind: sum(result for row_kind, result, _flags in rows
+                      if row_kind == kind)
             for kind in (1, 2)
         }
-
-    epoll_kinds, epoll_totals = normalized(epoll_trace)
-    uring_kinds, uring_totals = normalized(uring_trace)
-    assert epoll_response == uring_response
-    assert epoll_kinds[:2] == [1, 2]
-    assert uring_kinds[:2] == [1, 2]
-    assert epoll_totals[1] == uring_totals[1] == len(request)
-    assert epoll_totals[2] == uring_totals[2] == len(epoll_response)
+        assert b"200 OK" in response
+        assert kinds[:2] == [1, 2]
+        assert totals[1] == len(request)
+        assert totals[2] == len(response)
+    finally:
+        client.close()
+        loop.close()
 
 
 def test_metal_native_arena_capacities_are_bounded_and_configurable(
@@ -522,9 +896,7 @@ def test_metal_native_arena_capacities_are_bounded_and_configurable(
 
 def test_adaptive_polling_component_can_be_disabled_for_differential_coverage():
     try:
-        loop = _metal_component_loop(
-            io_backend="io_uring", adaptive_polling=False
-        )
+        loop = _metal_component_loop(adaptive_polling=False)
     except OSError as exc:
         assert exc.errno in {errno.ENOSYS, errno.EPERM, errno.EACCES, errno.ENOMEM}
         return
@@ -536,6 +908,59 @@ def test_adaptive_polling_component_can_be_disabled_for_differential_coverage():
         assert loop._poller.spin_nanoseconds == 0
         assert loop._poller.blocking_enters >= 1
     finally:
+        loop.close()
+
+
+def test_metal_completion_trace_records_timer_wait_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WREATH_METAL_TRACE", "1")
+    loop = _metal_loop()
+    try:
+        fired = loop.create_future()
+        loop.call_later(0.002, fired.set_result, None)
+        loop.run_until_complete(fired)
+        assert any(kind == 6 and result == 0
+                   for _seq, _token, result, kind, _backend, _flags
+                   in loop._poller.completion_trace())
+    finally:
+        loop.close()
+
+
+def test_metal_completion_trace_records_receive_cancellation_and_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WREATH_METAL_TRACE", "1")
+    loop = _metal_loop()
+
+    class Protocol(asyncio.Protocol):
+        def __init__(self) -> None:
+            self.eof = False
+
+        def eof_received(self) -> None:
+            self.eof = True
+
+    client, server = socket.socketpair()
+    client.setblocking(False)
+    protocol = Protocol()
+    try:
+        transport = loop._make_socket_transport(server, protocol)
+        loop.run_until_complete(asyncio.sleep(0))
+        transport.pause_reading()
+        loop.run_until_complete(asyncio.sleep(0.01))
+        transport.resume_reading()
+        loop.run_until_complete(asyncio.sleep(0))
+        client.close()
+        loop.run_until_complete(asyncio.sleep(0.01))
+
+        trace = loop._poller.completion_trace()
+        assert any(kind == 4 and result >= 0
+                   for _seq, _token, result, kind, _backend, _flags in trace)
+        assert any(kind == 1 and result == 0 and flags & 0x1
+                   for _seq, _token, result, kind, _backend, flags in trace)
+        assert protocol.eof is True
+    finally:
+        client.close()
         loop.close()
 
 
@@ -717,7 +1142,9 @@ def test_metal_http1_io_uring_arm_is_explicit_and_operational_when_available():
         if loop._poller.receive_enabled:
             assert loop._poller.provided_buffer_count == 16
             assert loop._poller.receive_completions >= 1
-            assert loop._poller.provided_buffer_recycles >= 1
+            assert loop._poller.direct_receive_completions >= 1
+            assert loop._poller.direct_receive_bytes > 0
+            assert loop._poller.provided_buffer_recycles == 0
     finally:
         client.close()
         loop.close()

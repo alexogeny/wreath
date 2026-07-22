@@ -110,18 +110,19 @@ exhaustion and rearms only at the bounded post-drain retry point, after selected
 buffers have been recycled. If provided-buffer registration is unavailable, metal
 loop startup fails instead of changing the transport architecture.
 
-Plaintext output uses a third ring. Each send SQE carries a generational operation
-token and retains an immutable payload until its final CQE. Partial sends advance
-a cursor and resubmit the remaining bytes; writes that arrive behind an active
-send enter the transport's bounded flow-control buffer. Completion releases the
+Plaintext TCP output uses `IORING_OP_SEND_ZC` on the unified ring. Each send SQE
+carries a generational operation token and retains an immutable payload until its
+data CQE and every zero-copy ownership-notification CQE have arrived. Partial
+sends advance a cursor and resubmit the remaining bytes; writes that arrive behind
+an active send enter the transport's bounded flow-control buffer. Completion releases the
 operation slot, resumes a paused producer at the low watermark, and submits the
 next payload. `close()` waits for all accepted bytes to complete, while abort and
 stale-connection paths discard callbacks without releasing kernel-visible memory
 early. Send CQ draining is also capped at 64 completions per loop turn. Failure to
 initialize asynchronous send ownership fails metal startup.
 
-Async SQEs are gathered in userspace and submitted per ring once at bounded loop
-phase boundaries rather than entering the kernel for every operation. The poller
+Async SQEs are gathered in userspace and submitted once at bounded loop phase
+boundaries rather than entering the kernel for every operation. The poller
 reports submitted SQEs separately from submission batches.
 
 After an empty completion probe, the adaptive polling controller learns an EWMA
@@ -134,9 +135,13 @@ attempts, hits, misses, spin time, blocking entries, samples, EWMA, and deviatio
 Cross-thread scheduling writes a native eventfd whose poll request and wake are
 owned by io_uring; the completion is drained and rearmed without scheduling the
 inherited Python self-pipe callback. The inherited socketpair remains only for
-CPython signal wake bytes until signal notification joins the unified completion
-domain. Adaptive polling is part of the metal runtime rather than a product
-selection.
+CPython signal wake bytes are polled by that same ring and dispatched through its
+control CQ path. Timer blocking uses `io_uring_enter(EXT_ARG)` deadlines derived
+from the native wheel and scheduled callbacks. Generic reader/writer readiness,
+including the UDP descriptor used by the HTTP/3 datagram adapter, uses tagged
+`IORING_OP_POLL_ADD` requests with generation validation, cancellation, bounded
+CQ dispatch, and rearm. Metal therefore owns no epoll instance or event array.
+Adaptive polling is part of the metal runtime rather than a product selection.
 Completion-trace capture is separately opt-in through
 `WREATH_METAL_TRACE=1`; the default allocates no trace ring and performs no
 per-completion trace write, avoiding diagnostic cache and RSS cost on production
@@ -212,5 +217,62 @@ run(app, required_env=["DATABASE_URL"])
 ```
 
 The [Configuration and state](config-state.md) guide covers this in full.
+
+## Metal champion checkpoint
+
+These checkpoints make metal optimization reviewable without treating one timing
+sample as evidence. Fixed native ownership is a deterministic regression gate;
+process RSS supplements it, and interpreter call events show work displaced from
+the Python loop without pretending every call has the same cost.
+
+Reproduce fixed ownership:
+
+```console
+uv run python -c 'import sys, wreath.reactor as r; l=r.metal_event_loop(); print(sys.version.split()[0], l._poller.native_ring_count, l._poller.native_mapped_bytes, l._poller.native_heap_bytes); l.close()'
+```
+
+Current CPython 3.14.6 champion:
+
+| Rings | Native mmap bytes | Native heap bytes |
+| ---: | ---: | ---: |
+| 1 | 317504 | 197120 |
+
+Reproduce the fresh-process memory comparison:
+
+```console
+uv run pytest tests/reactor/test_metal_tier.py -k process_memory_comparison -s -q
+```
+
+| Mode | VmSize | VmRSS | Python traced heap | Native mmap | Native heap | Rings |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `wreath` | 54431744 | 29642752 | 2860712 | 0 | 0 | 0 |
+| `wreath-native` | 54546432 | 29949952 | 2953283 | 0 | 0 | 0 |
+| `wreath-metal` | 55062528 | 30068736 | 3184587 | 317504 | 197120 | 1 |
+
+Reproduce equivalent-request interpreter work:
+
+```console
+uv run pytest tests/reactor/test_metal_tier.py -k request_work_comparison -s -q
+```
+
+| Mode | Phase | Python | asyncio | Wreath | Python accept | Native accept | Handles | Futures | Tasks | SQEs | Enters | Receive/direct CQEs | Send CQEs |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `wreath` | fresh connection | 298 | 110 | 3 | 2 | 0 | 9 | 4 | 1 | 0 | 0 | 0/0 | 0 |
+| `wreath-native` | fresh connection | 305 | 100 | 20 | 2 | 0 | 8 | 4 | 1 | 0 | 0 | 0/0 | 0 |
+| `wreath-metal` | fresh connection | 170 | 17 | 4 | 0 | 1 | 2 | 3 | 1 | 3 | 4 | 1/1 | 1 |
+| `wreath` | keep-alive request | 23 | 19 | 0 | 0 | 0 | 4 | 0 | 0 | 0 | 0 | 0/0 | 0 |
+| `wreath-native` | keep-alive request | 25 | 19 | 2 | 0 | 0 | 4 | 0 | 0 | 0 | 0 | 0/0 | 0 |
+| `wreath-metal` | keep-alive request | 4 | 2 | 0 | 0 | 0 | 2 | 0 | 0 | 3 | 3 | 1/1 | 1 |
+
+One subprocess now serves three requests on one connection and records phase
+snapshots around the first and second responses; the keep-alive row is no longer
+subtraction between separate runs. Each measured phase activates the app once and
+emits the same 119-byte response. Metal's fresh path displaces 128 Python calls
+versus `wreath` and 135 versus `wreath-native`; its steady keep-alive path uses
+four Python call events, with parser ingress committed directly from the receive
+SQE. SQ tail and CQ head publication counters, total enters, accepted-connection
+activation, and direct-receive ownership are regression gates in the test. This
+is structural evidence, not a throughput or latency claim; published performance
+claims still require repeated runs that clear the measured A/A noise floor.
 
 **Reference:** [`wreath.server`](../reference/server.md).
