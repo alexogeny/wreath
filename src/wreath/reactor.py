@@ -242,7 +242,7 @@ class EventLoop(asyncio.SelectorEventLoop):
                  native_transport: bool = False, native_loop: bool = False,
                  direct_task_steps: bool = True, worker_id: int = 0,
                  reuse_port: bool = False, adaptive_polling: bool = True,
-                 wheel_slots: int = 4096,
+                 diagnostics: bool = True, wheel_slots: int = 4096,
                  wheel_resolution: float = 0.001):
         super().__init__(selector)
         self._backend = backend
@@ -255,6 +255,7 @@ class EventLoop(asyncio.SelectorEventLoop):
             raise ValueError("worker_id must be non-negative")
         self._worker_id = worker_id
         self._adaptive_polling = adaptive_polling
+        self._diagnostics = diagnostics
         self._wreath_reuse_port = reuse_port
         self._poller = None
         self._reactor_stats = _stats_template()
@@ -295,6 +296,7 @@ class EventLoop(asyncio.SelectorEventLoop):
             self._worker_id,
             1,
             1 if self._adaptive_polling else 0,
+            1 if self._diagnostics else 0,
         )
         self._poller = poller
         self._add_reader = poller._add_reader
@@ -442,6 +444,7 @@ def new_event_loop(backend: str | None = None, *, timers: str = "heap") -> Event
 
 def metal_event_loop(
     *, worker_id: int = 0, reuse_port: bool | None = None,
+    diagnostics: bool = False,
 ) -> EventLoop:
     """The event loop for the ``metal`` tier: native C poller + transport.
 
@@ -468,7 +471,7 @@ def metal_event_loop(
     backend = _default_backend()
     return EventLoop(selectors.EpollSelector(), backend=backend,
                      timers=timers, tasks=tasks, stats=False,
-                     adaptive_polling=False,
+                     adaptive_polling=False, diagnostics=diagnostics,
                      native_transport=transport, native_loop=native_loop,
                      direct_task_steps=direct_task_steps, worker_id=worker_id,
                      reuse_port=reuse_port)

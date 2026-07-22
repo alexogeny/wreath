@@ -1,0 +1,2174 @@
+/* Native io_uring event-loop poller. */
+/* ======================================================================== *
+ *  ReactorPoller — the native run loop core.                               *
+ *                                                                          *
+ *  Metal's EventLoop rebinds its own _add_reader / _add_writer /          *
+ *  _remove_reader / _remove_writer / _run_once to this object's C          *
+ *  methods. It owns a tagged io_uring completion domain and an             *
+ *  fd-indexed registry of reader/writer callables, so a ready socket       *
+ *  dispatches the transport's C _read_ready DIRECTLY: no selector.select   *
+ *  wrapper, no _process_events, no per-event Handle allocation, no         *
+ *  Handle._run/context.run. This is the layer uvloop has in libuv and the  *
+ *  stock asyncio SelectorEventLoop pays for in Python on every iteration.  *
+ *                                                                          *
+ *  Reader/writer callbacks run WITHOUT a copied contextvars context: the   *
+ *  native transport does not read contextvars, and metal is a controlled   *
+ *  runtime. call_soon Handles and timers still run through their normal     *
+ *  Handle._run (context-correct); only the fd-readiness fast path is bare. *
+ * ======================================================================== */
+
+/* cached, interned attribute names + heapq.heappop, set in PyInit */
+static PyObject *g_s_when;       /* "_when"      */
+static PyObject *g_s_run;        /* "_run"       */
+static PyObject *g_s_cancelled;  /* "_cancelled" */
+static PyObject *g_s_scheduled;  /* "_scheduled" */
+static PyObject *g_s_popleft;    /* "popleft"    */
+static PyObject *g_s_append;     /* "append"     */
+static PyObject *g_s_setblocking; /* "setblocking" */
+static PyObject *g_fileno_kwnames; /* vectorcall keyword tuple */
+static PyObject *g_heappop;      /* heapq.heappop */
+static PyTypeObject *g_handle_type;
+static PyTypeObject *g_task_step_type;
+static PyMemberDef *g_handle_callback;
+static PyMemberDef *g_handle_args;
+static PyMemberDef *g_handle_cancelled;
+static PyMemberDef *g_handle_context;
+static PyMemberDef *g_handle_source_traceback;
+
+typedef struct {
+    PyObject *reader;       /* callable or NULL */
+    PyObject *reader_args;  /* tuple, or NULL for no-arg fast call */
+    PyObject *writer;
+    PyObject *writer_args;
+    PyObject *accept_callback;
+    int native_reader;
+    int native_writer;
+    int accept_active;
+    int accept_multishot;
+    int poll_multishot;
+    uint32_t mask;          /* POLLIN/POLLOUT mask owned by one ring poll request */
+    uint32_t generation;    /* registration incarnation carried in data.u64 */
+} FdEntry;
+
+typedef struct {
+    PyObject_HEAD
+    int wake_fd;
+    int signal_fd;
+    PyObject *signal_callback;
+    FdEntry *fds;
+    int fdcap;
+    PyObject *loop;         /* the EventLoop (for call_exception_handler) */
+    PyObject *ready;        /* loop._ready (collections.deque) */
+    PyObject *ready_popleft; /* cached bound deque method */
+    PyObject *ready_append;  /* cached bound deque method */
+    PyObject *scheduled;    /* loop._scheduled (heapq list) */
+    PyObject *exc_handler;  /* loop.call_exception_handler (bound) */
+    PyObject *wheel_obj;    /* TimingWheel or None */
+    TimingWheel *wheel;     /* borrowed from wheel_obj */
+    double clock_res;       /* loop._clock_resolution */
+    int direct_task_steps;  /* bypass Handle._run for C Task step callbacks */
+    uint64_t generation_wraps;
+    MetalRuntime metal;
+} ReactorPoller;
+
+static PyTypeObject ReactorPollerType;
+static void rp_dispatch(ReactorPoller *, PyObject *, PyObject *);
+static void rp_dispatch_native_transport(ReactorPoller *, PyObject *, int);
+static void rp_report_callback_error(ReactorPoller *);
+static int rp_submit_receive(ReactorPoller *, SocketTransport *);
+static uint64_t rp_poll_token(uint32_t, int);
+
+static int
+metal_attach_transport(SocketTransport *transport, PyObject *poller_obj)
+{
+    if (!PyObject_TypeCheck(poller_obj, &ReactorPollerType)) {
+        return 0;
+    }
+    ReactorPoller *poller = (ReactorPoller *)poller_obj;
+    uint64_t token = metal_slab_allocate(
+        &poller->metal.connections, transport, 0, 0
+    );
+    if (token == 0) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "metal connection slab is exhausted");
+        return -1;
+    }
+    transport->poller_obj = Py_NewRef(poller_obj);
+    transport->metal = &poller->metal;
+    transport->connection_token = token;
+    return 0;
+}
+
+static void
+metal_detach_transport(SocketTransport *transport)
+{
+    if (transport->metal != NULL && transport->connection_token != 0) {
+        metal_slab_release(&transport->metal->connections,
+                           transport->connection_token, transport);
+    }
+    transport->connection_token = 0;
+}
+
+static void
+metal_send_operations_clear(MetalRuntime *runtime)
+{
+    runtime->send_enabled = 0;
+    for (uint32_t index = 0; index < runtime->operations.capacity; index++) {
+        MetalSlot *operation = &runtime->operations.slots[index];
+        if (!metal_slot_live(operation) || operation->owner == NULL) {
+            continue;
+        }
+        uint16_t kind = metal_slot_kind(operation);
+        if (kind != METAL_OP_SEND && kind != METAL_OP_RECV) {
+            continue;
+        }
+        SocketTransport *transport = (SocketTransport *)operation->owner;
+        uint64_t token =
+            ((uint64_t)metal_slot_generation(operation) << 32) | index;
+        if (kind == METAL_OP_RECV) {
+            transport->uring_receive_active = 0;
+            transport->uring_receive_token = 0;
+        }
+        metal_slab_release(&runtime->operations, token, transport);
+        Py_DECREF(transport);
+    }
+}
+
+static double mono_seconds(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+/* Grow the fd registry so index `fd` is valid, zeroing new slots. */
+static int
+rp_ensure_fd(ReactorPoller *p, int fd)
+{
+    if (fd < 0) {
+        PyErr_SetString(PyExc_ValueError, "negative file descriptor");
+        return -1;
+    }
+    if (fd < p->fdcap) {
+        return 0;
+    }
+    int newcap = p->fdcap ? p->fdcap : 64;
+    while (newcap <= fd) {
+        newcap *= 2;
+    }
+    FdEntry *grown = PyMem_Realloc(p->fds, (size_t)newcap * sizeof(FdEntry));
+    if (grown == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    memset(grown + p->fdcap, 0, (size_t)(newcap - p->fdcap) * sizeof(FdEntry));
+    p->fds = grown;
+    p->fdcap = newcap;
+    return 0;
+}
+
+/* Reconcile one registration and publish a new {generation, fd} token. `force`
+ * refreshes data.u64 when a callback changes without changing the readiness
+ * mask, invalidating CQEs already published by the previous poll request. */
+static uint64_t
+rp_next_listener_token(ReactorPoller *p, int fd)
+{
+    FdEntry *entry = &p->fds[fd];
+    uint32_t generation = entry->generation + 1;
+    if (generation == 0) {
+        generation = 1;
+        p->generation_wraps++;
+    }
+    entry->generation = generation;
+    return ((uint64_t)generation << 32) | (uint32_t)fd;
+}
+
+static int
+rp_submit_accept(ReactorPoller *p, int fd)
+{
+    FdEntry *entry = &p->fds[fd];
+    uint64_t token = ((uint64_t)entry->generation << 32) | (uint32_t)fd;
+    if (metal_uring_queue_accept(&p->metal.uring, fd, token,
+                                 entry->accept_multishot) < 0) {
+        return -1;
+    }
+    p->metal.accept_submissions++;
+    return 0;
+}
+
+static PyObject *
+rp_add_uring_listener(PyObject *op, PyObject *args)
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    int fd;
+    PyObject *callback;
+    if (!PyArg_ParseTuple(args, "iO:_add_uring_listener", &fd, &callback)) {
+        return NULL;
+    }
+    int native_spec = PyTuple_CheckExact(callback) &&
+                      PyTuple_GET_SIZE(callback) == 3 &&
+                      PyCallable_Check(PyTuple_GET_ITEM(callback, 0)) &&
+                      PyCallable_Check(PyTuple_GET_ITEM(callback, 2));
+    if (!native_spec && !PyCallable_Check(callback)) {
+        PyErr_SetString(
+            PyExc_TypeError,
+            "accept target must be callable or a native server specification");
+        return NULL;
+    }
+    if (rp_ensure_fd(p, fd) < 0) {
+        return NULL;
+    }
+    FdEntry *entry = &p->fds[fd];
+    if (entry->accept_active) {
+        PyErr_SetString(PyExc_RuntimeError, "listener is already registered");
+        return NULL;
+    }
+    rp_next_listener_token(p, fd);
+    entry->accept_callback = Py_NewRef(callback);
+    entry->accept_active = 1;
+    entry->accept_multishot = 1;
+    if (rp_submit_accept(p, fd) < 0) {
+        entry->accept_active = 0;
+        Py_CLEAR(entry->accept_callback);
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+rp_remove_uring_listener(PyObject *op, PyObject *arg)
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    int fd = (int)PyLong_AsLong(arg);
+    if (fd < 0 && PyErr_Occurred()) {
+        return NULL;
+    }
+    if (fd < 0 || fd >= p->fdcap || !p->fds[fd].accept_active) {
+        Py_RETURN_FALSE;
+    }
+    FdEntry *entry = &p->fds[fd];
+    entry->accept_active = 0;
+    entry->accept_multishot = 0;
+    rp_next_listener_token(p, fd);
+    Py_CLEAR(entry->accept_callback);
+    Py_RETURN_TRUE;
+}
+
+static PyObject *
+rp_start_uring_receive(PyObject *op, PyObject *transport_obj)
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    if (!PyObject_TypeCheck(transport_obj, &SocketTransportType)) {
+        PyErr_SetString(PyExc_TypeError, "expected SocketTransport");
+        return NULL;
+    }
+    SocketTransport *transport = (SocketTransport *)transport_obj;
+    if (!p->metal.receive_enabled || transport->metal != &p->metal) {
+        Py_RETURN_FALSE;
+    }
+    if (transport->uring_receive_active) {
+        Py_RETURN_TRUE;
+    }
+    transport->uring_receive_active = 1;
+    transport->uring_receive_multishot = 1;
+    if (rp_submit_receive(p, transport) < 0) {
+        transport->uring_receive_active = 0;
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    Py_RETURN_TRUE;
+}
+
+static PyObject *
+rp_stop_uring_receive(PyObject *op, PyObject *transport_obj)
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    if (!PyObject_TypeCheck(transport_obj, &SocketTransportType)) {
+        PyErr_SetString(PyExc_TypeError, "expected SocketTransport");
+        return NULL;
+    }
+    SocketTransport *transport = (SocketTransport *)transport_obj;
+    if (!transport->uring_receive_active || transport->metal != &p->metal) {
+        Py_RETURN_FALSE;
+    }
+    uint64_t receive_token = transport->uring_receive_token != 0
+        ? transport->uring_receive_token : transport->connection_token;
+    if (metal_uring_queue_cancel(&p->metal.uring, receive_token) < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    transport->uring_receive_active = 0;
+    Py_RETURN_TRUE;
+}
+
+static int
+rp_submit_receive(ReactorPoller *p, SocketTransport *transport)
+{
+    /* A persistent provided-buffer receive removes one SQE publication and
+     * io_uring_enter from every keep-alive request. Copying the small HTTP head
+     * into the parser is cheaper than rearming a direct single-shot receive. */
+    if (metal_uring_queue_receive(
+            &p->metal.uring, transport->fd,
+            transport->connection_token, p->metal.receive_buffers.group_id,
+            p->metal.receive_buffers.buffer_size,
+            transport->uring_receive_multishot) < 0) {
+        return -1;
+    }
+    transport->uring_receive_token = transport->connection_token;
+    p->metal.receive_submissions++;
+    return 0;
+}
+
+static int
+rp_drain_receive_completions(ReactorPoller *p, unsigned budget,
+                             unsigned *drained_out)
+{
+    MetalUring *ring = &p->metal.uring;
+    MetalProvidedBuffers *buffers = &p->metal.receive_buffers;
+    *drained_out = 0;
+    while (*drained_out < budget) {
+        unsigned head = ring->cached_cq_head;
+        struct io_uring_cqe cqe = ring->cqes[head & ring->cq_mask_value];
+        uint64_t tag = cqe.user_data & ~METAL_TOKEN_PAYLOAD_MASK;
+        if (cqe.user_data != METAL_CANCEL_TOKEN &&
+            tag != METAL_TOKEN_RECEIVE) {
+            break;
+        }
+        ring->cached_cq_head = head + 1;
+        (*drained_out)++;
+        if (cqe.user_data == METAL_CANCEL_TOKEN) {
+            uint8_t flags = cqe.res < 0 ? METAL_COMPLETION_ERROR : 0;
+            metal_trace_add(&p->metal, METAL_IO_URING, METAL_OP_CANCEL,
+                            cqe.user_data, cqe.res, flags);
+            continue;
+        }
+        uint64_t owner_token = cqe.user_data & METAL_TOKEN_PAYLOAD_MASK;
+        if (p->metal.diagnostics) {
+            p->metal.receive_completions++;
+        }
+        uint8_t trace_flags = cqe.res == 0 ? METAL_COMPLETION_EOF : 0;
+        if (cqe.res < 0) {
+            trace_flags |= METAL_COMPLETION_ERROR;
+        }
+        metal_trace_add(&p->metal, METAL_IO_URING, METAL_OP_RECV,
+                        owner_token, cqe.res, trace_flags);
+
+        int has_buffer = (cqe.flags & IORING_CQE_F_BUFFER) != 0;
+        uint16_t buffer_id = (uint16_t)(cqe.flags >> IORING_CQE_BUFFER_SHIFT);
+        if (has_buffer && !metal_provided_buffer_claim(buffers, buffer_id)) {
+            p->metal.receive_errors++;
+            continue;
+        }
+
+        uint32_t index = (uint32_t)owner_token;
+        uint32_t generation = (uint32_t)(owner_token >> 32);
+        MetalSlot *slot = index < p->metal.connections.capacity
+            ? &p->metal.connections.slots[index] : NULL;
+        if (slot == NULL || !metal_slot_live(slot) ||
+            metal_slot_generation(slot) != generation) {
+            p->metal.receive_stale++;
+            if (has_buffer && buffer_id < buffers->entries) {
+                if (metal_provided_buffer_recycle(buffers, buffer_id) < 0) {
+                    PyErr_SetFromErrno(PyExc_OSError);
+                    return -1;
+                }
+                if (p->metal.diagnostics) {
+                    p->metal.provided_buffer_recycles++;
+                }
+            }
+            continue;
+        }
+
+        SocketTransport *transport = (SocketTransport *)slot->owner;
+        Py_INCREF(transport);
+        int has_more = (cqe.flags & IORING_CQE_F_MORE) != 0;
+        if (cqe.res > 0 && has_buffer && buffer_id < buffers->entries) {
+            if (!transport->conn_lost && !transport->closing) {
+                transport->cork = 1;
+                const char *data = buffers->data +
+                                   (size_t)buffer_id * buffers->buffer_size;
+                if (st_deliver_received(transport, data, cqe.res) < 0) {
+                    st_fatal(transport, "io_uring receive delivery failed");
+                }
+                transport->cork = 0;
+                st_flush_cork(transport);
+            }
+        } else if (cqe.res == 0) {
+            transport->uring_receive_active = 0;
+            if (!transport->conn_lost && !transport->closing) {
+                PyObject *eof_result = st_on_eof(transport);
+                Py_XDECREF(eof_result);
+            }
+        } else if (cqe.res > 0) {
+            p->metal.receive_errors++;
+            if (!transport->conn_lost && !transport->closing) {
+                PyErr_SetString(PyExc_OSError,
+                                "io_uring receive completed without a buffer");
+                st_fatal(transport, "io_uring receive failed");
+            }
+        } else if (cqe.res == -ENOBUFS) {
+            p->metal.provided_buffer_exhaustions++;
+        } else if (cqe.res != -ECANCELED) {
+            p->metal.receive_errors++;
+            if (!transport->conn_lost && !transport->closing) {
+                errno = -cqe.res;
+                PyErr_SetFromErrno(PyExc_OSError);
+                st_fatal(transport, "io_uring receive failed");
+            }
+        }
+
+        if (has_buffer && buffer_id < buffers->entries) {
+            if (metal_provided_buffer_recycle(buffers, buffer_id) < 0) {
+                Py_DECREF(transport);
+                PyErr_SetFromErrno(PyExc_OSError);
+                return -1;
+            }
+            if (p->metal.diagnostics) {
+                p->metal.provided_buffer_recycles++;
+            }
+        }
+        if (!has_more && transport->uring_receive_active &&
+            !transport->reading_paused && !transport->closing &&
+            !transport->conn_lost) {
+            if (rp_submit_receive(p, transport) < 0) {
+                Py_DECREF(transport);
+                PyErr_SetFromErrno(PyExc_OSError);
+                return -1;
+            }
+        }
+        Py_DECREF(transport);
+    }
+    return 0;
+}
+
+static int
+rp_activate_accepted_connection(ReactorPoller *p, FdEntry *entry, int fd)
+{
+    PyObject *spec = entry->accept_callback;
+    PyObject *protocol_factory = PyTuple_GET_ITEM(spec, 0);
+    PyObject *server = PyTuple_GET_ITEM(spec, 1);
+    PyObject *socket_factory = PyTuple_GET_ITEM(spec, 2);
+    PyObject *fd_object = PyLong_FromLong(fd);
+    PyObject *sock = NULL;
+    PyObject *protocol = NULL;
+    PyObject *transport = NULL;
+    if (fd_object == NULL) {
+        goto error;
+    }
+    PyObject *call_args[] = {fd_object};
+    sock = PyObject_Vectorcall(
+        socket_factory, call_args, 0, g_fileno_kwnames);
+    if (sock == NULL) {
+        goto error;
+    }
+    PyObject *blocking = PyObject_CallMethodOneArg(
+        sock, g_s_setblocking, Py_False);
+    if (blocking == NULL) {
+        goto error;
+    }
+    Py_DECREF(blocking);
+    protocol = PyObject_CallNoArgs(protocol_factory);
+    if (protocol == NULL) {
+        goto error;
+    }
+    transport = PyObject_CallFunctionObjArgs(
+        (PyObject *)&SocketTransportType, p->loop, sock, protocol,
+        Py_None, Py_None, server, Py_True, NULL);
+    if (transport == NULL) {
+        goto error;
+    }
+    Py_DECREF(transport);
+    Py_DECREF(protocol);
+    Py_DECREF(sock);
+    Py_DECREF(fd_object);
+    p->metal.accept_native_activations++;
+    return 0;
+
+error:
+    Py_XDECREF(transport);
+    Py_XDECREF(protocol);
+    if (sock == NULL) {
+        close(fd);
+    }
+    Py_XDECREF(sock);
+    Py_XDECREF(fd_object);
+    rp_report_callback_error(p);
+    return 0;
+}
+
+static int
+rp_drain_accept_completions(ReactorPoller *p, unsigned budget)
+{
+    MetalUring *ring = &p->metal.uring;
+    unsigned drained = 0;
+    while (drained < budget) {
+        unsigned head = ring->cached_cq_head++;
+        struct io_uring_cqe cqe = ring->cqes[head & ring->cq_mask_value];
+        drained++;
+        if (cqe.user_data == METAL_WAKE_TOKEN) {
+            uint64_t value;
+            while (read(p->wake_fd, &value, sizeof(value)) < 0 &&
+                   errno == EINTR) {
+                /* Retry only interrupted reads; EAGAIN means fully drained. */
+            }
+            __atomic_store_n(
+                &p->metal.wake_pending, 0, __ATOMIC_RELEASE);
+            p->metal.wake_completions++;
+            if (metal_uring_queue_poll(
+                    ring, p->wake_fd, POLLIN, METAL_WAKE_TOKEN, 0) < 0) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                return -1;
+            }
+            p->metal.wake_submissions++;
+            continue;
+        }
+        if (cqe.user_data == METAL_SIGNAL_TOKEN) {
+            p->metal.signal_completions++;
+            if (p->signal_callback == NULL) {
+                PyErr_SetString(PyExc_RuntimeError,
+                                "signal completion has no callback");
+                return -1;
+            }
+            PyObject *result = PyObject_CallNoArgs(p->signal_callback);
+            if (result == NULL) {
+                return -1;
+            }
+            Py_DECREF(result);
+            if (metal_uring_queue_poll(
+                    ring, p->signal_fd, POLLIN, METAL_SIGNAL_TOKEN, 0) < 0) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                return -1;
+            }
+            p->metal.signal_submissions++;
+            continue;
+        }
+        if ((cqe.user_data & ~METAL_TOKEN_PAYLOAD_MASK) != METAL_TOKEN_ACCEPT) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "accept CQ drain observed another token class");
+            return -1;
+        }
+        p->metal.accept_completions++;
+        uint8_t trace_flags = cqe.res < 0 ? METAL_COMPLETION_ERROR : 0;
+        metal_trace_add(&p->metal, METAL_IO_URING, METAL_OP_ACCEPT,
+                        cqe.user_data, cqe.res, trace_flags);
+
+        int fd = (int)(uint32_t)cqe.user_data;
+        uint32_t generation = (uint32_t)(cqe.user_data >> 32);
+        if (fd < 0 || fd >= p->fdcap ||
+            p->fds[fd].generation != generation ||
+            !p->fds[fd].accept_active) {
+            p->metal.accept_stale++;
+            if (cqe.res >= 0) {
+                close(cqe.res);
+            }
+            continue;
+        }
+        FdEntry *entry = &p->fds[fd];
+        int has_more = (cqe.flags & IORING_CQE_F_MORE) != 0;
+        if (cqe.res == -EINVAL && entry->accept_multishot) {
+            entry->accept_multishot = 0;
+            p->metal.accept_multishot_fallbacks++;
+        } else if (cqe.res >= 0) {
+            if (PyTuple_CheckExact(entry->accept_callback)) {
+                if (rp_activate_accepted_connection(p, entry, cqe.res) < 0) {
+                    return -1;
+                }
+            } else {
+                PyObject *accepted_fd = PyLong_FromLong(cqe.res);
+                PyObject *callback = Py_NewRef(entry->accept_callback);
+                if (accepted_fd == NULL || callback == NULL) {
+                    Py_XDECREF(accepted_fd);
+                    Py_XDECREF(callback);
+                    close(cqe.res);
+                    return -1;
+                }
+                PyObject *result = PyObject_CallOneArg(callback, accepted_fd);
+                Py_DECREF(callback);
+                Py_DECREF(accepted_fd);
+                if (result == NULL) {
+                    close(cqe.res);
+                    return -1;
+                }
+                Py_DECREF(result);
+            }
+        } else if (cqe.res != -ECANCELED) {
+            p->metal.accept_errors++;
+        }
+
+        entry = &p->fds[fd];
+        if (entry->generation == generation && entry->accept_active && !has_more) {
+            if (rp_submit_accept(p, fd) < 0) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int
+rp_drain_poll_completions(ReactorPoller *p, unsigned budget)
+{
+    MetalUring *ring = &p->metal.uring;
+    unsigned drained = 0;
+    while (drained < budget) {
+        unsigned head = ring->cached_cq_head++;
+        struct io_uring_cqe cqe = ring->cqes[head & ring->cq_mask_value];
+        drained++;
+        if ((cqe.user_data & METAL_POLL_TOKEN_FLAG) == 0) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "poll CQ drain observed another control token");
+            return -1;
+        }
+        p->metal.poll_completions++;
+        int fd = (int)(uint32_t)cqe.user_data;
+        uint32_t generation =
+            (uint32_t)((cqe.user_data >> 32) &
+                       (METAL_POLL_GENERATION_LIMIT - 1));
+        if (fd < 0 || fd >= p->fdcap ||
+            p->fds[fd].generation != generation ||
+            p->fds[fd].mask == 0) {
+            p->metal.poll_stale++;
+            continue;
+        }
+        FdEntry *entry = &p->fds[fd];
+        if (cqe.res == -EINVAL && entry->poll_multishot) {
+            p->metal.poll_multishot_enabled = 0;
+            p->metal.poll_multishot_fallbacks++;
+            entry->poll_multishot = 0;
+            if (metal_uring_queue_poll(
+                    ring, fd, entry->mask,
+                    rp_poll_token(generation, fd), 0) < 0) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                return -1;
+            }
+            p->metal.poll_submissions++;
+            continue;
+        }
+        if (cqe.res == -ECANCELED || cqe.res == -ENOENT) {
+            continue;
+        }
+        if (cqe.res < 0) {
+            entry->mask = 0;
+            errno = -cqe.res;
+            PyErr_SetFromErrno(PyExc_OSError);
+            return -1;
+        }
+        int has_more = (cqe.flags & IORING_CQE_F_MORE) != 0;
+        uint32_t events = (uint32_t)cqe.res;
+        if ((events & (POLLIN | POLLERR | POLLHUP | POLLNVAL)) &&
+            entry->reader != NULL) {
+            PyObject *callback = Py_NewRef(entry->reader);
+            PyObject *callback_args = entry->reader_args
+                ? Py_NewRef(entry->reader_args) : NULL;
+            p->metal.readiness_callbacks++;
+            if (entry->native_reader) {
+                rp_dispatch_native_transport(p, callback, 1);
+            } else {
+                rp_dispatch(p, callback, callback_args);
+            }
+            Py_XDECREF(callback_args);
+            Py_DECREF(callback);
+        }
+        entry = &p->fds[fd];
+        if (entry->generation != generation) {
+            p->metal.poll_stale++;
+            continue;
+        }
+        if ((events & (POLLOUT | POLLERR | POLLHUP | POLLNVAL)) &&
+            entry->writer != NULL) {
+            PyObject *callback = Py_NewRef(entry->writer);
+            PyObject *callback_args = entry->writer_args
+                ? Py_NewRef(entry->writer_args) : NULL;
+            p->metal.readiness_callbacks++;
+            if (entry->native_writer) {
+                rp_dispatch_native_transport(p, callback, 0);
+            } else {
+                rp_dispatch(p, callback, callback_args);
+            }
+            Py_XDECREF(callback_args);
+            Py_DECREF(callback);
+        }
+        entry = &p->fds[fd];
+        if (entry->generation == generation && entry->mask != 0 &&
+            !has_more) {
+            if (metal_uring_queue_poll(
+                    ring, fd, entry->mask,
+                    rp_poll_token(generation, fd), entry->poll_multishot) < 0) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                return -1;
+            }
+            p->metal.poll_submissions++;
+        }
+    }
+    return 0;
+}
+
+static int
+rp_drain_completions(ReactorPoller *p, unsigned budget)
+{
+    MetalUring *ring = &p->metal.uring;
+    unsigned head = __atomic_load_n(ring->cq_head, __ATOMIC_RELAXED);
+    unsigned tail = __atomic_load_n(ring->cq_tail, __ATOMIC_ACQUIRE);
+    unsigned available = tail - head;
+    if (available > budget) {
+        available = budget;
+    }
+    ring->cached_cq_head = head;
+    int status = 0;
+    unsigned drained = 0;
+    while (drained < available) {
+        uint64_t token = ring->cqes[
+            ring->cached_cq_head & ring->cq_mask_value].user_data;
+        uint64_t tag = token & ~METAL_TOKEN_PAYLOAD_MASK;
+        if (tag == METAL_TOKEN_RECEIVE || token == METAL_CANCEL_TOKEN) {
+            /* Consume the consecutive receive run in one pass. The old dispatcher
+             * first scanned every token to find the run and then reread every CQE
+             * to process it, doubling completion-ring traffic on the hot path. */
+            unsigned batch = 0;
+            status = rp_drain_receive_completions(
+                p, available - drained, &batch);
+            drained += batch;
+        } else if ((token & METAL_POLL_TOKEN_FLAG) != 0 &&
+                   tag == METAL_TOKEN_CONTROL) {
+            status = rp_drain_poll_completions(p, 1);
+            drained++;
+        } else if (tag == METAL_TOKEN_ACCEPT || token == METAL_WAKE_TOKEN ||
+                   token == METAL_SIGNAL_TOKEN) {
+            status = rp_drain_accept_completions(p, 1);
+            drained++;
+        } else {
+            ring->cached_cq_head++;
+            PyErr_SetString(PyExc_RuntimeError,
+                            "unknown io_uring completion token class");
+            status = -1;
+        }
+        if (status < 0) {
+            break;
+        }
+    }
+    /* Recycled descriptors become visible as one release publication per CQ
+     * batch instead of one cache-line handoff per received packet. */
+    metal_provided_buffers_publish(&p->metal.receive_buffers);
+    __atomic_store_n(
+        ring->cq_head, ring->cached_cq_head, __ATOMIC_RELEASE);
+    if (ring->diagnostics && ring->cached_cq_head != head) {
+        ring->cq_head_publications++;
+    }
+    return status;
+}
+
+static uint64_t
+rp_poll_token(uint32_t generation, int fd)
+{
+    return METAL_TOKEN_CONTROL | METAL_POLL_TOKEN_FLAG |
+           ((uint64_t)generation << 32) | (uint32_t)fd;
+}
+
+static int
+rp_apply(ReactorPoller *p, int fd, uint32_t want, int force)
+{
+    FdEntry *entry = &p->fds[fd];
+    if (entry->mask == want && !force) {
+        return 0;
+    }
+    if (entry->mask != 0) {
+        uint64_t old_token = rp_poll_token(entry->generation, fd);
+        if (metal_uring_queue_cancel_raw(&p->metal.uring, old_token) < 0) {
+            PyErr_SetFromErrno(PyExc_OSError);
+            return -1;
+        }
+        p->metal.poll_cancellations++;
+    }
+    uint32_t generation = entry->generation + 1;
+    if (generation >= METAL_POLL_GENERATION_LIMIT) {
+        generation = 1;
+        p->generation_wraps++;
+    }
+    if (want != 0) {
+        uint64_t token = rp_poll_token(generation, fd);
+        if (metal_uring_queue_poll(
+                &p->metal.uring, fd, want, token,
+                p->metal.poll_multishot_enabled) < 0) {
+            PyErr_SetFromErrno(PyExc_OSError);
+            return -1;
+        }
+        p->metal.poll_submissions++;
+    }
+    entry->generation = generation;
+    entry->mask = want;
+    entry->poll_multishot = want != 0 && p->metal.poll_multishot_enabled;
+    return 0;
+}
+
+/* args==NULL means "no positional args" (bound methods with a captured self). */
+static PyObject *
+rp_pack_args(PyObject *const *args, Py_ssize_t n)
+{
+    if (n == 0) {
+        return NULL;
+    }
+    PyObject *tuple = PyTuple_New(n);
+    if (tuple == NULL) {
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyTuple_SET_ITEM(tuple, i, Py_NewRef(args[i]));
+    }
+    return tuple;
+}
+
+static PyObject *
+rp_add_reader(PyObject *op, PyObject *const *args, Py_ssize_t nargs)
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    if (nargs < 2) {
+        PyErr_SetString(PyExc_TypeError, "_add_reader(fd, callback, *args)");
+        return NULL;
+    }
+    int fd = (int)PyLong_AsLong(args[0]);
+    if (fd < 0 && PyErr_Occurred()) {
+        return NULL;
+    }
+    if (rp_ensure_fd(p, fd) < 0) {
+        return NULL;
+    }
+    PyObject *cb_args = rp_pack_args(args + 2, nargs - 2);
+    if (nargs - 2 > 0 && cb_args == NULL) {
+        return NULL;
+    }
+    FdEntry *e = &p->fds[fd];
+    Py_XSETREF(e->reader, Py_NewRef(args[1]));
+    Py_XSETREF(e->reader_args, cb_args);
+    e->native_reader = PyCFunction_Check(args[1]) &&
+        PyCFunction_GET_SELF(args[1]) != NULL &&
+        PyObject_TypeCheck(PyCFunction_GET_SELF(args[1]), &SocketTransportType) &&
+        PyCFunction_GET_FUNCTION(args[1]) == (PyCFunction)st_read_ready;
+    if (rp_apply(p, fd, e->mask | POLLIN, 1) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+rp_add_writer(PyObject *op, PyObject *const *args, Py_ssize_t nargs)
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    if (nargs < 2) {
+        PyErr_SetString(PyExc_TypeError, "_add_writer(fd, callback, *args)");
+        return NULL;
+    }
+    int fd = (int)PyLong_AsLong(args[0]);
+    if (fd < 0 && PyErr_Occurred()) {
+        return NULL;
+    }
+    if (rp_ensure_fd(p, fd) < 0) {
+        return NULL;
+    }
+    PyObject *cb_args = rp_pack_args(args + 2, nargs - 2);
+    if (nargs - 2 > 0 && cb_args == NULL) {
+        return NULL;
+    }
+    FdEntry *e = &p->fds[fd];
+    Py_XSETREF(e->writer, Py_NewRef(args[1]));
+    Py_XSETREF(e->writer_args, cb_args);
+    e->native_writer = PyCFunction_Check(args[1]) &&
+        PyCFunction_GET_SELF(args[1]) != NULL &&
+        PyObject_TypeCheck(PyCFunction_GET_SELF(args[1]), &SocketTransportType) &&
+        PyCFunction_GET_FUNCTION(args[1]) == (PyCFunction)st_write_ready;
+    if (rp_apply(p, fd, e->mask | POLLOUT, 1) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+rp_remove_reader(PyObject *op, PyObject *arg)
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    int fd = (int)PyLong_AsLong(arg);
+    if (fd < 0 && PyErr_Occurred()) {
+        return NULL;
+    }
+    if (fd < 0 || fd >= p->fdcap || p->fds[fd].reader == NULL) {
+        Py_RETURN_FALSE;
+    }
+    FdEntry *e = &p->fds[fd];
+    if (rp_apply(p, fd, e->mask & ~(uint32_t)POLLIN, 0) < 0) {
+        return NULL;
+    }
+    Py_CLEAR(e->reader);
+    Py_CLEAR(e->reader_args);
+    e->native_reader = 0;
+    Py_RETURN_TRUE;
+}
+
+static PyObject *
+rp_remove_writer(PyObject *op, PyObject *arg)
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    int fd = (int)PyLong_AsLong(arg);
+    if (fd < 0 && PyErr_Occurred()) {
+        return NULL;
+    }
+    if (fd < 0 || fd >= p->fdcap || p->fds[fd].writer == NULL) {
+        Py_RETURN_FALSE;
+    }
+    FdEntry *e = &p->fds[fd];
+    if (rp_apply(p, fd, e->mask & ~(uint32_t)POLLOUT, 0) < 0) {
+        return NULL;
+    }
+    Py_CLEAR(e->writer);
+    Py_CLEAR(e->writer_args);
+    e->native_writer = 0;
+    Py_RETURN_TRUE;
+}
+
+static void
+rp_report_callback_error(ReactorPoller *p)
+{
+    /* Swallow into the loop's exception handler (never propagate out of poll). */
+    PyObject *exc = PyErr_GetRaisedException();
+    if (exc == NULL) {
+        return;
+    }
+    PyObject *ctx = PyDict_New();
+    PyObject *message = PyUnicode_FromString("Exception in callback");
+    if (ctx != NULL && message != NULL &&
+        PyDict_SetItemString(ctx, "message", message) == 0 &&
+        PyDict_SetItemString(ctx, "exception", exc) == 0) {
+        PyObject *hr = PyObject_CallOneArg(p->exc_handler, ctx);
+        Py_XDECREF(hr);
+    }
+    Py_XDECREF(message);
+    Py_XDECREF(ctx);
+    if (PyErr_Occurred()) {
+        PyErr_WriteUnraisable(p->exc_handler);
+    }
+    Py_DECREF(exc);
+}
+
+/* Call a readiness callback; on error route to loop.call_exception_handler,
+ * matching asyncio's Handle._run so one bad callback cannot kill the loop. */
+static void
+rp_dispatch(ReactorPoller *p, PyObject *cb, PyObject *cb_args)
+{
+    PyObject *r = (cb_args == NULL) ? PyObject_CallNoArgs(cb)
+                                    : PyObject_Call(cb, cb_args, NULL);
+    if (r != NULL) {
+        Py_DECREF(r);
+        return;
+    }
+    rp_report_callback_error(p);
+}
+
+static void
+rp_dispatch_native_transport(ReactorPoller *p, PyObject *cb, int reader)
+{
+    PyObject *transport = PyCFunction_GET_SELF(cb);
+    PyObject *r;
+    if (reader) {
+        ((SocketTransport *)transport)->direct_read_dispatches++;
+        r = st_read_ready(transport, NULL);
+    } else {
+        r = st_write_ready(transport, NULL);
+    }
+    if (r != NULL) {
+        Py_DECREF(r);
+    } else {
+        rp_report_callback_error(p);
+    }
+}
+
+static int
+rp_report_task_step_error(ReactorPoller *p, PyObject *handle, PyObject *callback)
+{
+    PyObject *exc = PyErr_GetRaisedException();
+    if (exc == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "task step failed without an exception");
+        return -1;
+    }
+    if (PyErr_GivenExceptionMatches(exc, PyExc_SystemExit) ||
+            PyErr_GivenExceptionMatches(exc, PyExc_KeyboardInterrupt)) {
+        PyErr_SetRaisedException(exc);
+        return -1;
+    }
+
+    PyObject *message = PyUnicode_FromFormat("Exception in callback %R", callback);
+    PyObject *context = message != NULL ? PyDict_New() : NULL;
+    if (context == NULL ||
+            PyDict_SetItemString(context, "message", message) < 0 ||
+            PyDict_SetItemString(context, "exception", exc) < 0 ||
+            PyDict_SetItemString(context, "handle", handle) < 0) {
+        Py_XDECREF(context);
+        Py_XDECREF(message);
+        PyErr_SetRaisedException(exc);
+        return -1;
+    }
+    Py_DECREF(message);
+
+    PyObject *source = PyMember_GetOne(
+        (const char *)handle, g_handle_source_traceback);
+    if (source == NULL) {
+        PyErr_Clear();
+    } else {
+        if (source != Py_None &&
+                PyDict_SetItemString(context, "source_traceback", source) < 0) {
+            Py_DECREF(source);
+            Py_DECREF(context);
+            PyErr_SetRaisedException(exc);
+            return -1;
+        }
+        Py_DECREF(source);
+    }
+    Py_DECREF(exc);
+    PyObject *result = PyObject_CallOneArg(p->exc_handler, context);
+    Py_DECREF(context);
+    if (result == NULL) {
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+static PyObject *
+rp_handle_object_member(PyObject *handle, const PyMemberDef *member)
+{
+    PyObject *value = *(PyObject **)((char *)handle + member->offset);
+    if (value == NULL) {
+        PyErr_Format(PyExc_AttributeError, "Handle.%s is unset", member->name);
+        return NULL;
+    }
+    return Py_NewRef(value);
+}
+
+/* asyncio's C Task schedules no-argument TaskStepMethWrapper callbacks. Going
+ * through Handle._run adds a Python frame around every suspension/resume. For
+ * that exact CPython 3.14 callback shape, enter the captured Context and invoke
+ * the C task step directly. Every other Handle retains asyncio's own _run. */
+static int
+rp_run_task_step(ReactorPoller *p, PyObject *handle)
+{
+    if (!Py_IS_TYPE(handle, g_handle_type)) {
+        return 0;
+    }
+    PyObject *callback = rp_handle_object_member(handle, g_handle_callback);
+    if (callback == NULL) {
+        return -1;
+    }
+    if (g_task_step_type == NULL) {
+        if (strcmp(Py_TYPE(callback)->tp_name,
+                   "_asyncio.TaskStepMethWrapper") != 0) {
+            Py_DECREF(callback);
+            return 0;
+        }
+        g_task_step_type = (PyTypeObject *)Py_NewRef((PyObject *)Py_TYPE(callback));
+    } else if (!Py_IS_TYPE(callback, g_task_step_type)) {
+        Py_DECREF(callback);
+        return 0;
+    }
+    PyObject *args = rp_handle_object_member(handle, g_handle_args);
+    if (args == NULL) {
+        Py_DECREF(callback);
+        return -1;
+    }
+    if (!PyTuple_CheckExact(args) || PyTuple_GET_SIZE(args) != 0) {
+        Py_DECREF(args);
+        Py_DECREF(callback);
+        return 0;
+    }
+    PyObject *context = rp_handle_object_member(handle, g_handle_context);
+    if (context == NULL) {
+        Py_DECREF(args);
+        Py_DECREF(callback);
+        return -1;
+    }
+
+    PyObject *result = PyObject_CallMethodOneArg(context, g_s_context_run, callback);
+    int status;
+    if (result != NULL) {
+        Py_DECREF(result);
+        status = 1;
+    } else {
+        status = rp_report_task_step_error(p, handle, callback) < 0 ? -1 : 1;
+    }
+    Py_DECREF(context);
+    Py_DECREF(args);
+    Py_DECREF(callback);
+    return status;
+}
+
+static int
+rp_flush_async_submissions(ReactorPoller *p)
+{
+    MetalUring *ring = &p->metal.uring;
+    if (ring->pending_submissions == 0) {
+        return 0;
+    }
+    int submitted = metal_uring_flush_submissions(ring);
+    if (submitted < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    if (p->metal.diagnostics && submitted > 0) {
+        p->metal.submission_batches++;
+        p->metal.submitted_sqes += (uint64_t)submitted;
+    }
+    return 0;
+}
+
+static int
+rp_has_completion(ReactorPoller *p)
+{
+    MetalUring *ring = &p->metal.uring;
+    return __atomic_load_n(ring->cq_tail, __ATOMIC_ACQUIRE) !=
+           __atomic_load_n(ring->cq_head, __ATOMIC_RELAXED);
+}
+
+static PyObject *
+rp_run_once(PyObject *op, PyObject *Py_UNUSED(ignored))
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    double loop_now = mono_seconds();
+    if (p->wheel != NULL && p->wheel->count > 0 &&
+            wreath_wheel_run_due(p->wheel, loop_now) < 0) {
+        return NULL;
+    }
+    int blocked = 0;
+
+    /* --- 1. poll -------------------------------------------------------- */
+    /* Non-blocking probe with the GIL held: a saturated server returns work on
+     * this call, so the hot path never computes a timeout, never reads the
+     * ready deque length, and never touches the timer heap. Only when the probe
+     * finds nothing do we compute how long to block and block with the GIL
+     * released, so executor threads and signals are never starved. */
+    if (rp_has_completion(p) && rp_drain_completions(p, 64) < 0) {
+        return NULL;
+    }
+    {
+        Py_ssize_t nready = PyObject_Length(p->ready);
+        if (nready < 0) {
+            return NULL;
+        }
+        int block_ms = -1;
+        if (nready > 0 || rp_has_completion(p)) {
+            block_ms = 0;
+        } else {
+            double delay = Py_HUGE_VAL;
+            if (PyList_GET_SIZE(p->scheduled) > 0) {
+                PyObject *h0 = PyList_GET_ITEM(p->scheduled, 0);  /* borrowed */
+                PyObject *whenobj = PyObject_GetAttr(h0, g_s_when);
+                if (whenobj == NULL) {
+                    return NULL;
+                }
+                delay = PyFloat_AsDouble(whenobj) - loop_now;
+                Py_DECREF(whenobj);
+            }
+            if (p->wheel != NULL && p->wheel->count > 0) {
+                double wheel_delay = wreath_wheel_next_when(p->wheel) - loop_now;
+                if (wheel_delay < delay) {
+                    delay = wheel_delay;
+                }
+            }
+            if (!isinf(delay)) {
+                if (delay <= 0.0) {
+                    block_ms = 0;
+                } else {
+                    double ms = delay * 1000.0;
+                    if (ms >= 2147483646.0) {
+                        block_ms = 2147483646;
+                    } else {
+                        block_ms = (int)ms;
+                        if ((double)block_ms < ms) {
+                            block_ms += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if (block_ms != 0) {
+            int wait_result;
+            unsigned pending_before = p->metal.uring.pending_submissions;
+            if (p->metal.diagnostics) {
+                p->metal.blocking_enters++;
+                p->metal.uring_waits++;
+            }
+            blocked = 1;
+            Py_BEGIN_ALLOW_THREADS
+            wait_result = metal_uring_wait(&p->metal.uring, block_ms);
+            Py_END_ALLOW_THREADS
+            unsigned submitted = pending_before -
+                p->metal.uring.pending_submissions;
+            if (p->metal.diagnostics && submitted > 0) {
+                p->metal.submission_batches++;
+                p->metal.submitted_sqes += submitted;
+            }
+            if (wait_result < 0) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                return NULL;
+            }
+            if (rp_has_completion(p)) {
+                if (rp_drain_completions(p, 64) < 0) {
+                    return NULL;
+                }
+            } else {
+                if (p->metal.diagnostics) {
+                    p->metal.uring_timeouts++;
+                }
+                if (p->metal.trace != NULL) {
+                    metal_trace_add(&p->metal, METAL_IO_URING,
+                                    METAL_OP_TIMEOUT, 0, 0, 0);
+                }
+            }
+        } else if (rp_flush_async_submissions(p) < 0) {
+            return NULL;
+        }
+    }
+
+    /* Keep CQ-generated receive rearms poller-local until ready callbacks have
+     * run, so response sends and rearms publish in one SQ batch below. */
+
+    /* The wheel is driven by the poll deadline itself: no recurring bridge
+     * timer, no idle 1 kHz wakeup, and no Python frame between poll and expiry. */
+    if (p->wheel != NULL && p->wheel->count > 0) {
+        if (blocked) {
+            loop_now = mono_seconds();
+        }
+        if (wreath_wheel_run_due(p->wheel, loop_now) < 0) {
+            return NULL;
+        }
+    }
+
+    /* --- 4. due timers -> ready ----------------------------------------- */
+    double end_time = loop_now + p->clock_res;
+    while (PyList_GET_SIZE(p->scheduled) > 0) {
+        PyObject *h0 = PyList_GET_ITEM(p->scheduled, 0);  /* borrowed */
+        PyObject *whenobj = PyObject_GetAttr(h0, g_s_when);
+        if (whenobj == NULL) {
+            return NULL;
+        }
+        double when = PyFloat_AsDouble(whenobj);
+        Py_DECREF(whenobj);
+        if (when == -1.0 && PyErr_Occurred()) {
+            return NULL;
+        }
+        if (when >= end_time) {
+            break;
+        }
+        PyObject *handle = PyObject_CallOneArg(g_heappop, p->scheduled);
+        if (handle == NULL) {
+            return NULL;
+        }
+        if (PyObject_SetAttr(handle, g_s_scheduled, Py_False) < 0) {
+            Py_DECREF(handle);
+            return NULL;
+        }
+        PyObject *ar = PyObject_CallOneArg(p->ready_append, handle);
+        Py_DECREF(handle);
+        if (ar == NULL) {
+            return NULL;
+        }
+        Py_DECREF(ar);
+    }
+
+    /* --- 5. drain the ready queue (call_soon + timers, context-correct) -- */
+    Py_ssize_t ntodo = PyObject_Length(p->ready);
+    if (ntodo < 0) {
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < ntodo; i++) {
+        PyObject *handle = PyObject_CallNoArgs(p->ready_popleft);
+        if (handle == NULL) {
+            return NULL;
+        }
+        int is_cancelled;
+        if (p->direct_task_steps && Py_IS_TYPE(handle, g_handle_type)) {
+            PyObject *cancelled = *(PyObject **)(
+                (char *)handle + g_handle_cancelled->offset);
+            is_cancelled = cancelled == Py_True;
+        } else {
+            PyObject *cancelled = PyObject_GetAttr(handle, g_s_cancelled);
+            if (cancelled == NULL) {
+                Py_DECREF(handle);
+                return NULL;
+            }
+            is_cancelled = PyObject_IsTrue(cancelled);
+            Py_DECREF(cancelled);
+        }
+        if (!is_cancelled) {
+            int fast = p->direct_task_steps ? rp_run_task_step(p, handle) : 0;
+            if (fast < 0) {
+                Py_DECREF(handle);
+                return NULL;
+            }
+            if (fast == 0) {
+                PyObject *rr = PyObject_CallMethodNoArgs(handle, g_s_run);
+                Py_XDECREF(rr);
+                if (rr == NULL) {
+                    /* Handle._run swallows callback errors itself; a failure here
+                     * is a real loop fault -- surface it. */
+                    Py_DECREF(handle);
+                    return NULL;
+                }
+            }
+        }
+        Py_DECREF(handle);
+    }
+    /* If the ready queue drained, the next run_once publishes pending SQEs in
+     * the same io_uring_enter that waits for their completions. */
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+rp_set_signal_reader(PyObject *op, PyObject *args)
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    int fd;
+    PyObject *callback;
+    if (!PyArg_ParseTuple(args, "iO:_set_signal_reader", &fd, &callback)) {
+        return NULL;
+    }
+    if (!PyCallable_Check(callback)) {
+        PyErr_SetString(PyExc_TypeError, "signal reader must be callable");
+        return NULL;
+    }
+    if (p->signal_fd >= 0) {
+        PyErr_SetString(PyExc_RuntimeError, "signal reader is already installed");
+        return NULL;
+    }
+    if (metal_uring_queue_poll(
+            &p->metal.uring, fd, POLLIN, METAL_SIGNAL_TOKEN, 0) < 0) {
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    p->signal_fd = fd;
+    p->signal_callback = Py_NewRef(callback);
+    p->metal.signal_submissions++;
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+rp_wake(PyObject *op, PyObject *Py_UNUSED(ignored))
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    p->metal.wake_requests++;
+    if (__atomic_exchange_n(
+            &p->metal.wake_pending, 1, __ATOMIC_ACQ_REL) != 0) {
+        p->metal.wake_coalesced++;
+        Py_RETURN_NONE;
+    }
+    uint64_t value = 1;
+    ssize_t written;
+    do {
+        written = write(p->wake_fd, &value, sizeof(value));
+    } while (written < 0 && errno == EINTR);
+    if (written < 0 && errno != EAGAIN) {
+        __atomic_store_n(&p->metal.wake_pending, 0, __ATOMIC_RELEASE);
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    p->metal.wake_writes++;
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+rp_close(PyObject *op, PyObject *Py_UNUSED(i))
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    if (p->wake_fd >= 0) {
+        close(p->wake_fd);
+        p->wake_fd = -1;
+    }
+    metal_send_operations_clear(&p->metal);
+    metal_provided_buffers_clear(&p->metal.uring,
+                                 &p->metal.receive_buffers);
+    metal_uring_clear(&p->metal.uring);
+    if (p->fds != NULL) {
+        for (int i = 0; i < p->fdcap; i++) {
+            Py_CLEAR(p->fds[i].reader);
+            Py_CLEAR(p->fds[i].reader_args);
+            Py_CLEAR(p->fds[i].writer);
+            Py_CLEAR(p->fds[i].writer_args);
+            Py_CLEAR(p->fds[i].accept_callback);
+        }
+        PyMem_Free(p->fds);
+        p->fds = NULL;
+        p->fdcap = 0;
+    }
+    Py_RETURN_NONE;
+}
+
+static int
+metal_env_capacity(const char *name, uint32_t default_value,
+                   uint32_t maximum, int require_power_of_two,
+                   uint32_t *result)
+{
+    const char *text = getenv(name);
+    if (text == NULL || text[0] == '\0') {
+        *result = default_value;
+        return 0;
+    }
+    char *end = NULL;
+    errno = 0;
+    unsigned long long parsed = strtoull(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' ||
+        parsed < METAL_CAPACITY_MIN || parsed > maximum ||
+        (require_power_of_two && (parsed & (parsed - 1)) != 0)) {
+        PyErr_Format(PyExc_ValueError,
+                     "%s must be an integer from %u through %u%s",
+                     name, METAL_CAPACITY_MIN, maximum,
+                     require_power_of_two ? " and a power of two" : "");
+        return -1;
+    }
+    *result = (uint32_t)parsed;
+    return 0;
+}
+
+static int
+rp_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwds))
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    p->wake_fd = -1;
+    p->signal_fd = -1;
+    PyObject *loop, *wheel = Py_None;
+    int direct_task_steps = 1;
+    unsigned int worker_id = 0;
+    unsigned int io_backend = METAL_IO_URING;
+    unsigned int adaptive_polling = 1;
+    unsigned int diagnostics = 1;
+    uint32_t connection_capacity;
+    uint32_t operation_capacity;
+    uint32_t receive_buffer_count;
+    if (!PyArg_ParseTuple(args, "O|OpIIII", &loop, &wheel, &direct_task_steps,
+                          &worker_id, &io_backend, &adaptive_polling,
+                          &diagnostics)) {
+        return -1;
+    }
+    /* The argument remains in the private constructor ABI so unsupported values
+     * fail explicitly, but a live ReactorPoller is always io_uring-backed. */
+    if (io_backend != METAL_IO_URING) {
+        PyErr_SetString(PyExc_ValueError, "unknown metal I/O backend");
+        return -1;
+    }
+    if (metal_env_capacity(
+            "WREATH_METAL_CONNECTION_CAPACITY",
+            METAL_CONNECTION_CAPACITY_DEFAULT,
+            METAL_CONNECTION_CAPACITY_MAX, 0, &connection_capacity) < 0 ||
+        metal_env_capacity(
+            "WREATH_METAL_OPERATION_CAPACITY",
+            METAL_OPERATION_CAPACITY_DEFAULT,
+            METAL_OPERATION_CAPACITY_MAX, 0, &operation_capacity) < 0 ||
+        metal_env_capacity(
+            "WREATH_METAL_RECV_BUFFERS", METAL_RECV_BUFFER_COUNT_DEFAULT,
+            METAL_RECV_BUFFER_COUNT_MAX, 1, &receive_buffer_count) < 0) {
+        return -1;
+    }
+    p->direct_task_steps = direct_task_steps;
+    p->generation_wraps = 0;
+    memset(&p->metal, 0, sizeof(p->metal));
+    const char *trace_mode = getenv("WREATH_METAL_TRACE");
+    if (trace_mode != NULL && strcmp(trace_mode, "0") != 0) {
+        if (strcmp(trace_mode, "1") != 0) {
+            PyErr_SetString(PyExc_ValueError,
+                            "WREATH_METAL_TRACE must be '0' or '1'");
+            return -1;
+        }
+        p->metal.trace = PyMem_Calloc(
+            METAL_TRACE_CAPACITY, sizeof(MetalTraceEntry));
+        if (p->metal.trace == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+    }
+    if (metal_slab_init(&p->metal.connections, connection_capacity) < 0) {
+        return -1;
+    }
+    if (metal_slab_init(&p->metal.operations, operation_capacity) < 0) {
+        metal_slab_clear(&p->metal.connections);
+        return -1;
+    }
+    if (metal_slab_init(&p->metal.buffer_descriptors,
+                        receive_buffer_count) < 0) {
+        metal_slab_clear(&p->metal.operations);
+        metal_slab_clear(&p->metal.connections);
+        return -1;
+    }
+    p->metal.submissions = 0;
+    p->metal.completions = 0;
+    p->metal.cross_worker_rejections = 0;
+    p->metal.owner_thread = PyThread_get_thread_ident();
+    p->metal.worker_id = worker_id;
+    p->metal.adaptive_polling = adaptive_polling != 0;
+    p->metal.diagnostics = diagnostics != 0;
+#ifdef IORING_POLL_ADD_MULTI
+    p->metal.poll_multishot_enabled = 1;
+#endif
+    p->metal.uring.fd = -1;
+    if (metal_uring_init(&p->metal.uring, 512) < 0) {
+        int saved_errno = errno;
+        metal_slab_clear(&p->metal.operations);
+        metal_slab_clear(&p->metal.connections);
+        errno = saved_errno;
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    p->metal.uring.diagnostics = p->metal.diagnostics;
+#ifdef IORING_FEAT_EXT_ARG
+    if ((p->metal.uring.features & IORING_FEAT_EXT_ARG) == 0) {
+        errno = EOPNOTSUPP;
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+#else
+    errno = EOPNOTSUPP;
+    PyErr_SetFromErrno(PyExc_OSError);
+    return -1;
+#endif
+    p->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (p->wake_fd < 0 ||
+        metal_uring_queue_poll(
+            &p->metal.uring, p->wake_fd, POLLIN, METAL_WAKE_TOKEN, 0) < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    p->metal.wake_submissions++;
+    if (metal_provided_buffers_init(
+            &p->metal.uring, &p->metal.receive_buffers,
+            &p->metal.buffer_descriptors, (uint16_t)receive_buffer_count,
+            METAL_RECV_BUFFER_SIZE, METAL_RECV_BUFFER_GROUP) < 0) {
+        p->metal.receive_setup_errno = errno;
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    p->metal.receive_enabled = 1;
+    /* Sends stay synchronous and nonblocking: a response is already hot in
+     * the owner thread, so an io_uring submission adds an avoidable enter
+     * and completion round trip before the peer can issue its next request. */
+    p->metal.send_enabled = 0;
+    p->fds = NULL;
+    p->fdcap = 0;
+    p->loop = Py_NewRef(loop);
+    p->wheel_obj = Py_NewRef(wheel);
+    p->wheel = PyObject_TypeCheck(wheel, &TimingWheelType)
+                   ? (TimingWheel *)wheel : NULL;
+    p->ready = PyObject_GetAttrString(loop, "_ready");
+    p->ready_popleft = p->ready != NULL
+        ? PyObject_GetAttr(p->ready, g_s_popleft) : NULL;
+    p->ready_append = p->ready != NULL
+        ? PyObject_GetAttr(p->ready, g_s_append) : NULL;
+    p->scheduled = PyObject_GetAttrString(loop, "_scheduled");
+    p->exc_handler = PyObject_GetAttrString(loop, "call_exception_handler");
+    if (p->ready == NULL || p->ready_popleft == NULL ||
+        p->ready_append == NULL || p->scheduled == NULL ||
+        p->exc_handler == NULL) {
+        return -1;
+    }
+    if (!PyList_Check(p->scheduled)) {
+        PyErr_SetString(PyExc_TypeError, "loop._scheduled must be a list");
+        return -1;
+    }
+    p->clock_res = 1e-9;
+    PyObject *cr = PyObject_GetAttrString(loop, "_clock_resolution");
+    if (cr != NULL) {
+        p->clock_res = PyFloat_AsDouble(cr);
+        Py_DECREF(cr);
+        if (p->clock_res < 0 && PyErr_Occurred()) {
+            PyErr_Clear();
+            p->clock_res = 1e-9;
+        }
+    } else {
+        PyErr_Clear();
+    }
+    return 0;
+}
+
+static int
+rp_traverse(PyObject *op, visitproc visit, void *arg)
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    Py_VISIT(p->loop);
+    Py_VISIT(p->ready);
+    Py_VISIT(p->ready_popleft);
+    Py_VISIT(p->ready_append);
+    Py_VISIT(p->scheduled);
+    Py_VISIT(p->exc_handler);
+    Py_VISIT(p->wheel_obj);
+    Py_VISIT(p->signal_callback);
+    for (int i = 0; i < p->fdcap; i++) {
+        Py_VISIT(p->fds[i].reader);
+        Py_VISIT(p->fds[i].reader_args);
+        Py_VISIT(p->fds[i].writer);
+        Py_VISIT(p->fds[i].writer_args);
+        Py_VISIT(p->fds[i].accept_callback);
+    }
+    return 0;
+}
+
+static int
+rp_clear(PyObject *op)
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    Py_CLEAR(p->loop);
+    Py_CLEAR(p->ready);
+    Py_CLEAR(p->ready_popleft);
+    Py_CLEAR(p->ready_append);
+    Py_CLEAR(p->scheduled);
+    Py_CLEAR(p->exc_handler);
+    Py_CLEAR(p->wheel_obj);
+    Py_CLEAR(p->signal_callback);
+    p->signal_fd = -1;
+    p->wheel = NULL;
+    if (p->fds != NULL) {
+        for (int i = 0; i < p->fdcap; i++) {
+            Py_CLEAR(p->fds[i].reader);
+            Py_CLEAR(p->fds[i].reader_args);
+            Py_CLEAR(p->fds[i].writer);
+            Py_CLEAR(p->fds[i].writer_args);
+            Py_CLEAR(p->fds[i].accept_callback);
+        }
+    }
+    return 0;
+}
+
+static void
+rp_dealloc(PyObject *op)
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    PyObject_GC_UnTrack(op);
+    if (p->wake_fd >= 0) {
+        close(p->wake_fd);
+        p->wake_fd = -1;
+    }
+    rp_clear(op);
+    if (p->fds != NULL) {
+        PyMem_Free(p->fds);
+        p->fds = NULL;
+    }
+    metal_send_operations_clear(&p->metal);
+    metal_provided_buffers_clear(&p->metal.uring,
+                                 &p->metal.receive_buffers);
+    metal_uring_clear(&p->metal.uring);
+    metal_slab_clear(&p->metal.buffer_descriptors);
+    metal_slab_clear(&p->metal.operations);
+    metal_slab_clear(&p->metal.connections);
+    PyMem_Free(p->metal.trace);
+    p->metal.trace = NULL;
+    Py_TYPE(op)->tp_free(op);
+}
+
+static uint64_t
+metal_uring_mapped_bytes(const MetalUring *ring)
+{
+    if (ring->fd < 0) {
+        return 0;
+    }
+    uint64_t total = ring->sqes_size + ring->sq_ring_size;
+    if (ring->cq_ring != ring->sq_ring) {
+        total += ring->cq_ring_size;
+    }
+    return total;
+}
+
+static PyObject *
+rp_get_native_mapped_bytes(PyObject *op, void *closure)
+{
+    (void)closure;
+    ReactorPoller *p = (ReactorPoller *)op;
+    uint64_t total = metal_uring_mapped_bytes(&p->metal.uring) +
+                     p->metal.receive_buffers.ring_size +
+                     p->metal.receive_buffers.data_size;
+    return PyLong_FromUnsignedLongLong(total);
+}
+
+static PyObject *
+rp_get_native_heap_bytes(PyObject *op, void *closure)
+{
+    (void)closure;
+    ReactorPoller *p = (ReactorPoller *)op;
+    uint64_t total =
+        (uint64_t)p->metal.connections.capacity * sizeof(MetalSlot) +
+        (uint64_t)p->metal.operations.capacity * sizeof(MetalSlot) +
+        (uint64_t)p->metal.buffer_descriptors.capacity * sizeof(MetalSlot) +
+        (uint64_t)p->metal.receive_buffers.entries * sizeof(uint64_t) +
+        (uint64_t)p->fdcap * sizeof(FdEntry);
+    if (p->metal.trace != NULL) {
+        total += METAL_TRACE_CAPACITY * sizeof(MetalTraceEntry);
+    }
+    return PyLong_FromUnsignedLongLong(total);
+}
+
+static PyObject *
+rp_get_native_ring_count(PyObject *op, void *closure)
+{
+    (void)closure;
+    ReactorPoller *p = (ReactorPoller *)op;
+    unsigned count = p->metal.uring.fd >= 0;
+    return PyLong_FromUnsignedLong(count);
+}
+
+static PyObject *
+rp_get_registered_ring_fd(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyBool_FromLong(
+        ((ReactorPoller *)op)->metal.uring.registered_ring_fd);
+}
+
+static PyObject *
+rp_get_epoll_active(PyObject *op, void *closure)
+{
+    (void)closure;
+    (void)op;
+    Py_RETURN_FALSE;
+}
+
+static PyObject *
+rp_get_stale_events(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->metal.poll_stale);
+}
+
+static PyObject *
+rp_get_generation_wraps(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(((ReactorPoller *)op)->generation_wraps);
+}
+
+static PyObject *
+rp_get_accept_submissions(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->metal.accept_submissions);
+}
+
+static PyObject *
+rp_get_accept_completions(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->metal.accept_completions);
+}
+
+static PyObject *
+rp_get_accept_native_activations(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->metal.accept_native_activations);
+}
+
+static PyObject *
+rp_get_accept_multishot_fallbacks(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->metal.accept_multishot_fallbacks);
+}
+
+static PyObject *
+rp_get_receive_enabled(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyBool_FromLong(((ReactorPoller *)op)->metal.receive_enabled);
+}
+
+static PyObject *
+rp_get_receive_submissions(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->metal.receive_submissions);
+}
+
+static PyObject *
+rp_get_receive_completions(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->metal.receive_completions);
+}
+
+static PyObject *
+rp_get_receive_multishot_fallbacks(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->metal.receive_multishot_fallbacks);
+}
+
+static PyObject *
+rp_get_provided_buffer_recycles(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->metal.provided_buffer_recycles);
+}
+
+static PyObject *
+rp_get_provided_buffer_count(PyObject *op, void *closure)
+{
+    (void)closure;
+    ReactorPoller *p = (ReactorPoller *)op;
+    return PyLong_FromUnsignedLong(
+        p->metal.receive_enabled ? p->metal.receive_buffers.entries : 0);
+}
+
+static PyObject *
+rp_get_send_enabled(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyBool_FromLong(((ReactorPoller *)op)->metal.send_enabled);
+}
+
+static PyObject *
+rp_get_send_submissions(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->metal.send_submissions);
+}
+
+static PyObject *
+rp_get_send_completions(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->metal.send_completions);
+}
+
+static PyObject *
+rp_get_sq_tail_publications(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->metal.uring.sq_tail_publications);
+}
+
+static PyObject *
+rp_get_cq_head_publications(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->metal.uring.cq_head_publications);
+}
+
+static PyObject *
+rp_get_enter_calls(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->metal.uring.enter_calls);
+}
+
+#define RP_METAL_U64_GETTER(name, field) \
+    static PyObject *name(PyObject *op, void *closure) \
+    { \
+        (void)closure; \
+        return PyLong_FromUnsignedLongLong( \
+            ((ReactorPoller *)op)->metal.field); \
+    }
+
+RP_METAL_U64_GETTER(rp_get_submission_batches, submission_batches)
+RP_METAL_U64_GETTER(rp_get_submitted_sqes, submitted_sqes)
+RP_METAL_U64_GETTER(rp_get_blocking_enters, blocking_enters)
+RP_METAL_U64_GETTER(rp_get_uring_waits, uring_waits)
+RP_METAL_U64_GETTER(rp_get_uring_timeouts, uring_timeouts)
+RP_METAL_U64_GETTER(rp_get_poll_submissions, poll_submissions)
+RP_METAL_U64_GETTER(rp_get_poll_completions, poll_completions)
+RP_METAL_U64_GETTER(rp_get_poll_cancellations, poll_cancellations)
+RP_METAL_U64_GETTER(rp_get_poll_stale, poll_stale)
+RP_METAL_U64_GETTER(rp_get_poll_multishot_fallbacks,
+                    poll_multishot_fallbacks)
+RP_METAL_U64_GETTER(rp_get_readiness_callbacks, readiness_callbacks)
+RP_METAL_U64_GETTER(rp_get_spin_attempts, spin_attempts)
+RP_METAL_U64_GETTER(rp_get_spin_hits, spin_hits)
+RP_METAL_U64_GETTER(rp_get_spin_misses, spin_misses)
+RP_METAL_U64_GETTER(rp_get_spin_nanoseconds, spin_nanoseconds)
+RP_METAL_U64_GETTER(rp_get_arrival_samples, arrival_samples)
+RP_METAL_U64_GETTER(rp_get_provided_buffer_exhaustions,
+                    provided_buffer_exhaustions)
+RP_METAL_U64_GETTER(rp_get_direct_receive_completions,
+                    direct_receive_completions)
+RP_METAL_U64_GETTER(rp_get_direct_receive_bytes, direct_receive_bytes)
+RP_METAL_U64_GETTER(rp_get_wake_requests, wake_requests)
+RP_METAL_U64_GETTER(rp_get_wake_submissions, wake_submissions)
+RP_METAL_U64_GETTER(rp_get_wake_completions, wake_completions)
+RP_METAL_U64_GETTER(rp_get_wake_writes, wake_writes)
+RP_METAL_U64_GETTER(rp_get_wake_coalesced, wake_coalesced)
+RP_METAL_U64_GETTER(rp_get_signal_submissions, signal_submissions)
+RP_METAL_U64_GETTER(rp_get_signal_completions, signal_completions)
+RP_METAL_U64_GETTER(rp_get_send_zc_notifications, send_zc_notifications)
+RP_METAL_U64_GETTER(rp_get_send_zc_copied, send_zc_copied)
+RP_METAL_U64_GETTER(rp_get_send_zc_bytes, send_zc_bytes)
+RP_METAL_U64_GETTER(rp_get_send_copy_bytes, send_copy_bytes)
+RP_METAL_U64_GETTER(rp_get_retained_send_enqueues, retained_send_enqueues)
+
+#undef RP_METAL_U64_GETTER
+
+#define RP_BUFFER_SLAB_GETTER(name, field) \
+    static PyObject *name(PyObject *op, void *closure) \
+    { \
+        (void)closure; \
+        return PyLong_FromUnsignedLongLong( \
+            ((ReactorPoller *)op)->metal.buffer_descriptors.field); \
+    }
+
+RP_BUFFER_SLAB_GETTER(rp_get_buffer_descriptor_capacity, capacity)
+RP_BUFFER_SLAB_GETTER(rp_get_buffer_descriptor_occupancy, occupancy)
+RP_BUFFER_SLAB_GETTER(rp_get_buffer_descriptor_high_water, high_water)
+RP_BUFFER_SLAB_GETTER(rp_get_buffer_descriptor_exhaustions, exhaustions)
+RP_BUFFER_SLAB_GETTER(rp_get_buffer_descriptor_stale, stale)
+RP_BUFFER_SLAB_GETTER(rp_get_buffer_descriptor_generation_wraps,
+                      generation_wraps)
+
+#undef RP_BUFFER_SLAB_GETTER
+
+static PyObject *
+rp_get_connection_capacity(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLong(
+        ((ReactorPoller *)op)->metal.connections.capacity);
+}
+
+static PyObject *
+rp_get_operation_capacity(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLong(
+        ((ReactorPoller *)op)->metal.operations.capacity);
+}
+
+static PyObject *
+rp_get_poll_multishot_enabled(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyBool_FromLong(
+        ((ReactorPoller *)op)->metal.poll_multishot_enabled);
+}
+
+static PyObject *
+rp_get_adaptive_polling(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyBool_FromLong(((ReactorPoller *)op)->metal.adaptive_polling);
+}
+
+static PyObject *
+rp_get_arrival_ewma_ns(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyFloat_FromDouble(((ReactorPoller *)op)->metal.arrival_ewma_ns);
+}
+
+static PyObject *
+rp_get_arrival_deviation_ns(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyFloat_FromDouble(
+        ((ReactorPoller *)op)->metal.arrival_deviation_ns);
+}
+
+static PyObject *
+rp_completion_trace(PyObject *op, PyObject *Py_UNUSED(ignored))
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    PyObject *rows = PyList_New(p->metal.trace_count);
+    if (rows == NULL) {
+        return NULL;
+    }
+    uint64_t first = p->metal.trace_sequence - p->metal.trace_count + 1;
+    for (uint32_t offset = 0; offset < p->metal.trace_count; offset++) {
+        uint64_t sequence = first + offset;
+        MetalTraceEntry *entry = &p->metal.trace[
+            (uint32_t)((sequence - 1) % METAL_TRACE_CAPACITY)];
+        PyObject *row = Py_BuildValue(
+            "(KKiiii)", entry->sequence, entry->token, entry->result,
+            (int)entry->kind, (int)entry->backend, (int)entry->flags);
+        if (row == NULL) {
+            Py_DECREF(rows);
+            return NULL;
+        }
+        PyList_SET_ITEM(rows, offset, row);
+    }
+    return rows;
+}
+
+static PyGetSetDef rp_getset[] = {
+    {"native_mapped_bytes", rp_get_native_mapped_bytes, NULL,
+     PyDoc_STR("Metal-owned mmap capacity in bytes."), NULL},
+    {"native_heap_bytes", rp_get_native_heap_bytes, NULL,
+     PyDoc_STR("Metal-owned fixed heap capacity in bytes."), NULL},
+    {"native_ring_count", rp_get_native_ring_count, NULL,
+     PyDoc_STR("Live io_uring instances owned by this worker."), NULL},
+    {"registered_ring_fd", rp_get_registered_ring_fd, NULL,
+     PyDoc_STR("Whether io_uring_enter uses a registered ring index."), NULL},
+    {"epoll_active", rp_get_epoll_active, NULL,
+     PyDoc_STR("Always false; metal owns no epoll instance."), NULL},
+    {"stale_events", rp_get_stale_events, NULL,
+     PyDoc_STR("Readiness records rejected after registration replacement."), NULL},
+    {"generation_wraps", rp_get_generation_wraps, NULL,
+     PyDoc_STR("32-bit registration generation wraps."), NULL},
+    {"accept_submissions", rp_get_accept_submissions, NULL,
+     PyDoc_STR("io_uring accept SQEs submitted."), NULL},
+    {"accept_completions", rp_get_accept_completions, NULL,
+     PyDoc_STR("io_uring accept CQEs drained."), NULL},
+    {"accept_native_activations", rp_get_accept_native_activations, NULL,
+     PyDoc_STR("Accepted connections activated directly from the CQ."), NULL},
+    {"accept_multishot_fallbacks", rp_get_accept_multishot_fallbacks, NULL,
+     PyDoc_STR("Listeners downgraded to ordinary accept SQEs."), NULL},
+    {"receive_enabled", rp_get_receive_enabled, NULL,
+     PyDoc_STR("Whether provided-buffer receive is active."), NULL},
+    {"receive_submissions", rp_get_receive_submissions, NULL,
+     PyDoc_STR("Receive SQEs submitted."), NULL},
+    {"receive_completions", rp_get_receive_completions, NULL,
+     PyDoc_STR("Receive CQEs drained."), NULL},
+    {"receive_multishot_fallbacks", rp_get_receive_multishot_fallbacks, NULL,
+     PyDoc_STR("Receivers downgraded to one-shot SQEs."), NULL},
+    {"provided_buffer_recycles", rp_get_provided_buffer_recycles, NULL,
+     PyDoc_STR("Consumed provided buffers returned to the ring."), NULL},
+    {"provided_buffer_exhaustions", rp_get_provided_buffer_exhaustions, NULL,
+     PyDoc_STR("Receive epochs stopped by provided-buffer exhaustion."), NULL},
+    {"direct_receive_completions", rp_get_direct_receive_completions, NULL,
+     PyDoc_STR("HTTP/1 receives committed directly into parser storage."), NULL},
+    {"direct_receive_bytes", rp_get_direct_receive_bytes, NULL,
+     PyDoc_STR("Bytes received directly into HTTP/1 parser storage."), NULL},
+    {"provided_buffer_count", rp_get_provided_buffer_count, NULL,
+     PyDoc_STR("Registered receive buffer count."), NULL},
+    {"connection_capacity", rp_get_connection_capacity, NULL,
+     PyDoc_STR("Configured per-worker connection slab capacity."), NULL},
+    {"operation_capacity", rp_get_operation_capacity, NULL,
+     PyDoc_STR("Configured per-worker operation slab capacity."), NULL},
+    {"buffer_descriptor_capacity", rp_get_buffer_descriptor_capacity, NULL,
+     PyDoc_STR("Configured provided-buffer descriptor capacity."), NULL},
+    {"buffer_descriptor_occupancy", rp_get_buffer_descriptor_occupancy, NULL,
+     PyDoc_STR("Live generational provided-buffer descriptors."), NULL},
+    {"buffer_descriptor_high_water", rp_get_buffer_descriptor_high_water, NULL,
+     PyDoc_STR("Provided-buffer descriptor high-water occupancy."), NULL},
+    {"buffer_descriptor_exhaustions", rp_get_buffer_descriptor_exhaustions,
+     NULL, PyDoc_STR("Provided-buffer descriptor slab exhaustions."), NULL},
+    {"buffer_descriptor_stale", rp_get_buffer_descriptor_stale, NULL,
+     PyDoc_STR("Rejected stale provided-buffer descriptor tokens."), NULL},
+    {"buffer_descriptor_generation_wraps",
+     rp_get_buffer_descriptor_generation_wraps, NULL,
+     PyDoc_STR("Provided-buffer descriptor generation wraps."), NULL},
+    {"send_enabled", rp_get_send_enabled, NULL,
+     PyDoc_STR("Whether asynchronous send completion is active."), NULL},
+    {"send_submissions", rp_get_send_submissions, NULL,
+     PyDoc_STR("Send SQEs submitted, including partial retries."), NULL},
+    {"send_completions", rp_get_send_completions, NULL,
+     PyDoc_STR("Send CQEs drained."), NULL},
+    {"send_zc_notifications", rp_get_send_zc_notifications, NULL,
+     PyDoc_STR("Zero-copy ownership notification CQEs."), NULL},
+    {"send_zc_copied", rp_get_send_zc_copied, NULL,
+     PyDoc_STR("SEND_ZC completions requiring no notification."), NULL},
+    {"send_zc_bytes", rp_get_send_zc_bytes, NULL,
+     PyDoc_STR("Bytes submitted through SEND_ZC."), NULL},
+    {"send_copy_bytes", rp_get_send_copy_bytes, NULL,
+     PyDoc_STR("Bytes submitted through ordinary async send."), NULL},
+    {"retained_send_enqueues", rp_get_retained_send_enqueues, NULL,
+     PyDoc_STR("Immutable payloads retained behind an active send."), NULL},
+    {"submission_batches", rp_get_submission_batches, NULL,
+     PyDoc_STR("io_uring submission-enter batches."), NULL},
+    {"submitted_sqes", rp_get_submitted_sqes, NULL,
+     PyDoc_STR("SQEs accepted by io_uring_enter."), NULL},
+    {"sq_tail_publications", rp_get_sq_tail_publications, NULL,
+     PyDoc_STR("Batched SQ tail release publications."), NULL},
+    {"cq_head_publications", rp_get_cq_head_publications, NULL,
+     PyDoc_STR("Batched CQ head release publications."), NULL},
+    {"enter_calls", rp_get_enter_calls, NULL,
+     PyDoc_STR("io_uring_enter syscalls, including interrupted retries."), NULL},
+    {"adaptive_polling", rp_get_adaptive_polling, NULL,
+     PyDoc_STR("Whether adaptive spin-then-block is enabled."), NULL},
+    {"blocking_enters", rp_get_blocking_enters, NULL,
+     PyDoc_STR("Blocking native waits after an empty probe."), NULL},
+    {"uring_waits", rp_get_uring_waits, NULL,
+     PyDoc_STR("Blocking io_uring_enter waits."), NULL},
+    {"uring_timeouts", rp_get_uring_timeouts, NULL,
+     PyDoc_STR("io_uring waits completed by their deadline."), NULL},
+    {"poll_submissions", rp_get_poll_submissions, NULL,
+     PyDoc_STR("Generic readiness poll SQEs submitted."), NULL},
+    {"poll_completions", rp_get_poll_completions, NULL,
+     PyDoc_STR("Generic readiness poll CQEs drained."), NULL},
+    {"poll_cancellations", rp_get_poll_cancellations, NULL,
+     PyDoc_STR("Generic readiness poll cancellation SQEs submitted."), NULL},
+    {"poll_stale", rp_get_poll_stale, NULL,
+     PyDoc_STR("Stale generic readiness CQEs rejected."), NULL},
+    {"poll_multishot_enabled", rp_get_poll_multishot_enabled, NULL,
+     PyDoc_STR("Whether generic readiness uses multishot poll."), NULL},
+    {"poll_multishot_fallbacks", rp_get_poll_multishot_fallbacks, NULL,
+     PyDoc_STR("Multishot polls downgraded after kernel rejection."), NULL},
+    {"readiness_callbacks", rp_get_readiness_callbacks, NULL,
+     PyDoc_STR("Generic readiness callbacks dispatched directly from the CQ."), NULL},
+    {"wake_requests", rp_get_wake_requests, NULL,
+     PyDoc_STR("Cross-thread native wake requests."), NULL},
+    {"wake_submissions", rp_get_wake_submissions, NULL,
+     PyDoc_STR("io_uring wake-poll submissions."), NULL},
+    {"wake_completions", rp_get_wake_completions, NULL,
+     PyDoc_STR("io_uring wake-poll completions."), NULL},
+    {"wake_writes", rp_get_wake_writes, NULL,
+     PyDoc_STR("eventfd writes after wake coalescing."), NULL},
+    {"wake_coalesced", rp_get_wake_coalesced, NULL,
+     PyDoc_STR("Wake requests covered by an already-pending eventfd signal."), NULL},
+    {"signal_submissions", rp_get_signal_submissions, NULL,
+     PyDoc_STR("io_uring signal-socket poll submissions."), NULL},
+    {"signal_completions", rp_get_signal_completions, NULL,
+     PyDoc_STR("io_uring signal-socket poll completions."), NULL},
+    {"spin_attempts", rp_get_spin_attempts, NULL,
+     PyDoc_STR("Adaptive userspace spin epochs."), NULL},
+    {"spin_hits", rp_get_spin_hits, NULL,
+     PyDoc_STR("Spin epochs observing a CQ arrival."), NULL},
+    {"spin_misses", rp_get_spin_misses, NULL,
+     PyDoc_STR("Spin epochs falling through to blocking."), NULL},
+    {"spin_nanoseconds", rp_get_spin_nanoseconds, NULL,
+     PyDoc_STR("Total measured userspace spin time."), NULL},
+    {"arrival_samples", rp_get_arrival_samples, NULL,
+     PyDoc_STR("Empty-CQ-to-arrival samples."), NULL},
+    {"arrival_ewma_ns", rp_get_arrival_ewma_ns, NULL,
+     PyDoc_STR("EWMA empty-CQ-to-arrival nanoseconds."), NULL},
+    {"arrival_deviation_ns", rp_get_arrival_deviation_ns, NULL,
+     PyDoc_STR("EWMA absolute arrival-gap deviation."), NULL},
+    {NULL, NULL, NULL, NULL, NULL},
+};
+
+static PyMethodDef rp_methods[] = {
+    {"_add_reader", (PyCFunction)(void (*)(void))rp_add_reader, METH_FASTCALL, NULL},
+    {"_add_writer", (PyCFunction)(void (*)(void))rp_add_writer, METH_FASTCALL, NULL},
+    {"_remove_reader", rp_remove_reader, METH_O, NULL},
+    {"_remove_writer", rp_remove_writer, METH_O, NULL},
+    {"_add_uring_listener", rp_add_uring_listener, METH_VARARGS, NULL},
+    {"_remove_uring_listener", rp_remove_uring_listener, METH_O, NULL},
+    {"_start_uring_receive", rp_start_uring_receive, METH_O, NULL},
+    {"_stop_uring_receive", rp_stop_uring_receive, METH_O, NULL},
+    {"_run_once", rp_run_once, METH_NOARGS, NULL},
+    {"_set_signal_reader", rp_set_signal_reader, METH_VARARGS, NULL},
+    {"_wake", rp_wake, METH_NOARGS, NULL},
+    {"completion_trace", rp_completion_trace, METH_NOARGS, NULL},
+    {"close", rp_close, METH_NOARGS, NULL},
+    {NULL, NULL, 0, NULL},
+};
+
+static PyTypeObject ReactorPollerType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "wreath._native._reactor.ReactorPoller",
+    .tp_basicsize = sizeof(ReactorPoller),
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_dealloc = rp_dealloc,
+    .tp_traverse = rp_traverse,
+    .tp_clear = rp_clear,
+    .tp_methods = rp_methods,
+    .tp_getset = rp_getset,
+    .tp_init = rp_init,
+    .tp_new = PyType_GenericNew,
+};
+
+static WreathTransportCAPI transport_capi = {
+    WREATH_TRANSPORT_CAPI_VERSION,
+    transport_capi_check,
+    transport_capi_write,
+    transport_capi_writelines,
+};
+

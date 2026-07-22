@@ -259,19 +259,21 @@ typedef struct {
  * The capsule keeps the server and reactor extensions link-independent while
  * allowing the metal transport to recv directly into the HTTP/1 parser buffer. */
 #define WREATH_HTTP1_CAPI_NAME "wreath._native._server._HTTP1_C_API"
-#define WREATH_HTTP1_CAPI_VERSION 1
+#define WREATH_HTTP1_CAPI_VERSION 2
 
 typedef struct {
     uint32_t version;
     int (*check)(PyObject *);
     int (*acquire_read_buffer)(PyObject *, char **, Py_ssize_t *);
     int (*commit_read)(PyObject *, Py_ssize_t);
+    int (*feed_external)(PyObject *, const char *, Py_ssize_t);
 } WreathHttp1CAPI;
 
 void wreath_http1_protocol_set_type(PyObject *);
 int wreath_http1_protocol_check(PyObject *);
 int wreath_http1_acquire_read_buffer(PyObject *, char **, Py_ssize_t *);
 int wreath_http1_commit_read(PyObject *, Py_ssize_t);
+int wreath_http1_feed_external(PyObject *, const char *, Py_ssize_t);
 
 /* Reverse private API: the native HTTP/1 protocol emits directly through the
  * metal transport without a PyObject_Call boundary. */

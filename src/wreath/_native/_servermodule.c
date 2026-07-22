@@ -16,6 +16,7 @@ static WreathHttp1CAPI http1_capi = {
     wreath_http1_protocol_check,
     wreath_http1_acquire_read_buffer,
     wreath_http1_commit_read,
+    wreath_http1_feed_external,
 };
 
 static PyModuleDef server_module = {

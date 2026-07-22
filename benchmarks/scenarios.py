@@ -26,20 +26,31 @@ FRAMEWORKS = (
 _ALL = frozenset(FRAMEWORKS)
 _NEO_ONLY = frozenset({"wreath", "wreath-native", "wreath-metal"})
 _REQUEST_FEATURE_FRAMEWORKS = frozenset(
-    {"wreath", "wreath-native", "wreath-metal", "starlette", "fastapi", "sanic", "django", "flask"}
+    {
+        "wreath", "wreath-native", "wreath-metal",
+        "starlette", "fastapi", "sanic", "django", "flask",
+    }
 )
 _STREAMING_FRAMEWORKS = frozenset(
     {"wreath", "wreath-native", "wreath-metal", "starlette", "fastapi"}
 )
-_BACKGROUND_FRAMEWORKS = frozenset({"wreath", "wreath-native", "wreath-metal", "starlette"})
+_BACKGROUND_FRAMEWORKS = frozenset(
+    {"wreath", "wreath-native", "wreath-metal", "starlette"}
+)
 _WEBSOCKET_FRAMEWORKS = frozenset(
-    {"wreath", "wreath-native", "wreath-metal", "starlette", "fastapi", "sanic", "blacksheep"}
+    {
+        "wreath", "wreath-native", "wreath-metal",
+        "starlette", "fastapi", "sanic", "blacksheep",
+    }
 )
 # Template rendering and HTTP caching are expressible in every ASGI-tier
 # framework (competitors use Jinja2 and a manual Cache-Control header); the
 # webhook HMAC profile is a Wreath framework primitive, so only Wreath implements it.
 _TEMPLATE_FRAMEWORKS = frozenset(
-    {"wreath", "wreath-native", "wreath-metal", "starlette", "fastapi", "sanic", "blacksheep"}
+    {
+        "wreath", "wreath-native", "wreath-metal",
+        "starlette", "fastapi", "sanic", "blacksheep",
+    }
 )
 _CACHE_FRAMEWORKS = _TEMPLATE_FRAMEWORKS
 _WEBHOOK_FRAMEWORKS = _NEO_ONLY

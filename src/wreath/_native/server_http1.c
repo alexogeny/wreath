@@ -3588,6 +3588,71 @@ wreath_http1_commit_read(PyObject *protocol, Py_ssize_t nbytes)
 }
 
 
+int
+wreath_http1_feed_external(PyObject *protocol, const char *data, Py_ssize_t size)
+{
+    if (!wreath_http1_protocol_check(protocol)) {
+        PyErr_SetString(PyExc_TypeError, "expected native Http1Protocol");
+        return -1;
+    }
+    if (size < 0) {
+        PyErr_SetString(PyExc_ValueError, "negative external read size");
+        return -1;
+    }
+    if (size == 0) {
+        return 0;
+    }
+
+    WreathHttpProtocol *self = (WreathHttpProtocol *)protocol;
+    apply_deferred_compaction(self);
+    if (self->buf_len != 0 || self->cursor != 0) {
+        if (buf_reserve(self, size) < 0) {
+            return -1;
+        }
+        memcpy(self->buf + self->buf_len, data, (size_t)size);
+        self->buf_len += size;
+        return run_drive(self);
+    }
+    if (self->read_offer_size > 0 || self->read_exports > 0) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "external read while parser storage is exported");
+        return -1;
+    }
+
+    /* Borrow the provided-buffer slice only for this synchronous drive. Every
+     * parsed object takes ownership of data it retains. An incomplete tail is
+     * copied back into parser-owned storage before the reactor recycles it. */
+    char *owned_buffer = self->buf;
+    Py_ssize_t owned_capacity = self->buf_cap;
+    self->buf = (char *)data;
+    self->buf_cap = size;
+    self->buf_len = size;
+    self->cursor = 0;
+    self->read_exports = 1;  /* suppress compaction of borrowed storage */
+    int result = run_drive(self);
+    Py_ssize_t consumed = self->cursor;
+    Py_ssize_t remaining = self->buf_len - consumed;
+
+    self->buf = owned_buffer;
+    self->buf_cap = owned_capacity;
+    self->buf_len = 0;
+    self->cursor = 0;
+    self->read_exports = 0;
+    self->compact_pending = 0;
+    if (result < 0) {
+        return -1;
+    }
+    if (remaining > 0) {
+        if (buf_reserve(self, remaining) < 0) {
+            return -1;
+        }
+        memcpy(self->buf, data + consumed, (size_t)remaining);
+        self->buf_len = remaining;
+    }
+    return 0;
+}
+
+
 static PyObject *
 http_eof_received(WreathHttpProtocol *self, PyObject *Py_UNUSED(ignored))
 {

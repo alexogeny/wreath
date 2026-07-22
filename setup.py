@@ -17,12 +17,18 @@ from setuptools import Extension, setup
 profile_build = os.environ.get("WREATH_NATIVE_PROFILE") == "1"
 if sys.platform == "win32":
     extra_compile_args = ["/O2"]
+    hot_compile_args = [*extra_compile_args, "/GL"]
+    hot_link_args = ["/LTCG"]
     if profile_build:
         extra_compile_args += ["/Zi", "/Oy-"]
+        hot_compile_args += ["/Zi", "/Oy-"]
 else:
     extra_compile_args = ["-O2", "-std=c11", "-fvisibility=hidden"]
+    hot_compile_args = [*extra_compile_args, "-O3", "-flto"]
+    hot_link_args = ["-flto"]
     if profile_build:
         extra_compile_args += ["-g", "-fno-omit-frame-pointer"]
+        hot_compile_args += ["-g", "-fno-omit-frame-pointer"]
 
 
 def _http3_extension() -> Extension:
@@ -155,9 +161,18 @@ ext_modules = [
             "wreath._native._reactor",
             sources=[
                 "src/wreath/_native/_reactormodule.c",
+                "src/wreath/_native/reactor_wheel.c",
             ],
-            depends=["src/wreath/_native/server.h"],
-            extra_compile_args=extra_compile_args,
+            depends=[
+                "src/wreath/_native/server.h",
+                "src/wreath/_native/reactor_internal.h",
+                "src/wreath/_native/reactor_ring.c",
+                "src/wreath/_native/reactor_buffers.c",
+                "src/wreath/_native/reactor_transport.c",
+                "src/wreath/_native/reactor_poller.c",
+            ],
+            extra_compile_args=hot_compile_args,
+            extra_link_args=hot_link_args,
         ),
         Extension(
             "wreath._native._server",
@@ -175,7 +190,8 @@ ext_modules = [
                 "src/wreath/_native/wreathcore.h",
                 "src/wreath/_native/server_request.c",
             ],
-            extra_compile_args=extra_compile_args,
+            extra_compile_args=hot_compile_args,
+            extra_link_args=hot_link_args,
         ),
         Extension(
             "wreath._native._flight",

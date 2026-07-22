@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))  # tests/http2 codec
 def _metal_loop():
     import wreath.reactor as r
 
-    return r.metal_event_loop()
+    return r.metal_event_loop(diagnostics=True)
 
 
 def _metal_component_loop(*, adaptive_polling: bool = True):
@@ -73,7 +73,7 @@ elif mode == "wreath-native":
 else:
     import wreath.reactor as reactor
     app = None
-    loop = reactor.metal_event_loop()
+    loop = reactor.metal_event_loop(diagnostics=True)
 loop.run_until_complete(asyncio.sleep(0))
 gc.collect()
 status = {}
@@ -139,7 +139,7 @@ elif mode == "wreath-native":
     loop = reactor.new_event_loop()
 else:
     import wreath.reactor as reactor
-    loop = reactor.metal_event_loop()
+    loop = reactor.metal_event_loop(diagnostics=True)
 asyncio.set_event_loop(loop)
 app_calls = 0
 
@@ -356,9 +356,9 @@ loop.close()
     assert metal["ring_sq_tail_publications"] <= metal["ring_enter_calls"]
     assert metal["ring_cq_head_publications"] <= metal["ring_enter_calls"]
     assert metal["ring_receive_completions"] >= 1
-    assert metal["ring_direct_receive_completions"] == 1
-    assert metal["ring_direct_receive_bytes"] > 0
-    assert metal["ring_send_completions"] >= 1
+    assert metal["ring_direct_receive_completions"] == 0
+    assert metal["ring_direct_receive_bytes"] == 0
+    assert metal["ring_send_completions"] == 0
     keepalive = by_mode["wreath-metal", "keepalive_increment"]
     assert keepalive["python_calls"] <= 4
     assert keepalive["asyncio_calls"] <= 2
@@ -366,9 +366,9 @@ loop.close()
     assert keepalive["ring_sq_tail_publications"] <= keepalive["ring_enter_calls"]
     assert keepalive["accept_handoff_calls"] == 0
     assert keepalive["ring_receive_completions"] == 1
-    assert keepalive["ring_direct_receive_completions"] == 1
-    assert keepalive["ring_direct_receive_bytes"] > 0
-    assert keepalive["ring_send_completions"] >= 1
+    assert keepalive["ring_direct_receive_completions"] == 0
+    assert keepalive["ring_direct_receive_bytes"] == 0
+    assert keepalive["ring_send_completions"] == 0
 
 
 def test_metal_defaults_to_poller_driven_wheel_without_bridge_heartbeat():
@@ -653,11 +653,7 @@ def test_native_transport_fuses_http1_ingress_without_python_buffer_callbacks():
         assert transport._fused_http1 is True
         assert transport._metal_connection_token != 0
         assert transport._metal_worker_id == 0
-        submissions_before = loop._poller.submitted_sqes
-        enters_before = loop._poller.submission_batches
-        blocks_before = loop._poller.blocking_enters
         receives_before = loop._poller.receive_completions
-        sends_before = loop._poller.send_completions
         client.sendall(b"GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
         loop.run_until_complete(asyncio.sleep(0.01))
         response = client.recv(4096)
@@ -666,17 +662,54 @@ def test_native_transport_fuses_http1_ingress_without_python_buffer_callbacks():
         assert b"metal-http" in response
         assert callbacks == []
         assert 1 <= loop._poller.receive_completions - receives_before <= 2
-        assert loop._poller.send_completions - sends_before == 1
-        assert 1 <= loop._poller.submitted_sqes - submissions_before <= 3
-        assert 1 <= loop._poller.submission_batches - enters_before <= 3
-        assert 1 <= loop._poller.blocking_enters - blocks_before <= 4
+        assert loop._poller.send_completions == 0
         assert transport._direct_protocol_writes >= 1
         assert transport._zero_copy_cork_writes >= 1
-        assert transport._metal_operation_high_water >= 1
         assert transport._metal_operation_exhaustions == 0
         assert transport._metal_cross_worker_rejections == 0
         transport.close()
         loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        client.close()
+        loop.close()
+
+
+def test_external_buffer_ingress_preserves_fragmented_request_body():
+    Http1Protocol = importlib.import_module("wreath._native._server").Http1Protocol
+    ServerConfig = importlib.import_module("wreath.server").ServerConfig
+
+    async def echo_body(scope, receive, send):
+        chunks = []
+        while True:
+            message = await receive()
+            chunks.append(message.get("body", b""))
+            if not message.get("more_body", False):
+                break
+        body = b"".join(chunks)
+        await send({"type": "http.response.start", "status": 200})
+        await send({"type": "http.response.body", "body": body})
+
+    loop = _metal_loop()
+    client, server = socket.socketpair()
+    client.setblocking(False)
+    body = b"external-buffer-body"
+    try:
+        protocol = Http1Protocol(
+            echo_body, ServerConfig(lifespan="off"), loop, set()
+        )
+        loop._make_socket_transport(server, protocol)
+        loop.run_until_complete(asyncio.sleep(0))
+        head = (
+            b"POST / HTTP/1.1\r\nHost: test\r\nContent-Length: "
+            + str(len(body)).encode("ascii")
+            + b"\r\nConnection: close\r\n\r\n"
+        )
+        client.sendall(head + body[:5])
+        loop.run_until_complete(asyncio.sleep(0.002))
+        client.sendall(body[5:])
+        loop.run_until_complete(asyncio.sleep(0.01))
+        response = client.recv(4096)
+        assert response.endswith(body)
     finally:
         client.close()
         loop.close()
@@ -721,7 +754,7 @@ def test_metal_io_uring_owns_listener_accept_and_drains_cqes():
     from wreath.server import Server, ServerConfig
 
     try:
-        loop = reactor.metal_event_loop()
+        loop = reactor.metal_event_loop(diagnostics=True)
     except OSError as exc:
         assert exc.errno in {errno.ENOSYS, errno.EPERM, errno.EACCES, errno.ENOMEM}
         return
@@ -788,7 +821,7 @@ def test_metal_io_uring_owns_listener_accept_and_drains_cqes():
         loop.close()
 
 
-def test_metal_send_zc_threshold_retains_large_immutable_body() -> None:
+def test_metal_direct_send_emits_large_immutable_body() -> None:
     from wreath.server import Server, ServerConfig
 
     body = b"x" * (32 * 1024)
@@ -819,9 +852,8 @@ def test_metal_send_zc_threshold_retains_large_immutable_body() -> None:
             writer.close()
             await writer.wait_closed()
             assert response.endswith(body)
-            assert loop._poller.send_copy_bytes > 0
-            assert loop._poller.send_zc_bytes >= len(body)
-            assert loop._poller.retained_send_enqueues >= 1
+            assert loop._poller.send_submissions == 0
+            assert loop._poller.send_completions == 0
         finally:
             await server.close()
 
@@ -831,7 +863,7 @@ def test_metal_send_zc_threshold_retains_large_immutable_body() -> None:
         loop.close()
 
 
-def test_io_uring_http1_completion_trace_accounts_for_request_and_response(
+def test_io_uring_http1_completion_trace_accounts_for_request_ingress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("WREATH_METAL_TRACE", "1")
@@ -863,9 +895,9 @@ def test_io_uring_http1_completion_trace_accounts_for_request_and_response(
             for kind in (1, 2)
         }
         assert b"200 OK" in response
-        assert kinds[:2] == [1, 2]
+        assert kinds == [1]
         assert totals[1] == len(request)
-        assert totals[2] == len(response)
+        assert totals[2] == 0
     finally:
         client.close()
         loop.close()
@@ -879,7 +911,7 @@ def test_metal_native_arena_capacities_are_bounded_and_configurable(
     monkeypatch.setenv("WREATH_METAL_CONNECTION_CAPACITY", "32")
     monkeypatch.setenv("WREATH_METAL_OPERATION_CAPACITY", "64")
     monkeypatch.setenv("WREATH_METAL_RECV_BUFFERS", "32")
-    loop = reactor.metal_event_loop()
+    loop = reactor.metal_event_loop(diagnostics=True)
     try:
         assert loop._poller.connection_capacity == 32
         assert loop._poller.operation_capacity == 64
@@ -981,7 +1013,7 @@ def test_metal_io_uring_receive_pause_cancels_and_resume_rearms():
                 self.transport.pause_reading()
 
     try:
-        loop = reactor.metal_event_loop()
+        loop = reactor.metal_event_loop(diagnostics=True)
     except OSError as exc:
         assert exc.errno in {errno.ENOSYS, errno.EPERM, errno.EACCES, errno.ENOMEM}
         return
@@ -1028,7 +1060,7 @@ def test_metal_io_uring_send_completion_retains_payload_and_drains_before_close(
             self.lost = True
 
     try:
-        loop = reactor.metal_event_loop()
+        loop = reactor.metal_event_loop(diagnostics=True)
     except OSError as exc:
         assert exc.errno in {errno.ENOSYS, errno.EPERM, errno.EACCES, errno.ENOMEM}
         return
@@ -1117,7 +1149,7 @@ def test_metal_http1_io_uring_arm_is_explicit_and_operational_when_available():
     Http1Protocol = importlib.import_module("wreath._native._server").Http1Protocol
     ServerConfig = importlib.import_module("wreath.server").ServerConfig
     try:
-        loop = reactor.metal_event_loop()
+        loop = reactor.metal_event_loop(diagnostics=True)
     except OSError as exc:
         # Explicit selection reports host/kernel policy; it must never fall back
         # silently to epoll.
@@ -1137,14 +1169,14 @@ def test_metal_http1_io_uring_arm_is_explicit_and_operational_when_available():
         response = client.recv(4096)
         assert b"200 OK" in response
         assert b"metal-http" in response
-        assert transport._metal_submissions >= 1
-        assert transport._metal_completions == transport._metal_submissions
+        assert transport._metal_submissions == 0
+        assert transport._metal_completions == 0
         if loop._poller.receive_enabled:
             assert loop._poller.provided_buffer_count == 16
             assert loop._poller.receive_completions >= 1
-            assert loop._poller.direct_receive_completions >= 1
-            assert loop._poller.direct_receive_bytes > 0
-            assert loop._poller.provided_buffer_recycles == 0
+            assert loop._poller.direct_receive_completions == 0
+            assert loop._poller.direct_receive_bytes == 0
+            assert loop._poller.provided_buffer_recycles >= 1
     finally:
         client.close()
         loop.close()
