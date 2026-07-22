@@ -19,7 +19,7 @@ def main() -> None:
         default="benchmarks.apps:app",
         help="module:attribute of the ASGI application to serve",
     )
-    parser.add_argument("--loop", choices=("asyncio", "uvloop"), default="asyncio")
+    parser.add_argument("--loop", choices=("asyncio", "uvloop", "metal"), default="asyncio")
     parser.add_argument(
         "--protocol", nargs="+", default=["http/1.1"],
         choices=("http/1.1", "h2", "h3"),
@@ -52,6 +52,10 @@ def main() -> None:
         import uvloop
 
         uvloop.run(run_server())
+    elif args.loop == "metal":
+        import wreath.reactor as reactor
+
+        asyncio.run(run_server(), loop_factory=reactor.metal_event_loop)
     else:
         asyncio.run(run_server())
 

@@ -231,6 +231,43 @@ def test_h2load_warmup_is_a_separate_unmeasured_run(monkeypatch) -> None:
     assert result.requests == 10
 
 
+def test_h2load_post_uses_the_exact_request_body(monkeypatch) -> None:
+    observed_bodies: list[bytes] = []
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        h2load, "capabilities", lambda: h2load.Capabilities("h2load", True)
+    )
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        observed_bodies.append(Path(command[command.index("--data") + 1]).read_bytes())
+        for item in command:
+            if item.startswith("--log-file="):
+                Path(item.partition("=")[2]).write_text(
+                    "0\t200\t10\n", encoding="utf-8"
+                )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "finished in 1s, 1.00 req/s\n"
+                "requests: 1 total, 1 started, 1 done, 1 succeeded, "
+                "0 failed, 0 errored, 0 timeout\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(h2load.subprocess, "run", fake_run)
+    result = h2load.measure(
+        "127.0.0.1", 8000, "/body", "http/1.1",
+        requests=1, connections=1, tls=False,
+        method="POST", body=b"exact-body",
+    )
+
+    assert observed_bodies == [b"exact-body"]
+    assert "--h1" in commands[0]
+    assert result.requests == 1
+
+
 def test_raw_trials_are_preserved_and_aggregates_derive_from_them() -> None:
     # Aggregation must never replace raw trials. A simple median-of-trials helper
     # derives from the raw rows without discarding them.

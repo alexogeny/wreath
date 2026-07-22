@@ -446,8 +446,8 @@ def metal_event_loop(
     """The event loop for the ``metal`` tier: native C poller + transport.
 
     Metal always owns socket I/O through io_uring, uses the native timing wheel,
-    native transport, direct native poller dispatch, adaptive polling, and no
-    callback-statistics bookkeeping. Backend selection belongs to other Wreath
+    native transport, direct native poller dispatch, deferred task-run polling,
+    and no callback-statistics bookkeeping. Backend selection belongs to other Wreath
     execution tiers, not to metal.
 
     ReactorPoller reads the wheel's exact next deadline, so there is no recurring
@@ -468,9 +468,10 @@ def metal_event_loop(
     backend = _default_backend()
     return EventLoop(selectors.EpollSelector(), backend=backend,
                      timers=timers, tasks=tasks, stats=False,
+                     adaptive_polling=False,
                      native_transport=transport, native_loop=native_loop,
                      direct_task_steps=direct_task_steps, worker_id=worker_id,
-                     reuse_port=reuse_port, adaptive_polling=True)
+                     reuse_port=reuse_port)
 
 
 class _ServerHandle:

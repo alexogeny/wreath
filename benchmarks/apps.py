@@ -76,7 +76,7 @@ def _route_path(path: str, style: str) -> str:
 
 ROUTE_SPECS = tuple(_route_spec(index) for index in range(ROUTE_COUNT))
 
-if FRAMEWORK in {"wreath", "wreath-native"}:
+if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     from dataclasses import dataclass
 
     from wreath import Response, Wreath

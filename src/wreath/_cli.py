@@ -533,7 +533,7 @@ def run_server(
 
 
 def _apply_metal_worker_affinity(worker_id: int) -> int | None:
-    policy = os.environ.get("WREATH_METAL_AFFINITY", "off").strip().lower()
+    policy = os.environ.get("WREATH_METAL_AFFINITY", "auto").strip().lower()
     if policy == "off":
         return None
     if policy != "auto":

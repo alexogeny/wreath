@@ -34,11 +34,15 @@ same owned request context.
 
 On top of both sits **fault injection**: a small, checksummed schedule that
 perturbs a compatible recording along owned seams — a short read, a truncated
-stream, a mid-message reset, a database pool timeout, an outbound connect
-failure — so the owned *recovery* behavior can be exercised and asserted
-deterministic. Fault injection is replay/test-only: it runs over fake transports
-and injected adapters, never a real resource, and cannot broaden any capture
-policy.
+stream, a mid-message reset, a request-deadline timeout, a database pool timeout,
+an outbound connect failure — so the owned *recovery* behavior can be exercised
+and asserted deterministic. Faults drive the *real* owned mechanism, never a
+simulated outcome: a `TIMEOUT` fault, for instance, fires the protocol driver's
+own armed request/keep-alive deadline enforcement (the native `_replay_fire_timeout`
+→ `enforce_deadline` in C, mirrored by the pure twin), so an incomplete
+body-awaiting request emits a genuine `408` from the same code the live server
+runs. Fault injection is replay/test-only: it runs over fake transports and
+injected adapters, never a real resource, and cannot broaden any capture policy.
 
 For a hands-on guide to pointing all of this at your own routes, see the cookbook
 recipe [Fuzz your own routes](../cookbook/recipes/fuzz-your-routes.md).

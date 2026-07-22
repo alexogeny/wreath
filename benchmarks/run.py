@@ -29,6 +29,9 @@ from .scenarios import FRAMEWORKS, SCENARIOS
 #: A (framework, protocol) pair outside this is skipped, not measured and lost.
 SERVER_PROTOCOLS: dict[str, frozenset[str]] = {
     "wreath-native": frozenset({"http/1.1", "h2", "h3"}),
+    # Experimental metal tier: verified serving HTTP/1.1, HTTP/2 (TLS+ALPN), and
+    # HTTP/3 (QUIC) end-to-end on the reactor loop with wheel-backed timers.
+    "wreath-metal": frozenset({"http/1.1", "h2", "h3"}),
     "sanic": frozenset({"http/1.1", "h3"}),
 }
 #: Everything else rides Uvicorn.
@@ -126,6 +129,7 @@ def _drain_background(
 REQUEST_TIERS = {
     "wreath": 1_000,
     "wreath-native": 1_000,
+    "wreath-metal": 1_000,
     "starlette": 1_000,
     "fastapi": 1_000,
     "sanic": 1_000,
@@ -223,17 +227,25 @@ async def _run_protocol(
     env = os.environ.copy()
     env["WREATH_BENCH_FRAMEWORK"] = framework
     protocols = [protocol]
-    # The built-in generator is cleartext HTTP/1.1; anything else needs h2load
-    # and TLS, and h2/h3 cannot be served without a certificate at all.
+    # h2/h3 need TLS. For HTTP/1.1 we now prefer h2load *cleartext* whenever it is
+    # installed: the pure-Python built-in client caps every server at its own
+    # throughput (~80k req/s here) and makes native servers indistinguishable, so
+    # a fast C client is essential to measure the server rather than the client.
     tls = bool(args.tls_cert and args.tls_key)
-    use_h2load = args.load_generator == "h2load" or (
-        args.load_generator == "auto" and protocol != "http/1.1"
-    )
-    if use_h2load and not tls:
+    if args.load_generator == "h2load":
+        use_h2load = True
+    elif args.load_generator == "auto":
+        use_h2load = protocol != "http/1.1" or h2load.capabilities() is not None
+    else:
+        use_h2load = False
+    if use_h2load and not tls and protocol != "http/1.1":
         print(f"[skip] {framework} {protocol}: needs --tls-cert/--tls-key", flush=True)
         return True
-    if framework == "wreath-native":
-        if args.loop == "auto":
+    if framework in ("wreath-native", "wreath-metal"):
+        if framework == "wreath-metal":
+            # The metal tier is defined by its loop; it always runs on the reactor.
+            native_loop = "metal"
+        elif args.loop == "auto":
             # Mirror uvicorn's `--loop auto`: uvloop when installed, else
             # asyncio, so the native-deployment comparison uses the same
             # event loop policy as every uvicorn-hosted framework.
@@ -259,7 +271,7 @@ async def _run_protocol(
         if tls:
             command += ["--protocol", *protocols, "--tls-cert", args.tls_cert,
                         "--tls-key", args.tls_key]
-        server = f"wreath-native ({native_loop})"
+        server = f"{framework} ({native_loop})"
     elif framework == "sanic":
         command = [
             sys.executable,
@@ -320,6 +332,13 @@ async def _run_protocol(
             if not spec.supports(framework):
                 continue
             method, path = spec.method, spec.path
+            # h2load measures GET and body-backed POST, and speaks no WebSocket.
+            # Other HTTP/1.1 methods fall to the built-in client. h2/h3 have no
+            # built-in client, so unsupported methods stay on h2load and skip.
+            scenario_h2load = use_h2load and (
+                protocol != "http/1.1"
+                or (method in {"GET", "POST"} and not spec.websocket)
+            )
             print(
                 f"[start] {framework}/{scenario} [{method}]: {args.warmup_requests:,} warmup + "
                 f"{request_count:,} measured requests",
@@ -340,113 +359,120 @@ async def _run_protocol(
                     flush=True,
                 )
 
-            bg_before: dict[str, int] | None = None
-            if spec.background:
-                # Snapshot before the load runs so this scenario's task counts
-                # are isolated from earlier scenarios on the same process.
-                bg_before = await asyncio.to_thread(_read_stats, args.host, port)
-            if use_h2load:
-                if spec.websocket:
-                    continue  # WebSocket is an HTTP/1.1 upgrade; h2load has none
-                try:
-                    result = await asyncio.to_thread(
-                        h2load.measure,
+            # Repeat the measurement `--trials` times; every trial emits its own
+            # row (tagged with the trial number) so the report can take run-to-run
+            # medians/ranges instead of trusting a single noisy shot.
+            for trial in range(1, max(1, args.trials) + 1):
+                bg_before: dict[str, int] | None = None
+                if spec.background:
+                    # Snapshot before the load runs so this scenario's task counts
+                    # are isolated from earlier scenarios on the same process.
+                    bg_before = await asyncio.to_thread(_read_stats, args.host, port)
+                if scenario_h2load:
+                    if spec.websocket:
+                        break  # WebSocket is an HTTP/1.1 upgrade; h2load has none
+                    try:
+                        result = await asyncio.to_thread(
+                            h2load.measure,
+                            args.host,
+                            port,
+                            path,
+                            protocol,
+                            requests=request_count,
+                            connections=args.connections or args.concurrency,
+                            streams_per_connection=args.streams_per_connection,
+                            warmup_requests=args.warmup_requests,
+                            method=method,
+                            body=spec.body,
+                            headers=dict(spec.headers),
+                            tls=tls,
+                        )
+                    except h2load.H2LoadError as error:
+                        # Never fall back to the built-in generator here: it
+                        # would answer HTTP/1.1 and the row would say h3.
+                        print(f"[skip] {framework}/{scenario} {protocol}: {error}",
+                              flush=True)
+                        break
+                    generator = h2load.LOAD_GENERATOR
+                    generator_version = _h2load_version()
+                    transport = "udp" if protocol == "h3" else "tcp"
+                    alpn: str | None = protocol
+                else:
+                    result = await measure(
                         args.host,
                         port,
                         path,
-                        protocol,
-                        requests=request_count,
-                        connections=args.connections or args.concurrency,
-                        streams_per_connection=args.streams_per_connection,
-                        warmup_requests=args.warmup_requests,
-                        method=method,
-                        headers=spec.headers,
+                        args.duration,
+                        args.warmup,
+                        args.concurrency,
+                        request_count,
+                        args.warmup_requests,
+                        show_progress,
+                        method,
+                        spec.body,
+                        spec.headers,
+                        spec.websocket,
                     )
-                except h2load.H2LoadError as error:
-                    # Never fall back to the built-in generator here: it
-                    # would answer HTTP/1.1 and the row would say h3.
-                    print(f"[skip] {framework}/{scenario} {protocol}: {error}",
-                          flush=True)
-                    continue
-                generator = h2load.LOAD_GENERATOR
-                generator_version = _h2load_version()
-                transport = "udp" if protocol == "h3" else "tcp"
-                alpn: str | None = protocol
-            else:
-                result = await measure(
-                    args.host,
-                    port,
-                    path,
-                    args.duration,
-                    args.warmup,
-                    args.concurrency,
-                    request_count,
-                    args.warmup_requests,
-                    show_progress,
-                    method,
-                    spec.body,
-                    spec.headers,
-                    spec.websocket,
-                )
-                generator = LOAD_GENERATOR
-                generator_version = LOAD_GENERATOR_VERSION
-                transport = "tcp"
-                alpn = None
-            background_stats: dict[str, Any] | None = None
-            if spec.background and bg_before is not None:
-                # Drain and read the app's task counters before the server is
-                # stopped in the finally block, so a dropped or backlogged task
-                # is caught rather than lost with the process.
-                background_stats = await asyncio.to_thread(
-                    _drain_background,
-                    args.host,
-                    port,
-                    bg_before,
-                    result.requests,
-                    args.warmup_requests,
-                )
-                if not background_stats["valid"]:
-                    print(
-                        f"[INVALID] {framework}/{scenario}: background work did not "
-                        f"reconcile: {background_stats}",
-                        flush=True,
+                    generator = LOAD_GENERATOR
+                    generator_version = LOAD_GENERATOR_VERSION
+                    transport = "tcp"
+                    alpn = None
+                background_stats: dict[str, Any] | None = None
+                if spec.background and bg_before is not None:
+                    # Drain and read the app's task counters before the server is
+                    # stopped in the finally block, so a dropped or backlogged task
+                    # is caught rather than lost with the process.
+                    background_stats = await asyncio.to_thread(
+                        _drain_background,
+                        args.host,
+                        port,
+                        bg_before,
+                        result.requests,
+                        args.warmup_requests,
                     )
-            row: dict[str, object] = {
-                "framework": framework,
-                "server": server,
-                "scenario": scenario,
-                "method": method,
-                "path": path,
-                # The protocol the connection actually negotiated: the
-                # h2load path refuses to return at all when the ALPN it was
-                # given back is not the one it asked for.
-                "protocol": protocol,
-                "transport": transport,
-                "secure": bool(tls and use_h2load),
-                "alpn": alpn,
-                "connections": args.connections or args.concurrency,
-                "max_streams_per_connection": (
-                    args.streams_per_connection if use_h2load else 1
-                ),
-                "trial": 1,
-                "load_generator": generator,
-                "load_generator_version": generator_version,
-                "server_tls_version": None,
-                "normalized_100k_seconds": (
-                    result.duration_seconds * 100_000
-                    / max(1, result.requests + result.errors)
-                ),
-                **asdict(result),
-            }
-            if background_stats is not None:
-                row["background"] = background_stats
-            on_result(row)
-            print(
-                f"[done] {framework:10} {scenario:10} {protocol:8} "
-                f"{result.requests_per_second:10.0f} req/s "
-                f"p99={result.latency_ms_p99:8.3f} ms errors={result.errors}",
-                flush=True,
-            )
+                    if not background_stats["valid"]:
+                        print(
+                            f"[INVALID] {framework}/{scenario}: background work did "
+                            f"not reconcile: {background_stats}",
+                            flush=True,
+                        )
+                row: dict[str, object] = {
+                    "framework": framework,
+                    "server": server,
+                    "scenario": scenario,
+                    "method": method,
+                    "path": path,
+                    # The protocol the connection actually negotiated: the
+                    # h2load path refuses to return at all when the ALPN it was
+                    # given back is not the one it asked for.
+                    "protocol": protocol,
+                    "transport": transport,
+                    "secure": bool(tls and scenario_h2load),
+                    "alpn": alpn,
+                    "connections": args.connections or args.concurrency,
+                    "max_streams_per_connection": (
+                        args.streams_per_connection if scenario_h2load else 1
+                    ),
+                    "trial": trial,
+                    "load_generator": generator,
+                    "load_generator_version": generator_version,
+                    "server_tls_version": None,
+                    "normalized_100k_seconds": (
+                        result.duration_seconds * 100_000
+                        / max(1, result.requests + result.errors)
+                    ),
+                    **asdict(result),
+                }
+                if background_stats is not None:
+                    row["background"] = background_stats
+                on_result(row)
+                print(
+                    f"[done] {framework:10} {scenario:10} {protocol:8} "
+                    f"{result.requests_per_second:10.0f} req/s "
+                    f"p99={result.latency_ms_p99:8.3f} ms errors={result.errors}"
+                    f"{'' if args.trials == 1 else f' (trial {trial})'}",
+                    flush=True,
+                )
         return True
     finally:
         process.terminate()
@@ -506,10 +532,10 @@ async def run(args: argparse.Namespace) -> None:
         "warmup_requests_per_scenario": args.warmup_requests,
         "suite_end_to_end_seconds": 0.0,
         "completed_scenarios": 0,
-        "total_scenarios": runnable_scenarios,
+        "total_scenarios": runnable_scenarios * max(1, args.trials),
         "skipped_frameworks": skipped_frameworks,
         "unavailable_scenarios": unavailable_scenarios,
-        "load_generator": "wreath-stdlib-development-client",
+        "load_generator": "pending",
     }
     document: dict[str, Any] = {"metadata": metadata, "results": rows}
 
@@ -523,6 +549,9 @@ async def run(args: argparse.Namespace) -> None:
 
     def on_result(row: dict[str, object]) -> None:
         rows.append(row)
+        generators = sorted({str(item["load_generator"]) for item in rows})
+        metadata["load_generators"] = generators
+        metadata["load_generator"] = generators[0] if len(generators) == 1 else "mixed"
         metadata["completed_scenarios"] = len(rows)
         persist()
         print(
@@ -585,6 +614,8 @@ def main() -> None:
         help="'builtin' is HTTP/1.1-only; 'h2load' exercises h2/h3 as a subprocess",
     )
     parsed = parser.parse_args()
+    if parsed.trials < 1:
+        parser.error("--trials must be positive")
     if parsed.connections is not None:
         parsed.concurrency = parsed.connections
     asyncio.run(run(parsed))

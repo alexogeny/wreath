@@ -213,23 +213,3 @@ async def test_rejected_bytes_are_not_retained(tmp_path) -> None:
         assert seen["bytes"] <= LIMIT
     finally:
         await server.close()
-
-
-async def test_header_list_limit_enforced(h3_module) -> None:
-    """See module docstring; RFC reference. Deeper conformance is future work."""
-    pytest.skip("deeper HTTP/3 conformance not yet implemented")
-
-
-async def test_qpack_table_bound_enforced(h3_module) -> None:
-    """See module docstring; RFC reference. Deeper conformance is future work."""
-    pytest.skip("deeper HTTP/3 conformance not yet implemented")
-
-
-async def test_blocked_streams_limit_enforced(h3_module) -> None:
-    """See module docstring; RFC reference. Deeper conformance is future work."""
-    pytest.skip("deeper HTTP/3 conformance not yet implemented")
-
-
-async def test_max_concurrent_streams_limit_enforced(h3_module) -> None:
-    """See module docstring; RFC reference. Deeper conformance is future work."""
-    pytest.skip("deeper HTTP/3 conformance not yet implemented")

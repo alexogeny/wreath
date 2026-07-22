@@ -50,7 +50,7 @@ from .load import LOAD_GENERATOR, LOAD_GENERATOR_VERSION, measure
 from .report import generate_report
 from .run import _available_port, _wait_until_ready
 
-LIFECYCLE_FRAMEWORKS = ("wreath-native", "wreath", "sanic", "blacksheep")
+LIFECYCLE_FRAMEWORKS = ("wreath-native", "wreath-metal", "wreath", "sanic", "blacksheep")
 SCENARIO = "lifecycle-admin-mutation"
 ADMIN_TOKEN = "admin-token-lifecycle"
 NON_ADMIN_TOKEN = "user-token-2"
@@ -238,8 +238,11 @@ async def _verify_endpoint(host: str, port: int, framework: str) -> tuple[int, i
 def _server_command(
     framework: str, host: str, port: int, loop: str, http_impl: str
 ) -> tuple[list[str], str]:
-    if framework == "wreath-native":
-        if loop == "auto":
+    if framework in ("wreath-native", "wreath-metal"):
+        if framework == "wreath-metal":
+            # The metal tier is defined by its loop; it always runs the reactor.
+            native_loop = "metal"
+        elif loop == "auto":
             # Mirror uvicorn's `--loop auto` so every stack shares one policy.
             try:
                 import uvloop  # noqa: F401
@@ -255,7 +258,8 @@ def _server_command(
             "--loop", native_loop,
             "--app", "benchmarks.lifecycle_apps:app",
         ]
-        return command, f"wreath-native ({native_loop})"
+        label = "wreath-metal" if framework == "wreath-metal" else f"wreath-native ({native_loop})"
+        return command, label
     if framework == "sanic":
         command = [
             sys.executable, "-m", "benchmarks.sanic_server",

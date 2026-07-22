@@ -118,7 +118,7 @@ class _AsyncpgDatabase:
         return await pool.fetchrow(MUTATE_SQL, name, user_id)
 
 
-if FRAMEWORK in {"wreath", "wreath-native"}:
+if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     from wreath import JSONResponse, Router, Wreath
     from wreath.auth import BearerTokenBackend, Identity
     from wreath.middleware import Middleware, SecurityHeadersMiddleware

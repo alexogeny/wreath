@@ -70,9 +70,10 @@ def test_native_server_import_does_not_pull_in_http3() -> None:
 
 
 @pytest.mark.asyncio
-async def test_requesting_unbuilt_h3_raises_without_downgrade() -> None:
-    if _http3_available():
-        pytest.skip("HTTP/3 backend is built in this environment")
+async def test_requesting_unbuilt_h3_raises_without_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("wreath.server._http3_available", lambda: False)
     cert, key = _self_signed()
     tls = TLSConfig(certfile=cert, keyfile=key)
     with pytest.raises(RuntimeError, match="HTTP/3"):

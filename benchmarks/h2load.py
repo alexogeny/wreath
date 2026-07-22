@@ -125,8 +125,10 @@ def measure(
     threads: int = 1,
     warmup_requests: int = 0,
     method: str = "GET",
+    body: bytes = b"",
     headers: dict[str, str] | None = None,
     timeout: float = 300.0,
+    tls: bool = True,
 ) -> Result:
     """Run `requests` requests over `protocol` and report what happened.
 
@@ -146,51 +148,74 @@ def measure(
             "this h2load was built without HTTP/3, and would accept --h3, ignore it, "
             "and exit 0. Rebuild nghttp2 with --enable-http3 (benchmarks/README.md)."
         )
-    if method != "GET":
-        raise H2LoadError(f"the h2load path measures GET only, not {method}")
+    if method not in {"GET", "POST"}:
+        raise H2LoadError(f"the h2load path measures GET and POST, not {method}")
+    if method == "GET" and body:
+        raise H2LoadError("the h2load GET path does not accept a request body")
 
-    # TLS throughout: h2 and h3 require it, and mixing a cleartext h1 row into a
-    # TLS run would compare a stack that pays for encryption against one that
-    # does not.
-    url = f"https://{host}:{port}{path}"
+    # h2 and h3 require TLS. HTTP/1.1 may be measured cleartext (tls=False) so a
+    # plaintext-h1 run is not bottlenecked on the pure-Python built-in client;
+    # cleartext and TLS rows are never mixed in one run (the caller passes the
+    # run's actual TLS state), so the "encryption tax" comparison stays honest.
+    cleartext = not tls and protocol == "http/1.1"
+    scheme = "http" if cleartext else "https"
+    url = f"{scheme}://{host}:{port}{path}"
     with tempfile.TemporaryDirectory() as directory:
         log = Path(directory) / "requests.tsv"
-        command = [
-            found.path,
-            "-n", str(requests + warmup_requests),
-            "-c", str(connections),
-            "-t", str(min(threads, connections)),
-            "-m", str(streams_per_connection),
-            f"--log-file={log}",
-            *_ALPN_FLAGS[protocol],
-        ]
-        for name, value in (headers or {}).items():
-            command += ["-H", f"{name}: {value}"]
-        command.append(url)
-        try:
-            completed = subprocess.run(
-                command, capture_output=True, text=True, timeout=timeout
-            )
-        except subprocess.TimeoutExpired as error:
-            raise H2LoadError(f"h2load timed out after {timeout}s") from error
-        output = completed.stdout + completed.stderr
-        if completed.returncode != 0:
-            raise H2LoadError(
-                f"h2load exited {completed.returncode}: {output.strip()[:400]}"
-            )
+        data = Path(directory) / "request-body.bin"
+        if method == "POST":
+            data.write_bytes(body)
 
-        negotiated = _APPLICATION_PROTOCOL.search(output)
-        expected = _EXPECTED_ALPN[protocol]
-        if negotiated is None:
-            raise H2LoadError(
-                f"h2load did not report a negotiated protocol; asked for {protocol}. "
-                f"Output: {output.strip()[:300]}"
-            )
-        if negotiated.group(1) != expected:
-            raise H2LoadError(
-                f"asked for {protocol}, but the connection negotiated "
-                f"{negotiated.group(1)!r}. Refusing to record this as {protocol}."
-            )
+        def command_for(count: int, *, measured: bool) -> list[str]:
+            command = [
+                found.path,
+                "-n", str(count),
+                "-c", str(connections),
+                "-t", str(min(threads, connections)),
+                "-m", str(streams_per_connection),
+                *([f"--log-file={log}"] if measured else []),
+                *(["--data", str(data)] if method == "POST" else []),
+                *(["--h1"] if cleartext else _ALPN_FLAGS[protocol]),
+            ]
+            for name, value in (headers or {}).items():
+                command += ["-H", f"{name}: {value}"]
+            command.append(url)
+            return command
+
+        def invoke(count: int, *, measured: bool) -> str:
+            try:
+                completed = subprocess.run(
+                    command_for(count, measured=measured),
+                    capture_output=True, text=True, timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise H2LoadError(f"h2load timed out after {timeout}s") from error
+            output = completed.stdout + completed.stderr
+            if completed.returncode != 0:
+                phase = "measurement" if measured else "warmup"
+                raise H2LoadError(
+                    f"h2load {phase} exited {completed.returncode}: "
+                    f"{output.strip()[:400]}"
+                )
+            return output
+
+        if warmup_requests > 0:
+            invoke(warmup_requests, measured=False)
+        output = invoke(requests, measured=True)
+
+        if not cleartext:  # cleartext h1 has no ALPN to verify
+            negotiated = _APPLICATION_PROTOCOL.search(output)
+            expected = _EXPECTED_ALPN[protocol]
+            if negotiated is None:
+                raise H2LoadError(
+                    f"h2load did not report a negotiated protocol; asked for {protocol}. "
+                    f"Output: {output.strip()[:300]}"
+                )
+            if negotiated.group(1) != expected:
+                raise H2LoadError(
+                    f"asked for {protocol}, but the connection negotiated "
+                    f"{negotiated.group(1)!r}. Refusing to record this as {protocol}."
+                )
 
         finished = _FINISHED.search(output)
         counted = _REQUESTS.search(output)

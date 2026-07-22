@@ -263,10 +263,24 @@ def bench(argv: list[str] | None = None) -> int:
                         help="skip the benchmarks that need podman/PostgreSQL")
     args, forwarded = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
 
-    pinned = _apply_pin(_resolve_pin(args.pin))
-    if pinned:
-        print(f"[pin] benchmark tree pinned to CPUs {sorted(os.sched_getaffinity(0))}")
-    elif args.pin != "none":
+    # Pin the server and the load generator to *disjoint* P-cores. If they share
+    # cores they steal cycles from each other, and on a hybrid CPU the loser can
+    # land on a slow E-core -- worth ~2x and the dominant source of run-to-run
+    # noise. We reserve one P-core (two HT threads) for the server via
+    # WREATH_BENCH_SERVER_CPUS and pin this process (which hosts the generator)
+    # to the rest.
+    pcores = sorted(_resolve_pin(args.pin))
+    if len(pcores) >= 4 and "WREATH_BENCH_SERVER_CPUS" not in os.environ:
+        server_cpus, client_cpus = pcores[:2], set(pcores[2:])
+        os.environ["WREATH_BENCH_SERVER_CPUS"] = ",".join(str(c) for c in server_cpus)
+        pinned = _apply_pin(client_cpus)
+        if pinned:
+            print(f"[pin] server -> CPUs {server_cpus}; generator -> {sorted(client_cpus)}")
+    else:
+        pinned = _apply_pin(set(pcores))
+        if pinned:
+            print(f"[pin] benchmark tree pinned to CPUs {sorted(os.sched_getaffinity(0))}")
+    if not pinned and args.pin != "none":
         print("[pin] no CPU pinning applied (sysfs unavailable or empty selection)")
 
     forwarded = _ensure_native_arm(forwarded)
@@ -300,6 +314,10 @@ def bench(argv: list[str] | None = None) -> int:
               "--output", "benchmark-results-webhooks/inbound-latest.json"])
         _run([sys.executable, "-m", "benchmarks.bench_webhook_dispatcher",
               "--output", "benchmark-results-webhooks/dispatcher-latest.json"])
+
+        print("\n=== wreath-metal timer " + "=" * 35)
+        _run([sys.executable, "-m", "benchmarks.bench_timing_wheel",
+              "--output", "benchmark-results-timing-wheel/latest.json"])
         if not args.no_db:
             print("\n=== database battery (ORM, PostgreSQL webhooks, lifecycle) " + "=" * 8)
             report_inputs.extend(_db_battery())

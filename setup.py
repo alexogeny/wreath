@@ -85,6 +85,33 @@ def _http3_extension() -> Extension:
     )
 
 
+def _experimental_reactor_extension() -> Extension:
+    """Build the isolated, non-production reactor research tier."""
+    root = "src/wreath/_exp/reactor"
+    domains = [
+        "deadline_lanes",
+        "connection_core",
+        "buffer_ladder",
+        "completion_batch",
+        "send_chain",
+        "fixed_files",
+        "adaptive_policy",
+        "uring_timeout",
+    ]
+    return Extension(
+        "wreath._exp._reactor",
+        sources=[
+            "src/wreath/_exp/_reactormodule.c",
+            *(f"{root}/{name}.c" for name in domains),
+        ],
+        depends=[
+            "src/wreath/_exp/reactor/domain.h",
+            *(f"{root}/{name}.h" for name in domains),
+        ],
+        extra_compile_args=extra_compile_args,
+    )
+
+
 ext_modules = [
         Extension(
             "wreath._native._core",
@@ -122,6 +149,14 @@ ext_modules = [
                 "src/wreath/_native/http.c",
             ],
             depends=["src/wreath/_native/wreathcore.h"],
+            extra_compile_args=extra_compile_args,
+        ),
+        Extension(
+            "wreath._native._reactor",
+            sources=[
+                "src/wreath/_native/_reactormodule.c",
+            ],
+            depends=["src/wreath/_native/server.h"],
             extra_compile_args=extra_compile_args,
         ),
         Extension(
@@ -195,5 +230,10 @@ ext_modules = [
 # while a requested build fails loudly if its linked libraries are unavailable.
 if os.environ.get("WREATH_BUILD_HTTP3") == "1":
     ext_modules.append(_http3_extension())
+
+# Experiments never participate in production backend selection. Building them
+# is explicit so unfinished kernel requirements cannot affect normal installs.
+if os.environ.get("WREATH_BUILD_EXP") == "1":
+    ext_modules.append(_experimental_reactor_extension())
 
 setup(ext_modules=ext_modules)

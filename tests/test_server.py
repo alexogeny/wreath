@@ -420,11 +420,10 @@ def test_protocol_config_rejects_empty_unknown_and_duplicate_values() -> None:
 
 
 @pytest.mark.asyncio
-async def test_requesting_unbuilt_http3_fails_without_downgrade() -> None:
-    from wreath.server import _http3_available
-
-    if _http3_available():
-        pytest.skip("HTTP/3 extension is built in this environment")
+async def test_requesting_unbuilt_http3_fails_without_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("wreath.server._http3_available", lambda: False)
 
     cert, key = _make_self_signed()
     tls = TLSConfig(certfile=cert, keyfile=key)

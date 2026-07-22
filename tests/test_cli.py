@@ -39,15 +39,12 @@ def test_run_parser_defaults_are_safe_and_deterministic() -> None:
     assert options.date_header is True
 
 
-def test_metal_worker_affinity_is_explicit_and_deterministic(
+def test_metal_worker_affinity_is_default_and_deterministic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cli_module = importlib.import_module("wreath._cli")
 
     monkeypatch.delenv("WREATH_METAL_AFFINITY", raising=False)
-    assert cli_module._apply_metal_worker_affinity(3) is None
-
-    monkeypatch.setenv("WREATH_METAL_AFFINITY", "auto")
     monkeypatch.setattr(cli_module.os, "sched_getaffinity", lambda _pid: {2, 6})
     applied: list[tuple[int, set[int]]] = []
     monkeypatch.setattr(

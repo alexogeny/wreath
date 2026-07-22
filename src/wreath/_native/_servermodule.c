@@ -11,6 +11,13 @@ static WreathRequestCAPI request_capi = {
     wreath_request_context_sever,
 };
 
+static WreathHttp1CAPI http1_capi = {
+    WREATH_HTTP1_CAPI_VERSION,
+    wreath_http1_protocol_check,
+    wreath_http1_acquire_read_buffer,
+    wreath_http1_commit_read,
+};
+
 static PyModuleDef server_module = {
     PyModuleDef_HEAD_INIT,
     .m_name = "wreath._native._server",
@@ -57,6 +64,7 @@ PyInit__server(void)
     PyObject *module;
     PyObject *protocol_type;
     PyObject *request_capsule;
+    PyObject *http1_capsule;
 
     module = PyModule_Create(&server_module);
     if (module == NULL) {
@@ -95,6 +103,16 @@ PyInit__server(void)
     }
     protocol_type = make_http1_protocol_type();
     if (protocol_type == NULL) {
+        disconnect_error = NULL;
+        Py_DECREF(module);
+        return NULL;
+    }
+    wreath_http1_protocol_set_type(protocol_type);
+    http1_capsule = PyCapsule_New(&http1_capi, WREATH_HTTP1_CAPI_NAME, NULL);
+    if (http1_capsule == NULL ||
+        PyModule_AddObject(module, "_HTTP1_C_API", http1_capsule) < 0) {
+        Py_XDECREF(http1_capsule);
+        Py_DECREF(protocol_type);
         disconnect_error = NULL;
         Py_DECREF(module);
         return NULL;

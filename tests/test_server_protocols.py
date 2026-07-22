@@ -207,9 +207,10 @@ async def test_h3_without_tls_is_error():
         await serve(_app, ServerConfig(port=0, lifespan="off", protocols=("h3",)))
 
 
-async def test_unbuilt_h3_fails_without_downgrade():
-    if _http3_available():
-        pytest.skip("HTTP/3 backend is built")
+async def test_unbuilt_h3_fails_without_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr("wreath.server._http3_available", lambda: False)
     cert, key = _cert()
     with pytest.raises(RuntimeError, match="HTTP/3"):
         await serve(

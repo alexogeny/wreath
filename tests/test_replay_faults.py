@@ -131,6 +131,50 @@ async def test_malformed_request_line_maps_to_an_owned_error_not_a_crash(
     assert a.matches(b)
 
 
+@proto
+@pytest.mark.asyncio
+async def test_timeout_fault_fires_the_drivers_own_request_deadline(protocol_cls: type) -> None:
+    # A TIMEOUT fault is not a fabricated outcome: it fires the *driver's own*
+    # armed deadline enforcement (native ``_replay_fire_timeout`` -> C
+    # ``enforce_deadline``; the pure twin mirrors it). A complete head that
+    # promises a body which never fully arrives leaves the request deadline armed
+    # and the response unanswered -> the owned path emits a real 408, identically
+    # on both twins.
+    app = wreath.Wreath()
+
+    @app.post("/upload")
+    async def upload(request: wreath.Request) -> wreath.Response:
+        await request.body()  # awaits the CL-promised body that never completes
+        return wreath.response.TextResponse("ok")
+
+    head = b"POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nhalf"
+    rec = record_transport_segments([head], close=None)
+    sched = FaultSchedule((FaultDescriptor(int(FaultKind.TIMEOUT), 0),))
+    a = await replay_transport(app, rec, protocol_cls=protocol_cls, faults=sched)
+    b = await replay_transport(app, rec, protocol_cls=protocol_cls, faults=sched)
+    assert b"HTTP/1.1 408" in a.response
+    assert a.matches(b)
+    assert a.terminal in _TERMINALS
+
+
+@proto
+@pytest.mark.asyncio
+async def test_timeout_fault_on_an_idle_connection_closes_deterministically(
+    protocol_cls: type,
+) -> None:
+    # With no request in flight the armed deadline is the keep-alive timer: firing
+    # it closes the idle connection with no response -- the other owned branch of
+    # the same mechanism, and still twin-deterministic.
+    partial = b"GET /ping HTTP/1.1\r\nHost: x\r\n"  # head never terminates
+    rec = record_transport_segments([partial], close=None)
+    sched = FaultSchedule((FaultDescriptor(int(FaultKind.TIMEOUT), 0),))
+    a = await replay_transport(_app(), rec, protocol_cls=protocol_cls, faults=sched)
+    b = await replay_transport(_app(), rec, protocol_cls=protocol_cls, faults=sched)
+    assert b"HTTP/1.1 200" not in a.response
+    assert a.terminal in _TERMINALS
+    assert a.matches(b)
+
+
 # --- PostgreSQL / ORM red-team -----------------------------------------------
 
 
