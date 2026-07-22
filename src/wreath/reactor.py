@@ -471,7 +471,7 @@ def metal_event_loop(
     backend = _default_backend()
     return EventLoop(selectors.EpollSelector(), backend=backend,
                      timers=timers, tasks=tasks, stats=False,
-                     adaptive_polling=False, diagnostics=diagnostics,
+                     adaptive_polling=True, diagnostics=diagnostics,
                      native_transport=transport, native_loop=native_loop,
                      direct_task_steps=direct_task_steps, worker_id=worker_id,
                      reuse_port=reuse_port)

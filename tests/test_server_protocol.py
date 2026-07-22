@@ -438,6 +438,95 @@ async def test_conflicting_content_length(protocol_cls: type) -> None:
     assert not called
 
 
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_chunked_body_limit_is_cumulative() -> None:
+    config = ServerConfig(max_body_bytes=10)
+    request = (
+        b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+        b"6\r\n123456\r\n6\r\nabcdef\r\n0\r\n\r\n"
+    )
+    transport = await drive(_NativeHttpProtocol, echo_ok, [request], config)
+    assert transport.buffer.startswith(b"HTTP/1.1 413")
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "host_fields",
+    [b"", b"Host: first\r\nHost: second\r\n"],
+)
+async def test_native_http11_requires_exactly_one_host(host_fields: bytes) -> None:
+    request = b"GET / HTTP/1.1\r\n" + host_fields + b"\r\n"
+    transport = await drive(_NativeHttpProtocol, echo_ok, [request])
+    assert transport.buffer.startswith(b"HTTP/1.1 400")
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_header_count_rejects_before_dispatch() -> None:
+    called = False
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        nonlocal called
+        called = True
+
+    request = b"GET / HTTP/1.1\r\nHost: x\r\nX-Extra: y\r\n\r\n"
+    transport = await drive(
+        _NativeHttpProtocol, app, [request], ServerConfig(max_header_count=1)
+    )
+    assert transport.buffer.startswith(b"HTTP/1.1 431")
+    assert called is False
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_expect_continue_is_answered() -> None:
+    request = (
+        b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
+        b"Expect: 100-continue\r\n\r\nhello"
+    )
+    transport = await drive(_NativeHttpProtocol, echo_ok, [request])
+    assert transport.buffer.startswith(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200")
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_rejects_malformed_or_forbidden_trailers() -> None:
+    request = (
+        b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+        b"1\r\nx\r\n0\r\nContent-Length: 9\r\n\r\n"
+    )
+    transport = await drive(_NativeHttpProtocol, echo_ok, [request])
+    assert transport.buffer.startswith(b"HTTP/1.1 400")
+
+
+@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@pytest.mark.asyncio
+async def test_native_pauses_a_pipeline_behind_a_running_request() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow(scope: dict, receive: Any, send: Any) -> None:
+        started.set()
+        await release.wait()
+        await send({"type": "http.response.start", "status": 200})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    loop = asyncio.get_running_loop()
+    transport = FakeTransport()
+    protocol = _NativeHttpProtocol(
+        slow, ServerConfig(max_header_bytes=1024), loop, set()
+    )
+    protocol.connection_made(transport)
+    feed(protocol, GET)
+    await started.wait()
+    feed(protocol, b"X" * 1024)
+    assert transport.reading_paused is True
+    release.set()
+    await _settle()
+
+
 @impl
 @pytest.mark.asyncio
 async def test_transfer_encoding_and_content_length(protocol_cls: type) -> None:

@@ -151,6 +151,7 @@ typedef struct {
     /* Request body decoder. */
     Py_ssize_t remaining;        /* fixed-length bytes still expected */
     Py_ssize_t chunk_remaining;  /* bytes left in the current chunk */
+    Py_ssize_t body_received;    /* cumulative bytes in this HTTP request */
     Py_ssize_t queued_bytes;     /* undelivered buffered body bytes */
     int reading_paused;
     int request_more_body;

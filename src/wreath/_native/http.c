@@ -103,7 +103,7 @@ int
 wreath_http_parse_request_parts(
     const uint8_t *data, Py_ssize_t len, Py_ssize_t head_end_off,
     PyObject **method_out, PyObject **target_out, int *minor_out,
-    PyObject **headers_out, Py_ssize_t *consumed_out
+    PyObject **headers_out, Py_ssize_t *consumed_out, Py_ssize_t max_headers
 )
 {
     /* The caller has already located the CRLFCRLF that ends the head (the
@@ -121,6 +121,7 @@ wreath_http_parse_request_parts(
     PyObject *method = NULL;
     PyObject *target = NULL;
     int minor_version;
+    Py_ssize_t header_count = 0;
 
     *method_out = NULL;
     *target_out = NULL;
@@ -157,6 +158,10 @@ wreath_http_parse_request_parts(
     headers = new_request_header_sink();
     if (headers == NULL) goto error;
     while (p < end) {
+        if (++header_count > max_headers) {
+            Py_DECREF(headers);
+            return -2;
+        }
         const uint8_t *name_start;
         const uint8_t *value_start;
         const uint8_t *value_end;
@@ -264,7 +269,7 @@ wreath_http_parse_request(PyObject *Py_UNUSED(self), PyObject *arg)
     status = wreath_http_parse_request_parts(
         view.buf, view.len,
         terminator != NULL ? terminator - (const uint8_t *)view.buf : -1,
-        &method, &target, &minor_version, &headers, &consumed
+        &method, &target, &minor_version, &headers, &consumed, PY_SSIZE_T_MAX
     );
     PyBuffer_Release(&view);
     if (status < 0) return NULL;

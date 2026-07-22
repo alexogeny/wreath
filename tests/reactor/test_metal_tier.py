@@ -115,8 +115,8 @@ del app
     assert by_mode["wreath"]["native_rings"] == 0
     assert by_mode["wreath-native"]["native_rings"] == 0
     assert by_mode["wreath-metal"]["native_rings"] == 1
-    assert 256 * 1024 <= by_mode["wreath-metal"]["native_mapped"] <= 320 * 1024
-    assert 190 * 1024 <= by_mode["wreath-metal"]["native_heap"] <= 195 * 1024
+    assert 16 * 1024 * 1024 <= by_mode["wreath-metal"]["native_mapped"] <= 17 * 1024 * 1024
+    assert 220 * 1024 <= by_mode["wreath-metal"]["native_heap"] <= 230 * 1024
 
 
 def test_wreath_execution_tier_request_work_comparison() -> None:
@@ -358,7 +358,8 @@ loop.close()
     assert metal["ring_receive_completions"] >= 1
     assert metal["ring_direct_receive_completions"] == 0
     assert metal["ring_direct_receive_bytes"] == 0
-    assert metal["ring_send_completions"] == 0
+    # each response leaves as one async SEND riding the loop's next enter
+    assert metal["ring_send_completions"] >= 1
     keepalive = by_mode["wreath-metal", "keepalive_increment"]
     assert keepalive["python_calls"] <= 4
     assert keepalive["asyncio_calls"] <= 2
@@ -368,7 +369,7 @@ loop.close()
     assert keepalive["ring_receive_completions"] == 1
     assert keepalive["ring_direct_receive_completions"] == 0
     assert keepalive["ring_direct_receive_bytes"] == 0
-    assert keepalive["ring_send_completions"] == 0
+    assert keepalive["ring_send_completions"] == 1
 
 
 def test_metal_defaults_to_poller_driven_wheel_without_bridge_heartbeat():
@@ -467,8 +468,8 @@ def test_metal_native_memory_and_kernel_object_baseline() -> None:
     try:
         poller = loop._poller
         assert poller.native_ring_count == 1
-        assert 256 * 1024 <= poller.native_mapped_bytes <= 320 * 1024
-        assert 190 * 1024 <= poller.native_heap_bytes <= 195 * 1024
+        assert 16 * 1024 * 1024 <= poller.native_mapped_bytes <= 17 * 1024 * 1024
+        assert 220 * 1024 <= poller.native_heap_bytes <= 230 * 1024
         with pytest.raises(ValueError, match="closed epoll"):
             loop._selector.fileno()
         assert poller.submission_batches == 0
@@ -504,7 +505,9 @@ def test_metal_cross_thread_wake_is_an_io_uring_completion() -> None:
         thread.join()
         assert loop._poller.wake_requests >= 1
         assert loop._poller.wake_completions >= 1
-        assert loop._poller.wake_submissions == loop._poller.wake_completions + 1
+        # multishot wake poll: the initial arm covers every wake unless the
+        # kernel downgraded it to one-shot rearms
+        assert 1 <= loop._poller.wake_submissions <= loop._poller.wake_completions + 1
     finally:
         loop.close()
 
@@ -518,9 +521,12 @@ def test_metal_signal_wake_is_an_io_uring_completion() -> None:
         loop.run_until_complete(asyncio.sleep(0.01))
         assert seen == [signal.SIGUSR1]
         assert loop._poller.signal_completions >= 1
+        # multishot signal poll: one arm covers every delivery unless the
+        # kernel downgraded it to one-shot rearms
         assert (
-            loop._poller.signal_submissions
-            == loop._poller.signal_completions + 1
+            1
+            <= loop._poller.signal_submissions
+            <= loop._poller.signal_completions + 1
         )
     finally:
         loop.remove_signal_handler(signal.SIGUSR1)
@@ -662,7 +668,8 @@ def test_native_transport_fuses_http1_ingress_without_python_buffer_callbacks():
         assert b"metal-http" in response
         assert callbacks == []
         assert 1 <= loop._poller.receive_completions - receives_before <= 2
-        assert loop._poller.send_completions == 0
+        # the fused response leaves as one async SEND completion
+        assert loop._poller.send_completions == 1
         assert transport._direct_protocol_writes >= 1
         assert transport._zero_copy_cork_writes >= 1
         assert transport._metal_operation_exhaustions == 0
@@ -795,11 +802,11 @@ def test_metal_io_uring_owns_listener_accept_and_drains_cqes():
             assert loop._poller.accept_completions >= 4
             assert loop._poller.wake_completions >= 1
             if loop._poller.receive_enabled:
-                assert loop._poller.provided_buffer_count == 16
+                assert loop._poller.provided_buffer_count == 1024
                 assert loop._poller.receive_completions >= 4
                 assert loop._poller.provided_buffer_recycles >= 4
-                assert loop._poller.buffer_descriptor_occupancy == 16
-                assert loop._poller.buffer_descriptor_high_water == 16
+                assert loop._poller.buffer_descriptor_occupancy == 1024
+                assert loop._poller.buffer_descriptor_high_water == 1024
                 assert loop._poller.buffer_descriptor_exhaustions == 0
                 assert loop._poller.provided_buffer_exhaustions == 0
                 assert loop._poller.buffer_descriptor_stale == 0
@@ -852,8 +859,10 @@ def test_metal_direct_send_emits_large_immutable_body() -> None:
             writer.close()
             await writer.wait_closed()
             assert response.endswith(body)
-            assert loop._poller.send_submissions == 0
-            assert loop._poller.send_completions == 0
+            # the head leaves through the async SEND path; the large
+            # immutable body still exits via the vectored sendmsg fast path
+            assert loop._poller.send_submissions >= 1
+            assert loop._poller.send_completions >= 1
         finally:
             await server.close()
 
@@ -895,9 +904,10 @@ def test_io_uring_http1_completion_trace_accounts_for_request_ingress(
             for kind in (1, 2)
         }
         assert b"200 OK" in response
-        assert kinds == [1]
+        # one ingress RECV row, then the response's async SEND row
+        assert kinds == [1, 2]
         assert totals[1] == len(request)
-        assert totals[2] == 0
+        assert totals[2] == len(response)
     finally:
         client.close()
         loop.close()
@@ -941,6 +951,105 @@ def test_adaptive_polling_component_can_be_disabled_for_differential_coverage():
         assert loop._poller.blocking_enters >= 1
     finally:
         loop.close()
+
+
+def test_adaptive_polling_records_arrival_samples() -> None:
+    """A blocked wait woken by a completion feeds the spin predictor's EWMA."""
+    loop = _metal_loop()
+    try:
+        assert loop._poller.adaptive_polling is True
+
+        async def wake_while_blocked():
+            future = loop.create_future()
+
+            def resolve():
+                loop.call_soon_threadsafe(future.set_result, "awake")
+
+            timer = threading.Timer(0.02, resolve)
+            timer.start()
+            try:
+                return await asyncio.wait_for(future, 1.0)
+            finally:
+                timer.join()
+
+        assert loop.run_until_complete(wake_while_blocked()) == "awake"
+        assert loop._poller.arrival_samples >= 1
+        assert loop._poller.arrival_ewma_ns > 0.0
+    finally:
+        loop.close()
+
+
+def test_metal_async_send_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    import wreath.reactor as reactor
+
+    Http1Protocol = importlib.import_module("wreath._native._server").Http1Protocol
+    ServerConfig = importlib.import_module("wreath.server").ServerConfig
+
+    monkeypatch.setenv("WREATH_METAL_ASYNC_SEND", "0")
+    loop = _metal_loop()
+    client, server = socket.socketpair()
+    client.setblocking(False)
+    try:
+        assert loop._poller.send_enabled is False
+        protocol = Http1Protocol(_echo, ServerConfig(lifespan="off"), loop, set())
+        loop._make_socket_transport(server, protocol)
+        loop.run_until_complete(asyncio.sleep(0))
+        client.sendall(b"GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
+        loop.run_until_complete(asyncio.sleep(0.01))
+        response = client.recv(4096)
+        assert b"200 OK" in response
+        # every byte left through the synchronous fallback
+        assert loop._poller.send_submissions == 0
+        assert loop._poller.send_completions == 0
+    finally:
+        client.close()
+        loop.close()
+
+    monkeypatch.setenv("WREATH_METAL_ASYNC_SEND", "2")
+    with pytest.raises(ValueError, match="WREATH_METAL_ASYNC_SEND"):
+        reactor.metal_event_loop()
+
+
+def test_native_accept_resolves_lazy_peer_addresses() -> None:
+    """sockname/peername defer out of the accept path but still resolve."""
+    from wreath.server import Server, ServerConfig
+
+    captured = {}
+
+    async def app(scope, receive, send):
+        captured["client"] = scope.get("client")
+        captured["server"] = scope.get("server")
+        await receive()
+        await send({"type": "http.response.start", "status": 200})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    loop = _metal_loop()
+
+    async def exercise():
+        server = Server(
+            app, ServerConfig(host="127.0.0.1", port=0, lifespan="off"), loop
+        )
+        await server._start(ssl=None)
+        try:
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1", server.sockets[0].getsockname()[1]
+            )
+            writer.write(b"GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+            await writer.drain()
+            await reader.read()
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.close()
+
+    try:
+        loop.run_until_complete(exercise())
+    finally:
+        loop.close()
+    assert captured["client"] is not None
+    assert captured["client"][0] == "127.0.0.1"
+    assert captured["server"] is not None
+    assert captured["server"][0] == "127.0.0.1"
 
 
 def test_metal_completion_trace_records_timer_wait_timeout(
@@ -1169,10 +1278,11 @@ def test_metal_http1_io_uring_arm_is_explicit_and_operational_when_available():
         response = client.recv(4096)
         assert b"200 OK" in response
         assert b"metal-http" in response
-        assert transport._metal_submissions == 0
-        assert transport._metal_completions == 0
+        # one async SEND operation carried the response
+        assert transport._metal_submissions == 1
+        assert transport._metal_completions == 1
         if loop._poller.receive_enabled:
-            assert loop._poller.provided_buffer_count == 16
+            assert loop._poller.provided_buffer_count == 1024
             assert loop._poller.receive_completions >= 1
             assert loop._poller.direct_receive_completions == 0
             assert loop._poller.direct_receive_bytes == 0

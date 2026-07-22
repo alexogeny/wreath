@@ -1627,6 +1627,11 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
             self->pending_priorities, priority_key);
         if (saved != NULL) {
             unsigned long packed = PyLong_AsUnsignedLong(saved);
+            if (packed == (unsigned long)-1 && PyErr_Occurred()) {
+                Py_DECREF(priority_key);
+                Py_DECREF(st);
+                return -1;
+            }
             st->urgency = (uint8_t)(packed & 0xffU);
             st->incremental = (uint8_t)((packed >> 8) & 0x1U);
             if (PyDict_DelItem(self->pending_priorities, priority_key) < 0) {

@@ -8,7 +8,10 @@
  * bounded, and generation-validated before state-machine delivery. */
 #define METAL_CONNECTION_CAPACITY_DEFAULT 4096
 #define METAL_OPERATION_CAPACITY_DEFAULT 4096
-#define METAL_RECV_BUFFER_COUNT_DEFAULT 16
+/* One provided buffer per possible undrained CQE: the CQ ring holds 1024
+ * entries, so 1024 buffers make pool exhaustion coincide with CQ saturation
+ * instead of arriving three orders of magnitude earlier. 16 MiB per worker. */
+#define METAL_RECV_BUFFER_COUNT_DEFAULT 1024
 #define METAL_CAPACITY_MIN 16
 #define METAL_CONNECTION_CAPACITY_MAX (1U << 20)
 #define METAL_OPERATION_CAPACITY_MAX (1U << 21)
@@ -52,14 +55,6 @@ enum {
     METAL_COMPLETION_EOF = 0x1,
     METAL_COMPLETION_ERROR = 0x2,
 };
-
-typedef struct {
-    uint64_t token;
-    int32_t result;
-    uint16_t kind;
-    uint16_t flags;
-    uint32_t value;
-} MetalCompletion;
 
 typedef struct {
     void *owner;
@@ -240,6 +235,24 @@ static uint64_t metal_slab_allocate(
 static MetalSlot *metal_slab_validate(MetalSlab *, uint64_t, void *);
 static void metal_slab_release(MetalSlab *, uint64_t, void *);
 
+static uint64_t
+metal_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static inline void
+metal_cpu_relax(void)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__ __volatile__("pause");
+#elif defined(__aarch64__)
+    __asm__ __volatile__("isb" ::: "memory");
+#endif
+}
+
 static void
 metal_trace_add(MetalRuntime *runtime, uint8_t backend, uint16_t kind,
                 uint64_t token, int32_t result, uint8_t flags)
@@ -306,7 +319,22 @@ metal_uring_init(MetalUring *ring, unsigned entries)
 #ifdef IORING_SETUP_DEFER_TASKRUN
     params.flags |= IORING_SETUP_DEFER_TASKRUN;
 #endif
+#ifdef IORING_SETUP_NO_SQARRAY
+    /* 6.6+: the kernel reads SQEs at their ring index directly, removing the
+     * redundant sq_array indirection store from every submission. */
+    params.flags |= IORING_SETUP_NO_SQARRAY;
+#endif
     int fd = (int)syscall(SYS_io_uring_setup, entries, &params);
+#ifdef IORING_SETUP_NO_SQARRAY
+    if (fd < 0 && errno == EINVAL &&
+        (params.flags & IORING_SETUP_NO_SQARRAY) != 0) {
+        /* Pre-6.6 kernel: retry with the other modern flags intact. */
+        unsigned retained = params.flags & ~IORING_SETUP_NO_SQARRAY;
+        memset(&params, 0, sizeof(params));
+        params.flags = retained;
+        fd = (int)syscall(SYS_io_uring_setup, entries, &params);
+    }
+#endif
     if (fd < 0 && errno == EINVAL && params.flags != 0) {
         memset(&params, 0, sizeof(params));
         fd = (int)syscall(SYS_io_uring_setup, entries, &params);
@@ -334,6 +362,12 @@ metal_uring_init(MetalUring *ring, unsigned entries)
                          params.sq_entries * sizeof(unsigned);
     ring->cq_ring_size = params.cq_off.cqes +
                          params.cq_entries * sizeof(struct io_uring_cqe);
+#ifdef IORING_SETUP_NO_SQARRAY
+    if (params.flags & IORING_SETUP_NO_SQARRAY) {
+        /* No index array trails the rings; the shared mapping ends at the CQEs. */
+        ring->sq_ring_size = ring->cq_ring_size;
+    }
+#endif
     if (params.features & IORING_FEAT_SINGLE_MMAP) {
         if (ring->cq_ring_size > ring->sq_ring_size) {
             ring->sq_ring_size = ring->cq_ring_size;
@@ -402,7 +436,13 @@ metal_uring_get_sqe(MetalUring *ring, unsigned *index_out)
     unsigned index = tail & ring->sq_mask_value;
     struct io_uring_sqe *sqe = &ring->sqes[index];
     memset(sqe, 0, sizeof(*sqe));
+#ifdef IORING_SETUP_NO_SQARRAY
+    if (!(ring->setup_flags & IORING_SETUP_NO_SQARRAY)) {
+        ring->sq_array[index] = index;
+    }
+#else
     ring->sq_array[index] = index;
+#endif
     ring->cached_sq_tail = tail + 1;
     ring->pending_submissions++;
     *index_out = index;
@@ -492,6 +532,26 @@ metal_uring_queue_receive(MetalUring *ring, int fd, uint64_t token,
     (void)multishot;
 #endif
     sqe->user_data = token | METAL_TOKEN_RECEIVE;
+    return 0;
+}
+
+static int
+metal_uring_queue_send(MetalUring *ring, int fd, const void *data,
+                       size_t size, uint64_t token)
+{
+    unsigned index;
+    struct io_uring_sqe *sqe = metal_uring_get_sqe(ring, &index);
+    if (sqe == NULL) {
+        return -1;
+    }
+    sqe->opcode = IORING_OP_SEND;
+    sqe->fd = fd;
+    sqe->addr = (uint64_t)(uintptr_t)data;
+    sqe->len = (uint32_t)size;
+    /* MSG_WAITALL: io_uring retries short sends internally, so one CQE covers
+     * the whole payload unless the operation errors or is cancelled mid-way. */
+    sqe->msg_flags = MSG_NOSIGNAL | MSG_WAITALL;
+    sqe->user_data = token | METAL_TOKEN_SEND;
     return 0;
 }
 

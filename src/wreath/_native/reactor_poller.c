@@ -24,7 +24,6 @@ static PyObject *g_s_cancelled;  /* "_cancelled" */
 static PyObject *g_s_scheduled;  /* "_scheduled" */
 static PyObject *g_s_popleft;    /* "popleft"    */
 static PyObject *g_s_append;     /* "append"     */
-static PyObject *g_s_setblocking; /* "setblocking" */
 static PyObject *g_fileno_kwnames; /* vectorcall keyword tuple */
 static PyObject *g_heappop;      /* heapq.heappop */
 static PyTypeObject *g_handle_type;
@@ -54,6 +53,8 @@ typedef struct {
     PyObject_HEAD
     int wake_fd;
     int signal_fd;
+    int wake_poll_multishot;
+    int signal_poll_multishot;
     PyObject *signal_callback;
     FdEntry *fds;
     int fdcap;
@@ -128,6 +129,13 @@ metal_send_operations_clear(MetalRuntime *runtime)
         if (kind == METAL_OP_RECV) {
             transport->uring_receive_active = 0;
             transport->uring_receive_token = 0;
+        }
+        if (kind == METAL_OP_SEND) {
+            /* The ring is shutting down: no CQE will arrive to finish this
+             * operation, so the payload can be released here. */
+            transport->send_op_token = 0;
+            Py_CLEAR(transport->send_obj);
+            transport->send_obj_off = 0;
         }
         metal_slab_release(&runtime->operations, token, transport);
         Py_DECREF(transport);
@@ -255,51 +263,82 @@ rp_remove_uring_listener(PyObject *op, PyObject *arg)
     Py_RETURN_TRUE;
 }
 
-static PyObject *
-rp_start_uring_receive(PyObject *op, PyObject *transport_obj)
+/* C fast paths for the transport: poller_obj is type-checked when the metal
+ * runtime attaches, so pause/resume/close need no Python method dispatch.
+ * Return 1 started/stopped, 0 not applicable, -1 with the exception set. */
+static int
+rp_start_uring_receive_native(SocketTransport *transport)
 {
-    ReactorPoller *p = (ReactorPoller *)op;
-    if (!PyObject_TypeCheck(transport_obj, &SocketTransportType)) {
-        PyErr_SetString(PyExc_TypeError, "expected SocketTransport");
-        return NULL;
-    }
-    SocketTransport *transport = (SocketTransport *)transport_obj;
-    if (!p->metal.receive_enabled || transport->metal != &p->metal) {
-        Py_RETURN_FALSE;
+    ReactorPoller *p = (ReactorPoller *)transport->poller_obj;
+    if (p == NULL || !p->metal.receive_enabled ||
+        transport->metal != &p->metal) {
+        return 0;
     }
     if (transport->uring_receive_active) {
-        Py_RETURN_TRUE;
+        return 1;
     }
     transport->uring_receive_active = 1;
     transport->uring_receive_multishot = 1;
     if (rp_submit_receive(p, transport) < 0) {
         transport->uring_receive_active = 0;
         PyErr_SetFromErrno(PyExc_OSError);
-        return NULL;
+        return -1;
     }
-    Py_RETURN_TRUE;
+    return 1;
 }
 
-static PyObject *
-rp_stop_uring_receive(PyObject *op, PyObject *transport_obj)
+static int
+rp_stop_uring_receive_native(SocketTransport *transport)
 {
-    ReactorPoller *p = (ReactorPoller *)op;
-    if (!PyObject_TypeCheck(transport_obj, &SocketTransportType)) {
-        PyErr_SetString(PyExc_TypeError, "expected SocketTransport");
-        return NULL;
-    }
-    SocketTransport *transport = (SocketTransport *)transport_obj;
-    if (!transport->uring_receive_active || transport->metal != &p->metal) {
-        Py_RETURN_FALSE;
+    ReactorPoller *p = (ReactorPoller *)transport->poller_obj;
+    if (p == NULL || !transport->uring_receive_active ||
+        transport->metal != &p->metal) {
+        return 0;
     }
     uint64_t receive_token = transport->uring_receive_token != 0
         ? transport->uring_receive_token : transport->connection_token;
     if (metal_uring_queue_cancel(&p->metal.uring, receive_token) < 0) {
         PyErr_SetFromErrno(PyExc_OSError);
-        return NULL;
+        return -1;
     }
     transport->uring_receive_active = 0;
-    Py_RETURN_TRUE;
+    return 1;
+}
+
+static PyObject *
+rp_start_uring_receive(PyObject *op, PyObject *transport_obj)
+{
+    if (!PyObject_TypeCheck(transport_obj, &SocketTransportType)) {
+        PyErr_SetString(PyExc_TypeError, "expected SocketTransport");
+        return NULL;
+    }
+    SocketTransport *transport = (SocketTransport *)transport_obj;
+    if (transport->poller_obj != op) {
+        Py_RETURN_FALSE;
+    }
+    int started = rp_start_uring_receive_native(transport);
+    if (started < 0) {
+        return NULL;
+    }
+    return PyBool_FromLong(started);
+}
+
+static PyObject *
+rp_stop_uring_receive(PyObject *op, PyObject *transport_obj)
+{
+    if (!PyObject_TypeCheck(transport_obj, &SocketTransportType)) {
+        PyErr_SetString(PyExc_TypeError, "expected SocketTransport");
+        return NULL;
+    }
+    SocketTransport *transport = (SocketTransport *)transport_obj;
+    if (transport->poller_obj != op) {
+        Py_RETURN_FALSE;
+    }
+    int stopped = rp_stop_uring_receive_native(transport);
+    if (stopped < 0) {
+        return NULL;
+    }
+    return PyBool_FromLong(stopped);
 }
 
 static int
@@ -442,6 +481,46 @@ rp_drain_receive_completions(ReactorPoller *p, unsigned budget,
     return 0;
 }
 
+/* Consume the consecutive run of async SEND CQEs at the CQ head. Each
+ * completion releases its operation slot, settles the transport's in-flight
+ * payload, and re-pumps that transport's egress queue. */
+static int
+rp_drain_send_completions(ReactorPoller *p, unsigned budget,
+                          unsigned *drained_out)
+{
+    MetalUring *ring = &p->metal.uring;
+    *drained_out = 0;
+    while (*drained_out < budget) {
+        unsigned head = ring->cached_cq_head;
+        struct io_uring_cqe cqe = ring->cqes[head & ring->cq_mask_value];
+        if ((cqe.user_data & ~METAL_TOKEN_PAYLOAD_MASK) != METAL_TOKEN_SEND) {
+            break;
+        }
+        ring->cached_cq_head = head + 1;
+        (*drained_out)++;
+        p->metal.send_completions++;
+        uint64_t token = cqe.user_data & METAL_TOKEN_PAYLOAD_MASK;
+        uint8_t trace_flags = cqe.res < 0 ? METAL_COMPLETION_ERROR : 0;
+        metal_trace_add(&p->metal, METAL_IO_URING, METAL_OP_SEND,
+                        token, cqe.res, trace_flags);
+        uint32_t index = (uint32_t)token;
+        uint32_t generation = (uint32_t)(token >> 32);
+        MetalSlot *slot = index < p->metal.operations.capacity
+            ? &p->metal.operations.slots[index] : NULL;
+        if (slot == NULL || !metal_slot_live(slot) ||
+            metal_slot_generation(slot) != generation ||
+            metal_slot_kind(slot) != METAL_OP_SEND) {
+            p->metal.send_stale++;
+            continue;
+        }
+        SocketTransport *transport = (SocketTransport *)slot->owner;
+        metal_slab_release(&p->metal.operations, token, transport);
+        st_on_send_complete(transport, cqe.res);
+        Py_DECREF(transport);  /* the operation's reference */
+    }
+    return 0;
+}
+
 static int
 rp_activate_accepted_connection(ReactorPoller *p, FdEntry *entry, int fd)
 {
@@ -462,19 +541,16 @@ rp_activate_accepted_connection(ReactorPoller *p, FdEntry *entry, int fd)
     if (sock == NULL) {
         goto error;
     }
-    PyObject *blocking = PyObject_CallMethodOneArg(
-        sock, g_s_setblocking, Py_False);
-    if (blocking == NULL) {
-        goto error;
-    }
-    Py_DECREF(blocking);
+    /* No setblocking(False) round trip: the fd was accepted with
+     * SOCK_NONBLOCK and socket(fileno=...) adopts the fd's blocking mode
+     * (timeout 0) on CPython 3.7+. */
     protocol = PyObject_CallNoArgs(protocol_factory);
     if (protocol == NULL) {
         goto error;
     }
     transport = PyObject_CallFunctionObjArgs(
         (PyObject *)&SocketTransportType, p->loop, sock, protocol,
-        Py_None, Py_None, server, Py_True, NULL);
+        Py_None, Py_None, server, Py_True, fd_object, NULL);
     if (transport == NULL) {
         goto error;
     }
@@ -498,15 +574,35 @@ error:
 }
 
 static int
-rp_drain_accept_completions(ReactorPoller *p, unsigned budget)
+rp_drain_accept_completions(ReactorPoller *p, unsigned budget,
+                            unsigned *drained_out)
 {
     MetalUring *ring = &p->metal.uring;
-    unsigned drained = 0;
-    while (drained < budget) {
-        unsigned head = ring->cached_cq_head++;
+    *drained_out = 0;
+    while (*drained_out < budget) {
+        unsigned head = ring->cached_cq_head;
         struct io_uring_cqe cqe = ring->cqes[head & ring->cq_mask_value];
-        drained++;
+        if (cqe.user_data != METAL_WAKE_TOKEN &&
+            cqe.user_data != METAL_SIGNAL_TOKEN &&
+            (cqe.user_data & ~METAL_TOKEN_PAYLOAD_MASK) != METAL_TOKEN_ACCEPT) {
+            break;  /* another class: the dispatcher re-routes */
+        }
+        ring->cached_cq_head = head + 1;
+        (*drained_out)++;
         if (cqe.user_data == METAL_WAKE_TOKEN) {
+            /* Multishot keeps the wake poll armed across wakes: no rearm SQE
+             * per cross-thread wake. Downgrade once if the kernel rejects it. */
+            if (cqe.res == -EINVAL && p->wake_poll_multishot) {
+                p->wake_poll_multishot = 0;
+                p->metal.poll_multishot_fallbacks++;
+                if (metal_uring_queue_poll(
+                        ring, p->wake_fd, POLLIN, METAL_WAKE_TOKEN, 0) < 0) {
+                    PyErr_SetFromErrno(PyExc_OSError);
+                    return -1;
+                }
+                p->metal.wake_submissions++;
+                continue;
+            }
             uint64_t value;
             while (read(p->wake_fd, &value, sizeof(value)) < 0 &&
                    errno == EINTR) {
@@ -515,15 +611,30 @@ rp_drain_accept_completions(ReactorPoller *p, unsigned budget)
             __atomic_store_n(
                 &p->metal.wake_pending, 0, __ATOMIC_RELEASE);
             p->metal.wake_completions++;
-            if (metal_uring_queue_poll(
-                    ring, p->wake_fd, POLLIN, METAL_WAKE_TOKEN, 0) < 0) {
-                PyErr_SetFromErrno(PyExc_OSError);
-                return -1;
+            if (!(cqe.flags & IORING_CQE_F_MORE)) {
+                if (metal_uring_queue_poll(
+                        ring, p->wake_fd, POLLIN, METAL_WAKE_TOKEN,
+                        p->wake_poll_multishot) < 0) {
+                    PyErr_SetFromErrno(PyExc_OSError);
+                    return -1;
+                }
+                p->metal.wake_submissions++;
             }
-            p->metal.wake_submissions++;
             continue;
         }
         if (cqe.user_data == METAL_SIGNAL_TOKEN) {
+            if (cqe.res == -EINVAL && p->signal_poll_multishot) {
+                p->signal_poll_multishot = 0;
+                p->metal.poll_multishot_fallbacks++;
+                if (metal_uring_queue_poll(
+                        ring, p->signal_fd, POLLIN, METAL_SIGNAL_TOKEN,
+                        0) < 0) {
+                    PyErr_SetFromErrno(PyExc_OSError);
+                    return -1;
+                }
+                p->metal.signal_submissions++;
+                continue;
+            }
             p->metal.signal_completions++;
             if (p->signal_callback == NULL) {
                 PyErr_SetString(PyExc_RuntimeError,
@@ -535,18 +646,16 @@ rp_drain_accept_completions(ReactorPoller *p, unsigned budget)
                 return -1;
             }
             Py_DECREF(result);
-            if (metal_uring_queue_poll(
-                    ring, p->signal_fd, POLLIN, METAL_SIGNAL_TOKEN, 0) < 0) {
-                PyErr_SetFromErrno(PyExc_OSError);
-                return -1;
+            if (!(cqe.flags & IORING_CQE_F_MORE)) {
+                if (metal_uring_queue_poll(
+                        ring, p->signal_fd, POLLIN, METAL_SIGNAL_TOKEN,
+                        p->signal_poll_multishot) < 0) {
+                    PyErr_SetFromErrno(PyExc_OSError);
+                    return -1;
+                }
+                p->metal.signal_submissions++;
             }
-            p->metal.signal_submissions++;
             continue;
-        }
-        if ((cqe.user_data & ~METAL_TOKEN_PAYLOAD_MASK) != METAL_TOKEN_ACCEPT) {
-            PyErr_SetString(PyExc_RuntimeError,
-                            "accept CQ drain observed another token class");
-            return -1;
         }
         p->metal.accept_completions++;
         uint8_t trace_flags = cqe.res < 0 ? METAL_COMPLETION_ERROR : 0;
@@ -608,19 +717,21 @@ rp_drain_accept_completions(ReactorPoller *p, unsigned budget)
 }
 
 static int
-rp_drain_poll_completions(ReactorPoller *p, unsigned budget)
+rp_drain_poll_completions(ReactorPoller *p, unsigned budget,
+                          unsigned *drained_out)
 {
     MetalUring *ring = &p->metal.uring;
-    unsigned drained = 0;
-    while (drained < budget) {
-        unsigned head = ring->cached_cq_head++;
+    *drained_out = 0;
+    while (*drained_out < budget) {
+        unsigned head = ring->cached_cq_head;
         struct io_uring_cqe cqe = ring->cqes[head & ring->cq_mask_value];
-        drained++;
-        if ((cqe.user_data & METAL_POLL_TOKEN_FLAG) == 0) {
-            PyErr_SetString(PyExc_RuntimeError,
-                            "poll CQ drain observed another control token");
-            return -1;
+        if ((cqe.user_data & METAL_POLL_TOKEN_FLAG) == 0 ||
+            (cqe.user_data & ~METAL_TOKEN_PAYLOAD_MASK) !=
+                METAL_TOKEN_CONTROL) {
+            break;  /* another class: the dispatcher re-routes */
         }
+        ring->cached_cq_head = head + 1;
+        (*drained_out)++;
         p->metal.poll_completions++;
         int fd = (int)(uint32_t)cqe.user_data;
         uint32_t generation =
@@ -730,14 +841,22 @@ rp_drain_completions(ReactorPoller *p, unsigned budget)
             status = rp_drain_receive_completions(
                 p, available - drained, &batch);
             drained += batch;
+        } else if (tag == METAL_TOKEN_SEND) {
+            unsigned batch = 0;
+            status = rp_drain_send_completions(
+                p, available - drained, &batch);
+            drained += batch;
         } else if ((token & METAL_POLL_TOKEN_FLAG) != 0 &&
                    tag == METAL_TOKEN_CONTROL) {
-            status = rp_drain_poll_completions(p, 1);
-            drained++;
+            unsigned batch = 0;
+            status = rp_drain_poll_completions(p, available - drained, &batch);
+            drained += batch;
         } else if (tag == METAL_TOKEN_ACCEPT || token == METAL_WAKE_TOKEN ||
                    token == METAL_SIGNAL_TOKEN) {
-            status = rp_drain_accept_completions(p, 1);
-            drained++;
+            unsigned batch = 0;
+            status = rp_drain_accept_completions(
+                p, available - drained, &batch);
+            drained += batch;
         } else {
             ring->cached_cq_head++;
             PyErr_SetString(PyExc_RuntimeError,
@@ -1126,6 +1245,113 @@ rp_has_completion(ReactorPoller *p)
            __atomic_load_n(ring->cq_head, __ATOMIC_RELAXED);
 }
 
+/* --- adaptive spin-then-block ------------------------------------------- */
+/* An idle probe predicts the next completion's arrival from an EWMA of past
+ * empty-CQ-to-arrival gaps. When arrivals are predicted imminent, a bounded
+ * busy-poll skips the blocking io_uring_enter's sleep/wake round trip -- the
+ * dominant fixed cost per request on a saturated keep-alive loop. */
+#define METAL_SPIN_MIN_SAMPLES 8
+#define METAL_SPIN_PREDICT_NS 100000.0   /* spin only under this EWMA */
+#define METAL_SPIN_BUDGET_MIN_NS 2000
+#define METAL_SPIN_BUDGET_MAX_NS 50000
+
+static void
+rp_record_arrival(MetalRuntime *metal, uint64_t gap_ns)
+{
+    double gap = (double)gap_ns;
+    if (metal->arrival_samples == 0) {
+        metal->arrival_ewma_ns = gap;
+        metal->arrival_deviation_ns = 0.0;
+    } else {
+        double err = gap - metal->arrival_ewma_ns;
+        /* Fast attack toward shorter gaps (load onset), slow release toward
+         * longer ones (going idle): mispredicting idle costs one bounded
+         * spin, mispredicting load costs latency on every request. */
+        metal->arrival_ewma_ns += err * (err < 0.0 ? 0.25 : 0.125);
+        metal->arrival_deviation_ns +=
+            (fabs(err) - metal->arrival_deviation_ns) * 0.125;
+    }
+    metal->arrival_samples++;
+}
+
+static int
+rp_spin_predicted(const MetalRuntime *metal)
+{
+    return metal->arrival_samples >= METAL_SPIN_MIN_SAMPLES &&
+           metal->arrival_ewma_ns < METAL_SPIN_PREDICT_NS;
+}
+
+/* Busy-poll for a completion within an EWMA-derived budget. The ring runs
+ * with DEFER_TASKRUN, so completions materialize only through io_uring_enter:
+ * each probe is a zero-timeout GETEVENTS enter (~submit-free syscall, no
+ * sleep, no wakeup IPI) interleaved with pause loops. Returns 1 on arrival,
+ * 0 on budget exhaustion, -1 with the exception set. */
+static int
+rp_spin_for_completions(ReactorPoller *p, uint64_t *spin_ns_out)
+{
+    MetalRuntime *metal = &p->metal;
+    MetalUring *ring = &metal->uring;
+    double predicted = metal->arrival_ewma_ns +
+                       2.0 * metal->arrival_deviation_ns;
+    uint64_t budget = (uint64_t)predicted;
+    if (budget < METAL_SPIN_BUDGET_MIN_NS) {
+        budget = METAL_SPIN_BUDGET_MIN_NS;
+    } else if (budget > METAL_SPIN_BUDGET_MAX_NS) {
+        budget = METAL_SPIN_BUDGET_MAX_NS;
+    }
+    uint64_t start = metal_now_ns();
+    uint64_t deadline = start + budget;
+    metal->spin_attempts++;
+    int hit = 0;
+    int failed_errno = 0;
+    Py_BEGIN_ALLOW_THREADS
+    for (;;) {
+        unsigned to_submit = ring->pending_submissions;
+        metal_uring_publish_submissions(ring);
+        if (ring->diagnostics) {
+            ring->enter_calls++;
+        }
+        int entered = (int)syscall(
+            SYS_io_uring_enter, ring->enter_fd, to_submit, 0,
+            IORING_ENTER_GETEVENTS | ring->enter_flags, NULL, 0);
+        if (entered >= 0 && to_submit != 0) {
+            ring->pending_submissions -=
+                (unsigned)entered <= ring->pending_submissions
+                    ? (unsigned)entered : ring->pending_submissions;
+        } else if (entered < 0 && errno != EINTR) {
+            failed_errno = errno;
+            break;
+        }
+        if (__atomic_load_n(ring->cq_tail, __ATOMIC_ACQUIRE) !=
+            __atomic_load_n(ring->cq_head, __ATOMIC_RELAXED)) {
+            hit = 1;
+            break;
+        }
+        if (metal_now_ns() >= deadline) {
+            break;
+        }
+        for (int i = 0; i < 32; i++) {
+            metal_cpu_relax();
+        }
+    }
+    Py_END_ALLOW_THREADS
+    uint64_t elapsed = metal_now_ns() - start;
+    metal->spin_nanoseconds += elapsed;
+    *spin_ns_out = elapsed;
+    if (failed_errno != 0) {
+        errno = failed_errno;
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    if (hit) {
+        metal->spin_hits++;
+        rp_record_arrival(metal, elapsed);
+    } else {
+        metal->spin_misses++;
+    }
+    return hit;
+}
+
 static PyObject *
 rp_run_once(PyObject *op, PyObject *Py_UNUSED(ignored))
 {
@@ -1188,37 +1414,58 @@ rp_run_once(PyObject *op, PyObject *Py_UNUSED(ignored))
             }
         }
         if (block_ms != 0) {
-            int wait_result;
-            unsigned pending_before = p->metal.uring.pending_submissions;
-            if (p->metal.diagnostics) {
-                p->metal.blocking_enters++;
-                p->metal.uring_waits++;
+            uint64_t spin_ns = 0;
+            int spun = 0;
+            if (p->metal.adaptive_polling && rp_spin_predicted(&p->metal)) {
+                spun = rp_spin_for_completions(p, &spin_ns);
+                if (spun < 0) {
+                    return NULL;
+                }
+                blocked = 1;  /* time advanced; re-read the clock below */
             }
-            blocked = 1;
-            Py_BEGIN_ALLOW_THREADS
-            wait_result = metal_uring_wait(&p->metal.uring, block_ms);
-            Py_END_ALLOW_THREADS
-            unsigned submitted = pending_before -
-                p->metal.uring.pending_submissions;
-            if (p->metal.diagnostics && submitted > 0) {
-                p->metal.submission_batches++;
-                p->metal.submitted_sqes += submitted;
-            }
-            if (wait_result < 0) {
-                PyErr_SetFromErrno(PyExc_OSError);
-                return NULL;
-            }
-            if (rp_has_completion(p)) {
+            if (spun == 1) {
                 if (rp_drain_completions(p, 64) < 0) {
                     return NULL;
                 }
             } else {
+                int wait_result;
+                unsigned pending_before = p->metal.uring.pending_submissions;
                 if (p->metal.diagnostics) {
-                    p->metal.uring_timeouts++;
+                    p->metal.blocking_enters++;
+                    p->metal.uring_waits++;
                 }
-                if (p->metal.trace != NULL) {
-                    metal_trace_add(&p->metal, METAL_IO_URING,
-                                    METAL_OP_TIMEOUT, 0, 0, 0);
+                blocked = 1;
+                uint64_t wait_start = metal_now_ns();
+                Py_BEGIN_ALLOW_THREADS
+                wait_result = metal_uring_wait(&p->metal.uring, block_ms);
+                Py_END_ALLOW_THREADS
+                unsigned submitted = pending_before -
+                    p->metal.uring.pending_submissions;
+                if (p->metal.diagnostics && submitted > 0) {
+                    p->metal.submission_batches++;
+                    p->metal.submitted_sqes += submitted;
+                }
+                if (wait_result < 0) {
+                    PyErr_SetFromErrno(PyExc_OSError);
+                    return NULL;
+                }
+                if (rp_has_completion(p)) {
+                    /* Sample empty-CQ-to-arrival (spin time included) so the
+                     * predictor tracks the live arrival cadence. */
+                    rp_record_arrival(
+                        &p->metal,
+                        (metal_now_ns() - wait_start) + spin_ns);
+                    if (rp_drain_completions(p, 64) < 0) {
+                        return NULL;
+                    }
+                } else {
+                    if (p->metal.diagnostics) {
+                        p->metal.uring_timeouts++;
+                    }
+                    if (p->metal.trace != NULL) {
+                        metal_trace_add(&p->metal, METAL_IO_URING,
+                                        METAL_OP_TIMEOUT, 0, 0, 0);
+                    }
                 }
             }
         } else if (rp_flush_async_submissions(p) < 0) {
@@ -1338,7 +1585,8 @@ rp_set_signal_reader(PyObject *op, PyObject *args)
         return NULL;
     }
     if (metal_uring_queue_poll(
-            &p->metal.uring, fd, POLLIN, METAL_SIGNAL_TOKEN, 0) < 0) {
+            &p->metal.uring, fd, POLLIN, METAL_SIGNAL_TOKEN,
+            p->signal_poll_multishot) < 0) {
         return PyErr_SetFromErrno(PyExc_OSError);
     }
     p->signal_fd = fd;
@@ -1499,8 +1747,12 @@ rp_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwds))
     p->metal.worker_id = worker_id;
     p->metal.adaptive_polling = adaptive_polling != 0;
     p->metal.diagnostics = diagnostics != 0;
+    p->wake_poll_multishot = 0;
+    p->signal_poll_multishot = 0;
 #ifdef IORING_POLL_ADD_MULTI
     p->metal.poll_multishot_enabled = 1;
+    p->wake_poll_multishot = 1;
+    p->signal_poll_multishot = 1;
 #endif
     p->metal.uring.fd = -1;
     if (metal_uring_init(&p->metal.uring, 512) < 0) {
@@ -1526,7 +1778,8 @@ rp_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwds))
     p->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (p->wake_fd < 0 ||
         metal_uring_queue_poll(
-            &p->metal.uring, p->wake_fd, POLLIN, METAL_WAKE_TOKEN, 0) < 0) {
+            &p->metal.uring, p->wake_fd, POLLIN, METAL_WAKE_TOKEN,
+            p->wake_poll_multishot) < 0) {
         PyErr_SetFromErrno(PyExc_OSError);
         return -1;
     }
@@ -1540,10 +1793,20 @@ rp_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwds))
         return -1;
     }
     p->metal.receive_enabled = 1;
-    /* Sends stay synchronous and nonblocking: a response is already hot in
-     * the owner thread, so an io_uring submission adds an avoidable enter
-     * and completion round trip before the peer can issue its next request. */
-    p->metal.send_enabled = 0;
+    /* Async sends ride the loop's next io_uring_enter -- during a CQ drain
+     * batch of N responses that is zero send syscalls instead of N, and the
+     * submission side of the enter executes the send before any sleep, so
+     * response latency does not move. WREATH_METAL_ASYNC_SEND=0 restores the
+     * synchronous path for differential measurement. */
+    const char *async_send_mode = getenv("WREATH_METAL_ASYNC_SEND");
+    if (async_send_mode != NULL && strcmp(async_send_mode, "0") != 0 &&
+        strcmp(async_send_mode, "1") != 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "WREATH_METAL_ASYNC_SEND must be '0' or '1'");
+        return -1;
+    }
+    p->metal.send_enabled =
+        async_send_mode == NULL || strcmp(async_send_mode, "0") != 0;
     p->fds = NULL;
     p->fdcap = 0;
     p->loop = Py_NewRef(loop);

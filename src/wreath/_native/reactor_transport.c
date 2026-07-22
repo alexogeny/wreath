@@ -35,6 +35,16 @@ typedef struct {
     uint64_t uring_receive_token;
     int uring_receive_active;
     int uring_receive_multishot;
+    /* Ordered egress of retained immutable payloads. `send_obj` is the payload
+     * currently leaving (async SEND in flight when send_op_token != 0, or a
+     * synchronous partial), `send_queue` holds the payloads behind it, and the
+     * write buffer drains only after every retained payload has left. */
+    PyObject *send_queue;        /* PyList FIFO, lazily created */
+    Py_ssize_t send_queue_head;
+    PyObject *send_obj;          /* exact-bytes payload being sent */
+    Py_ssize_t send_obj_off;     /* bytes of send_obj already accepted */
+    Py_ssize_t send_queued_bytes; /* unsent bytes across send_obj + queue */
+    uint64_t send_op_token;      /* live async SEND operation, 0 when idle */
     /* Cold diagnostics live after request-hot transport state. */
     Py_ssize_t direct_writelines;
     Py_ssize_t direct_read_dispatches;
@@ -45,91 +55,28 @@ typedef struct {
 static PyTypeObject SocketTransportType;
 static int metal_attach_transport(SocketTransport *, PyObject *);
 static void metal_detach_transport(SocketTransport *);
-
-static uint64_t
-metal_begin_operation(SocketTransport *t, uint16_t kind)
-{
-    if (t->metal == NULL) {
-        return 0;
-    }
-    if (PyThread_get_thread_ident() != t->metal->owner_thread) {
-        t->metal->cross_worker_rejections++;
-        errno = EXDEV;
-        return 0;
-    }
-    uint64_t token = metal_slab_allocate(
-        &t->metal->operations, t, t->connection_token, kind
-    );
-    if (token == 0) {
-        errno = ENOBUFS;
-        return 0;
-    }
-    t->metal->submissions++;
-    return token;
-}
-
-static ssize_t
-metal_finish_operation(SocketTransport *t, uint64_t token, uint16_t kind,
-                       ssize_t raw_result, int saved_errno)
-{
-    if (t->metal == NULL) {
-        errno = saved_errno;
-        return raw_result;
-    }
-    MetalCompletion completion;
-    completion.token = token;
-    completion.result = raw_result < 0 ? -saved_errno : (int32_t)raw_result;
-    completion.kind = kind;
-    completion.flags = raw_result == 0 ? METAL_COMPLETION_EOF : 0;
-    if (raw_result < 0) {
-        completion.flags |= METAL_COMPLETION_ERROR;
-    }
-    completion.value = 0;
-    metal_trace_add(t->metal, METAL_IO_URING, kind, token,
-                    completion.result, (uint8_t)completion.flags);
-
-    MetalSlot *operation = metal_slab_validate(&t->metal->operations, token, t);
-    MetalSlot *connection = metal_slab_validate(
-        &t->metal->connections, t->connection_token, t
-    );
-    int valid = operation != NULL && connection != NULL &&
-                metal_slot_kind(operation) == kind &&
-                operation->related == t->connection_token;
-    if (operation != NULL) {
-        metal_slab_release(&t->metal->operations, token, t);
-    }
-    t->metal->completions++;
-    if (!valid) {
-        errno = ECANCELED;
-        return -1;
-    }
-    errno = saved_errno;
-    return completion.result < 0 ? -1 : (ssize_t)completion.result;
-}
+static int rp_start_uring_receive_native(SocketTransport *);
+static int rp_stop_uring_receive_native(SocketTransport *);
+static void st_pump_egress(SocketTransport *);
+static void st_egress_epilogue(SocketTransport *);
+static void st_fatal(SocketTransport *, const char *);
+static void st_maybe_resume(SocketTransport *);
+static int st_call_soon(SocketTransport *, PyObject *, PyObject *);
 
 static ssize_t
 metal_recv(SocketTransport *t, void *buffer, size_t size)
 {
-    if (t->metal == NULL) {
-        ssize_t result;
-        do {
-            result = recv(t->fd, buffer, size, 0);
-        } while (result < 0 && errno == EINTR);
-        return result;
-    }
-    uint64_t token = metal_begin_operation(t, METAL_OP_RECV);
-    if (token == 0) {
+    if (t->metal != NULL) {
+        /* Metal ingress is completion-driven into provided buffers; the poll
+         * readiness path must never issue a competing synchronous read. */
+        errno = EOPNOTSUPP;
         return -1;
     }
     ssize_t result;
-    int saved_errno;
-    /* Production Metal receive is completion-driven into provided buffers; a
-     * synchronous read here would violate that ownership domain. */
-    (void)buffer;
-    (void)size;
-    result = -1;
-    saved_errno = EOPNOTSUPP;
-    return metal_finish_operation(t, token, METAL_OP_RECV, result, saved_errno);
+    do {
+        result = recv(t->fd, buffer, size, 0);
+    } while (result < 0 && errno == EINTR);
+    return result;
 }
 
 static ssize_t
@@ -157,10 +104,22 @@ static Py_ssize_t st_wsize(SocketTransport *t)
     return PyByteArray_GET_SIZE(t->wbuf) - t->whead;
 }
 
+static int
+st_send_busy(SocketTransport *t)
+{
+    return t->send_op_token != 0 || t->send_obj != NULL ||
+           (t->send_queue != NULL &&
+            t->send_queue_head < PyList_GET_SIZE(t->send_queue));
+}
+
 static Py_ssize_t
 st_pending_write_size(SocketTransport *t)
 {
-    return st_wsize(t);
+    Py_ssize_t pending = st_wsize(t) + t->send_queued_bytes;
+    if (t->cork_obj != NULL) {
+        pending += PyBytes_GET_SIZE(t->cork_obj);
+    }
+    return pending;
 }
 
 static PyObject *
@@ -169,14 +128,32 @@ st_bound(PyObject *obj, const char *name)
     return PyObject_GetAttrString(obj, name);
 }
 
+/* Bind a method into its cache slot on first use. Connections in the metal
+ * fast path never touch most loop/self bound methods (io_uring receive, async
+ * send), so binding all of them eagerly in __init__ paid eight attribute
+ * lookups and three closure allocations per accepted connection for nothing.
+ * Returns a borrowed reference, or NULL with the exception set. */
+static PyObject *
+st_lazy_bound(PyObject **slot, PyObject *owner, const char *name)
+{
+    if (*slot == NULL) {
+        *slot = PyObject_GetAttrString(owner, name);
+    }
+    return *slot;
+}
+
 static int
 st_call_soon(SocketTransport *t, PyObject *fn, PyObject *arg)
 {
+    PyObject *call_soon = st_lazy_bound(&t->m_call_soon, t->loop, "call_soon");
+    if (call_soon == NULL) {
+        return -1;
+    }
     PyObject *r;
     if (arg == NULL) {
-        r = PyObject_CallOneArg(t->m_call_soon, fn);
+        r = PyObject_CallOneArg(call_soon, fn);
     } else {
-        r = PyObject_CallFunctionObjArgs(t->m_call_soon, fn, arg, NULL);
+        r = PyObject_CallFunctionObjArgs(call_soon, fn, arg, NULL);
     }
     Py_XDECREF(r);
     return r == NULL ? -1 : 0;
@@ -189,31 +166,326 @@ st_try_start_uring_receive(SocketTransport *t)
         !t->metal->receive_enabled) {
         return 0;
     }
-    PyObject *result = PyObject_CallMethod(
-        t->poller_obj, "_start_uring_receive", "O", (PyObject *)t);
-    if (result == NULL) {
-        return -1;
-    }
-    int started = PyObject_IsTrue(result);
-    Py_DECREF(result);
-    return started;
+    /* poller_obj was type-checked when the metal runtime attached, so the
+     * poller's C helper is reachable without a Python method call. */
+    return rp_start_uring_receive_native(t);
 }
 
 static int
 st_try_stop_uring_receive(SocketTransport *t)
 {
-    if (t->poller_obj == NULL || !t->uring_receive_active) {
+    if (t->poller_obj == NULL || t->metal == NULL ||
+        !t->uring_receive_active) {
         return 0;
     }
-    PyObject *result = PyObject_CallMethod(
-        t->poller_obj, "_stop_uring_receive", "O", (PyObject *)t);
-    if (result == NULL) {
+    int stopped = rp_stop_uring_receive_native(t);
+    if (stopped < 0) {
         PyErr_Clear();
         return 1;
     }
-    int stopped = PyObject_IsTrue(result);
-    Py_DECREF(result);
     return stopped;
+}
+
+static int
+st_remove_reader_cb(SocketTransport *t)
+{
+    PyObject *remove = st_lazy_bound(&t->m_remove_reader, t->loop,
+                                     "_remove_reader");
+    if (remove == NULL) {
+        return -1;
+    }
+    PyObject *r = PyObject_CallFunction(remove, "i", t->fd);
+    Py_XDECREF(r);
+    return r == NULL ? -1 : 0;
+}
+
+static int
+st_remove_writer_cb(SocketTransport *t)
+{
+    PyObject *remove = st_lazy_bound(&t->m_remove_writer, t->loop,
+                                     "_remove_writer");
+    if (remove == NULL) {
+        return -1;
+    }
+    PyObject *r = PyObject_CallFunction(remove, "i", t->fd);
+    Py_XDECREF(r);
+    return r == NULL ? -1 : 0;
+}
+
+/* Register the writer callback; returns -1 with the exception set. */
+static int
+st_register_writer(SocketTransport *t)
+{
+    if (t->writing) {
+        return 0;
+    }
+    PyObject *ready = st_lazy_bound(&t->write_ready, (PyObject *)t,
+                                    "_write_ready");
+    PyObject *add = ready != NULL
+        ? st_lazy_bound(&t->m_add_writer, t->loop, "_add_writer") : NULL;
+    if (add == NULL) {
+        return -1;
+    }
+    PyObject *r = PyObject_CallFunction(add, "iO", t->fd, ready);
+    if (r == NULL) {
+        return -1;
+    }
+    Py_DECREF(r);
+    t->writing = 1;
+    return 0;
+}
+
+static int
+st_register_reader(SocketTransport *t)
+{
+    PyObject *ready = st_lazy_bound(&t->read_ready, (PyObject *)t,
+                                    "_read_ready");
+    PyObject *add = ready != NULL
+        ? st_lazy_bound(&t->m_add_reader, t->loop, "_add_reader") : NULL;
+    if (add == NULL) {
+        return -1;
+    }
+    PyObject *r = PyObject_CallFunction(add, "iO", t->fd, ready);
+    Py_XDECREF(r);
+    return r == NULL ? -1 : 0;
+}
+
+static int
+st_schedule_conn_lost(SocketTransport *t, PyObject *exc)
+{
+    PyObject *cb = st_lazy_bound(&t->conn_lost_cb, (PyObject *)t,
+                                 "_call_connection_lost");
+    if (cb == NULL) {
+        return -1;
+    }
+    return st_call_soon(t, cb, exc == NULL ? Py_None : exc);
+}
+
+static int
+st_async_send_available(SocketTransport *t)
+{
+    return t->metal != NULL && t->metal->send_enabled &&
+           PyThread_get_thread_ident() == t->metal->owner_thread;
+}
+
+/* Retain an immutable payload at the tail of the egress queue. */
+static int
+st_enqueue_send(SocketTransport *t, PyObject *bytes_obj)
+{
+    if (t->send_queue == NULL) {
+        t->send_queue = PyList_New(0);
+        if (t->send_queue == NULL) {
+            return -1;
+        }
+    }
+    if (PyList_Append(t->send_queue, bytes_obj) < 0) {
+        return -1;
+    }
+    t->send_queued_bytes += PyBytes_GET_SIZE(bytes_obj);
+    if (t->metal != NULL &&
+        (t->send_op_token != 0 || t->send_obj != NULL)) {
+        t->metal->retained_send_enqueues++;
+    }
+    return 0;
+}
+
+static PyObject *
+st_dequeue_send(SocketTransport *t)
+{
+    if (t->send_queue == NULL) {
+        return NULL;
+    }
+    Py_ssize_t size = PyList_GET_SIZE(t->send_queue);
+    if (t->send_queue_head >= size) {
+        return NULL;
+    }
+    /* native-lint: allow NC001 -- consumed items are dropped by advancing a
+     * head index; the slice delete below runs only on a drained or mostly
+     * consumed list, keeping removal amortized O(1). */
+    PyObject *item = Py_NewRef(PyList_GET_ITEM(t->send_queue,
+                                               t->send_queue_head));
+    t->send_queue_head++;
+    if (t->send_queue_head >= size ||
+        (t->send_queue_head >= 64 && t->send_queue_head * 2 >= size)) {
+        if (PyList_SetSlice(t->send_queue, 0, t->send_queue_head, NULL) == 0) {
+            t->send_queue_head = 0;
+        }
+        else {
+            PyErr_Clear();  /* keep draining through the head index */
+        }
+    }
+    return item;
+}
+
+/* Submit the in-flight payload remainder as one io_uring SEND. The operation
+ * retains the transport (released by its CQE) so teardown cannot free the
+ * payload while the kernel may still read it. */
+static int
+st_submit_send_op(SocketTransport *t)
+{
+    MetalRuntime *metal = t->metal;
+    uint64_t token = metal_slab_allocate(
+        &metal->operations, t, t->connection_token, METAL_OP_SEND);
+    if (token == 0) {
+        return -1;  /* slab exhausted: the synchronous fallback takes over */
+    }
+    const char *base = PyBytes_AS_STRING(t->send_obj);
+    Py_ssize_t size = PyBytes_GET_SIZE(t->send_obj) - t->send_obj_off;
+    if (metal_uring_queue_send(&metal->uring, t->fd, base + t->send_obj_off,
+                               (size_t)size, token) < 0) {
+        metal_slab_release(&metal->operations, token, t);
+        return -1;
+    }
+    t->send_op_token = token;
+    metal->send_submissions++;
+    metal->send_copy_bytes += (uint64_t)size;
+    Py_INCREF(t);
+    return 0;
+}
+
+/* Drive queued egress in order: in-flight payload, retained queue, then the
+ * write buffer. Prefers one completion-driven io_uring SEND per payload --
+ * submitted here, flushed by the poller's next io_uring_enter, so a drain
+ * batch of N responses costs zero send syscalls instead of N. Falls back to
+ * synchronous sends when the ring cannot take the operation. Consumes its own
+ * errors (st_fatal); leaves no pending exception. */
+static void
+st_pump_egress(SocketTransport *t)
+{
+    if (t->conn_lost || t->send_op_token != 0) {
+        return;  /* the completion continues this drain */
+    }
+    int async_ok = st_async_send_available(t);
+    for (;;) {
+        if (t->send_obj == NULL) {
+            t->send_obj = st_dequeue_send(t);
+            t->send_obj_off = 0;
+            if (t->send_obj == NULL) {
+                break;
+            }
+        }
+        if (async_ok && st_submit_send_op(t) == 0) {
+            return;  /* the CQE resumes the pump */
+        }
+        /* Synchronous fallback: ring or slab full, or metal absent. */
+        const char *base = PyBytes_AS_STRING(t->send_obj);
+        Py_ssize_t size = PyBytes_GET_SIZE(t->send_obj);
+        while (t->send_obj_off < size) {
+            ssize_t n = metal_send(t, base + t->send_obj_off,
+                                   (size_t)(size - t->send_obj_off));
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    if (st_register_writer(t) < 0) {
+                        st_fatal(t, "add_writer failed");
+                    }
+                    return;
+                }
+                PyErr_SetFromErrno(PyExc_OSError);
+                st_fatal(t, "write error");
+                return;
+            }
+            t->send_obj_off += n;
+            t->send_queued_bytes -= n;
+        }
+        Py_CLEAR(t->send_obj);
+        t->send_obj_off = 0;
+    }
+    /* The write buffer drains only after every retained payload has left. */
+    Py_ssize_t size = st_wsize(t);
+    if (size > 0) {
+        const char *p = PyByteArray_AS_STRING(t->wbuf) + t->whead;
+        ssize_t n = metal_send(t, p, (size_t)size);
+        if (n < 0) {
+            if (!(errno == EAGAIN || errno == EWOULDBLOCK)) {
+                PyErr_SetFromErrno(PyExc_OSError);
+                st_fatal(t, "write error");
+                return;
+            }
+            n = 0;
+        }
+        t->whead += n;
+    }
+    st_egress_epilogue(t);
+}
+
+/* Shared completion tail: on full drain honour a pending close() or
+ * half-close; on a partial synchronous write keep the writer registered so
+ * the rest drains. */
+static void
+st_egress_epilogue(SocketTransport *t)
+{
+    if (st_wsize(t) == 0 && !st_send_busy(t)) {
+        if (t->whead != 0 || PyByteArray_GET_SIZE(t->wbuf) != 0) {
+            if (PyByteArray_Resize(t->wbuf, 0) == 0) {
+                t->whead = 0;
+            }
+        }
+        if (t->writing) {
+            if (st_remove_writer_cb(t) < 0) {
+                PyErr_Clear();
+            }
+            t->writing = 0;
+        }
+        st_maybe_resume(t);
+        if (t->closing && !t->conn_lost) {
+            t->conn_lost++;
+            st_schedule_conn_lost(t, Py_None);
+        } else if (t->eof) {
+            shutdown(t->fd, SHUT_WR);
+        }
+        return;
+    }
+    if (st_wsize(t) > 0 && t->send_op_token == 0 && !t->writing) {
+        if (st_register_writer(t) < 0) {
+            st_fatal(t, "add_writer failed");
+            return;
+        }
+    }
+    st_maybe_resume(t);
+}
+
+/* Async SEND completion delivered by the poller's CQ drain. */
+static void
+st_on_send_complete(SocketTransport *t, int32_t result)
+{
+    t->send_op_token = 0;
+    if (result < 0) {
+        Py_CLEAR(t->send_obj);  /* the CQE ends the kernel's read of it */
+        t->send_obj_off = 0;
+        if (result != -ECANCELED && !t->conn_lost) {
+            errno = -result;
+            PyErr_SetFromErrno(PyExc_OSError);
+            st_fatal(t, "write error");
+        }
+        return;
+    }
+    t->send_obj_off += result;
+    t->send_queued_bytes -= result;
+    if (t->send_queued_bytes < 0) {
+        t->send_queued_bytes = 0;  /* an abort already zeroed the accounting */
+    }
+    if (t->send_obj != NULL &&
+        t->send_obj_off >= PyBytes_GET_SIZE(t->send_obj)) {
+        Py_CLEAR(t->send_obj);
+        t->send_obj_off = 0;
+    }
+    if (!t->conn_lost) {
+        st_pump_egress(t);
+    }
+}
+
+/* Drop queued payloads on abort. The in-flight payload survives until its
+ * CQE arrives: the kernel may still be reading it. */
+static void
+st_clear_send_queue(SocketTransport *t)
+{
+    Py_CLEAR(t->send_queue);
+    t->send_queue_head = 0;
+    t->send_queued_bytes = 0;
+    if (t->send_op_token == 0) {
+        Py_CLEAR(t->send_obj);
+        t->send_obj_off = 0;
+    }
 }
 
 static void
@@ -252,25 +524,34 @@ st_force_close(SocketTransport *t, PyObject *exc)
         return;
     }
     Py_CLEAR(t->cork_obj);
+    if (t->send_op_token != 0 && t->metal != NULL) {
+        /* Best effort: without the cancel a SEND parked on a stalled peer
+         * would pin its slot and payload until the poller closes. */
+        (void)metal_uring_queue_cancel_raw(
+            &t->metal->uring, t->send_op_token | METAL_TOKEN_SEND);
+    }
+    st_clear_send_queue(t);
     if (st_wsize(t) > 0) {
         if (PyByteArray_Resize(t->wbuf, 0) == 0) {
             t->whead = 0;
         }
         if (t->writing) {
-            PyObject *r = PyObject_CallFunction(t->m_remove_writer, "i", t->fd);
-            Py_XDECREF(r);
+            if (st_remove_writer_cb(t) < 0) {
+                PyErr_Clear();
+            }
             t->writing = 0;
         }
     }
     if (!t->closing) {
         t->closing = 1;
         if (!st_try_stop_uring_receive(t)) {
-            PyObject *r = PyObject_CallFunction(t->m_remove_reader, "i", t->fd);
-            Py_XDECREF(r);
+            if (st_remove_reader_cb(t) < 0) {
+                PyErr_Clear();
+            }
         }
     }
     t->conn_lost++;
-    st_call_soon(t, t->conn_lost_cb, exc == NULL ? Py_None : exc);
+    st_schedule_conn_lost(t, exc);
 }
 
 static void
@@ -297,8 +578,9 @@ st_on_eof(SocketTransport *t)
     Py_DECREF(keep);
     if (keep_open) {
         if (!st_try_stop_uring_receive(t)) {
-            PyObject *r = PyObject_CallFunction(t->m_remove_reader, "i", t->fd);
-            Py_XDECREF(r);
+            if (st_remove_reader_cb(t) < 0) {
+                PyErr_Clear();
+            }
         }
     } else {
         PyObject *c = PyObject_CallMethod((PyObject *)t, "close", NULL);
@@ -307,86 +589,28 @@ st_on_eof(SocketTransport *t)
     Py_RETURN_NONE;
 }
 
-/* Flush the corked write buffer in a single send(); register the writer for any
- * remainder. Called after the synchronous request drive so a burst of small
- * writes (response head + streaming chunks) collapses into one syscall instead
- * of one per write. Leaves no pending exception (st_fatal consumes it). */
+/* Flush the corked response. The retained exact-bytes payload moves onto the
+ * egress queue unchanged (still zero-copy) and the pump prefers one io_uring
+ * SEND per payload: during a CQ drain batch of N responses that submission
+ * rides the loop's next io_uring_enter, so the batch costs zero send syscalls
+ * instead of N. Leaves no pending exception (st_fatal consumes it). */
 static void
 st_flush_cork(SocketTransport *t)
 {
     if (t->conn_lost) {
         return;
     }
-    int pending_partial = 0;
     if (t->cork_obj != NULL) {
-        const char *p = PyBytes_AS_STRING(t->cork_obj);
-        Py_ssize_t size = PyBytes_GET_SIZE(t->cork_obj);
-        ssize_t n = metal_send(t, p, (size_t)size);
-        if (n < 0) {
-            if (!(errno == EAGAIN || errno == EWOULDBLOCK)) {
-                PyErr_SetFromErrno(PyExc_OSError);
-                st_fatal(t, "write error");
-                return;
-            }
-            n = 0;
-        }
-        if (n < size) {
-            Py_ssize_t remaining = size - n;
-            if (PyByteArray_Resize(t->wbuf, remaining) < 0) {
-                st_fatal(t, "write buffer allocation failed");
-                return;
-            }
-            memcpy(PyByteArray_AS_STRING(t->wbuf), p + n, (size_t)remaining);
-            t->whead = 0;
-            pending_partial = 1;
-        }
-        Py_CLEAR(t->cork_obj);
-    }
-    Py_ssize_t size = st_wsize(t);
-    if (size > 0 && !pending_partial) {
-        const char *p = PyByteArray_AS_STRING(t->wbuf) + t->whead;
-        ssize_t n = metal_send(t, p, (size_t)size);
-        if (n < 0) {
-            if (!(errno == EAGAIN || errno == EWOULDBLOCK)) {
-                PyErr_SetFromErrno(PyExc_OSError);
-                st_fatal(t, "write error");
-                return;
-            }
-            n = 0;
-        }
-        t->whead += n;
-    }
-    /* Same completion as st_write_ready: on full drain honour a pending close()
-     * (schedule connection_lost -- a corked response followed by close() must
-     * still terminate the connection) or half-close; on a partial write register
-     * the writer so the rest drains. */
-    if (st_wsize(t) == 0) {
-        if (t->whead != 0 || PyByteArray_GET_SIZE(t->wbuf) != 0) {
-            if (PyByteArray_Resize(t->wbuf, 0) == 0) {
-                t->whead = 0;
-            }
-        }
-        if (t->writing) {
-            PyObject *r = PyObject_CallFunction(t->m_remove_writer, "i", t->fd);
-            Py_XDECREF(r);
-            t->writing = 0;
-        }
-        st_maybe_resume(t);
-        if (t->closing && !t->conn_lost) {
-            t->conn_lost++;
-            st_call_soon(t, t->conn_lost_cb, Py_None);
-        } else if (t->eof) {
-            shutdown(t->fd, SHUT_WR);
-        }
-    } else if (!t->writing) {
-        PyObject *r = PyObject_CallFunction(t->m_add_writer, "iO", t->fd, t->write_ready);
-        if (r == NULL) {
-            st_fatal(t, "add_writer failed");
+        PyObject *payload = t->cork_obj;
+        t->cork_obj = NULL;
+        int queued = st_enqueue_send(t, payload);
+        Py_DECREF(payload);
+        if (queued < 0) {
+            st_fatal(t, "write buffer allocation failed");
             return;
         }
-        Py_DECREF(r);
-        t->writing = 1;
     }
+    st_pump_egress(t);
 }
 
 static int
@@ -615,40 +839,7 @@ st_write_ready(PyObject *op, PyObject *Py_UNUSED(ignored))
     if (t->conn_lost) {
         Py_RETURN_NONE;
     }
-    Py_ssize_t size = st_wsize(t);
-    if (size > 0) {
-        const char *p = PyByteArray_AS_STRING(t->wbuf) + t->whead;
-        ssize_t n = metal_send(t, p, (size_t)size);
-        if (n < 0) {
-            if (!(errno == EAGAIN || errno == EWOULDBLOCK)) {
-                PyErr_SetFromErrno(PyExc_OSError);
-                st_fatal(t, "write error");
-            }
-            Py_RETURN_NONE;
-        }
-        t->whead += n;
-    }
-    if (st_wsize(t) == 0) {
-        if (t->whead != 0 || PyByteArray_GET_SIZE(t->wbuf) != 0) {
-            if (PyByteArray_Resize(t->wbuf, 0) == 0) {
-                t->whead = 0;
-            }
-        }
-        if (t->writing) {
-            PyObject *r = PyObject_CallFunction(t->m_remove_writer, "i", t->fd);
-            Py_XDECREF(r);
-            t->writing = 0;
-        }
-        st_maybe_resume(t);
-        if (t->closing) {
-            t->conn_lost++;
-            st_call_soon(t, t->conn_lost_cb, Py_None);
-        } else if (t->eof) {
-            shutdown(t->fd, SHUT_WR);
-        }
-    } else {
-        st_maybe_resume(t);
-    }
+    st_pump_egress(t);
     Py_RETURN_NONE;
 }
 
@@ -687,8 +878,22 @@ st_write(PyObject *op, PyObject *data)
         Py_CLEAR(t->cork_obj);
         t->whead = 0;
     }
+    /* Immediate async path: an exact-bytes payload with nothing buffered in
+     * the write buffer rides the egress queue zero-copy. This holds whether
+     * the queue is idle (submit now) or busy (retain behind the in-flight
+     * send) -- the queue preserves order and the CQE-driven pump drains it. */
+    if (!t->cork && st_wsize(t) == 0 && PyBytes_CheckExact(data) &&
+        st_async_send_available(t)) {
+        PyBuffer_Release(&view);
+        if (st_enqueue_send(t, data) < 0) {
+            return NULL;
+        }
+        st_pump_egress(t);
+        st_maybe_pause(t);
+        Py_RETURN_NONE;
+    }
     Py_ssize_t off = 0;
-    if (!t->cork && st_wsize(t) == 0) {
+    if (!t->cork && st_wsize(t) == 0 && !st_send_busy(t)) {
         ssize_t n = metal_send(t, view.buf, (size_t)view.len);
         if (n < 0) {
             if (!(errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -705,15 +910,10 @@ st_write(PyObject *op, PyObject *data)
             st_maybe_pause(t);
             Py_RETURN_NONE;  /* submitted or fully sent */
         }
-        if (!t->writing) {
-            PyObject *r = PyObject_CallFunction(t->m_add_writer, "iO", t->fd, t->write_ready);
-            if (r == NULL) {
-                PyBuffer_Release(&view);
-                st_fatal(t, "add_writer failed");
-                Py_RETURN_NONE;
-            }
-            Py_DECREF(r);
-            t->writing = 1;
+        if (st_register_writer(t) < 0) {
+            PyBuffer_Release(&view);
+            st_fatal(t, "add_writer failed");
+            Py_RETURN_NONE;
         }
     }
     /* Reclaim the dead prefix only once it has grown to at least the live size.
@@ -757,8 +957,11 @@ st_writelines(PyObject *op, PyObject *seq)
 
     /* Large response head+body pairs can leave directly as one writev-shaped
      * syscall. This avoids copying an immutable response body into bytearray.
-     * Keep the vector stack-bounded; arbitrary iterables use the normal path. */
-    if (count >= 2 && count <= 16 && st_wsize(t) == 0 && !t->conn_lost && !t->eof) {
+     * Keep the vector stack-bounded; arbitrary iterables use the normal path.
+     * A busy egress queue or staged cork payload must drain first: bypassing
+     * them here would reorder bytes on the wire. */
+    if (count >= 2 && count <= 16 && st_wsize(t) == 0 && !t->conn_lost &&
+        !t->eof && !st_send_busy(t) && t->cork_obj == NULL) {
         struct iovec iov[16];
         Py_buffer views[16];
         Py_ssize_t acquired = 0;
@@ -818,19 +1021,13 @@ st_writelines(PyObject *op, PyObject *seq)
                     dst += copy;
                     skip = 0;
                 }
-                if (!t->writing) {
-                    PyObject *r = PyObject_CallFunction(
-                        t->m_add_writer, "iO", t->fd, t->write_ready);
-                    if (r == NULL) {
-                        for (Py_ssize_t i = 0; i < acquired; i++) {
-                            PyBuffer_Release(&views[i]);
-                        }
-                        Py_DECREF(parts);
-                        st_fatal(t, "add_writer failed");
-                        Py_RETURN_NONE;
+                if (st_register_writer(t) < 0) {
+                    for (Py_ssize_t i = 0; i < acquired; i++) {
+                        PyBuffer_Release(&views[i]);
                     }
-                    Py_DECREF(r);
-                    t->writing = 1;
+                    Py_DECREF(parts);
+                    st_fatal(t, "add_writer failed");
+                    Py_RETURN_NONE;
                 }
                 st_maybe_pause(t);
             }
@@ -867,18 +1064,22 @@ st_close(PyObject *op, PyObject *Py_UNUSED(ignored))
     }
     t->closing = 1;
     if (!t->reading_paused && !st_try_stop_uring_receive(t)) {
-        PyObject *r = PyObject_CallFunction(t->m_remove_reader, "i", t->fd);
-        Py_XDECREF(r);
+        if (st_remove_reader_cb(t) < 0) {
+            PyErr_Clear();
+        }
     }
-    if (st_wsize(t) == 0 && t->cork_obj == NULL) {
+    if (st_pending_write_size(t) == 0) {
         t->conn_lost++;
         if (t->writing) {
-            PyObject *r = PyObject_CallFunction(t->m_remove_writer, "i", t->fd);
-            Py_XDECREF(r);
+            if (st_remove_writer_cb(t) < 0) {
+                PyErr_Clear();
+            }
             t->writing = 0;
         }
-        st_call_soon(t, t->conn_lost_cb, Py_None);
+        st_schedule_conn_lost(t, Py_None);
     }
+    /* Otherwise the egress pump's drained epilogue delivers connection_lost
+     * once the queue, in-flight send, and write buffer have all left. */
     Py_RETURN_NONE;
 }
 
@@ -914,6 +1115,7 @@ st_call_connection_lost(PyObject *op, PyObject *exc)
     }
     Py_CLEAR(t->protocol);
     Py_CLEAR(t->server);
+    st_clear_send_queue(t);
     metal_detach_transport(t);
     Py_RETURN_NONE;
 }
@@ -930,9 +1132,8 @@ st_start_reading(PyObject *op, PyObject *Py_UNUSED(ignored))
         st_fatal(t, "starting io_uring receive failed");
         Py_RETURN_NONE;
     }
-    if (!uring_started) {
-        PyObject *r = PyObject_CallFunction(t->m_add_reader, "iO", t->fd, t->read_ready);
-        Py_XDECREF(r);
+    if (!uring_started && st_register_reader(t) < 0) {
+        PyErr_Clear();
     }
     Py_RETURN_NONE;
 }
@@ -946,8 +1147,9 @@ st_pause_reading(PyObject *op, PyObject *Py_UNUSED(ignored))
     }
     t->reading_paused = 1;
     if (!st_try_stop_uring_receive(t)) {
-        PyObject *r = PyObject_CallFunction(t->m_remove_reader, "i", t->fd);
-        Py_XDECREF(r);
+        if (st_remove_reader_cb(t) < 0) {
+            PyErr_Clear();
+        }
     }
     Py_RETURN_NONE;
 }
@@ -963,11 +1165,39 @@ st_resume_reading(PyObject *op, PyObject *Py_UNUSED(ignored))
     int uring_started = st_try_start_uring_receive(t);
     if (uring_started < 0) {
         st_fatal(t, "resuming io_uring receive failed");
-    } else if (!uring_started) {
-        PyObject *r = PyObject_CallFunction(t->m_add_reader, "iO", t->fd, t->read_ready);
-        Py_XDECREF(r);
+    } else if (!uring_started && st_register_reader(t) < 0) {
+        PyErr_Clear();
     }
     Py_RETURN_NONE;
+}
+
+/* Natively accepted connections defer the getsockname/getpeername syscalls
+ * and tuple conversions out of the accept hot path; the first request for
+ * either computes and caches it here (cold: at most once per connection). */
+static PyObject *
+st_lazy_extra_address(SocketTransport *t, PyObject *name)
+{
+    const char *method = NULL;
+    if (!PyUnicode_Check(name) || t->sock == NULL || t->conn_lost) {
+        return NULL;
+    }
+    if (PyUnicode_CompareWithASCIIString(name, "sockname") == 0) {
+        method = "getsockname";
+    } else if (PyUnicode_CompareWithASCIIString(name, "peername") == 0) {
+        method = "getpeername";
+    }
+    if (method == NULL) {
+        return NULL;
+    }
+    PyObject *value = PyObject_CallMethod(t->sock, method, NULL);
+    if (value == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    if (PyDict_SetItem(t->extra, name, value) < 0) {
+        PyErr_Clear();
+    }
+    return value;
 }
 
 static PyObject *
@@ -984,6 +1214,10 @@ st_get_extra_info(PyObject *op, PyObject *args)
     }
     if (PyErr_Occurred()) {
         return NULL;
+    }
+    PyObject *lazy = st_lazy_extra_address(t, name);
+    if (lazy != NULL) {
+        return lazy;
     }
     return Py_NewRef(dflt);
 }
@@ -1073,7 +1307,7 @@ st_write_eof(PyObject *op, PyObject *Py_UNUSED(i))
         Py_RETURN_NONE;
     }
     t->eof = 1;
-    if (st_wsize(t) == 0) {
+    if (st_pending_write_size(t) == 0) {
         shutdown(t->fd, SHUT_WR);
     }
     Py_RETURN_NONE;
@@ -1139,13 +1373,14 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
     SocketTransport *t = (SocketTransport *)op;
     PyObject *loop, *sock, *protocol, *waiter = Py_None, *extra = Py_None, *server = Py_None;
     int inline_activate = 0;
+    int known_fd = -1;
     static char *kw[] = {
         "loop", "sock", "protocol", "waiter", "extra", "server",
-        "inline_activate", NULL
+        "inline_activate", "fd", NULL
     };
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOO|OOOp", kw, &loop, &sock,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOO|OOOpi", kw, &loop, &sock,
                                      &protocol, &waiter, &extra, &server,
-                                     &inline_activate)) {
+                                     &inline_activate, &known_fd)) {
         return -1;
     }
     t->loop = Py_NewRef(loop);
@@ -1171,32 +1406,36 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
     if (t->extra == NULL) {
         return -1;
     }
-    PyObject *fdobj = PyObject_CallMethod(sock, "fileno", NULL);
-    if (fdobj == NULL) {
-        return -1;
-    }
-    t->fd = (int)PyLong_AsLong(fdobj);
-    Py_DECREF(fdobj);
-    if (t->fd < 0 && PyErr_Occurred()) {
-        return -1;
+    if (known_fd >= 0) {
+        /* The native accept path already holds the fd; skip the fileno()
+         * Python round trip per accepted connection. */
+        t->fd = known_fd;
+    } else {
+        PyObject *fdobj = PyObject_CallMethod(sock, "fileno", NULL);
+        if (fdobj == NULL) {
+            return -1;
+        }
+        t->fd = (int)PyLong_AsLong(fdobj);
+        Py_DECREF(fdobj);
+        if (t->fd < 0 && PyErr_Occurred()) {
+            return -1;
+        }
     }
     /* TCP_NODELAY (best effort) */
     int one = 1;
     setsockopt(t->fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
-    t->m_add_reader = st_bound(loop, "_add_reader");
-    t->m_remove_reader = st_bound(loop, "_remove_reader");
-    t->m_add_writer = st_bound(loop, "_add_writer");
-    t->m_remove_writer = st_bound(loop, "_remove_writer");
-    t->m_call_soon = st_bound(loop, "call_soon");
-    t->read_ready = st_bound(op, "_read_ready");
-    t->write_ready = st_bound(op, "_write_ready");
-    t->conn_lost_cb = st_bound(op, "_call_connection_lost");
-    if (!t->m_add_reader || !t->m_remove_reader || !t->m_add_writer ||
-        !t->m_remove_writer || !t->m_call_soon || !t->read_ready ||
-        !t->write_ready || !t->conn_lost_cb) {
-        return -1;
-    }
+    /* Loop and self bound methods bind lazily on first use (st_lazy_bound):
+     * the metal fast path -- io_uring receive, async send -- touches none of
+     * them, so eager binding taxed every accepted connection. */
+    t->m_add_reader = NULL;
+    t->m_remove_reader = NULL;
+    t->m_add_writer = NULL;
+    t->m_remove_writer = NULL;
+    t->m_call_soon = NULL;
+    t->read_ready = NULL;
+    t->write_ready = NULL;
+    t->conn_lost_cb = NULL;
 
     t->wbuf = PyByteArray_FromStringAndSize("", 0);
     if (t->wbuf == NULL) {
@@ -1206,6 +1445,12 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
     t->cork_obj = NULL;
     t->writing = 0;
     t->cork = 0;
+    t->send_queue = NULL;
+    t->send_queue_head = 0;
+    t->send_obj = NULL;
+    t->send_obj_off = 0;
+    t->send_queued_bytes = 0;
+    t->send_op_token = 0;
     t->direct_writelines = 0;
     t->direct_read_dispatches = 0;
     t->direct_protocol_writes = 0;
@@ -1225,26 +1470,31 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
     if (PyDict_SetItemString(t->extra, "socket", sock) < 0) {
         return -1;
     }
-    PyObject *sn = PyObject_CallMethod(sock, "getsockname", NULL);
-    if (sn != NULL) {
-        if (PyDict_SetItemString(t->extra, "sockname", sn) < 0) {
-            Py_DECREF(sn);
-            return -1;
-        }
-        Py_DECREF(sn);
-    } else {
-        PyErr_Clear();
-    }
-    if (PyDict_GetItemString(t->extra, "peername") == NULL) {
-        PyObject *pn = PyObject_CallMethod(sock, "getpeername", NULL);
-        if (pn != NULL) {
-            if (PyDict_SetItemString(t->extra, "peername", pn) < 0) {
-                Py_DECREF(pn);
+    /* Native accepts (inline_activate) defer sockname/peername: two syscalls
+     * plus tuple conversions per connection that most protocols never read.
+     * st_get_extra_info computes and caches them on first request. */
+    if (!inline_activate) {
+        PyObject *sn = PyObject_CallMethod(sock, "getsockname", NULL);
+        if (sn != NULL) {
+            if (PyDict_SetItemString(t->extra, "sockname", sn) < 0) {
+                Py_DECREF(sn);
                 return -1;
             }
-            Py_DECREF(pn);
+            Py_DECREF(sn);
         } else {
             PyErr_Clear();
+        }
+        if (PyDict_GetItemString(t->extra, "peername") == NULL) {
+            PyObject *pn = PyObject_CallMethod(sock, "getpeername", NULL);
+            if (pn != NULL) {
+                if (PyDict_SetItemString(t->extra, "peername", pn) < 0) {
+                    Py_DECREF(pn);
+                    return -1;
+                }
+                Py_DECREF(pn);
+            } else {
+                PyErr_Clear();
+            }
         }
     }
 
@@ -1290,10 +1540,16 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
     if (waiter != Py_None) {
         PyObject *setres = PyObject_GetAttrString(
             PyImport_AddModule("asyncio.futures"), "_set_result_unless_cancelled");
-        if (setres != NULL) {
-            PyObject *r = PyObject_CallFunctionObjArgs(t->m_call_soon, setres, waiter, Py_None, NULL);
+        PyObject *call_soon = setres != NULL
+            ? st_lazy_bound(&t->m_call_soon, t->loop, "call_soon") : NULL;
+        if (call_soon != NULL) {
+            PyObject *r = PyObject_CallFunctionObjArgs(
+                call_soon, setres, waiter, Py_None, NULL);
             Py_XDECREF(r);
-            Py_DECREF(setres);
+        }
+        Py_XDECREF(setres);
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
         }
     }
     return 0;
@@ -1311,6 +1567,8 @@ st_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(t->extra);
     Py_VISIT(t->wbuf);
     Py_VISIT(t->cork_obj);
+    Py_VISIT(t->send_queue);
+    Py_VISIT(t->send_obj);
     /* The bound methods below close a reference cycle back to the transport
      * (read_ready/write_ready/conn_lost_cb are bound to self); GC must see them
      * or a closed connection is never collected. */
@@ -1342,6 +1600,11 @@ st_clear(PyObject *op)
     Py_CLEAR(t->extra);
     Py_CLEAR(t->wbuf);
     Py_CLEAR(t->cork_obj);
+    Py_CLEAR(t->send_queue);
+    Py_CLEAR(t->send_obj);
+    t->send_queue_head = 0;
+    t->send_obj_off = 0;
+    t->send_queued_bytes = 0;
     Py_CLEAR(t->m_add_reader);
     Py_CLEAR(t->m_remove_reader);
     Py_CLEAR(t->m_add_writer);

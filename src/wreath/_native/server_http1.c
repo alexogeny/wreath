@@ -616,6 +616,21 @@ receive_pressure_resume(WreathHttpProtocol *self)
     return 0;
 }
 
+static int
+pause_pipeline_if_needed(WreathHttpProtocol *self)
+{
+    if (self->state != ST_REQUEST_RUNNING || self->reading_paused ||
+        self->buf_len - self->cursor < self->max_header_bytes) {
+        return 0;
+    }
+    if (transport_method0(self, "pause_reading") < 0) {
+        return -1;
+    }
+    self->reading_paused = 1;
+    return 0;
+}
+
+
 static void
 receive_queue_clear(WreathHttpProtocol *self, int release_storage)
 {
@@ -954,8 +969,14 @@ valid_header_name(const char *data, Py_ssize_t size)
     }
     for (Py_ssize_t i = 0; i < size; i++) {
         unsigned char c = (unsigned char)data[i];
-        if (c == ':' || c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\0' ||
-            c < 0x20) {
+        int token = (c >= '0' && c <= '9') ||
+                    (c >= 'A' && c <= 'Z') ||
+                    (c >= 'a' && c <= 'z') ||
+                    c == '!' || c == '#' || c == 0x24 || c == '%' ||
+                    c == '&' || c == 0x27 || c == '*' || c == '+' ||
+                    c == '-' || c == '.' || c == '^' || c == '_' ||
+                    c == 0x60 || c == '|' || c == '~';
+        if (!token) {
             return 0;
         }
     }
@@ -968,9 +989,46 @@ valid_header_value(const char *data, Py_ssize_t size)
 {
     for (Py_ssize_t i = 0; i < size; i++) {
         unsigned char c = (unsigned char)data[i];
-        if (c == 0x00 || c == 0x0A || c == 0x0D) {
+        if ((c < 0x20 && c != '\t') || c == 0x7f) {
             return 0;
         }
+    }
+    return 1;
+}
+
+
+static int
+validate_trailer_block(const char *data, Py_ssize_t size, Py_ssize_t max_count)
+{
+    Py_ssize_t offset = 0;
+    Py_ssize_t count = 0;
+    while (offset < size) {
+        Py_ssize_t end = offset;
+        while (end + 1 < size &&
+               !(data[end] == '\r' && data[end + 1] == '\n')) {
+            end++;
+        }
+        if (end + 1 >= size || ++count > max_count) {
+            return 0;
+        }
+        const char *colon = memchr(data + offset, ':', (size_t)(end - offset));
+        if (colon == NULL || !valid_header_name(data + offset, colon - (data + offset))) {
+            return 0;
+        }
+        const char *value = colon + 1;
+        while (value < data + end && (*value == ' ' || *value == '\t')) {
+            value++;
+        }
+        if (!valid_header_value(value, data + end - value)) {
+            return 0;
+        }
+        Py_ssize_t name_size = colon - (data + offset);
+        if ((name_size == 4 && PyOS_strnicmp(data + offset, "host", 4) == 0) ||
+            (name_size == 14 && PyOS_strnicmp(data + offset, "content-length", 14) == 0) ||
+            (name_size == 17 && PyOS_strnicmp(data + offset, "transfer-encoding", 17) == 0)) {
+            return 0;
+        }
+        offset = end + 2;
     }
     return 1;
 }
@@ -1902,17 +1960,19 @@ decode_path(const char *data, Py_ssize_t size, int *bad)
 
 static int
 decide_framing(WreathHttpProtocol *self, PyObject *headers, int *kind, Py_ssize_t *length,
-               int *err_status)
+               int *err_status, int *send_continue)
 {
     /* kind: 0 none, 1 fixed, 2 chunked. err_status non-zero => reject. */
     PyObject *first_length = NULL;
     int saw_transfer = 0;
     int chunked_count = 0;
+    int expect_count = 0;
     Py_ssize_t i;
     Py_ssize_t n = PyList_GET_SIZE(headers);
     *err_status = 0;
     *kind = 0;
     *length = 0;
+    *send_continue = 0;
 
     for (i = 0; i < n; i++) {
         PyObject *pair = PyList_GET_ITEM(headers, i);
@@ -1920,6 +1980,17 @@ decide_framing(WreathHttpProtocol *self, PyObject *headers, int *kind, Py_ssize_
         PyObject *value = PyTuple_GET_ITEM(pair, 1);
         const char *nd = PyBytes_AS_STRING(name);
         Py_ssize_t ns = PyBytes_GET_SIZE(name);
+        if (ns == 6 && memcmp(nd, "expect", 6) == 0) {
+            const char *vd = PyBytes_AS_STRING(value);
+            Py_ssize_t vs = PyBytes_GET_SIZE(value);
+            expect_count++;
+            if (vs != 12 || PyOS_strnicmp(vd, "100-continue", 12) != 0) {
+                Py_XDECREF(first_length);
+                *err_status = 417;
+                return 0;
+            }
+            *send_continue = 1;
+        }
         if (ns == 14 && memcmp(nd, "content-length", 14) == 0) {
             const char *vd = PyBytes_AS_STRING(value);
             Py_ssize_t vs = PyBytes_GET_SIZE(value);
@@ -1982,6 +2053,11 @@ decide_framing(WreathHttpProtocol *self, PyObject *headers, int *kind, Py_ssize_
         }
     }
 
+    if (expect_count > 1) {
+        Py_XDECREF(first_length);
+        *err_status = 417;
+        return 0;
+    }
     if (saw_transfer && first_length != NULL) {
         Py_DECREF(first_length);
         *err_status = 400;
@@ -2412,6 +2488,7 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
     int kind;
     Py_ssize_t length;
     int err_status;
+    int send_continue;
     int bad = 0;
     int result = -1;
 
@@ -2445,11 +2522,16 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
                                  headers);
         goto done;
     }
-    if (decide_framing(self, headers, &kind, &length, &err_status) < 0) {
+    if (decide_framing(
+            self, headers, &kind, &length, &err_status, &send_continue) < 0) {
         goto done;
     }
     if (err_status != 0) {
         result = send_error(self, err_status) < 0 ? -1 : 0;
+        goto done;
+    }
+    if (send_continue && (kind == 2 || length > 0) &&
+        transport_write_raw(self, "HTTP/1.1 100 Continue\r\n\r\n", 25) < 0) {
         goto done;
     }
     scope = build_scope(self, method, path, raw_path, query_string, headers);
@@ -2465,6 +2547,7 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
     self->request_more_body = 1;
     self->remaining = 0;
     self->chunk_remaining = 0;
+    self->body_received = 0;
 
     if (kind == 0) {
         self->request_more_body = 0;
@@ -3037,8 +3120,11 @@ drive_head(WreathHttpProtocol *self)
 
     parsed = wreath_http_parse_request_parts(
         (const uint8_t *)p, n, head_end, &method, &target, &minor, &headers,
-        &consumed
+        &consumed, self->max_header_count
     );
+    if (parsed == -2) {
+        return send_error(self, 431) < 0 ? -1 : 0;
+    }
     if (parsed < 0) {
         if (PyErr_ExceptionMatches(PyExc_ValueError)) {
             PyErr_Clear();
@@ -3047,6 +3133,23 @@ drive_head(WreathHttpProtocol *self)
         return -1;
     }
     if (parsed == 0) return 0;
+    if (minor == 1) {
+        Py_ssize_t host_count = 0;
+        for (Py_ssize_t i = 0; i < PyList_GET_SIZE(headers); i++) {
+            PyObject *pair = PyList_GET_ITEM(headers, i);
+            PyObject *name = PyTuple_GET_ITEM(pair, 0);
+            if (PyBytes_GET_SIZE(name) == 4 &&
+                memcmp(PyBytes_AS_STRING(name), "host", 4) == 0) {
+                host_count++;
+            }
+        }
+        if (host_count != 1) {
+            Py_DECREF(method);
+            Py_DECREF(target);
+            Py_DECREF(headers);
+            return send_error(self, 400) < 0 ? -1 : 0;
+        }
+    }
     if (PyList_GET_SIZE(headers) > self->max_header_count) {
         Py_DECREF(method);
         Py_DECREF(target);
@@ -3162,9 +3265,10 @@ drive_chunk_size(WreathHttpProtocol *self)
         return 1;
     }
     if (chunk_size > self->max_body_bytes ||
-        self->queued_bytes > self->max_body_bytes - chunk_size) {
+        self->body_received > self->max_body_bytes - chunk_size) {
         return body_error(self, 413) < 0 ? -1 : 0;
     }
+    self->body_received += chunk_size;
     self->chunk_remaining = chunk_size;
     self->state = ST_READING_CHUNK_DATA;
     return 1;
@@ -3235,6 +3339,9 @@ drive_chunk_trailers(WreathHttpProtocol *self)
             }
             return 0;
         }
+        if (!validate_trailer_block(p, end + 2, self->max_header_count)) {
+            return body_error(self, 400) < 0 ? -1 : 0;
+        }
         do_consume(self, end + 4);
     }
     empty = PyBytes_FromStringAndSize("", 0);
@@ -3302,6 +3409,7 @@ reset_request(WreathHttpProtocol *self)
     self->queued_bytes = 0;
     self->remaining = 0;
     self->chunk_remaining = 0;
+    self->body_received = 0;
     self->nfr_bytes_in = 0;
     self->nfr_bytes_out = 0;
     if (self->reading_paused) {
@@ -3418,7 +3526,7 @@ http_data_received(WreathHttpProtocol *self, PyObject *data)
         self->buf_len += view.len;
     }
     PyBuffer_Release(&view);
-    if (run_drive(self) < 0) {
+    if (run_drive(self) < 0 || pause_pipeline_if_needed(self) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -3513,7 +3621,11 @@ http_commit_read_buffer(WreathHttpProtocol *self, Py_ssize_t nbytes)
     if (nbytes == 0 || self->closing) {
         return 0;
     }
-    return run_drive(self);
+    int result = run_drive(self);
+    if (result < 0 || pause_pipeline_if_needed(self) < 0) {
+        return -1;
+    }
+    return result;
 }
 
 
@@ -3611,7 +3723,11 @@ wreath_http1_feed_external(PyObject *protocol, const char *data, Py_ssize_t size
         }
         memcpy(self->buf + self->buf_len, data, (size_t)size);
         self->buf_len += size;
-        return run_drive(self);
+        int result = run_drive(self);
+        if (result < 0 || pause_pipeline_if_needed(self) < 0) {
+            return -1;
+        }
+        return result;
     }
     if (self->read_offer_size > 0 || self->read_exports > 0) {
         PyErr_SetString(PyExc_RuntimeError,
@@ -3649,7 +3765,7 @@ wreath_http1_feed_external(PyObject *protocol, const char *data, Py_ssize_t size
         memcpy(self->buf, data + consumed, (size_t)remaining);
         self->buf_len = remaining;
     }
-    return 0;
+    return pause_pipeline_if_needed(self);
 }
 
 

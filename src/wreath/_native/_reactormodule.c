@@ -160,7 +160,6 @@ PyInit__reactor(void)
     g_s_scheduled = PyUnicode_InternFromString("_scheduled");
     g_s_popleft = PyUnicode_InternFromString("popleft");
     g_s_append = PyUnicode_InternFromString("append");
-    g_s_setblocking = PyUnicode_InternFromString("setblocking");
     PyObject *fileno = PyUnicode_InternFromString("fileno");
     if (fileno != NULL) {
         g_fileno_kwnames = PyTuple_Pack(1, fileno);
@@ -168,7 +167,7 @@ PyInit__reactor(void)
     }
     if (!g_s_when || !g_s_run || !g_s_context_run || !g_s_cancelled ||
             !g_s_scheduled || !g_s_popleft || !g_s_append ||
-            !g_s_setblocking || !g_fileno_kwnames) {
+            !g_fileno_kwnames) {
         return NULL;
     }
     /* native-lint: allow NC004 -- one-time module initialization */

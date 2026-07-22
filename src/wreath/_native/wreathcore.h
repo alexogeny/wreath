@@ -100,7 +100,7 @@ PyObject *wreath_template_configure(PyObject *self, PyObject *args);
 int wreath_http_parse_request_parts(
     const uint8_t *data, Py_ssize_t len, Py_ssize_t head_end_off,
     PyObject **method, PyObject **target, int *minor_version,
-    PyObject **headers, Py_ssize_t *consumed
+    PyObject **headers, Py_ssize_t *consumed, Py_ssize_t max_headers
 );
 PyObject *wreath_http_parse_request(PyObject *self, PyObject *args);
 PyObject *wreath_http_parse_response(PyObject *self, PyObject *args);
