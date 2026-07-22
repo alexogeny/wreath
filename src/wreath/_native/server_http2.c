@@ -18,7 +18,7 @@ enum {
     FRAME_DATA = 0x0, FRAME_HEADERS = 0x1, FRAME_PRIORITY = 0x2,
     FRAME_RST_STREAM = 0x3, FRAME_SETTINGS = 0x4, FRAME_PUSH_PROMISE = 0x5,
     FRAME_PING = 0x6, FRAME_GOAWAY = 0x7, FRAME_WINDOW_UPDATE = 0x8,
-    FRAME_CONTINUATION = 0x9
+    FRAME_CONTINUATION = 0x9, FRAME_PRIORITY_UPDATE = 0x10
 };
 enum {
     FLAG_END_STREAM = 0x1, FLAG_ACK = 0x1, FLAG_END_HEADERS = 0x4,
@@ -53,6 +53,13 @@ enum {
  * request, real body bytes, or response DATA framed toward the peer) resets it,
  * so ordinary interleaved control traffic never trips. */
 #define H2_MAX_UNPRODUCTIVE_FRAMES 100
+
+/* Outbound DATA scheduling is deliberately bounded per activation. Persistent
+ * deficits make renewed connection credit fair across active streams; the byte
+ * and stream budgets keep one response burst from monopolizing the loop. */
+#define H2_DRR_QUANTUM (16 * 1024)
+#define H2_SCHED_MAX_STREAMS 64
+#define H2_SCHED_MAX_BYTES (256 * 1024)
 
 typedef struct {
     PyObject *body;             /* bytearray, mutable only while queued */
@@ -101,6 +108,9 @@ typedef struct {
     PyObject *send_waiter;     /* Future returned by _send, or NULL */
     int pending_end_stream;
     int in_conn_blocked;       /* queued in protocol->conn_blocked */
+    int64_t send_deficit;      /* persistent DRR payload credit */
+    uint8_t urgency;           /* RFC 9218 urgency, 0 (highest) through 7 */
+    uint8_t incremental;       /* RFC 9218 incremental delivery preference */
 
     /* Native Flight Recorder per-stream context (one request). */
     wreath_nfr_context nfr_ctx;
@@ -116,6 +126,7 @@ static int h2_write_frame(PyObject *proto, int type, int flags, uint32_t sid,
                           const uint8_t *payload, Py_ssize_t len);
 static int h2_stream_error(PyObject *proto, uint32_t sid, int code);
 static int h2_flush_stream_pending(PyObject *proto, Http2Stream *st);
+static int h2_schedule_pending(PyObject *proto);
 static void h2_maybe_close_stream(PyObject *proto, Http2Stream *st);
 static void h2_abort_pending_send(Http2Stream *st);
 
@@ -137,7 +148,13 @@ typedef struct {
     PyObject *loop_create_task;
 
     PyObject *streams;         /* dict {int stream_id: Http2Stream} */
-    PyObject *conn_blocked;    /* list of streams blocked on the connection window */
+    PyObject *pending_priorities; /* bounded PRIORITY_UPDATE values for idle streams */
+    PyObject *conn_blocked;    /* cursor queue of streams with pending DATA */
+    Py_ssize_t conn_blocked_head;
+    PyObject *scheduler_callable; /* bound _run_write_scheduler */
+    int scheduler_scheduled;
+    int rfc9218_enabled;       /* metal-only urgency/incremental policy */
+    uint32_t nonincremental_stream; /* current same-urgency sequential response */
     PyObject *out;             /* bytearray: pending outbound bytes */
 
     WreathHpackTable hpack;       /* inbound header decode table */
@@ -358,7 +375,8 @@ static int
 h2_flush(PyObject *proto)
 {
     Http2Protocol *self = (Http2Protocol *)proto;
-    if (self->transport == NULL || self->transport_write_fn == NULL) {
+    if (self->transport == NULL || self->transport_write_fn == NULL ||
+        self->write_paused) {
         return 0;
     }
     Py_ssize_t n = PyByteArray_GET_SIZE(self->out);
@@ -720,10 +738,9 @@ h2_note_unproductive(Http2Protocol *self)
     return h2_connection_error(self, H2_ENHANCE_YOUR_CALM);
 }
 
-/* Record that a stream is blocked on the *connection* send window, so a later
- * connection-level WINDOW_UPDATE can flush exactly the blocked streams instead
- * of scanning the whole open-stream table. The list holds a strong reference,
- * so a stream queued here is never freed out from under us. */
+/* Add a stream to the outbound active queue exactly once. The cursor queue owns
+ * a strong reference, so reset/close may safely leave a stale entry for the
+ * bounded scheduler to discard later. */
 static int
 mark_conn_blocked(Http2Protocol *self, Http2Stream *st)
 {
@@ -737,17 +754,37 @@ mark_conn_blocked(Http2Protocol *self, Http2Stream *st)
     return 0;
 }
 
-/* Frame as much of the retained body as the flow-control windows allow.
- *
- * Bytes are framed straight out of the application's own bytes object starting
- * at `pending_offset`, which only ever advances: no memmove, no front resize,
- * and no second copy of the body. */
+static int
+h2_schedule_continuation(Http2Protocol *self)
+{
+    if (self->scheduler_scheduled || self->write_paused || self->fatal ||
+        self->conn_send_window <= 0 ||
+        self->conn_blocked_head >= PyList_GET_SIZE(self->conn_blocked)) {
+        return 0;
+    }
+    PyObject *handle = PyObject_CallMethod(
+        self->loop, "call_soon", "O", self->scheduler_callable
+    );
+    if (handle == NULL) {
+        return -1;
+    }
+    Py_DECREF(handle);
+    self->scheduler_scheduled = 1;
+    return 0;
+}
+
+/* Frame at most one persistent DRR deficit from this stream. Bytes come
+ * directly from the application's immutable body object; transport pressure,
+ * stream credit, connection credit, and the deficit are all prerequisites. */
 static int
 h2_flush_stream_pending(PyObject *proto, Http2Stream *st)
 {
     Http2Protocol *self = (Http2Protocol *)proto;
     if (st->pending_body == NULL) {
         return 0;
+    }
+    if (self->write_paused) {
+        return mark_conn_blocked(self, st);
     }
     Py_ssize_t total = PyBytes_GET_SIZE(st->pending_body);
     while (st->pending_offset < total) {
@@ -756,14 +793,13 @@ h2_flush_stream_pending(PyObject *proto, Http2Stream *st)
             window = self->conn_send_window;
         }
         if (window <= 0) {
-            /* blocked: keep the body and leave the waiter pending. If the
-             * connection window is the binding constraint, remember this stream
-             * so a connection WINDOW_UPDATE can find it without a full scan. */
-            if (self->conn_send_window <= 0 && st->send_window > 0
-                && mark_conn_blocked(self, st) < 0) {
-                return -1;
+            if (self->conn_send_window <= 0 && st->send_window > 0) {
+                return mark_conn_blocked(self, st);
             }
             return 0;
+        }
+        if (st->send_deficit <= 0) {
+            return mark_conn_blocked(self, st);
         }
         Py_ssize_t chunk = total - st->pending_offset;
         if ((int64_t)chunk > window) {
@@ -771,6 +807,9 @@ h2_flush_stream_pending(PyObject *proto, Http2Stream *st)
         }
         if (chunk > self->our_max_frame) {
             chunk = self->our_max_frame;
+        }
+        if ((int64_t)chunk > st->send_deficit) {
+            chunk = (Py_ssize_t)st->send_deficit;
         }
         int last = (st->pending_offset + chunk == total) && st->pending_end_stream;
         if (h2_write_frame(proto, FRAME_DATA, last ? FLAG_END_STREAM : 0, st->id,
@@ -781,20 +820,147 @@ h2_flush_stream_pending(PyObject *proto, Http2Stream *st)
         }
         st->pending_offset += chunk;
         st->send_window -= chunk;
+        st->send_deficit -= chunk;
         self->conn_send_window -= chunk;
-        h2_note_progress(self);  /* framing response data is real progress */
+        h2_note_progress(self);
         if (self->nfr_worker != NULL) {
             st->nfr_bytes_out += (uint64_t)chunk;
         }
     }
-    /* A non-empty body carried END_STREAM on its last DATA frame; an empty
-     * final body still needs a frame of its own to carry the flag. */
     if (total == 0 && st->pending_end_stream) {
         if (h2_write_frame(proto, FRAME_DATA, FLAG_END_STREAM, st->id, NULL, 0) < 0) {
             return -1;
         }
     }
     return h2_finish_pending_send(proto, st);
+}
+
+static Py_ssize_t
+h2_select_pending_index(Http2Protocol *self, Py_ssize_t head)
+{
+    if (!self->rfc9218_enabled) {
+        return head;
+    }
+    Py_ssize_t size = PyList_GET_SIZE(self->conn_blocked);
+    Py_ssize_t limit = head + H2_SCHED_MAX_STREAMS;
+    if (limit > size) {
+        limit = size;
+    }
+    Py_ssize_t best = head;
+    uint8_t best_urgency = 8;
+    int best_incremental = 1;
+    Py_ssize_t exclusive = -1;
+    uint8_t exclusive_urgency = 8;
+    for (Py_ssize_t index = head; index < limit; index++) {
+        Http2Stream *candidate = (Http2Stream *)PyList_GET_ITEM(
+            self->conn_blocked, index);
+        if (candidate->pending_body == NULL || candidate->state == S_CLOSED) {
+            continue;
+        }
+        if (candidate->id == self->nonincremental_stream &&
+            !candidate->incremental) {
+            exclusive = index;
+            exclusive_urgency = candidate->urgency;
+        }
+        if (candidate->urgency < best_urgency ||
+            (candidate->urgency == best_urgency && best_incremental &&
+             !candidate->incremental)) {
+            best = index;
+            best_urgency = candidate->urgency;
+            best_incremental = candidate->incremental;
+        }
+    }
+    if (exclusive >= 0 && exclusive_urgency <= best_urgency) {
+        return exclusive;
+    }
+    return best;
+}
+
+static int
+h2_schedule_pending(PyObject *proto)
+{
+    Http2Protocol *self = (Http2Protocol *)proto;
+    if (self->write_paused || self->fatal) {
+        return 0;
+    }
+    Py_ssize_t visited = 0;
+    Py_ssize_t framed = 0;
+    while (self->conn_blocked_head < PyList_GET_SIZE(self->conn_blocked) &&
+           visited < H2_SCHED_MAX_STREAMS && framed < H2_SCHED_MAX_BYTES) {
+        Py_ssize_t selected = h2_select_pending_index(
+            self, self->conn_blocked_head);
+        if (selected != self->conn_blocked_head) {
+            PyObject *at_head = PyList_GET_ITEM(
+                self->conn_blocked, self->conn_blocked_head);
+            PyObject *at_selected = PyList_GET_ITEM(self->conn_blocked, selected);
+            PyList_SET_ITEM(self->conn_blocked, self->conn_blocked_head,
+                            at_selected);
+            PyList_SET_ITEM(self->conn_blocked, selected, at_head);
+        }
+        Http2Stream *st = (Http2Stream *)PyList_GET_ITEM(
+            self->conn_blocked, self->conn_blocked_head++
+        );
+        st->in_conn_blocked = 0;
+        visited++;
+        if (st->pending_body == NULL || st->state == S_CLOSED) {
+            continue;
+        }
+        Py_ssize_t before = PyBytes_GET_SIZE(st->pending_body) - st->pending_offset;
+        /* A blocked turn earns no deficit: otherwise repeated wakeups with no
+         * connection credit let the first stream hoard the next increment. */
+        if (st->send_window > 0 && self->conn_send_window > 0) {
+            int64_t quantum = self->rfc9218_enabled && !st->incremental
+                ? 2 * H2_DRR_QUANTUM : H2_DRR_QUANTUM;
+            st->send_deficit += quantum;
+            if (st->send_deficit > 2 * quantum) {
+                st->send_deficit = 2 * quantum;
+            }
+        }
+        if (h2_flush_stream_pending(proto, st) < 0) {
+            return -1;
+        }
+        Py_ssize_t after = st->pending_body == NULL
+            ? 0 : PyBytes_GET_SIZE(st->pending_body) - st->pending_offset;
+        Py_ssize_t progress = before - after;
+        framed += progress;
+        if (self->rfc9218_enabled && !st->incremental && after > 0 &&
+            progress > 0) {
+            self->nonincremental_stream = st->id;
+        } else if (self->nonincremental_stream == st->id &&
+                   (after == 0 || progress == 0)) {
+            self->nonincremental_stream = 0;
+        }
+    }
+
+    Py_ssize_t size = PyList_GET_SIZE(self->conn_blocked);
+    Py_ssize_t live = size - self->conn_blocked_head;
+    if (live == 0) {
+        if (PyList_SetSlice(self->conn_blocked, 0, size, NULL) < 0) {
+            return -1;
+        }
+        self->conn_blocked_head = 0;
+    } else if (self->conn_blocked_head >= H2_SCHED_MAX_STREAMS &&
+               live <= H2_SCHED_MAX_STREAMS) {
+        PyObject *tail = PyList_GetSlice(self->conn_blocked,
+                                         self->conn_blocked_head, size);
+        if (tail == NULL) {
+            return -1;
+        }
+        Py_SETREF(self->conn_blocked, tail);
+        self->conn_blocked_head = 0;
+    }
+    return h2_schedule_continuation(self);
+}
+
+static PyObject *
+h2_run_write_scheduler(PyObject *op, PyObject *Py_UNUSED(ignored))
+{
+    Http2Protocol *self = (Http2Protocol *)op;
+    self->scheduler_scheduled = 0;
+    if (h2_schedule_pending(op) < 0 || h2_flush(op) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
 }
 
 static PyObject *
@@ -884,7 +1050,8 @@ stream_send(PyObject *op, PyObject *message)
         Py_XDECREF(owned);
         self->pending_offset = 0;
         self->pending_end_stream = !more_body && !self->trailers_expected;
-        if (h2_flush_stream_pending((PyObject *)proto, self) < 0) {
+        if (mark_conn_blocked(proto, self) < 0 ||
+            h2_schedule_pending((PyObject *)proto) < 0) {
             return NULL;
         }
         if (h2_flush((PyObject *)proto) < 0) {
@@ -1356,6 +1523,42 @@ proto_err:
     return -1;
 }
 
+static void
+parse_priority_field(const char *value, Py_ssize_t length,
+                     uint8_t *urgency, uint8_t *incremental)
+{
+    Py_ssize_t cursor = 0;
+    while (cursor < length) {
+        while (cursor < length &&
+               (value[cursor] == ' ' || value[cursor] == '\t' ||
+                value[cursor] == ',')) {
+            cursor++;
+        }
+        Py_ssize_t start = cursor;
+        while (cursor < length && value[cursor] != ',') {
+            cursor++;
+        }
+        Py_ssize_t end = cursor;
+        while (end > start &&
+               (value[end - 1] == ' ' || value[end - 1] == '\t')) {
+            end--;
+        }
+        if (end - start == 3 && value[start] == 'u' &&
+            value[start + 1] == '=' && value[start + 2] >= '0' &&
+            value[start + 2] <= '7') {
+            *urgency = (uint8_t)(value[start + 2] - '0');
+        } else if (end - start == 1 && value[start] == 'i') {
+            *incremental = 1;
+        } else if (end - start == 4 &&
+                   memcmp(value + start, "i=?1", 4) == 0) {
+            *incremental = 1;
+        } else if (end - start == 4 &&
+                   memcmp(value + start, "i=?0", 4) == 0) {
+            *incremental = 0;
+        }
+    }
+}
+
 /* Create the stream object, build scope, spawn the ASGI task. */
 static int
 start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
@@ -1411,6 +1614,33 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     st->send_waiter = NULL;
     st->pending_end_stream = 0;
     st->in_conn_blocked = 0;
+    st->send_deficit = 0;
+    st->urgency = 3;
+    st->incremental = 0;
+    if (self->rfc9218_enabled) {
+        PyObject *priority_key = PyLong_FromUnsignedLong(sid);
+        if (priority_key == NULL) {
+            Py_DECREF(st);
+            return -1;
+        }
+        PyObject *saved = PyDict_GetItemWithError(
+            self->pending_priorities, priority_key);
+        if (saved != NULL) {
+            unsigned long packed = PyLong_AsUnsignedLong(saved);
+            st->urgency = (uint8_t)(packed & 0xffU);
+            st->incremental = (uint8_t)((packed >> 8) & 0x1U);
+            if (PyDict_DelItem(self->pending_priorities, priority_key) < 0) {
+                Py_DECREF(priority_key);
+                Py_DECREF(st);
+                return -1;
+            }
+        } else if (PyErr_Occurred()) {
+            Py_DECREF(priority_key);
+            Py_DECREF(st);
+            return -1;
+        }
+        Py_DECREF(priority_key);
+    }
     st->nfr_active = 0;
     st->nfr_bytes_out = 0;
     PyObject_GC_Track((PyObject *)st);
@@ -1426,6 +1656,11 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
             st->content_length = (Py_ssize_t)PyLong_AsLong(
                 PyLong_FromString(PyBytes_AS_STRING(value), NULL, 10));
             PyErr_Clear();
+        } else if (self->rfc9218_enabled && PyBytes_GET_SIZE(name) == 8 &&
+                   memcmp(PyBytes_AS_STRING(name), "priority", 8) == 0) {
+            PyObject *value = PyTuple_GET_ITEM(pair, 1);
+            parse_priority_field(PyBytes_AS_STRING(value), PyBytes_GET_SIZE(value),
+                                 &st->urgency, &st->incremental);
         }
     }
 
@@ -1820,27 +2055,9 @@ process_window_update(Http2Protocol *self, uint32_t sid,
         if (self->conn_send_window > WINDOW_MAX) {
             return h2_connection_error(self, H2_FLOW_CONTROL_ERROR);
         }
-        /* Flush exactly the streams blocked on the connection window -- O(blocked)
-         * rather than O(open streams). Swap in a fresh queue and let each flush
-         * re-enqueue the stream if it is still connection-blocked afterward. */
-        PyObject *blocked = self->conn_blocked;
-        PyObject *fresh = PyList_New(0);
-        if (fresh == NULL) {
-            return -1;
-        }
-        self->conn_blocked = fresh;
-        Py_ssize_t nb = PyList_GET_SIZE(blocked);
-        int rc = 0;
-        for (Py_ssize_t i = 0; i < nb; i++) {
-            Http2Stream *bs = (Http2Stream *)PyList_GET_ITEM(blocked, i);
-            bs->in_conn_blocked = 0;
-            if (h2_flush_stream_pending((PyObject *)self, bs) < 0) {
-                rc = -1;
-                break;
-            }
-        }
-        Py_DECREF(blocked);
-        return rc;
+        /* Streams blocked on connection credit remain in the cursor queue.
+         * Persistent deficits divide this increment fairly in bounded work. */
+        return h2_schedule_pending((PyObject *)self);
     }
     /* A zero increment on a stream is a stream error regardless of the stream's
      * current state (RFC 9113 s6.9); an idle stream id is a connection error. */
@@ -1863,7 +2080,10 @@ process_window_update(Http2Protocol *self, uint32_t sid,
     if (st->send_window > WINDOW_MAX) {
         return h2_stream_error((PyObject *)self, sid, H2_FLOW_CONTROL_ERROR);
     }
-    return h2_flush_stream_pending((PyObject *)self, st);
+    if (st->pending_body != NULL && mark_conn_blocked(self, st) < 0) {
+        return -1;
+    }
+    return h2_schedule_pending((PyObject *)self);
 }
 
 static int
@@ -1950,6 +2170,65 @@ process_ping(Http2Protocol *self, int flags, uint32_t sid,
     return h2_write_frame((PyObject *)self, FRAME_PING, FLAG_ACK, 0, payload, 8);
 }
 
+static int
+process_priority_update(Http2Protocol *self, uint32_t sid,
+                        const uint8_t *payload, Py_ssize_t len)
+{
+    if (!self->rfc9218_enabled) {
+        return 0;  /* preserve stock asyncio/uvloop scheduling */
+    }
+    if (sid != 0) {
+        return h2_connection_error(self, H2_PROTOCOL_ERROR);
+    }
+    if (len < 4) {
+        return h2_connection_error(self, H2_FRAME_SIZE_ERROR);
+    }
+    if (h2_note_unproductive(self) < 0 || self->fatal) {
+        return self->fatal ? 0 : -1;
+    }
+    uint32_t stream_id = get_u32(payload) & 0x7fffffffU;
+    if (stream_id == 0 || (stream_id & 1) == 0) {
+        return 0;
+    }
+    PyObject *key = PyLong_FromUnsignedLong(stream_id);
+    if (key == NULL) {
+        return -1;
+    }
+    PyObject *stream_obj = PyDict_GetItemWithError(self->streams, key);
+    if (stream_obj == NULL) {
+        if (PyErr_Occurred()) {
+            Py_DECREF(key);
+            return -1;
+        }
+        if (stream_id > self->last_stream_id &&
+            PyDict_Size(self->pending_priorities) < self->max_concurrent) {
+            uint8_t urgency = 3;
+            uint8_t incremental = 0;
+            parse_priority_field((const char *)payload + 4, len - 4,
+                                 &urgency, &incremental);
+            PyObject *packed = PyLong_FromUnsignedLong(
+                (unsigned long)urgency | ((unsigned long)incremental << 8));
+            if (packed == NULL ||
+                PyDict_SetItem(self->pending_priorities, key, packed) < 0) {
+                Py_XDECREF(packed);
+                Py_DECREF(key);
+                return -1;
+            }
+            Py_DECREF(packed);
+        }
+        Py_DECREF(key);
+        return 0;
+    }
+    Py_DECREF(key);
+    Http2Stream *stream = (Http2Stream *)stream_obj;
+    parse_priority_field((const char *)payload + 4, len - 4,
+                         &stream->urgency, &stream->incremental);
+    if (stream->incremental && self->nonincremental_stream == stream_id) {
+        self->nonincremental_stream = 0;
+    }
+    return 0;
+}
+
 /* Dispatch a single fully-buffered frame. */
 static int
 dispatch_frame(Http2Protocol *self, int type, int flags, uint32_t sid,
@@ -1982,7 +2261,9 @@ dispatch_frame(Http2Protocol *self, int type, int flags, uint32_t sid,
         if (h2_note_unproductive(self) < 0) {  /* ignored, but still costs us */
             return -1;
         }
-        return 0;  /* ignore priority */
+        return 0;  /* RFC 7540 dependency priority remains ignored */
+    case FRAME_PRIORITY_UPDATE:
+        return process_priority_update(self, sid, payload, len);
     case FRAME_GOAWAY:
         self->closing = 1;
         return 0;
@@ -2203,6 +2484,13 @@ h2_connection_lost(PyObject *op, PyObject *Py_UNUSED(exc))
         }
         PyDict_Clear(self->streams);
     }
+    if (self->conn_blocked != NULL) {
+        Py_ssize_t queued = PyList_GET_SIZE(self->conn_blocked);
+        if (PyList_SetSlice(self->conn_blocked, 0, queued, NULL) < 0) {
+            PyErr_Clear();
+        }
+        self->conn_blocked_head = 0;
+    }
     self->active_requests = 0;
     if (self->registry != NULL) {
         if (PySet_Discard(self->registry, op) < 0) {
@@ -2224,7 +2512,11 @@ h2_pause_writing(PyObject *op, PyObject *Py_UNUSED(ignored))
 static PyObject *
 h2_resume_writing(PyObject *op, PyObject *Py_UNUSED(ignored))
 {
-    ((Http2Protocol *)op)->write_paused = 0;
+    Http2Protocol *self = (Http2Protocol *)op;
+    self->write_paused = 0;
+    if (h2_flush(op) < 0 || h2_schedule_pending(op) < 0 || h2_flush(op) < 0) {
+        return NULL;
+    }
     Py_RETURN_NONE;
 }
 
@@ -2272,6 +2564,7 @@ static PyMethodDef h2_methods[] = {
     {"connection_lost", h2_connection_lost, METH_O, NULL},
     {"pause_writing", h2_pause_writing, METH_NOARGS, NULL},
     {"resume_writing", h2_resume_writing, METH_NOARGS, NULL},
+    {"_run_write_scheduler", h2_run_write_scheduler, METH_NOARGS, NULL},
     {"stop_accepting", h2_stop_accepting, METH_NOARGS, NULL},
     {"shutdown", h2_shutdown, METH_NOARGS, NULL},
     {NULL, NULL, 0, NULL},
@@ -2291,7 +2584,9 @@ h2_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->loop_create_future);
     Py_VISIT(self->loop_create_task);
     Py_VISIT(self->streams);
+    Py_VISIT(self->pending_priorities);
     Py_VISIT(self->conn_blocked);
+    Py_VISIT(self->scheduler_callable);
     Py_VISIT(self->out);
     Py_VISIT(self->header_block);
     return 0;
@@ -2311,7 +2606,9 @@ h2_clear(PyObject *op)
     Py_CLEAR(self->loop_create_future);
     Py_CLEAR(self->loop_create_task);
     Py_CLEAR(self->streams);
+    Py_CLEAR(self->pending_priorities);
     Py_CLEAR(self->conn_blocked);
+    Py_CLEAR(self->scheduler_callable);
     Py_CLEAR(self->out);
     Py_CLEAR(self->header_block);
     wreath_hpack_table_clear(&self->hpack);
@@ -2367,10 +2664,28 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
         return -1;
     }
     self->streams = PyDict_New();
+    self->pending_priorities = PyDict_New();
     self->conn_blocked = PyList_New(0);
+    self->conn_blocked_head = 0;
+    self->scheduler_callable = PyObject_GetAttrString(op, "_run_write_scheduler");
+    self->scheduler_scheduled = 0;
+    self->rfc9218_enabled = 0;
+    self->nonincremental_stream = 0;
+    PyObject *native_loop = PyObject_GetAttrString(loop, "_native_loop");
+    if (native_loop != NULL) {
+        self->rfc9218_enabled = PyObject_IsTrue(native_loop);
+        Py_DECREF(native_loop);
+        if (self->rfc9218_enabled < 0) {
+            return -1;
+        }
+    } else {
+        PyErr_Clear();
+    }
     self->out = PyByteArray_FromStringAndSize("", 0);
     self->header_block = PyByteArray_FromStringAndSize("", 0);
-    if (!self->streams || !self->conn_blocked || !self->out || !self->header_block) {
+    if (!self->streams || !self->pending_priorities || !self->conn_blocked ||
+        !self->scheduler_callable ||
+        !self->out || !self->header_block) {
         return -1;
     }
     self->buf = NULL;

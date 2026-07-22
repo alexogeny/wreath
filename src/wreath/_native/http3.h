@@ -77,6 +77,9 @@ typedef struct {
     Py_ssize_t resp_read_index;  /* segment currently offered to nghttp3 */
     Py_ssize_t resp_read_offset; /* offset inside that segment */
     uint64_t resp_payload_acked; /* acked payload bytes not yet attributed */
+    Py_ssize_t resp_retained_bytes;
+    Py_ssize_t resp_retained_segments;
+    PyObject *send_waiter;       /* pending ASGI send above response high water */
     int resp_eof;                /* response body complete (fin) */
 
     /* Native Flight Recorder per-stream context (one request). Only touched
@@ -106,6 +109,8 @@ typedef struct WreathH3Conn {
     PyObject *capsule;                /* borrowed self-capsule (no destructor) */
     Py_ssize_t queued_body_bytes;     /* application DATA not consumed by ASGI */
     Py_ssize_t queued_body_messages;  /* streams with a nonempty body buffer */
+    Py_ssize_t retained_response_bytes;
+    Py_ssize_t retained_response_segments;
     uint64_t nfr_connection_id;       /* 0 when telemetry is off */
     int handshake_done;
     int closed;
@@ -136,12 +141,20 @@ typedef struct WreathH3Endpoint {
     Py_ssize_t reap_cap;
     int accepting;
     int active_requests;
+    Py_ssize_t retained_response_bytes;
+    Py_ssize_t retained_response_segments;
+    Py_ssize_t response_backpressure_waiters;
+    uint64_t response_backpressure_pauses;
 
     /* limits (from ServerConfig) */
     Py_ssize_t max_concurrent_streams;
     Py_ssize_t max_body_bytes;
     Py_ssize_t read_high_water;
     Py_ssize_t read_high_water_messages;
+    Py_ssize_t response_high_water;
+    Py_ssize_t response_low_water;
+    Py_ssize_t response_high_water_segments;
+    Py_ssize_t response_low_water_segments;
     Py_ssize_t max_header_list_bytes;
     Py_ssize_t initial_stream_window;
     Py_ssize_t initial_connection_window;

@@ -2,8 +2,8 @@
  *
  * Built only when WREATH_BUILD_HTTP3=1 (ADR 0011). Maps QUIC request streams to
  * ASGI http scopes (http_version == "3") and turns ASGI responses back into
- * nghttp3 responses. The response body is buffered and submitted once complete
- * so ngtcp2's retransmission vecs never point into a reallocated buffer.
+ * nghttp3 responses. Response segments are submitted while streaming and retained
+ * under bounded acknowledgement-driven credit while ngtcp2 may retransmit them.
  */
 #include "http3.h"
 
@@ -43,6 +43,125 @@ resolved_future(PyObject *loop, PyObject *value)
 
 static PyObject *endpoint_loop(WreathH3Conn *c) { return c->endpoint->loop; }
 static PyObject *endpoint_app(WreathH3Conn *c) { return c->endpoint->app; }
+
+static int
+h3_response_over_high_water(WreathH3Stream *s)
+{
+    WreathH3Conn *c = s->conn;
+    WreathH3Endpoint *ep = c->endpoint;
+    return s->resp_retained_bytes > ep->response_high_water ||
+           s->resp_retained_segments > ep->response_high_water_segments ||
+           c->retained_response_bytes > ep->response_high_water ||
+           c->retained_response_segments > ep->response_high_water_segments;
+}
+
+static int
+h3_stream_below_response_low_water(WreathH3Stream *s)
+{
+    WreathH3Endpoint *ep = s->conn->endpoint;
+    return s->resp_retained_bytes <= ep->response_low_water &&
+           s->resp_retained_segments <= ep->response_low_water_segments;
+}
+
+static int
+h3_resolve_send_waiter(WreathH3Stream *s)
+{
+    PyObject *waiter = s->send_waiter;
+    if (waiter == NULL) {
+        return 0;
+    }
+    s->send_waiter = NULL;
+    if (s->conn != NULL && s->conn->endpoint->response_backpressure_waiters > 0) {
+        s->conn->endpoint->response_backpressure_waiters--;
+    }
+    PyObject *done = PyObject_CallMethod(waiter, "done", NULL);
+    if (done == NULL) {
+        Py_DECREF(waiter);
+        return -1;
+    }
+    int is_done = PyObject_IsTrue(done);
+    Py_DECREF(done);
+    if (is_done < 0) {
+        Py_DECREF(waiter);
+        return -1;
+    }
+    if (!is_done) {
+        PyObject *result = PyObject_CallMethod(waiter, "set_result", "O", Py_None);
+        if (result == NULL) {
+            Py_DECREF(waiter);
+            return -1;
+        }
+        Py_DECREF(result);
+    }
+    Py_DECREF(waiter);
+    return 0;
+}
+
+static void
+h3_cancel_send_waiter(WreathH3Stream *s)
+{
+    PyObject *waiter = s->send_waiter;
+    if (waiter == NULL) {
+        return;
+    }
+    s->send_waiter = NULL;
+    if (s->conn != NULL && s->conn->endpoint->response_backpressure_waiters > 0) {
+        s->conn->endpoint->response_backpressure_waiters--;
+    }
+    PyObject *done = PyObject_CallMethod(waiter, "done", NULL);
+    int is_done = done != NULL ? PyObject_IsTrue(done) : 1;
+    Py_XDECREF(done);
+    if (is_done == 0) {
+        PyObject *result = PyObject_CallMethod(waiter, "cancel", NULL);
+        Py_XDECREF(result);
+    }
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
+    }
+    Py_DECREF(waiter);
+}
+
+static int
+h3_maybe_resume_senders(WreathH3Conn *c)
+{
+    WreathH3Endpoint *ep = c->endpoint;
+    if (c->retained_response_bytes > ep->response_low_water ||
+        c->retained_response_segments > ep->response_low_water_segments) {
+        return 0;
+    }
+    PyObject *streams = PyDict_Values(c->streams);
+    if (streams == NULL) {
+        return -1;
+    }
+    Py_ssize_t count = PyList_GET_SIZE(streams);
+    for (Py_ssize_t i = 0; i < count; i++) {
+        WreathH3Stream *s = (WreathH3Stream *)PyList_GET_ITEM(streams, i);
+        if (s->send_waiter != NULL && h3_stream_below_response_low_water(s) &&
+            h3_resolve_send_waiter(s) < 0) {
+            Py_DECREF(streams);
+            return -1;
+        }
+    }
+    Py_DECREF(streams);
+    return 0;
+}
+
+static PyObject *
+h3_response_send_result(WreathH3Stream *s, PyObject *loop)
+{
+    if (!h3_response_over_high_water(s)) {
+        return resolved_future(loop, Py_None);
+    }
+    if (s->send_waiter == NULL) {
+        s->send_waiter = PyObject_CallMethod(loop, "create_future", NULL);
+        if (s->send_waiter == NULL) {
+            return NULL;
+        }
+        s->conn->endpoint->response_backpressure_waiters++;
+        s->conn->endpoint->response_backpressure_pauses++;
+    }
+    return Py_NewRef(s->send_waiter);
+}
 
 static PyObject *
 wreath_request_context_new(
@@ -221,9 +340,25 @@ h3_stream_send(PyObject *op, PyObject *message)
             }
             /* Retain the app's exact bytes; never concatenate into a bytearray
              * whose reallocation would move addresses nghttp3 still holds. */
-            if (PyBytes_GET_SIZE(body) > 0) {
+            Py_ssize_t body_size = PyBytes_GET_SIZE(body);
+            if (body_size > 0) {
+                WreathH3Conn *c = s->conn;
+                WreathH3Endpoint *ep = c->endpoint;
+                if (body_size > PY_SSIZE_T_MAX - s->resp_retained_bytes ||
+                    body_size > PY_SSIZE_T_MAX - c->retained_response_bytes ||
+                    body_size > PY_SSIZE_T_MAX - ep->retained_response_bytes) {
+                    PyErr_SetString(PyExc_OverflowError,
+                                    "retained HTTP/3 response bytes overflow");
+                    return NULL;
+                }
                 if (s->resp_chunks_len == s->resp_chunks_cap) {
+                    if (s->resp_chunks_cap > PY_SSIZE_T_MAX / 2) {
+                        return PyErr_NoMemory();
+                    }
                     Py_ssize_t cap = s->resp_chunks_cap ? s->resp_chunks_cap * 2 : 16;
+                    if ((size_t)cap > SIZE_MAX / sizeof(PyObject *)) {
+                        return PyErr_NoMemory();
+                    }
                     PyObject **grown = PyMem_Realloc(
                         s->resp_chunks, (size_t)cap * sizeof(PyObject *));
                     if (grown == NULL) return PyErr_NoMemory();
@@ -231,6 +366,12 @@ h3_stream_send(PyObject *op, PyObject *message)
                     s->resp_chunks_cap = cap;
                 }
                 s->resp_chunks[s->resp_chunks_len++] = Py_NewRef(body);
+                s->resp_retained_bytes += body_size;
+                s->resp_retained_segments++;
+                c->retained_response_bytes += body_size;
+                c->retained_response_segments++;
+                ep->retained_response_bytes += body_size;
+                ep->retained_response_segments++;
             }
             if (s->nfr_active) {
                 s->nfr_bytes_out += (uint64_t)PyBytes_GET_SIZE(body);
@@ -244,7 +385,7 @@ h3_stream_send(PyObject *op, PyObject *message)
             nghttp3_conn_resume_stream(s->conn->h3, s->stream_id);
             wreath_h3_flush(s->conn);
         }
-        return resolved_future(loop, Py_None);
+        return h3_response_send_result(s, loop);
     }
     PyErr_Format(PyExc_RuntimeError, "unsupported ASGI message type: %s", t);
     return NULL;
@@ -320,6 +461,15 @@ h3_release_acked(WreathH3Stream *s, uint64_t datalen)
         s->resp_payload_acked -= n;
         /* Drop the payload reference as soon as acknowledgement covers it. */
         Py_CLEAR(s->resp_chunks[s->resp_head]);
+        s->resp_retained_bytes -= (Py_ssize_t)n;
+        s->resp_retained_segments--;
+        if (s->conn != NULL) {
+            WreathH3Conn *c = s->conn;
+            c->retained_response_bytes -= (Py_ssize_t)n;
+            c->retained_response_segments--;
+            c->endpoint->retained_response_bytes -= (Py_ssize_t)n;
+            c->endpoint->retained_response_segments--;
+        }
         s->resp_head++;
     }
     /* Compact the released prefix occasionally: the payload is already gone, so
@@ -555,6 +705,19 @@ void
 wreath_h3_stream_disconnect(WreathH3Stream *s)
 {
     s->disconnected = 1;
+    WreathH3Conn *c = s->conn;
+    h3_cancel_send_waiter(s);
+    if (c != NULL && s->resp_retained_segments > 0) {
+        c->retained_response_bytes -= s->resp_retained_bytes;
+        c->retained_response_segments -= s->resp_retained_segments;
+        c->endpoint->retained_response_bytes -= s->resp_retained_bytes;
+        c->endpoint->retained_response_segments -= s->resp_retained_segments;
+        s->resp_retained_bytes = 0;
+        s->resp_retained_segments = 0;
+        if (h3_maybe_resume_senders(c) < 0) {
+            PyErr_Clear();
+        }
+    }
     if (s->conn != NULL && s->body_buffer != NULL) {
         Py_ssize_t queued = PyByteArray_GET_SIZE(s->body_buffer);
         s->conn->queued_body_bytes -= queued;
@@ -590,6 +753,7 @@ h3_stream_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(s->body_buffer);
     Py_VISIT(s->receive_waiter);
     Py_VISIT(s->resp_headers);
+    Py_VISIT(s->send_waiter);
     for (Py_ssize_t i = s->resp_head; i < s->resp_chunks_len; i++) {
         Py_VISIT(s->resp_chunks[i]);
     }
@@ -610,6 +774,7 @@ h3_stream_clear(PyObject *op)
     Py_CLEAR(s->body_buffer);
     Py_CLEAR(s->receive_waiter);
     Py_CLEAR(s->resp_headers);
+    h3_cancel_send_waiter(s);
     for (Py_ssize_t i = s->resp_head; i < s->resp_chunks_len; i++) {
         Py_XDECREF(s->resp_chunks[i]);
     }
@@ -620,6 +785,8 @@ h3_stream_clear(PyObject *op)
     s->resp_read_index = 0;
     s->resp_read_offset = 0;
     s->resp_payload_acked = 0;
+    s->resp_retained_bytes = 0;
+    s->resp_retained_segments = 0;
     return 0;
 }
 
@@ -714,6 +881,9 @@ begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     s->resp_read_index = 0;
     s->resp_read_offset = 0;
     s->resp_payload_acked = 0;
+    s->resp_retained_bytes = 0;
+    s->resp_retained_segments = 0;
+    s->send_waiter = NULL;
     s->status = 0;
     s->resp_headers = NULL;
     s->resp_eof = 0;
@@ -1094,6 +1264,9 @@ acked_stream_data_cb(nghttp3_conn *conn, int64_t stream_id, uint64_t datalen,
         return 0;
     }
     h3_release_acked(s, datalen);
+    if (s->conn != NULL && h3_maybe_resume_senders(s->conn) < 0) {
+        return NGHTTP3_ERR_CALLBACK_FAILURE;
+    }
     return 0;
 }
 

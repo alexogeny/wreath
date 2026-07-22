@@ -15,7 +15,7 @@ from typing import Any, Literal, cast
 
 from .server import ASGIApplication, ServerConfig, TLSConfig, run
 
-LoopName = Literal["asyncio", "uvloop"]
+LoopName = Literal["asyncio", "uvloop", "metal"]
 
 
 class CliError(Exception):
@@ -47,6 +47,10 @@ class RunOptions:
     max_body_bytes: int
     read_high_water: int
     read_high_water_messages: int
+    response_high_water: int
+    response_low_water: int
+    response_high_water_segments: int
+    response_low_water_segments: int
     max_ws_fragments: int
     lifespan: Literal["auto", "on", "off"]
     protocols: tuple[str, ...]
@@ -58,6 +62,7 @@ class RunOptions:
     qpack_table_bytes: int
     qpack_blocked_streams: int
     loop: LoopName
+    workers: int
     tls_cert: str | None
     tls_key: str | None
     tls_password_file: str | None
@@ -85,6 +90,10 @@ class RunOptions:
                 max_body_bytes=self.max_body_bytes,
                 read_high_water=self.read_high_water,
                 read_high_water_messages=self.read_high_water_messages,
+                response_high_water=self.response_high_water,
+                response_low_water=self.response_low_water,
+                response_high_water_segments=self.response_high_water_segments,
+                response_low_water_segments=self.response_low_water_segments,
                 max_ws_fragments=self.max_ws_fragments,
                 lifespan=self.lifespan,
                 protocols=cast(Any, self.protocols),
@@ -152,6 +161,20 @@ def _add_server_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--read-high-water-messages", type=int, default=defaults.read_high_water_messages
     )
+    parser.add_argument(
+        "--response-high-water", type=int, default=defaults.response_high_water
+    )
+    parser.add_argument(
+        "--response-low-water", type=int, default=defaults.response_low_water
+    )
+    parser.add_argument(
+        "--response-high-water-segments", type=int,
+        default=defaults.response_high_water_segments,
+    )
+    parser.add_argument(
+        "--response-low-water-segments", type=int,
+        default=defaults.response_low_water_segments,
+    )
     parser.add_argument("--max-ws-fragments", type=int, default=defaults.max_ws_fragments)
     parser.add_argument(
         "--lifespan", choices=("auto", "on", "off"), default=defaults.lifespan
@@ -180,7 +203,11 @@ def _add_server_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--qpack-blocked-streams", type=int, default=defaults.qpack_blocked_streams
     )
-    parser.add_argument("--loop", choices=("asyncio", "uvloop"), default="asyncio")
+    parser.add_argument("--loop", choices=("asyncio", "uvloop", "metal"), default="asyncio")
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="metal worker processes sharing an SO_REUSEPORT listener",
+    )
     parser.add_argument("--tls-cert", metavar="PATH")
     parser.add_argument("--tls-key", metavar="PATH")
     parser.add_argument(
@@ -373,6 +400,14 @@ def options_from_namespace(namespace: argparse.Namespace) -> RunOptions:
         raise CliError("--tls-password-file requires --tls-cert and --tls-key", exit_code=2)
     if namespace.command == "dev" and namespace.port == 0:
         raise CliError("wreath dev does not support port 0 across reloads", exit_code=2)
+    if namespace.workers < 1:
+        raise CliError("--workers must be at least 1", exit_code=2)
+    if namespace.workers > 1 and namespace.loop != "metal":
+        raise CliError("--workers requires --loop metal", exit_code=2)
+    if namespace.workers > 1 and namespace.command == "dev":
+        raise CliError("wreath dev does not support multiple workers", exit_code=2)
+    if namespace.workers > 1 and namespace.port == 0:
+        raise CliError("multiple workers require a fixed port", exit_code=2)
     reload_delay = getattr(namespace, "reload_delay", 0.25)
     reload_debounce = getattr(namespace, "reload_debounce", 0.10)
     if reload_delay <= 0 or reload_debounce < 0:
@@ -396,6 +431,10 @@ def options_from_namespace(namespace: argparse.Namespace) -> RunOptions:
         max_body_bytes=namespace.max_body_bytes,
         read_high_water=namespace.read_high_water,
         read_high_water_messages=namespace.read_high_water_messages,
+        response_high_water=namespace.response_high_water,
+        response_low_water=namespace.response_low_water,
+        response_high_water_segments=namespace.response_high_water_segments,
+        response_low_water_segments=namespace.response_low_water_segments,
         max_ws_fragments=namespace.max_ws_fragments,
         lifespan=namespace.lifespan,
         protocols=protocols,
@@ -407,6 +446,7 @@ def options_from_namespace(namespace: argparse.Namespace) -> RunOptions:
         qpack_table_bytes=namespace.qpack_table_bytes,
         qpack_blocked_streams=namespace.qpack_blocked_streams,
         loop=namespace.loop,
+        workers=namespace.workers,
         tls_cert=namespace.tls_cert,
         tls_key=namespace.tls_key,
         tls_password_file=namespace.tls_password_file,
@@ -468,6 +508,11 @@ def load_application(target: str, *, factory: bool = False) -> ASGIApplication:
 def _loop_factory(name: LoopName) -> Callable[[], Any] | None:
     if name == "asyncio":
         return None
+    if name == "metal":
+        # Experimental "bare metal" tier: the native reactor with wheel-backed
+        # timers and inline-driven request coroutines.
+        reactor = importlib.import_module("wreath.reactor")
+        return cast(Callable[[], Any], reactor.metal_event_loop)
     try:
         uvloop = importlib.import_module("uvloop")
     except ImportError as error:
@@ -487,6 +532,229 @@ def run_server(
     run(app, config, tls=tls, loop_factory=loop_factory)
 
 
+def _spawn_metal_worker(
+    app: ASGIApplication,
+    config: ServerConfig,
+    *,
+    tls: TLSConfig | None,
+    worker_id: int,
+) -> tuple[int, int]:
+    import functools
+    import signal
+
+    ready_read, ready_write = os.pipe()
+    pid = os.fork()
+    if pid != 0:
+        os.close(ready_write)
+        return pid, ready_read
+
+    os.close(ready_read)
+    exit_code = 0
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        os.environ["_WREATH_WORKER_READY_FD"] = str(ready_write)
+        reactor = importlib.import_module("wreath.reactor")
+        loop_factory = functools.partial(
+            reactor.metal_event_loop,
+            worker_id=worker_id,
+            reuse_port=True,
+        )
+        run_server(app, config, tls=tls, loop_factory=loop_factory)
+    except BaseException:  # child must report startup/runtime failure to its supervisor
+        import traceback
+
+        traceback.print_exc()
+        exit_code = 1
+    finally:
+        try:
+            os.close(ready_write)
+        except OSError:
+            pass
+        os._exit(exit_code)
+
+
+def _wait_for_worker_generation(
+    workers: dict[int, tuple[int, int]], timeout: float
+) -> bool:
+    import select
+    import time
+
+    pending = {ready_fd: worker_id for worker_id, (_pid, ready_fd) in workers.items()}
+    deadline = time.monotonic() + timeout
+    ready_ok = True
+    try:
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            readable, _, _ = select.select(tuple(pending), (), (), min(remaining, 0.1))
+            for ready_fd in readable:
+                message = os.read(ready_fd, 1)
+                if message != b"1":
+                    ready_ok = False
+                os.close(ready_fd)
+                pending.pop(ready_fd, None)
+        return ready_ok
+    finally:
+        for ready_fd in pending:
+            try:
+                os.close(ready_fd)
+            except OSError:
+                pass
+
+
+def _terminate_worker_pids(pids: set[int], timeout: float) -> None:
+    import signal
+    import time
+
+    live = set(pids)
+    for pid in live:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + timeout
+    while live and time.monotonic() < deadline:
+        for pid in tuple(live):
+            try:
+                exited, _status = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                exited = pid
+            if exited:
+                live.discard(pid)
+        if live:
+            time.sleep(0.05)
+    for pid in live:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    for pid in live:
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+
+
+def _run_metal_worker_group(
+    app: ASGIApplication,
+    config: ServerConfig,
+    *,
+    tls: TLSConfig | None,
+    workers: int,
+) -> None:
+    import signal
+    import time
+
+    if not hasattr(os, "fork"):
+        raise CliError("metal workers require a POSIX process model", exit_code=2)
+    state = {"stop": False, "restart": False}
+
+    def stop_handler(_signum: int, _frame: Any) -> None:
+        state["stop"] = True
+
+    def restart_handler(_signum: int, _frame: Any) -> None:
+        state["restart"] = True
+
+    previous = {
+        signal.SIGINT: signal.getsignal(signal.SIGINT),
+        signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+        signal.SIGHUP: signal.getsignal(signal.SIGHUP),
+    }
+    signal.signal(signal.SIGINT, stop_handler)
+    signal.signal(signal.SIGTERM, stop_handler)
+    signal.signal(signal.SIGHUP, restart_handler)
+
+    startup_timeout = max(5.0, min(config.shutdown_timeout, 30.0))
+    current: dict[int, tuple[int, int]] = {}
+    draining: dict[int, float] = {}
+    try:
+        current = {
+            worker_id: _spawn_metal_worker(
+                app, config, tls=tls, worker_id=worker_id
+            )
+            for worker_id in range(workers)
+        }
+        if not _wait_for_worker_generation(current, startup_timeout):
+            _terminate_worker_pids(
+                {pid for pid, _ready_fd in current.values()},
+                config.shutdown_timeout,
+            )
+            current.clear()
+            raise CliError("metal worker generation failed to become ready")
+
+        while not state["stop"]:
+            if state["restart"]:
+                state["restart"] = False
+                replacement = {
+                    worker_id: _spawn_metal_worker(
+                        app, config, tls=tls, worker_id=worker_id
+                    )
+                    for worker_id in range(workers)
+                }
+                if _wait_for_worker_generation(replacement, startup_timeout):
+                    old_pids = {pid for pid, _ready_fd in current.values()}
+                    drain_deadline = time.monotonic() + config.shutdown_timeout
+                    draining.update({pid: drain_deadline for pid in old_pids})
+                    for pid in old_pids:
+                        try:
+                            os.kill(pid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                    current = replacement
+                else:
+                    _terminate_worker_pids(
+                        {pid for pid, _ready_fd in replacement.values()},
+                        config.shutdown_timeout,
+                    )
+
+            for worker_id, (pid, _ready_fd) in tuple(current.items()):
+                try:
+                    exited, _status = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    exited = pid
+                if not exited or state["stop"]:
+                    continue
+                replacement = _spawn_metal_worker(
+                    app, config, tls=tls, worker_id=worker_id
+                )
+                candidate = {worker_id: replacement}
+                if _wait_for_worker_generation(candidate, startup_timeout):
+                    current[worker_id] = replacement
+                else:
+                    _terminate_worker_pids({replacement[0]}, config.shutdown_timeout)
+                    state["stop"] = True
+                    break
+
+            for pid, deadline in tuple(draining.items()):
+                try:
+                    exited, _status = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    exited = pid
+                if exited:
+                    draining.pop(pid, None)
+                elif time.monotonic() >= deadline:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        os.waitpid(pid, 0)
+                    except ChildProcessError:
+                        pass
+                    draining.pop(pid, None)
+            time.sleep(0.05)
+    finally:
+        _terminate_worker_pids(
+            {pid for pid, _ready_fd in current.values()} | set(draining),
+            config.shutdown_timeout,
+        )
+        for signame, handler in previous.items():
+            signal.signal(signame, handler)
+
+
 def execute(options: RunOptions) -> None:
     if options.command == "dev":
         from ._devserver import supervise
@@ -496,6 +764,9 @@ def execute(options: RunOptions) -> None:
     app = load_application(options.target, factory=options.factory)
     config = options.server_config()
     tls = options.tls_config()
+    if options.workers > 1:
+        _run_metal_worker_group(app, config, tls=tls, workers=options.workers)
+        return
     loop_factory = _loop_factory(options.loop)
     run_server(app, config, tls=tls, loop_factory=loop_factory)
 

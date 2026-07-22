@@ -38,7 +38,9 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import dataclasses
+import functools
 import selectors
+import socket
 from asyncio import events as _events
 from asyncio.tasks import (  # C-accelerated task-state helpers
     _enter_task,
@@ -239,13 +241,24 @@ class EventLoop(asyncio.SelectorEventLoop):
     def __init__(self, selector=None, *, backend: str = "epoll",
                  timers: str = "heap", tasks: str = "inline", stats: bool = True,
                  native_transport: bool = False, native_loop: bool = False,
-                 wheel_slots: int = 4096, wheel_resolution: float = 0.001):
+                 direct_task_steps: bool = True, worker_id: int = 0,
+                 io_backend: str = "epoll", reuse_port: bool = False,
+                 wheel_slots: int = 4096,
+                 wheel_resolution: float = 0.001):
         super().__init__(selector)
         self._backend = backend
         self._tasks = tasks
         self._stats_on = stats
         self._native_transport = native_transport and _wheel_ext is not None
         self._native_loop = native_loop and _wheel_ext is not None
+        self._direct_task_steps = direct_task_steps
+        if worker_id < 0:
+            raise ValueError("worker_id must be non-negative")
+        self._worker_id = worker_id
+        if io_backend not in ("epoll", "io_uring"):
+            raise ValueError("io_backend must be 'epoll' or 'io_uring'")
+        self._io_backend = io_backend
+        self._wreath_reuse_port = reuse_port
         self._poller = None
         self._reactor_stats = _stats_template()
         self._wheel = None
@@ -278,7 +291,11 @@ class EventLoop(asyncio.SelectorEventLoop):
         the poller, or call_soon_threadsafe and signals could never wake us.
         """
         poller = _wheel_ext.ReactorPoller(
-            self, self._wheel if self._wheel is not None else None
+            self,
+            self._wheel if self._wheel is not None else None,
+            self._direct_task_steps,
+            self._worker_id,
+            1 if self._io_backend == "io_uring" else 0,
         )
         self._poller = poller
         self._add_reader = poller._add_reader
@@ -346,6 +363,63 @@ class EventLoop(asyncio.SelectorEventLoop):
             self._reactor_stats["poll_calls"] += 1
         return super()._run_once()
 
+    def _start_serving(
+        self, protocol_factory, sock, sslcontext=None, server=None, backlog=100,
+        ssl_handshake_timeout=None, ssl_shutdown_timeout=None,
+    ):
+        if self._io_backend == "io_uring" and sslcontext is None:
+            callback = functools.partial(
+                self._metal_accept_connection,
+                protocol_factory,
+                sslcontext,
+                server,
+                ssl_handshake_timeout,
+                ssl_shutdown_timeout,
+            )
+            self._poller._add_uring_listener(sock.fileno(), callback)
+            return
+        return super()._start_serving(
+            protocol_factory,
+            sock,
+            sslcontext,
+            server,
+            backlog,
+            ssl_handshake_timeout,
+            ssl_shutdown_timeout,
+        )
+
+    def _metal_accept_connection(
+        self, protocol_factory, sslcontext, server, ssl_handshake_timeout,
+        ssl_shutdown_timeout, accepted_fd,
+    ):
+        conn = socket.socket(fileno=accepted_fd)
+        conn.setblocking(False)
+        try:
+            address = conn.getpeername()
+        except OSError:
+            conn.close()
+            return
+        accept = self._accept_connection2(
+            protocol_factory,
+            conn,
+            {"peername": address},
+            sslcontext,
+            server,
+            ssl_handshake_timeout,
+            ssl_shutdown_timeout,
+        )
+        self.create_task(accept)
+
+    def _stop_serving(self, sock):
+        if (
+            self._io_backend == "io_uring"
+            and self._poller is not None
+            and self._poller._remove_uring_listener(sock.fileno())
+        ):
+            sock.close()
+            return
+        return super()._stop_serving(sock)
+
     def _make_socket_transport(self, sock, protocol, waiter=None, *,
                                extra=None, server=None):
         if self._native_transport:
@@ -389,12 +463,16 @@ def new_event_loop(backend: str | None = None, *, timers: str = "heap") -> Event
     return EventLoop(selector, backend=backend, timers=timers)
 
 
-def metal_event_loop() -> EventLoop:
+def metal_event_loop(
+    *, worker_id: int = 0, io_backend: str | None = None,
+    reuse_port: bool | None = None,
+) -> EventLoop:
     """The event loop for the ``metal`` tier: native C poller + transport.
 
     Configurable for ablation via env (WREATH_METAL_TASKS=inline|auto,
-    WREATH_METAL_TIMERS=heap|wheel); introspection stats are off on the runtime
-    path so no per-callback counter is paid.
+    WREATH_METAL_TASK_STEPS=direct|handle, WREATH_METAL_TIMERS=heap|wheel);
+    introspection stats are off on the runtime path so no per-callback counter
+    is paid.
 
     Timers default to the native wheel. ReactorPoller reads its exact next
     deadline and uses that as the epoll timeout, so there is no recurring bridge
@@ -410,10 +488,16 @@ def metal_event_loop() -> EventLoop:
     timers = os.environ.get("WREATH_METAL_TIMERS", "wheel")
     transport = os.environ.get("WREATH_METAL_TRANSPORT", "native") == "native"
     native_loop = os.environ.get("WREATH_METAL_LOOP", "native") == "native"
+    direct_task_steps = os.environ.get("WREATH_METAL_TASK_STEPS", "direct") == "direct"
+    io_backend = io_backend or os.environ.get("WREATH_METAL_IO", "epoll")
+    if reuse_port is None:
+        reuse_port = os.environ.get("WREATH_METAL_REUSEPORT", "0") == "1"
     backend = _default_backend()
     return EventLoop(selectors.EpollSelector(), backend=backend,
                      timers=timers, tasks=tasks, stats=False,
-                     native_transport=transport, native_loop=native_loop)
+                     native_transport=transport, native_loop=native_loop,
+                     direct_task_steps=direct_task_steps, worker_id=worker_id,
+                     io_backend=io_backend, reuse_port=reuse_port)
 
 
 class _ServerHandle:

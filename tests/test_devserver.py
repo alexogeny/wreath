@@ -94,6 +94,14 @@ def test_worker_argv_round_trips_server_configuration(tmp_path: Path) -> None:
                 "h2",
                 "--max-body-bytes",
                 "4321",
+                "--response-high-water",
+                "8192",
+                "--response-low-water",
+                "4096",
+                "--response-high-water-segments",
+                "32",
+                "--response-low-water-segments",
+                "16",
                 "--loop",
                 "asyncio",
                 "--reload-dir",
@@ -113,6 +121,10 @@ def test_worker_argv_round_trips_server_configuration(tmp_path: Path) -> None:
     assert parsed.port == options.port
     assert parsed.protocols == options.protocols
     assert parsed.max_body_bytes == options.max_body_bytes
+    assert parsed.response_high_water == options.response_high_water
+    assert parsed.response_low_water == options.response_low_water
+    assert parsed.response_high_water_segments == options.response_high_water_segments
+    assert parsed.response_low_water_segments == options.response_low_water_segments
     assert "--reload-dir" not in argv
 
 def test_supervisor_gracefully_replaces_one_generation(

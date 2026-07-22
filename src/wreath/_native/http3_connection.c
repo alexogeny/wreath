@@ -976,9 +976,47 @@ endpoint_get_active_requests(PyObject *op, void *closure)
     return PyLong_FromSsize_t(total);
 }
 
+static PyObject *
+endpoint_get_retained_response_bytes(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromSsize_t(((WreathH3Endpoint *)op)->retained_response_bytes);
+}
+
+static PyObject *
+endpoint_get_retained_response_segments(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromSsize_t(((WreathH3Endpoint *)op)->retained_response_segments);
+}
+
+static PyObject *
+endpoint_get_response_backpressure_waiters(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromSsize_t(((WreathH3Endpoint *)op)->response_backpressure_waiters);
+}
+
+static PyObject *
+endpoint_get_response_backpressure_pauses(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((WreathH3Endpoint *)op)->response_backpressure_pauses
+    );
+}
+
 static PyGetSetDef endpoint_getset[] = {
     {"active_requests", endpoint_get_active_requests, NULL,
      PyDoc_STR("Requests still in flight across this endpoint's connections."), NULL},
+    {"retained_response_bytes", endpoint_get_retained_response_bytes, NULL,
+     PyDoc_STR("HTTP/3 response payload bytes retained for retransmission."), NULL},
+    {"retained_response_segments", endpoint_get_retained_response_segments, NULL,
+     PyDoc_STR("HTTP/3 response segments retained for retransmission."), NULL},
+    {"response_backpressure_waiters", endpoint_get_response_backpressure_waiters, NULL,
+     PyDoc_STR("ASGI sends currently waiting for HTTP/3 response credit."), NULL},
+    {"response_backpressure_pauses", endpoint_get_response_backpressure_pauses, NULL,
+     PyDoc_STR("ASGI sends suspended by HTTP/3 response pressure."), NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
@@ -1037,6 +1075,10 @@ endpoint_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwargs))
     }
     ep->accepting = 1;
     ep->active_requests = 0;
+    ep->retained_response_bytes = 0;
+    ep->retained_response_segments = 0;
+    ep->response_backpressure_waiters = 0;
+    ep->response_backpressure_pauses = 0;
     ep->reap = NULL;
     ep->reap_len = 0;
     ep->reap_cap = 0;
@@ -1045,6 +1087,10 @@ endpoint_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwargs))
         read_ssize(config, "max_body_bytes", &ep->max_body_bytes) < 0 ||
         read_ssize(config, "read_high_water", &ep->read_high_water) < 0 ||
         read_ssize(config, "read_high_water_messages", &ep->read_high_water_messages) < 0 ||
+        read_ssize(config, "response_high_water", &ep->response_high_water) < 0 ||
+        read_ssize(config, "response_low_water", &ep->response_low_water) < 0 ||
+        read_ssize(config, "response_high_water_segments", &ep->response_high_water_segments) < 0 ||
+        read_ssize(config, "response_low_water_segments", &ep->response_low_water_segments) < 0 ||
         read_ssize(config, "max_header_list_bytes", &ep->max_header_list_bytes) < 0 ||
         read_ssize(config, "initial_stream_window", &ep->initial_stream_window) < 0 ||
         read_ssize(config, "initial_connection_window", &ep->initial_connection_window) < 0 ||

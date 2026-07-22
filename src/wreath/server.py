@@ -298,6 +298,13 @@ class ServerConfig:
     # WebSocket message, an empty chunk), so `read_high_water` alone cannot
     # bound the queue. This bounds it by count as well; both watermarks apply.
     read_high_water_messages: int = 1024
+    # HTTP/3 must retain immutable response segments until the peer acknowledges
+    # them. Bound both payload bytes and segment metadata; ASGI send waits above
+    # the high watermarks and resumes only after both fall to their low marks.
+    response_high_water: int = 1 * 1024 * 1024
+    response_low_water: int = 512 * 1024
+    response_high_water_segments: int = 1024
+    response_low_water_segments: int = 512
     # `max_body_bytes` bounds what a fragmented WebSocket message may hold, but
     # an empty continuation costs parser dispatch and unmasking while adding no
     # bytes, so the byte limit alone cannot bound the work one message causes.
@@ -354,9 +361,18 @@ class ServerConfig:
             raise ValueError("backlog must be positive")
         for name in ("max_request_line", "max_header_count", "max_header_bytes",
                      "max_body_bytes", "read_high_water",
-                     "read_high_water_messages", "max_ws_fragments"):
+                     "read_high_water_messages", "response_high_water",
+                     "response_high_water_segments", "max_ws_fragments"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
+        for low, high in (
+            ("response_low_water", "response_high_water"),
+            ("response_low_water_segments", "response_high_water_segments"),
+        ):
+            if getattr(self, low) < 0:
+                raise ValueError(f"{low} must be non-negative")
+            if getattr(self, low) >= getattr(self, high):
+                raise ValueError(f"{low} must be less than {high}")
         if self.lifespan not in ("auto", "on", "off"):
             raise ValueError("lifespan must be 'auto', 'on', or 'off'")
         self._validate_protocols()
@@ -707,6 +723,7 @@ class Server:
                     backlog=config.backlog,
                     ssl=ssl,
                     reuse_address=True,
+                    reuse_port=bool(getattr(self._loop, "_wreath_reuse_port", False)),
                 )
                 # When port==0, bind UDP to the OS-assigned TCP port.
                 if wants_udp and self.sockets:
@@ -760,7 +777,9 @@ class Server:
             )
 
         transport, _protocol = await self._loop.create_datagram_endpoint(
-            factory, local_addr=(config.host, port), reuse_port=False,
+            factory,
+            local_addr=(config.host, port),
+            reuse_port=bool(getattr(self._loop, "_wreath_reuse_port", False)),
         )
         return transport
 
@@ -964,6 +983,13 @@ def run(
 
     async def _main() -> None:
         server = await serve(app, config, ssl=ssl, tls=tls)
+        ready_fd_text = os.environ.pop("_WREATH_WORKER_READY_FD", None)
+        if ready_fd_text is not None:
+            ready_fd = int(ready_fd_text)
+            try:
+                os.write(ready_fd, b"1")
+            finally:
+                os.close(ready_fd)
         try:
             server._install_signal_handlers()
         except ValueError:

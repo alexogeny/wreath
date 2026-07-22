@@ -32,10 +32,32 @@ def test_run_parser_defaults_are_safe_and_deterministic() -> None:
     assert options.port == 8000
     assert options.protocols == ("http/1.1",)
     assert options.loop == "asyncio"
+    assert options.workers == 1
     assert options.lifespan == "auto"
     assert options.factory is False
     assert options.server_header == "wreath"
     assert options.date_header is True
+
+
+def test_multiple_workers_are_explicitly_metal_only() -> None:
+    namespace = build_parser().parse_args(
+        ["run", "example:app", "--loop", "metal", "--workers", "3"]
+    )
+    options = options_from_namespace(namespace)
+    assert options.workers == 3
+    assert options.loop == "metal"
+
+    namespace = build_parser().parse_args(
+        ["run", "example:app", "--loop", "asyncio", "--workers", "2"]
+    )
+    with pytest.raises(CliError, match="requires --loop metal"):
+        options_from_namespace(namespace)
+
+    namespace = build_parser().parse_args(
+        ["run", "example:app", "--loop", "metal", "--workers", "0"]
+    )
+    with pytest.raises(CliError, match="at least 1"):
+        options_from_namespace(namespace)
 
 
 def test_run_parser_configures_default_response_headers() -> None:
@@ -181,6 +203,28 @@ def test_main_loads_the_target_and_delegates_to_the_server(
     assert calls[0][1].port == 8123
     assert calls[0][2] is None
     assert calls[0][3] is None
+
+
+def test_main_routes_multiple_metal_workers_to_the_supervisor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module_name = _write_app(
+        tmp_path,
+        "async def app(scope, receive, send):\n    pass\n",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+    calls: list[int] = []
+
+    def fake_group(app: Any, config: Any, *, tls: Any, workers: int) -> None:
+        del app, config, tls
+        calls.append(workers)
+
+    monkeypatch.setattr("wreath._cli._run_metal_worker_group", fake_group)
+    assert cli.main([
+        "run", f"{module_name}:app", "--loop", "metal", "--workers", "2"
+    ]) == 0
+    assert calls == [2]
 
 
 def test_main_reports_target_import_errors_without_a_traceback(capsys: Any) -> None:

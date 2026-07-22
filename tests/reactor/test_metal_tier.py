@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import errno
 import importlib
 import os
 import shutil
@@ -54,6 +55,40 @@ def test_metal_defaults_to_poller_driven_wheel_without_bridge_heartbeat():
         loop.run_until_complete(asyncio.sleep(0.02))
         assert fired == [True]
         assert loop._wheel_tick_handle is None
+    finally:
+        loop.close()
+
+
+def test_metal_directly_dispatches_c_task_steps_with_their_context(monkeypatch):
+    import contextvars
+    from asyncio import events
+
+    original_run = events.Handle._run
+
+    def reject_python_task_step(self):
+        if type(self._callback).__name__ == "TaskStepMethWrapper":
+            raise AssertionError("C task step went through Handle._run")
+        return original_run(self)
+
+    monkeypatch.setattr(events.Handle, "_run", reject_python_task_step)
+    value: contextvars.ContextVar[str] = contextvars.ContextVar("value", default="outside")
+    loop = _metal_loop()
+    try:
+        async def resumed():
+            value.set("captured")
+            await asyncio.sleep(0)
+            return value.get()
+
+        assert loop.run_until_complete(resumed()) == "captured"
+    finally:
+        loop.close()
+
+
+def test_metal_task_step_dispatch_has_a_handle_ablation(monkeypatch):
+    monkeypatch.setenv("WREATH_METAL_TASK_STEPS", "handle")
+    loop = _metal_loop()
+    try:
+        assert loop._direct_task_steps is False
     finally:
         loop.close()
 
@@ -132,6 +167,8 @@ def test_native_transport_fuses_http1_ingress_without_python_buffer_callbacks():
         transport = loop._make_socket_transport(server, protocol)
         loop.run_until_complete(asyncio.sleep(0))
         assert transport._fused_http1 is True
+        assert transport._metal_connection_token != 0
+        assert transport._metal_worker_id == 0
         client.sendall(b"GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
         loop.run_until_complete(asyncio.sleep(0.01))
         response = client.recv(4096)
@@ -142,8 +179,220 @@ def test_native_transport_fuses_http1_ingress_without_python_buffer_callbacks():
         assert transport._direct_read_dispatches >= 1
         assert transport._direct_protocol_writes >= 1
         assert transport._zero_copy_cork_writes >= 1
+        assert transport._metal_submissions >= 2
+        assert transport._metal_completions == transport._metal_submissions
+        assert transport._metal_operation_high_water >= 1
+        assert transport._metal_operation_exhaustions == 0
+        assert transport._metal_cross_worker_rejections == 0
         transport.close()
         loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        client.close()
+        loop.close()
+
+
+def test_metal_connection_slots_are_per_worker_and_generation_validated():
+    import wreath.reactor as reactor
+
+    class Protocol(asyncio.Protocol):
+        pass
+
+    loop = reactor.metal_event_loop(worker_id=7)
+    client1, server1 = socket.socketpair()
+    client2 = server2 = None
+    try:
+        first = loop._make_socket_transport(server1, Protocol())
+        loop.run_until_complete(asyncio.sleep(0))
+        token1 = first._metal_connection_token
+        assert first._metal_worker_id == 7
+        first.abort()
+        loop.run_until_complete(asyncio.sleep(0))
+
+        client2, server2 = socket.socketpair()
+        second = loop._make_socket_transport(server2, Protocol())
+        loop.run_until_complete(asyncio.sleep(0))
+        token2 = second._metal_connection_token
+
+        assert token2 != token1
+        assert token2 & 0xFFFFFFFF == token1 & 0xFFFFFFFF
+        assert token2 >> 32 > token1 >> 32
+        second.abort()
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        client1.close()
+        if client2 is not None:
+            client2.close()
+        loop.close()
+
+
+def test_metal_io_uring_owns_listener_accept_and_drains_cqes():
+    import wreath.reactor as reactor
+    from wreath.server import Server, ServerConfig
+
+    try:
+        loop = reactor.metal_event_loop(io_backend="io_uring")
+    except OSError as exc:
+        assert exc.errno in {errno.ENOSYS, errno.EPERM, errno.EACCES, errno.ENOMEM}
+        return
+
+    async def exercise():
+        server = Server(
+            _echo,
+            ServerConfig(host="127.0.0.1", port=0, lifespan="off"),
+            loop,
+        )
+        await server._start(ssl=None)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            clients = await asyncio.gather(*(
+                asyncio.open_connection("127.0.0.1", port) for _ in range(4)
+            ))
+            for _reader, writer in clients:
+                writer.write(
+                    b"GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
+                )
+            await asyncio.gather(*(writer.drain() for _reader, writer in clients))
+            responses = await asyncio.gather(*(reader.read() for reader, _writer in clients))
+            for _reader, writer in clients:
+                writer.close()
+            await asyncio.gather(*(writer.wait_closed() for _reader, writer in clients))
+            assert all(b"200 OK" in response for response in responses)
+            assert all(b"metal-http" in response for response in responses)
+            assert loop._poller.accept_submissions >= 1
+            assert loop._poller.accept_completions >= 4
+            if loop._poller.receive_enabled:
+                assert loop._poller.provided_buffer_count == 16
+                assert loop._poller.receive_completions >= 4
+                assert loop._poller.provided_buffer_recycles >= 4
+        finally:
+            await server.close()
+
+    try:
+        loop.run_until_complete(exercise())
+    finally:
+        loop.close()
+
+
+def test_metal_io_uring_receive_pause_cancels_and_resume_rearms():
+    import wreath.reactor as reactor
+
+    class PausingProtocol(asyncio.Protocol):
+        def __init__(self):
+            self.transport = None
+            self.chunks = []
+
+        def connection_made(self, transport):
+            self.transport = transport
+
+        def data_received(self, data):
+            self.chunks.append(data)
+            if len(self.chunks) == 1:
+                self.transport.pause_reading()
+
+    try:
+        loop = reactor.metal_event_loop(io_backend="io_uring")
+    except OSError as exc:
+        assert exc.errno in {errno.ENOSYS, errno.EPERM, errno.EACCES, errno.ENOMEM}
+        return
+    if not loop._poller.receive_enabled:
+        loop.close()
+        return
+
+    client, server = socket.socketpair()
+    client.setblocking(False)
+    protocol = PausingProtocol()
+    try:
+        transport = loop._make_socket_transport(server, protocol)
+        loop.run_until_complete(asyncio.sleep(0))
+        client.sendall(b"first")
+        loop.run_until_complete(asyncio.sleep(0.01))
+        assert b"".join(protocol.chunks) == b"first"
+        assert not transport.is_reading()
+
+        client.sendall(b"second")
+        loop.run_until_complete(asyncio.sleep(0.01))
+        assert b"".join(protocol.chunks) == b"first"
+
+        transport.resume_reading()
+        loop.run_until_complete(asyncio.sleep(0.01))
+        assert b"".join(protocol.chunks) == b"firstsecond"
+        assert loop._poller.receive_completions >= 2
+        assert loop._poller.provided_buffer_recycles >= 2
+        transport.close()
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        client.close()
+        loop.close()
+
+
+def test_metal_workers_can_own_a_reuseport_listener_group():
+    import wreath.reactor as reactor
+    from wreath.server import Server, ServerConfig
+
+    loop1 = reactor.metal_event_loop(worker_id=1, reuse_port=True)
+    loop2 = reactor.metal_event_loop(worker_id=2, reuse_port=True)
+    server1 = server2 = None
+    try:
+        server1 = Server(
+            _echo,
+            ServerConfig(host="127.0.0.1", port=0, lifespan="off"),
+            loop1,
+        )
+        loop1.run_until_complete(server1._start(ssl=None))
+        port = server1.sockets[0].getsockname()[1]
+
+        server2 = Server(
+            _echo,
+            ServerConfig(host="127.0.0.1", port=port, lifespan="off"),
+            loop2,
+        )
+        loop2.run_until_complete(server2._start(ssl=None))
+
+        assert server1.sockets[0].getsockname()[1] == port
+        assert server2.sockets[0].getsockname()[1] == port
+        assert loop1._worker_id == 1
+        assert loop2._worker_id == 2
+    finally:
+        if server2 is not None:
+            loop2.run_until_complete(server2.close())
+        if server1 is not None:
+            loop1.run_until_complete(server1.close())
+        loop2.close()
+        loop1.close()
+
+
+def test_metal_http1_io_uring_arm_is_explicit_and_operational_when_available():
+    import wreath.reactor as reactor
+
+    Http1Protocol = importlib.import_module("wreath._native._server").Http1Protocol
+    ServerConfig = importlib.import_module("wreath.server").ServerConfig
+    try:
+        loop = reactor.metal_event_loop(io_backend="io_uring")
+    except OSError as exc:
+        # Explicit selection reports host/kernel policy; it must never fall back
+        # silently to epoll.
+        assert exc.errno in {errno.ENOSYS, errno.EPERM, errno.EACCES, errno.ENOMEM}
+        return
+
+    client, server = socket.socketpair()
+    client.setblocking(False)
+    try:
+        protocol = Http1Protocol(_echo, ServerConfig(lifespan="off"), loop, set())
+        transport = loop._make_socket_transport(server, protocol)
+        loop.run_until_complete(asyncio.sleep(0))
+        assert transport._metal_io_backend == "io_uring"
+
+        client.sendall(b"GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
+        loop.run_until_complete(asyncio.sleep(0.01))
+        response = client.recv(4096)
+        assert b"200 OK" in response
+        assert b"metal-http" in response
+        assert transport._metal_submissions >= 1
+        assert transport._metal_completions == transport._metal_submissions
+        if loop._poller.receive_enabled:
+            assert loop._poller.provided_buffer_count == 16
+            assert loop._poller.receive_completions >= 1
+            assert loop._poller.provided_buffer_recycles >= 1
     finally:
         client.close()
         loop.close()

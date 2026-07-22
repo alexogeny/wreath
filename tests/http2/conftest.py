@@ -86,13 +86,25 @@ class H2Driver:
     """Drives one native Http2Protocol connection for tests."""
 
     def __init__(self, app: Any, config: ServerConfig | None = None,
-                 extra: dict[str, Any] | None = None) -> None:
+                 extra: dict[str, Any] | None = None,
+                 metal_scheduler: bool = False) -> None:
         assert Http2Protocol is not None
         self.loop = asyncio.get_event_loop()
         self.registry: set[Any] = set()
         self.transport = FakeTransport(extra)
         self.config = config or ServerConfig(protocols=("h2",))
-        self.protocol = Http2Protocol(app, self.config, self.loop, self.registry)
+        missing = object()
+        previous = getattr(self.loop, "_native_loop", missing)
+        if metal_scheduler:
+            self.loop._native_loop = True
+        try:
+            self.protocol = Http2Protocol(app, self.config, self.loop, self.registry)
+        finally:
+            if metal_scheduler:
+                if previous is missing:
+                    del self.loop._native_loop
+                else:
+                    self.loop._native_loop = previous
         self.parser = support.FrameParser()
         self._consumed = 0
 
@@ -137,8 +149,9 @@ def make_driver():
     drivers: list[H2Driver] = []
 
     def _make(app: Any, config: ServerConfig | None = None,
-              extra: dict[str, Any] | None = None) -> H2Driver:
-        d = H2Driver(app, config, extra)
+              extra: dict[str, Any] | None = None,
+              metal_scheduler: bool = False) -> H2Driver:
+        d = H2Driver(app, config, extra, metal_scheduler)
         drivers.append(d)
         return d
 

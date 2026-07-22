@@ -8,38 +8,16 @@ exercised through the ``h3_module`` fixture and a real QUIC client, never a mock
 """
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 import pytest
 
-from .conftest import requires_h3
+from wreath.server import ServerConfig, TLSConfig, serve
+
+from .conftest import curl_http3, make_self_signed_cert, requires_curl_h3, requires_h3
 
 pytestmark = [requires_h3, pytest.mark.asyncio]
-
-
-async def test_scope_http_version_is_3(h3_module) -> None:
-    """See module docstring; RFC reference. Deeper conformance is future work."""
-    pytest.skip("deeper HTTP/3 conformance not yet implemented")
-
-
-async def test_scope_scheme_is_https(h3_module) -> None:
-    """See module docstring; RFC reference. Deeper conformance is future work."""
-    pytest.skip("deeper HTTP/3 conformance not yet implemented")
-
-
-async def test_request_body_delivered(h3_module) -> None:
-    """See module docstring; RFC reference. Deeper conformance is future work."""
-    pytest.skip("deeper HTTP/3 conformance not yet implemented")
-
-
-async def test_response_start_body_mapping(h3_module) -> None:
-    """See module docstring; RFC reference. Deeper conformance is future work."""
-    pytest.skip("deeper HTTP/3 conformance not yet implemented")
-
-
-async def test_connection_close_propagates_disconnect(h3_module) -> None:
-    """See module docstring; RFC reference. Deeper conformance is future work."""
-    pytest.skip("deeper HTTP/3 conformance not yet implemented")
-
-
 
 
 # --- streaming responses ---------------------------------------------------
@@ -48,22 +26,33 @@ async def test_connection_close_propagates_disconnect(h3_module) -> None:
 # straight to nghttp3, and submitted at http.response.start so bytes reach the
 # wire while the app is still producing. These drive a real QUIC client.
 
-import asyncio  # noqa: E402
-from pathlib import Path  # noqa: E402
-
-from wreath.server import ServerConfig, TLSConfig, serve  # noqa: E402
-
-from .conftest import curl_http3, make_self_signed_cert, requires_curl_h3  # noqa: E402
-
-
-async def _serve_h3(app):
+async def _serve_h3(app, **config):
     cert, key = make_self_signed_cert()
     server = await serve(
         app,
-        ServerConfig(host="127.0.0.1", port=0, lifespan="off", protocols=("h3",)),
+        ServerConfig(
+            host="127.0.0.1", port=0, lifespan="off", protocols=("h3",), **config
+        ),
         tls=TLSConfig(cert, key),
     )
     return server, server.datagram_addresses[0][1]
+
+
+@requires_curl_h3
+@pytest.mark.network
+async def test_scope_reports_http3_over_https() -> None:
+    async def app(scope, receive, send):
+        payload = f"{scope['http_version']}|{scope['scheme']}".encode()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": payload})
+
+    server, port = await _serve_h3(app)
+    try:
+        rc, output = await curl_http3(port, "/scope")
+        assert rc == 0
+        assert output == b"3|https"
+    finally:
+        await server.close()
 
 
 @requires_curl_h3
@@ -169,6 +158,58 @@ async def test_large_streamed_response_is_complete_under_retransmission() -> Non
         assert rc == 0, f"curl failed rc={rc}"
         assert len(out) == len(chunk) * count
         assert out == chunk * count
+    finally:
+        await server.close()
+
+
+@requires_curl_h3
+@pytest.mark.network
+@pytest.mark.parametrize(
+    ("config", "chunks"),
+    [
+        (
+            {
+                "response_high_water": 7,
+                "response_low_water": 3,
+                "response_high_water_segments": 100,
+                "response_low_water_segments": 50,
+            },
+            (b"aaaa", b"bbbb"),
+        ),
+        (
+            {
+                "response_high_water": 1 << 20,
+                "response_low_water": 1 << 19,
+                "response_high_water_segments": 1,
+                "response_low_water_segments": 0,
+            },
+            (b"a", b"b"),
+        ),
+    ],
+    ids=("bytes", "segments"),
+)
+async def test_response_retention_watermarks_suspend_asgi_send(
+    config: dict[str, int], chunks: tuple[bytes, ...]
+) -> None:
+    observed: list[bool] = []
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        for index, chunk in enumerate(chunks):
+            waiter = send(
+                {"type": "http.response.body", "body": chunk, "more_body": True}
+            )
+            if index == len(chunks) - 1:
+                observed.append(not waiter.done())
+            await waiter
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    server, port = await _serve_h3(app, **config)
+    try:
+        rc, out = await curl_http3(port, "/pressure")
+        assert rc == 0, f"curl failed rc={rc}"
+        assert out == b"".join(chunks)
+        assert observed == [True]
     finally:
         await server.close()
 
@@ -312,7 +353,7 @@ async def test_large_request_body_uploads_past_the_flow_control_window() -> None
     try:
         import tempfile
 
-        payload = b"a" * (1024 * 1024 + 7)  # well past the initial window
+        payload = b"a" * (512 * 1024 + 7)  # past flow window, within body limit
         path = tempfile.mktemp()
         await asyncio.to_thread(Path(path).write_bytes, payload)
         rc, out = await curl_http3(port, "/upload", "-X", "POST", "--data-binary", f"@{path}")

@@ -203,6 +203,178 @@ def _data_frames(d, stream_id=1):
     return [f for f in d.frames() if f.type == support.DATA and f.stream_id == stream_id]
 
 
+async def test_transport_pause_stops_data_framing_until_resume(make_driver):
+    state = {"returned": False}
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"p" * 4096})
+        state["returned"] = True
+
+    d = make_driver(app)
+    await d.preface()
+    d.frames()  # discard the server preface
+    d.protocol.pause_writing()
+    await d.feed_and_settle(support.build_headers_frame(
+        1, support.request_headers(path=b"/paused")
+    ))
+    assert state["returned"] is False
+    assert _data_frames(d) == []
+
+    d.protocol.resume_writing()
+    await d.settle()
+    assert state["returned"] is True
+    frames = _data_frames(d)
+    assert b"".join(frame.payload for frame in frames) == b"p" * 4096
+
+
+async def test_connection_window_credit_is_shared_fairly(make_driver):
+    body_size = 128 * 1024
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"x" * body_size})
+
+    d = make_driver(app)
+    await d.preface()
+    d.protocol.pause_writing()
+    await d.feed_and_settle(support.build_headers_frame(
+        1, support.request_headers(path=b"/one")
+    ))
+    await d.feed_and_settle(support.build_headers_frame(
+        3, support.request_headers(path=b"/three")
+    ))
+    # Release both streams into the initial connection window together. They
+    # consume roughly half each and remain eligible when connection credit returns.
+    d.protocol.resume_writing()
+    await d.settle()
+    d.frames()  # discard bytes sent under the initial connection window
+
+    await d.feed_and_settle(support.encode_window_update(0, 32 * 1024))
+    payload_by_stream = {1: 0, 3: 0}
+    for frame in d.frames():
+        if frame.type == support.DATA and frame.stream_id in payload_by_stream:
+            payload_by_stream[frame.stream_id] += len(frame.payload)
+
+    assert payload_by_stream[1] > 0, payload_by_stream
+    assert payload_by_stream[3] > 0, payload_by_stream
+    assert sum(payload_by_stream.values()) == 32 * 1024
+
+
+async def test_metal_rfc9218_urgency_preempts_lower_urgency(make_driver):
+    body_size = 48 * 1024
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"x" * body_size})
+
+    d = make_driver(app, metal_scheduler=True)
+    await d.preface()
+    d.protocol.pause_writing()
+    await d.feed_and_settle(support.build_headers_frame(
+        1, support.request_headers(
+            path=b"/low", extra=[(b"priority", b"u=7, i")]
+        )
+    ))
+    await d.feed_and_settle(support.build_headers_frame(
+        3, support.request_headers(
+            path=b"/high", extra=[(b"priority", b"u=0, i")]
+        )
+    ))
+    d.protocol.resume_writing()
+    await d.settle()
+    data = [frame for frame in d.frames() if frame.type == support.DATA]
+    assert data
+    assert data[0].stream_id == 3
+    high = sum(len(frame.payload) for frame in data if frame.stream_id == 3)
+    low = sum(len(frame.payload) for frame in data if frame.stream_id == 1)
+    assert high == body_size
+    assert high > low
+
+
+async def test_metal_rfc9218_priority_update_reorders_queued_stream(make_driver):
+    body_size = 40 * 1024
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"y" * body_size})
+
+    d = make_driver(app, metal_scheduler=True)
+    await d.preface()
+    d.protocol.pause_writing()
+    priority = [(b"priority", b"u=7, i")]
+    await d.feed_and_settle(support.build_headers_frame(
+        1, support.request_headers(path=b"/one", extra=priority)
+    ))
+    await d.feed_and_settle(support.build_headers_frame(
+        3, support.request_headers(path=b"/three", extra=priority)
+    ))
+    update = support.encode_frame(
+        0x10, 0, 0, (3).to_bytes(4, "big") + b"u=0, i"
+    )
+    await d.feed_and_settle(update)
+    d.protocol.resume_writing()
+    await d.settle()
+    data = [frame for frame in d.frames() if frame.type == support.DATA]
+    assert data
+    assert data[0].stream_id == 3
+
+
+async def test_metal_rfc9218_incremental_peers_share_same_urgency(make_driver):
+    body_size = 128 * 1024
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"i" * body_size})
+
+    d = make_driver(app, metal_scheduler=True)
+    await d.preface()
+    d.protocol.pause_writing()
+    priority = [(b"priority", b"u=1, i")]
+    await d.feed_and_settle(support.build_headers_frame(
+        1, support.request_headers(path=b"/one", extra=priority)
+    ))
+    await d.feed_and_settle(support.build_headers_frame(
+        3, support.request_headers(path=b"/three", extra=priority)
+    ))
+    d.protocol.resume_writing()
+    await d.settle()
+    payload_by_stream = {1: 0, 3: 0}
+    for frame in d.frames():
+        if frame.type == support.DATA and frame.stream_id in payload_by_stream:
+            payload_by_stream[frame.stream_id] += len(frame.payload)
+    assert payload_by_stream[1] > 0
+    assert payload_by_stream[3] > 0
+
+
+async def test_metal_rfc9218_nonincremental_response_stays_sequential(make_driver):
+    body_size = 24 * 1024
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"z" * body_size})
+
+    d = make_driver(app, metal_scheduler=True)
+    await d.preface()
+    d.protocol.pause_writing()
+    priority = [(b"priority", b"u=0")]
+    await d.feed_and_settle(support.build_headers_frame(
+        1, support.request_headers(path=b"/one", extra=priority)
+    ))
+    await d.feed_and_settle(support.build_headers_frame(
+        3, support.request_headers(path=b"/three", extra=priority)
+    ))
+    d.protocol.resume_writing()
+    await d.settle()
+    stream_order = [
+        frame.stream_id for frame in d.frames()
+        if frame.type == support.DATA and frame.payload
+    ]
+    assert stream_order
+    first_three = stream_order.index(3)
+    assert all(stream_id == 1 for stream_id in stream_order[:first_three])
+
+
 async def test_send_stays_pending_while_windows_are_zero(make_driver):
     state = {"returned": False}
 

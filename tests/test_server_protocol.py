@@ -40,6 +40,27 @@ IMPLS.append(
 impl = pytest.mark.parametrize("protocol_cls", IMPLS)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("response_high_water", 0),
+        ("response_high_water_segments", 0),
+        ("response_low_water", -1),
+        ("response_low_water_segments", -1),
+    ],
+)
+def test_response_watermarks_reject_invalid_bounds(field: str, value: int) -> None:
+    with pytest.raises(ValueError, match=field):
+        ServerConfig(**{field: value})
+
+
+def test_response_low_watermarks_must_stay_below_high_watermarks() -> None:
+    with pytest.raises(ValueError, match="response_low_water"):
+        ServerConfig(response_high_water=1024, response_low_water=1025)
+    with pytest.raises(ValueError, match="response_low_water_segments"):
+        ServerConfig(response_high_water_segments=8, response_low_water_segments=9)
+
+
 class FakeTransport(asyncio.Transport):
     def __init__(self, extra: dict[str, Any] | None = None) -> None:
         super().__init__()
