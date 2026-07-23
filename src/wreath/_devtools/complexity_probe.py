@@ -11,37 +11,49 @@ linear into ~2x, a constant into ~1x -- no full benchmark rig required.
     uv run wreath-complexity-probe --list
     uv run wreath-complexity-probe --sizes 1000,2000,4000,8000
     uv run wreath-complexity-probe --format json
+    uv run wreath-complexity-probe --group metal-http1 --check
 
-Registered probes pin the complexity contracts of hot-path data structures
-(the timing wheel's batch fire/cancel and parked-timer costs, first). Each
-probe declares the exponent it expects; the run fails (exit 1) when the fitted
-exponent drifts a whole class away, so a regression to a rescan-per-node shape
-shows up as a reviewable number rather than as drift nobody noticed.
+Registered probes pin named assumptions: the independently scaled axis, the
+request stage it belongs to, and the maximum exponent permitted. Both the
+global fit and the largest-three-size tail fit are checked, so a late threshold
+cliff cannot hide in earlier points. Work that is faster than the upper bound is
+not a regression. A timed result below its declared resolution is UNRESOLVED,
+never silently successful.
 
 Adding a probe: decorate a callable taking a size and returning either the
-elapsed-seconds float for that size, or a (seconds, {counter: value}) pair --
-counters are printed alongside and often identify the mechanism (e.g. the
-wheel's `slot_rescans` going k -> 1 is the tie-count fix, visible).
+elapsed-seconds float for that size, or a (seconds, {counter: value}) pair.
+Counters are deterministic work measures; a declared metric must be returned at
+every size. Tiny operations must be batched inside the probe so the returned
+elapsed time clears the resolution floor.
 
 Timings run with GC disabled, best-of-`repeats` per size, warmed up at a small
-size first. Sizes double so the fitted exponent has three or more steps to
-settle; keep a probe's largest size small enough to finish in tens of
-milliseconds -- this is a shape check, not a throughput benchmark.
+size first. Sizes double so global, tail, and adjacent exponents can settle.
+`--update-baseline` records the reviewed assumptions and observations;
+`--check` rejects assumption drift and reruns the proof. This is a shape check,
+not a throughput benchmark.
 """
 
 from __future__ import annotations
 
 import argparse
 import gc
+import importlib
 import json
 import math
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from .native_lint import repo_root
+
 ProbeFn = Callable[[int], "float | tuple[float, dict[str, int]]"]
+
+#: Checked-in complexity assumptions for the request-hot probes.
+BASELINE_PATH = Path("docs/agents/complexity-baseline.json")
+BASELINE_VERSION = 1
 
 #: exponent -> printable class, in fit order
 _CLASSES = ((0.0, "O(1)"), (1.0, "O(n)"), (2.0, "O(n^2)"), (3.0, "O(n^3)"))
@@ -51,21 +63,23 @@ _CLASSES = ((0.0, "O(1)"), (1.0, "O(n)"), (2.0, "O(n^2)"), (3.0, "O(n^3)"))
 class Probe:
     name: str
     fn: ProbeFn
-    expect: float          # expected growth exponent (0 constant, 1 linear, ...)
+    expect: float          # maximum expected growth exponent
     sizes: tuple[int, ...]
     doc: str = ""
     repeats: int = 3
-    #: exponent drift that still counts as the expected class; a whole class
-    #: away (>= 0.5 toward the next integer) fails the probe.
+    #: Growth above expect+tolerance fails. Faster growth is an improvement or
+    #: fixed-cost domination, not a complexity regression.
     tolerance: float = 0.5
-    #: when every size finishes under this, growth is unobservable and the
-    #: probe passes -- fitting an exponent to scheduler jitter proves nothing,
-    #: and the regressions probes guard against sit orders of magnitude above.
-    noise_floor: float = 100e-6
+    #: Timed probes whose largest sample does not clear this are UNRESOLVED,
+    #: never silently successful. Probe bodies should batch tiny operations.
+    noise_floor: float = 1e-6
     #: name of a returned counter to fit the exponent on instead of wall time.
-    #: Counters are deterministic work measures (rescans, verifications), so a
-    #: shape proof on one is immune to timer jitter and the noise floor.
     metric: str | None = None
+    #: The independently scaled input and the production assumption it tests.
+    axis: str = "input size"
+    assumption: str = ""
+    stage: str = "component"
+    group: str = "extended"
 
 
 _REGISTRY: dict[str, Probe] = {}
@@ -73,13 +87,18 @@ _REGISTRY: dict[str, Probe] = {}
 
 def probe(name: str, *, expect: float, sizes: tuple[int, ...],
           repeats: int = 3, tolerance: float = 0.5,
-          metric: str | None = None,
-          noise_floor: float = 100e-6) -> Callable[[ProbeFn], ProbeFn]:
-    """Register `fn(size)` as a named complexity probe."""
+          metric: str | None = None, noise_floor: float = 1e-6,
+          axis: str = "input size", assumption: str = "",
+          stage: str = "component", group: str = "extended",
+          ) -> Callable[[ProbeFn], ProbeFn]:
+    """Register `fn(size)` as a named complexity assumption."""
     def register(fn: ProbeFn) -> ProbeFn:
-        _REGISTRY[name] = Probe(name, fn, expect, sizes,
-                                (fn.__doc__ or "").strip(), repeats, tolerance,
-                                noise_floor=noise_floor, metric=metric)
+        doc = (fn.__doc__ or "").strip()
+        _REGISTRY[name] = Probe(
+            name, fn, expect, sizes, doc, repeats, tolerance, noise_floor,
+            metric, axis, assumption or (doc.splitlines()[0] if doc else ""),
+            stage, group,
+        )
         return fn
     return register
 
@@ -126,19 +145,44 @@ class Result:
     times: list[float]
     counters: list[dict[str, int]]
     exponent: float = field(init=False)
+    tail_exponent: float = field(init=False)
+    local_exponents: list[float] = field(init=False)
+    status: str = field(init=False)
     ok: bool = field(init=False)
 
     def __post_init__(self) -> None:
         p = self.probe
         if p.metric is not None:
-            values = [float(max(c.get(p.metric, 0), 1)) for c in self.counters]
-            self.exponent = _fit_exponent(p.sizes, values)
-            self.below_floor = False   # counters are jitter-free: always fit
+            missing = [size for size, counters in zip(p.sizes, self.counters, strict=True)
+                       if p.metric not in counters]
+            if missing:
+                raise ValueError(
+                    f"{p.name}: metric {p.metric!r} missing at sizes {missing}"
+                )
+            values = [float(c[p.metric]) for c in self.counters]
+            below_floor = False
         else:
-            self.exponent = _fit_exponent(p.sizes, self.times)
-            self.below_floor = max(self.times) <= p.noise_floor
-        self.ok = (self.below_floor or
-                   abs(self.exponent - p.expect) < p.tolerance)
+            values = self.times
+            below_floor = max(self.times) <= p.noise_floor
+        self.exponent = _fit_exponent(p.sizes, values)
+        tail_count = min(3, len(p.sizes))
+        self.tail_exponent = _fit_exponent(
+            p.sizes[-tail_count:], values[-tail_count:]
+        )
+        self.local_exponents = [
+            math.log(max(right, 1e-12) / max(left, 1e-12)) /
+            math.log(right_size / left_size)
+            for left_size, right_size, left, right in zip(
+                p.sizes, p.sizes[1:], values, values[1:], strict=False
+            )
+        ]
+        if below_floor:
+            self.status = "UNRESOLVED"
+        elif max(self.exponent, self.tail_exponent) >= p.expect + p.tolerance:
+            self.status = "FAIL"
+        else:
+            self.status = "PASS"
+        self.ok = self.status == "PASS"
 
 
 def run_probe(p: Probe) -> Result:
@@ -155,13 +199,13 @@ def run_probe(p: Probe) -> Result:
 
 def _print_result(r: Result) -> None:
     p = r.probe
-    verdict = "ok" if r.ok else "FAIL"
     on = f" on {p.metric}" if p.metric else ""
-    fitted = ("below noise floor" if r.below_floor
-              else f"fitted n^{r.exponent:.2f}{on} ({_classify(r.exponent)})")
-    print(f"\n== {p.name} — expect {_classify(p.expect)}, {fitted} [{verdict}]")
-    if p.doc:
-        print(f"   {p.doc.splitlines()[0]}")
+    fitted = (
+        f"global n^{r.exponent:.2f}, tail n^{r.tail_exponent:.2f}{on} "
+        f"({_classify(r.tail_exponent)})"
+    )
+    print(f"\n== {p.name} — at most {_classify(p.expect)}, {fitted} [{r.status}]")
+    print(f"   axis: {p.axis}; stage: {p.stage}; assumption: {p.assumption}")
     counter_names = sorted({k for c in r.counters for k in c})
     header = f"{'size':>10} {'time':>12} {'ratio':>7}"
     header += "".join(f" {name:>14}" for name in counter_names)
@@ -187,8 +231,8 @@ _WHEEL_SLOTS = 4096
 
 
 def _wheel():
-    from wreath._native import _reactor
-    return _reactor.TimingWheel(
+    reactor: Any = importlib.import_module("wreath._native._reactor")
+    return reactor.TimingWheel(
         resolution=_WHEEL_RES, slots=_WHEEL_SLOTS, base=0.0)
 
 
@@ -305,6 +349,7 @@ def _loop_timer_churn(k: int):
         for handle in handles:
             handle.cancel()
         elapsed = time.perf_counter() - start
+        assert loop._wheel is not None
         retained = loop._wheel.count
     finally:
         loop.close()
@@ -321,12 +366,16 @@ class _SinkTransport:
         self._extra = {"sockname": ("127.0.0.1", 8000),
                        "peername": ("127.0.0.1", 54321)}
         self.closed = False
+        self.bytes_written = 0
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
         return self._extra.get(name, default)
 
-    def write(self, data: Any) -> None: ...
-    def writelines(self, chunks: Any) -> None: ...
+    def write(self, data: Any) -> None:
+        self.bytes_written += len(data)
+
+    def writelines(self, chunks: Any) -> None:
+        self.bytes_written += sum(map(len, chunks))
     def pause_reading(self) -> None: ...
     def resume_reading(self) -> None: ...
     def is_closing(self) -> bool:
@@ -339,8 +388,13 @@ class _SinkTransport:
         self.closed = True
 
 
-@probe("http1-receive-queue-lockstep", expect=0.0,
-       sizes=(16384, 32768, 65536, 131072), noise_floor=1e-6)
+@probe(
+    "http1-receive-queue-lockstep", expect=0.0,
+    sizes=(16384, 32768, 65536, 131072),
+    axis="retained receive-queue capacity",
+    assumption="one pop plus one push is amortized O(1) in queue capacity",
+    stage="ingress", group="metal-http1",
+)
 def _http1_receive_queue_lockstep(cap: int):
     """Chunk ingest with the receive queue in pop/push lockstep at capacity:
     amortized O(1) per message.
@@ -350,8 +404,9 @@ def _http1_receive_queue_lockstep(cap: int):
     push (head == 1 reclaims one slot for cap-1 pointer moves)."""
     import asyncio
 
-    from wreath._native import _server
     from wreath.server import ServerConfig
+
+    _server: Any = importlib.import_module("wreath._native._server")
 
     chunk = b"1\r\nx\r\n"
     iterations = 256
@@ -391,9 +446,174 @@ def _http1_receive_queue_lockstep(cap: int):
             ingest += time.perf_counter() - start
         protocol.connection_lost(None)
         await asyncio.sleep(0)
-        return ingest / iterations
+        return ingest
 
     return asyncio.run(run())
+
+
+async def _http1_bridge_trial(
+    request_chunks: tuple[bytes, ...],
+    *,
+    response_headers: list[tuple[bytes, bytes]] | None = None,
+) -> tuple[float, int]:
+    """Drive the real native protocol -> Wreath -> one-shot response bridge."""
+    import asyncio
+
+    from wreath import Response, Wreath
+    from wreath.server import ServerConfig
+
+    _server: Any = importlib.import_module("wreath._native._server")
+
+    app = Wreath()
+    done = asyncio.Event()
+    response = Response(b"x", headers=response_headers)
+
+    @app.get("/")
+    async def endpoint(request):
+        done.set()
+        return response
+
+    loop = asyncio.get_running_loop()
+    config = ServerConfig(max_header_bytes=1 << 22, max_header_count=1 << 16)
+    protocol = _server.HttpProtocol(app, config, loop, set())
+    transport = _SinkTransport()
+    protocol.connection_made(transport)
+    start = time.perf_counter()
+    for chunk in request_chunks:
+        protocol.data_received(chunk)
+    await done.wait()
+    # The handler sets the event immediately before returning. Let its task run
+    # through _finish_http and the native one-shot response before stopping.
+    await asyncio.sleep(0)
+    elapsed = time.perf_counter() - start
+    protocol.connection_lost(None)
+    await asyncio.sleep(0)
+    return elapsed, transport.bytes_written
+
+
+@probe(
+    "http1-fragmented-head", expect=1.0,
+    sizes=(2000, 4000, 8000, 16000),
+    axis="request-head bytes delivered one byte at a time",
+    assumption="incremental delimiter scans visit each buffered byte O(1) times",
+    stage="ingress", group="metal-http1",
+)
+def _http1_fragmented_head(n: int):
+    """Byte-at-a-time native protocol ingestion is O(total request-head bytes)."""
+    import asyncio
+
+    request = b"GET / HTTP/1.1\r\nHost: x\r\nX-Pad: " + b"x" * n + b"\r\n\r\n"
+    chunks = tuple(request[index:index + 1] for index in range(len(request)))
+    elapsed, written = asyncio.run(_http1_bridge_trial(chunks))
+    assert written > 0
+    return elapsed
+
+
+@probe(
+    "http1-pipelined-requests", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="keep-alive requests queued on one protocol",
+    assumption="request parsing, activation, and response emission are O(requests)",
+    stage="request", group="metal-http1",
+)
+def _http1_pipelined_requests(n: int):
+    """Queued keep-alive requests complete in linear time with amortized compaction."""
+    import asyncio
+
+    from wreath import Response, Wreath
+    from wreath.server import ServerConfig
+
+    _server: Any = importlib.import_module("wreath._native._server")
+    request = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"
+
+    async def run() -> float:
+        app = Wreath()
+        response = Response(b"x")
+        completed = 0
+        done = asyncio.Event()
+
+        @app.get("/")
+        async def endpoint(request):
+            nonlocal completed
+            completed += 1
+            if completed == n:
+                done.set()
+            return response
+
+        loop = asyncio.get_running_loop()
+        protocol = _server.HttpProtocol(app, ServerConfig(), loop, set())
+        transport = _SinkTransport()
+        protocol.connection_made(transport)
+        start = time.perf_counter()
+        for _ in range(n):
+            protocol.data_received(request)
+        await done.wait()
+        await asyncio.sleep(0)
+        elapsed = time.perf_counter() - start
+        protocol.connection_lost(None)
+        await asyncio.sleep(0)
+        assert transport.bytes_written > n
+        return elapsed
+
+    return asyncio.run(run())
+
+
+@probe(
+    "http1-response-headers", expect=1.0,
+    sizes=(2000, 4000, 8000, 16000),
+    axis="response header count at fixed value width",
+    assumption="one-shot response validation and serialization are O(header bytes)",
+    stage="egress", group="metal-http1",
+)
+def _http1_response_headers(n: int):
+    """Native one-shot response serialization is linear in response headers."""
+    import asyncio
+
+    headers = [(f"x-h{index}".encode(), b"v" * 16) for index in range(n)]
+    request = (b"GET / HTTP/1.1\r\nHost: x\r\n\r\n",)
+    elapsed, written = asyncio.run(
+        _http1_bridge_trial(request, response_headers=headers)
+    )
+    assert written > n * 16
+    return elapsed
+
+
+@probe(
+    "metal-egress-backpressure", expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="fixed-size writes retained behind a blocked metal socket",
+    assumption="native egress enqueue is amortized O(writes) under backpressure",
+    stage="egress", group="metal-host",
+)
+def _metal_egress_backpressure(n: int):
+    """Real native-transport enqueue remains linear while the peer does not read."""
+    import asyncio
+    import socket
+
+    from wreath.reactor import metal_event_loop
+
+    class Protocol(asyncio.Protocol):
+        pass
+
+    loop = metal_event_loop(diagnostics=True)
+    client, server = socket.socketpair()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+    payload = b"x" * 4096
+    try:
+        transport = loop._make_socket_transport(server, Protocol())
+        loop.run_until_complete(asyncio.sleep(0))
+        start = time.perf_counter()
+        for _ in range(n):
+            transport.write(payload)
+        elapsed = time.perf_counter() - start
+        queued = transport.get_write_buffer_size()
+        assert queued > 0
+        transport.abort()
+        loop.run_until_complete(asyncio.sleep(0))
+        return elapsed, {"queued_bytes": queued}
+    finally:
+        client.close()
+        loop.close()
 
 
 # --- probes: native body validation ---------------------------------------
@@ -567,8 +787,13 @@ def _multipart_many_parts(n: int):
 _MATCH_LOOPS = 4000
 
 
-@probe("bitset-router-static-scale", expect=0.0,
-       sizes=(1000, 4000, 16000, 64000), repeats=1)
+@probe(
+    "bitset-router-static-scale", expect=0.0,
+    sizes=(1000, 4000, 16000, 64000), repeats=1,
+    axis="unrelated static route count",
+    assumption="static route activation is O(1) in total route count",
+    stage="routing", group="metal-http1",
+)
 def _bitset_router_static_scale(n: int):
     """Bitset (default) static-route match is O(1) in total route count.
 
@@ -589,8 +814,13 @@ def _bitset_router_static_scale(n: int):
     return time.perf_counter() - start
 
 
-@probe("bitset-router-same-group-scale", expect=1.0,
-       sizes=(8000, 16000, 32000, 64000), repeats=1)
+@probe(
+    "bitset-router-same-group-scale", expect=1.0,
+    sizes=(8000, 16000, 32000, 64000), repeats=1,
+    axis="same-shape parameter route group size",
+    assumption="worst-case bitset activation is O(group size / 64)",
+    stage="routing", group="metal-http1",
+)
 def _bitset_router_same_group_scale(n: int):
     """Bitset match within ONE same-shape param group is O(group_size/64).
 
@@ -636,7 +866,12 @@ def _trie_router_match_scale(n: int):
 # --- baseline probes: ingress parse & codecs ------------------------------
 
 
-@probe("http-parse-request-headers", expect=1.0, sizes=(500, 1000, 2000, 4000))
+@probe(
+    "http-parse-request-headers", expect=1.0, sizes=(500, 1000, 2000, 4000),
+    axis="request header count",
+    assumption="request-head parsing is O(headers plus header bytes)",
+    stage="ingress", group="metal-http1",
+)
 def _http_parse_request_headers(n: int):
     """Parsing a request with n headers is O(n): the header loop is a single
     forward pass, not an O(n^2) rescan or per-header dedup scan."""
@@ -691,8 +926,12 @@ def _ws_unmask(n: int):
 # --- baseline probe: middleware tape dispatch -----------------------------
 
 
-@probe("middleware-tape-fused-dispatch", expect=1.0,
-       sizes=(8, 16, 32, 64))
+@probe(
+    "middleware-tape-fused-dispatch", expect=1.0, sizes=(8, 16, 32, 64),
+    axis="fused synchronous middleware hook count",
+    assumption="middleware dispatch is O(active hooks)",
+    stage="middleware", group="metal-http1",
+)
 def _middleware_tape_fused_dispatch(n: int):
     """Dispatching a tape of n fused synchronous before hooks is O(n): the
     fused run is a single flat pass over the hooks (no per-hook coroutine),
@@ -717,7 +956,7 @@ def _middleware_tape_fused_dispatch(n: int):
         start = time.perf_counter()
         for _ in range(loops):
             await tape(request)
-        return (time.perf_counter() - start) / loops
+        return time.perf_counter() - start
 
     return asyncio.run(run())
 
@@ -725,8 +964,13 @@ def _middleware_tape_fused_dispatch(n: int):
 # --- baseline probe: response coercion fast path --------------------------
 
 
-@probe("response-coerce-text", expect=1.0,
-       sizes=(20_000, 40_000, 80_000, 160_000))
+@probe(
+    "response-coerce-text", expect=1.0,
+    sizes=(20_000, 40_000, 80_000, 160_000),
+    axis="text response body bytes",
+    assumption="response coercion is O(encoded body bytes)",
+    stage="egress", group="metal-http1",
+)
 def _response_coerce_text(n: int):
     """Coercing an n-byte string handler return into a Response is O(n): the
     single-frame fast path does one utf-8 encode plus O(1) header assembly, so
@@ -734,9 +978,112 @@ def _response_coerce_text(n: int):
     from wreath.response import coerce_text
 
     body = "x" * n
+    loops = 200
     start = time.perf_counter()
-    coerce_text(body)
+    for _ in range(loops):
+        coerce_text(body)
     return time.perf_counter() - start
+
+
+# --- checked assumption baseline ------------------------------------------
+
+
+def _result_document(result: Result) -> dict[str, Any]:
+    p = result.probe
+    return {
+        "probe": p.name,
+        "group": p.group,
+        "stage": p.stage,
+        "axis": p.axis,
+        "assumption": p.assumption,
+        "expect_exponent": p.expect,
+        "tolerance": p.tolerance,
+        "fitted_exponent": round(result.exponent, 3),
+        "tail_exponent": round(result.tail_exponent, 3),
+        "local_exponents": [round(value, 3) for value in result.local_exponents],
+        "class": _classify(result.tail_exponent),
+        "status": result.status,
+        "sizes": list(p.sizes),
+        "seconds": result.times,
+        "counters": result.counters,
+    }
+
+
+def _contract(p: Probe) -> dict[str, Any]:
+    return {
+        "group": p.group,
+        "stage": p.stage,
+        "axis": p.axis,
+        "assumption": p.assumption,
+        "expect_exponent": p.expect,
+        "tolerance": p.tolerance,
+        "metric": p.metric,
+        "sizes": list(p.sizes),
+    }
+
+
+def _baseline_path() -> Path:
+    return repo_root() / BASELINE_PATH
+
+
+def _write_baseline(names: list[str]) -> int:
+    results = [run_probe(_REGISTRY[name]) for name in names]
+    failures = [result for result in results if not result.ok]
+    if failures:
+        for result in failures:
+            _print_result(result)
+        print("wreath-complexity-probe: refusing to record a failing/unresolved baseline",
+              file=sys.stderr)
+        return 1
+    payload = {
+        "version": BASELINE_VERSION,
+        "note": (
+            "Checked complexity assumptions for the metal request path. Timings are "
+            "observations, not absolute performance gates; --check reruns each probe "
+            "and enforces its declared global and tail exponent bound."
+        ),
+        "probes": {
+            result.probe.name: {
+                "contract": _contract(result.probe),
+                "observation": _result_document(result),
+            }
+            for result in results
+        },
+    }
+    path = _baseline_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    print(f"wreath-complexity-probe: wrote {BASELINE_PATH}")
+    return 0
+
+
+def _check_baseline(names: list[str]) -> int:
+    path = _baseline_path()
+    if not path.exists():
+        print(f"wreath-complexity-probe: no baseline at {BASELINE_PATH}; "
+              "create it with --update-baseline", file=sys.stderr)
+        return 1
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("version") != BASELINE_VERSION:
+        print("wreath-complexity-probe: baseline version mismatch", file=sys.stderr)
+        return 1
+    recorded = payload.get("probes", {})
+    failures = 0
+    for name in names:
+        p = _REGISTRY[name]
+        before = recorded.get(name)
+        if before is None or before.get("contract") != _contract(p):
+            print(f"{name}: assumption differs from the baseline; run --update-baseline")
+            failures += 1
+            continue
+        result = run_probe(p)
+        _print_result(result)
+        failures += 0 if result.ok else 1
+    if failures:
+        print(f"wreath-complexity-probe: {failures} contract failure(s)", file=sys.stderr)
+        return 1
+    print(f"wreath-complexity-probe: all assumptions match {BASELINE_PATH}")
+    return 0
 
 
 # --- CLI ------------------------------------------------------------------
@@ -756,19 +1103,37 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repeats", type=int, default=None,
                         help="best-of repeats per size (default: per probe)")
     parser.add_argument("--format", choices=("table", "json"), default="table")
+    parser.add_argument("--group", help="run probes in one named group")
+    parser.add_argument("--check", action="store_true",
+                        help=f"rerun and check assumptions in {BASELINE_PATH}")
+    parser.add_argument("--update-baseline", action="store_true",
+                        help=f"record assumptions and observations in {BASELINE_PATH}")
     options = parser.parse_args(argv)
 
+    if options.check and options.update_baseline:
+        parser.error("--check and --update-baseline are exclusive")
     if options.list_probes:
         for p in _REGISTRY.values():
-            summary = p.doc.splitlines()[0] if p.doc else ""
-            print(f"{p.name:<24} expect {_classify(p.expect):<7} {summary}")
+            print(f"{p.name:<34} {p.group:<12} at most {_classify(p.expect):<7} "
+                  f"{p.axis}: {p.assumption}")
         return 0
 
-    names = options.probes or list(_REGISTRY)
+    if options.probes and options.group:
+        parser.error("probe names and --group are exclusive")
+    names = (options.probes or
+             ([name for name, p in _REGISTRY.items() if p.group == options.group]
+              if options.group else list(_REGISTRY)))
+    if options.group and not names:
+        parser.error(f"unknown or empty group: {options.group}")
     unknown = [n for n in names if n not in _REGISTRY]
     if unknown:
         parser.error(f"unknown probe(s): {', '.join(unknown)} "
                      f"(--list shows registered names)")
+
+    if options.update_baseline:
+        return _write_baseline(names)
+    if options.check:
+        return _check_baseline(names)
 
     failures = 0
     documents: list[dict[str, Any]] = []
@@ -782,17 +1147,7 @@ def main(argv: list[str] | None = None) -> int:
         if options.format == "table":
             _print_result(result)
         else:
-            documents.append({
-                "probe": p.name,
-                "expect_exponent": p.expect,
-                "fitted_exponent": round(result.exponent, 3),
-                "class": _classify(result.exponent),
-                "below_noise_floor": result.below_floor,
-                "ok": result.ok,
-                "sizes": list(p.sizes),
-                "seconds": result.times,
-                "counters": result.counters,
-            })
+            documents.append(_result_document(result))
         failures += 0 if result.ok else 1
 
     if options.format == "json":

@@ -340,6 +340,8 @@ _CHECKS: tuple[tuple[str, list[str]], ...] = (
     ("native-error-lint", [sys.executable, "-m", "wreath._devtools.native_error_lint"]),
     ("native-memory-lint", [sys.executable, "-m", "wreath._devtools.native_memory_lint"]),
     ("native-gil-lint", [sys.executable, "-m", "wreath._devtools.native_gil_lint"]),
+    ("complexity", [sys.executable, "-m", "wreath._devtools.complexity_probe",
+                    "--group", "metal-http1", "--check"]),
     ("request-trace", [sys.executable, "-m", "wreath._devtools.request_trace", "--check"]),
 )
 

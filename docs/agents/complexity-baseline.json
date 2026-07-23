@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "note": "Checked complexity assumptions for the metal HTTP/1 request path. Timings are observations, not absolute performance gates; `uv run wreath-complexity-probe --group metal-http1 --check` reruns each proof and enforces its declared global and tail exponent bound. Re-record reviewed assumption changes with `--update-baseline`.",
+  "probes": {
+    "http1-receive-queue-lockstep": {
+      "contract": {
+        "group": "metal-http1",
+        "stage": "ingress",
+        "axis": "retained receive-queue capacity",
+        "assumption": "one pop plus one push is amortized O(1) in queue capacity",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [16384, 32768, 65536, 131072]
+      },
+      "observation": {"status": "PASS"}
+    },
+    "http1-fragmented-head": {
+      "contract": {
+        "group": "metal-http1",
+        "stage": "ingress",
+        "axis": "request-head bytes delivered one byte at a time",
+        "assumption": "incremental delimiter scans visit each buffered byte O(1) times",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [2000, 4000, 8000, 16000]
+      },
+      "observation": {"status": "PASS"}
+    },
+    "http1-pipelined-requests": {
+      "contract": {
+        "group": "metal-http1",
+        "stage": "request",
+        "axis": "keep-alive requests queued on one protocol",
+        "assumption": "request parsing, activation, and response emission are O(requests)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [500, 1000, 2000, 4000]
+      },
+      "observation": {"status": "PASS"}
+    },
+    "http1-response-headers": {
+      "contract": {
+        "group": "metal-http1",
+        "stage": "egress",
+        "axis": "response header count at fixed value width",
+        "assumption": "one-shot response validation and serialization are O(header bytes)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [2000, 4000, 8000, 16000]
+      },
+      "observation": {"status": "PASS"}
+    },
+    "bitset-router-static-scale": {
+      "contract": {
+        "group": "metal-http1",
+        "stage": "routing",
+        "axis": "unrelated static route count",
+        "assumption": "static route activation is O(1) in total route count",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [1000, 4000, 16000, 64000]
+      },
+      "observation": {"status": "PASS"}
+    },
+    "bitset-router-same-group-scale": {
+      "contract": {
+        "group": "metal-http1",
+        "stage": "routing",
+        "axis": "same-shape parameter route group size",
+        "assumption": "worst-case bitset activation is O(group size / 64)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [8000, 16000, 32000, 64000]
+      },
+      "observation": {"status": "PASS"}
+    },
+    "http-parse-request-headers": {
+      "contract": {
+        "group": "metal-http1",
+        "stage": "ingress",
+        "axis": "request header count",
+        "assumption": "request-head parsing is O(headers plus header bytes)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [500, 1000, 2000, 4000]
+      },
+      "observation": {"status": "PASS"}
+    },
+    "middleware-tape-fused-dispatch": {
+      "contract": {
+        "group": "metal-http1",
+        "stage": "middleware",
+        "axis": "fused synchronous middleware hook count",
+        "assumption": "middleware dispatch is O(active hooks)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [8, 16, 32, 64]
+      },
+      "observation": {"status": "PASS"}
+    },
+    "response-coerce-text": {
+      "contract": {
+        "group": "metal-http1",
+        "stage": "egress",
+        "axis": "text response body bytes",
+        "assumption": "response coercion is O(encoded body bytes)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [20000, 40000, 80000, 160000]
+      },
+      "observation": {"status": "PASS"}
+    }
+  }
+}
