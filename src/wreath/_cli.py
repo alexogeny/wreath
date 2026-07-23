@@ -302,7 +302,18 @@ def build_parser() -> argparse.ArgumentParser:
     migration_status.add_argument("artifacts", nargs="+", metavar="ARTIFACT")
     migration_status.add_argument("--database", default="main")
     migration_status.add_argument("--factory", action="store_true")
+    migration_status.add_argument("--dsn-env", default="WREATH_MIGRATION_DSN")
     migration_status.add_argument("--json", action="store_true")
+    migration_apply = migration_actions.add_parser(
+        "apply", help="lock, apply, record, and verify one authoritative artifact"
+    )
+    migration_apply.add_argument("target", help="application target as module:attribute")
+    migration_apply.add_argument("artifact", metavar="ARTIFACT")
+    migration_apply.add_argument("--database", default="main")
+    migration_apply.add_argument("--factory", action="store_true")
+    migration_apply.add_argument("--allow-destructive", action="store_true")
+    migration_apply.add_argument("--dsn-env", default="WREATH_MIGRATION_DSN")
+    migration_apply.add_argument("--json", action="store_true")
     inspect_parser = commands.add_parser(
         "inspect", help="query a running server's read-only telemetry Inspector"
     )

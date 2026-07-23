@@ -123,7 +123,10 @@ image_open(PyObject *object, const char *name, WreathMigrationImage *image)
     if (memcmp(image->view.buf, "WMI1", 4) != 0 ||
         read_u32_le((const unsigned char *)image->view.buf + 4) != IMAGE_VERSION ||
         read_u32_le((const unsigned char *)image->view.buf + 8) != IMAGE_RECORD_SIZE) {
-        PyErr_Format(PyExc_ValueError, "%s migration image header is unsupported", name);
+        PyErr_Format(
+            PyExc_ValueError,
+            "invalid %s WMI1 image: expected WMI1 magic, format 1, and 24-byte records",
+            name);
         goto error;
     }
     image->count = read_u32_le((const unsigned char *)image->view.buf + 12);
@@ -383,7 +386,10 @@ catalog_field_bytes(
     slot = (Py_ssize_t)field->slab_index - tape->owner_head;
     if ((uint64_t)field->offset + (uint64_t)field->length >
         (uint64_t)buffers[slot].len) {
-        PyErr_SetString(PyExc_RuntimeError, "catalog field range is invalid");
+        PyErr_Format(
+            PyExc_RuntimeError,
+            "catalog field range exceeds its slab: offset %u plus length %d is greater than %zd bytes",
+            field->offset, field->length, buffers[slot].len);
         return NULL;
     }
     *length_out = field->length;
@@ -413,8 +419,8 @@ catalog_hash_part(uint64_t hash, const unsigned char *value, Py_ssize_t length)
     return hash * UINT64_C(1099511628211);
 }
 
-static uint64_t
-catalog_object_id(
+uint64_t
+wreath_pg_migration_object_id(
     uint32_t kind,
     const unsigned char *schema, Py_ssize_t schema_length,
     const unsigned char *table, Py_ssize_t table_length,
@@ -470,8 +476,8 @@ catalog_decode_numeric_row(
     return 0;
 }
 
-static uint32_t
-catalog_signature(const unsigned char *value, Py_ssize_t length)
+uint32_t
+wreath_pg_migration_signature(const unsigned char *value, Py_ssize_t length)
 {
     uint32_t hash = UINT32_C(2166136261);
     for (Py_ssize_t index = 0; index < length; index++) {
@@ -554,12 +560,12 @@ catalog_decode_named_row(
     if (schema == NULL || table == NULL || name == NULL ||
         kind_data == NULL || signature_data == NULL) return -1;
     kind = read_u32_be(kind_data);
-    table_id = catalog_object_id(
+    table_id = wreath_pg_migration_object_id(
         1, schema, schema_length, table, table_length, empty, 0);
-    object_id = kind == 1 ? table_id : catalog_object_id(
+    object_id = kind == 1 ? table_id : wreath_pg_migration_object_id(
         kind, schema, schema_length, table, table_length, name, name_length);
     signature = signature_text
-        ? catalog_signature(signature_data, signature_length)
+        ? wreath_pg_migration_signature(signature_data, signature_length)
         : read_u32_be(signature_data);
     if (catalog_append_descriptor(
             catalog, schema, schema_length, table, table_length,
@@ -805,7 +811,9 @@ migration_compile_desired(PyObject *module, PyObject *args)
             args, "y#:_migration_compile_desired", &descriptor, &length)) return NULL;
     if (length < 12 || memcmp(descriptor, "WMD1", 4) != 0 ||
         read_u32_le(descriptor + 4) != 1) {
-        PyErr_SetString(PyExc_ValueError, "desired descriptor header is unsupported");
+        PyErr_SetString(
+            PyExc_ValueError,
+            "invalid desired WMD1 descriptor: expected WMD1 magic, format 1, and a 12-byte header");
         return NULL;
     }
     count = read_u32_le(descriptor + 8);
@@ -838,7 +846,10 @@ migration_compile_desired(PyObject *module, PyObject *args)
         payload_length = (Py_ssize_t)schema_length + table_length +
             name_length + signature_length;
         if (schema_length == 0 || table_length == 0 || payload_length > length - offset) {
-            PyErr_SetString(PyExc_ValueError, "desired descriptor record is invalid");
+            PyErr_Format(
+                PyExc_ValueError,
+                "invalid desired WMD1 record %u: schema/table names must be nonempty and its %zd-byte payload must fit in %zd remaining bytes",
+                index, payload_length, length - offset);
             goto done;
         }
         schema = descriptor + offset;
@@ -846,17 +857,17 @@ migration_compile_desired(PyObject *module, PyObject *args)
         name = table + table_length;
         signature = name + name_length;
         offset += payload_length;
-        table_id = catalog_object_id(
+        table_id = wreath_pg_migration_object_id(
             1, schema, schema_length, table, table_length,
             (const unsigned char *)"", 0);
         record = records + (Py_ssize_t)index * IMAGE_RECORD_SIZE;
         write_u64_le(
             record,
-            kind == 1 ? table_id : catalog_object_id(
+            kind == 1 ? table_id : wreath_pg_migration_object_id(
                 kind, schema, schema_length, table, table_length, name, name_length));
         write_u64_le(record + 8, kind == 1 ? 0 : table_id);
         write_u32_le(record + 16, kind);
-        write_u32_le(record + 20, catalog_signature(signature, signature_length));
+        write_u32_le(record + 20, wreath_pg_migration_signature(signature, signature_length));
     }
     if (offset != length) {
         PyErr_SetString(PyExc_ValueError, "desired descriptor has trailing bytes");
@@ -927,7 +938,10 @@ open_named_descriptor(
     Py_ssize_t offset = 12;
     WreathNamedMigrationRecord *records;
     if (length < 12 || memcmp(data, "WMD1", 4) != 0 || read_u32_le(data + 4) != 1) {
-        PyErr_Format(PyExc_ValueError, "%s descriptor header is unsupported", label);
+        PyErr_Format(
+            PyExc_ValueError,
+            "invalid %s WMD1 descriptor: expected WMD1 magic, format 1, and a 12-byte header",
+            label);
         return -1;
     }
     count = read_u32_le(data + 8);
@@ -958,7 +972,10 @@ open_named_descriptor(
             record->name_length + record->signature_length;
         if (record->schema_length == 0 || record->table_length == 0 ||
             payload_length > length - offset) {
-            PyErr_Format(PyExc_ValueError, "%s descriptor record is invalid", label);
+            PyErr_Format(
+                PyExc_ValueError,
+                "invalid %s WMD1 record %u: schema/table names must be nonempty and its %zd-byte payload must fit in %zd remaining bytes",
+                label, index, payload_length, length - offset);
             goto error;
         }
         record->schema = data + offset;
@@ -966,13 +983,13 @@ open_named_descriptor(
         record->name = record->table + record->table_length;
         record->signature = record->name + record->name_length;
         offset += payload_length;
-        table_id = catalog_object_id(
+        table_id = wreath_pg_migration_object_id(
             1, record->schema, record->schema_length,
             record->table, record->table_length, (const unsigned char *)"", 0);
-        record->object_id = record->kind == 1 ? table_id : catalog_object_id(
+        record->object_id = record->kind == 1 ? table_id : wreath_pg_migration_object_id(
             record->kind, record->schema, record->schema_length,
             record->table, record->table_length, record->name, record->name_length);
-        record->signature_hash = catalog_signature(
+        record->signature_hash = wreath_pg_migration_signature(
             record->signature, record->signature_length);
     }
     if (offset != length) {

@@ -5,8 +5,9 @@
 #include <string.h>
 
 #include "migration_artifact.h"
+#include "migration_sql.h"
 
-#define ARTIFACT_HEADER_SIZE 160
+#define ARTIFACT_HEADER_SIZE 168
 #define ARTIFACT_VERSION 1
 #define TAPE_HEADER_SIZE 12
 #define TAPE_RECORD_SIZE 24
@@ -50,6 +51,12 @@ read_u32_be(const unsigned char *value)
            ((uint32_t)value[1] << 16) |
            ((uint32_t)value[2] << 8) |
            (uint32_t)value[3];
+}
+
+static uint16_t
+read_u16_le(const unsigned char *value)
+{
+    return (uint16_t)((uint16_t)value[0] | ((uint16_t)value[1] << 8));
 }
 
 static uint32_t
@@ -183,9 +190,87 @@ validate_tape(const unsigned char *tape, Py_ssize_t length)
     }
     expected = TAPE_HEADER_SIZE + (Py_ssize_t)count * TAPE_RECORD_SIZE;
     if (length != expected) {
-        PyErr_SetString(PyExc_ValueError, "operation_tape byte length is invalid");
+        PyErr_Format(
+            PyExc_ValueError,
+            "invalid WMO1 operation tape: count %u requires %zd bytes, but the tape has %zd",
+            count, expected, length);
         return -1;
     }
+    return 0;
+}
+
+static int
+validate_named_plan(
+    const unsigned char *tape, Py_ssize_t length, uint32_t *count_out)
+{
+    Py_ssize_t offset = 12;
+    uint32_t count;
+    if (length < 12 || memcmp(tape, "WMP1", 4) != 0 || read_u32_le(tape + 4) != 1) {
+        PyErr_SetString(PyExc_ValueError, "named_plan is not a supported WMP1 tape");
+        return -1;
+    }
+    count = read_u32_le(tape + 8);
+    for (uint32_t index = 0; index < count; index++) {
+        Py_ssize_t payload = 0;
+        if (length - offset < 20 || read_u16_le(tape + offset + 18) != 0) {
+            PyErr_Format(
+                PyExc_ValueError,
+                "invalid WMP1 named plan: operation %u lacks its 20-byte header or has nonzero reserved flags",
+                index);
+            return -1;
+        }
+        for (Py_ssize_t field = 0; field < 5; field++)
+            payload += read_u16_le(tape + offset + 8 + field * 2);
+        offset += 20;
+        if (payload > length - offset) {
+            PyErr_SetString(PyExc_ValueError, "named_plan is truncated");
+            return -1;
+        }
+        offset += payload;
+    }
+    if (offset != length) {
+        PyErr_SetString(PyExc_ValueError, "named_plan has trailing bytes");
+        return -1;
+    }
+    *count_out = count;
+    return 0;
+}
+
+static int
+validate_sql_tape(
+    const unsigned char *tape, Py_ssize_t length, uint32_t *count_out)
+{
+    Py_ssize_t offset = 12;
+    uint32_t count;
+    if (length < 12 || memcmp(tape, "WMS1", 4) != 0 || read_u32_le(tape + 4) != 1) {
+        PyErr_SetString(PyExc_ValueError, "sql_tape is not a supported WMS1 tape");
+        return -1;
+    }
+    count = read_u32_le(tape + 8);
+    for (uint32_t index = 0; index < count; index++) {
+        uint32_t flags, sql_length;
+        if (length - offset < 8) {
+            PyErr_SetString(PyExc_ValueError, "sql_tape is truncated");
+            return -1;
+        }
+        flags = read_u32_le(tape + offset);
+        sql_length = read_u32_le(tape + offset + 4);
+        offset += 8;
+        if ((flags & ~3U) != 0 || sql_length > (uint32_t)(length - offset) ||
+            ((flags & 2U) != 0 && sql_length != 0)) {
+            PyErr_Format(
+                PyExc_ValueError,
+                "invalid WMS1 SQL statement %u: flags are %u and declared SQL length is %u with %zd bytes remaining",
+                index, flags, sql_length, length - offset);
+            return -1;
+        }
+        offset += sql_length;
+    }
+    if (offset != length) {
+        PyErr_SetString(PyExc_ValueError, "sql_tape has trailing bytes");
+        return -1;
+    }
+    *count_out = count;
     return 0;
 }
 
@@ -205,7 +290,7 @@ artifact_digest(const unsigned char *data, Py_ssize_t length, unsigned char dige
     static const unsigned char zero_checksum[32] = {0};
     WreathSha256 context;
     sha256_init(&context);
-    sha256_update(&context, data, 128);
+    sha256_update(&context, data, 136);
     sha256_update(&context, zero_checksum, 32);
     sha256_update(&context, data + ARTIFACT_HEADER_SIZE, length - ARTIFACT_HEADER_SIZE);
     sha256_final(&context, digest);
@@ -224,80 +309,192 @@ require_length(const char *name, Py_ssize_t actual, Py_ssize_t expected)
 static PyObject *
 migration_build_artifact(PyObject *self, PyObject *args)
 {
-    const unsigned char *migration_id, *parent, *source, *target, *tape;
-    Py_ssize_t migration_id_length, parent_length, source_length, target_length, tape_length;
+    const unsigned char *migration_id, *parent, *source, *target;
+    const unsigned char *operations, *named_plan, *sql_tape;
+    Py_ssize_t migration_id_length, parent_length, source_length, target_length;
+    Py_ssize_t operations_length, named_length, sql_length, total;
+    uint32_t named_count, sql_count;
     PyObject *artifact;
+    PyObject *derived_operations;
+    PyObject *derived_sql;
     unsigned char *data;
     unsigned char digest[32];
-    Py_ssize_t total;
-
     (void)self;
     if (!PyArg_ParseTuple(
-            args, "y#y#y#y#y#:_migration_build_artifact",
+            args, "y#y#y#y#y#y#y#:_migration_build_artifact",
             &migration_id, &migration_id_length, &parent, &parent_length,
-            &source, &source_length, &target, &target_length, &tape, &tape_length)) {
-        return NULL;
-    }
+            &source, &source_length, &target, &target_length,
+            &operations, &operations_length, &named_plan, &named_length,
+            &sql_tape, &sql_length)) return NULL;
     if (require_length("migration_id", migration_id_length, 16) < 0 ||
         require_length("parent_checksum", parent_length, 32) < 0 ||
         require_length("source_fingerprint", source_length, 32) < 0 ||
         require_length("target_fingerprint", target_length, 32) < 0 ||
-        validate_tape(tape, tape_length) < 0) {
+        validate_tape(operations, operations_length) < 0 ||
+        validate_named_plan(named_plan, named_length, &named_count) < 0 ||
+        validate_sql_tape(sql_tape, sql_length, &sql_count) < 0) return NULL;
+    if (named_count != read_u32_le(operations + 8) || sql_count != named_count) {
+        PyErr_SetString(PyExc_ValueError, "artifact operation representations disagree");
         return NULL;
     }
-    if (tape_length > UINT32_MAX || tape_length > PY_SSIZE_T_MAX - ARTIFACT_HEADER_SIZE) {
+    derived_operations = wreath_pg_migration_operations_from_plan(
+        named_plan, named_length);
+    if (derived_operations == NULL) return NULL;
+    if (PyBytes_GET_SIZE(derived_operations) != operations_length ||
+        memcmp(
+            PyBytes_AS_STRING(derived_operations), operations,
+            (size_t)operations_length) != 0) {
+        Py_DECREF(derived_operations);
+        PyErr_SetString(
+            PyExc_ValueError,
+            "operation_tape does not match the metal derivation of named_plan");
+        return NULL;
+    }
+    Py_DECREF(derived_operations);
+    derived_sql = wreath_pg_migration_render_sql(named_plan, named_length);
+    if (derived_sql == NULL) return NULL;
+    if (PyBytes_GET_SIZE(derived_sql) != sql_length ||
+        memcmp(PyBytes_AS_STRING(derived_sql), sql_tape, (size_t)sql_length) != 0) {
+        Py_DECREF(derived_sql);
+        PyErr_SetString(PyExc_ValueError, "sql_tape is not the metal derivation of named_plan");
+        return NULL;
+    }
+    Py_DECREF(derived_sql);
+    if (operations_length > UINT32_MAX || named_length > UINT32_MAX ||
+        sql_length > UINT32_MAX ||
+        operations_length > PY_SSIZE_T_MAX - ARTIFACT_HEADER_SIZE ||
+        named_length > PY_SSIZE_T_MAX - ARTIFACT_HEADER_SIZE - operations_length ||
+        sql_length > PY_SSIZE_T_MAX - ARTIFACT_HEADER_SIZE -
+            operations_length - named_length) {
         PyErr_SetString(PyExc_OverflowError, "migration artifact is too large");
         return NULL;
     }
-    total = ARTIFACT_HEADER_SIZE + tape_length;
-    artifact = PyBytes_FromStringAndSize(NULL, total);
-    if (artifact == NULL) {
+    total = ARTIFACT_HEADER_SIZE + operations_length + named_length + sql_length;
+    if (total > UINT32_MAX) {
+        PyErr_SetString(PyExc_OverflowError, "migration artifact is too large");
         return NULL;
     }
+    artifact = PyBytes_FromStringAndSize(NULL, total);
+    if (artifact == NULL) return NULL;
     data = (unsigned char *)PyBytes_AS_STRING(artifact);
     memset(data, 0, ARTIFACT_HEADER_SIZE);
     memcpy(data, "WMA1", 4);
     write_u32_le(data + 4, ARTIFACT_VERSION);
     write_u32_le(data + 8, (uint32_t)total);
-    write_u32_le(data + 12, (uint32_t)tape_length);
-    memcpy(data + 16, migration_id, 16);
-    memcpy(data + 32, parent, 32);
-    memcpy(data + 64, source, 32);
-    memcpy(data + 96, target, 32);
-    memcpy(data + ARTIFACT_HEADER_SIZE, tape, tape_length);
+    write_u32_le(data + 12, (uint32_t)operations_length);
+    write_u32_le(data + 16, (uint32_t)named_length);
+    write_u32_le(data + 20, (uint32_t)sql_length);
+    memcpy(data + 24, migration_id, 16);
+    memcpy(data + 40, parent, 32);
+    memcpy(data + 72, source, 32);
+    memcpy(data + 104, target, 32);
+    memcpy(data + ARTIFACT_HEADER_SIZE, operations, (size_t)operations_length);
+    memcpy(data + ARTIFACT_HEADER_SIZE + operations_length,
+           named_plan, (size_t)named_length);
+    memcpy(data + ARTIFACT_HEADER_SIZE + operations_length + named_length,
+           sql_tape, (size_t)sql_length);
     artifact_digest(data, total, digest);
-    memcpy(data + 128, digest, 32);
+    memcpy(data + 136, digest, 32);
     return artifact;
 }
 
 static int
 verify_artifact_data(
-    const unsigned char *data, Py_ssize_t length, uint32_t *tape_length_out)
+    const unsigned char *data,
+    Py_ssize_t length,
+    uint32_t *operations_length_out,
+    uint32_t *named_length_out,
+    uint32_t *sql_length_out)
 {
-    uint32_t tape_length;
+    uint32_t operations_length, named_length, sql_length, named_count, sql_count;
     unsigned char digest[32];
     unsigned char mismatch = 0;
-    if (length < ARTIFACT_HEADER_SIZE || memcmp(data, "WMA1", 4) != 0 ||
-        read_u32_le(data + 4) != ARTIFACT_VERSION) {
-        PyErr_SetString(PyExc_ValueError, "migration artifact header is unsupported");
+    const unsigned char *operations, *named_plan, *sql_tape;
+    PyObject *derived_operations;
+    PyObject *derived_sql;
+    if (length < ARTIFACT_HEADER_SIZE) {
+        PyErr_Format(
+            PyExc_ValueError,
+            "invalid WMA1 artifact: truncated header (%zd bytes; need at least %d)",
+            length, ARTIFACT_HEADER_SIZE);
         return -1;
     }
-    tape_length = read_u32_le(data + 12);
-    if (length > UINT32_MAX || read_u32_le(data + 8) != (uint32_t)length ||
-        tape_length != (uint32_t)(length - ARTIFACT_HEADER_SIZE)) {
-        PyErr_SetString(PyExc_ValueError, "migration artifact byte length is invalid");
+    if (memcmp(data, "WMA1", 4) != 0) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "invalid migration artifact: expected WMA1 magic in the first four bytes");
+        return -1;
+    }
+    if (read_u32_le(data + 4) != ARTIFACT_VERSION) {
+        PyErr_Format(
+            PyExc_ValueError,
+            "invalid WMA1 artifact: format field is %u; expected %u",
+            read_u32_le(data + 4), ARTIFACT_VERSION);
+        return -1;
+    }
+    if (length > UINT32_MAX || read_u32_le(data + 8) != (uint32_t)length) {
+        PyErr_Format(
+            PyExc_ValueError,
+            "invalid WMA1 artifact: declared total length is %u bytes, actual length is %zd",
+            read_u32_le(data + 8), length);
+        return -1;
+    }
+    operations_length = read_u32_le(data + 12);
+    named_length = read_u32_le(data + 16);
+    sql_length = read_u32_le(data + 20);
+    if ((uint64_t)ARTIFACT_HEADER_SIZE + operations_length + named_length + sql_length !=
+        (uint64_t)length) {
+        PyErr_Format(
+            PyExc_ValueError,
+            "invalid WMA1 artifact: header declares operation/name/SQL payloads of "
+            "%u/%u/%u bytes, which do not fill the %zd-byte artifact",
+            operations_length, named_length, sql_length, length);
         return -1;
     }
     artifact_digest(data, length, digest);
-    for (uint32_t index = 0; index < 32; index++) {
-        mismatch |= digest[index] ^ data[128 + index];
-    }
+    for (uint32_t index = 0; index < 32; index++) mismatch |= digest[index] ^ data[136 + index];
     if (mismatch != 0) {
-        PyErr_SetString(PyExc_ValueError, "migration artifact checksum mismatch");
+        PyErr_SetString(
+            PyExc_ValueError,
+            "invalid WMA1 artifact: SHA-256 checksum mismatch; the artifact was modified or corrupted");
         return -1;
     }
-    if (validate_tape(data + ARTIFACT_HEADER_SIZE, tape_length) < 0) return -1;
-    *tape_length_out = tape_length;
+    operations = data + ARTIFACT_HEADER_SIZE;
+    named_plan = operations + operations_length;
+    sql_tape = named_plan + named_length;
+    if (validate_tape(operations, operations_length) < 0 ||
+        validate_named_plan(named_plan, named_length, &named_count) < 0 ||
+        validate_sql_tape(sql_tape, sql_length, &sql_count) < 0) return -1;
+    if (named_count != read_u32_le(operations + 8) || sql_count != named_count) {
+        PyErr_SetString(PyExc_ValueError, "artifact operation representations disagree");
+        return -1;
+    }
+    derived_operations = wreath_pg_migration_operations_from_plan(
+        named_plan, named_length);
+    if (derived_operations == NULL) return -1;
+    if (PyBytes_GET_SIZE(derived_operations) != operations_length ||
+        memcmp(
+            PyBytes_AS_STRING(derived_operations), operations,
+            (size_t)operations_length) != 0) {
+        Py_DECREF(derived_operations);
+        PyErr_SetString(
+            PyExc_ValueError,
+            "invalid WMA1 artifact: operation tape differs from its named plan");
+        return -1;
+    }
+    Py_DECREF(derived_operations);
+    derived_sql = wreath_pg_migration_render_sql(named_plan, named_length);
+    if (derived_sql == NULL) return -1;
+    if (PyBytes_GET_SIZE(derived_sql) != sql_length ||
+        memcmp(PyBytes_AS_STRING(derived_sql), sql_tape, (size_t)sql_length) != 0) {
+        Py_DECREF(derived_sql);
+        PyErr_SetString(PyExc_ValueError, "artifact SQL is not the metal derivation of its plan");
+        return -1;
+    }
+    Py_DECREF(derived_sql);
+    *operations_length_out = operations_length;
+    *named_length_out = named_length;
+    *sql_length_out = sql_length;
     return 0;
 }
 
@@ -306,20 +503,23 @@ migration_verify_artifact(PyObject *self, PyObject *args)
 {
     const unsigned char *data;
     Py_ssize_t length;
-    uint32_t tape_length;
-
+    uint32_t operations_length, named_length, sql_length;
+    const unsigned char *operations, *named_plan, *sql_tape;
     (void)self;
-    if (!PyArg_ParseTuple(args, "y#:_migration_verify_artifact", &data, &length)) {
+    if (!PyArg_ParseTuple(args, "y#:_migration_verify_artifact", &data, &length))
         return NULL;
-    }
-    if (verify_artifact_data(data, length, &tape_length) < 0) return NULL;
+    if (verify_artifact_data(
+            data, length, &operations_length, &named_length, &sql_length) < 0)
+        return NULL;
+    operations = data + ARTIFACT_HEADER_SIZE;
+    named_plan = operations + operations_length;
+    sql_tape = named_plan + named_length;
     return Py_BuildValue(
-        "(y#y#y#y#y#)",
-        data + 16, (Py_ssize_t)16,
-        data + 32, (Py_ssize_t)32,
-        data + 64, (Py_ssize_t)32,
-        data + 96, (Py_ssize_t)32,
-        data + ARTIFACT_HEADER_SIZE, (Py_ssize_t)tape_length);
+        "(y#y#y#y#y#y#y#)",
+        data + 24, (Py_ssize_t)16, data + 40, (Py_ssize_t)32,
+        data + 72, (Py_ssize_t)32, data + 104, (Py_ssize_t)32,
+        operations, (Py_ssize_t)operations_length,
+        named_plan, (Py_ssize_t)named_length, sql_tape, (Py_ssize_t)sql_length);
 }
 
 static PyObject *
@@ -340,14 +540,16 @@ migration_verify_chain(PyObject *self, PyObject *args)
         require_length("expected_source", source_length, 32) < 0) return NULL;
     if (chain_length < 12 || memcmp(chain, "WMC1", 4) != 0 ||
         read_u32_le(chain + 4) != 1) {
-        PyErr_SetString(PyExc_ValueError, "migration chain header is unsupported");
+        PyErr_SetString(
+            PyExc_ValueError,
+            "invalid WMC1 migration chain: expected WMC1 magic, format 1, and a 12-byte header");
         return NULL;
     }
     count = read_u32_le(chain + 8);
     parent = expected_parent;
     source = expected_source;
     for (uint32_t index = 0; index < count; index++) {
-        uint32_t artifact_length, ignored_tape_length;
+        uint32_t artifact_length, ignored_operations, ignored_named, ignored_sql;
         const unsigned char *artifact;
         if (chain_length - offset < 4) {
             PyErr_SetString(PyExc_ValueError, "migration chain is truncated");
@@ -360,19 +562,20 @@ migration_verify_chain(PyObject *self, PyObject *args)
             return NULL;
         }
         artifact = chain + offset;
-        if (verify_artifact_data(artifact, artifact_length, &ignored_tape_length) < 0)
-            return NULL;
-        if (memcmp(artifact + 32, parent, 32) != 0) {
+        if (verify_artifact_data(
+                artifact, artifact_length,
+                &ignored_operations, &ignored_named, &ignored_sql) < 0) return NULL;
+        if (memcmp(artifact + 40, parent, 32) != 0) {
             PyErr_Format(PyExc_ValueError, "migration chain parent mismatch at index %u", index);
             return NULL;
         }
-        if (memcmp(artifact + 64, source, 32) != 0) {
+        if (memcmp(artifact + 72, source, 32) != 0) {
             PyErr_Format(PyExc_ValueError, "migration chain source mismatch at index %u", index);
             return NULL;
         }
         last = artifact;
-        parent = artifact + 128;
-        source = artifact + 96;
+        parent = artifact + 136;
+        source = artifact + 104;
         offset += artifact_length;
     }
     if (offset != chain_length) {
@@ -385,8 +588,8 @@ migration_verify_chain(PyObject *self, PyObject *args)
             expected_source, (Py_ssize_t)32, count);
     }
     return Py_BuildValue(
-        "(y#y#I)", last + 128, (Py_ssize_t)32,
-        last + 96, (Py_ssize_t)32, count);
+        "(y#y#I)", last + 136, (Py_ssize_t)32,
+        last + 104, (Py_ssize_t)32, count);
 }
 
 static PyMethodDef migration_artifact_methods[] = {

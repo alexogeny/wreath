@@ -23,9 +23,12 @@ from .schema import (
     ColumnSpec,
     ModelSpec,
     RelationshipSpec,
+    SchemaMode,
+    SchemaRef,
     StorageSpec,
     fingerprint_model,
     fingerprint_registry,
+    fingerprint_registry_template,
 )
 
 ValidateSchema = Literal["off", "warn", "error"]
@@ -60,7 +63,10 @@ class Registry:
         "fingerprint",
         "query_cache_bytes",
         "query_cache_size",
+        "schema_mode",
         "specs",
+        "template_fingerprint",
+        "deployment_fingerprint",
         "validate_schema",
     )
 
@@ -72,6 +78,7 @@ class Registry:
         validate_schema: ValidateSchema = "error",
         query_cache_size: int = 512,
         query_cache_bytes: int = 8 * 1024 * 1024,
+        schema_mode: SchemaMode | None = None,
     ) -> None:
         if validate_schema not in _VALIDATE_MODES:
             raise RegistryError(
@@ -84,6 +91,7 @@ class Registry:
             raise RegistryError("query_cache_bytes must be a positive integer")
         self.database = database
         self.validate_schema: ValidateSchema = validate_schema
+        self.schema_mode = schema_mode or SchemaMode.single("public")
         self.query_cache_size = query_cache_size
         self.query_cache_bytes = query_cache_bytes
         self._specs: dict[type[Model], ModelSpec] = {}
@@ -94,6 +102,8 @@ class Registry:
         self._by_name: dict[str, ModelSpec | None] = {}
         self.specs: tuple[ModelSpec, ...] = ()
         self.fingerprint = b""
+        self.template_fingerprint = b""
+        self.deployment_fingerprint = b""
         # Plan cache insertion and eviction must stay correct without the GIL.
         self._lock = threading.Lock()
         self._cache: OrderedDict[bytes, tuple[Any, int]] = OrderedDict()
@@ -152,7 +162,9 @@ class Registry:
         self._model_order: dict[type[Model], int] = {
             spec.model_type: index for index, spec in enumerate(self.specs)
         }
-        self.fingerprint = fingerprint_registry(self.specs)
+        self.template_fingerprint = fingerprint_registry_template(self.specs)
+        self.deployment_fingerprint = fingerprint_registry(self.specs)
+        self.fingerprint = self.deployment_fingerprint
 
     def _build_columns(self, model: type[Model]) -> ModelSpec:
         table = model.__wreath_table__
@@ -177,6 +189,7 @@ class Registry:
                     nullable=item.nullable,
                     primary_key=item.primary_key,
                     unique=item.unique,
+                    indexed=item.indexed,
                     default=item.default,
                     server_default=item.server_default,
                     reference=_column_ref(item),
@@ -186,10 +199,19 @@ class Registry:
         primary_key = tuple(item for item in columns if item.primary_key)
         if not primary_key:
             raise DeclarationError(f"{model.__name__} declares no primary-key column")
+        declared_schema = model.__wreath_schema__
+        schema_ref = (
+            declared_schema
+            if isinstance(declared_schema, SchemaRef)
+            else SchemaRef("fixed", declared_schema)
+        )
+        resolved_schema, sql_namespace = self._resolve_schema(schema_ref)
         spec = ModelSpec(
             model_type=model,
-            schema=model.__wreath_schema__,
+            schema=resolved_schema,
+            schema_ref=schema_ref,
             table=table,
+            sql_namespace=sql_namespace,
             columns=tuple(columns),
             primary_key=primary_key,
             relationships=(),
@@ -204,10 +226,29 @@ class Registry:
         )
         return spec
 
+    def _resolve_schema(
+        self, schema: SchemaRef
+    ) -> tuple[str, Literal["qualified", "tenant_search_path"]]:
+        if schema.kind == "fixed":
+            assert schema.name is not None
+            return schema.name, "qualified"
+        if self.schema_mode.kind == "single":
+            assert self.schema_mode.schema is not None
+            return self.schema_mode.schema, "qualified"
+        if schema.kind == "central":
+            assert self.schema_mode.central is not None
+            return self.schema_mode.central, "qualified"
+        return "", "tenant_search_path"
+
     def _build_relationship(
         self, owner: ModelSpec, item: Relationship
     ) -> RelationshipSpec:
         target = self._resolve_target(owner, item)
+        if owner.schema_ref.kind == "central" and target.schema_ref.kind == "tenant":
+            raise DeclarationError(
+                f"central model {owner.model_type.__name__} cannot declare a relationship "
+                f"to tenant model {target.model_type.__name__}"
+            )
         # Write the class back onto the declaration, so a forward-referenced
         # relationship can be traversed in a predicate once models are compiled.
         item.resolved_target = target.model_type

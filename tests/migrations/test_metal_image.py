@@ -45,6 +45,20 @@ def descriptor(*records: tuple[str, str, str, int, str]) -> bytes:
     return bytes(payload)
 
 
+def sql_statements(tape: bytes) -> list[tuple[int, str]]:
+    assert tape[:4] == b"WMS1" and struct.unpack_from("<I", tape, 4)[0] == 1
+    count = struct.unpack_from("<I", tape, 8)[0]
+    offset = 12
+    result = []
+    for _ in range(count):
+        flags, length = struct.unpack_from("<II", tape, offset)
+        offset += 8
+        result.append((flags, tape[offset : offset + length].decode()))
+        offset += length
+    assert offset == len(tape)
+    return result
+
+
 def named_operations(plan: bytes) -> list[tuple[int, int, str, str, str, str, str]]:
     assert plan[:4] == b"WMP1" and struct.unpack_from("<I", plan, 4)[0] == 1
     count = struct.unpack_from("<I", plan, 8)[0]
@@ -133,8 +147,8 @@ def test_registry_intent_compiles_to_the_same_native_name_and_signature_image() 
     desired = _compile_registry_image(registry)
     rows = [
         ("app", "widgets", "", TABLE, "table\x1fr\x1fp"),
-        ("app", "widgets", "id", COLUMN, "column\x1f20\x1f1\x1f1\x1f\x1f\x1f"),
-        ("app", "widgets", "name", COLUMN, "column\x1f25\x1f2\x1f1\x1f\x1f\x1f"),
+        ("app", "widgets", "id", COLUMN, "column\x1f20\x1f\x1f1\x1f\x1f\x1f"),
+        ("app", "widgets", "name", COLUMN, "column\x1f25\x1f\x1f1\x1f\x1f\x1f"),
         ("app", "widgets", "p:id:::", CONSTRAINT, "p:id:::"),
     ]
     tape = native._FieldTape(5)
@@ -327,7 +341,9 @@ def test_registry_plan_uses_column_names_for_reviewable_constraints() -> None:
 
     class Entry(Model, table="entries", schema="app"):
         id: Mapped[int] = column(Int64, primary_key=True)
-        account_id: Mapped[int] = column(Int64, references=Account.id)
+        account_id: Mapped[int] = column(
+            Int64, references=Account.id, index=True
+        )
 
     class Database:
         name = "main"
@@ -336,10 +352,14 @@ def test_registry_plan_uses_column_names_for_reviewable_constraints() -> None:
     plan = native._migration_plan_descriptors(
         _registry_descriptor(registry), descriptor()
     )
+    planned = named_operations(plan)
     constraint_names = {
         operation[4]
-        for operation in named_operations(plan)
+        for operation in planned
         if operation[1] == CONSTRAINT
+    }
+    index_names = {
+        operation[4] for operation in planned if operation[1] == 4
     }
 
     assert constraint_names == {
@@ -347,6 +367,11 @@ def test_registry_plan_uses_column_names_for_reviewable_constraints() -> None:
         "u:email:::",
         "f:account_id:app:accounts:id",
     }
+    assert index_names == {"i:account_id"}
+    assert any(
+        sql == 'create index on "app"."entries" ("account_id");'
+        for _flags, sql in sql_statements(native._migration_render_sql(plan))
+    )
 
 
 def test_native_named_plan_preserves_add_drop_and_alter_review_metadata() -> None:
@@ -367,6 +392,89 @@ def test_native_named_plan_preserves_add_drop_and_alter_review_metadata() -> Non
         (ALTER, COLUMN, "app", "widgets", "id", "column-old", "column-new"),
     ]
     assert native._migration_plan_descriptors(desired, actual) == plan
+    assert native._migration_operations_from_plan(plan) == native._migration_diff_images(
+        native._migration_compile_desired(desired),
+        native._migration_compile_desired(actual),
+    )
+
+
+def test_native_sql_tape_is_dependency_ordered_and_marks_manual_work() -> None:
+    desired = descriptor(
+        ("app", "new_table", "", TABLE, "table\x1fr\x1fp"),
+        ("app", "new_table", "id", COLUMN, "column\x1f20\x1f\x1f1\x1f\x1f\x1f"),
+        ("app", "new_table", "p:id:::", CONSTRAINT, "p:id:::"),
+        ("app", "widgets", "id", COLUMN, "column-new"),
+    )
+    actual = descriptor(
+        ("app", "old_table", "", TABLE, "table\x1fr\x1fp"),
+        ("app", "widgets", "id", COLUMN, "column-old"),
+    )
+    plan = native._migration_plan_descriptors(desired, actual)
+
+    statements = sql_statements(native._migration_render_sql(plan))
+
+    assert statements == [
+        (1, 'drop table "app"."old_table";'),
+        (0, 'create table "app"."new_table" ();'),
+        (0, 'alter table "app"."new_table" add column "id" bigint not null;'),
+        (2, ""),
+        (0, 'alter table "app"."new_table" add primary key ("id");'),
+    ]
+
+
+def test_native_sql_tape_renders_supported_column_alterations() -> None:
+    desired = descriptor(
+        ("app", "widgets", "name", COLUMN, "column\x1f25\x1f\x1f1\x1f\x1f\x1f'new'")
+    )
+    actual = descriptor(
+        ("app", "widgets", "name", COLUMN, "column\x1f20\x1f\x1f0\x1f\x1f\x1f")
+    )
+    plan = native._migration_plan_descriptors(desired, actual)
+
+    assert sql_statements(native._migration_render_sql(plan)) == [
+        (
+            0,
+            'alter table "app"."widgets" alter column "name" type text; '
+            'alter table "app"."widgets" alter column "name" set default \'new\'; '
+            'alter table "app"."widgets" alter column "name" set not null;',
+        )
+    ]
+
+
+def test_native_ddl_block_refuses_manual_and_unapproved_destructive_work() -> None:
+    add_plan = native._migration_plan_descriptors(
+        descriptor(
+            ("app", "widgets", "", TABLE, "table\x1fr\x1fp"),
+            ("app", "widgets", "id", COLUMN, "column\x1f20\x1f\x1f1\x1f\x1f\x1f"),
+            ("app", "widgets", "p:id:::", CONSTRAINT, "p:id:::"),
+        ),
+        descriptor(),
+    )
+    add_sql = native._migration_render_sql(add_plan)
+
+    block = native._migration_build_ddl_block(add_sql, False)
+
+    assert block.startswith("DO $wreath_migration_0$\nBEGIN\n")
+    assert '  create table "app"."widgets" ();\n' in block
+    assert '  alter table "app"."widgets" add column "id" bigint not null;\n' in block
+    assert block.endswith("END\n$wreath_migration_0$;")
+
+    drop_plan = native._migration_plan_descriptors(
+        descriptor(), descriptor(("app", "widgets", "", TABLE, "table"))
+    )
+    drop_sql = native._migration_render_sql(drop_plan)
+    with pytest.raises(PermissionError, match="operation 1 is destructive"):
+        native._migration_build_ddl_block(drop_sql, False)
+    assert 'drop table "app"."widgets";' in native._migration_build_ddl_block(
+        drop_sql, True
+    )
+
+    alter_plan = native._migration_plan_descriptors(
+        descriptor(("app", "widgets", "id", COLUMN, "new")),
+        descriptor(("app", "widgets", "id", COLUMN, "old")),
+    )
+    with pytest.raises(ValueError, match="operation 1 is marked MANUAL"):
+        native._migration_build_ddl_block(native._migration_render_sql(alter_plan), True)
 
 
 def test_equal_images_produce_an_empty_tape_and_cryptographic_fingerprint() -> None:
@@ -395,7 +503,7 @@ async def test_single_detection_returns_bounded_native_fingerprints_and_diff() -
             assert "pg_catalog.pg_class" in sql and args == ("app",)
             rows = [
                 ("app", "widgets", "", TABLE, "table\x1fr\x1fp"),
-                ("app", "widgets", "id", COLUMN, "column\x1f20\x1f1\x1f1\x1f\x1f\x1f"),
+                ("app", "widgets", "id", COLUMN, "column\x1f20\x1f\x1f1\x1f\x1f\x1f"),
                 ("app", "widgets", "p:id:::", CONSTRAINT, "p:id:::"),
             ]
             tape = native._FieldTape(5)

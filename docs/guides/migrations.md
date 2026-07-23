@@ -13,12 +13,11 @@ mapping — start with [Coming from FastAPI](../from-fastapi/index.md).
 
 !!! warning "Implementation status"
 
-    Logical schema modes, the first Wreath-metal managed-fleet resolver, direct
-    catalog-row decoding into packed schema images, native image diffing, and
-    checksummed artifact verification are available.
-    Catalog-driven generation and DDL application are not released yet. Keep
-    Alembic as the DDL authority until the Wreath runner ships; do not replace a
-    working production migration path with an unfinished one.
+    Catalog-driven generation and locked single-schema application are available
+    for the object kinds documented below. WMA1 binds operations, literal metadata,
+    and metal-derived SQL as one authority. Indexes, composite constraints, rename
+    hints, and tenant-fleet execution are not complete, so keep Alembic for schemas
+    that use unsupported objects rather than treating partial coverage as parity.
 
 ## What changes
 
@@ -132,11 +131,15 @@ wreath migrations generate app:app --database main \
 The native planner emits deterministic `WMP1`, matching the operation count from
 the independent fixed-record image diff. With `--output`, generation writes a
 metal-checksummed `migration.bin`, deterministic `migration.json`, and quoted
-`migration.sql` review view. Use `--initial` only for the root migration; later
-migrations require `--parent CHECKSUM`. The JSON and SQL files are presentation
-only and never become execution input. Unsupported alterations are visibly marked
-`MANUAL` rather than guessed. The signed `WMA1` operation tape remains the
-authority. A strict status check can verify the complete parent/source chain in
+`migration.sql` view. Use `--initial` only for the root migration; later
+migrations require `--parent CHECKSUM`. The sole `WMA1` artifact binds all three
+authoritative representations: fixed operations (`WMO1`), literal names and
+signatures (`WMP1`), and dependency-ordered SQL statements (`WMS1`). Wreath-metal
+re-derives both WMO1 and WMS1 from WMP1 while building and loading the artifact;
+a matching operation count is not considered sufficient. Unsupported alterations
+are encoded as `MANUAL` with no executable statement, which makes application
+ineligible rather than inviting a guess. The exported JSON and SQL files are
+review conveniences for the same bound artifact, not a second source of truth. A strict status check can verify the complete parent/source chain in
 metal and compare its target with both code and the live catalog:
 
 ```bash
@@ -144,9 +147,33 @@ wreath migrations status app:app migrations/0001/migration.bin \
   migrations/0002/migration.bin --database main
 ```
 
-`status` exits 1 if the chain, ORM target, and catalog do not all agree. Application
-is still unavailable until locking, history, transactional DDL, and post-apply
-target verification land.
+`status` exits 1 if the chain, ORM target, and catalog do not all agree.
+
+## Apply one authoritative artifact
+
+Application requires a dedicated migration DSN. Wreath never falls back to the
+application's request pool:
+
+```bash
+export WREATH_MIGRATION_DSN='postgresql://migration-role@db/service'
+wreath migrations apply app:app migrations/0001/migration.bin --database main
+```
+
+For a destructive tape, the operator must additionally pass
+`--allow-destructive`; the approval is written to history. Application performs a
+fixed number of Python orchestration steps, never one call per migration operation:
+
+1. verify the WMA1 checksum and re-derive WMO1 and WMS1 from WMP1 in metal;
+2. begin a transaction and acquire a schema-specific advisory transaction lock;
+3. bootstrap central `wreath_migrations.history` and verify its parent/source tip;
+4. stream the locked live catalog into WMI1 and verify the artifact source;
+5. execute one metal-built PostgreSQL DDL block;
+6. stream the catalog again, require the target fingerprint, append history, and
+   commit—or roll the whole transaction back.
+
+Any `MANUAL` operation makes the artifact ineligible for application. Error
+messages name the failing operation or field and include expected and observed
+fingerprints/checksums; generic format errors are not used.
 
 Catalog rows stream through the PostgreSQL field tape into a native packed image.
 Wreath does not allocate one Python record per table or column. Desired metadata
@@ -155,11 +182,15 @@ and the linear merge diff are native. The command stops the selected database
 before returning and never starts ASGI lifespan, clients, or user startup hooks.
 
 The current detector covers ordinary/permanent tables, columns, primary keys,
-per-column uniqueness, and foreign keys. Column signatures include OID, position,
-nullability, identity/generated flags, and server-default text. Composite unique
-constraints, full foreign-key actions/deferrability, and index coverage are still
-being implemented, so `detect` is not yet a complete Alembic replacement and must
-not be used as the sole production drift gate.
+per-column uniqueness, foreign keys, and declared single-column btree indexes.
+Column signatures include OID,
+nullability, identity/generated flags, and server-default text. Physical `attnum`
+position is deliberately excluded because PostgreSQL leaves gaps after dropped
+columns and Wreath does not mistake those gaps for schema drift. Composite unique
+constraints, full foreign-key actions/deferrability, expression/partial/covering
+indexes, and index-method options are still being implemented, so `detect` is not
+yet a complete Alembic replacement and must not be used as the sole production
+drift gate.
 
 ## Inspect an artifact
 
@@ -196,14 +227,26 @@ The practical checklist is in
 
 ## Read the benchmark honestly
 
-`wreath-bench` includes a migration-resolution section in its generated
-`latest.html`. The ranked microbenchmark resolves an already-current linear
-history after current state is known. It compares the actual Wreath-metal packed
-resolver with Alembic's revision resolver and Django's migration graph. It does
-**not** include catalog I/O or DDL, and the Wreath-only fleet row is not ranked
-against tools without an equivalent batch API.
+`wreath-bench` includes a migration section in its generated `latest.html`,
+covering exactly what has shipped:
 
-That narrowness is intentional: the report may show control-plane overhead, but
-it must never imply that PostgreSQL locks, WAL, or table rewrites disappeared.
+- **Resolution (ranked).** Resolving an already-current linear history after
+  current state is known: the Wreath-metal packed resolver against Alembic's
+  revision resolver and Django's migration graph.
+- **Plan generation (side by side, never ranked).** Planning and rendering the
+  same two-object drift: Wreath's native image diff → named plan → SQL tape
+  against Alembic autogenerate. The arms do not do identical work — Alembic's
+  number includes reflecting an in-memory SQLite database per call, while
+  Wreath diffs images compiled once at startup — so the table states that
+  asymmetry instead of pretending a ranking.
+- **Artifact verification (Wreath-only, unranked).** Verifying one
+  checksummed `WMA1` artifact from bytes; Alembic revision files have no
+  equivalent verifiable envelope.
+
+None of it includes catalog I/O against PostgreSQL or DDL execution — the
+`apply` path needs a live database and operator credentials and is deliberately
+not benchmarked. That narrowness is intentional: the report may show
+control-plane overhead, but it must never imply that PostgreSQL locks, WAL, or
+table rewrites disappeared.
 
 **Reference:** [`wreath.migrations`](../reference/migrations.md).

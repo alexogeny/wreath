@@ -7,9 +7,11 @@ immutable: once ``Registry.compile()` returns, nothing re-derives them.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from .errors import DeclarationError
 from .fields import Column, encode_default
 from .types import PgType
 
@@ -20,12 +22,67 @@ if TYPE_CHECKING:
 #: from different Wreath versions can never collide.
 FINGERPRINT_VERSION = b"wreath-orm-fingerprint-1"
 
+_SCHEMA_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_$]*$")
+
+
+@dataclass(frozen=True, slots=True)
+class SchemaRef:
+    """A logical or fixed schema reference compiled by a registry."""
+
+    kind: Literal["fixed", "central", "tenant"]
+    name: str | None = None
+
+
+CENTRAL_SCHEMA = SchemaRef("central")
+TENANT_SCHEMA = SchemaRef("tenant")
+
+
+@dataclass(frozen=True, slots=True)
+class SchemaMode:
+    """Startup-selected mapping from logical schemas to PostgreSQL namespaces."""
+
+    kind: Literal["single", "isolated"]
+    schema: str | None = None
+    central: str | None = None
+    isolation: Literal["namespace", "role"] = "namespace"
+
+    @classmethod
+    def single(cls, schema: str) -> SchemaMode:
+        return cls(kind="single", schema=_schema_identifier(schema))
+
+    @classmethod
+    def isolated(
+        cls,
+        *,
+        central: str,
+        isolation: Literal["namespace", "role"] = "namespace",
+    ) -> SchemaMode:
+        if isolation not in ("namespace", "role"):
+            raise DeclarationError(
+                "isolation must be 'namespace' or 'role'"
+            )
+        return cls(
+            kind="isolated",
+            central=_schema_identifier(central),
+            isolation=isolation,
+        )
+
+
+def _schema_identifier(value: str) -> str:
+    if not isinstance(value, str) or not _SCHEMA_IDENTIFIER.match(value):
+        raise DeclarationError(
+            f"schema name {value!r} is not a valid unquoted PostgreSQL identifier"
+        )
+    if len(value.encode("utf-8")) > 63:
+        raise DeclarationError(f"schema name {value!r} exceeds PostgreSQL's 63-byte limit")
+    return value
+
 
 @dataclass(frozen=True, slots=True)
 class ColumnRef:
     """A resolved foreign-key target."""
 
-    schema: str
+    schema: str | SchemaRef
     table: str
     column: str
     position: int
@@ -46,6 +103,7 @@ class ColumnSpec:
     nullable: bool
     primary_key: bool
     unique: bool
+    indexed: bool
     default: Any
     server_default: str | None
     reference: ColumnRef | None
@@ -86,7 +144,9 @@ class StorageSpec:
 class ModelSpec:
     model_type: type[Model]
     schema: str
+    schema_ref: SchemaRef
     table: str
+    sql_namespace: Literal["qualified", "tenant_search_path"]
     columns: tuple[ColumnSpec, ...]
     primary_key: tuple[ColumnSpec, ...]
     relationships: tuple[RelationshipSpec, ...]
@@ -99,7 +159,14 @@ class ModelSpec:
 
     @property
     def qualified_name(self) -> str:
+        if self.sql_namespace == "tenant_search_path":
+            return self.table
         return f"{self.schema}.{self.table}"
+
+    @property
+    def template_name(self) -> str:
+        name = self.schema_ref.name or self.schema_ref.kind
+        return f"{self.schema_ref.kind}:{name}.{self.table}"
 
     def relationship(self, name: str) -> RelationshipSpec | None:
         return self.by_relationship_name.get(name)
@@ -116,6 +183,7 @@ def _encode_column(spec: ColumnSpec) -> bytes:
         b"1" if spec.nullable else b"0",
         b"1" if spec.primary_key else b"0",
         b"1" if spec.unique else b"0",
+        b"1" if spec.indexed else b"0",
         encode_default(spec.default),
         b"" if spec.server_default is None else spec.server_default.encode("utf-8"),
     ]
@@ -168,13 +236,38 @@ def fingerprint_model(
 
 
 def fingerprint_registry(specs: tuple[ModelSpec, ...]) -> bytes:
-    """A stable fingerprint over every model a registry owns, in order."""
+    """A stable deployment fingerprint over every model, in order."""
     digest = hashlib.sha256()
     digest.update(FINGERPRINT_VERSION)
     for spec in specs:
         digest.update(b"\x1e")
         digest.update(spec.qualified_name.encode("utf-8"))
         digest.update(spec.fingerprint)
+    return digest.digest()
+
+
+def fingerprint_registry_template(specs: tuple[ModelSpec, ...]) -> bytes:
+    """Fingerprint model semantics without physical schema deployment names."""
+    digest = hashlib.sha256()
+    digest.update(FINGERPRINT_VERSION)
+    digest.update(b"\x1etemplate")
+    for spec in specs:
+        digest.update(b"\x1e")
+        digest.update(spec.template_name.encode("utf-8"))
+        for column in spec.columns:
+            digest.update(b"\x1f")
+            digest.update(column.python_name.encode("utf-8"))
+            digest.update(b"\x00")
+            digest.update(column.database_name.encode("utf-8"))
+            digest.update(column.oid.to_bytes(4, "big"))
+            digest.update(
+                bytes((column.nullable, column.primary_key, column.unique, column.indexed))
+            )
+        for relationship in spec.relationships:
+            digest.update(b"\x1f")
+            digest.update(relationship.name.encode("utf-8"))
+            digest.update(b"\x00")
+            digest.update(relationship.target.template_name.encode("utf-8"))
     return digest.digest()
 
 

@@ -16,12 +16,15 @@ from wreath.migrations import (
     MigrationGeneration,
     NativeMigrationDiff,
     NativeMigrationPlan,
+    NativeMigrationSql,
     _build_native_artifact,
     _load_native_artifact,
 )
 
 MIGRATION_ID = bytes.fromhex("00112233445566778899aabbccddeeff")
 EMPTY_TAPE = b"WMO1\x01\x00\x00\x00\x00\x00\x00\x00"
+EMPTY_PLAN = b"WMP1\x01\x00\x00\x00\x00\x00\x00\x00"
+EMPTY_SQL = b"WMS1\x01\x00\x00\x00\x00\x00\x00\x00"
 
 
 def artifact_bytes() -> bytes:
@@ -31,6 +34,8 @@ def artifact_bytes() -> bytes:
         source_fingerprint=b"s" * 32,
         target_fingerprint=b"t" * 32,
         operation_tape=EMPTY_TAPE,
+        named_plan=EMPTY_PLAN,
+        sql_tape=EMPTY_SQL,
     ).data
 
 
@@ -78,6 +83,37 @@ def test_migration_status_parser_requires_ordered_artifacts() -> None:
     assert namespace.json is True
 
 
+def test_migration_apply_parser_requires_explicit_artifact_and_supports_approval() -> None:
+    namespace = build_parser().parse_args(
+        [
+            "migrations", "apply", "example:app", "migration.bin",
+            "--allow-destructive", "--dsn-env", "DEPLOY_DATABASE_URL",
+        ]
+    )
+
+    assert namespace.migration_action == "apply"
+    assert namespace.artifact == "migration.bin"
+    assert namespace.allow_destructive is True
+    assert namespace.dsn_env == "DEPLOY_DATABASE_URL"
+
+
+@pytest.mark.asyncio
+async def test_apply_never_falls_back_to_request_pool_credentials(monkeypatch) -> None:
+    monkeypatch.delenv("MISSING_MIGRATION_DSN", raising=False)
+    application = SimpleNamespace(
+        _orm_registries={"main": SimpleNamespace(database=object())}
+    )
+    namespace = argparse.Namespace(
+        database="main",
+        dsn_env="MISSING_MIGRATION_DSN",
+        artifact="migration.bin",
+        allow_destructive=False,
+    )
+
+    with pytest.raises(ValueError, match="never falls back to request-pool credentials"):
+        await _migrations_cli._apply(namespace, application)
+
+
 def test_migration_show_parser_is_literal() -> None:
     namespace = build_parser().parse_args(
         ["migrations", "show", "0001/migration.bin", "--json"]
@@ -100,7 +136,7 @@ def test_migration_show_verifies_and_prints_machine_readable_metadata(
     assert payload["format"] == "WMA1"
     assert payload["migration_id"] == MIGRATION_ID.hex()
     assert payload["operation_count"] == 0
-    assert payload["checksum"] == artifact_bytes()[128:160].hex()
+    assert payload["checksum"] == artifact_bytes()[136:168].hex()
 
 
 @pytest.mark.asyncio
@@ -172,27 +208,29 @@ def test_named_plan_unpacking_is_bounded_and_literal() -> None:
     ]
 
 
-def test_review_sql_is_deterministic_quoted_and_dependency_ordered() -> None:
-    operations = [
-        {
-            "action": "add", "kind": "constraint", "schema": "app",
-            "table": "widgets", "name": "p:id:::", "before": "", "after": "p:id:::"
-        },
-        {
-            "action": "add", "kind": "column", "schema": "app",
-            "table": "widgets", "name": "id", "before": "",
-            "after": "column\x1f20\x1f1\x1f1\x1f\x1f\x1f"
-        },
-        {
-            "action": "add", "kind": "table", "schema": "app",
-            "table": "widgets", "name": "", "before": "", "after": "table"
-        },
-    ]
+def test_review_sql_comes_from_the_bounded_native_statement_tape() -> None:
+    sql = b'create table "app"."widgets" ();'
+    tape = (
+        b"WMS1"
+        + (1).to_bytes(4, "little")
+        + (2).to_bytes(4, "little")
+        + struct.pack("<II", 0, len(sql))
+        + sql
+        + struct.pack("<II", 2, 0)
+    )
 
-    assert _migrations_cli._render_review_sql(operations) == (
-        'create table "app"."widgets" ();\n'
-        'alter table "app"."widgets" add column "id" bigint not null;\n'
-        'alter table "app"."widgets" add primary key ("id");\n'
+    statements = _migrations_cli._unpack_sql_tape(tape)
+
+    assert statements == [
+        {
+            "destructive": False,
+            "manual": False,
+            "sql": 'create table "app"."widgets" ();',
+        },
+        {"destructive": False, "manual": True, "sql": ""},
+    ]
+    assert _migrations_cli._review_sql(statements) == (
+        'create table "app"."widgets" ();\n-- MANUAL operation 2\n'
     )
 
 
@@ -242,6 +280,9 @@ async def test_generate_can_write_one_verified_immutable_artifact_directory(
             b"s" * 32,
             NativeMigrationDiff(0, EMPTY_TAPE),
             NativeMigrationPlan(0, b"WMP1" + (1).to_bytes(4, "little") + bytes(4)),
+            NativeMigrationSql(
+                0, 0, 0, b"WMS1" + (1).to_bytes(4, "little") + bytes(4)
+            ),
         )
 
     monkeypatch.setattr(_migrations_cli, "generate_single_plan", generate)
@@ -275,22 +316,45 @@ async def test_status_requires_chain_code_and_catalog_to_agree(monkeypatch, tmp_
         source_fingerprint=b"s" * 32,
         target_fingerprint=b"t" * 32,
         operation_tape=EMPTY_TAPE,
+        named_plan=EMPTY_PLAN,
+        sql_tape=EMPTY_SQL,
     )
     path = tmp_path / "migration.bin"
     path.write_bytes(artifact.data)
 
-    async def detect(namespace, application):
-        return {
-            "current": True,
-            "operation_count": 0,
-            "desired_fingerprint": (b"t" * 32).hex(),
-            "actual_fingerprint": (b"t" * 32).hex(),
-        }
+    registry = SimpleNamespace(
+        specs=(SimpleNamespace(schema="app"),), database=object()
+    )
+    application = SimpleNamespace(_orm_registries={"main": registry})
 
-    monkeypatch.setattr(_migrations_cli, "_detect", detect)
-    namespace = argparse.Namespace(artifacts=[str(path)])
+    class Connection:
+        async def fetchval(self, sql: str) -> bool:
+            return True
 
-    payload = await _migrations_cli._status(namespace, object())
+        async def fetchrow(self, sql: str, schema: str):
+            return artifact.checksum, artifact.target_fingerprint
+
+        async def close(self) -> None:
+            return None
+
+    async def detect(selected, connection) -> MigrationDetection:
+        assert selected is registry
+        return MigrationDetection(
+            b"t" * 32, b"t" * 32, NativeMigrationDiff(0, EMPTY_TAPE)
+        )
+
+    async def connect(dsn: str) -> Connection:
+        assert dsn == "postgresql://migration"
+        return Connection()
+
+    monkeypatch.setenv("TEST_MIGRATION_DSN", "postgresql://migration")
+    monkeypatch.setattr(_migrations_cli, "detect_single", detect)
+    monkeypatch.setattr(_migrations_cli, "connect_migration", connect)
+    namespace = argparse.Namespace(
+        artifacts=[str(path)], database="main", dsn_env="TEST_MIGRATION_DSN"
+    )
+
+    payload = await _migrations_cli._status(namespace, application)
 
     assert payload["current"] is True
     assert payload["catalog_matches_code"] is True

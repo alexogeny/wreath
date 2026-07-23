@@ -29,7 +29,7 @@ WITH migration_objects AS (
         a.attname::text,
         2::int4,
         concat_ws(
-            E'\\x1f', 'column', a.atttypid::text, a.attnum::text,
+            E'\\x1f', 'column', a.atttypid::text, ''::text,
             a.attnotnull::int::text, a.attidentity::text, a.attgenerated::text,
             COALESCE(pg_catalog.pg_get_expr(d.adbin, d.adrelid), '')
         )::text
@@ -88,6 +88,42 @@ WITH migration_objects AS (
     LEFT JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace
     WHERE n.nspname = $1
       AND con.contype IN ('p', 'u', 'f')
+
+    UNION ALL
+
+    SELECT
+        n.nspname::text,
+        c.relname::text,
+        concat(
+            CASE WHEN i.indisunique THEN 'ui:' ELSE 'i:' END,
+            columns.column_names
+        )::text,
+        4::int4,
+        concat(
+            'index:', CASE WHEN i.indisunique THEN 'ui:' ELSE 'i:' END,
+            columns.column_names, ':btree'
+        )::text
+    FROM pg_catalog.pg_index i
+    JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
+    JOIN pg_catalog.pg_am am ON am.oid = ic.relam
+    CROSS JOIN LATERAL (
+        SELECT string_agg(a.attname, ',' ORDER BY key.ord) AS column_names
+        FROM unnest(i.indkey::smallint[]) WITH ORDINALITY AS key(attnum, ord)
+        JOIN pg_catalog.pg_attribute a
+          ON a.attrelid = i.indrelid AND a.attnum = key.attnum
+    ) columns
+    WHERE n.nspname = $1
+      AND am.amname = 'btree'
+      AND i.indisvalid
+      AND i.indisready
+      AND i.indpred IS NULL
+      AND i.indexprs IS NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM pg_catalog.pg_constraint con
+          WHERE con.conindid = i.indexrelid
+      )
 )
 SELECT schema_name, table_name, object_name, object_kind, signature
 FROM migration_objects
@@ -169,6 +205,18 @@ class NativeMigrationArtifact:
     source_fingerprint: bytes
     target_fingerprint: bytes
     operation_tape: bytes
+    named_plan: bytes
+    sql_tape: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class NativeMigrationSql:
+    """Deterministic WMS1 statement tape derived from a named native plan."""
+
+    operation_count: int
+    manual_count: int
+    destructive_count: int
+    tape: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +249,17 @@ class MigrationDetection:
 
 
 @dataclass(frozen=True, slots=True)
+class MigrationApplyResult:
+    """Verified result of one locked, transactional single-schema application."""
+
+    migration_id: bytes
+    checksum: bytes
+    source_fingerprint: bytes
+    target_fingerprint: bytes
+    destructive_approved: bool
+
+
+@dataclass(frozen=True, slots=True)
 class MigrationGeneration:
     """Review metadata retained by the native named operation planner."""
 
@@ -208,6 +267,7 @@ class MigrationGeneration:
     actual_fingerprint: bytes
     diff: NativeMigrationDiff
     plan: NativeMigrationPlan
+    sql: NativeMigrationSql
 
 
 def _metal() -> Any:
@@ -278,7 +338,7 @@ def _registry_descriptor(registry: Any) -> bytes:
                 (
                     "column",
                     str(column.oid),
-                    str(column.position + 1),
+                    "",
                     "1" if not column.nullable else "0",
                     "",
                     "",
@@ -305,6 +365,17 @@ def _registry_descriptor(registry: Any) -> bytes:
                 records.append(
                     _descriptor_record(
                         spec.schema, spec.table, unique_name, 3, unique_name
+                    )
+                )
+            if column.indexed:
+                index_name = f"i:{column.database_name}"
+                records.append(
+                    _descriptor_record(
+                        spec.schema,
+                        spec.table,
+                        index_name,
+                        4,
+                        f"index:{index_name}:btree",
                     )
                 )
             reference = column.reference
@@ -391,6 +462,35 @@ def _plan_descriptors(desired: bytes, actual: bytes) -> NativeMigrationPlan:
     return NativeMigrationPlan(int.from_bytes(tape[8:12], "little"), tape)
 
 
+def _render_sql_plan(plan: NativeMigrationPlan) -> NativeMigrationSql:
+    module = _metal()
+    if not hasattr(module, "_migration_render_sql"):
+        raise RuntimeError(
+            "the installed Wreath-metal PostgreSQL extension lacks SQL tapes; "
+            "rebuild Wreath's native extensions"
+        )
+    tape = module._migration_render_sql(plan.tape)
+    if len(tape) < 12 or tape[:4] != b"WMS1" or int.from_bytes(tape[4:8], "little") != 1:
+        raise RuntimeError("Wreath-metal returned an invalid SQL tape")
+    count = int.from_bytes(tape[8:12], "little")
+    offset = 12
+    manual = destructive = 0
+    for _ in range(count):
+        if len(tape) - offset < 8:
+            raise RuntimeError("Wreath-metal returned a truncated SQL tape")
+        flags = int.from_bytes(tape[offset : offset + 4], "little")
+        length = int.from_bytes(tape[offset + 4 : offset + 8], "little")
+        offset += 8
+        if flags & ~3 or length > len(tape) - offset:
+            raise RuntimeError("Wreath-metal returned an invalid SQL statement")
+        manual += bool(flags & 2)
+        destructive += bool(flags & 1)
+        offset += length
+    if offset != len(tape) or count != plan.operation_count:
+        raise RuntimeError("native SQL tape and named plan disagree")
+    return NativeMigrationSql(count, manual, destructive, tape)
+
+
 def _diff_packed_images(desired: object, actual: object) -> NativeMigrationDiff:
     """Diff two canonical native schema images without materializing operations."""
     module = _metal()
@@ -434,11 +534,172 @@ async def generate_single_plan(registry: Any, connection: Any) -> MigrationGener
     plan = _plan_descriptors(desired_descriptor, actual.descriptor)
     if plan.operation_count != diff.operation_count:
         raise RuntimeError("native named plan and image diff disagree")
+    derived_operations = _metal()._migration_operations_from_plan(plan.tape)
+    if derived_operations != diff.tape:
+        raise RuntimeError(
+            "native named plan describes different operations than the image diff"
+        )
+    sql = _render_sql_plan(plan)
     return MigrationGeneration(
         desired_fingerprint=_fingerprint_image(desired),
         actual_fingerprint=_fingerprint_image(actual.image),
         diff=diff,
         plan=plan,
+        sql=sql,
+    )
+
+
+async def connect_migration(dsn: str) -> Any:
+    """Open a dedicated Wreath-metal migration connection."""
+    module = _metal()
+    if not hasattr(module, "connect"):
+        raise RuntimeError(
+            "Wreath-metal PostgreSQL connection support is unavailable; rebuild native extensions"
+        )
+    return await module.connect(dsn)
+
+
+def _qualified_history_table() -> str:
+    return '"wreath_migrations"."history"'
+
+
+async def _bootstrap_migration_history(connection: Any) -> None:
+    history = _qualified_history_table()
+    await connection.execute("BEGIN")
+    committed = False
+    try:
+        await connection.fetchval(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+            "wreath:migrations:bootstrap",
+        )
+        await connection.execute('CREATE SCHEMA IF NOT EXISTS "wreath_migrations"')
+        await connection.execute(
+            f"""CREATE TABLE IF NOT EXISTS {history} (
+                sequence bigint GENERATED ALWAYS AS IDENTITY,
+                target_schema text NOT NULL,
+                migration_id bytea NOT NULL,
+                checksum bytea NOT NULL,
+                parent_checksum bytea NOT NULL,
+                source_fingerprint bytea NOT NULL,
+                target_fingerprint bytea NOT NULL,
+                destructive_approved boolean NOT NULL,
+                applied_at timestamp with time zone NOT NULL DEFAULT clock_timestamp(),
+                PRIMARY KEY (target_schema, migration_id),
+                UNIQUE (target_schema, checksum)
+            )"""
+        )
+        await connection.execute("COMMIT")
+        committed = True
+    finally:
+        if not committed:
+            await connection.execute("ROLLBACK")
+
+
+async def apply_single_artifact(
+    registry: Any,
+    connection: Any,
+    artifact_data: bytes,
+    *,
+    allow_destructive: bool = False,
+) -> MigrationApplyResult:
+    """Apply one authoritative artifact under a transaction-scoped native plan."""
+    artifact = _load_native_artifact(artifact_data)
+    schemas = {spec.schema for spec in registry.specs}
+    if len(schemas) != 1:
+        raise ValueError(
+            "apply_single_artifact requires exactly one resolved physical schema"
+        )
+    schema = next(iter(schemas))
+    module = _metal()
+    ddl_block = module._migration_build_ddl_block(
+        artifact.sql_tape, allow_destructive
+    )
+    history = _qualified_history_table()
+    zero_checksum = bytes(32)
+    await _bootstrap_migration_history(connection)
+    await connection.execute("BEGIN")
+    committed = False
+    try:
+        await connection.fetchval(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+            f"wreath:migrations:{schema}",
+        )
+        previous = await connection.fetchrow(
+            f"""SELECT checksum, target_fingerprint
+                FROM {history}
+                WHERE target_schema = $1
+                ORDER BY sequence DESC
+                LIMIT 1""",
+            schema,
+        )
+        if previous is None:
+            if artifact.parent_checksum != zero_checksum:
+                raise RuntimeError(
+                    "cannot apply migration: database has no Wreath history for schema "
+                    f"{schema!r}, but artifact parent is {artifact.parent_checksum.hex()} "
+                    "instead of the all-zero root checksum"
+                )
+        else:
+            previous_checksum = bytes(previous[0])
+            previous_target = bytes(previous[1])
+            if artifact.parent_checksum != previous_checksum:
+                raise RuntimeError(
+                    "cannot apply migration: artifact parent "
+                    f"{artifact.parent_checksum.hex()} does not match database history tip "
+                    f"{previous_checksum.hex()} for schema {schema!r}"
+                )
+            if artifact.source_fingerprint != previous_target:
+                raise RuntimeError(
+                    "cannot apply migration: artifact source fingerprint "
+                    f"{artifact.source_fingerprint.hex()} does not match history target "
+                    f"{previous_target.hex()} for schema {schema!r}"
+                )
+        actual = await _decode_catalog_snapshot(
+            connection, _SINGLE_CATALOG_SQL, (schema,)
+        )
+        actual_fingerprint = _fingerprint_image(actual.image)
+        if actual_fingerprint != artifact.source_fingerprint:
+            raise RuntimeError(
+                "cannot apply migration: live catalog fingerprint "
+                f"{actual_fingerprint.hex()} does not match artifact source "
+                f"{artifact.source_fingerprint.hex()} for schema {schema!r}"
+            )
+        await connection.execute(ddl_block)
+        resulting = await _decode_catalog_snapshot(
+            connection, _SINGLE_CATALOG_SQL, (schema,)
+        )
+        resulting_fingerprint = _fingerprint_image(resulting.image)
+        if resulting_fingerprint != artifact.target_fingerprint:
+            raise RuntimeError(
+                "migration DDL ran but target verification failed: live catalog fingerprint "
+                f"{resulting_fingerprint.hex()} does not match artifact target "
+                f"{artifact.target_fingerprint.hex()} for schema {schema!r}; "
+                "the transaction will be rolled back"
+            )
+        await connection.execute(
+            f"""INSERT INTO {history} (
+                target_schema, migration_id, checksum, parent_checksum,
+                source_fingerprint, target_fingerprint, destructive_approved
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+            schema,
+            artifact.migration_id,
+            artifact.checksum,
+            artifact.parent_checksum,
+            artifact.source_fingerprint,
+            artifact.target_fingerprint,
+            allow_destructive,
+        )
+        await connection.execute("COMMIT")
+        committed = True
+    finally:
+        if not committed:
+            await connection.execute("ROLLBACK")
+    return MigrationApplyResult(
+        migration_id=artifact.migration_id,
+        checksum=artifact.checksum,
+        source_fingerprint=artifact.source_fingerprint,
+        target_fingerprint=artifact.target_fingerprint,
+        destructive_approved=allow_destructive,
     )
 
 
@@ -449,6 +710,8 @@ def _build_native_artifact(
     source_fingerprint: bytes,
     target_fingerprint: bytes,
     operation_tape: bytes,
+    named_plan: bytes,
+    sql_tape: bytes,
 ) -> NativeMigrationArtifact:
     """Build and immediately verify one deterministic artifact in metal."""
     module = _metal()
@@ -463,6 +726,8 @@ def _build_native_artifact(
         source_fingerprint,
         target_fingerprint,
         operation_tape,
+        named_plan,
+        sql_tape,
     )
     return _load_native_artifact(data)
 
@@ -498,15 +763,19 @@ def _load_native_artifact(data: bytes) -> NativeMigrationArtifact:
             "the installed Wreath-metal PostgreSQL extension lacks migration artifacts; "
             "rebuild Wreath's native extensions"
         )
-    migration_id, parent, source, target, tape = module._migration_verify_artifact(data)
+    migration_id, parent, source, target, tape, plan, sql = (
+        module._migration_verify_artifact(data)
+    )
     return NativeMigrationArtifact(
         data=data,
-        checksum=data[128:160],
+        checksum=data[136:168],
         migration_id=migration_id,
         parent_checksum=parent,
         source_fingerprint=source,
         target_fingerprint=target,
         operation_tape=tape,
+        named_plan=plan,
+        sql_tape=sql,
     )
 
 
@@ -515,12 +784,16 @@ __all__ = [
     "MigrationConfig",
     "MigrationDetection",
     "MigrationGeneration",
+    "MigrationApplyResult",
     "NativeCatalogSnapshot",
     "NativeMigrationArtifact",
     "NativeMigrationChain",
     "NativeMigrationDiff",
     "NativeMigrationPlan",
+    "NativeMigrationSql",
     "ResolutionPolicy",
+    "apply_single_artifact",
+    "connect_migration",
     "detect_single",
     "generate_single_plan",
 ]

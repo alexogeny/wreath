@@ -67,6 +67,7 @@ class Column:
         "shape_projection",
         "shape_ref",
         "unique",
+        "indexed",
         "validate",
     )
 
@@ -77,6 +78,7 @@ class Column:
         primary_key: bool,
         nullable: bool,
         unique: bool,
+        indexed: bool,
         default: Any,
         server_default: str | None,
         references: Any,
@@ -88,6 +90,7 @@ class Column:
         self.primary_key = primary_key
         self.nullable = nullable
         self.unique = unique
+        self.indexed = indexed
         self.default = default
         self.server_default = server_default
         self.references = references
@@ -115,6 +118,7 @@ class Column:
             primary_key=self.primary_key,
             nullable=self.nullable,
             unique=self.unique,
+            indexed=self.indexed,
             default=self.default,
             server_default=self.server_default,
             references=self.references,
@@ -178,6 +182,7 @@ def column(
     primary_key: bool = False,
     nullable: bool = False,
     unique: bool = False,
+    index: bool = False,
     default: Any = MISSING,
     server_default: str | None = None,
     references: Any = None,
@@ -186,7 +191,8 @@ def column(
     """Declare a mapped column.
 
     ``default`` is a Python value or a zero-argument callable applied when a
-    constructor omits the field. ``server_default`` names a database-side
+    constructor omits the field. ``index=True`` declares one ordinary btree index
+    on this column. ``server_default`` names a database-side
     default, which makes the column optional on insert and returned by
     ``RETURNING``. ``references`` takes another model's column expression
     (``references=User.id``) and records a foreign key.
@@ -218,6 +224,7 @@ def column(
         primary_key=primary_key,
         nullable=nullable,
         unique=unique,
+        indexed=index,
         default=default,
         server_default=server_default,
         references=references,
