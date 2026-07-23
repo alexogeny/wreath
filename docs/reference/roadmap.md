@@ -9,4 +9,3 @@ they export nothing.
 | `wreath.telemetry` | Native metrics, tracing configuration, and OpenTelemetry integration. |
 | `wreath.recording` | Request capture and recording policies. |
 | `wreath.replay` | Transport and endpoint-plan replay. |
-| `wreath.migrations` | Database migration generation and running over `wreath.orm` / `wreath.postgres`. |

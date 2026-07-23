@@ -21,13 +21,15 @@
 - [Auth](guides/auth.md): authentication (identity) and authorization (roles, permissions, Cedar).
 - [WebSockets](guides/websockets.md), [Native server](guides/server.md), [Outbound HTTP and webhooks](guides/http-client.md).
 - [PostgreSQL](guides/postgres.md) and [ORM](guides/orm.md): strict direction orm → postgres.
+- [FastAPI and Alembic migration](guides/migrations.md): staged SaaS adoption of logical schemas and metal readiness resolution.
 - [Templates](guides/templates.md), [Caching](guides/caching.md), [Compression](guides/compression.md), [Static files](guides/static-files.md).
 - [Configuration and state](guides/config-state.md), [OpenAPI and typed clients](guides/openapi-typegen.md), [Testing](guides/testing.md).
 
 ## Reference
 
 - One page per public module under [reference/](reference/app.md), generated from the code.
-- [Reserved modules](reference/roadmap.md): telemetry, inspector, recording, replay, migrations (not implemented yet).
+- [`wreath.migrations`](reference/migrations.md): metal-only readiness policy, configuration, and bounded fleet results.
+- [Reserved modules](reference/roadmap.md): telemetry, recording, and replay (not implemented yet).
 
 ## For coding agents
 

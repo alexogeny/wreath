@@ -52,6 +52,10 @@ own named module so the whole stays easy to hold in your head.
   authorization (with a Cedar policy engine), WebSockets, an outbound HTTP
   client, signed webhooks, templates, an ORM over a native Postgres driver,
   OpenAPI with typed client generation, and an in-process test client.
+- **A measured path away from per-tenant Python loops.** The
+  [FastAPI and Alembic migration guide](guides/migrations.md) shows SaaS teams how
+  to introduce logical schemas and Wreath-metal readiness without a dangerous
+  flag-day change of DDL authority.
 - **Correctness before cleverness.** Validation compiled at startup, a firm line
   between configuration and runtime state, and a test suite that treats ASGI
   semantics as the contract Wreath must keep.

@@ -201,6 +201,11 @@ class Session:
     )
 
     def __init__(self, registry: Any, workload: Workload) -> None:
+        if getattr(getattr(registry, "schema_mode", None), "kind", None) == "isolated":
+            raise SessionError(
+                "isolated tenant sessions require the unreleased metal schema-context "
+                "binder; registry compilation is available, query execution is not"
+            )
         self._registry = registry
         self._workload = workload
         self._connection: Any = None

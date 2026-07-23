@@ -19,3 +19,4 @@ There are two circles of readers here, and each gets its own set.
 - [Handle file uploads](recipes/file-uploads.md)
 - [Run work after the response](recipes/background-jobs.md)
 - [Manage a database pool with the lifespan](recipes/database-lifespan.md)
+- [Move a schema-per-tenant SaaS application from Alembic](recipes/fastapi-alembic-saas.md)

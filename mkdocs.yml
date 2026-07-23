@@ -88,6 +88,7 @@ nav:
       - Outbound HTTP and webhooks: guides/http-client.md
       - PostgreSQL: guides/postgres.md
       - ORM: guides/orm.md
+      - FastAPI and Alembic migration: guides/migrations.md
       - Templates: guides/templates.md
       - Caching: guides/caching.md
       - Compression: guides/compression.md
@@ -102,6 +103,7 @@ nav:
       - Handle file uploads: cookbook/recipes/file-uploads.md
       - Run work after the response: cookbook/recipes/background-jobs.md
       - Manage a database pool: cookbook/recipes/database-lifespan.md
+      - Move a FastAPI + Alembic SaaS app: cookbook/recipes/fastapi-alembic-saas.md
       - Fuzz your own routes: cookbook/recipes/fuzz-your-routes.md
       - For coding agents:
           - Overview: cookbook/agents/index.md
@@ -122,6 +124,7 @@ nav:
       - Native server: reference/server.md
       - PostgreSQL: reference/postgres.md
       - ORM: reference/orm.md
+      - Migrations: reference/migrations.md
       - Outbound HTTP client: reference/http_client.md
       - Webhooks: reference/webhooks.md
       - Templates: reference/templates.md

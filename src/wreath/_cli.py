@@ -258,6 +258,51 @@ def build_parser() -> argparse.ArgumentParser:
     typegen_parser.add_argument("--pure", action="store_true")
     typegen_parser.add_argument("--factory", action="store_true",
                                 help="invoke the target as a zero-argument application factory")
+    migrations_parser = commands.add_parser(
+        "migrations", help="inspect and run Wreath-metal PostgreSQL migrations"
+    )
+    migration_actions = migrations_parser.add_subparsers(
+        dest="migration_action", required=True
+    )
+    migration_detect = migration_actions.add_parser(
+        "detect", help="compare one compiled registry with its live schema"
+    )
+    migration_detect.add_argument("target", help="application target as module:attribute")
+    migration_detect.add_argument("--database", default="main")
+    migration_detect.add_argument("--factory", action="store_true")
+    migration_detect.add_argument("--json", action="store_true")
+    migration_check = migration_actions.add_parser(
+        "check", help="exit nonzero when one compiled registry has schema drift"
+    )
+    migration_check.add_argument("target", help="application target as module:attribute")
+    migration_check.add_argument("--database", default="main")
+    migration_check.add_argument("--factory", action="store_true")
+    migration_check.add_argument("--json", action="store_true")
+    migration_generate = migration_actions.add_parser(
+        "generate", help="build a deterministic named migration review plan"
+    )
+    migration_generate.add_argument("target", help="application target as module:attribute")
+    migration_generate.add_argument("--database", default="main")
+    migration_generate.add_argument("--factory", action="store_true")
+    migration_generate.add_argument("--json", action="store_true")
+    migration_generate.add_argument("--output", metavar="DIRECTORY")
+    migration_generate.add_argument("--migration-id", metavar="32_HEX")
+    generation_parent = migration_generate.add_mutually_exclusive_group()
+    generation_parent.add_argument("--initial", action="store_true")
+    generation_parent.add_argument("--parent", metavar="64_HEX")
+    migration_show = migration_actions.add_parser(
+        "show", help="verify and display one immutable migration artifact"
+    )
+    migration_show.add_argument("artifact", metavar="PATH")
+    migration_show.add_argument("--json", action="store_true")
+    migration_status = migration_actions.add_parser(
+        "status", help="verify an artifact chain against code and the live catalog"
+    )
+    migration_status.add_argument("target", help="application target as module:attribute")
+    migration_status.add_argument("artifacts", nargs="+", metavar="ARTIFACT")
+    migration_status.add_argument("--database", default="main")
+    migration_status.add_argument("--factory", action="store_true")
+    migration_status.add_argument("--json", action="store_true")
     inspect_parser = commands.add_parser(
         "inspect", help="query a running server's read-only telemetry Inspector"
     )
@@ -1161,6 +1206,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return execute_capture(namespace)
         if namespace.command == "replay":
             return execute_replay(namespace)
+        if namespace.command == "migrations":
+            from ._migrations_cli import execute as execute_migrations
+
+            try:
+                return execute_migrations(namespace, load_application)
+            except (OSError, RuntimeError, ValueError) as error:
+                raise CliError(str(error), exit_code=2) from error
         options = options_from_namespace(namespace)
         execute(options)
     except CliError as error:

@@ -16,6 +16,7 @@
 
 #include "codec.h"
 #include "decode.h"
+#include "migration_image.h"
 #include "model.h"
 #include "tape.h"
 
@@ -651,9 +652,16 @@ decode_models(PyObject *module, PyObject *args)
                           &destination, &limit, &rows)) {
         return NULL;
     }
+    if (wreath_pg_migration_catalog_check(destination)) {
+        if (wreath_pg_migration_catalog_decode(
+                decoder_plan, tape, destination, limit) < 0) return NULL;
+        Py_RETURN_NONE;
+    }
     if (!PyTuple_Check(destination) || PyTuple_GET_SIZE(destination) != 3) {
-        PyErr_SetString(PyExc_TypeError,
-                        "a model destination is (hydrate_plan, identity_map, session)");
+        PyErr_SetString(
+            PyExc_TypeError,
+            "a decode destination is a migration catalog or "
+            "(hydrate_plan, identity_map, session)");
         return NULL;
     }
     plan = PyTuple_GET_ITEM(destination, 0);

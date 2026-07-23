@@ -5,6 +5,7 @@
 #include "buffer.h"
 #include "codec.h"
 #include "decode.h"
+#include "migration_image.h"
 #include "plan.h"
 #include "slab.h"
 #include "tape.h"
@@ -891,17 +892,25 @@ direct_data_row(WreathPgBufferedProtocol *self, Py_ssize_t payload_length,
     }
     if (self->cached_mode == 1 && tape->row_count >= 256) {
         if (self->cached_dest != NULL && self->cached_dest != Py_None) {
-            if (!PyTuple_Check(self->cached_dest) ||
-                PyTuple_GET_SIZE(self->cached_dest) != 3) {
-                PyErr_SetString(PyExc_TypeError,
-                                "a decode destination is (plan, identity_map, owner)");
-                return -1;
+            if (wreath_pg_migration_catalog_check(self->cached_dest)) {
+                if (wreath_pg_migration_catalog_decode(
+                        self->cached_plan, self->cached_tape,
+                        self->cached_dest, 256) < 0) return -1;
+            } else {
+                if (!PyTuple_Check(self->cached_dest) ||
+                    PyTuple_GET_SIZE(self->cached_dest) != 3) {
+                    PyErr_SetString(
+                        PyExc_TypeError,
+                        "a decode destination is a migration catalog or "
+                        "(plan, identity_map, owner)");
+                    return -1;
+                }
+                if (wreath_pg_hydrate_models(
+                        self->cached_plan, self->cached_tape,
+                        PyTuple_GET_ITEM(self->cached_dest, 0), 256, self->cached_rows,
+                        PyTuple_GET_ITEM(self->cached_dest, 1),
+                        PyTuple_GET_ITEM(self->cached_dest, 2)) < 0) return -1;
             }
-            if (wreath_pg_hydrate_models(
-                    self->cached_plan, self->cached_tape,
-                    PyTuple_GET_ITEM(self->cached_dest, 0), 256, self->cached_rows,
-                    PyTuple_GET_ITEM(self->cached_dest, 1),
-                    PyTuple_GET_ITEM(self->cached_dest, 2)) < 0) return -1;
         } else if (wreath_pg_decode_fetch_extend(
                        self->cached_plan, self->cached_tape, 256,
                        self->cached_rows) < 0) {
