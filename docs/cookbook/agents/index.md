@@ -4,8 +4,8 @@ If you're an agent working in this codebase, this section is written for you.
 The wreath is a fellowship of parts held in one shape, and a change is welcome
 into it only when it keeps that shape — when it preserves the invariants below
 and can prove it works. Start with
-[`AGENTS.md`](https://github.com/neo-asgi/neo/blob/main/AGENTS.md) and
-[`repo-map.md`](https://github.com/neo-asgi/neo/blob/main/repo-map.md); the map
+[`AGENTS.md`](https://github.com/alexogeny/wreath/blob/main/AGENTS.md) and
+[`repo-map.md`](https://github.com/alexogeny/wreath/blob/main/repo-map.md); the map
 points you at the source, tests, and benchmarks for every subsystem.
 
 - **[The gates](checks.md)** — every check a change must pass, and what each one

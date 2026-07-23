@@ -653,7 +653,14 @@ static int
 receive_queue_push(WreathHttpProtocol *self, PyObject *msg)
 {
     if (self->receive_queue_len == self->receive_queue_cap) {
-        if (self->receive_head > 0) {
+        /* Compact only when the consumed prefix is at least half the array:
+         * the memmove then reclaims >= cap/2 slots while moving <= cap/2
+         * live entries, so every pointer moved is paid for by a later push
+         * (amortized O(1)). Compacting at head == 1 would move cap-1 entries
+         * to reclaim one slot -- O(cap) per message whenever an app consumes
+         * in lockstep with ingest near capacity. Growth stays bounded by the
+         * read high-water pause. */
+        if (self->receive_head * 2 >= self->receive_queue_cap) {
             Py_ssize_t live = self->receive_queue_len - self->receive_head;
             memmove(self->receive_queue, self->receive_queue + self->receive_head,
                     (size_t)live * sizeof(PyObject *));

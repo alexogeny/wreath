@@ -225,14 +225,14 @@ async def run(args: argparse.Namespace) -> int:
     relay_port = await relay.start()
     dsn = _relay_dsn(args.dsn, relay_port)
     try:
-        neo = await _wreath_samples(dsn, args.concurrency, args.warmup, args.trials)
+        wreath_raw = await _wreath_samples(dsn, args.concurrency, args.warmup, args.trials)
         asyncpg = await _asyncpg_samples(dsn, args.concurrency, args.warmup, args.trials)
         psycopg3 = await _psycopg3_samples(dsn, args.concurrency, args.warmup, args.trials)
         psycopg2 = await _psycopg2_samples(dsn, args.concurrency, args.warmup, args.trials)
     finally:
         await relay.close()
 
-    wreath_summary = _summary(neo, args.concurrency)
+    wreath_summary = _summary(wreath_raw, args.concurrency)
     competitors = {
         "asyncpg_sequential": _summary(asyncpg, args.concurrency),
         "psycopg3_sequential": _summary(psycopg3, args.concurrency),
@@ -253,7 +253,7 @@ async def run(args: argparse.Namespace) -> int:
             "warmup": args.warmup,
             "trials": args.trials,
         },
-        "wreath_pipeline": {**wreath_summary, "raw_seconds": neo},
+        "wreath_pipeline": {**wreath_summary, "raw_seconds": wreath_raw},
         "asyncpg_sequential": {**competitors["asyncpg_sequential"], "raw_seconds": asyncpg},
         "psycopg3_sequential": {**competitors["psycopg3_sequential"], "raw_seconds": psycopg3},
         "psycopg2_sequential": {**competitors["psycopg2_sequential"], "raw_seconds": psycopg2},

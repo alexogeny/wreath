@@ -9,9 +9,9 @@ from wreath.config import Environment, find_dotenv, load_env, parse_dotenv, read
 
 
 def test_dotenv_parser_is_literal_and_strict() -> None:
-    data = b"NAME=neo\nEMPTY=\nLITERAL=$(whoami)\nREFERENCE=${HOME}\n"
+    data = b"NAME=wreath\nEMPTY=\nLITERAL=$(whoami)\nREFERENCE=${HOME}\n"
     expected = {
-        "NAME": "neo",
+        "NAME": "wreath",
         "EMPTY": "",
         "LITERAL": "$(whoami)",
         "REFERENCE": "${HOME}",
@@ -19,7 +19,7 @@ def test_dotenv_parser_is_literal_and_strict() -> None:
     assert pure_parse_dotenv(data) == expected
     assert parse_dotenv(data) == expected
     with pytest.raises(ValueError, match="line 1"):
-        parse_dotenv(b"export NAME=neo\n")
+        parse_dotenv(b"export NAME=wreath\n")
     with pytest.raises(ValueError, match="line 1"):
         parse_dotenv(b"NO_EQUALS\n")
 

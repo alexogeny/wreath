@@ -37,6 +37,17 @@ enum {
     OP_UNSUPPORTED = 10,
 };
 
+/* Total node visits allowed per validation. A OP_UNION tries every option
+ * against the whole value, so nested unions that fail deep re-explore each
+ * branch at every level -- O(2^depth) work from a small body (a validation
+ * bomb). This ceiling bounds the worst case: the densest legitimate body under
+ * the default max_body_bytes (1 MiB) decodes to ~500k nodes, so 2M leaves ~4x
+ * headroom and is never reached by real input, while a bomb is stopped with
+ * one "too_complex" error instead of hanging. The pure binding._validate uses
+ * the same ceiling; raise both together if max_body_bytes is raised far above
+ * the default. */
+#define WREATH_VALIDATE_MAX_STEPS 2000000
+
 /* Append {"loc": list(loc), "msg": msg, "type": kind} to errors. Returns -1 on
  * a C-API failure with an exception set, 0 otherwise. */
 static int
@@ -75,8 +86,18 @@ loc_pop(PyObject *loc)
  * C-API failure (exception set). Validation failures are accumulated into
  * errors and still return a (new-reference) value, mirroring the pure code. */
 static PyObject *
-validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors)
+validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors,
+              long *steps)
 {
+    if (*steps <= 0) {
+        /* Budget exhausted: mark it (negative sentinel) and stop descending.
+         * The single "too_complex" error is added by wreath_run_validation, so
+         * it reaches the top even when exhaustion happens inside a union branch
+         * whose per-attempt error list is discarded. */
+        *steps = -1;
+        return Py_NewRef(value);
+    }
+    (*steps)--;
     long opcode = PyLong_AsLong(PyTuple_GET_ITEM(plan, 0));
     if (opcode == -1 && PyErr_Occurred()) {
         return NULL;
@@ -157,7 +178,7 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors)
             }
             Py_DECREF(key);
             PyObject *item = validate_node(item_plan, PyList_GET_ITEM(value, index), loc,
-                                           errors);
+                                           errors, steps);
             loc_pop(loc);
             if (item == NULL) {
                 Py_DECREF(result);
@@ -187,7 +208,7 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors)
                 Py_DECREF(result);
                 return NULL;
             }
-            PyObject *validated = validate_node(value_plan, item, loc, errors);
+            PyObject *validated = validate_node(value_plan, item, loc, errors, steps);
             loc_pop(loc);
             if (validated == NULL) {
                 Py_DECREF(result);
@@ -219,17 +240,24 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors)
                 return NULL;
             }
             PyObject *result = validate_node(PyTuple_GET_ITEM(options, index), value, loc,
-                                             attempt);
+                                             attempt, steps);
             if (result == NULL) {
                 Py_DECREF(attempt);
                 return NULL;
             }
-            if (PyList_GET_SIZE(attempt) == 0) {
+            if (PyList_GET_SIZE(attempt) == 0 && *steps >= 0) {
                 Py_DECREF(attempt);
                 return result; /* first clean match wins */
             }
             Py_DECREF(result);
             Py_DECREF(attempt);
+            if (*steps < 0) {
+                /* Budget ran out mid-union: stop trying options. An empty
+                 * attempt from here on is a silent bail, not a real match, so
+                 * declaring success would wrongly accept the value. Fall
+                 * through; run_validation reports too_complex. */
+                return Py_NewRef(value);
+            }
         }
         PyObject *msg = PyTuple_GET_ITEM(plan, 3);
         PyObject *loc_copy = PyList_GetSlice(loc, 0, PyList_GET_SIZE(loc));
@@ -289,7 +317,8 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors)
                     Py_DECREF(kwargs);
                     return NULL;
                 }
-                PyObject *validated = validate_node(field_plan, present, loc, errors);
+                PyObject *validated = validate_node(field_plan, present, loc, errors,
+                                                    steps);
                 loc_pop(loc);
                 if (validated == NULL) {
                     Py_DECREF(kwargs);
@@ -318,38 +347,54 @@ validate_node(PyObject *plan, PyObject *value, PyObject *loc, PyObject *errors)
         /* Unexpected fields: any value key not named by a field. Iterated in
          * value's insertion order to match the pure implementation. */
         if (PyDict_GET_SIZE(value) > PyDict_GET_SIZE(kwargs)) {
+            /* Build the field-name set once (O(F)) so each value key is an O(1)
+             * membership test. The old per-key linear rescan of every field
+             * name was O(V*F) -- quadratic when a large body is validated
+             * against a wide schema. Mirrors pure _validate_dataclass, which
+             * builds the same `known` set. */
+            PyObject *known = PySet_New(NULL);
+            if (known == NULL) {
+                Py_DECREF(kwargs);
+                return NULL;
+            }
+            for (Py_ssize_t index = 0; index < field_count; index++) {
+                PyObject *name = PyTuple_GET_ITEM(PyTuple_GET_ITEM(fields, index), 0);
+                if (PySet_Add(known, name) < 0) {
+                    Py_DECREF(known);
+                    Py_DECREF(kwargs);
+                    return NULL;
+                }
+            }
             PyObject *key, *item;
             Py_ssize_t pos = 0;
             while (PyDict_Next(value, &pos, &key, &item)) {
-                int known = 0;
-                for (Py_ssize_t index = 0; index < field_count; index++) {
-                    PyObject *name = PyTuple_GET_ITEM(PyTuple_GET_ITEM(fields, index), 0);
-                    int equal = PyObject_RichCompareBool(key, name, Py_EQ);
-                    if (equal < 0) {
-                        Py_DECREF(kwargs);
-                        return NULL;
-                    }
-                    if (equal) {
-                        known = 1;
-                        break;
-                    }
+                int contains = PySet_Contains(known, key);
+                if (contains < 0) {
+                    Py_DECREF(known);
+                    Py_DECREF(kwargs);
+                    return NULL;
                 }
-                if (!known) {
+                if (!contains) {
                     if (loc_push(loc, key) < 0) {
+                        Py_DECREF(known);
                         Py_DECREF(kwargs);
                         return NULL;
                     }
                     int rc = emit(errors, loc, "unexpected field", "extra");
                     loc_pop(loc);
                     if (rc < 0) {
+                        Py_DECREF(known);
                         Py_DECREF(kwargs);
                         return NULL;
                     }
                 }
             }
+            Py_DECREF(known);
         }
-        /* Any error anywhere (shared list) means we cannot construct. */
-        if (PyList_GET_SIZE(errors) > 0) {
+        /* Any error anywhere (shared list) means we cannot construct. A
+         * negative step budget means validation was cut short mid-tree, so the
+         * kwargs may be incomplete -- never construct from a truncated body. */
+        if (PyList_GET_SIZE(errors) > 0 || *steps < 0) {
             Py_DECREF(kwargs);
             return Py_NewRef(value);
         }
@@ -410,7 +455,19 @@ wreath_run_validation(PyObject *self, PyObject *args)
         Py_DECREF(loc);
         return NULL;
     }
-    PyObject *result = validate_node(plan, value, loc, errors);
+    long steps = WREATH_VALIDATE_MAX_STEPS;
+    PyObject *result = validate_node(plan, value, loc, errors, &steps);
+    if (result != NULL && steps < 0) {
+        /* Validation was cut short by the step budget: report it once, at the
+         * root, regardless of which subtree exhausted it. */
+        if (emit(errors, loc, "value is too complex to validate",
+                 "too_complex") < 0) {
+            Py_DECREF(result);
+            Py_DECREF(loc);
+            Py_DECREF(errors);
+            return NULL;
+        }
+    }
     Py_DECREF(loc);
     if (result == NULL) {
         Py_DECREF(errors);

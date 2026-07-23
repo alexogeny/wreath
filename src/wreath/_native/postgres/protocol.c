@@ -9,6 +9,8 @@
 #include "slab.h"
 #include "tape.h"
 
+#include "../wreath_stream.h"
+
 #include <string.h>
 
 static PyObject *str_discarded = NULL;
@@ -328,6 +330,12 @@ typedef struct {
     PyObject_HEAD
     PyObject *transport;
     PyObject *transport_write;
+    /* Fused-egress fast path: when the transport is the native metal
+     * transport, writes go through its C API instead of the bound method. */
+    const WreathTransportCAPI *transport_capi;
+    /* One outstanding fused read offer at a time; guards the offered slab
+     * tail against acquisition/retirement races (see stream_* below). */
+    int read_offer_live;
     /* Control messages queue through an indexed list plus at most one waiter
        future; DataRow frames never come through here (they stay on the
        slab/tape path). */
@@ -480,6 +488,8 @@ buffered_clear(WreathPgBufferedProtocol *self)
 {
     Py_CLEAR(self->transport);
     Py_CLEAR(self->transport_write);
+    self->transport_capi = NULL;
+    self->read_offer_live = 0;
     Py_CLEAR(self->messages);
     self->messages_head = 0;
     Py_CLEAR(self->read_waiter);
@@ -1081,6 +1091,149 @@ buffered_buffer_updated(WreathPgBufferedProtocol *self, PyObject *count_object)
     Py_RETURN_NONE;
 }
 
+/* --- fused stream ingress (WreathStreamCAPI) ----------------------------- */
+/* The metal transport delivers wire bytes here with no Python calling
+ * convention: no memoryview, no boxed byte counts, no method dispatch per
+ * socket read. The copy into the slab remains -- records and DataRow windows
+ * retain slab memory beyond the callback, so ingress cannot borrow transient
+ * transport buffers the way the HTTP/1 parser does.
+ *
+ * Offer contract: at most one outstanding offer; the offered region is the
+ * current slab's writable tail, which is stable between acquire and commit
+ * because slabs are fixed allocations and retirement only touches the
+ * `retired` list (never `current`). `read_offer_live` asserts the contract. */
+
+static int
+stream_check(PyObject *protocol)
+{
+    return buffered_protocol_type != NULL &&
+           PyObject_TypeCheck(protocol, buffered_protocol_type);
+}
+
+static int
+stream_acquire_read_buffer(PyObject *protocol, char **buffer,
+                           Py_ssize_t *capacity)
+{
+    if (!stream_check(protocol)) {
+        PyErr_SetString(PyExc_TypeError, "expected native pg BufferedProtocol");
+        return -1;
+    }
+    WreathPgBufferedProtocol *self = (WreathPgBufferedProtocol *)protocol;
+    if (self->read_offer_live) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "acquire_read_buffer() while a read offer is live");
+        return -1;
+    }
+    if (reclaim_retired(self, 8) < 0) return -1;
+    if (self->current == NULL ||
+        self->current->write_position == WREATH_PG_SLAB_SIZE) {
+        if (acquire_slab(self) == NULL) return -1;
+    }
+    self->read_offer_live = 1;
+    *buffer = (char *)self->current->data + self->current->write_position;
+    *capacity = WREATH_PG_SLAB_SIZE - self->current->write_position;
+    return 0;
+}
+
+static int
+stream_commit_read(PyObject *protocol, Py_ssize_t nbytes)
+{
+    if (!stream_check(protocol)) {
+        PyErr_SetString(PyExc_TypeError, "expected native pg BufferedProtocol");
+        return -1;
+    }
+    WreathPgBufferedProtocol *self = (WreathPgBufferedProtocol *)protocol;
+    if (!self->read_offer_live) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "commit_read() without a live read offer");
+        return -1;
+    }
+    self->read_offer_live = 0;
+    if (nbytes < 0 || self->current == NULL ||
+        nbytes > WREATH_PG_SLAB_SIZE - self->current->write_position) {
+        PyErr_SetString(PyExc_ValueError, "invalid fused receive count");
+        return -1;
+    }
+    self->current->write_position += nbytes;
+    if (nbytes == 0) return 0;  /* abandoned offer: nothing to parse */
+    return parse_messages(self);
+}
+
+static int
+stream_feed_external(PyObject *protocol, const char *data, Py_ssize_t size)
+{
+    if (!stream_check(protocol)) {
+        PyErr_SetString(PyExc_TypeError, "expected native pg BufferedProtocol");
+        return -1;
+    }
+    if (size < 0) {
+        PyErr_SetString(PyExc_ValueError, "negative external read size");
+        return -1;
+    }
+    WreathPgBufferedProtocol *self = (WreathPgBufferedProtocol *)protocol;
+    if (self->read_offer_live) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "external read while a read offer is live");
+        return -1;
+    }
+    /* Copy slab-by-slab, parsing after each fill exactly as the buffered
+     * path parses after each buffer_updated(); messages spanning slab
+     * boundaries take the existing chained-payload path. */
+    while (size > 0) {
+        if (self->current == NULL ||
+            self->current->write_position == WREATH_PG_SLAB_SIZE) {
+            if (reclaim_retired(self, 8) < 0) return -1;
+            if (acquire_slab(self) == NULL) return -1;
+        }
+        Py_ssize_t space = WREATH_PG_SLAB_SIZE - self->current->write_position;
+        Py_ssize_t chunk = size < space ? size : space;
+        memcpy(self->current->data + self->current->write_position,
+               data, (size_t)chunk);
+        self->current->write_position += chunk;
+        data += chunk;
+        size -= chunk;
+        if (parse_messages(self) < 0) return -1;
+    }
+    return 0;
+}
+
+static const WreathStreamCAPI stream_capi = {
+    WREATH_STREAM_CAPI_VERSION,
+    stream_check,
+    stream_acquire_read_buffer,
+    stream_commit_read,
+    stream_feed_external,
+};
+
+/* Fused egress: resolved once per process from sys.modules (the reactor is
+ * definitionally imported before it hands us a transport to check). */
+static const WreathTransportCAPI *g_transport_capi = NULL;
+
+static const WreathTransportCAPI *
+transport_capi_resolve(void)
+{
+    if (g_transport_capi != NULL) return g_transport_capi;
+    PyObject *modules = PyImport_GetModuleDict();  /* borrowed */
+    PyObject *module = modules == NULL
+        ? NULL : PyDict_GetItemString(modules, "wreath._native._reactor");
+    if (module == NULL) return NULL;
+    PyObject *capsule = PyObject_GetAttrString(module, "_TRANSPORT_C_API");
+    if (capsule == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    const WreathTransportCAPI *capi =
+        PyCapsule_GetPointer(capsule, WREATH_TRANSPORT_CAPI_NAME);
+    Py_DECREF(capsule);
+    if (capi == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    if (capi->version != WREATH_TRANSPORT_CAPI_VERSION) return NULL;
+    g_transport_capi = capi;
+    return capi;
+}
+
 static PyObject *
 buffered_connection_made(WreathPgBufferedProtocol *self, PyObject *transport)
 {
@@ -1088,6 +1241,9 @@ buffered_connection_made(WreathPgBufferedProtocol *self, PyObject *transport)
     if (write == NULL) return NULL;
     Py_XSETREF(self->transport, Py_NewRef(transport));
     Py_XSETREF(self->transport_write, write);
+    const WreathTransportCAPI *capi = transport_capi_resolve();
+    self->transport_capi =
+        capi != NULL && capi->check(transport) ? capi : NULL;
     Py_RETURN_NONE;
 }
 
@@ -1225,6 +1381,15 @@ buffered_write(WreathPgBufferedProtocol *self, PyObject *data)
     if (self->transport_write == NULL) {
         PyErr_SetString(PyExc_ConnectionError, "transport is not connected");
         return NULL;
+    }
+    if (self->transport_capi != NULL && self->transport != NULL) {
+        /* Fused egress: no bound-method dispatch; exact-bytes payloads enter
+         * the metal transport's retained send queue zero-copy. */
+        if (self->transport_capi->write(self->transport, data) < 0) {
+            return NULL;
+        }
+        self->write_calls++;
+        Py_RETURN_NONE;
     }
     result = PyObject_CallOneArg(self->transport_write, data);
     if (result != NULL) self->write_calls++;
@@ -1406,6 +1571,13 @@ wreath_pg_protocol_init(PyObject *module)
             module, "BufferedProtocol", (PyObject *)buffered_protocol_type) < 0 ||
         PyModule_AddFunctions(module, protocol_methods) < 0) return -1;
     Py_DECREF(buffered_protocol_type);
+    PyObject *stream_capsule = PyCapsule_New(
+        (void *)&stream_capi, "wreath._native._postgres._STREAM_C_API", NULL);
+    if (stream_capsule == NULL ||
+        PyModule_AddObject(module, "_STREAM_C_API", stream_capsule) < 0) {
+        Py_XDECREF(stream_capsule);
+        return -1;
+    }
     return 0;
 }
 

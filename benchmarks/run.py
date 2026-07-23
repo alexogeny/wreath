@@ -198,12 +198,13 @@ async def _run_framework(
     framework: str,
     on_result: Callable[[dict[str, object]], None],
 ) -> bool:
-    """One server per protocol.
+    """One protocol at a time; each trial below boots its own server.
 
     Not merely tidy: Sanic's `version=3` serves HTTP/3 and nothing else, so a
-    single process cannot cover h1 and h3, and wreath-native serving all three at
-    once would give it a warmed, shared process while Sanic got a cold one per
-    protocol. A server each keeps the arms alike.
+    single process cannot cover h1 and h3, and wreath-native serving all three
+    at once would give it a warmed, shared process while Sanic got a cold one
+    per protocol. Per-trial processes (see _run_protocol) keep every arm
+    equally cold on top of that.
     """
     wanted = [p for p in args.protocol if server_supports(framework, p)]
     if not wanted:
@@ -216,31 +217,10 @@ async def _run_framework(
     return ok
 
 
-async def _run_protocol(
-    args: argparse.Namespace,
-    framework: str,
-    protocol: str,
-    on_result: Callable[[dict[str, object]], None],
-) -> bool:
-    port = args.port or _available_port(args.host)
-    request_count = args.requests if args.requests is not None else REQUEST_TIERS[framework]
-    env = os.environ.copy()
-    env["WREATH_BENCH_FRAMEWORK"] = framework
-    protocols = [protocol]
-    # h2/h3 need TLS. For HTTP/1.1 we now prefer h2load *cleartext* whenever it is
-    # installed: the pure-Python built-in client caps every server at its own
-    # throughput (~80k req/s here) and makes native servers indistinguishable, so
-    # a fast C client is essential to measure the server rather than the client.
-    tls = bool(args.tls_cert and args.tls_key)
-    if args.load_generator == "h2load":
-        use_h2load = True
-    elif args.load_generator == "auto":
-        use_h2load = protocol != "http/1.1" or h2load.capabilities() is not None
-    else:
-        use_h2load = False
-    if use_h2load and not tls and protocol != "http/1.1":
-        print(f"[skip] {framework} {protocol}: needs --tls-cert/--tls-key", flush=True)
-        return True
+def _server_command(
+    args: argparse.Namespace, framework: str, protocol: str, port: int, tls: bool
+) -> tuple[list[str], str]:
+    """Build one server invocation and its display label for a single boot."""
     if framework in ("wreath-native", "wreath-metal"):
         if framework == "wreath-metal":
             # The metal tier is defined by its loop; it always runs on the reactor.
@@ -269,7 +249,7 @@ async def _run_protocol(
             native_loop,
         ]
         if tls:
-            command += ["--protocol", *protocols, "--tls-cert", args.tls_cert,
+            command += ["--protocol", protocol, "--tls-cert", args.tls_cert,
                         "--tls-key", args.tls_key]
         server = f"{framework} ({native_loop})"
     elif framework == "sanic":
@@ -283,7 +263,7 @@ async def _run_protocol(
             str(port),
         ]
         if tls:
-            command += ["--protocol", *protocols, "--tls-cert", args.tls_cert,
+            command += ["--protocol", protocol, "--tls-cert", args.tls_cert,
                         "--tls-key", args.tls_key]
         server = "sanic-native"
     else:
@@ -316,61 +296,119 @@ async def _run_protocol(
     if server_cpus:
         command = ["taskset", "-c", server_cpus, *command]
         server = f"{server} [cpus {server_cpus}]"
-    process = subprocess.Popen(command, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    return command, server
+
+
+def _stop_server(process: subprocess.Popen[bytes]) -> None:
+    process.terminate()
     try:
-        try:
-            # An h3-only server has no TCP listener; probe it over QUIC instead.
-            if protocols == ["h3"]:
-                await asyncio.to_thread(_wait_until_ready_h3, process, args.host, port)
-            else:
-                await asyncio.to_thread(_wait_until_ready, process, args.host, port)
-        except (TimeoutError, RuntimeError) as error:
-            print(f"[skip] {framework}: {error}", flush=True)
-            return False
-        for scenario in args.scenario:
-            spec = SCENARIOS[scenario]
-            if not spec.supports(framework):
-                continue
-            method, path = spec.method, spec.path
-            # h2load measures GET and body-backed POST, and speaks no WebSocket.
-            # Other HTTP/1.1 methods fall to the built-in client. h2/h3 have no
-            # built-in client, so unsupported methods stay on h2load and skip.
-            scenario_h2load = use_h2load and (
-                protocol != "http/1.1"
-                or (method in {"GET", "POST"} and not spec.websocket)
-            )
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+    if process.returncode not in (0, -15):
+        error = (
+            process.stderr.read().decode("utf-8", errors="replace")
+            if process.stderr
+            else ""
+        )
+        if error:
+            print(error, file=sys.stderr)
+
+
+async def _run_protocol(
+    args: argparse.Namespace,
+    framework: str,
+    protocol: str,
+    on_result: Callable[[dict[str, object]], None],
+) -> bool:
+    request_count = args.requests if args.requests is not None else REQUEST_TIERS[framework]
+    env = os.environ.copy()
+    env["WREATH_BENCH_FRAMEWORK"] = framework
+    # h2/h3 need TLS. For HTTP/1.1 we now prefer h2load *cleartext* whenever it is
+    # installed: the pure-Python built-in client caps every server at its own
+    # throughput (~80k req/s here) and makes native servers indistinguishable, so
+    # a fast C client is essential to measure the server rather than the client.
+    tls = bool(args.tls_cert and args.tls_key)
+    if args.load_generator == "h2load":
+        use_h2load = True
+    elif args.load_generator == "auto":
+        use_h2load = protocol != "http/1.1" or h2load.capabilities() is not None
+    else:
+        use_h2load = False
+    if use_h2load and not tls and protocol != "http/1.1":
+        print(f"[skip] {framework} {protocol}: needs --tls-cert/--tls-key", flush=True)
+        return True
+    for scenario in args.scenario:
+        spec = SCENARIOS[scenario]
+        if not spec.supports(framework):
+            continue
+        method, path = spec.method, spec.path
+        # h2load measures GET and body-backed POST, and speaks no WebSocket.
+        # Other HTTP/1.1 methods fall to the built-in client. h2/h3 have no
+        # built-in client, so unsupported methods stay on h2load and skip.
+        # Every non-WebSocket scenario rides h2load: bodyless non-GET
+        # methods go through its :method pseudo-header override, so the
+        # slow built-in Python generator (which caps out around 50k rps
+        # and was silently the measured bottleneck on the PUT/PATCH/DELETE
+        # routing rows) is reserved for WebSocket upgrades only.
+        scenario_h2load = use_h2load and not spec.websocket
+        print(
+            f"[start] {framework}/{scenario} [{method}]: {args.warmup_requests:,} warmup + "
+            f"{request_count:,} measured requests",
+            flush=True,
+        )
+
+        def show_progress(
+            completed: int,
+            total: int,
+            elapsed: float,
+            scenario_name: str = scenario,
+        ) -> None:
+            percent = completed / total * 100 if total else 100.0
+            rate = completed / elapsed if elapsed else 0.0
             print(
-                f"[start] {framework}/{scenario} [{method}]: {args.warmup_requests:,} warmup + "
-                f"{request_count:,} measured requests",
+                f"[progress] {framework}/{scenario_name}: {completed:,}/{total:,} "
+                f"({percent:5.1f}%) {rate:,.0f} req/s",
                 flush=True,
             )
 
-            def show_progress(
-                completed: int,
-                total: int,
-                elapsed: float,
-                scenario_name: str = scenario,
-            ) -> None:
-                percent = completed / total * 100 if total else 100.0
-                rate = completed / elapsed if elapsed else 0.0
-                print(
-                    f"[progress] {framework}/{scenario_name}: {completed:,}/{total:,} "
-                    f"({percent:5.1f}%) {rate:,.0f} req/s",
-                    flush=True,
-                )
-
-            # Repeat the measurement `--trials` times; every trial emits its own
-            # row (tagged with the trial number) so the report can take run-to-run
-            # medians/ranges instead of trusting a single noisy shot.
-            for trial in range(1, max(1, args.trials) + 1):
+        # Repeat the measurement `--trials` times; every trial emits its own
+        # row (tagged with the trial number) so the report can take run-to-run
+        # medians/ranges instead of trusting a single noisy shot.
+        for trial in range(1, max(1, args.trials) + 1):
+            # Every trial is a fully cold arm: its own server process on a
+            # fresh port, warmed by this trial's warmup requests alone.
+            # Nothing survives from one trial into the next — no keep-alive
+            # connections, allocator or buffer-pool state, caches, or
+            # accumulated fd/timer state — so trial-to-trial deltas measure
+            # cold-start variance, never accumulation from earlier trials.
+            port = args.port or _available_port(args.host)
+            command, server = _server_command(args, framework, protocol, port, tls)
+            process = subprocess.Popen(
+                command, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+            )
+            try:
+                try:
+                    # An h3-only server has no TCP listener; probe it over QUIC.
+                    if protocol == "h3":
+                        await asyncio.to_thread(
+                            _wait_until_ready_h3, process, args.host, port
+                        )
+                    else:
+                        await asyncio.to_thread(
+                            _wait_until_ready, process, args.host, port
+                        )
+                except (TimeoutError, RuntimeError) as error:
+                    print(f"[skip] {framework}: {error}", flush=True)
+                    return False
                 bg_before: dict[str, int] | None = None
                 if spec.background:
-                    # Snapshot before the load runs so this scenario's task counts
-                    # are isolated from earlier scenarios on the same process.
+                    # With a per-trial process this snapshot is always zero,
+                    # but reading it keeps the reconciliation arithmetic
+                    # self-contained rather than trusting that assumption.
                     bg_before = await asyncio.to_thread(_read_stats, args.host, port)
                 if scenario_h2load:
-                    if spec.websocket:
-                        break  # WebSocket is an HTTP/1.1 upgrade; h2load has none
                     try:
                         result = await asyncio.to_thread(
                             h2load.measure,
@@ -419,9 +457,10 @@ async def _run_protocol(
                     alpn = None
                 background_stats: dict[str, Any] | None = None
                 if spec.background and bg_before is not None:
-                    # Drain and read the app's task counters before the server is
-                    # stopped in the finally block, so a dropped or backlogged task
-                    # is caught rather than lost with the process.
+                    # Drain and read the app's task counters before the server
+                    # is stopped in the finally block, so a dropped or
+                    # backlogged task is caught rather than lost with the
+                    # process.
                     background_stats = await asyncio.to_thread(
                         _drain_background,
                         args.host,
@@ -473,22 +512,9 @@ async def _run_protocol(
                     f"{'' if args.trials == 1 else f' (trial {trial})'}",
                     flush=True,
                 )
-        return True
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-        if process.returncode not in (0, -15):
-            error = (
-                process.stderr.read().decode("utf-8", errors="replace")
-                if process.stderr
-                else ""
-            )
-            if error:
-                print(error, file=sys.stderr)
+            finally:
+                _stop_server(process)
+    return True
 
 
 async def run(args: argparse.Namespace) -> None:
@@ -523,7 +549,7 @@ async def run(args: argparse.Namespace) -> None:
         "loop": args.loop,
         "http": args.http,
         "host": args.host,
-        "port": args.port or "ephemeral-per-framework",
+        "port": args.port or "ephemeral-per-trial",
         "concurrency": args.concurrency,
         "request_tiers": {
             framework: args.requests if args.requests is not None else REQUEST_TIERS[framework]

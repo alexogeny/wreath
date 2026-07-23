@@ -48,7 +48,7 @@ def _self_signed() -> tuple[str, str]:
 
 
 def test_framework_imports_without_quic_libraries() -> None:
-    # Importing neo and wreath.server must not require the HTTP/3 extension.
+    # Importing wreath and wreath.server must not require the HTTP/3 extension.
     import wreath.server  # noqa: PLC0415
 
     assert hasattr(wreath.server, "serve")

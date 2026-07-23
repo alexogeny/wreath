@@ -13,7 +13,7 @@
  * Exit status is 0 only when every case matches the reference.
  */
 #define WREATH_FORCE_PORTABLE_MEMMEM 1
-#include "../src/neo/_native/wreathcore.h"
+#include "../src/wreath/_native/wreathcore.h"
 
 #include <stdio.h>
 #include <stdlib.h>

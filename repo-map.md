@@ -69,9 +69,9 @@ Prefer a focused test near the changed subsystem. The canonical commands and mar
 
 | Need | Start here |
 | --- | --- |
-| Agent workflow and subsystem lookup | `docs/agents/index.md`, `docs/agents/manifest.json` |
-| Behavioral invariants | `docs/agents/contracts.md` |
-| Change playbooks | `docs/agents/playbooks.md` |
+| Agent workflow and subsystem lookup | `docs/cookbook/agents/index.md`, `docs/agents/manifest.json` |
+| Behavioral invariants | `AGENTS.md`, per-subsystem `policy` fields in `docs/agents/manifest.json` |
+| Change playbooks | `docs/cookbook/agents/` (add-an-endpoint, verify-a-change, checks) |
 | User-facing behavior | `docs/guides/`, `docs/getting-started/`, `docs/cookbook/` |
 | Public API | `docs/reference/` |
 | Request/ASGI concepts | `docs/concepts/` |

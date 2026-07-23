@@ -1,6 +1,6 @@
 # Release notes
 
-Per-version release notes for neo. Each release has a page at
+Per-version release notes for wreath. Each release has a page at
 `release_notes/<version>.md`, generated with the **release-notes** agent skill
 (`skills/release-notes/`) and used verbatim as the body of the GitHub
 Release cut by `.github/workflows/publish.yml`.

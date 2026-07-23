@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json as stdlib_json
 import os
 from typing import Any, cast
@@ -126,6 +127,67 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     @roles("admin")
     async def auth_admin(request):
         return TextResponse("admin")
+
+    # --- e2e: the whole stack orchestrated in one request ------------------
+    # Authentication, a database round trip through wreath.postgres, and a
+    # remote HTTP fetch through wreath.http_client, composed into one JSON
+    # response. Both upstreams run in-process on the benchmarked loop (see
+    # e2e_upstream.py), so on wreath-metal every wire -- ingress, DB, and
+    # client -- rides the fused native transport. Setup is lazy and happens
+    # once, inside the warmup requests.
+    _e2e_state: dict = {"lock": asyncio.Lock()}
+
+    async def _e2e_ensure():
+        if "connection" in _e2e_state:
+            return _e2e_state
+        async with _e2e_state["lock"]:
+            if "connection" in _e2e_state:
+                return _e2e_state
+            from wreath import postgres
+            from wreath.http_client import DestinationPolicy, HTTPClient
+
+            from .e2e_upstream import BenchPostgres, BenchUpstreamHttp
+
+            database = BenchPostgres()
+            dsn = await database.start()
+            upstream = BenchUpstreamHttp()
+            upstream_port = await upstream.start()
+            client = HTTPClient(
+                "bench-e2e",
+                base_url=f"http://127.0.0.1:{upstream_port}",
+                destination=DestinationPolicy(
+                    allow_private=True, allow_loopback=True
+                ),
+            )
+            await client.start()
+            connection = await postgres.connect(dsn)
+            _e2e_state.update(
+                database=database,
+                upstream=upstream,
+                client=client,
+                connection=connection,
+            )
+            return _e2e_state
+
+    @app.get("/e2e")
+    @authenticated()
+    async def e2e(request):
+        state = await _e2e_ensure()
+        # Overlap the HTTP fetch with the DB round trip: one task, no gather
+        # (gather costs two task wrappers plus its own future per request).
+        fetch = asyncio.ensure_future(state["client"].get("/data"))
+        try:
+            value = await state["connection"].fetchval("select $1::int4", 42)
+        except BaseException:
+            fetch.cancel()
+            raise
+        upstream_response = await fetch
+        return {
+            "user": request.identity.id,
+            "db": value,
+            "upstream_status": upstream_response.status,
+            "upstream_bytes": len(upstream_response.body),
+        }
 
     @app.get("/headers")
     async def header_lookup(request):

@@ -120,6 +120,52 @@ def test_cancelling_earliest_timer_rescans_only_its_bucket():
     assert wheel.tree_node_updates - updates <= 10
 
 
+def test_cancelling_a_same_deadline_cohort_rescans_once_total():
+    # Every timer here shares one deadline, so all tie their slot minimum.
+    # Tie-counting must let all but the last leave in O(1): one rescan for
+    # the whole cohort, not one per cancel (the O(k^2) hazard this fixes).
+    wheel = TimingWheel(resolution=0.001, slots=512, base=0.0)
+    handles = [wheel.schedule(0.050, lambda: None) for _ in range(256)]
+    rescans = wheel.slot_rescans
+
+    for handle in handles:
+        assert handle.cancel() is True
+
+    assert wheel.slot_rescans - rescans == 1
+
+
+def test_firing_a_same_deadline_cohort_rescans_once_total():
+    # The same tie-count contract on the expiry path: draining k timers due
+    # in one tick rescans the slot once, after the whole chain has left.
+    fired = []
+    wheel = TimingWheel(resolution=0.001, slots=512, base=0.0)
+    for index in range(256):
+        wheel.schedule(0.050, lambda i=index: fired.append(i))
+    rescans = wheel.slot_rescans
+
+    due = wheel.advance(0.100)
+    for callback in due:
+        callback()
+
+    assert len(fired) == 256
+    assert wheel.slot_rescans - rescans == 1
+
+
+def test_advance_over_idle_gap_skips_parked_timers():
+    # Absolute-deadline drain jumps cursor to the next due tick via the
+    # interval tree; a long-parked timer must not be touched (let alone
+    # decremented once per rotation) while the wheel sweeps idle ticks.
+    wheel = TimingWheel(resolution=0.001, slots=64, base=0.0)
+    wheel.schedule(10.0, lambda: None)          # ~156 rotations away
+    rescans = wheel.slot_rescans
+    updates = wheel.tree_node_updates
+
+    assert wheel.advance(5.0) == []             # 5000 ticks, nothing due
+    # No node visited, so neither counter moves for the parked timer.
+    assert wheel.slot_rescans == rescans
+    assert wheel.tree_node_updates == updates
+
+
 def test_wheel_releases_pending_timers_on_dealloc():
     # A wheel dropped with live timers must not leak or dangle.
     w = TimingWheel(resolution=0.001, slots=32, base=0.0)

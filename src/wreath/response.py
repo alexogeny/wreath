@@ -160,6 +160,40 @@ class JSONResponse(Response):
         super().__init__(_json_dumps(data), status=status, background=background)
 
 
+# --- coercion fast paths ----------------------------------------------------
+# Handlers overwhelmingly return str/bytes/dict with the default 200 status.
+# _coerce_response builds those into a Response in one frame -- skipping the
+# subclass __init__ -> Response.__init__ double call and its branch logic --
+# producing byte-for-byte the same result as the constructors above. The type
+# headers derive from each class's media_type so they cannot drift. Guarded by
+# the equivalence test in tests/test_response_fast_path.py.
+_TEXT_TYPE_HEADER = (_CONTENT_TYPE, TextResponse.media_type)
+_JSON_TYPE_HEADER = (_CONTENT_TYPE, JSONResponse.media_type)
+_OCTET_TYPE_HEADER = (_CONTENT_TYPE, Response.media_type)
+
+
+def _build_response(body: bytes, type_header: tuple[bytes, bytes]) -> Response:
+    # 200 is never in _STATUS_WITHOUT_BODY, so content-length always applies.
+    response = Response.__new__(Response)
+    response.body = body
+    response.status = 200
+    response.background = None
+    response.headers = [type_header, (_CONTENT_LENGTH, _content_length(len(body)))]
+    return response
+
+
+def coerce_text(body: str) -> Response:
+    return _build_response(body.encode("utf-8"), _TEXT_TYPE_HEADER)
+
+
+def coerce_json(data: Any) -> Response:
+    return _build_response(_json_dumps(data), _JSON_TYPE_HEADER)
+
+
+def coerce_bytes(body: bytes) -> Response:
+    return _build_response(body, _OCTET_TYPE_HEADER)
+
+
 @dataclass(frozen=True, slots=True)
 class ProblemDetail:
     status: int

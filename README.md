@@ -111,4 +111,16 @@ See [`benchmarks/README.md`](benchmarks/README.md) for methodology.
 
 ## License
 
-See [`LICENSE`](LICENSE).
+Wreath is licensed under the [Mozilla Public License 2.0](LICENSE) (MPL-2.0).
+
+In practice: use it freely, commercially, as a dependency of anything —
+proprietary applications and closed-source SaaS included. Your own code is
+never affected. The only obligation is that if you ship a product containing
+*modified copies of wreath's own files*, those file changes must remain
+source-available to your recipients.
+
+**The spirit of this release** (a request, not a license term): if you make
+substantial improvements to wreath — bug fixes, features, performance work —
+we'd love to see them upstream rather than living in a fork. Massive divergent
+forks are legal; they're just not the point. The MPL grants no rights to the
+"wreath" name (§2.3), so a fork should pick its own.

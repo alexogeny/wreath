@@ -142,23 +142,32 @@ bucket_rebuild(WreathTokenBucket *self, size_t target, double now, Py_ssize_t dr
     return 0;
 }
 
-/* Guarantee a free slot for one insert. Returns 0, or -1 with an exception. */
+/* Guarantee a free slot for one insert. Returns 0, or -1 with an exception.
+ *
+ * One O(slots) scan decides the whole strategy so the saturated path pays a
+ * single rebuild, not two. Previously, at the ceiling with every bucket still
+ * limiting, this ran a no-op reclaiming rebuild (which frees nothing), found
+ * the table still full, scanned again for the fullest, then rebuilt a second
+ * time -- ~3x O(slots) and two allocations per new key under a key flood.
+ * Now the same scan refills, counts reclaimable (refilled-to-capacity) buckets
+ * and tracks the fullest, so exactly one rebuild runs: grow, reclaim, or evict.
+ */
 static int
 bucket_ensure_room(WreathTokenBucket *self, double now)
 {
     size_t slots = self->mask + 1;
-    size_t survivors = 0;
-    size_t target;
+    size_t survivors = 0;      /* buckets a compaction would keep */
+    size_t reclaimable = 0;    /* buckets refilled back to capacity (droppable) */
     size_t fullest = 0;
     double most_tokens = -1.0;
     int found_any = 0;
+    size_t target;
 
     if (WREATH_HAS_ROOM(self)) {
         return 0;
     }
-    /* Count what a compaction would keep so the table is sized once rather than
-     * grown and immediately compacted. The refill here is not wasted work: the
-     * rebuild below sees the same `now` and skips it. */
+    /* The refill here is not wasted work: the rebuild below sees the same `now`
+     * and skips it. */
     for (size_t i = 0; i < slots; i++) {
         WreathBucket *slot = &self->slots[i];
         if (slot->key == NULL) {
@@ -167,21 +176,43 @@ bucket_ensure_room(WreathTokenBucket *self, double now)
         bucket_refill(self, slot, now);
         if (slot->tokens < self->capacity) {
             survivors++;
+        } else {
+            reclaimable++;
+        }
+        if (slot->tokens > most_tokens) {
+            most_tokens = slot->tokens;
+            fullest = i;
+            found_any = 1;
         }
     }
     target = slots;
     while (!WREATH_FITS(survivors, target) && target < self->max_slots) {
         target <<= 1;
     }
+    /* Skip a rebuild that provably reclaims nothing: at the ceiling (no growth)
+     * with no bucket refilled to capacity, a keep-all rebuild is a pure copy
+     * that leaves the table just as full. Evict the fullest directly -- it is
+     * the closest to idle, so its owner loses the least by starting over, and
+     * the table stays inside its configured bound. This is the saturated
+     * key-flood path; collapsing it to one rebuild is the whole point. */
+    if (target == slots && reclaimable == 0) {
+        if (!found_any) {
+            return 0;
+        }
+        return bucket_rebuild(self, slots, now, (Py_ssize_t)fullest);
+    }
+    /* Grow and/or drop reclaimable buckets. */
     if (bucket_rebuild(self, target, now, -1) < 0) {
         return -1;
     }
     if (WREATH_HAS_ROOM(self)) {
         return 0;
     }
-    /* At the ceiling with every bucket still actively limited. Evict the
-     * fullest: it is the closest to idle, so its owner loses the least by
-     * starting over, and the table stays inside its configured bound. */
+    /* Growth capped out and survivors alone exceed the load factor: evict the
+     * fullest survivor. The pre-rebuild scan's `fullest` may have been dropped
+     * as reclaimable, so re-select among what remains. */
+    most_tokens = -1.0;
+    found_any = 0;
     for (size_t i = 0; i <= self->mask; i++) {
         if (self->slots[i].key != NULL && self->slots[i].tokens > most_tokens) {
             most_tokens = self->slots[i].tokens;

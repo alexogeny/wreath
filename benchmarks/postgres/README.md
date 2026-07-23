@@ -14,7 +14,7 @@ Run the automatic-pipeline comparison against a disposable PostgreSQL server:
 uv sync --group benchmark
 uv run --with asyncpg --with 'psycopg[binary]' --with psycopg2-binary \
   python -m benchmarks.postgres.bench_pipeline \
-  --dsn postgresql://neo:secret@127.0.0.1:55433/neo \
+  --dsn postgresql://wreath:secret@127.0.0.1:55433/wreath \
   --latency-ms 20 --require-win
 ```
 
@@ -28,7 +28,7 @@ allocation baseline:
 
 ```bash
 uv run python -m benchmarks.postgres.bench_receive \
-  --dsn postgresql://neo:secret@127.0.0.1:55433/neo \
+  --dsn postgresql://wreath:secret@127.0.0.1:55433/wreath \
   --iterations 10000 --slice2-allocations-per-query 4 \
   --require-improvement
 ```
@@ -41,7 +41,7 @@ Run the three-column multi-row decode comparison:
 ```bash
 uv run --with asyncpg --with 'psycopg[binary]' --with psycopg2-binary \
   python -m benchmarks.postgres.bench_decode \
-  --dsn postgresql://neo:secret@127.0.0.1:55433/neo \
+  --dsn postgresql://wreath:secret@127.0.0.1:55433/wreath \
   --rows 10000 --require-improvement
 ```
 
@@ -55,7 +55,7 @@ PostgreSQL server:
 ```bash
 uv run --with asyncpg --with 'psycopg[binary]' --with psycopg2-binary \
   python -m benchmarks.postgres.bench_workload \
-  --dsn postgresql://neo:secret@127.0.0.1:55433/neo
+  --dsn postgresql://wreath:secret@127.0.0.1:55433/wreath
 ```
 
 It seeds a five-column table (int4/bool/float8/text/bytea), then measures

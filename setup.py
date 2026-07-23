@@ -165,6 +165,7 @@ ext_modules = [
             ],
             depends=[
                 "src/wreath/_native/server.h",
+                "src/wreath/_native/wreath_stream.h",
                 "src/wreath/_native/reactor_internal.h",
                 "src/wreath/_native/reactor_ring.c",
                 "src/wreath/_native/reactor_buffers.c",
@@ -187,6 +188,7 @@ ext_modules = [
             ],
             depends=[
                 "src/wreath/_native/server.h",
+                "src/wreath/_native/wreath_stream.h",
                 "src/wreath/_native/wreathcore.h",
                 "src/wreath/_native/server_request.c",
             ],
@@ -224,6 +226,7 @@ ext_modules = [
                 "src/wreath/_native/postgres/pool.c",
             ],
             depends=[
+                "src/wreath/_native/wreath_stream.h",
                 "src/wreath/_native/postgres/buffer.h",
                 "src/wreath/_native/postgres/slab.h",
                 "src/wreath/_native/postgres/codec.h",

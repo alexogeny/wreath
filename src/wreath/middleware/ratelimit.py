@@ -204,7 +204,7 @@ class RateLimitMiddleware:
     """Reject requests that exceed a per-key token-bucket allowance."""
 
     global_scope = True
-    __slots__ = ("_cost", "_exempt", "_key", "_store", "_try_acquire", "before")
+    __slots__ = ("_cost", "_exempt", "_key", "_store", "_try_acquire", "before", "before_sync")
 
     def __init__(
         self,
@@ -234,9 +234,15 @@ class RateLimitMiddleware:
         self._exempt = exempt
         # Resolved once rather than branching and re-looking-up per request. A
         # synchronous store also skips a coroutine on the hot path; the memory
-        # store is exactly that.
+        # store is exactly that, so it exposes before_sync (fused, no await)
+        # while a remote store keeps the awaiting before hook.
         self._try_acquire: Any = getattr(selected, "try_acquire", None)
-        self.before = self._before_local if self._try_acquire is not None else self._before_remote
+        if self._try_acquire is not None:
+            self.before = None
+            self.before_sync = self._before_local_sync
+        else:
+            self.before = self._before_remote
+            self.before_sync = None
 
     def _identify(self, request: Request) -> str | None:
         if self._exempt is not None and self._exempt(request):
@@ -252,7 +258,7 @@ class RateLimitMiddleware:
         response.headers.append((b"retry-after", str(seconds).encode("ascii")))
         return response
 
-    async def _before_local(self, request: Request) -> Any | None:
+    def _before_local_sync(self, request: Request) -> Any | None:
         key = self._identify(request)
         if key is None:
             return None

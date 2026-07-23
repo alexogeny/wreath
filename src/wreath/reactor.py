@@ -263,6 +263,14 @@ class EventLoop(asyncio.SelectorEventLoop):
         self._wheel_schedule = None  # cached bound schedule_call: no per-timer attr lookup
         self._wheel_res = wheel_resolution
         self._wheel_tick_handle = None
+        if self._native_loop and timers != "wheel":
+            # The C _run_once pops loop._scheduled by expiry only; asyncio's
+            # cancelled-TimerHandle compaction lives in the Python _run_once it
+            # replaces, so heap timers under the native loop leak every
+            # schedule-then-cancel (wait_for churn) until its deadline lapses.
+            raise ValueError(
+                "native_loop=True requires timers='wheel': the native run "
+                "loop does not compact cancelled heap timers")
         if timers == "wheel":
             if _wheel_ext is None:
                 raise RuntimeError("timers='wheel' needs wreath._native._reactor")
@@ -304,6 +312,13 @@ class EventLoop(asyncio.SelectorEventLoop):
         self._remove_reader = poller._remove_reader
         self._remove_writer = poller._remove_writer
         self._run_once = poller._run_once
+        # Handle-free call_soon: every Future callback and Task wakeup skips
+        # asyncio's two Python frames + Handle construction in favour of a
+        # freelisted C handle the native run loop executes directly.
+        # call_soon_threadsafe keeps the base implementation (thread safety);
+        # its Handles share the same FIFO deque, so ordering is preserved.
+        # Debug-mode thread/coroutine checks do not apply on this fast path.
+        self.call_soon = poller._call_soon
         ssock = getattr(self, "_ssock", None)
         if ssock is not None:
             # CPython writes signal wake bytes to this socket; the unified ring

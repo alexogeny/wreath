@@ -83,7 +83,12 @@ class _Group:
         Survival is sum(size^2)/total^2 over the branches a position induces,
         with parameter routes counted into every branch. A position every route
         parameterises cannot narrow anything, so it is dropped here rather than
-        intersected on every request.
+        intersected on every request. A position with literals scoring 1.0
+        (every route shares one literal, e.g. a common '/api' prefix segment)
+        narrows nothing among hits but rejects the whole group on a miss --
+        it is kept, ordered last, so a matched request usually early-exits
+        before paying its probe while a request missing only there is filtered
+        instead of falling through to per-route verification.
         """
         scored: list[tuple[float, int]] = []
         for p in range(nseg):
@@ -97,9 +102,7 @@ class _Group:
             if not total:
                 continue
             survival = sum(s * s for s in sizes) / (total * total)
-            if survival >= 1.0:
-                continue
-            scored.append((survival, p))
+            scored.append((min(survival, 1.0), p))
         scored.sort()
         return [p for _, p in scored]
 

@@ -365,7 +365,7 @@ def run(args: argparse.Namespace) -> int:
             "trials": args.trials,
         },
         "results": results,
-        "speedup_over_neo": {
+        "speedup_over_wreath": {
             scenario: {
                 name: results[name][scenario]["median_seconds"]
                 / results["wreath"][scenario]["median_seconds"]

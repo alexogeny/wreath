@@ -40,6 +40,9 @@ from .response import (
     Send,
     StreamingResponse,
     TextResponse,
+    coerce_bytes,
+    coerce_json,
+    coerce_text,
 )
 from .router import RouteDefinition, Router
 from .state import State
@@ -309,7 +312,8 @@ class Wreath:
         self._application_image = _ApplicationImage(self)
         self._middleware: list[tuple[int, int, Middleware]] = []
         self._global_middleware: list[tuple[int, int, Middleware]] = []
-        self._global_hooks: tuple[tuple[Any, Any], ...] = ()
+        # (before_hook, after_hook, is_sync) per global middleware.
+        self._global_hooks: tuple[tuple[Any, Any, bool], ...] = ()
         self._handler_requirements: dict[Any, AuthRequirement] = {}
         # Native Flight Recorder route attribution: {compiled_handler:
         # (route_id, plan_id)} joined to the Stage-0 metadata image, built lazily
@@ -540,12 +544,17 @@ class Wreath:
     def add_global_middleware(self, middleware: Middleware, *, priority: int = 0) -> None:
         """Register hook middleware around routing and all HTTP responses.
 
-        Global middleware must expose ``before`` and/or ``after`` hooks. Unlike
-        route middleware, it covers misses, static files, and authorization
-        failures, so it is suitable for ingress checks and response headers.
+        Global middleware must expose ``before``, ``before_sync``, and/or
+        ``after`` hooks. Unlike route middleware, it covers misses, static
+        files, and authorization failures, so it is suitable for ingress checks
+        and response headers.
         """
-        if not any(hasattr(middleware, name) for name in ("before", "after")):
-            raise TypeError("global middleware must expose before and/or after hooks")
+        if not any(
+            hasattr(middleware, name) for name in ("before", "before_sync", "after")
+        ):
+            raise TypeError(
+                "global middleware must expose before, before_sync, and/or after hooks"
+            )
         self._global_middleware.append((priority, self._middleware_order, middleware))
         self._middleware_order += 1
         preflight = getattr(middleware, "handle_preflight", None)
@@ -658,11 +667,11 @@ class Wreath:
         if global_hooks:
             request = Request(scope, receive, limits=self._limits)
             request._route_outcome = "ingress"
-            for index, (before, _after) in enumerate(global_hooks):
+            for index, (before, _after, is_sync) in enumerate(global_hooks):
                 if before is None:
                     continue
                 try:
-                    candidate = await before(request)
+                    candidate = before(request) if is_sync else await before(request)
                 except Exception as error:
                     candidate = await self._handle_exception(request, error)
                 if candidate is not None:
@@ -940,7 +949,7 @@ class Wreath:
         active_global: int,
     ) -> None:
         hooks = self._global_hooks
-        for _before, after in reversed(hooks[:active_global]) if active_global else ():
+        for _before, after, _sync in reversed(hooks[:active_global]) if active_global else ():
             if after is not None:
                 try:
                     response = _coerce_response(await after(request, response))
@@ -1039,8 +1048,13 @@ class Wreath:
             item[2]
             for item in sorted(self._global_middleware, key=lambda item: (item[0], item[1]))
         )
+        # (before_hook, after_hook, is_sync). A synchronous before_sync hook is
+        # dispatched without a coroutine/await in the global loop; otherwise the
+        # async before hook is awaited as before.
         self._global_hooks = tuple(
-            (getattr(item, "before", None), getattr(item, "after", None))
+            (before_sync, getattr(item, "after", None), True)
+            if (before_sync := getattr(item, "before_sync", None)) is not None
+            else (getattr(item, "before", None), getattr(item, "after", None), False)
             for item in global_middleware
         )
         stage_hooks = {
@@ -1465,12 +1479,12 @@ def _ensure_response(endpoint: Handler) -> Handler:
 
 def _coerce_response(value: Any) -> Response | StreamingResponse | FileResponse | PreparedResponse:
     kind = type(value)
-    if kind is dict:
-        return JSONResponse(value)
     if kind is str:
-        return TextResponse(value)
+        return coerce_text(value)
+    if kind is dict:
+        return coerce_json(value)
     if kind is bytes:
-        return Response(value)
+        return coerce_bytes(value)
     if isinstance(value, (Response, StreamingResponse, FileResponse, PreparedResponse)):
         return value
     if isinstance(value, bytes):

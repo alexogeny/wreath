@@ -72,7 +72,7 @@ wreath_h3_worker_from(PyObject *recorder)
 
 /* Per-process secret for stateless-reset and Retry tokens (dev-grade). */
 static const uint8_t wreath_h3_secret[32] =
-    "neo-http3-static-secret-32byte!!";
+    "wth-http3-static-secret-32byte!!";
 
 /* --- address conversion -------------------------------------------------- */
 
@@ -707,6 +707,19 @@ rearm_timer(WreathH3Endpoint *ep)
     if (handle == NULL) {
         PyErr_Clear();
         return;
+    }
+    /* Cancel the previous timer before dropping our reference to it. The loop
+     * keeps its own reference in _scheduled, so releasing ours does NOT
+     * deschedule it -- without this the old _on_timer still fires, and a new
+     * one is scheduled on every datagram, accumulating stale timers (each of
+     * which reruns this O(conns) rearm) in the loop's heap at datagram rate. */
+    if (ep->timer_handle != NULL) {
+        PyObject *cancelled = PyObject_CallMethod(ep->timer_handle, "cancel", NULL);
+        if (cancelled == NULL) {
+            PyErr_Clear();
+        } else {
+            Py_DECREF(cancelled);
+        }
     }
     Py_XSETREF(ep->timer_handle, handle);
 }

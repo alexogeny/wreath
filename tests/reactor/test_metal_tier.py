@@ -1497,3 +1497,71 @@ def test_metal_serves_http3_over_quic():
         loop.close()
         os.unlink(cp)
         os.unlink(kp)
+
+
+def test_metal_call_soon_fast_path_semantics() -> None:
+    """The rebound C call_soon: FIFO order (threadsafe Handles interleaved),
+    cancellation, context propagation, exception routing, closed-loop error."""
+    import contextvars
+
+    loop = _metal_loop()
+    ran: list = []
+    errors: list = []
+    var = contextvars.ContextVar("fast", default="unset")
+
+    try:
+        assert loop.call_soon.__self__ is loop._poller
+
+        async def exercise():
+            loop.set_exception_handler(lambda _l, ctx: errors.append(ctx))
+            # FIFO across fast handles
+            loop.call_soon(ran.append, "a")
+            handle = loop.call_soon(ran.append, "cancelled")
+            handle.cancel()
+            assert handle.cancelled() is True
+            loop.call_soon(ran.append, "b")
+            # context: default copies the current context...
+            var.set("copied")
+            loop.call_soon(lambda: ran.append(var.get()))
+            # ...and an explicit context wins
+            fresh = contextvars.copy_context()
+            loop.call_soon(lambda: ran.append(var.get()), context=fresh)
+            # a failing callback routes to the exception handler, loop survives
+            loop.call_soon(lambda: 1 / 0)
+            loop.call_soon(ran.append, "after-error")
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        loop.run_until_complete(exercise())
+        assert ran == ["a", "b", "copied", "copied", "after-error"]
+        assert len(errors) == 1
+        assert isinstance(errors[0]["exception"], ZeroDivisionError)
+    finally:
+        loop.close()
+    with pytest.raises(RuntimeError):
+        loop._poller._call_soon(ran.append, "closed")
+
+
+def test_metal_call_soon_threadsafe_interleaves_with_fast_handles() -> None:
+    loop = _metal_loop()
+    ran: list = []
+    try:
+        async def exercise():
+            done = loop.create_future()
+            loop.call_soon(ran.append, "fast-1")
+
+            def from_thread():
+                loop.call_soon_threadsafe(ran.append, "threadsafe")
+                loop.call_soon_threadsafe(done.set_result, None)
+
+            thread = threading.Thread(target=from_thread)
+            thread.start()
+            await done
+            thread.join()
+            loop.call_soon(ran.append, "fast-2")
+            await asyncio.sleep(0)
+
+        loop.run_until_complete(exercise())
+        assert ran == ["fast-1", "threadsafe", "fast-2"]
+    finally:
+        loop.close()

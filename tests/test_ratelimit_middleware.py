@@ -295,6 +295,7 @@ async def test_middleware_awaits_a_store_without_a_sync_path(
     middleware = RateLimitMiddleware(limit=3, window=3.0, store=store)
     # No try_acquire on this store, so the awaiting hook must have been bound.
     assert middleware.before.__name__ == "_before_remote"
+    assert middleware.before_sync is None
     await database.start()
 
     app = Wreath()
@@ -311,4 +312,7 @@ async def test_middleware_awaits_a_store_without_a_sync_path(
 
 def test_middleware_binds_the_sync_path_for_the_memory_store() -> None:
     middleware = RateLimitMiddleware(limit=1, window=1.0)
-    assert middleware.before.__name__ == "_before_local"
+    # The memory store exposes a synchronous before_sync hook (fused, no await)
+    # and leaves the awaiting before hook unset.
+    assert middleware.before is None
+    assert middleware.before_sync.__name__ == "_before_local_sync"

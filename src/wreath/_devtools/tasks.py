@@ -12,7 +12,7 @@ removing, and then runs the tool:
 
     uv run wreath-docs                 # build the docs, strictly
     uv run wreath-docs --serve         # ... and watch them
-    uv run wreath-bench --framework neo starlette
+    uv run wreath-bench --framework wreath starlette
     uv run wreath-check                # ruff, ty, pytest, native lints, baseline
 
 `--inexact` is the whole point: `wreath-docs` must not cost you `wreath-bench`.
@@ -40,7 +40,7 @@ def _uv() -> str:
     executable = shutil.which("uv")
     if executable is None:
         raise SystemExit(
-            "neo tasks need the `uv` executable on PATH; see https://docs.astral.sh/uv/"
+            "wreath tasks need the `uv` executable on PATH; see https://docs.astral.sh/uv/"
         )
     return executable
 
@@ -51,7 +51,7 @@ def ensure_groups(*groups: str) -> None:
     result = subprocess.run(command, cwd=repo_root())
     if result.returncode != 0:
         raise SystemExit(
-            f"neo tasks: `{' '.join(command)}` failed; the group is not installed."
+            f"wreath tasks: `{' '.join(command)}` failed; the group is not installed."
         )
 
 
@@ -173,7 +173,7 @@ def _wait_pg_ready(name: str, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         ready = subprocess.run(
-            ["podman", "exec", name, "pg_isready", "-U", "neo", "-d", "neo"],
+            ["podman", "exec", name, "pg_isready", "-U", "wreath", "-d", "wreath"],
             capture_output=True,
         )
         if ready.returncode == 0:
@@ -196,13 +196,13 @@ def _db_battery() -> list[Path]:
         return produced
 
     port = _free_port()
-    dsn = f"postgresql://neo:secret@127.0.0.1:{port}/neo"
+    dsn = f"postgresql://wreath:secret@127.0.0.1:{port}/wreath"
     subprocess.run(["podman", "rm", "-f", _BENCH_PG_NAME], capture_output=True)
     started = _run([
         "podman", "run", "--rm", "--detach", "--name", _BENCH_PG_NAME,
         "--publish", f"127.0.0.1:{port}:5432",
-        "--env", "POSTGRES_USER=neo", "--env", "POSTGRES_PASSWORD=secret",
-        "--env", "POSTGRES_DB=neo", _BENCH_PG_IMAGE,
+        "--env", "POSTGRES_USER=wreath", "--env", "POSTGRES_PASSWORD=secret",
+        "--env", "POSTGRES_DB=wreath", _BENCH_PG_IMAGE,
         "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off",
     ])
     if started != 0:

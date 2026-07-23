@@ -9,27 +9,62 @@ from __future__ import annotations  # noqa: I001 -- Ruff misorders the local cod
 
 import asyncio
 import ipaddress
+import os
 import socket
 import ssl
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 from urllib.parse import SplitResult, urljoin, urlsplit
 
 from . import _client_codec
-from ._flight_markers import (
-    CAP_OUTBOUND_REQUEST as _CAP_OUTBOUND_REQUEST,
-    CAP_OUTBOUND_RESPONSE as _CAP_OUTBOUND_RESPONSE,
-    COV_EXTERNAL as _COV_EXTERNAL,
-    PH_HTTP_CLIENT as _PH_HTTP_CLIENT,
-    capture_marker as _capture_marker,
-    phase_marker as _phase_marker,
-)
+
+try:  # accelerated transport-facing stream; optional like every native piece
+    from wreath._native._client import Http1ClientStream as _NativeClientStream
+except ImportError:  # pragma: no cover - pure tier
+    _NativeClientStream = None
+if os.environ.get("WREATH_CLIENT_NATIVE_STREAM") == "0":
+    _NativeClientStream = None
 from time import monotonic_ns as _monotonic_ns
 
+from ._flight_markers import (
+    CAP_OUTBOUND_REQUEST as _CAP_OUTBOUND_REQUEST,
+)
+from ._flight_markers import (
+    CAP_OUTBOUND_RESPONSE as _CAP_OUTBOUND_RESPONSE,
+)
+from ._flight_markers import (
+    COV_EXTERNAL as _COV_EXTERNAL,
+)
+from ._flight_markers import (
+    PH_HTTP_CLIENT as _PH_HTTP_CLIENT,
+)
+from ._flight_markers import (
+    capture_marker as _capture_marker,
+)
+from ._flight_markers import (
+    phase_marker as _phase_marker,
+)
 
 type _AddressInfo = tuple[int, int, int, str, tuple[object, ...]]
 
 _HAPPY_EYEBALLS_DELAY = 0.25
+
+
+async def _timed(pending: Any, deadline_seconds: float) -> bytes:
+    """Await a stream read under a timeout, skipping wait_for entirely when
+    the read already resolved.
+
+    The native client stream returns buffered reads synchronously as `bytes`
+    (no future, no await) and only allocates a loop future when it must wait;
+    a timeout that cannot fire is not worth wait_for's Timeout context, timer
+    handle, and cancellation bookkeeping per read. The asyncio-streams
+    fallback always passes coroutines through to wait_for unchanged.
+    """
+    if type(pending) is bytes:
+        return pending
+    if isinstance(pending, asyncio.Future) and pending.done():
+        return cast(bytes, pending.result())
+    return cast(bytes, await asyncio.wait_for(pending, deadline_seconds))
 
 
 class ClientError(Exception):
@@ -227,10 +262,42 @@ class ClientResponse:
             raise ClientError(f"HTTP response status {self.status}")
 
 
+class _NativeStreamWriter:
+    """StreamWriter surface over a transport + native client stream.
+
+    The native stream protocol owns backpressure futures (`_drain`,
+    `_wait_closed`); writes go straight to the transport, which on the metal
+    loop means the retained zero-copy send queue.
+    """
+
+    __slots__ = ("_transport", "_protocol")
+
+    def __init__(self, transport: asyncio.BaseTransport, protocol: Any) -> None:
+        self._transport = transport
+        self._protocol = protocol
+
+    def write(self, data: bytes) -> None:
+        self._transport.write(data)  # type: ignore[attr-defined]
+
+    async def drain(self) -> None:
+        waiter = self._protocol._drain()
+        if waiter is not None:
+            await waiter
+
+    def close(self) -> None:
+        self._transport.close()
+
+    def is_closing(self) -> bool:
+        return self._transport.is_closing()
+
+    async def wait_closed(self) -> None:
+        await self._protocol._wait_closed()
+
+
 @dataclass(slots=True, eq=False)
 class _Connection:
-    reader: asyncio.StreamReader
-    writer: asyncio.StreamWriter
+    reader: Any  # asyncio.StreamReader or native Http1ClientStream
+    writer: Any  # asyncio.StreamWriter or _NativeStreamWriter
 
 
 _IDEMPOTENT = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PUT", "TRACE"})
@@ -717,6 +784,30 @@ class HTTPClient:
         if delay:
             await asyncio.sleep(delay)
         family, _socket_type, _protocol, _canonical, sockaddr = address_info
+        timeout = self._timeout.connect + (
+            self._timeout.tls if ssl_context is not None else 0
+        )
+        if _NativeClientStream is not None:
+            # Native stream: C-owned receive buffer, StreamReader-shaped
+            # awaitable reads, and the stream-fusion C API -- on a metal loop
+            # wire bytes never cross into Python per read.
+            protocol = _NativeClientStream(limit=self._limits.read_high_water)
+            loop = asyncio.get_running_loop()
+            transport, _ = await asyncio.wait_for(
+                loop.create_connection(
+                    lambda: protocol,
+                    self._address(family, sockaddr),
+                    self._port,
+                    family=family,
+                    flags=0,
+                    ssl=ssl_context,
+                    server_hostname=(
+                        self._host if ssl_context is not None else None
+                    ),
+                ),
+                timeout,
+            )
+            return _Connection(protocol, _NativeStreamWriter(transport, protocol))
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(
                 self._address(family, sockaddr),
@@ -727,8 +818,7 @@ class HTTPClient:
                 ssl=ssl_context,
                 server_hostname=self._host if ssl_context is not None else None,
             ),
-            self._timeout.connect
-            + (self._timeout.tls if ssl_context is not None else 0),
+            timeout,
         )
         return _Connection(reader, writer)
 
@@ -815,7 +905,7 @@ class HTTPClient:
     ) -> tuple[ClientResponse, bool]:
         while True:
             try:
-                head = await asyncio.wait_for(
+                head = await _timed(
                     reader.readuntil(b"\r\n\r\n"), self._timeout.response_headers
                 )
             except TimeoutError as error:
@@ -875,7 +965,7 @@ class HTTPClient:
             if length > self._limits.max_response_bytes:
                 raise ResponseTooLarge("response body exceeds configured limit")
             try:
-                body = await asyncio.wait_for(
+                body = await _timed(
                     reader.readexactly(length), self._timeout.response_body
                 )
             except TimeoutError as error:
@@ -887,7 +977,7 @@ class HTTPClient:
         size = 0
         while True:
             try:
-                chunk = await asyncio.wait_for(
+                chunk = await _timed(
                     reader.read(min(64 * 1024, self._limits.max_response_bytes + 1 - size)),
                     self._timeout.response_body,
                 )
@@ -911,7 +1001,7 @@ class HTTPClient:
         total = 0
         while True:
             try:
-                line = await asyncio.wait_for(
+                line = await _timed(
                     reader.readuntil(b"\r\n"), self._timeout.response_body
                 )
             except TimeoutError as error:
@@ -927,7 +1017,7 @@ class HTTPClient:
             if size == 0:
                 trailer_bytes = 0
                 while True:
-                    trailer = await asyncio.wait_for(
+                    trailer = await _timed(
                         reader.readuntil(b"\r\n"), self._timeout.response_body
                     )
                     trailer_bytes += len(trailer)
@@ -945,7 +1035,7 @@ class HTTPClient:
             if total > self._limits.max_response_bytes:
                 raise ResponseTooLarge("response body exceeds configured limit")
             try:
-                chunk = await asyncio.wait_for(
+                chunk = await _timed(
                     reader.readexactly(size + 2), self._timeout.response_body
                 )
             except TimeoutError as error:

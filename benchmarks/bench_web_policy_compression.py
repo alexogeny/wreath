@@ -58,7 +58,7 @@ def _measure(
 
 
 def run(warmup: int, trials: int) -> dict[str, Any]:
-    text_1k = (b'{"message":"neo browser policy"}' * 40)[:1024]
+    text_1k = (b'{"message":"wreath browser policy"}' * 40)[:1024]
     text_16k = (text_1k * 16)[: 16 * 1024]
     text_1m = (text_16k * 64)[: 1024 * 1024]
     random_16k = os.urandom(16 * 1024)

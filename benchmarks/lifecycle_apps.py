@@ -50,7 +50,7 @@ from benchmarks.lifecycle_routes import (
 )
 
 FRAMEWORK = os.environ.get("WREATH_BENCH_FRAMEWORK", "wreath")
-DSN = os.environ.get("WREATH_BENCH_DSN", "postgresql://neo:secret@127.0.0.1:5432/neo")
+DSN = os.environ.get("WREATH_BENCH_DSN", "postgresql://wreath:secret@127.0.0.1:5432/wreath")
 POOL_SIZE = int(os.environ.get("WREATH_BENCH_DB_POOL", "4"))
 API_PREFIX = API_PREFIX_TEMPLATE
 

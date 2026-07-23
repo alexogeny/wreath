@@ -38,7 +38,7 @@ Run against a disposable server:
     uv run --with tortoise-orm --with peewee --with psycopg2-binary \\
       --with 'sqlalchemy[asyncio]' --with sqlmodel --with asyncpg \\
       python -m benchmarks.postgres.bench_orm_competitors \\
-      --dsn postgresql://neo:secret@127.0.0.1:55434/neo --output PATH
+      --dsn postgresql://wreath:secret@127.0.0.1:55434/wreath --output PATH
 """
 
 from __future__ import annotations
@@ -112,7 +112,7 @@ def _dsn_parts(dsn: str) -> dict[str, Any]:
         "port": parsed.port or 5432,
         "user": parsed.username or "wreath",
         "password": parsed.password or "",
-        "database": (parsed.path or "/neo").lstrip("/"),
+        "database": (parsed.path or "/wreath").lstrip("/"),
     }
 
 

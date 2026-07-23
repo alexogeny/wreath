@@ -1,4 +1,58 @@
 /* Native plaintext socket transport. */
+
+/* Registered stream-fusion capsules, probed in order at protocol-bind time.
+ * Resolution reads sys.modules only (no import machinery): by the time a
+ * protocol instance reaches bind, its defining module is definitionally
+ * imported, and a module that is absent simply has not produced any protocol
+ * yet. Resolved pointers are cached for the life of the process. */
+typedef struct {
+    const char *module_name;   /* sys.modules key; also the _fused_stream id */
+    const char *attribute;     /* capsule attribute on the module */
+    const char *capsule_name;  /* full dotted capsule name */
+    const WreathStreamCAPI *capi;  /* resolved lazily; NULL until seen */
+} StreamCapiEntry;
+
+static StreamCapiEntry g_stream_capis[] = {
+    {"wreath._native._server", "_HTTP1_C_API", WREATH_HTTP1_CAPI_NAME, NULL},
+    {"wreath._native._postgres", "_STREAM_C_API",
+     "wreath._native._postgres._STREAM_C_API", NULL},
+    {"wreath._native._client", "_STREAM_C_API",
+     "wreath._native._client._STREAM_C_API", NULL},
+};
+#define STREAM_CAPI_COUNT \
+    (Py_ssize_t)(sizeof(g_stream_capis) / sizeof(g_stream_capis[0]))
+
+static const WreathStreamCAPI *
+stream_capi_resolve(StreamCapiEntry *entry)
+{
+    if (entry->capi != NULL) {
+        return entry->capi;
+    }
+    PyObject *modules = PyImport_GetModuleDict();  /* borrowed */
+    PyObject *module = modules == NULL
+        ? NULL : PyDict_GetItemString(modules, entry->module_name);
+    if (module == NULL) {
+        return NULL;  /* not imported yet; retried on a later bind */
+    }
+    PyObject *capsule = PyObject_GetAttrString(module, entry->attribute);
+    if (capsule == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    const WreathStreamCAPI *capi =
+        PyCapsule_GetPointer(capsule, entry->capsule_name);
+    Py_DECREF(capsule);
+    if (capi == NULL) {
+        PyErr_Clear();
+        return NULL;
+    }
+    if (capi->version != WREATH_STREAM_CAPI_VERSION) {
+        return NULL;
+    }
+    entry->capi = capi;
+    return capi;
+}
+
 typedef struct {
     PyObject_HEAD
     PyObject *loop;
@@ -8,7 +62,8 @@ typedef struct {
     PyObject *extra;            /* get_extra_info dict */
     int fd;
     int buffered;               /* protocol is a BufferedProtocol */
-    int fused_http1;             /* direct native HTTP/1 buffer C API */
+    const WreathStreamCAPI *fused;  /* stream C API for direct ingress, or NULL */
+    const char *fused_module;   /* static module name of the fused capsule */
     /* cached bound methods */
     PyObject *m_add_reader, *m_remove_reader, *m_add_writer, *m_remove_writer;
     PyObject *m_call_soon;
@@ -617,8 +672,8 @@ static int
 st_deliver_received(SocketTransport *t, const char *data, Py_ssize_t size)
 {
     Py_ssize_t offset = 0;
-    if (t->fused_http1) {
-        return g_http1_capi->feed_external(t->protocol, data, size);
+    if (t->fused != NULL) {
+        return t->fused->feed_external(t->protocol, data, size);
     }
     if (t->buffered) {
         while (offset < size) {
@@ -692,18 +747,18 @@ st_read_ready(PyObject *op, PyObject *Py_UNUSED(ignored))
      * entirely inside this call, so this coalesces without any deferral. */
     t->cork = 1;
     for (int drain = 0; drain < ST_MAX_DRAIN; drain++) {
-        if (t->fused_http1) {
+        if (t->fused != NULL) {
             char *buffer;
             Py_ssize_t capacity;
-            if (g_http1_capi->acquire_read_buffer(
+            if (t->fused->acquire_read_buffer(
                     t->protocol, &buffer, &capacity) < 0) {
-                st_fatal(t, "native HTTP/1 get_buffer failed");
+                st_fatal(t, "native stream get_buffer failed");
                 goto done;
             }
             ssize_t n = metal_recv(t, buffer, (size_t)capacity);
             if (n < 0) {
                 int saved_errno = errno;
-                if (g_http1_capi->commit_read(t->protocol, 0) < 0) {
+                if (t->fused->commit_read(t->protocol, 0) < 0) {
                     PyErr_Clear();
                 }
                 errno = saved_errno;
@@ -715,16 +770,16 @@ st_read_ready(PyObject *op, PyObject *Py_UNUSED(ignored))
                 goto done;
             }
             if (n == 0) {
-                if (g_http1_capi->commit_read(t->protocol, 0) < 0) {
-                    st_fatal(t, "native HTTP/1 commit failed");
+                if (t->fused->commit_read(t->protocol, 0) < 0) {
+                    st_fatal(t, "native stream commit failed");
                     goto done;
                 }
                 t->cork = 0;
                 st_flush_cork(t);
                 return st_on_eof(t);
             }
-            if (g_http1_capi->commit_read(t->protocol, n) < 0) {
-                st_fatal(t, "native HTTP/1 commit failed");
+            if (t->fused->commit_read(t->protocol, n) < 0) {
+                st_fatal(t, "native stream commit failed");
                 goto done;
             }
             if (t->conn_lost || t->reading_paused) {
@@ -1345,11 +1400,17 @@ st_bind_protocol_methods(SocketTransport *t)
     Py_CLEAR(t->proto_get_buffer);
     Py_CLEAR(t->proto_buffer_updated);
     Py_CLEAR(t->proto_data_received);
-    load_http1_capi();
-    t->fused_http1 = g_http1_capi != NULL &&
-                     g_http1_capi->version == WREATH_HTTP1_CAPI_VERSION &&
-                     g_http1_capi->check(t->protocol);
-    if (t->fused_http1) {
+    t->fused = NULL;
+    t->fused_module = NULL;
+    for (Py_ssize_t i = 0; i < STREAM_CAPI_COUNT; i++) {
+        const WreathStreamCAPI *capi = stream_capi_resolve(&g_stream_capis[i]);
+        if (capi != NULL && capi->check(t->protocol)) {
+            t->fused = capi;
+            t->fused_module = g_stream_capis[i].module_name;
+            break;
+        }
+    }
+    if (t->fused != NULL) {
         t->buffered = 1;
         return;
     }
@@ -1630,7 +1691,19 @@ st_dealloc(PyObject *op)
 static PyObject *
 st_fused_http1_get(PyObject *op, void *Py_UNUSED(closure))
 {
-    return PyBool_FromLong(((SocketTransport *)op)->fused_http1);
+    SocketTransport *t = (SocketTransport *)op;
+    return PyBool_FromLong(
+        t->fused != NULL && t->fused == g_stream_capis[0].capi);
+}
+
+static PyObject *
+st_fused_stream_get(PyObject *op, void *Py_UNUSED(closure))
+{
+    SocketTransport *t = (SocketTransport *)op;
+    if (t->fused_module == NULL) {
+        Py_RETURN_NONE;
+    }
+    return PyUnicode_FromString(t->fused_module);
 }
 
 static PyObject *
@@ -1762,6 +1835,8 @@ st_metal_io_backend_get(PyObject *op, void *Py_UNUSED(closure))
 static PyGetSetDef st_getset[] = {
     {"_fused_http1", st_fused_http1_get, NULL,
      "whether ingress uses the private native HTTP/1 C API", NULL},
+    {"_fused_stream", st_fused_stream_get, NULL,
+     "module name of the fused stream C API, or None", NULL},
     {"_direct_writelines", st_direct_writelines_get, NULL,
      "number of large writelines emitted through sendmsg", NULL},
     {"_direct_read_dispatches", st_direct_read_dispatches_get, NULL,

@@ -129,6 +129,17 @@ def _error(loc: tuple[Any, ...], message: str, kind: str) -> dict[str, Any]:
 # --- JSON value validation ------------------------------------------------------
 
 
+# Total node visits allowed per validation. A union tries every option against
+# the whole value, so nested unions that fail deep re-explore each branch at
+# every level -- O(2**depth) work from a small body (a validation bomb). This
+# ceiling bounds the worst case: the densest legitimate body under the default
+# max_body_bytes (1 MiB) decodes to ~500k nodes, so 2M leaves ~4x headroom and
+# is never reached by real input, while a bomb stops with one "too_complex"
+# error instead of hanging. Kept in lockstep with WREATH_VALIDATE_MAX_STEPS in
+# the native validate.c.
+_VALIDATE_MAX_STEPS = 2_000_000
+
+
 def validate(annotation: Any, value: Any, loc: tuple[Any, ...] = ()) -> Any:
     """Validate ``value`` (a decoded-JSON shape) against ``annotation``.
 
@@ -138,13 +149,24 @@ def validate(annotation: Any, value: Any, loc: tuple[Any, ...] = ()) -> Any:
     dataclasses (recursively).
     """
     errors: list[dict[str, Any]] = []
-    result = _validate(annotation, value, loc, errors)
+    budget = [_VALIDATE_MAX_STEPS]
+    result = _validate(annotation, value, loc, errors, budget)
+    if budget[0] < 0:
+        # Cut short by the step budget: report once, at the root, regardless of
+        # which subtree exhausted it (mirrors native wreath_run_validation).
+        errors.append(_error(loc, "value is too complex to validate", "too_complex"))
     if errors:
         raise ValidationError(errors)
     return result
 
 
-def _validate(annotation: Any, value: Any, loc: tuple[Any, ...], errors: list) -> Any:
+def _validate(annotation: Any, value: Any, loc: tuple[Any, ...], errors: list,
+              budget: list) -> Any:
+    if budget[0] <= 0:
+        # Budget exhausted: mark it (negative sentinel) and stop descending.
+        budget[0] = -1
+        return value
+    budget[0] -= 1
     if annotation is Any or annotation is inspect.Parameter.empty:
         return value
     if annotation is None or annotation is _NONE_TYPE:
@@ -178,7 +200,7 @@ def _validate(annotation: Any, value: Any, loc: tuple[Any, ...], errors: list) -
             errors.append(_error(loc, "value is not a string", "str"))
             return value
         if dataclasses.is_dataclass(annotation):
-            return _validate_dataclass(annotation, value, loc, errors)
+            return _validate_dataclass(annotation, value, loc, errors, budget)
         errors.append(
             _error(loc, f"unsupported annotation {annotation!r}", "unsupported")
         )
@@ -192,9 +214,14 @@ def _validate(annotation: Any, value: Any, loc: tuple[Any, ...], errors: list) -
             if option is _NONE_TYPE:
                 continue
             attempt: list[dict[str, Any]] = []
-            result = _validate(option, value, loc, attempt)
-            if not attempt:
+            result = _validate(option, value, loc, attempt, budget)
+            if not attempt and budget[0] >= 0:
                 return result
+            if budget[0] < 0:
+                # Budget ran out mid-union: an empty attempt from here is a
+                # silent bail, not a real match, so stop trying options. The
+                # top-level reports too_complex.
+                return value
         errors.append(
             _error(loc, f"value matches no option of {annotation}", "union")
         )
@@ -207,7 +234,7 @@ def _validate(annotation: Any, value: Any, loc: tuple[Any, ...], errors: list) -
         args = typing.get_args(annotation)
         item_type = args[0] if args else Any
         return [
-            _validate(item_type, item, (*loc, index), errors)
+            _validate(item_type, item, (*loc, index), errors, budget)
             for index, item in enumerate(value)
         ]
 
@@ -218,7 +245,7 @@ def _validate(annotation: Any, value: Any, loc: tuple[Any, ...], errors: list) -
         args = typing.get_args(annotation)
         value_type = args[1] if len(args) == 2 else Any
         return {
-            key: _validate(value_type, item, (*loc, key), errors)
+            key: _validate(value_type, item, (*loc, key), errors, budget)
             for key, item in value.items()
         }
 
@@ -247,7 +274,8 @@ def _dataclass_spec(cls: type) -> tuple[tuple[str, Any, bool], ...]:
     return spec
 
 
-def _validate_dataclass(cls: Any, value: Any, loc: tuple[Any, ...], errors: list) -> Any:
+def _validate_dataclass(cls: Any, value: Any, loc: tuple[Any, ...], errors: list,
+                        budget: list) -> Any:
     if isinstance(value, cls):
         return value
     if not isinstance(value, dict):
@@ -257,7 +285,7 @@ def _validate_dataclass(cls: Any, value: Any, loc: tuple[Any, ...], errors: list
     spec = _dataclass_spec(cls)
     for name, annotation, required in spec:
         if name in value:
-            kwargs[name] = _validate(annotation, value[name], (*loc, name), errors)
+            kwargs[name] = _validate(annotation, value[name], (*loc, name), errors, budget)
         elif required:
             errors.append(_error((*loc, name), "field is required", "missing"))
     if len(value) > len(kwargs):
@@ -267,7 +295,9 @@ def _validate_dataclass(cls: Any, value: Any, loc: tuple[Any, ...], errors: list
         for extra in value:
             if extra not in known:
                 errors.append(_error((*loc, extra), "unexpected field", "extra"))
-    if errors:
+    # A negative budget means validation was cut short mid-tree, so kwargs may
+    # be incomplete -- never construct from a truncated body.
+    if errors or budget[0] < 0:
         return value
     return cls(**kwargs)
 

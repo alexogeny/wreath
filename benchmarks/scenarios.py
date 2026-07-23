@@ -24,7 +24,7 @@ FRAMEWORKS = (
 )
 
 _ALL = frozenset(FRAMEWORKS)
-_NEO_ONLY = frozenset({"wreath", "wreath-native", "wreath-metal"})
+_WREATH_ONLY = frozenset({"wreath", "wreath-native", "wreath-metal"})
 _REQUEST_FEATURE_FRAMEWORKS = frozenset(
     {
         "wreath", "wreath-native", "wreath-metal",
@@ -53,7 +53,7 @@ _TEMPLATE_FRAMEWORKS = frozenset(
     }
 )
 _CACHE_FRAMEWORKS = _TEMPLATE_FRAMEWORKS
-_WEBHOOK_FRAMEWORKS = _NEO_ONLY
+_WEBHOOK_FRAMEWORKS = _WREATH_ONLY
 
 JSON_REQUEST_BODY = b'{"message":"hello","values":[1,2,3,4]}'
 TYPED_REQUEST_BODY = (
@@ -127,28 +127,38 @@ class Scenario:
 
 SCENARIOS = {
     "plaintext": Scenario("GET", "/"),
+    "e2e": Scenario(
+        # The whole stack orchestrated in one request: bearer authentication,
+        # a wreath.postgres round trip, and a wreath.http_client fetch against
+        # in-process upstreams (benchmarks/e2e_upstream.py), composed into one
+        # JSON response. Self-contained: no external database or service.
+        "GET",
+        "/e2e",
+        headers=(("Authorization", "Bearer user"),),
+        frameworks=_WREATH_ONLY,
+    ),
     "json": Scenario("GET", "/json"),
     "parameter": Scenario("GET", "/users/42"),
-    "middleware-noop": Scenario("GET", "/middleware/noop", frameworks=_NEO_ONLY),
-    "missing": Scenario("GET", "/definitely-missing", frameworks=_NEO_ONLY),
-    "auth-missing": Scenario("GET", "/auth/profile", frameworks=_NEO_ONLY),
+    "middleware-noop": Scenario("GET", "/middleware/noop", frameworks=_WREATH_ONLY),
+    "missing": Scenario("GET", "/definitely-missing", frameworks=_WREATH_ONLY),
+    "auth-missing": Scenario("GET", "/auth/profile", frameworks=_WREATH_ONLY),
     "auth-authenticated": Scenario(
         "GET",
         "/auth/profile",
         headers=(("Authorization", "Bearer user"),),
-        frameworks=_NEO_ONLY,
+        frameworks=_WREATH_ONLY,
     ),
     "auth-rbac-allow": Scenario(
         "GET",
         "/auth/admin",
         headers=(("Authorization", "Bearer admin"),),
-        frameworks=_NEO_ONLY,
+        frameworks=_WREATH_ONLY,
     ),
     "auth-rbac-deny": Scenario(
         "GET",
         "/auth/admin",
         headers=(("Authorization", "Bearer user"),),
-        frameworks=_NEO_ONLY,
+        frameworks=_WREATH_ONLY,
     ),
     "header-lookup": Scenario(
         "GET",

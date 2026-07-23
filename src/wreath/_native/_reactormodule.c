@@ -10,10 +10,13 @@
  * exactly the shape of that workload.
  *
  * Design: `slots` buckets at `resolution` seconds each. A timer due in `d`
- * ticks lands in bucket `(cur + d) % slots` carrying `rounds = d / slots`; each
- * time the cursor sweeps a bucket, a node with rounds>0 is decremented,
- * otherwise it fires. Insert/cancel are pointer splices on an intrusive doubly
- * linked list — no reallocation, no heapify, no compaction.
+ * ticks lands in bucket `(cur + d) % slots` carrying its absolute deadline; an
+ * interval tree over the buckets tracks each slot's minimum deadline (plus how
+ * many nodes tie it), so the drain loop jumps the cursor from due tick to due
+ * tick without touching parked long timers, and a batch of same-deadline
+ * fires/cancels pays one chain rescan total. Insert/cancel are pointer splices
+ * on an intrusive doubly linked list — no reallocation, no heapify, no
+ * compaction.
  */
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
@@ -37,21 +40,8 @@
 #include "server.h"
 #include "reactor_internal.h"
 
-static const WreathHttp1CAPI *g_http1_capi = NULL;
 static PyObject *g_buffered_protocol;
 static PyObject *g_s_context_run;
-
-static void
-load_http1_capi(void)
-{
-    if (g_http1_capi != NULL) {
-        return;
-    }
-    g_http1_capi = PyCapsule_Import(WREATH_HTTP1_CAPI_NAME, 0);
-    if (g_http1_capi == NULL) {
-        PyErr_Clear();
-    }
-}
 
 /* ======================================================================== */
 /* SocketTransport: a native asyncio Transport for plaintext TCP.             */
@@ -149,7 +139,8 @@ PyInit__reactor(void)
 {
     if (wreath_reactor_timers_ready() < 0 ||
         PyType_Ready(&SocketTransportType) < 0 ||
-        PyType_Ready(&ReactorPollerType) < 0) {
+        PyType_Ready(&ReactorPollerType) < 0 ||
+        PyType_Ready(&WreathReadyHandleType) < 0) {
         return NULL;
     }
     /* intern the attribute names the run loop touches every iteration */

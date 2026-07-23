@@ -167,7 +167,7 @@ no ORM can win by returning rows and deferring the join.
 ```bash
 uv sync --group benchmark
 uv run python -m benchmarks.postgres.bench_orm_competitors \
-  --dsn postgresql://neo:secret@127.0.0.1:55434/neo \
+  --dsn postgresql://wreath:secret@127.0.0.1:55434/wreath \
   --output benchmark-results-orm-competitors/latest.json
 ```
 

@@ -78,3 +78,16 @@ def test_stop_then_run_resumes_pending_work(loop):
     # 'b' was queued before the loop was re-entered; it must not be lost.
     loop.run_until_complete(asyncio.sleep(0))
     assert "a" in log and "b" in log
+
+
+def test_native_loop_requires_wheel_timers():
+    # The C _run_once never compacts cancelled heap TimerHandles (asyncio's
+    # compaction lives in the Python _run_once it replaces), so the pairing
+    # is refused at construction rather than leaking under wait_for churn.
+    import selectors
+
+    from wreath.reactor import EventLoop
+
+    pytest.importorskip("wreath._native._reactor")
+    with pytest.raises(ValueError, match="timers='wheel'"):
+        EventLoop(selectors.EpollSelector(), native_loop=True, timers="heap")

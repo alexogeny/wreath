@@ -49,6 +49,145 @@ typedef struct {
     uint32_t generation;    /* registration incarnation carried in data.u64 */
 } FdEntry;
 
+/* ======================================================================== */
+/* WreathReadyHandle: the Handle-free call_soon fast path.                  */
+/*                                                                          */
+/* asyncio's call_soon costs two Python frames (call_soon -> _call_soon)    */
+/* plus a Python-class Handle construction per wakeup; every Future         */
+/* callback and Task step scheduling pays it. The metal loop rebinds        */
+/* loop.call_soon to the poller's C implementation, which enqueues this     */
+/* freelisted C handle instead; the run loop recognizes it and runs the     */
+/* callback inside its context directly. Legacy asyncio.Handles (e.g. from  */
+/* call_soon_threadsafe, which stays on the base implementation for its     */
+/* thread safety) continue through the existing path, sharing one FIFO      */
+/* deque so cross-source ordering is preserved.                             */
+/* ======================================================================== */
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *callback;
+    PyObject *args;      /* tuple, or NULL for a no-argument callback */
+    PyObject *context;
+    int cancelled;
+} WreathReadyHandle;
+
+#define READY_HANDLE_FREELIST_CAP 64
+static WreathReadyHandle *ready_handle_freelist[READY_HANDLE_FREELIST_CAP];
+static int ready_handle_freelist_len = 0;
+
+static PyTypeObject WreathReadyHandleType;
+
+static void
+ready_handle_dealloc(PyObject *op)
+{
+    WreathReadyHandle *handle = (WreathReadyHandle *)op;
+    PyObject_GC_UnTrack(op);
+    Py_CLEAR(handle->callback);
+    Py_CLEAR(handle->args);
+    Py_CLEAR(handle->context);
+    if (ready_handle_freelist_len < READY_HANDLE_FREELIST_CAP) {
+        ready_handle_freelist[ready_handle_freelist_len++] = handle;
+    } else {
+        PyObject_GC_Del(op);
+    }
+}
+
+static int
+ready_handle_traverse(PyObject *op, visitproc visit, void *arg)
+{
+    WreathReadyHandle *handle = (WreathReadyHandle *)op;
+    Py_VISIT(handle->callback);
+    Py_VISIT(handle->args);
+    Py_VISIT(handle->context);
+    return 0;
+}
+
+static int
+ready_handle_clear_slot(PyObject *op)
+{
+    WreathReadyHandle *handle = (WreathReadyHandle *)op;
+    Py_CLEAR(handle->callback);
+    Py_CLEAR(handle->args);
+    Py_CLEAR(handle->context);
+    return 0;
+}
+
+static PyObject *
+ready_handle_cancel(PyObject *op, PyObject *Py_UNUSED(ignored))
+{
+    WreathReadyHandle *handle = (WreathReadyHandle *)op;
+    handle->cancelled = 1;
+    /* Match asyncio.Handle.cancel: release what the callback closed over. */
+    Py_CLEAR(handle->callback);
+    Py_CLEAR(handle->args);
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+ready_handle_cancelled(PyObject *op, PyObject *Py_UNUSED(ignored))
+{
+    return PyBool_FromLong(((WreathReadyHandle *)op)->cancelled);
+}
+
+static PyMethodDef ready_handle_methods[] = {
+    {"cancel", ready_handle_cancel, METH_NOARGS, NULL},
+    {"cancelled", ready_handle_cancelled, METH_NOARGS, NULL},
+    {NULL, NULL, 0, NULL},
+};
+
+static PyTypeObject WreathReadyHandleType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "wreath._native._reactor.ReadyHandle",
+    .tp_basicsize = sizeof(WreathReadyHandle),
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_dealloc = ready_handle_dealloc,
+    .tp_traverse = ready_handle_traverse,
+    .tp_clear = ready_handle_clear_slot,
+    .tp_methods = ready_handle_methods,
+};
+
+static WreathReadyHandle *
+ready_handle_new(PyObject *callback, PyObject *const *args, Py_ssize_t nargs,
+                 PyObject *context)
+{
+    WreathReadyHandle *handle;
+    if (ready_handle_freelist_len > 0) {
+        handle = ready_handle_freelist[--ready_handle_freelist_len];
+        _Py_NewReference((PyObject *)handle);
+    } else {
+        handle = PyObject_GC_New(WreathReadyHandle, &WreathReadyHandleType);
+        if (handle == NULL) {
+            return NULL;
+        }
+    }
+    handle->callback = Py_NewRef(callback);
+    handle->cancelled = 0;
+    if (nargs > 0) {
+        handle->args = PyTuple_New(nargs);
+        if (handle->args == NULL) {
+            handle->context = NULL;
+            Py_DECREF(handle);
+            return NULL;
+        }
+        for (Py_ssize_t i = 0; i < nargs; i++) {
+            PyTuple_SET_ITEM(handle->args, i, Py_NewRef(args[i]));
+        }
+    } else {
+        handle->args = NULL;
+    }
+    if (context == NULL || context == Py_None) {
+        handle->context = PyContext_CopyCurrent();
+        if (handle->context == NULL) {
+            Py_DECREF(handle);
+            return NULL;
+        }
+    } else {
+        handle->context = Py_NewRef(context);
+    }
+    PyObject_GC_Track((PyObject *)handle);
+    return handle;
+}
+
 typedef struct {
     PyObject_HEAD
     int wake_fd;
@@ -68,6 +207,7 @@ typedef struct {
     TimingWheel *wheel;     /* borrowed from wheel_obj */
     double clock_res;       /* loop._clock_resolution */
     int direct_task_steps;  /* bypass Handle._run for C Task step callbacks */
+    int closed;             /* poller closed: fast call_soon must reject */
     uint64_t generation_wraps;
     MetalRuntime metal;
 } ReactorPoller;
@@ -1245,6 +1385,109 @@ rp_has_completion(ReactorPoller *p)
            __atomic_load_n(ring->cq_head, __ATOMIC_RELAXED);
 }
 
+/* The Handle-free call_soon: enqueue a freelisted C handle onto the shared
+ * ready deque. Replaces asyncio's two Python frames + Handle construction
+ * per scheduled callback (every Future callback, every Task wakeup). The
+ * loop rebinds `loop.call_soon` here; call_soon_threadsafe stays on the
+ * base implementation and its asyncio.Handles interleave in the same FIFO. */
+static PyObject *
+rp_call_soon(PyObject *op, PyObject *const *args, Py_ssize_t nargs,
+             PyObject *kwnames)
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    if (p->closed) {
+        PyErr_SetString(PyExc_RuntimeError, "Event loop is closed");
+        return NULL;
+    }
+    PyObject *context = NULL;
+    if (kwnames != NULL) {
+        Py_ssize_t nkw = PyTuple_GET_SIZE(kwnames);
+        for (Py_ssize_t i = 0; i < nkw; i++) {
+            PyObject *name = PyTuple_GET_ITEM(kwnames, i);
+            if (PyUnicode_CompareWithASCIIString(name, "context") == 0) {
+                context = args[nargs + i];
+            } else {
+                PyErr_Format(PyExc_TypeError,
+                             "call_soon() got an unexpected keyword argument "
+                             "%R", name);
+                return NULL;
+            }
+        }
+    }
+    if (nargs < 1) {
+        PyErr_SetString(PyExc_TypeError,
+                        "call_soon() missing required argument: 'callback'");
+        return NULL;
+    }
+    if (!PyCallable_Check(args[0])) {
+        PyErr_Format(PyExc_TypeError,
+                     "a callable object was expected by call_soon(), got %R",
+                     args[0]);
+        return NULL;
+    }
+    WreathReadyHandle *handle = ready_handle_new(
+        args[0], args + 1, nargs - 1, context);
+    if (handle == NULL) {
+        return NULL;
+    }
+    PyObject *appended = PyObject_CallOneArg(
+        p->ready_append, (PyObject *)handle);
+    if (appended == NULL) {
+        Py_DECREF(handle);
+        return NULL;
+    }
+    Py_DECREF(appended);
+    return (PyObject *)handle;
+}
+
+/* Run one fast handle: callback inside its context, straight from C. Returns
+ * -1 only for exceptions that must stop the loop (SystemExit/KeyboardInterrupt
+ * or a failing exception handler); callback errors route to the loop's
+ * exception handler exactly like Handle._run. */
+static int
+rp_run_ready_handle(ReactorPoller *p, WreathReadyHandle *handle)
+{
+    if (handle->cancelled) {
+        return 0;
+    }
+    PyObject *result;
+    if (handle->args == NULL) {
+        result = PyObject_CallMethodOneArg(
+            handle->context, g_s_context_run, handle->callback);
+    } else {
+        Py_ssize_t extra = PyTuple_GET_SIZE(handle->args);
+        PyObject *stack_small[8];
+        PyObject **stack = stack_small;
+        if (extra + 2 > 8) {
+            stack = PyMem_Malloc((size_t)(extra + 2) * sizeof(PyObject *));
+            if (stack == NULL) {
+                PyErr_NoMemory();
+                return -1;
+            }
+        }
+        stack[0] = handle->context;
+        stack[1] = handle->callback;
+        for (Py_ssize_t i = 0; i < extra; i++) {
+            stack[2 + i] = PyTuple_GET_ITEM(handle->args, i);
+        }
+        result = PyObject_VectorcallMethod(
+            g_s_context_run, stack, (size_t)(extra + 2), NULL);
+        if (stack != stack_small) {
+            PyMem_Free(stack);
+        }
+    }
+    if (result != NULL) {
+        Py_DECREF(result);
+        return 0;
+    }
+    if (PyErr_ExceptionMatches(PyExc_SystemExit) ||
+        PyErr_ExceptionMatches(PyExc_KeyboardInterrupt)) {
+        return -1;
+    }
+    rp_report_callback_error(p);
+    return 0;
+}
+
 /* --- adaptive spin-then-block ------------------------------------------- */
 /* An idle probe predicts the next completion's arrival from an EWMA of past
  * empty-CQ-to-arrival gaps. When arrivals are predicted imminent, a bounded
@@ -1529,6 +1772,14 @@ rp_run_once(PyObject *op, PyObject *Py_UNUSED(ignored))
         if (handle == NULL) {
             return NULL;
         }
+        if (Py_IS_TYPE(handle, &WreathReadyHandleType)) {
+            int status = rp_run_ready_handle(p, (WreathReadyHandle *)handle);
+            Py_DECREF(handle);
+            if (status < 0) {
+                return NULL;
+            }
+            continue;
+        }
         int is_cancelled;
         if (p->direct_task_steps && Py_IS_TYPE(handle, g_handle_type)) {
             PyObject *cancelled = *(PyObject **)(
@@ -1622,6 +1873,7 @@ static PyObject *
 rp_close(PyObject *op, PyObject *Py_UNUSED(i))
 {
     ReactorPoller *p = (ReactorPoller *)op;
+    p->closed = 1;
     if (p->wake_fd >= 0) {
         close(p->wake_fd);
         p->wake_fd = -1;
@@ -1711,6 +1963,7 @@ rp_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwds))
         return -1;
     }
     p->direct_task_steps = direct_task_steps;
+    p->closed = 0;
     p->generation_wraps = 0;
     memset(&p->metal, 0, sizeof(p->metal));
     const char *trace_mode = getenv("WREATH_METAL_TRACE");
@@ -2407,6 +2660,8 @@ static PyMethodDef rp_methods[] = {
     {"_start_uring_receive", rp_start_uring_receive, METH_O, NULL},
     {"_stop_uring_receive", rp_stop_uring_receive, METH_O, NULL},
     {"_run_once", rp_run_once, METH_NOARGS, NULL},
+    {"_call_soon", (PyCFunction)(void (*)(void))rp_call_soon,
+     METH_FASTCALL | METH_KEYWORDS, NULL},
     {"_set_signal_reader", rp_set_signal_reader, METH_VARARGS, NULL},
     {"_wake", rp_wake, METH_NOARGS, NULL},
     {"completion_trace", rp_completion_trace, METH_NOARGS, NULL},

@@ -16,14 +16,14 @@ from wreath._pure.http_client import parse_response_head, serialize_request
 def test_serialize_fixed_request() -> None:
     request = serialize_request(
         "POST",
-        b"/events?source=neo",
+        b"/events?source=wreath",
         b"partner.example",
         headers=((b"content-type", b"application/json"), (b"x-event-id", b"evt-1")),
         body=b'{}',
     )
 
     assert request == (
-        b"POST /events?source=neo HTTP/1.1\r\n"
+        b"POST /events?source=wreath HTTP/1.1\r\n"
         b"host: partner.example\r\n"
         b"content-type: application/json\r\n"
         b"x-event-id: evt-1\r\n"
@@ -140,7 +140,7 @@ def test_native_request_serializer_matches_pure_serializer() -> None:
         ("GET", b"/", b"example.com", (), b""),
         (
             "POST",
-            b"/events?source=neo",
+            b"/events?source=wreath",
             b"partner.example:8443",
             ((b"Content-Type", b"application/json"), (b"x-id", b"one")),
             b"{}",

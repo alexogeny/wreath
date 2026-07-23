@@ -73,12 +73,12 @@ class FakePostgres:
         self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
         socket = self.server.sockets[0]
         self.port = int(socket.getsockname()[1])
-        return f"postgresql://neo:secret@127.0.0.1:{self.port}/neo"
+        return f"postgresql://wreath:secret@127.0.0.1:{self.port}/wreath"
 
     async def start_unix(self, path: Path) -> str:
         self.path = path
         self.server = await asyncio.start_unix_server(self._handle, path)
-        return f"postgresql://neo:secret@/neo?host={quote(str(path.parent))}&port={path.name}"
+        return f"postgresql://wreath:secret@/wreath?host={quote(str(path.parent))}&port={path.name}"
 
     async def close(self) -> None:
         assert self.server is not None

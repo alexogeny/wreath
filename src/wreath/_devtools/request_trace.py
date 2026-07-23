@@ -171,14 +171,17 @@ def _is_harness_frame(code: CodeType) -> bool:
     return filename.endswith("_devtools/request_trace.py")
 
 
+_PACKAGE_MARKER = "/src/wreath/"
+
+
 def _is_wreath_frame(code: CodeType) -> bool:
-    return "/neo/" in code.co_filename and not _is_harness_frame(code)
+    return _PACKAGE_MARKER in code.co_filename and not _is_harness_frame(code)
 
 
 def _short_path(code: CodeType) -> str:
     filename = code.co_filename
-    if "/neo/" in filename:
-        return filename.rsplit("/neo/", 1)[-1]
+    if _PACKAGE_MARKER in filename:
+        return "src/wreath/" + filename.rsplit(_PACKAGE_MARKER, 1)[-1]
     return filename.rsplit("/", 1)[-1]
 
 

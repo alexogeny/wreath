@@ -148,10 +148,10 @@ def measure(
             "this h2load was built without HTTP/3, and would accept --h3, ignore it, "
             "and exit 0. Rebuild nghttp2 with --enable-http3 (benchmarks/README.md)."
         )
-    if method not in {"GET", "POST"}:
-        raise H2LoadError(f"the h2load path measures GET and POST, not {method}")
-    if method == "GET" and body:
-        raise H2LoadError("the h2load GET path does not accept a request body")
+    if body and method != "POST":
+        raise H2LoadError("the h2load path only sends a request body with POST")
+    if not method.isalpha() or not method.isupper():
+        raise H2LoadError(f"suspicious HTTP method for h2load: {method!r}")
 
     # h2 and h3 require TLS. HTTP/1.1 may be measured cleartext (tls=False) so a
     # plaintext-h1 run is not bottlenecked on the pure-Python built-in client;
@@ -163,7 +163,10 @@ def measure(
     with tempfile.TemporaryDirectory() as directory:
         log = Path(directory) / "requests.tsv"
         data = Path(directory) / "request-body.bin"
-        if method == "POST":
+        # h2load cannot mmap an empty --data file; an empty-body POST goes
+        # through the :method override below instead, like PUT/PATCH/DELETE.
+        send_data = method == "POST" and bool(body)
+        if send_data:
             data.write_bytes(body)
 
         def command_for(count: int, *, measured: bool) -> list[str]:
@@ -174,7 +177,12 @@ def measure(
                 "-t", str(min(threads, connections)),
                 "-m", str(streams_per_connection),
                 *([f"--log-file={log}"] if measured else []),
-                *(["--data", str(data)] if method == "POST" else []),
+                *(["--data", str(data)] if send_data else []),
+                # h2load's request method is GET (or POST with --data); the
+                # :method pseudo-header override rewrites it for every
+                # protocol, including the HTTP/1.1 request line (verified:
+                # a method-discriminating server sees the real method).
+                *(["-H", f":method: {method}"] if method != "GET" and not send_data else []),
                 *(["--h1"] if cleartext else _ALPN_FLAGS[protocol]),
             ]
             for name, value in (headers or {}).items():

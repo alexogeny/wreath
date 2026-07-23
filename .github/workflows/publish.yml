@@ -132,7 +132,7 @@ jobs:
           set -euo pipefail
           branch="release/v$VERSION"
           git branch -f "$branch" HEAD
-          git tag -a "v$VERSION" -m "neo v$VERSION"
+          git tag -a "v$VERSION" -m "wreath v$VERSION"
           git push origin "$branch"
           git push origin "refs/tags/v$VERSION"
 

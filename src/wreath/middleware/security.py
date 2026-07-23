@@ -39,7 +39,9 @@ class TrustedHostMiddleware:
                 raise ValueError(f"invalid trusted-host pattern: {pattern!r}")
         self.allowed_hosts = patterns
 
-    async def before(self, request: Request):
+    def before_sync(self, request: Request):
+        # Host validation is pure and synchronous: a before_sync hook so the
+        # global pipeline runs it with no coroutine or await.
         value = request.header("host")
         if value is None or not _host_allowed(_normalize_host(value), self.allowed_hosts):
             return ProblemResponse(status=400, detail="Invalid Host header")

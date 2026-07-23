@@ -40,16 +40,28 @@ static PyTypeObject WheelTimerType;
 PyTypeObject TimingWheelType;
 static PyObject *g_s_context_run;
 
+/* Recompute a slot's minimum deadline (and how many live nodes tie it) by
+ * walking the chain. This is the only O(chain) tree operation; unlink calls
+ * it only when the last node tying the minimum leaves the slot, so a batch of
+ * k same-deadline fires/cancels pays one rescan total, not k. */
 static void
 wheel_update_slot_minimum(TimingWheel *w, int slot)
 {
     w->slot_rescans++;
     int64_t minimum = INT64_MAX;
+    uint32_t ties = 0;
     for (WheelTimer *t = w->slots[slot]; t != NULL; t = t->next) {
-        if (t->callback != NULL && t->deadline < minimum) {
+        if (t->callback == NULL) {
+            continue;
+        }
+        if (t->deadline < minimum) {
             minimum = t->deadline;
+            ties = 1;
+        } else if (t->deadline == minimum) {
+            ties++;
         }
     }
+    w->min_ties[slot] = ties;
     int node = w->tree_base + slot;
     w->deadline_tree[node] = minimum;
     w->tree_node_updates++;
@@ -61,16 +73,20 @@ wheel_update_slot_minimum(TimingWheel *w, int slot)
         w->tree_node_updates++;
     }
     w->next_deadline = w->deadline_tree[1];
-    w->next_dirty = 0;
 }
 
 static void
 wheel_note_deadline(TimingWheel *w, int slot, int64_t deadline)
 {
     int node = w->tree_base + slot;
-    if (deadline >= w->deadline_tree[node]) {
+    if (deadline > w->deadline_tree[node]) {
         return;
     }
+    if (deadline == w->deadline_tree[node]) {
+        w->min_ties[slot]++;
+        return;
+    }
+    w->min_ties[slot] = 1;
     w->deadline_tree[node] = deadline;
     w->tree_node_updates++;
     while (node > 1) {
@@ -81,13 +97,6 @@ wheel_note_deadline(TimingWheel *w, int slot, int64_t deadline)
         w->tree_node_updates++;
     }
     w->next_deadline = w->deadline_tree[1];
-}
-
-static void
-wheel_refresh_next(TimingWheel *w)
-{
-    w->next_deadline = w->deadline_tree[1];
-    w->next_dirty = 0;
 }
 
 static int
@@ -101,9 +110,6 @@ wheel_slot(const TimingWheel *w, int64_t deadline)
 double
 wreath_wheel_next_when(TimingWheel *w)
 {
-    if (w->next_dirty) {
-        wheel_refresh_next(w);
-    }
     if (w->next_deadline == INT64_MAX) {
         return Py_HUGE_VAL;
     }
@@ -134,7 +140,13 @@ timer_unlink(WheelTimer *t)
     t->slot = -1;
     w->count--;
     if (removed_slot_minimum) {
-        wheel_update_slot_minimum(w, slot);
+        /* Only the last node tying the minimum forces the O(chain) rescan;
+         * same-deadline cohorts (per-tick timeout batches) leave in O(1). */
+        if (w->min_ties[slot] > 1) {
+            w->min_ties[slot]--;
+        } else {
+            wheel_update_slot_minimum(w, slot);
+        }
     }
 }
 
@@ -145,11 +157,17 @@ timer_cancel(PyObject *op, PyObject *Py_UNUSED(ignored))
     if (t->callback == NULL) {
         Py_RETURN_FALSE;  /* already fired or cancelled */
     }
+    int linked = t->slot >= 0;
     timer_unlink(t);
     Py_CLEAR(t->callback);
     /* Drop the wheel's owning reference (parked when scheduled). The caller's
-     * handle keeps `t` alive for the duration of this call. */
-    Py_DECREF(t);
+     * handle keeps `t` alive for the duration of this call. A node that is
+     * unlinked but still has a callback sits on run_due's pending-dispatch
+     * list, which owns that reference and will drop it after dispatch --
+     * clearing the callback above already made the dispatch a no-op. */
+    if (linked) {
+        Py_DECREF(t);
+    }
     Py_RETURN_TRUE;
 }
 
@@ -226,6 +244,15 @@ wheel_init(PyObject *op, PyObject *args, PyObject *kwds)
         PyErr_NoMemory();
         return -1;
     }
+    w->min_ties = PyMem_Calloc((size_t)nslots, sizeof(uint32_t));
+    if (w->min_ties == NULL) {
+        PyMem_Free(w->deadline_tree);
+        w->deadline_tree = NULL;
+        PyMem_Free(w->slots);
+        w->slots = NULL;
+        PyErr_NoMemory();
+        return -1;
+    }
     for (int node = 0; node < tree_base * 2; node++) {
         w->deadline_tree[node] = INT64_MAX;
     }
@@ -237,7 +264,6 @@ wheel_init(PyObject *op, PyObject *args, PyObject *kwds)
     w->base = base;
     w->cursor = 0;
     w->next_deadline = INT64_MAX;
-    w->next_dirty = 0;
     w->count = 0;
     return 0;
 }
@@ -261,6 +287,7 @@ wheel_dealloc(PyObject *op)
         PyMem_Free(w->slots);
     }
     PyMem_Free(w->deadline_tree);
+    PyMem_Free(w->min_ties);
     Py_TYPE(op)->tp_free(op);
 }
 
@@ -283,7 +310,6 @@ wheel_schedule(PyObject *op, PyObject *args)
     }
     int64_t deadline = w->cursor + ticks;
     int slot = wheel_slot(w, deadline);
-    int64_t rounds = (ticks - 1) / w->nslots;  /* fire on first arrival at the slot */
 
     WheelTimer *t = PyObject_New(WheelTimer, &WheelTimerType);
     if (t == NULL) {
@@ -292,7 +318,6 @@ wheel_schedule(PyObject *op, PyObject *args)
     t->callback = Py_NewRef(callback);
     t->args = NULL;
     t->context = NULL;
-    t->rounds = rounds;
     t->deadline = deadline;
     t->slot = slot;
     t->wheel = w;
@@ -344,7 +369,6 @@ wheel_schedule_call(PyObject *op, PyObject *const *fastargs, Py_ssize_t nargs)
     /* context=None means "no isolation": dispatch calls the callback directly,
      * skipping context.run and the per-timer copy_context the caller would pay. */
     t->context = (fastargs[3] == Py_None) ? NULL : Py_NewRef(fastargs[3]);
-    t->rounds = (ticks - 1) / w->nslots;  /* fire on first arrival at the slot */
     t->deadline = deadline;
     t->slot = slot;
     t->wheel = w;
@@ -359,60 +383,12 @@ wheel_schedule_call(PyObject *op, PyObject *const *fastargs, Py_ssize_t nargs)
     return Py_NewRef((PyObject *)t);
 }
 
-#define WHEEL_CATCHUP_ROTATIONS 4
-
-static int
-wheel_deadline_compare(const void *left, const void *right)
-{
-    const WheelTimer *a = *(WheelTimer *const *)left;
-    const WheelTimer *b = *(WheelTimer *const *)right;
-    return (a->deadline > b->deadline) - (a->deadline < b->deadline);
-}
-
-/* A normal poll advances zero or one ticks. After a machine suspend or process
- * stop, tick-by-tick catch-up turns elapsed wall time into a latency spike. The
- * rare large-jump path scans live nodes once and keeps callback order by sorting
- * their absolute deadlines. It does not mutate the wheel until all allocation
- * that can fail has succeeded. */
-static int
-wheel_collect_overdue(TimingWheel *w, int64_t target,
-                      WheelTimer ***out, Py_ssize_t *out_count)
-{
-    *out = NULL;
-    *out_count = 0;
-    if (w->count == 0) {
-        return 0;
-    }
-    WheelTimer **nodes = PyMem_Malloc((size_t)w->count * sizeof(*nodes));
-    if (nodes == NULL) {
-        PyErr_NoMemory();
-        return -1;
-    }
-    Py_ssize_t count = 0;
-    for (int slot = 0; slot < w->nslots; slot++) {
-        for (WheelTimer *t = w->slots[slot]; t != NULL; t = t->next) {
-            if (t->deadline <= target) {
-                nodes[count++] = t;
-            }
-        }
-    }
-    qsort(nodes, (size_t)count, sizeof(*nodes), wheel_deadline_compare);
-    *out = nodes;
-    *out_count = count;
-    return 0;
-}
-
-static void
-wheel_finish_jump(TimingWheel *w, int64_t target)
-{
-    w->cursor = target;
-    for (int slot = 0; slot < w->nslots; slot++) {
-        for (WheelTimer *t = w->slots[slot]; t != NULL; t = t->next) {
-            int64_t remaining = t->deadline - target;
-            t->rounds = (remaining - 1) / w->nslots;
-        }
-    }
-}
+/* Timers carry absolute tick deadlines and the interval tree tracks each
+ * slot's minimum, so both drain loops jump the cursor straight from due tick
+ * to due tick: an advance over an idle gap -- one quiet poll or a machine
+ * suspend alike -- is O(1) in elapsed ticks and never touches parked timers.
+ * A deadline maps to exactly one slot, so draining ticks in tree-minimum
+ * order yields callbacks in exact deadline order with no catch-up path. */
 
 /* advance(now_seconds) -> list of callbacks now due (removed from the wheel) */
 static PyObject *
@@ -429,42 +405,20 @@ wheel_advance(PyObject *op, PyObject *arg)
     if (due == NULL) {
         return NULL;
     }
-    if (target - w->cursor >= (int64_t)w->nslots * WHEEL_CATCHUP_ROTATIONS) {
-        WheelTimer **nodes;
-        Py_ssize_t count;
-        if (wheel_collect_overdue(w, target, &nodes, &count) < 0) {
-            Py_DECREF(due);
-            return NULL;
-        }
-        Py_DECREF(due);
-        due = PyList_New(count);
-        if (due == NULL) {
-            PyMem_Free(nodes);
-            return NULL;
-        }
-        for (Py_ssize_t i = 0; i < count; i++) {
-            WheelTimer *t = nodes[i];
-            PyList_SET_ITEM(due, i, Py_NewRef(t->callback));
-            timer_unlink(t);
-            Py_CLEAR(t->callback);
-            Py_DECREF(t);
-        }
-        PyMem_Free(nodes);
-        wheel_finish_jump(w, target);
-        if (w->next_dirty) {
-            wheel_refresh_next(w);
-        }
-        return due;
-    }
     while (w->cursor < target) {
-        w->cursor++;
+        int64_t next = w->deadline_tree[1];
+        if (next > target) {
+            w->cursor = target;
+            break;
+        }
+        /* next > cursor by construction (due nodes never outlive their tick);
+         * the +1 arm only guards termination against a corrupted tree. */
+        w->cursor = next > w->cursor ? next : w->cursor + 1;
         int slot = wheel_slot(w, w->cursor);
         WheelTimer *t = w->slots[slot];
         while (t != NULL) {
             WheelTimer *nxt = t->next;
-            if (t->rounds > 0) {
-                t->rounds--;
-            } else {
+            if (t->deadline <= w->cursor) {
                 /* fire: unlink, hand the callback to the result list */
                 timer_unlink(t);
                 if (t->callback != NULL) {
@@ -479,9 +433,6 @@ wheel_advance(PyObject *op, PyObject *arg)
             }
             t = nxt;
         }
-    }
-    if (w->next_dirty) {
-        wheel_refresh_next(w);
     }
     return due;
 }
@@ -533,58 +484,51 @@ wheel_dispatch_callback(WheelTimer *timer)
 }
 
 /* Dispatch due timers without allocating an argument object. ReactorPoller uses
- * this directly, while advance_run() remains the Python-visible wrapper. */
+ * this directly, while advance_run() remains the Python-visible wrapper.
+ *
+ * Due nodes are unlinked from the slot chain first and dispatched after the
+ * walk, so a callback that schedules into or cancels out of this slot mutates
+ * a chain the walk no longer holds pointers into. While a node waits on the
+ * pending list it is recognizable by slot < 0 with callback != NULL;
+ * timer_cancel leaves the wheel's reference with the list for that state and
+ * clearing the callback already makes the dispatch a no-op. */
 Py_ssize_t
 wreath_wheel_run_due(TimingWheel *w, double now)
 {
     int64_t target = (int64_t)(
         (now - w->base) * w->inverse_resolution);
     Py_ssize_t fired = 0;
-    if (target - w->cursor >= (int64_t)w->nslots * WHEEL_CATCHUP_ROTATIONS) {
-        WheelTimer **nodes;
-        Py_ssize_t count;
-        if (wheel_collect_overdue(w, target, &nodes, &count) < 0) {
-            return -1;
-        }
-        for (Py_ssize_t i = 0; i < count; i++) {
-            WheelTimer *t = nodes[i];
-            timer_unlink(t);
-            if (t->callback != NULL) {
-                wheel_dispatch_callback(t);
-                Py_CLEAR(t->callback);
-                fired++;
-            }
-            Py_DECREF(t);
-        }
-        PyMem_Free(nodes);
-        wheel_finish_jump(w, target);
-        if (w->next_dirty) {
-            wheel_refresh_next(w);
-        }
-        return fired;
-    }
     while (w->cursor < target) {
-        w->cursor++;
+        int64_t next = w->deadline_tree[1];
+        if (next > target) {
+            w->cursor = target;
+            break;
+        }
+        w->cursor = next > w->cursor ? next : w->cursor + 1;
         int slot = wheel_slot(w, w->cursor);
         WheelTimer *t = w->slots[slot];
+        WheelTimer *pending = NULL;
+        WheelTimer **pending_tail = &pending;
         while (t != NULL) {
             WheelTimer *nxt = t->next;
-            if (t->rounds > 0) {
-                t->rounds--;
-            } else {
-                timer_unlink(t);
-                if (t->callback != NULL) {
-                    wheel_dispatch_callback(t);
-                    Py_CLEAR(t->callback);
-                    fired++;
-                }
-                Py_DECREF(t);
+            if (t->deadline <= w->cursor) {
+                timer_unlink(t);       /* clears t->next */
+                *pending_tail = t;     /* reuse the link as the dispatch list */
+                pending_tail = &t->next;
             }
             t = nxt;
         }
-    }
-    if (w->next_dirty) {
-        wheel_refresh_next(w);
+        while (pending != NULL) {
+            WheelTimer *nxt = pending->next;
+            pending->next = NULL;
+            if (pending->callback != NULL) {
+                wheel_dispatch_callback(pending);
+                Py_CLEAR(pending->callback);
+                fired++;
+            }
+            Py_DECREF(pending);
+            pending = nxt;
+        }
     }
     return fired;
 }

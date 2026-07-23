@@ -12,7 +12,6 @@ typedef struct WheelTimer {
     PyObject *callback;
     PyObject *args;
     PyObject *context;
-    int64_t rounds;
     int64_t deadline;
     int slot;
     struct WheelTimer *prev;
@@ -24,6 +23,7 @@ struct TimingWheel {
     PyObject_HEAD
     WheelTimer **slots;
     int64_t *deadline_tree;
+    uint32_t *min_ties;    /* per slot: live nodes tying the slot's tree minimum */
     int nslots;
     int tree_base;
     int slot_mask;
@@ -32,7 +32,6 @@ struct TimingWheel {
     double base;
     int64_t cursor;
     int64_t next_deadline;
-    int next_dirty;
     Py_ssize_t count;
     uint64_t slot_rescans;
     uint64_t tree_node_updates;

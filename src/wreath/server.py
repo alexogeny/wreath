@@ -588,17 +588,31 @@ class NegotiatingHttpProtocol(asyncio.Protocol):
             self._delegate.resume_writing()
 
 
+_http3_available_cache: bool | None = None
+
+
 def _http3_available() -> bool:
-    """Report whether the optional native HTTP/3 extension is importable.
+    """Report whether the optional native HTTP/3 extension can be loaded.
 
     The extension is only configured when ``WREATH_BUILD_HTTP3=1`` at build time,
-    so a default install returns ``False``. This never imports the module (that
-    would fail loudly on a partial build); it only checks discoverability.
+    so a default install returns ``False``. "Available" means *loadable*, not
+    merely discoverable: a partial build where the ``.so`` exists but a
+    transitive shared library (e.g. ``libngtcp2_crypto_ossl``) is missing must
+    report ``False`` so ``serve()`` raises its actionable "not built" error
+    rather than a raw ``ImportError`` from deep in the import machinery. The
+    import is attempted once and the result cached.
     """
-    try:
-        return importlib.util.find_spec("wreath._native._http3") is not None
-    except (ImportError, ValueError):
-        return False
+    global _http3_available_cache
+    if _http3_available_cache is None:
+        if importlib.util.find_spec("wreath._native._http3") is None:
+            _http3_available_cache = False
+        else:
+            try:
+                importlib.import_module("wreath._native._http3")
+                _http3_available_cache = True
+            except (ImportError, ValueError):
+                _http3_available_cache = False
+    return _http3_available_cache
 
 
 def _resolve_tls(

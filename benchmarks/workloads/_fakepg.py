@@ -57,7 +57,7 @@ class FakePostgres:
     async def start(self) -> str:
         self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
         self.port = int(self.server.sockets[0].getsockname()[1])
-        return f"postgresql://neo:secret@127.0.0.1:{self.port}/neo"
+        return f"postgresql://wreath:secret@127.0.0.1:{self.port}/wreath"
 
     async def close(self) -> None:
         if self.server is not None:

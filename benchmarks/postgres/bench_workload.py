@@ -15,7 +15,7 @@ Run it with:
 
     uv run --with asyncpg --with 'psycopg[binary]' --with psycopg2-binary \
       python -m benchmarks.postgres.bench_workload \
-      --dsn postgresql://neo:secret@127.0.0.1:55434/neo
+      --dsn postgresql://wreath:secret@127.0.0.1:55434/wreath
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ PYFORMAT = {
 }
 
 
-class _NeoDriver:
+class _WreathDriver:
     name = "wreath"
     sql = DOLLAR
     concurrent = True
@@ -90,7 +90,7 @@ class _NeoDriver:
         return await self.connection.fetch(sql, *args)
 
 
-class _AsyncpgDriver(_NeoDriver):
+class _AsyncpgDriver(_WreathDriver):
     name = "asyncpg"
     concurrent = False
 
@@ -164,7 +164,7 @@ class _Psycopg2Driver:
         return await asyncio.to_thread(self._fetch, sql, args)
 
 
-DRIVERS = (_NeoDriver, _AsyncpgDriver, _Psycopg3Driver, _Psycopg2Driver)
+DRIVERS = (_WreathDriver, _AsyncpgDriver, _Psycopg3Driver, _Psycopg2Driver)
 
 
 def _summary(samples: list[float], errors: int) -> dict[str, object]:

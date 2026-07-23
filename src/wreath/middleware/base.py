@@ -11,6 +11,10 @@ from ..request import Request
 type ResponseValue = Any
 type CallNext = Callable[[Request], Awaitable[ResponseValue]]
 type BeforeHook = Callable[[Request], Awaitable[ResponseValue | None]]
+# A synchronous before hook -- a plain function, not a coroutine. Contiguous
+# sync hooks are fused into one instruction run in a single pass, with no
+# per-hook coroutine or await.
+type SyncBeforeHook = Callable[[Request], ResponseValue | None]
 type AfterHook = Callable[[Request, ResponseValue], Awaitable[ResponseValue]]
 type RoutePredicate = Callable[[MiddlewareRoute], bool]
 
@@ -35,11 +39,17 @@ class MiddlewareHooks:
 
     A before hook returns ``None`` to continue or a response value to
     short-circuit. After hooks receive responses from either path.
+
+    ``before_sync`` is the synchronous form of ``before``: when set, the hook
+    is a plain function and a contiguous run of such hooks executes in one
+    synchronous pass with no per-hook coroutine or await. Provide ``before``
+    (async) or ``before_sync`` (sync), not both.
     """
 
     before: BeforeHook | None = None
     after: AfterHook | None = None
     applies_to: RoutePredicate | None = None
+    before_sync: SyncBeforeHook | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +79,17 @@ type Middleware = LegacyMiddleware | MiddlewareHooks | PipelineHooks
 class _BeforeInstruction:
     hook: BeforeHook
     failure_target: int
+    sync: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _FusedBeforeInstruction:
+    """A contiguous run of synchronous before hooks, run in one pass. Each
+    ``(hook, failure_target)`` pair short-circuits to its own target -- the
+    after-region position of its middleware -- so entered after hooks still
+    run correctly when a fused hook responds."""
+
+    pairs: tuple[tuple[SyncBeforeHook, int], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +102,9 @@ class _AfterInstruction:
     hook: AfterHook
 
 
-type _Instruction = _BeforeInstruction | _EndpointInstruction | _AfterInstruction
+type _Instruction = (
+    _BeforeInstruction | _FusedBeforeInstruction | _EndpointInstruction | _AfterInstruction
+)
 _UNSET = object()
 
 
@@ -93,7 +116,9 @@ class MiddlewareTape:
     def __init__(self, instructions: tuple[_Instruction, ...]) -> None:
         self._instructions = instructions
         self.operations = tuple(
-            "before"
+            "fused_before"
+            if isinstance(instruction, _FusedBeforeInstruction)
+            else "before"
             if isinstance(instruction, _BeforeInstruction)
             else "endpoint"
             if isinstance(instruction, _EndpointInstruction)
@@ -107,7 +132,16 @@ class MiddlewareTape:
         position = 0
         while position < len(instructions):
             instruction = instructions[position]
-            if isinstance(instruction, _BeforeInstruction):
+            if isinstance(instruction, _FusedBeforeInstruction):
+                # One synchronous pass over the run: no coroutine, no await.
+                position += 1
+                for hook, failure_target in instruction.pairs:
+                    candidate = hook(request)
+                    if candidate is not None:
+                        response = candidate
+                        position = failure_target
+                        break
+            elif isinstance(instruction, _BeforeInstruction):
                 candidate = await instruction.hook(request)
                 if candidate is None:
                     position += 1
@@ -127,22 +161,83 @@ class MiddlewareTape:
 
 def _is_fused(middleware: Middleware) -> bool:
     return isinstance(middleware, MiddlewareHooks) or any(
-        hasattr(middleware, attribute) for attribute in ("before", "after")
+        hasattr(middleware, attribute)
+        for attribute in ("before", "before_sync", "after")
     )
 
 
+def _fuse_sync_befores(instructions: list[_Instruction]) -> list[_Instruction]:
+    """Collapse each contiguous run of synchronous before instructions into one
+    ``_FusedBeforeInstruction`` and remap every jump position to the new layout.
+
+    Failure targets only ever point into the after-region (>= endpoint), never
+    back into the before-region, so fusing the before-region shifts those
+    positions but never invalidates them.
+    """
+    grouped: list[_Instruction] = []
+    remap: dict[int, int] = {}
+    index = 0
+    count = len(instructions)
+    while index < count:
+        instruction = instructions[index]
+        if isinstance(instruction, _BeforeInstruction) and instruction.sync:
+            new_position = len(grouped)
+            pairs: list[tuple[SyncBeforeHook, int]] = []
+            while (
+                index < count
+                and isinstance(instructions[index], _BeforeInstruction)
+                and cast(_BeforeInstruction, instructions[index]).sync
+            ):
+                current = cast(_BeforeInstruction, instructions[index])
+                remap[index] = new_position
+                pairs.append(
+                    (cast(SyncBeforeHook, current.hook), current.failure_target)
+                )
+                index += 1
+            grouped.append(_FusedBeforeInstruction(tuple(pairs)))
+        else:
+            remap[index] = len(grouped)
+            grouped.append(instruction)
+            index += 1
+    remap[count] = len(grouped)  # the "no after entered" final position
+
+    result: list[_Instruction] = []
+    for instruction in grouped:
+        if isinstance(instruction, _FusedBeforeInstruction):
+            result.append(
+                _FusedBeforeInstruction(
+                    tuple((hook, remap[target]) for hook, target in instruction.pairs)
+                )
+            )
+        elif isinstance(instruction, _BeforeInstruction):
+            result.append(
+                _BeforeInstruction(
+                    instruction.hook, remap[instruction.failure_target], instruction.sync
+                )
+            )
+        else:
+            result.append(instruction)
+    return result
+
+
 def _compile_tape(endpoint: CallNext, middleware: tuple[Middleware, ...]) -> MiddlewareTape:
-    hooks = [
-        (
-            cast(BeforeHook | None, getattr(current, "before", None)),
-            cast(AfterHook | None, getattr(current, "after", None)),
-        )
-        for current in middleware
+    # A synchronous before_sync hook is the fusable form; otherwise the async
+    # before hook is used. (name, hook, is_sync, after) per middleware.
+    hooks: list[tuple[BeforeHook | SyncBeforeHook | None, bool, AfterHook | None]] = []
+    for current in middleware:
+        before_sync = cast(SyncBeforeHook | None, getattr(current, "before_sync", None))
+        after = cast(AfterHook | None, getattr(current, "after", None))
+        if before_sync is not None:
+            hooks.append((before_sync, True, after))
+        else:
+            hooks.append((cast(BeforeHook | None, getattr(current, "before", None)), False, after))
+
+    before_entries = [
+        (index, hook, sync) for index, (hook, sync, _) in enumerate(hooks) if hook
     ]
-    before_entries = [(index, before) for index, (before, _) in enumerate(hooks) if before]
     after_entries = [
         (index, after)
-        for index, (_, after) in reversed(tuple(enumerate(hooks)))
+        for index, (_, _, after) in reversed(tuple(enumerate(hooks)))
         if after
     ]
     endpoint_position = len(before_entries)
@@ -153,7 +248,7 @@ def _compile_tape(endpoint: CallNext, middleware: tuple[Middleware, ...]) -> Mid
     final_position = endpoint_position + 1 + len(after_entries)
 
     instructions: list[_Instruction] = []
-    for middleware_index, before in before_entries:
+    for middleware_index, hook, sync in before_entries:
         failure_target = min(
             (
                 position
@@ -162,18 +257,22 @@ def _compile_tape(endpoint: CallNext, middleware: tuple[Middleware, ...]) -> Mid
             ),
             default=final_position,
         )
-        instructions.append(_BeforeInstruction(before, failure_target))
+        instructions.append(_BeforeInstruction(cast(BeforeHook, hook), failure_target, sync))
     instructions.append(_EndpointInstruction(endpoint))
     instructions.extend(_AfterInstruction(after) for _, after in after_entries)
-    return MiddlewareTape(tuple(instructions))
+    return MiddlewareTape(tuple(_fuse_sync_befores(instructions)))
 
 
 def _adapt_fused(middleware: Middleware) -> LegacyMiddleware:
+    before_sync = cast(SyncBeforeHook | None, getattr(middleware, "before_sync", None))
     before = cast(BeforeHook | None, getattr(middleware, "before", None))
     after = cast(AfterHook | None, getattr(middleware, "after", None))
 
     async def adapted(request: Request, call_next: CallNext) -> ResponseValue:
-        response = None if before is None else await before(request)
+        if before_sync is not None:
+            response = before_sync(request)
+        else:
+            response = None if before is None else await before(request)
         if response is None:
             response = await call_next(request)
         if after is not None:

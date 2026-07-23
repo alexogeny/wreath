@@ -247,7 +247,7 @@ def test_the_native_tree_is_clean() -> None:
     When this fails, either fix the pattern or waive it in place with a reason
     that says why the bound is acceptable.
     """
-    assert main([]) == 0, "wreath-native-lint reported findings in src/neo/_native"
+    assert main([]) == 0, "wreath-native-lint reported findings in src/wreath/_native"
 
 
 @pytest.mark.parametrize("args", [["--list-rules"], ["--format", "json"]])

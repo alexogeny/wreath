@@ -596,7 +596,7 @@ def test_buffered_ingress_under_uvloop() -> None:
 
 def test_server_response_header_configuration_validates_values() -> None:
     with pytest.raises(ValueError, match="printable ASCII"):
-        ServerConfig(server_header="neo\ninvalid")
+        ServerConfig(server_header="wreath\ninvalid")
     with pytest.raises(ValueError, match="printable ASCII"):
         ServerConfig(server_header="")
     with pytest.raises(ValueError, match="date_header must be bool"):

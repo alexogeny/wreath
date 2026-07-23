@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "A Python 3.14-first, dependency-free ASGI framework core"
 readme = "README.md"
 requires-python = ">=3.14"
-license = "MIT"
+license = "MPL-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Wreath contributors" }]
 dependencies = []
 classifiers = [
@@ -73,7 +74,7 @@ benchmark = [
 
 [project.scripts]
 wreath = "wreath.cli:main"
-# Maintenance commands for Wreath's C; see src/neo/_devtools/.
+# Maintenance commands for Wreath's C; see src/wreath/_devtools/.
 wreath-native-lint = "wreath._devtools.native_lint:main"
 wreath-native-boundary-lint = "wreath._devtools.native_boundary_lint:main"
 wreath-native-error-lint = "wreath._devtools.native_error_lint:main"
@@ -81,6 +82,7 @@ wreath-native-gil-lint = "wreath._devtools.native_gil_lint:main"
 wreath-native-gil-status = "wreath._devtools.native_gil_status:main"
 wreath-native-memory-lint = "wreath._devtools.native_memory_lint:main"
 wreath-native-profile = "wreath._devtools.native_profile:main"
+wreath-complexity-probe = "wreath._devtools.complexity_probe:main"
 wreath-request-trace = "wreath._devtools.request_trace:main"
 wreath-tape-decomp = "wreath._devtools.tape_decomp:main"
 wreath-decomp = "wreath._devtools.decomp:main"

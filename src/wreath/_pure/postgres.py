@@ -1035,10 +1035,13 @@ class Connection:
             and not self._emitted
             and self._flush_handle is None
         )
+        # No done-callback: the only cleanup a resolved future needs is the
+        # cancellation path, and the `except asyncio.CancelledError` below
+        # already runs it (every submitted future is awaited right here, and
+        # nothing else holds it). A callback would add one lambda allocation
+        # and one call_soon Handle per operation for a duplicate idempotent
+        # _cancel_operation call.
         self._waiting.append(operation)
-        future.add_done_callback(
-            lambda completed, item=operation: self._operation_done(item, completed)
-        )
         if eager:
             self._flush()
         elif self._flush_handle is None:
@@ -1310,12 +1313,6 @@ class Connection:
                 future.set_result(operation.one_row)
             else:
                 future.set_result(operation.one_value)
-
-    def _operation_done(
-        self, operation: Operation, future: asyncio.Future[Any]
-    ) -> None:
-        if future.cancelled():
-            self._cancel_operation(operation)
 
     def _cancel_operation(self, operation: Operation) -> None:
         if operation.state in {"completed", "cancelled"} or operation.discarded:

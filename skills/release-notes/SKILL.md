@@ -1,7 +1,7 @@
 ---
 name: release-notes
 description: >-
-  Summarize the changes between two neo versions into a curated release-notes
+  Summarize the changes between two wreath versions into a curated release-notes
   page at docs/release_notes/<version>.md, and link it from the release-notes
   index. Use when preparing a release, cutting a version, or when someone asks
   for release notes / a changelog for a version. The publish.yml workflow

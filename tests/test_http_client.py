@@ -888,6 +888,8 @@ async def test_client_caches_dns_and_tls_setup(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
     monkeypatch.setattr(ssl, "create_default_context", create_default_context)
+    # DNS/TLS-setup caching is transport-agnostic; spoof the streams seam.
+    monkeypatch.setattr("wreath.http_client._NativeClientStream", None)
     monkeypatch.setattr(asyncio, "open_connection", open_connection)
 
     limits = ClientLimits(read_high_water=12345, dns_cache_ttl=30)
@@ -921,6 +923,8 @@ async def test_client_races_resolved_addresses(monkeypatch: pytest.MonkeyPatch) 
         return cast(asyncio.StreamReader, object()), cast(asyncio.StreamWriter, object())
 
     monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
+    # Address racing is transport-agnostic; spoof the streams seam.
+    monkeypatch.setattr("wreath.http_client._NativeClientStream", None)
     monkeypatch.setattr(asyncio, "open_connection", open_connection)
 
     client = HTTPClient("race", base_url="http://example.com")

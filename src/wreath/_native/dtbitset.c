@@ -118,6 +118,34 @@ typedef struct {
     uint8_t built[BRT_MAX_SEGMENTS + 1]; /* set once tried; NULL means no routes */
 } MethodGroups;
 
+/* Probe instrumentation. Compiled in by default: predictable increments on a
+ * path already doing a hash, kept because the numbers decide whether a
+ * different table design (Swiss-style control bytes, discriminating-byte keys)
+ * is worth building. Per table -- not a process-global -- so tables do not
+ * pollute each other's numbers and the hottest match path never writes a
+ * cache line shared across every table (and, under free threading, every
+ * thread). Read and reset through `probe_stats()`. Build with
+ * -DWREATH_BRT_PROBES=0 to compile the counters out when pricing them. */
+#ifndef WREATH_BRT_PROBES
+#define WREATH_BRT_PROBES 1
+#endif
+#if WREATH_BRT_PROBES
+#define BRT_PROBE(stmt) stmt
+#else
+#define BRT_PROBE(stmt) ((void)0)
+#endif
+typedef struct {
+    uint64_t lookups;
+    uint64_t buckets;      /* buckets examined, including the first */
+    uint64_t key_compares; /* full memcmp calls actually made */
+    uint64_t hits;
+    uint64_t misses;
+    uint64_t max_probe;
+    uint64_t disc_lookups; /* lookups served by the discriminating-byte keying */
+    uint64_t verify_routes;/* routes the scan fully verified */
+    uint64_t verify_cmps;  /* literal segment compares inside verify */
+} ProbeStats;
+
 typedef struct {
     PyObject_HEAD
     BRoute *routes;
@@ -135,6 +163,7 @@ typedef struct {
     PyObject *get_method; /* owned per table; avoids process-global Python state */
     int dirty;
     int sealed;
+    ProbeStats probe_stats; /* zeroed by tp_alloc; reset via probe_stats() */
 } BitsetRouteTable;
 
 typedef struct {
@@ -553,42 +582,16 @@ done:
     return rc;
 }
 
-/* Probe instrumentation. Compiled in by default: predictable increments on a
- * path already doing a hash, kept because the numbers decide whether a
- * different table design (Swiss-style control bytes, discriminating-byte keys)
- * is worth building. Read and reset through `probe_stats()`. Build with
- * -DWREATH_BRT_PROBES=0 to compile the counters out when pricing them. */
-#ifndef WREATH_BRT_PROBES
-#define WREATH_BRT_PROBES 1
-#endif
-#if WREATH_BRT_PROBES
-#define BRT_PROBE(stmt) stmt
-#else
-#define BRT_PROBE(stmt) ((void)0)
-#endif
-typedef struct {
-    uint64_t lookups;
-    uint64_t buckets;      /* buckets examined, including the first */
-    uint64_t key_compares; /* full memcmp calls actually made */
-    uint64_t hits;
-    uint64_t misses;
-    uint64_t max_probe;
-    uint64_t disc_lookups; /* lookups served by the discriminating-byte keying */
-    uint64_t verify_routes;/* routes the scan fully verified */
-    uint64_t verify_cmps;  /* literal segment compares inside verify */
-} ProbeStats;
-
-static ProbeStats brt_probe_stats = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-
 static inline void
-probe_record(uint64_t examined, int hit)
+probe_record(ProbeStats *ps, uint64_t examined, int hit)
 {
 #if WREATH_BRT_PROBES
-    brt_probe_stats.buckets += examined;
-    if (hit) brt_probe_stats.hits++;
-    else brt_probe_stats.misses++;
-    if (examined > brt_probe_stats.max_probe) brt_probe_stats.max_probe = examined;
+    ps->buckets += examined;
+    if (hit) ps->hits++;
+    else ps->misses++;
+    if (examined > ps->max_probe) ps->max_probe = examined;
 #else
+    (void)ps;
     (void)examined;
     (void)hit;
 #endif
@@ -596,7 +599,8 @@ probe_record(uint64_t examined, int hit)
 
 /* Exact keying: hash every byte, then confirm with a memcmp. */
 static inline Py_ssize_t
-maskmap_get_exact(const MaskMap *m, const char *key, Py_ssize_t len)
+maskmap_get_exact(const MaskMap *m, const char *key, Py_ssize_t len,
+                  ProbeStats *ps)
 {
     uint64_t h = hash_bytes(key, len);
     Py_ssize_t mask = m->cap - 1;
@@ -604,11 +608,11 @@ maskmap_get_exact(const MaskMap *m, const char *key, Py_ssize_t len)
     uint64_t examined = 0;
     for (;;) {
         examined++;
-        if (m->slots[i] < 0) { probe_record(examined, 0); return -1; }
+        if (m->slots[i] < 0) { probe_record(ps, examined, 0); return -1; }
         if (m->hashes[i] == h && m->lens[i] == len) {
-            BRT_PROBE(brt_probe_stats.key_compares++);
+            BRT_PROBE(ps->key_compares++);
             if (memcmp(m->keys[i], key, (size_t)len) == 0) {
-                probe_record(examined, 1);
+                probe_record(ps, examined, 1);
                 return m->slots[i];
             }
         }
@@ -620,28 +624,29 @@ maskmap_get_exact(const MaskMap *m, const char *key, Py_ssize_t len)
  * integer. A hit is not proof the segment equals the literal -- verify decides
  * that -- it is only proof that no true match was dropped. */
 static inline Py_ssize_t
-maskmap_get_disc(const MaskMap *m, const char *key, Py_ssize_t len)
+maskmap_get_disc(const MaskMap *m, const char *key, Py_ssize_t len,
+                 ProbeStats *ps)
 {
     uint64_t k = disc_key(m, key, len);
     Py_ssize_t mask = m->cap - 1;
     Py_ssize_t i = (Py_ssize_t)(disc_mix(k) & (uint64_t)mask);
     uint64_t examined = 0;
-    BRT_PROBE(brt_probe_stats.disc_lookups++);
+    BRT_PROBE(ps->disc_lookups++);
     for (;;) {
         examined++;
-        if (m->slots[i] < 0) { probe_record(examined, 0); return -1; }
-        if (m->hashes[i] == k) { probe_record(examined, 1); return m->slots[i]; }
+        if (m->slots[i] < 0) { probe_record(ps, examined, 0); return -1; }
+        if (m->hashes[i] == k) { probe_record(ps, examined, 1); return m->slots[i]; }
         i = (i + 1) & mask;
     }
 }
 
 static Py_ssize_t
-maskmap_get(const MaskMap *m, const char *key, Py_ssize_t len)
+maskmap_get(const MaskMap *m, const char *key, Py_ssize_t len, ProbeStats *ps)
 {
     if (m->cap == 0) return -1;
-    BRT_PROBE(brt_probe_stats.lookups++);
-    if (m->noff > 0) return maskmap_get_disc(m, key, len);
-    return maskmap_get_exact(m, key, len);
+    BRT_PROBE(ps->lookups++);
+    if (m->noff > 0) return maskmap_get_disc(m, key, len, ps);
+    return maskmap_get_exact(m, key, len, ps);
 }
 
 static void
@@ -796,7 +801,17 @@ bgroup_plan(BGroup *g)
     int n = 0;
     for (int p = 0; p < g->nseg; p++) {
         double s = position_survival(g, p);
-        if (s >= 1.0) continue; /* cannot narrow: intersecting is a no-op */
+        if (s >= 1.0) {
+            /* An all-param position accepts any segment: probing it is a true
+             * no-op. A position with literals scoring 1.0 (every route shares
+             * one literal, e.g. a common '/api' prefix segment) narrows
+             * nothing among hits but rejects the whole group on a miss --
+             * keep it, ordered last, so a matched request usually early-exits
+             * before paying its probe while a request missing only there is
+             * filtered instead of falling through to per-route verification. */
+            if (g->literal[p].count == 0) continue;
+            s = 1.0;
+        }
         score[n] = s;
         g->order[n] = p;
         n++;
@@ -1427,7 +1442,8 @@ brt_match_impl(BitsetRouteTable *self, PyObject *method_obj,
     }
     for (int k = 0; k < g->norder; k++) {
         int p = g->order[k];
-        Py_ssize_t slot = maskmap_get(&g->literal[p], segs[p].bytes, segs[p].len);
+        Py_ssize_t slot = maskmap_get(&g->literal[p], segs[p].bytes, segs[p].len,
+                                      &self->probe_stats);
         const uint64_t *pm = &g->param[(Py_ssize_t)p * nw];
         int live = 0;
         for (Py_ssize_t w = 0; w < nw; w++) {
@@ -1450,10 +1466,10 @@ brt_match_impl(BitsetRouteTable *self, PyObject *method_obj,
             bits &= bits - 1;
             BRoute *r = g->routes[i];
             int matches = 1;
-            BRT_PROBE(brt_probe_stats.verify_routes++);
+            BRT_PROBE(self->probe_stats.verify_routes++);
             for (int p = 0; p < r->nseg; p++) {
                 if (r->segs[p].bytes == NULL) continue;
-                BRT_PROBE(brt_probe_stats.verify_cmps++);
+                BRT_PROBE(self->probe_stats.verify_cmps++);
                 if (r->segs[p].len != segs[p].len ||
                     memcmp(r->segs[p].bytes, segs[p].bytes,
                            (size_t)segs[p].len) != 0) {
@@ -1651,9 +1667,9 @@ brt_stats(BitsetRouteTable *self, PyObject *Py_UNUSED(a))
 }
 
 static PyObject *
-brt_probe_stats_get(PyObject *Py_UNUSED(mod), PyObject *Py_UNUSED(a))
+brt_probe_stats_get(BitsetRouteTable *self, PyObject *Py_UNUSED(a))
 {
-    ProbeStats *s = &brt_probe_stats;
+    ProbeStats *s = &self->probe_stats;
     PyObject *d = Py_BuildValue(
         "{s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K}",
         "lookups", s->lookups, "buckets_examined", s->buckets,
@@ -1680,8 +1696,8 @@ static PyMethodDef brt_methods[] = {
      "probe(method, path, all_capability_mask) -> (classification, match | None)"},
     {"stats", (PyCFunction)brt_stats, METH_NOARGS,
      "stats() -> compiled size, for measurement"},
-    {"probe_stats", (PyCFunction)brt_probe_stats_get, METH_NOARGS | METH_STATIC,
-     "probe_stats() -> hash probe counters, and reset them"},
+    {"probe_stats", (PyCFunction)brt_probe_stats_get, METH_NOARGS,
+     "probe_stats() -> this table's hash probe counters, and reset them"},
     {NULL, NULL, 0, NULL},
 };
 

@@ -28,9 +28,26 @@ EXPECTED = Path(__file__).parent / "expected"
 _node = shutil.which("node")
 _npx = shutil.which("npx")
 
+
+def _node_major() -> int:
+    """Major version of the node on PATH, or 0 if it can't be determined."""
+    if _node is None:
+        return 0
+    try:
+        out = subprocess.run([_node, "--version"], capture_output=True,
+                             text=True, timeout=10).stdout.strip()
+        return int(out.lstrip("v").split(".", 1)[0])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+
+
+# The consumer's mock harness is an ES module ``.mts`` file, which node only
+# executes directly from v18 (v16 raises ERR_UNKNOWN_FILE_EXTENSION), so an old
+# toolchain is treated the same as a missing one.
 pytestmark = pytest.mark.skipif(
-    _node is None or _npx is None or not (CONSUMER / "node_modules").exists(),
-    reason="node toolchain or consumer node_modules not available",
+    _node is None or _npx is None or not (CONSUMER / "node_modules").exists()
+    or _node_major() < 18,
+    reason="node>=18 toolchain or consumer node_modules not available",
 )
 
 

@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "project": "neo",
+  "project": "wreath",
   "python": ">=3.14",
   "status": "pre-1.0",
   "entrypoints": {
     "human_docs": "docs/index.md",
-    "agent_docs": "docs/agents/index.md",
+    "agent_docs": "docs/cookbook/agents/index.md",
     "llm_map": "docs/llms.txt",
     "repository_rules": "AGENTS.md",
     "site_config": "mkdocs.yml"
@@ -23,11 +23,11 @@
   "subsystems": [
     {
       "name": "application",
-      "guide": "docs/concepts/request-lifecycle.md",
+      "guide": "docs/guides/routing.md",
       "sources": [
-        "src/neo/app.py",
-        "src/neo/router.py",
-        "src/neo/state.py"
+        "src/wreath/app.py",
+        "src/wreath/router.py",
+        "src/wreath/state.py"
       ],
       "tests": [
         "tests/test_app.py"
@@ -37,16 +37,16 @@
       "name": "http",
       "guide": "docs/guides/requests-responses.md",
       "sources": [
-        "src/neo/request.py",
-        "src/neo/response.py",
-        "src/neo/background.py",
-        "src/neo/http.py",
-        "src/neo/http_client.py",
-        "src/neo/webhooks.py",
-        "src/neo/_client_codec.py",
-        "src/neo/_pure/http_client.py",
-        "src/neo/_native/_clientmodule.c",
-        "src/neo/_native/http.c"
+        "src/wreath/request.py",
+        "src/wreath/response.py",
+        "src/wreath/background.py",
+        "src/wreath/_http.py",
+        "src/wreath/http_client.py",
+        "src/wreath/webhooks.py",
+        "src/wreath/_client_codec.py",
+        "src/wreath/_pure/http_client.py",
+        "src/wreath/_native/_clientmodule.c",
+        "src/wreath/_native/http.c"
       ],
       "tests": [
         "tests/test_request.py",
@@ -62,19 +62,19 @@
       "name": "routing",
       "guide": "docs/guides/routing.md",
       "sources": [
-        "src/neo/routing.py",
-        "src/neo/_pure/router.py",
-        "src/neo/_native/router.c",
-        "src/neo/_pure/dtrouter.py",
-        "src/neo/_native/dtrouter.c"
+        "src/wreath/_routing.py",
+        "src/wreath/_pure/router.py",
+        "src/wreath/_native/router.c",
+        "src/wreath/_pure/dtrouter.py",
+        "src/wreath/_native/dtrouter.c"
       ]
     },
     {
       "name": "binding",
       "guide": "docs/guides/binding.md",
       "sources": [
-        "src/neo/binding.py",
-        "src/neo/_native/validate.c"
+        "src/wreath/binding.py",
+        "src/wreath/_native/validate.c"
       ],
       "tests": [
         "tests/test_binding.py",
@@ -84,11 +84,11 @@
     },
     {
       "name": "typegen",
-      "guide": "docs/guides/typegen.md",
+      "guide": "docs/guides/openapi-typegen.md",
       "sources": [
-        "src/neo/typegen/",
-        "src/neo/_pure/typegen.py",
-        "src/neo/openapi.py"
+        "src/wreath/typegen/",
+        "src/wreath/_pure/typegen.py",
+        "src/wreath/openapi.py"
       ],
       "tests": [
         "tests/test_typegen.py",
@@ -100,11 +100,11 @@
     },
     {
       "name": "configuration",
-      "guide": "docs/guides/configuration.md",
+      "guide": "docs/guides/config-state.md",
       "sources": [
-        "src/neo/config.py",
-        "src/neo/_pure/env.py",
-        "src/neo/_native/env.c"
+        "src/wreath/config.py",
+        "src/wreath/_pure/env.py",
+        "src/wreath/_native/env.c"
       ],
       "tests": [
         "tests/test_config.py"
@@ -112,9 +112,9 @@
     },
     {
       "name": "middleware",
-      "guide": "docs/guides/middleware-errors.md",
+      "guide": "docs/guides/middleware.md",
       "sources": [
-        "src/neo/middleware/"
+        "src/wreath/middleware/"
       ],
       "decision": "docs/decisions/0009-middleware-fusion-execution-model.md"
     },
@@ -122,19 +122,21 @@
       "name": "auth",
       "guide": "docs/guides/auth.md",
       "sources": [
-        "src/neo/auth/",
-        "src/neo/_pure/authz.py",
-        "src/neo/_native/authz.c"
+        "src/wreath/auth.py",
+        "src/wreath/authorization.py",
+        "src/wreath/_auth/",
+        "src/wreath/_pure/authz.py",
+        "src/wreath/_native/authz.c"
       ]
     },
     {
       "name": "postgres",
       "guide": "docs/guides/postgres.md",
-      "internals": "docs/native/postgres.md",
+      "internals": "docs/reference/postgres.md",
       "sources": [
-        "src/neo/postgres.py",
-        "src/neo/_pure/postgres.py",
-        "src/neo/_native/postgres/"
+        "src/wreath/postgres.py",
+        "src/wreath/_pure/postgres.py",
+        "src/wreath/_native/postgres/"
       ],
       "tests": [
         "tests/postgres/"
@@ -145,15 +147,15 @@
       "name": "server",
       "guide": "docs/guides/server.md",
       "sources": [
-        "src/neo/server.py",
-        "src/neo/cli.py",
-        "src/neo/_cli.py",
-        "src/neo/_devserver.py",
-        "src/neo/__main__.py",
-        "src/neo/_pure/server.py",
-        "src/neo/_native/server_http1.c",
-        "src/neo/_native/server_http2.c",
-        "src/neo/_native/http3_asgi.c"
+        "src/wreath/server.py",
+        "src/wreath/cli.py",
+        "src/wreath/_cli.py",
+        "src/wreath/_devserver.py",
+        "src/wreath/__main__.py",
+        "src/wreath/_pure/server.py",
+        "src/wreath/_native/server_http1.c",
+        "src/wreath/_native/server_http2.c",
+        "src/wreath/_native/http3_asgi.c"
       ],
       "tests": [
         "tests/test_cli.py",
@@ -166,11 +168,11 @@
     },
     {
       "name": "testing",
-      "guide": "docs/guides/websockets-static-testing.md",
+      "guide": "docs/guides/testing.md",
       "sources": [
-        "src/neo/testing.py",
-        "src/neo/websocket.py",
-        "src/neo/staticfiles.py"
+        "src/wreath/testing.py",
+        "src/wreath/websocket.py",
+        "src/wreath/staticfiles.py"
       ]
     },
     {
@@ -178,20 +180,20 @@
       "guide": "docs/guides/orm.md",
       "reference": "docs/reference/orm.md",
       "sources": [
-        "src/neo/orm/",
-        "src/neo/_native/postgres/model.c",
-        "src/neo/_native/postgres/hydrate.c",
-        "src/neo/_native/orm_shape.c"
+        "src/wreath/orm/",
+        "src/wreath/_native/postgres/model.c",
+        "src/wreath/_native/postgres/hydrate.c",
+        "src/wreath/_native/orm_shape.c"
       ],
       "tests": [
         "tests/orm/",
         "tests/orm/test_native_shape_parity.py"
       ],
-      "policy": "Attribute access never performs I/O; raw SQL and neo.postgres stay unchanged; no migrations or DDL; pure and native storage must match behavior, not representation; the native query cache-key (orm_shape) must produce bytes identical to _shape_of_pure or the plan cache splits"
+      "policy": "Attribute access never performs I/O; raw SQL and wreath.postgres stay unchanged; no migrations or DDL; pure and native storage must match behavior, not representation; the native query cache-key (orm_shape) must produce bytes identical to _shape_of_pure or the plan cache splits"
     },
     {
       "name": "performance",
-      "guide": "docs/internals/performance.md",
+      "guide": "benchmarks/README.md",
       "sources": [
         "benchmarks/"
       ],
@@ -201,9 +203,9 @@
       "name": "templates",
       "guide": "docs/guides/templates.md",
       "sources": [
-        "src/neo/templates.py",
-        "src/neo/_pure/templates.py",
-        "src/neo/_native/templates.c"
+        "src/wreath/templates.py",
+        "src/wreath/_pure/templates.py",
+        "src/wreath/_native/templates.c"
       ],
       "tests": [
         "tests/test_template_parity.py"
@@ -214,8 +216,8 @@
       "name": "snapshot",
       "guide": "docs/guides/caching.md",
       "sources": [
-        "src/neo/snapshot.py",
-        "src/neo/_pure/snapshot.py"
+        "src/wreath/cache.py",
+        "src/wreath/_pure/snapshot.py"
       ],
       "tests": [
         "tests/test_snapshot_parity.py"
@@ -223,8 +225,8 @@
       "policy": "Read-mostly application cache by atomic generation publication. Reads perform no hidden I/O; misses are explicit. Refresh is single-flight and failure preserves the previous generation. Shipped pure-first (dict-backed read path); facade selects a native SnapshotCache only if one is measured in."
     }
   ],
-  "invariants": "docs/agents/contracts.md",
-  "playbooks": "docs/agents/playbooks.md",
+  "invariants": "AGENTS.md",
+  "playbooks": "docs/cookbook/agents/index.md",
   "subsystems[5]": {
     "tests": [
       "tests/test_middleware.py",

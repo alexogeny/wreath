@@ -103,9 +103,9 @@ def _start_container(image: str, host: str, port: int, name: str) -> None:
         [
             "podman", "run", "--rm", "--detach", "--name", name,
             "--publish", f"{host}:{port}:5432",
-            "--env", "POSTGRES_USER=neo",
+            "--env", "POSTGRES_USER=wreath",
             "--env", "POSTGRES_PASSWORD=secret",
-            "--env", "POSTGRES_DB=neo",
+            "--env", "POSTGRES_DB=wreath",
             image,
             # Identical durability tuning for every run so write scenarios
             # compare framework/driver CPU instead of host-disk fsync latency.
@@ -281,7 +281,7 @@ async def _run_framework(args: argparse.Namespace, framework: str) -> dict[str, 
 
     db_port = _available_port(args.host)
     container = f"wreath-bench-lifecycle-{framework}-{db_port}"
-    dsn = f"postgresql://neo:secret@{args.host}:{db_port}/neo"
+    dsn = f"postgresql://wreath:secret@{args.host}:{db_port}/wreath"
     db_started = time.perf_counter()
     print(f"[db] {framework}: starting fresh {args.image} on port {db_port}", flush=True)
     await asyncio.to_thread(_start_container, args.image, args.host, db_port, container)

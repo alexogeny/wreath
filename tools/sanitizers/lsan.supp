@@ -1,12 +1,12 @@
 # No active suppressions. Every reported leak must be investigated and fixed.
 #
-# Known non-leak: importing neo.orm with the native extension leaves a fixed
+# Known non-leak: importing wreath.orm with the native extension leaves a fixed
 # residue of roughly 240 allocations at interpreter shutdown, in stacks that are
 # entirely inside libpython. It is CPython's, not ours: it reproduces with a
 # bare `class Meta(_ModelType): def __new__(...)` and disappears when the
 # metaclass derives from `type` instead, with or without our metatype dealloc.
-# neo.orm needs that metaclass so a model class can be created by Python while
-# its storage base is generated in C (see src/neo/_native/postgres/model.c).
+# wreath.orm needs that metaclass so a model class can be created by Python while
+# its storage base is generated in C (see src/wreath/_native/postgres/model.c).
 #
 # It is deliberately NOT suppressed: every frame is libpython, so any pattern
 # broad enough to hide it would hide real leaks too.
@@ -19,8 +19,8 @@
 #     ASAN_OPTIONS=detect_leaks=1 LD_PRELOAD=$(gcc -print-file-name=libasan.so) \
 #     PYTHONPATH=.sanitizers/native-postgres/lib .venv/bin/python -c "
 #   import gc
-#   from neo.orm import Mapped, Model, column
-#   from neo.orm.types import Int64, Text
+#   from wreath.orm import Mapped, Model, column
+#   from wreath.orm.types import Int64, Text
 #   for i in range($n):
 #       class M(Model, table='m%d' % i):
 #           id: Mapped[int] = column(Int64, primary_key=True)
