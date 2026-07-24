@@ -103,6 +103,18 @@ class Select:
     def offset(self, value: int) -> Select:
         return self._replace(offset_=_check_bound(value, "offset"))
 
+    def paginate(self, page: int, size: int) -> Select:
+        """Shape this query for one page: ``LIMIT size OFFSET (page - 1) * size``.
+
+        Pure query-shaping; execution and the total count live in
+        ``wreath.pagination``.
+        """
+        if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+            raise ValueError(f"page must be an integer >= 1, got {page!r}")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 1:
+            raise ValueError(f"size must be an integer >= 1, got {size!r}")
+        return self.limit(size).offset((page - 1) * size)
+
     def for_update(self) -> Select:
         """Lock matched rows; requires a write session inside a transaction."""
         return self._replace(for_update_=True)

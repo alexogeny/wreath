@@ -4,7 +4,7 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 126,
+        "c": 128,
         "python": 2
       },
       "pre_activation": {
@@ -29,7 +29,7 @@
           "python": 0
         },
         "handler": {
-          "c": 57,
+          "c": 59,
           "python": 1
         },
         "egress": {
@@ -40,16 +40,16 @@
       "c_calls": {
         "dict.get": 38,
         "builtins.isinstance": 12,
-        "list.append": 9,
+        "list.append": 8,
         "str.encode": 5,
         "builtins.len": 4,
+        "builtins.getattr": 4,
         "TracedUser._orm_is_dirty": 4,
         "TracedUser._orm_set_loaded": 4,
         "bytes.decode": 3,
         "time.perf_counter": 2,
         "bytes.lower": 2,
         "str.rpartition": 2,
-        "builtins.getattr": 2,
         "builtins.id": 2,
         "dict.clear": 2,
         "TrustedNetworks.contains": 1,
@@ -65,10 +65,10 @@
         "wreath._native._core.find_header": 1,
         "posix.urandom": 1,
         "bytes.hex": 1,
-        "DecisionRouteTable.classify": 1,
+        "BitsetRouteTable.classify": 1,
         "str.partition": 1,
         "wreath._native._core.build_capability_mask": 1,
-        "DecisionRouteTable.resolve": 1,
+        "BitsetRouteTable.resolve": 1,
         "wreath._native._core.orm_shape": 1,
         "lock.__enter__": 1,
         "OrderedDict.get": 1,
@@ -81,6 +81,7 @@
         "list.clear": 1,
         "set.clear": 1,
         "wreath._native._core.json_dumps": 1,
+        "object.__new__": 1,
         "wreath._native._core.format_server_timing": 1,
         "wreath._native._core.append_missing_headers": 1,
         "str.capitalize": 1,
@@ -128,10 +129,10 @@
       "c_calls": {
         "builtins.len": 2,
         "dict.get": 2,
-        "DecisionRouteTable.classify": 1,
+        "BitsetRouteTable.classify": 1,
         "builtins.isinstance": 1,
         "wreath._native._core.json_dumps": 1,
-        "list.append": 1
+        "object.__new__": 1
       },
       "python_frames": {
         "src/wreath/app.py:__call__": 1

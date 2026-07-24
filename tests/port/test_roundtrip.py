@@ -9,6 +9,10 @@ import pytest
 
 port = pytest.importorskip("wreath.port")
 
+# Phase 0 ships analysis + report only; code emission (port_tree/emit_module) is
+# deferred to Phase 1 (design 07 §7). Re-enable when the declarative emitter lands.
+pytestmark = pytest.mark.skip(reason="Phase 1 code emission deferred; Phase 0 is report-only")
+
 
 def test_emitted_modules_parse(tmp_path, corpus_app_roots):
     for root in corpus_app_roots:

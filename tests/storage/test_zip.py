@@ -1,0 +1,96 @@
+"""Zip64 stream framing verified against the stdlib ``zipfile`` reference reader.
+
+Standalone-runnable: ``storage.py`` is import-clean at module level (the ``_fsguard``
+import is lazy inside LocalStorage), so it loads by path under ``/usr/bin/python3``
+without the built wreath extension. Exercises `zip_stream`/`unzip_stream` + `InMemoryStorage`.
+"""
+import asyncio
+import importlib.util
+import io
+import pathlib
+import sys
+import zipfile
+
+_SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "wreath"
+
+
+def _load(name, filename):
+    spec = importlib.util.spec_from_file_location(name, _SRC / filename)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod  # slotted dataclasses need the module registered
+    spec.loader.exec_module(mod)
+    return mod
+
+
+storage = _load("wreath_storage_standalone", "storage.py")
+
+
+async def _collect(store, keys):
+    out = bytearray()
+    async for chunk in storage.zip_stream(store, keys):
+        out += chunk
+    return bytes(out)
+
+
+def _build(objects):
+    async def go():
+        store = storage.InMemoryStorage()
+        for k, v in objects.items():
+            await store.write(k, v)
+        return await _collect(store, list(objects))
+
+    return asyncio.run(go())
+
+
+def _read_back(archive):
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        assert zf.testzip() is None  # every CRC validates
+        return {info.filename: zf.read(info.filename) for info in zf.infolist()}
+
+
+def test_empty_archive():
+    archive = _build({})
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        assert zf.namelist() == []
+
+
+def test_single_small():
+    objects = {"a/b/hello.txt": b"hello world"}
+    assert _read_back(_build(objects)) == objects
+
+
+def test_many_entries():
+    objects = {f"dir/file{i:03}.bin": bytes([i % 256]) * (i + 1) for i in range(50)}
+    assert _read_back(_build(objects)) == objects
+
+
+def test_large_multichunk():
+    # >64 KiB so it crosses the read chunk boundary; CRC + size must accumulate correctly.
+    objects = {"big.dat": b"wreath" * 200_000}  # ~1.2 MiB
+    got = _read_back(_build(objects))
+    assert got["big.dat"] == objects["big.dat"]
+
+
+def test_unzip_roundtrip():
+    objects = {"x/one.txt": b"one", "x/two.txt": b"two"}
+
+    async def go():
+        store = storage.InMemoryStorage()
+        for k, v in objects.items():
+            await store.write(k, v)
+        archive = await _collect(store, list(objects))
+        await store.write("bundle.zip", archive)
+        written = await storage.unzip_stream(store, "bundle.zip", prefix="out/")
+        return written, {k: await store.read(k) for k in written}
+
+    written, contents = asyncio.run(go())
+    assert set(written) == {"out/x/one.txt", "out/x/two.txt"}
+    assert contents["out/x/one.txt"] == b"one"
+
+
+if __name__ == "__main__":
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"PASS {name}")
+    print("all zip tests PASS")

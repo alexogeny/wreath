@@ -47,6 +47,10 @@ __all__ = [
     "server_span",
     "current_span",
     "activate_otel",
+    "activate_prometheus",
+    "activate_openmetrics",
+    "activate_statsd",
+    "activate_cloudwatch_emf",
 ]
 
 #: Hard ceilings so a misconfiguration cannot ask for unbounded memory. These are
@@ -387,3 +391,108 @@ def activate_otel(request: object) -> object:
         trace_flags=otel_trace.TraceFlags(0x01 if view.sampled else 0x00),
     )
     return otel_trace.set_span_in_context(otel_trace.NonRecordingSpan(context))
+
+
+# --- Prometheus exposition bridge -------------------------------------------
+#
+# Where the OTLP path (``wreath._otlp``/``wreath._export``) pushes the projector's
+# aggregated metrics to a collector, this bridge renders the *same* projector
+# snapshot as Prometheus text exposition to be *scraped*. It is opt-in and off the
+# request path: a scrape calls ``bridge.render()``, which reads one consistent
+# ``Projector.snapshot()`` (plus ``recorder_loss()``); an app that never mounts it
+# pays nothing. The renderer and format live in ``wreath._prometheus``.
+
+
+def activate_prometheus(
+    source: object,
+    *,
+    namespace: str = "wreath",
+    route_labels: object = None,
+) -> object:
+    """Wrap a metrics snapshot source in a Prometheus exposition bridge.
+
+    ``source`` is a :class:`wreath._projector.Projector` (or anything exposing
+    ``snapshot()`` and optionally ``recorder_loss()``). The returned
+    :class:`wreath._prometheus.PrometheusBridge` renders Prometheus text
+    exposition format 0.0.4 from the projector's per-route counters/errors,
+    duration histogram, pending gauge, and loss counters — the same aggregates
+    the OTLP exporter reads. Mount ``bridge.handler()`` (or
+    ``wreath._prometheus.metrics_router(source)``) at ``/metrics`` yourself, so
+    exposure and any auth gating stay your decision.
+
+    ``route_labels`` maps a numeric ``route_id`` to scrape labels (e.g. from the
+    metadata image's route table); without it rows are labelled by ``route_id``.
+    """
+    from ._prometheus import PrometheusBridge
+
+    return PrometheusBridge(source, namespace=namespace, route_labels=route_labels)
+
+
+def activate_openmetrics(
+    source: object,
+    *,
+    namespace: str = "wreath",
+    route_labels: object = None,
+) -> object:
+    """Like :func:`activate_prometheus`, but the bridge renders OpenMetrics 1.0.0.
+
+    Same ``Projector.snapshot()`` aggregates; the exposition drops the ``_total``
+    suffix from counter ``# TYPE`` families, terminates with ``# EOF``, and
+    advertises ``application/openmetrics-text; version=1.0.0``.
+    """
+    from ._prometheus import PrometheusBridge
+
+    return PrometheusBridge(
+        source, namespace=namespace, route_labels=route_labels, openmetrics=True,
+    )
+
+
+def activate_statsd(
+    source: object,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8125,
+    prefix: str = "wreath",
+    dogstatsd: bool = False,
+    tags: dict | None = None,
+    route_labels: object = None,
+) -> object:
+    """Wrap a snapshot source in a StatsD/DogStatsD UDP push bridge.
+
+    Where Prometheus/OpenMetrics expose the projector aggregates for scrape, this
+    *pushes* the same ``Projector.snapshot()`` state as StatsD lines: counters as
+    deltas since the last :meth:`~wreath._statsd.StatsDBridge.flush`, gauges
+    absolute. ``dogstatsd=True`` emits ``|#k:v`` tags (route/method/path labels);
+    plain StatsD folds labels into the metric name. Drive ``bridge.flush()`` (or
+    ``bridge.run_periodic(interval)`` from a supervised task) yourself.
+    """
+    from ._statsd import StatsDBridge
+
+    return StatsDBridge(
+        source, host=host, port=port, prefix=prefix,
+        dogstatsd=dogstatsd, tags=tags, route_labels=route_labels,
+    )
+
+
+def activate_cloudwatch_emf(
+    source: object,
+    *,
+    namespace: str = "Wreath",
+    dimensions: dict | None = None,
+    route_labels: object = None,
+    cumulative: bool = False,
+) -> object:
+    """Wrap a snapshot source in a CloudWatch EMF bridge.
+
+    Renders the same ``Projector.snapshot()`` aggregates as EMF structured-JSON
+    log lines (one blob per route + a global blob); written to stdout, CloudWatch
+    Logs turns them into metrics with no agent. Counters are per-period deltas
+    (CloudWatch SUMs) unless ``cumulative=True``. Call ``bridge.emit()`` on a
+    cadence (or ``bridge.render()`` for the text).
+    """
+    from ._cloudwatch_emf import EmfBridge
+
+    return EmfBridge(
+        source, namespace=namespace, dimensions=dimensions,
+        route_labels=route_labels, cumulative=cumulative,
+    )

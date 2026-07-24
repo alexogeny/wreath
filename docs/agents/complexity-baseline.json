@@ -1,7 +1,304 @@
 {
   "version": 1,
-  "note": "Checked complexity assumptions for the metal HTTP/1 request path. Timings are observations, not absolute performance gates; `uv run wreath-complexity-probe --group metal-http1 --check` reruns each proof and enforces its declared global and tail exponent bound. Re-record reviewed assumption changes with `--update-baseline`.",
+  "note": "Checked complexity assumptions for the metal request path. Timings are observations, not absolute performance gates; --check reruns each probe and enforces its declared global and tail exponent bound.",
   "probes": {
+    "wheel-fire-batch": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "advance() over k same-tick timers: linear, exactly one slot rescan.",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ]
+      },
+      "observation": {
+        "probe": "wheel-fire-batch",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "advance() over k same-tick timers: linear, exactly one slot rescan.",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.177,
+        "tail_exponent": 1.341,
+        "local_exponents": [
+          0.919,
+          0.966,
+          1.716
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "seconds": [
+          1.2909993529319763e-05,
+          2.4410008336417377e-05,
+          4.7698995331302285e-05,
+          0.00015672699373681098
+        ],
+        "counters": [
+          {
+            "slot_rescans": 1
+          },
+          {
+            "slot_rescans": 1
+          },
+          {
+            "slot_rescans": 1
+          },
+          {
+            "slot_rescans": 1
+          }
+        ]
+      }
+    },
+    "wheel-cancel-cohort": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "cancel() of k same-deadline timers: linear, exactly one slot rescan.",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ]
+      },
+      "observation": {
+        "probe": "wheel-cancel-cohort",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "cancel() of k same-deadline timers: linear, exactly one slot rescan.",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.989,
+        "tail_exponent": 0.995,
+        "local_exponents": [
+          0.978,
+          0.99,
+          1.0
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "seconds": [
+          3.3688993426039815e-05,
+          6.635799945797771e-05,
+          0.00013183700502850115,
+          0.00026360400079283863
+        ],
+        "counters": [
+          {
+            "slot_rescans": 1
+          },
+          {
+            "slot_rescans": 1
+          },
+          {
+            "slot_rescans": 1
+          },
+          {
+            "slot_rescans": 1
+          }
+        ]
+      }
+    },
+    "wheel-parked-rotation": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "advance() across one idle rotation with n parked long timers: O(1).",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          50000,
+          100000,
+          200000,
+          400000
+        ]
+      },
+      "observation": {
+        "probe": "wheel-parked-rotation",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "advance() across one idle rotation with n parked long timers: O(1).",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.239,
+        "tail_exponent": 0.314,
+        "local_exponents": [
+          0.042,
+          0.384,
+          0.245
+        ],
+        "class": "O(1)",
+        "status": "PASS",
+        "sizes": [
+          50000,
+          100000,
+          200000,
+          400000
+        ],
+        "seconds": [
+          1.3699900591745973e-06,
+          1.410007826052606e-06,
+          1.8400023691356182e-06,
+          2.1799933165311813e-06
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "bitset-uniform-literal-miss": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "match() missing only at a group-uniform literal position: O(1).",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": "verified_per_match",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ]
+      },
+      "observation": {
+        "probe": "bitset-uniform-literal-miss",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "match() missing only at a group-uniform literal position: O(1).",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.0,
+        "tail_exponent": 0.0,
+        "local_exponents": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "class": "O(1)",
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          1.7739497707225382e-07,
+          2.562949521234259e-07,
+          4.188399907434359e-07,
+          7.984349940670655e-07
+        ],
+        "counters": [
+          {
+            "verified_per_match": 0
+          },
+          {
+            "verified_per_match": 0
+          },
+          {
+            "verified_per_match": 0
+          },
+          {
+            "verified_per_match": 0
+          }
+        ]
+      }
+    },
+    "loop-timer-churn": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "k call_later+cancel cycles on the metal-config loop: linear, no rot.",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          5000,
+          10000,
+          20000,
+          40000
+        ]
+      },
+      "observation": {
+        "probe": "loop-timer-churn",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "k call_later+cancel cycles on the metal-config loop: linear, no rot.",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.05,
+        "tail_exponent": 1.086,
+        "local_exponents": [
+          0.996,
+          0.999,
+          1.173
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          5000,
+          10000,
+          20000,
+          40000
+        ],
+        "seconds": [
+          0.0005551880021812394,
+          0.001107336996938102,
+          0.002213222993304953,
+          0.0049893929972313344
+        ],
+        "counters": [
+          {
+            "retained_timers": 0
+          },
+          {
+            "retained_timers": 0
+          },
+          {
+            "retained_timers": 0
+          },
+          {
+            "retained_timers": 0
+          }
+        ]
+      }
+    },
     "http1-receive-queue-lockstep": {
       "contract": {
         "group": "metal-http1",
@@ -11,9 +308,49 @@
         "expect_exponent": 0.0,
         "tolerance": 0.5,
         "metric": null,
-        "sizes": [16384, 32768, 65536, 131072]
+        "sizes": [
+          16384,
+          32768,
+          65536,
+          131072
+        ]
       },
-      "observation": {"status": "PASS"}
+      "observation": {
+        "probe": "http1-receive-queue-lockstep",
+        "group": "metal-http1",
+        "stage": "ingress",
+        "axis": "retained receive-queue capacity",
+        "assumption": "one pop plus one push is amortized O(1) in queue capacity",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.038,
+        "tail_exponent": 0.023,
+        "local_exponents": [
+          0.007,
+          0.225,
+          -0.18
+        ],
+        "class": "O(1)",
+        "status": "PASS",
+        "sizes": [
+          16384,
+          32768,
+          65536,
+          131072
+        ],
+        "seconds": [
+          3.6547964555211365e-05,
+          3.673399623949081e-05,
+          4.294581594876945e-05,
+          3.7899924791418016e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
     },
     "http1-fragmented-head": {
       "contract": {
@@ -24,9 +361,49 @@
         "expect_exponent": 1.0,
         "tolerance": 0.5,
         "metric": null,
-        "sizes": [2000, 4000, 8000, 16000]
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ]
       },
-      "observation": {"status": "PASS"}
+      "observation": {
+        "probe": "http1-fragmented-head",
+        "group": "metal-http1",
+        "stage": "ingress",
+        "axis": "request-head bytes delivered one byte at a time",
+        "assumption": "incremental delimiter scans visit each buffered byte O(1) times",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.711,
+        "tail_exponent": 0.778,
+        "local_exponents": [
+          0.559,
+          0.768,
+          0.788
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "seconds": [
+          0.0001003179932013154,
+          0.00014782699872739613,
+          0.000251655001193285,
+          0.000434410001616925
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
     },
     "http1-pipelined-requests": {
       "contract": {
@@ -37,9 +414,49 @@
         "expect_exponent": 1.0,
         "tolerance": 0.5,
         "metric": null,
-        "sizes": [500, 1000, 2000, 4000]
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ]
       },
-      "observation": {"status": "PASS"}
+      "observation": {
+        "probe": "http1-pipelined-requests",
+        "group": "metal-http1",
+        "stage": "request",
+        "axis": "keep-alive requests queued on one protocol",
+        "assumption": "request parsing, activation, and response emission are O(requests)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.975,
+        "tail_exponent": 0.988,
+        "local_exponents": [
+          0.946,
+          0.982,
+          0.995
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          0.0010438770113978535,
+          0.0020105770090594888,
+          0.003970706005929969,
+          0.007912490997114219
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
     },
     "http1-response-headers": {
       "contract": {
@@ -50,9 +467,587 @@
         "expect_exponent": 1.0,
         "tolerance": 0.5,
         "metric": null,
-        "sizes": [2000, 4000, 8000, 16000]
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ]
       },
-      "observation": {"status": "PASS"}
+      "observation": {
+        "probe": "http1-response-headers",
+        "group": "metal-http1",
+        "stage": "egress",
+        "axis": "response header count at fixed value width",
+        "assumption": "one-shot response validation and serialization are O(header bytes)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.711,
+        "tail_exponent": 0.713,
+        "local_exponents": [
+          0.711,
+          0.695,
+          0.731
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "seconds": [
+          0.0001135669881477952,
+          0.00018587599333841354,
+          0.00030100299045443535,
+          0.0004996189964003861
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "metal-egress-backpressure": {
+      "contract": {
+        "group": "metal-host",
+        "stage": "egress",
+        "axis": "fixed-size writes retained behind a blocked metal socket",
+        "assumption": "native egress enqueue is amortized O(writes) under backpressure",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ]
+      },
+      "observation": {
+        "probe": "metal-egress-backpressure",
+        "group": "metal-host",
+        "stage": "egress",
+        "axis": "fixed-size writes retained behind a blocked metal socket",
+        "assumption": "native egress enqueue is amortized O(writes) under backpressure",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.898,
+        "tail_exponent": 0.948,
+        "local_exponents": [
+          0.761,
+          1.014,
+          0.881
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          3.5209013731218874e-05,
+          5.967900506220758e-05,
+          0.0001205180014949292,
+          0.00022198499937076122
+        ],
+        "counters": [
+          {
+            "queued_bytes": 4096000
+          },
+          {
+            "queued_bytes": 8192000
+          },
+          {
+            "queued_bytes": 16384000
+          },
+          {
+            "queued_bytes": 32768000
+          }
+        ]
+      }
+    },
+    "validate-unexpected-fields": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Rejecting a body with n extra keys against an n-field schema: O(n).",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          400,
+          800,
+          1600,
+          3200
+        ]
+      },
+      "observation": {
+        "probe": "validate-unexpected-fields",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Rejecting a body with n extra keys against an n-field schema: O(n).",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.037,
+        "tail_exponent": 1.037,
+        "local_exponents": [
+          1.061,
+          0.97,
+          1.104
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          400,
+          800,
+          1600,
+          3200
+        ],
+        "seconds": [
+          0.00012551635009003804,
+          0.00026179990018135866,
+          0.0005127720993186813,
+          0.0011021295002137776
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "validate-union-bomb": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "A nested-union validation bomb stays bounded regardless of depth: O(1).",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          22,
+          24,
+          26,
+          28
+        ]
+      },
+      "observation": {
+        "probe": "validate-union-bomb",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "A nested-union validation bomb stays bounded regardless of depth: O(1).",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": -0.364,
+        "tail_exponent": -0.291,
+        "local_exponents": [
+          -0.503,
+          -0.317,
+          -0.263
+        ],
+        "class": "O(1)",
+        "status": "PASS",
+        "sizes": [
+          22,
+          24,
+          26,
+          28
+        ],
+        "seconds": [
+          0.44510438801080454,
+          0.42605220300902147,
+          0.4153777210012777,
+          0.40736121199734043
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "json-encode": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Encoding an n-element structure is O(n): the writer buffer grows",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          20000,
+          40000,
+          80000,
+          160000
+        ]
+      },
+      "observation": {
+        "probe": "json-encode",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Encoding an n-element structure is O(n): the writer buffer grows",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.048,
+        "tail_exponent": 1.027,
+        "local_exponents": [
+          1.121,
+          0.953,
+          1.1
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          20000,
+          40000,
+          80000,
+          160000
+        ],
+        "seconds": [
+          0.00017209599900525063,
+          0.00037435200647450984,
+          0.0007246650056913495,
+          0.0015535069978795946
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "json-decode": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Decoding an n-element document is O(n): single-pass scan, parser-local",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          20000,
+          40000,
+          80000,
+          160000
+        ]
+      },
+      "observation": {
+        "probe": "json-decode",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Decoding an n-element document is O(n): single-pass scan, parser-local",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.02,
+        "tail_exponent": 0.946,
+        "local_exponents": [
+          1.166,
+          1.024,
+          0.869
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          20000,
+          40000,
+          80000,
+          160000
+        ],
+        "seconds": [
+          0.00038566200237255543,
+          0.000865472000441514,
+          0.001759392995154485,
+          0.003213642004993744
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "parse-cookies": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Parsing an n-cookie header is O(n): one forward pass, O(1) dict ops.",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ]
+      },
+      "observation": {
+        "probe": "parse-cookies",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Parsing an n-cookie header is O(n): one forward pass, O(1) dict ops.",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.993,
+        "tail_exponent": 1.033,
+        "local_exponents": [
+          0.68,
+          1.695,
+          0.37
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "seconds": [
+          0.0001910259888973087,
+          0.00030599300225730985,
+          0.000990959000773728,
+          0.001281033008126542
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "parse-qs": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Parsing an n-field query string is O(n): one forward pass, list append.",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ]
+      },
+      "observation": {
+        "probe": "parse-qs",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Parsing an n-field query string is O(n): one forward pass, list append.",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.068,
+        "tail_exponent": 1.026,
+        "local_exponents": [
+          1.181,
+          0.982,
+          1.07
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "seconds": [
+          0.00014527600433211774,
+          0.00032932301110122353,
+          0.0006503369950223714,
+          0.0013651909976033494
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "build-header-map": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Building the header map from n headers is O(n): one pass into a dict.",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ]
+      },
+      "observation": {
+        "probe": "build-header-map",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Building the header map from n headers is O(n): one pass into a dict.",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.033,
+        "tail_exponent": 1.055,
+        "local_exponents": [
+          0.946,
+          1.165,
+          0.944
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "seconds": [
+          7.293799717444927e-05,
+          0.00014053699851501733,
+          0.00031507400854025036,
+          0.0006062870088499039
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "append-missing-headers-bounded": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Injecting a fixed set of default headers into an n-header response stays",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ]
+      },
+      "observation": {
+        "probe": "append-missing-headers-bounded",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Injecting a fixed set of default headers into an n-header response stays",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.907,
+        "tail_exponent": 0.823,
+        "local_exponents": [
+          1.141,
+          0.705,
+          0.941
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.0002536749962018803,
+          0.0005593579990090802,
+          0.000911619994440116,
+          0.0017507129959994927
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "multipart-many-parts": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Parsing an n-part multipart body is O(body): the boundary search advances",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ]
+      },
+      "observation": {
+        "probe": "multipart-many-parts",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Parsing an n-part multipart body is O(body): the boundary search advances",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.025,
+        "tail_exponent": 1.017,
+        "local_exponents": [
+          1.007,
+          1.125,
+          0.91
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          0.00024922499142121524,
+          0.0005009189917473122,
+          0.0010924770031124353,
+          0.0020527070009848103
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
     },
     "bitset-router-static-scale": {
       "contract": {
@@ -63,9 +1058,49 @@
         "expect_exponent": 0.0,
         "tolerance": 0.5,
         "metric": null,
-        "sizes": [1000, 4000, 16000, 64000]
+        "sizes": [
+          1000,
+          4000,
+          16000,
+          64000
+        ]
       },
-      "observation": {"status": "PASS"}
+      "observation": {
+        "probe": "bitset-router-static-scale",
+        "group": "metal-http1",
+        "stage": "routing",
+        "axis": "unrelated static route count",
+        "assumption": "static route activation is O(1) in total route count",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.004,
+        "tail_exponent": 0.006,
+        "local_exponents": [
+          -0.019,
+          0.062,
+          -0.05
+        ],
+        "class": "O(1)",
+        "status": "PASS",
+        "sizes": [
+          1000,
+          4000,
+          16000,
+          64000
+        ],
+        "seconds": [
+          0.00013972699525766075,
+          0.00013605700223706663,
+          0.0001483369997004047,
+          0.00013834700803272426
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
     },
     "bitset-router-same-group-scale": {
       "contract": {
@@ -76,9 +1111,102 @@
         "expect_exponent": 1.0,
         "tolerance": 0.5,
         "metric": null,
-        "sizes": [8000, 16000, 32000, 64000]
+        "sizes": [
+          8000,
+          16000,
+          32000,
+          64000
+        ]
       },
-      "observation": {"status": "PASS"}
+      "observation": {
+        "probe": "bitset-router-same-group-scale",
+        "group": "metal-http1",
+        "stage": "routing",
+        "axis": "same-shape parameter route group size",
+        "assumption": "worst-case bitset activation is O(group size / 64)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.899,
+        "tail_exponent": 0.932,
+        "local_exponents": [
+          0.823,
+          0.929,
+          0.935
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          8000,
+          16000,
+          32000,
+          64000
+        ],
+        "seconds": [
+          0.0013092519948258996,
+          0.00231642099970486,
+          0.004409436005516909,
+          0.008430889996816404
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "trie-router-match-scale": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Trie match cost is independent of route count: O(1) in N.",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ]
+      },
+      "observation": {
+        "probe": "trie-router-match-scale",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Trie match cost is independent of route count: O(1) in N.",
+        "expect_exponent": 0.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.016,
+        "tail_exponent": 0.024,
+        "local_exponents": [
+          -0.006,
+          0.032,
+          0.016
+        ],
+        "class": "O(1)",
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          0.0005312479916028678,
+          0.0005291689885780215,
+          0.0005412089958554134,
+          0.0005470989999594167
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
     },
     "http-parse-request-headers": {
       "contract": {
@@ -89,9 +1217,208 @@
         "expect_exponent": 1.0,
         "tolerance": 0.5,
         "metric": null,
-        "sizes": [500, 1000, 2000, 4000]
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ]
       },
-      "observation": {"status": "PASS"}
+      "observation": {
+        "probe": "http-parse-request-headers",
+        "group": "metal-http1",
+        "stage": "ingress",
+        "axis": "request header count",
+        "assumption": "request-head parsing is O(headers plus header bytes)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.214,
+        "tail_exponent": 1.359,
+        "local_exponents": [
+          0.914,
+          1.245,
+          1.473
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          4.606899165082723e-05,
+          8.67890048539266e-05,
+          0.00020566499733831733,
+          0.0005708579992642626
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "json-decode-distinct-keys": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Decoding an object with n distinct keys is O(n): the parser-local key",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          10000,
+          20000,
+          40000,
+          80000
+        ]
+      },
+      "observation": {
+        "probe": "json-decode-distinct-keys",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Decoding an object with n distinct keys is O(n): the parser-local key",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.104,
+        "tail_exponent": 1.125,
+        "local_exponents": [
+          1.087,
+          1.027,
+          1.223
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          10000,
+          20000,
+          40000,
+          80000
+        ],
+        "seconds": [
+          0.0007125139964045957,
+          0.0015132979897316545,
+          0.0030832440097583458,
+          0.0071992260054685175
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "percent-decode": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Percent-decoding an n-byte target is O(n): one forward pass.",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          20000,
+          40000,
+          80000,
+          160000
+        ]
+      },
+      "observation": {
+        "probe": "percent-decode",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "Percent-decoding an n-byte target is O(n): one forward pass.",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.944,
+        "tail_exponent": 0.968,
+        "local_exponents": [
+          0.846,
+          1.092,
+          0.843
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          20000,
+          40000,
+          80000,
+          160000
+        ],
+        "seconds": [
+          4.889900446869433e-05,
+          8.790800347924232e-05,
+          0.00018744599947240204,
+          0.0003363029973115772
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "ws-unmask": {
+      "contract": {
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "XOR-unmasking an n-byte WebSocket payload is O(n): a single word-at-a-",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          50000,
+          100000,
+          200000,
+          400000
+        ]
+      },
+      "observation": {
+        "probe": "ws-unmask",
+        "group": "extended",
+        "stage": "component",
+        "axis": "input size",
+        "assumption": "XOR-unmasking an n-byte WebSocket payload is O(n): a single word-at-a-",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.845,
+        "tail_exponent": 0.878,
+        "local_exponents": [
+          0.682,
+          1.138,
+          0.619
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          50000,
+          100000,
+          200000,
+          400000
+        ],
+        "seconds": [
+          4.699992132373154e-06,
+          7.538998033851385e-06,
+          1.6589998267591e-05,
+          2.5478992029093206e-05
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
     },
     "middleware-tape-fused-dispatch": {
       "contract": {
@@ -102,9 +1429,49 @@
         "expect_exponent": 1.0,
         "tolerance": 0.5,
         "metric": null,
-        "sizes": [8, 16, 32, 64]
+        "sizes": [
+          8,
+          16,
+          32,
+          64
+        ]
       },
-      "observation": {"status": "PASS"}
+      "observation": {
+        "probe": "middleware-tape-fused-dispatch",
+        "group": "metal-http1",
+        "stage": "middleware",
+        "axis": "fused synchronous middleware hook count",
+        "assumption": "middleware dispatch is O(active hooks)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.609,
+        "tail_exponent": 0.68,
+        "local_exponents": [
+          0.483,
+          0.562,
+          0.798
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          8,
+          16,
+          32,
+          64
+        ],
+        "seconds": [
+          0.009767360999830998,
+          0.013651648987433873,
+          0.02016077000007499,
+          0.03505343198776245
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
     },
     "response-coerce-text": {
       "contract": {
@@ -115,9 +1482,49 @@
         "expect_exponent": 1.0,
         "tolerance": 0.5,
         "metric": null,
-        "sizes": [20000, 40000, 80000, 160000]
+        "sizes": [
+          20000,
+          40000,
+          80000,
+          160000
+        ]
       },
-      "observation": {"status": "PASS"}
+      "observation": {
+        "probe": "response-coerce-text",
+        "group": "metal-http1",
+        "stage": "egress",
+        "axis": "text response body bytes",
+        "assumption": "response coercion is O(encoded body bytes)",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.678,
+        "tail_exponent": 0.746,
+        "local_exponents": [
+          0.546,
+          0.667,
+          0.826
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          20000,
+          40000,
+          80000,
+          160000
+        ],
+        "seconds": [
+          0.00013784698967356235,
+          0.00020127500465605408,
+          0.00031952300923876464,
+          0.0005663379997713491
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
     }
   }
 }

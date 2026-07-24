@@ -328,6 +328,65 @@ def build_parser() -> argparse.ArgumentParser:
     )
     migration_down.add_argument("--dsn-env", default="WREATH_MIGRATION_DSN")
     migration_down.add_argument("--json", action="store_true")
+    port_parser = commands.add_parser(
+        "port", help="port an existing FastAPI app to Wreath (report or emit)"
+    )
+    port_parser.add_argument("source", nargs="+", help="one or more app roots")
+    port_parser.add_argument(
+        "--report-only", action="store_true", default=True,
+        help="static analysis + report (default when neither --output nor --in-place is given)",
+    )
+    port_parser.add_argument("--json", action="store_true", dest="as_json",
+                             help="emit the machine-readable report JSON")
+    port_emit = port_parser.add_mutually_exclusive_group()
+    port_emit.add_argument("--in-place", action="store_true",
+                           help="rewrite files in place (Phase 1 declarative emit; requires --force)")
+    port_emit.add_argument("--output", metavar="DIR",
+                           help="write ported code to a sister tree (Phase 1 declarative emit)")
+    port_parser.add_argument("--force", action="store_true",
+                             help="allow --in-place and overwrite hand-edited outputs")
+    audit_parser = commands.add_parser(
+        "audit",
+        help="audit generated HTML + responses for accessibility (WCAG 2.1) and performance",
+    )
+    audit_actions = audit_parser.add_subparsers(dest="audit_action", required=True)
+    audit_static = audit_actions.add_parser(
+        "static", help="audit the API-docs surface and static HTML for a11y + performance"
+    )
+    audit_static.add_argument("target", help="application import target, e.g. app.main:app")
+    audit_static.add_argument(
+        "--factory", action="store_true", help="treat the target as an application factory"
+    )
+    audit_static.add_argument(
+        "--static", action="append", metavar="DIR", default=[],
+        help="also audit *.html under DIR (repeatable)",
+    )
+    audit_static.add_argument("--title", default="Wreath", help="docs title used when rendering")
+    audit_static.add_argument(
+        "--version", default="0.1.0", help="docs version used when rendering"
+    )
+    audit_static.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="emit the machine-readable report JSON",
+    )
+    audit_static.add_argument(
+        "--strict", action="store_true", help="exit non-zero on warnings as well as errors"
+    )
+    audit_static.add_argument(
+        "--fix", action="store_true",
+        help="apply the safe auto-fix subset to static HTML (and suggest patches for the docs)",
+    )
+    audit_runtime = audit_actions.add_parser(
+        "runtime", help="audit a running server's live responses (headers + HTML)"
+    )
+    audit_runtime.add_argument("url", nargs="?", help="base URL of the running app")
+    audit_runtime.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="emit the machine-readable report JSON",
+    )
+    audit_runtime.add_argument(
+        "--strict", action="store_true", help="exit non-zero on warnings as well as errors"
+    )
     inspect_parser = commands.add_parser(
         "inspect", help="query a running server's read-only telemetry Inspector"
     )
@@ -1237,6 +1296,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 return execute_migrations(namespace, load_application)
             except (OSError, RuntimeError, ValueError) as error:
+                raise CliError(str(error), exit_code=2) from error
+        if namespace.command == "port":
+            from ._port.cli import execute as execute_port
+
+            try:
+                return execute_port(namespace)
+            except (OSError, ValueError) as error:
+                raise CliError(str(error), exit_code=2) from error
+        if namespace.command == "audit":
+            from ._audit.cli import execute as execute_audit
+
+            try:
+                return execute_audit(namespace, load_application)
+            except (OSError, ValueError) as error:
                 raise CliError(str(error), exit_code=2) from error
         options = options_from_namespace(namespace)
         execute(options)

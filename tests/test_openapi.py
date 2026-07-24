@@ -143,7 +143,10 @@ async def test_enable_docs_routes() -> None:
     status, content_type, body = await call("/docs")
     assert status == 200
     assert content_type == b"text/html; charset=utf-8"
-    assert b"swagger-ui" in body
+    # The docs page is now self-contained (no CDN Swagger UI).
+    assert b"<!DOCTYPE html>" in body
+    assert b"swagger" not in body.lower()
+    assert b"unpkg" not in body
 
 
 def test_operation_ids_match_typegen() -> None:

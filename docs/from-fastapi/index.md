@@ -212,3 +212,20 @@ is not, keep your current data layer and use Wreath for the web tier.
   what deliberately doesn't yet.
 - [Getting started](../getting-started/index.md) — the ground-up introduction,
   if you'd rather build than translate.
+
+## More equivalences (recent additions)
+
+| FastAPI / ecosystem | Wreath |
+| --- | --- |
+| `as_form` model decorator | `Annotated[Model, Form()]` — [Form-model binding](../guides/forms.md) |
+| `EventSourceResponse` / SSE add-ons | `SSEResponse` — [Server-Sent Events](../guides/sse.md) |
+| Celery / arq tasks | `app.jobs()` + `@jobs.task` / `jobs.schedule()` — [Jobs](../guides/jobs.md) |
+| Cognito / OIDC via `python-jose`/`authlib` | `app.oidc_provider(...)` + `BearerTokenBackend` — [Auth](../guides/auth.md) |
+| `fastapi-users` | `app.users(...)` — [User management](../guides/users.md) |
+| `sqlalchemy-dlock` | `db.lock(...)` / `session.lock(...)` — [Distributed locks](../guides/distributed-locks.md) |
+| `s3path` / hand-rolled S3 helpers | `wreath.storage` — [Object storage](../guides/storage.md) |
+| `fastapi-pagination` | `wreath.pagination` — [Pagination](../guides/pagination.md) |
+| `aiometer` / `tenacity` on the client | `app.http_client(..., rate=, retries=)` |
+| `prometheus-fastapi-instrumentator` | `app.metrics(...)` / `telemetry.activate_*` — [Observability](../guides/observability.md) |
+
+Most of these are rewritten for you automatically — point [`wreath port`](../guides/porting.md) at your app and read the report.

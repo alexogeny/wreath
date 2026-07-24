@@ -325,3 +325,71 @@ async def test_session_tenant_schema_is_folded_into_the_namespace() -> None:
     _, args = database.connection.calls[-1]
     # Advisory locks ignore search_path, so the tenant schema must be in the key.
     assert args == ("tenant_acme", "invoice:1")
+
+
+# -- affinity failure paths (no still-locked connection ever leased out) ------
+
+
+@pytest.mark.asyncio
+async def test_lock_acquire_failure_hands_connection_back_to_pool() -> None:
+    class FailAcquire(FakeConnection):
+        async def fetchval(self, sql: str, *args: object) -> object:
+            self.calls.append((sql, args))
+            if "pg_advisory_lock(" in sql:
+                raise PostgresError("boom", sqlstate="XX000")
+            return None
+
+    database, _ = await _write_db(FailAcquire)
+    pool = database.pool("write")
+    try:
+        with pytest.raises(PostgresError):
+            async with database.lock("k"):
+                pass
+        # Nothing was held, so the connection is returned rather than withheld.
+        assert pool.borrowed == 0
+    finally:
+        await database.stop()
+
+
+@pytest.mark.asyncio
+async def test_broken_unlock_closes_connection_not_leased_still_locked() -> None:
+    class BadUnlock(FakeConnection):
+        async def fetchval(self, sql: str, *args: object) -> object:
+            self.calls.append((sql, args))
+            if "pg_advisory_unlock" in sql:
+                raise PostgresError("connection gone", sqlstate="08006")
+            return None
+
+    database, connector = await _write_db(BadUnlock)
+    try:
+        async with database.lock("k"):
+            pass
+        # Unlock could not be confirmed -> the connection is closed rather than
+        # returned to the pool while it might still hold the lock.
+        assert connector.connections[0].closed is True
+    finally:
+        await database.stop()
+
+
+@pytest.mark.asyncio
+async def test_singleton_follower_never_runs_work_while_lock_unavailable() -> None:
+    class NotLeader(FakeConnection):
+        async def fetchval(self, sql: str, *args: object) -> object:
+            self.calls.append((sql, args))
+            if "pg_try_advisory_lock" in sql:
+                return False  # another instance holds leadership
+            return None
+
+    database, _ = await _write_db(NotLeader)
+    ran = asyncio.Event()
+
+    async def work() -> None:
+        ran.set()
+
+    try:
+        runner = database.run_singleton("leader", work, poll_interval=0.01)
+        await asyncio.sleep(0.05)  # several contention rounds
+        assert not ran.is_set()  # lost every round -> work never fired
+        await runner.stop()
+    finally:
+        await database.stop()

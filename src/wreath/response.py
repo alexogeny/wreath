@@ -7,7 +7,7 @@ import contextlib
 import mimetypes
 import os
 import threading
-from collections.abc import AsyncIterable, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterable, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, cast
@@ -316,6 +316,124 @@ class StreamingResponse:
             if cleanup is not None:
                 self._cleanup = None
                 await cleanup()
+
+
+class ServerSentEvent:
+    """One Server-Sent Event. Every field is optional; ``data`` may be multi-line
+    (each line is framed as its own ``data:`` field). A ``comment``-only event is
+    a keep-alive."""
+
+    __slots__ = ("data", "event", "id", "retry", "comment")
+
+    def __init__(
+        self,
+        data: str | bytes | None = None,
+        *,
+        event: str | None = None,
+        id: str | None = None,
+        retry: int | None = None,
+        comment: str | None = None,
+    ) -> None:
+        self.data = data
+        self.event = event
+        self.id = id
+        self.retry = retry
+        self.comment = comment
+
+
+def _sse_lines(field: str, value: str, out: list[str]) -> None:
+    # An SSE field value cannot contain CR or LF, so a multi-line value becomes
+    # one repeated field per line (normalising CRLF/CR to LF first).
+    for line in value.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        out.append(f"{field}: {line}" if line else f"{field}:")
+
+
+def _encode_sse(event: ServerSentEvent | str | bytes | Mapping[str, Any]) -> bytes:
+    """Frame one event to the ``text/event-stream`` wire format.
+
+    Accepts a :class:`ServerSentEvent`, a ``str``/``bytes`` (treated as ``data``),
+    or a mapping with ``data``/``event``/``id``/``retry``/``comment`` keys.
+
+    TODO(native)/TODO(pure-twin): framing is trivial per-event string work and
+    there is no existing native primitive to reuse, so this is pure Python; a
+    native ``_core.sse_frame`` can drop in behind this function later if a
+    benchmark ever justifies it. It already behaves identically under
+    ``WREATH_PURE=1`` (no native path to diverge from).
+    """
+    if isinstance(event, ServerSentEvent):
+        comment, name, ident, retry, data = (
+            event.comment, event.event, event.id, event.retry, event.data,
+        )
+    elif isinstance(event, (str, bytes)):
+        comment = name = ident = retry = None
+        data = event
+    elif isinstance(event, Mapping):
+        comment = event.get("comment")
+        name = event.get("event")
+        ident = event.get("id")
+        retry = event.get("retry")
+        data = event.get("data")
+    else:
+        raise TypeError(f"cannot frame SSE event of type {type(event).__name__!r}")
+    lines: list[str] = []
+    if comment is not None:
+        _sse_lines("", str(comment), lines)
+    if name is not None:
+        lines.append(f"event: {name}")
+    if ident is not None:
+        lines.append(f"id: {ident}")
+    if retry is not None:
+        lines.append(f"retry: {int(retry)}")
+    if data is not None:
+        text = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+        _sse_lines("data", text, lines)
+    if not lines:
+        lines.append(":")  # bare keep-alive comment
+    return ("\n".join(lines) + "\n\n").encode("utf-8")
+
+
+class SSEResponse(StreamingResponse):
+    """Server-Sent Events over the streaming-response plumbing.
+
+    Frames each item from an async iterator of events (a
+    :class:`ServerSentEvent`, a ``str``/``bytes`` treated as ``data``, or a
+    mapping) as ``text/event-stream`` with the correct no-buffering headers
+    (``cache-control: no-cache``, ``x-accel-buffering: no``). Emit a keep-alive
+    by yielding ``ServerSentEvent(comment="ping")``.
+
+    This is the SSE *transport* only; a progress/status convention is left to the
+    application (consumer-owned, by design).
+    """
+
+    __slots__ = ()
+    media_type = b"text/event-stream"
+
+    def __init__(
+        self,
+        events: AsyncIterable[ServerSentEvent | str | bytes | Mapping[str, Any]],
+        *,
+        status: int = 200,
+        headers: Iterable[tuple[bytes, bytes]] | None = None,
+        background: Background | None = None,
+    ) -> None:
+        combined: list[tuple[bytes, bytes]] = [
+            (_CONTENT_TYPE, self.media_type),
+            (b"cache-control", b"no-cache"),
+            (b"x-accel-buffering", b"no"),
+            (b"connection", b"keep-alive"),
+        ]
+        if headers is not None:
+            combined.extend(headers)
+        super().__init__(
+            self._framed(events), status=status, headers=combined, background=background
+        )
+
+    @staticmethod
+    async def _framed(
+        events: AsyncIterable[ServerSentEvent | str | bytes | Mapping[str, Any]],
+    ) -> AsyncIterable[bytes]:
+        async for event in events:
+            yield _encode_sse(event)
 
 
 _FILE_CHUNK = 256 * 1024

@@ -10,6 +10,7 @@ from __future__ import annotations  # noqa: I001 -- Ruff misorders the local cod
 import asyncio
 import ipaddress
 import os
+import random
 import socket
 import ssl
 from dataclasses import dataclass
@@ -24,7 +25,17 @@ except ImportError:  # pragma: no cover - pure tier
     _NativeClientStream = None
 if os.environ.get("WREATH_CLIENT_NATIVE_STREAM") == "0":
     _NativeClientStream = None
+from time import monotonic as _monotonic
 from time import monotonic_ns as _monotonic_ns
+
+# Reuse the native token-bucket that backs the inbound rate-limiter (no new C):
+# the outbound client throttle shares the exact same primitive.
+from ._native import _core as _native_core
+
+if _native_core is not None and hasattr(_native_core, "TokenBucket"):
+    _TokenBucket: Any = _native_core.TokenBucket
+else:  # pragma: no cover - exercised under WREATH_PURE=1
+    from ._pure.ratelimit import TokenBucket as _TokenBucket
 
 from ._flight_markers import (
     CAP_OUTBOUND_REQUEST as _CAP_OUTBOUND_REQUEST,
@@ -172,10 +183,58 @@ class RetryPolicy:
     attempts: int = 1
     idempotent_only: bool = True
     statuses: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
+    # Exponential backoff between attempts: min(base * 2**attempt, cap), with
+    # optional bounded jitter and Retry-After honouring on 429/503.
+    backoff_base: float = 0.05
+    backoff_cap: float = 1.0
+    jitter: bool = True
+    respect_retry_after: bool = True
 
     def __post_init__(self) -> None:
         if self.attempts <= 0:
             raise ValueError("retry attempts must be positive")
+        if self.backoff_base <= 0 or self.backoff_cap <= 0:
+            raise ValueError("retry backoff_base and backoff_cap must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class RatePolicy:
+    """Client-side outbound throttle: one continuous token bucket shared by every
+    request from this client (``rate`` tokens/sec, bursting to ``capacity``),
+    reusing the same native ``TokenBucket`` as the inbound rate-limiter. When a
+    token is not yet available the request parks — up to ``max_wait`` — rather
+    than being rejected. ``enabled=False`` (default) skips throttling entirely.
+
+    TODO(pure-twin): none needed — TokenBucket already has a native/pure twin
+    selected above; this policy is pure-Python glue.
+    """
+
+    enabled: bool = False
+    capacity: float = 0.0
+    rate: float = 0.0
+    max_wait: float = 30.0
+
+    def __post_init__(self) -> None:
+        if self.enabled:
+            if self.rate <= 0 or self.capacity <= 0:
+                raise ValueError("an enabled RatePolicy needs positive rate and capacity")
+            if self.max_wait <= 0:
+                raise ValueError("RatePolicy max_wait must be positive")
+
+
+_DEFAULT_RATE = RatePolicy()
+
+
+def _parse_retry_after(raw: bytes | None) -> float | None:
+    """Parse a ``Retry-After`` header. Only the delta-seconds form is honoured;
+    the HTTP-date form falls back to normal backoff (returns None)."""
+    if raw is None:
+        return None
+    try:
+        seconds = int(raw.decode("ascii").strip())
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return float(seconds) if seconds >= 0 else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +393,8 @@ class HTTPClient:
         "_name",
         "_open",
         "_port",
+        "_rate",
+        "_rate_bucket",
         "_redirect",
         "_requests",
         "_retry",
@@ -355,6 +416,7 @@ class HTTPClient:
         retry: RetryPolicy = _DEFAULT_RETRY,
         redirect: RedirectPolicy = _DEFAULT_REDIRECT,
         destination: DestinationPolicy = _DEFAULT_DESTINATION,
+        rate: RatePolicy = _DEFAULT_RATE,
     ) -> None:
         if not name:
             raise ValueError("HTTP client name cannot be empty")
@@ -373,6 +435,13 @@ class HTTPClient:
         self._retry = retry
         self._redirect = redirect
         self._destination = destination
+        self._rate = rate
+        # One shared bucket per client (single key); reuses the native TokenBucket.
+        self._rate_bucket = (
+            _TokenBucket(capacity=rate.capacity, rate=rate.rate, max_entries=1)
+            if rate.enabled
+            else None
+        )
         self._condition = asyncio.Condition()
         self._dns_lock = asyncio.Lock()
         # Metadata-image ID for phase attribution; stamped by the app when the
@@ -596,6 +665,36 @@ class HTTPClient:
             elif response.status in (301, 302) and method_upper not in ("GET", "HEAD"):
                 raise RedirectError("redirect would require rewriting a non-idempotent method")
 
+    async def _throttle(self) -> None:
+        """Park until the outbound token bucket admits this request (bounded by
+        ``RatePolicy.max_wait``). No-op unless rate limiting is enabled."""
+        bucket = self._rate_bucket
+        if bucket is None:
+            return
+        deadline = _monotonic() + self._rate.max_wait
+        while True:
+            now = _monotonic()
+            wait = float(bucket.acquire("client", now, 1.0))
+            if wait <= 0.0:
+                return
+            if now + wait > deadline:
+                raise ClientError("outbound rate limit exceeded max_wait")
+            await asyncio.sleep(wait)
+
+    def _retry_delay(self, attempt: int, response: ClientResponse | None) -> float:
+        """Backoff before the next attempt: honour Retry-After on the response
+        when present, else exponential backoff with optional bounded jitter."""
+        policy = self._retry
+        if policy.respect_retry_after and response is not None:
+            after = _parse_retry_after(response.header(b"retry-after"))
+            if after is not None:
+                # Clamp an absurd server value so one bad header can't hang us.
+                return min(after, policy.backoff_cap * 16)
+        delay = min(policy.backoff_base * (2**attempt), policy.backoff_cap)
+        if policy.jitter:
+            delay *= 0.5 + random.random() * 0.5  # jitter within [0.5x, 1.0x]
+        return delay
+
     async def _send_with_retries(
         self,
         method: str,
@@ -611,6 +710,8 @@ class HTTPClient:
         attempts = self._retry.attempts if retryable else 1
         last_error: ClientError | None = None
         for attempt in range(attempts):
+            await self._throttle()  # each attempt spends a token
+            retry_response: ClientResponse | None = None
             try:
                 response = await self._request_once(method, request_bytes)
             except (ConnectError, DNSFailure, ResponseTimeout, _TransportError) as error:
@@ -622,7 +723,8 @@ class HTTPClient:
             else:
                 if response.status not in self._retry.statuses or attempt + 1 == attempts:
                     return response
-            await asyncio.sleep(min(0.05 * (2**attempt), 1.0))
+                retry_response = response
+            await asyncio.sleep(self._retry_delay(attempt, retry_response))
         assert last_error is not None
         raise last_error
 
@@ -1061,6 +1163,7 @@ __all__ = [
     "ProtocolError",
     "ProxyError",
     "RedirectError",
+    "RatePolicy",
     "RedirectPolicy",
     "RequestTimeout",
     "ResponseTimeout",

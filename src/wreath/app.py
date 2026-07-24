@@ -253,11 +253,15 @@ class Wreath:
         "_global_middleware",
         "_handler_requirements",
         "_http_clients",
+        "_job_runners",
         "_match",
+        "_message_buses",
+        "_storages",
         "_middleware",
         "_middleware_order",
         "_oidc_providers",
         "_orm_registries",
+        "_supervisor",
         "_preflight_fallback",
         "_probe",
         "_resolve",
@@ -337,6 +341,12 @@ class Wreath:
         self._orm_registries: dict[str, Any] = {}
         self._oidc_providers: dict[str, Any] = {}
         self._webhook_hubs: dict[str, Any] = {}
+        self._job_runners: dict[str, Any] = {}
+        self._message_buses: dict[str, Any] = {}
+        self._storages: dict[str, Any] = {}
+        # Built at lifespan startup from the registered runners/buses; owns their
+        # process-lifetime worker/consumer/sweeper tasks.
+        self._supervisor: Any = None
 
     def webhooks(self, name: str) -> Any:
         """Register one named inbound/outbound webhook hub."""
@@ -359,6 +369,61 @@ class Wreath:
         self._http_clients[name] = client
         self.state.__setattr__(f"http_{name}", client)
         return client
+
+    def storage(self, name: str, *, backend: str = "local", **options: Any) -> Any:
+        """Register a lifespan-managed object-storage backend (``local`` or ``s3``).
+
+        Exposed on ``app.state.storage_<name>``. An ``s3`` backend owns a pinned
+        outbound ``HTTPClient`` started/stopped with the app; ``local`` opens its root
+        at registration and is closed on shutdown. Credentials come from
+        ``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY``/``AWS_SESSION_TOKEN`` unless
+        given explicitly.
+        """
+        from .storage import LocalStorage, S3Storage
+
+        if name in self._storages:
+            raise ValueError(f"duplicate storage: {name}")
+        if backend == "local":
+            store: Any = LocalStorage(
+                options["root"], url_secret=options.get("url_secret")
+            )
+        elif backend == "s3":
+            import os
+            from urllib.parse import urlsplit
+
+            from .http_client import HTTPClient
+
+            region = options["region"]
+            bucket = options["bucket"]
+            scheme = options.get("scheme", "https")
+            endpoint = options.get("endpoint")
+            path_style = bool(options.get("path_style", bool(endpoint)))
+            if endpoint:
+                base_url = endpoint if "://" in endpoint else f"{scheme}://{endpoint}"
+                host = urlsplit(base_url).hostname or endpoint
+                base_url = base_url.rstrip("/")
+            else:
+                host = f"{bucket}.s3.{region}.amazonaws.com"
+                base_url = f"{scheme}://{host}"
+            ak = options.get("access_key") or os.environ.get("AWS_ACCESS_KEY_ID")
+            sk = options.get("secret_key") or os.environ.get("AWS_SECRET_ACCESS_KEY")
+            if not ak or not sk:
+                raise ValueError(
+                    "s3 storage needs AWS credentials "
+                    "(env AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or access_key=/secret_key=)"
+                )
+            token = options.get("session_token") or os.environ.get("AWS_SESSION_TOKEN")
+            client = HTTPClient(f"storage:{name}", base_url=base_url)
+            self._http_clients[f"__storage_{name}"] = client
+            store = S3Storage(
+                client, bucket=bucket, region=region, access_key=ak, secret_key=sk,
+                session_token=token, host=host, scheme=scheme, path_style=path_style,
+            )
+        else:
+            raise ValueError(f"unknown storage backend: {backend!r}")
+        self._storages[name] = store
+        self.state.__setattr__(f"storage_{name}", store)
+        return store
 
     def oidc_provider(
         self,
@@ -451,6 +516,68 @@ class Wreath:
         self._dirty = True
         return database
 
+    def jobs(
+        self,
+        name: str,
+        *,
+        database: str,
+        workload: str = "write",
+        concurrency: int = 8,
+        lease: float = 30.0,
+        poll_interval: float = 5.0,
+        schema: str = "wreath",
+        batch: int = 1,
+    ) -> Any:
+        """Configure a durable job runner on an existing ``app.postgres()`` database.
+
+        Its workers, sweeper, and scheduler run for the process lifetime, started
+        during lifespan after the databases come up. See :mod:`wreath.jobs`.
+        """
+        from .jobs import JobRunner
+
+        if name in self._job_runners:
+            raise ValueError(f"duplicate job runner: {name}")
+        if database not in self._databases:
+            known = ", ".join(sorted(self._databases)) or "none"
+            raise KeyError(f"unknown database {database!r}; configured: {known}")
+        runner = JobRunner(
+            self._databases[database], name=name, workload=workload,
+            concurrency=concurrency, lease=lease, poll_interval=poll_interval,
+            schema=schema, batch=batch,
+        )
+        self._job_runners[name] = runner
+        self.state.__setattr__(f"jobs_{name}", runner)
+        self._dirty = True
+        return runner
+
+    def messaging(
+        self,
+        name: str,
+        *,
+        database: str,
+        workload: str = "write",
+        schema: str = "wreath",
+        poll_interval: float = 5.0,
+        lease: float = 30.0,
+    ) -> Any:
+        """Configure a pub/sub + durable message bus on an ``app.postgres()``
+        database. Consumers run for the process lifetime. See :mod:`wreath.messaging`."""
+        from .messaging import MessageBus
+
+        if name in self._message_buses:
+            raise ValueError(f"duplicate message bus: {name}")
+        if database not in self._databases:
+            known = ", ".join(sorted(self._databases)) or "none"
+            raise KeyError(f"unknown database {database!r}; configured: {known}")
+        bus = MessageBus(
+            self._databases[database], name=name, workload=workload, schema=schema,
+            poll_interval=poll_interval, lease=lease,
+        )
+        self._message_buses[name] = bus
+        self.state.__setattr__(f"messaging_{name}", bus)
+        self._dirty = True
+        return bus
+
     def orm(
         self,
         *,
@@ -486,6 +613,56 @@ class Wreath:
         self.state.__setattr__(f"orm_{database}", registry)
         self._dirty = True
         return registry
+
+    def flags(self, provider: Any = None, **values: str) -> Any:
+        """Register a feature-flag provider on ``app.state.flags``.
+
+        Pass a ``FlagProvider`` (e.g. ``FeatureFlags(...)``), keyword flag values,
+        or nothing to build one from the environment (``WREATH_FLAG_*``).
+        ``wreath.flags.flags_dependency`` reads ``app.state.flags``.
+        """
+        from .flags import FeatureFlags
+
+        if provider is None:
+            provider = FeatureFlags(values) if values else FeatureFlags.from_env()
+        self.state.__setattr__("flags", provider)
+        return provider
+
+    def health(
+        self,
+        *,
+        checks: Iterable[Any] = (),
+        liveness_path: str = "/health",
+        readiness_path: str = "/ready",
+        is_live: Any = None,
+    ) -> Any:
+        """Mount liveness (``/health``) + readiness (``/ready``) endpoints."""
+        from .health import health_router
+
+        router = health_router(
+            checks, liveness_path=liveness_path, readiness_path=readiness_path, is_live=is_live
+        )
+        self.include_router(router)
+        return router
+
+    def metrics(
+        self, source: Any, *, path: str = "/metrics", namespace: str = "wreath",
+        route_labels: Any = None,
+    ) -> Any:
+        """Mount a Prometheus scrape endpoint rendering ``source.snapshot()``."""
+        from ._prometheus import metrics_router
+
+        router = metrics_router(source, path=path, namespace=namespace, route_labels=route_labels)
+        self.include_router(router)
+        return router
+
+    def users(self, store: Any, *, secret: str, **options: Any) -> Any:
+        """Mount the user-management lifecycle router (register/login/verify/reset)."""
+        from .users import user_router
+
+        router = user_router(store, secret=secret, **options)
+        self.include_router(router)
+        return router
 
     def route(
         self,
@@ -1394,18 +1571,23 @@ class Wreath:
         return None
 
     async def _authorize_request(
-        self, request: Request, requirement: AuthRequirement
+        self, request: Request, requirement: AuthRequirement, backend: Any = None
     ) -> Response | StreamingResponse | FileResponse | PreparedResponse | None:
-        """Run authentication and authorization before route middleware."""
+        """Run authentication and authorization before route middleware.
+
+        ``backend`` overrides the app-wide auth backend for route-scoped
+        authentication (e.g. the API-docs subsystem); it defaults to
+        ``self._auth_backend`` so ordinary routes are unaffected.
+        """
+        auth_backend = backend if backend is not None else self._auth_backend
         identity = request.identity
         if identity is None:
             if "pre_auth" in self._stage_hooks:
                 stage_response = await self._run_stage("pre_auth", request)
                 if stage_response is not None:
                     return stage_response
-            backend = self._auth_backend
-            if backend is not None:
-                identity = await backend.authenticate(request)
+            if auth_backend is not None:
+                identity = await auth_backend.authenticate(request)
                 request._set_identity(identity)
                 if "identity" in self._stage_hooks:
                     stage_response = await self._run_stage("identity", request)
@@ -1413,9 +1595,7 @@ class Wreath:
                         return stage_response
         if identity is None:
             challenge = (
-                None
-                if self._auth_backend is None
-                else self._auth_backend.challenge(request)
+                None if auth_backend is None else auth_backend.challenge(request)
             )
             raise Unauthorized(challenge=challenge)
         for check in requirement.role_checks:
@@ -1434,6 +1614,143 @@ class Wreath:
                     raise Forbidden(decision.reason or "Forbidden")
         return None
 
+    def enable_api_docs(
+        self,
+        *,
+        path: str = "/docs",
+        spec_path: str = "/openapi.json",
+        environments: Iterable[str] | None = None,
+        env: str | None = None,
+        auth: Any = None,
+        authorize: Callable[[Any], Any] | None = None,
+        authenticated: bool = False,
+        permissions: Iterable[str] = (),
+        try_it_out: bool = False,
+        title: str = "Wreath",
+        version: str = "0.1.0",
+    ) -> bool:
+        """Serve a self-contained API-docs page + the OpenAPI document, fail-closed.
+
+        Both are rendered from the same signature inspection that drives request
+        binding, so the page, the spec, and the typed clients cannot drift. No
+        external/CDN assets are used.
+
+        Gating is declarative and fail-closed:
+
+        * ``environments`` -- if set, the routes are registered *only* when the
+          current environment (``env`` arg, else ``WREATH_ENV``, else
+          ``"production"``) is listed. Otherwise nothing is registered and both
+          paths 404 -- no existence leak. Forgetting to set an env therefore
+          means production, which means docs OFF.
+        * ``authenticated`` / ``permissions`` / ``authorize`` -- require auth on
+          the two routes, enforced (401/403) by a route-scoped guard. ``authorize``
+          is a decorator such as :func:`wreath.authorize`.
+        * ``auth`` -- a backend that authenticates ONLY these two routes,
+          independent of :meth:`configure_auth` (no global side effect). When it
+          and the other auth args are all omitted, the docs are open within the
+          allowed environments (environment gating is the only guard). A live
+          try-it-out console inherits exactly this gate.
+
+        Returns ``True`` when the routes were registered, ``False`` when the
+        environment gate withheld them.
+        """
+        import os
+        import secrets
+
+        from ._auth.requirements import add_authenticated, add_permissions
+        from .openapi import generate_openapi, render_docs_body, render_docs_shell
+
+        current_env = env or os.environ.get("WREATH_ENV") or "production"
+        if environments is not None and current_env not in tuple(environments):
+            return False
+
+        permission_values = frozenset(permissions)
+        spec_state: dict[str, Any] = {}
+        body_state: dict[str, Any] = {}
+
+        def spec_bytes() -> bytes:
+            key = len(self._routes)
+            if spec_state.get("bytes") is None or spec_state.get("key") != key:
+                spec_state["bytes"] = _json_dumps(
+                    generate_openapi(self, title=title, version=version)
+                )
+                spec_state["key"] = key
+            return spec_state["bytes"]
+
+        def body_html() -> str:
+            key = len(self._routes)
+            if body_state.get("html") is None or body_state.get("key") != key:
+                body_state["html"] = render_docs_body(
+                    self, title=title, version=version, try_it_out=try_it_out
+                )
+                body_state["key"] = key
+            return body_state["html"]
+
+        async def openapi_spec(request: Request) -> Any:
+            return Response(spec_bytes(), media_type=b"application/json")
+
+        async def docs(request: Request) -> Any:
+            nonce = secrets.token_urlsafe(16)
+            page = render_docs_shell(
+                title=title,
+                version=version,
+                spec_path=spec_path,
+                nonce=nonce,
+                body=body_html(),
+                try_it_out=try_it_out,
+            )
+            # The docs page carries its OWN CSP with a per-response nonce: the
+            # default `default-src 'self'` would otherwise block the single inline
+            # <style>/<script>. connect-src 'self' bounds try-it-out to same-origin.
+            csp = (
+                f"default-src 'self'; style-src 'nonce-{nonce}'; "
+                f"script-src 'nonce-{nonce}'; connect-src 'self'; img-src 'self' data:; "
+                "base-uri 'none'; form-action 'self'"
+            ).encode("ascii")
+            return Response(
+                page.encode("utf-8"),
+                media_type=b"text/html; charset=utf-8",
+                headers=[(b"content-security-policy", csp)],
+            )
+
+        # Build the docs auth requirement on a throwaway marker so it is NOT
+        # compiled into the global pre-route auth path (which uses the global
+        # backend). We enforce it ourselves in a route-scoped guard with `auth`
+        # as the backend, so `auth` guards only these two routes independent of
+        # `configure_auth`. With no auth args, the requirement is empty -> open.
+        def _marker() -> None:  # pragma: no cover - metadata carrier only
+            return None
+
+        if authorize is not None:
+            _marker = authorize(_marker)
+        if permission_values:
+            _marker = add_permissions(_marker, permission_values, "all")
+        elif authenticated or auth is not None:
+            _marker = add_authenticated(_marker)
+        docs_requirement = requirement_for(_marker)
+        needs_guard = bool(
+            docs_requirement.authenticated
+            or docs_requirement.role_checks
+            or docs_requirement.permission_checks
+            or docs_requirement.policies
+        )
+
+        def _scoped(handler: Callable[[Request], Any]) -> Callable[[Request], Any]:
+            async def guarded_handler(request: Request) -> Any:
+                if needs_guard:
+                    denied = await self._authorize_request(
+                        request, docs_requirement, backend=auth
+                    )
+                    if denied is not None:
+                        return denied
+                return await handler(request)
+
+            return guarded_handler
+
+        self.get(spec_path)(_scoped(openapi_spec))
+        self.get(path)(_scoped(docs))
+        return True
+
     def enable_docs(
         self,
         *,
@@ -1442,28 +1759,15 @@ class Wreath:
         title: str = "Wreath",
         version: str = "0.1.0",
     ) -> None:
-        """Serve the OpenAPI document and a Swagger UI page for this app.
+        """Backwards-compatible alias for :meth:`enable_api_docs`.
 
-        The document is generated once, on first request, from the same
-        signature inspection that drives request binding.
+        Serves the self-contained docs page and OpenAPI document, ungated (all
+        environments, no auth). Prefer :meth:`enable_api_docs` for env/auth
+        gating.
         """
-        from .openapi import docs_page, generate_openapi
-        from .response import HTMLResponse
-
-        spec_cache: list[bytes] = []
-        page = HTMLResponse(docs_page(title, spec_path))
-
-        @self.get(spec_path)
-        async def openapi_spec(request: Request) -> Any:
-            if not spec_cache:
-                spec_cache.append(
-                    _json_dumps(generate_openapi(self, title=title, version=version))
-                )
-            return Response(spec_cache[0], media_type=b"application/json")
-
-        @self.get(docs_path)
-        async def docs(request: Request) -> Any:
-            return page
+        self.enable_api_docs(
+            path=docs_path, spec_path=spec_path, title=title, version=version
+        )
 
     def on_startup(self, handler: LifespanHandler) -> LifespanHandler:
         """Run ``handler(app)`` during lifespan startup, in registration order."""
@@ -1497,9 +1801,25 @@ class Wreath:
                     for client in self._http_clients.values():
                         await client.start()
                         started_clients.append(client)
+                    # Supervised jobs/messaging start after their dependencies
+                    # (databases, clients) and before user startup handlers, so a
+                    # startup handler may enqueue onto a running runner.
+                    if self._job_runners or self._message_buses:
+                        from .services import Supervisor
+
+                        supervisor = Supervisor()
+                        for runner in self._job_runners.values():
+                            supervisor.add(runner)
+                        for bus in self._message_buses.values():
+                            supervisor.add(bus)
+                        await supervisor.start()
+                        self._supervisor = supervisor
                     for handler in self._startup_handlers:
                         await handler(self)
                 except Exception as error:  # noqa: BLE001 - reported to the server
+                    if self._supervisor is not None:
+                        await self._supervisor.stop()
+                        self._supervisor = None
                     for client in reversed(started_clients):
                         await client.close()
                     for database in reversed(started_databases):
@@ -1513,6 +1833,15 @@ class Wreath:
                 try:
                     for handler in self._shutdown_handlers:
                         await handler(self)
+                    # Stop supervised work before the resources it depends on:
+                    # stop fetching, drain in-flight, release leases (design 01).
+                    if self._supervisor is not None:
+                        await self._supervisor.stop()
+                        self._supervisor = None
+                    for store in reversed(tuple(self._storages.values())):
+                        close = getattr(store, "close", None)
+                        if close is not None:
+                            close()
                     for client in reversed(tuple(self._http_clients.values())):
                         await client.close()
                     for database in reversed(tuple(self._databases.values())):

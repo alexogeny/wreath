@@ -602,6 +602,90 @@ class _MultipartValidationTape:
                 kwargs[name] = upload
 
 
+def _unwrap_form_type(annotation: Any) -> Any:
+    """Peel ``Mapped[T]`` and ``Optional[T]`` down to the scalar type that
+    :func:`_convert_scalar` understands; leave anything else unchanged."""
+    origin = typing.get_origin(annotation)
+    if origin in (types.UnionType, typing.Union):
+        options = [o for o in typing.get_args(annotation) if o is not _NONE_TYPE]
+        if len(options) == 1:
+            return _unwrap_form_type(options[0])
+        return annotation
+    args = typing.get_args(annotation)
+    name = getattr(origin, "__name__", "") or getattr(annotation, "__name__", "")
+    if name == "Mapped" and args:  # wreath.orm Mapped[T]
+        return _unwrap_form_type(args[0])
+    return annotation
+
+
+def _form_model_fields(annotation: Any) -> tuple[tuple[str, Any, bool], ...]:
+    """``(field_name, python_type, required)`` for each scalar field of a
+    dataclass or ORM model bound from multipart form fields. File parts are not
+    model fields — bind an upload with a separate ``File()`` parameter."""
+    try:
+        hints = typing.get_type_hints(annotation)
+    except (TypeError, ValueError):
+        hints = {}
+    if _is_model(annotation):
+        model_fields: list[tuple[str, Any, bool]] = []
+        for column in annotation.__wreath_columns__:
+            name = column.python_name
+            ptype = _unwrap_form_type(hints.get(name, str))
+            required = not (column.nullable or column.server_default or column.primary_key)
+            model_fields.append((name, ptype, required))
+        return tuple(model_fields)
+    result: list[tuple[str, Any, bool]] = []
+    for field in dataclasses.fields(annotation):
+        ptype = _unwrap_form_type(hints.get(field.name, field.type))
+        required = (
+            field.default is dataclasses.MISSING
+            and field.default_factory is dataclasses.MISSING
+        )
+        result.append((field.name, ptype, required))
+    return tuple(result)
+
+
+class _FormModelValidationTape:
+    """Bind a whole dataclass/ORM model from multipart form fields, then run the
+    SAME native body validator (the JSON-body path) over the assembled dict — so
+    a form-posted model is validated exactly like a JSON-posted one. Reuses the
+    native multipart parser (``request.form()``) and the native validation tape;
+    no new native code. File parts are bound by separate ``File()`` params.
+
+    TODO(pure-twin): the reuse means there is nothing new to twin — validation
+    already runs native-or-pure via ``_body_validator``; this tape is pure-Python
+    glue and works identically under ``WREATH_PURE=1``.
+    """
+
+    __slots__ = ("_name", "_fields", "_validator")
+
+    def __init__(
+        self,
+        name: str,
+        fields: tuple[tuple[str, Any, bool], ...],
+        validator: _BodyValidator,
+    ) -> None:
+        self._name = name
+        self._fields = fields
+        self._validator = validator
+
+    async def decode(self, request: Request, kwargs: dict[str, Any]) -> None:
+        parsed = await request.form()
+        known = {name for name, _type, _required in self._fields}
+        extras = [key for key in parsed.fields if key not in known]
+        if extras:
+            raise ValidationError(
+                [_error(("form", key), "unexpected field", "extra") for key in extras]
+            )
+        payload: dict[str, Any] = {}
+        for name, ptype, _required in self._fields:
+            raw = parsed.fields.get(name)
+            if raw is None:
+                continue  # absent: the body validator applies default / flags missing
+            payload[name] = _convert_scalar(ptype, raw, ("form", name))
+        kwargs[self._name] = self._validator(payload, ("form",))
+
+
 def _body_validator(annotation: Any) -> _BodyValidator:
     """Compile the body checker once, at route-compile time.
 
@@ -672,6 +756,9 @@ class BindingSpec:
     # Compiled numeric ranges keyed by parameter name; parallel to query_params
     # so OpenAPI/typegen keep iterating the 4-tuple shape unchanged.
     query_constraints: tuple[tuple[str, ScalarConstraint], ...] = ()
+    # A dataclass/ORM model bound whole-cloth from multipart form fields
+    # (``Annotated[MyModel, Form()]``) — the ``as_form`` ergonomic.
+    form_model: tuple[str, Any] | None = None
 
 
 def inspect_handler(handler: Handler, path: str) -> BindingSpec | None:
@@ -701,6 +788,7 @@ def inspect_handler(handler: Handler, path: str) -> BindingSpec | None:
     connection_specs: list[tuple[str, Any]] = []
     session_specs: list[tuple[str, Any]] = []
     body_spec: tuple[str, Any] | None = None
+    form_model_spec: tuple[str, Any] | None = None
 
     for parameter in parameters[1:]:
         if parameter.kind in (
@@ -765,7 +853,15 @@ def inspect_handler(handler: Handler, path: str) -> BindingSpec | None:
                 raise TypeError("handler declares two body parameters")
             body_spec = (parameter.name, base_annotation)
         elif isinstance(source, Form):
-            form_specs.append((parameter.name, alias, base_annotation, default))
+            if dataclasses.is_dataclass(base_annotation) or _is_model(base_annotation):
+                if form_model_spec is not None:
+                    label = getattr(handler, "__qualname__", handler)
+                    raise TypeError(
+                        f"handler {label!s} declares two form-model parameters"
+                    )
+                form_model_spec = (parameter.name, base_annotation)
+            else:
+                form_specs.append((parameter.name, alias, base_annotation, default))
         elif isinstance(source, File):
             file_specs.append((parameter.name, alias, base_annotation, default))
         elif parameter.name in placeholders:
@@ -777,8 +873,12 @@ def inspect_handler(handler: Handler, path: str) -> BindingSpec | None:
             body_spec = (parameter.name, base_annotation)
         else:
             query_specs.append((parameter.name, parameter.name, base_annotation, default))
-    if body_spec is not None and (form_specs or file_specs):
+    if body_spec is not None and (form_specs or file_specs or form_model_spec is not None):
         raise TypeError("a handler cannot combine body and form/file parameters")
+    if form_model_spec is not None and form_specs:
+        raise TypeError(
+            "a handler cannot combine a form-model with individual Form() fields"
+        )
     return BindingSpec(
         tuple(path_specs),
         tuple(query_specs),
@@ -792,6 +892,7 @@ def inspect_handler(handler: Handler, path: str) -> BindingSpec | None:
         tuple(connection_specs),
         tuple(session_specs),
         tuple(query_constraints),
+        form_model=form_model_spec,
     )
 
 
@@ -827,6 +928,16 @@ def compile_binder(
     # Compiled here, never per request: a model body resolves to a validator
     # over its own columns.
     body_validator = None if body_spec is None else _body_validator(body_spec[1])
+    form_model_spec = None if spec is None else spec.form_model
+    form_model_tape = (
+        None
+        if form_model_spec is None
+        else _FormModelValidationTape(
+            form_model_spec[0],
+            _form_model_fields(form_model_spec[1]),
+            _body_validator(form_model_spec[1]),
+        )
+    )
     resolvers: tuple[tuple[str, Depends, Resolver], ...] = tuple(
         (name, marker, _compile_dependency(marker.fn, ()))
         for name, marker in (() if spec is None else spec.depends)
@@ -915,6 +1026,8 @@ def compile_binder(
                     kwargs[name] = _convert_scalar(annotation, raw, ("cookie", alias))
         if form_specs or file_specs:
             await form_tape.decode_multipart_validation_tape(request, kwargs)
+        if form_model_tape is not None:
+            await form_model_tape.decode(request, kwargs)
         if body_spec is not None and body_validator is not None:
             name, _annotation = body_spec
             try:

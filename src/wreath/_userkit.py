@@ -1,0 +1,342 @@
+"""Stdlib-only core for the user-management lifecycle (no wreath imports).
+
+Kept dependency-free and import-light so the password hashing, signed action
+tokens, store protocol, and flow logic are unit-testable without the native
+package. The wreath-coupled router glue lives in :mod:`wreath.users`.
+
+Password hashing uses stdlib ``hashlib.scrypt`` (zero-dep, memory-hard). Action
+tokens (email verification, password reset) are HMAC-SHA256 signed and expiring;
+a per-user *fingerprint* (a hash of the current password hash) is folded into the
+signature so a reset link self-invalidates the moment the password changes —
+giving single-use semantics without server-side token storage.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import os
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field, replace
+from typing import Protocol, runtime_checkable
+
+__all__ = [
+    "CapturingEmailSender",
+    "EmailSender",
+    "InMemoryUserStore",
+    "LogEmailSender",
+    "UserRecord",
+    "UserStore",
+    "fingerprint",
+    "hash_password",
+    "register",
+    "authenticate",
+    "verify_email",
+    "start_password_reset",
+    "reset_password",
+    "sign_token",
+    "verify_password",
+    "verify_token",
+]
+
+# --- password hashing -------------------------------------------------------
+
+_SCRYPT_N = 2**14
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+_SCRYPT_DKLEN = 32
+_SCRYPT_MAXMEM = 64 * 1024 * 1024
+
+
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _unb64(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def hash_password(
+    password: str, *, n: int = _SCRYPT_N, r: int = _SCRYPT_R, p: int = _SCRYPT_P
+) -> str:
+    """Hash ``password`` with a fresh salt; returns ``scrypt$n$r$p$salt$hash``."""
+    if not password:
+        raise ValueError("password must not be empty")
+    salt = os.urandom(16)
+    dk = hashlib.scrypt(
+        password.encode("utf-8"), salt=salt, n=n, r=r, p=p,
+        dklen=_SCRYPT_DKLEN, maxmem=_SCRYPT_MAXMEM,
+    )
+    return f"scrypt${n}${r}${p}${_b64(salt)}${_b64(dk)}"
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    """Constant-time verify ``password`` against a stored ``encoded`` hash."""
+    try:
+        scheme, n, r, p, salt_b64, hash_b64 = encoded.split("$")
+        if scheme != "scrypt":
+            return False
+        expected = _unb64(hash_b64)
+        dk = hashlib.scrypt(
+            password.encode("utf-8"), salt=_unb64(salt_b64),
+            n=int(n), r=int(r), p=int(p), dklen=len(expected), maxmem=_SCRYPT_MAXMEM,
+        )
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(dk, expected)
+
+
+# --- signed action tokens ---------------------------------------------------
+
+
+def fingerprint(hashed_password: str) -> str:
+    """A short, opaque fingerprint of the current password hash (for single-use)."""
+    return hashlib.sha256(hashed_password.encode("utf-8")).hexdigest()[:16]
+
+
+def sign_token(
+    secret: str, purpose: str, subject: str, *, ttl: int, bound: str = "", now: float | None = None
+) -> str:
+    """Sign an expiring, purpose-scoped token bound to ``subject`` (+ optional ``bound``)."""
+    issued = int(time.time() if now is None else now)
+    expires = issued + int(ttl)
+    body = f"{purpose}:{subject}:{expires}:{bound}"
+    encoded = _b64(body.encode("utf-8"))
+    mac = hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), "sha256").hexdigest()
+    return f"{encoded}.{mac}"
+
+
+def verify_token(
+    secret: str, purpose: str, token: str, *, bound: str = "", now: float | None = None
+) -> str | None:
+    """Return the token ``subject`` if valid/unexpired/purpose-and-bound-matched, else None."""
+    try:
+        encoded, mac = token.split(".")
+        expected = hmac.new(
+            secret.encode("utf-8"), encoded.encode("ascii"), "sha256"
+        ).hexdigest()
+        if not hmac.compare_digest(mac, expected):
+            return None
+        got_purpose, subject, expires, got_bound = _unb64(encoded).decode("utf-8").split(":", 3)
+    except (ValueError, TypeError):
+        return None
+    if got_purpose != purpose or got_bound != bound:
+        return None
+    if int(expires) < int(time.time() if now is None else now):
+        return None
+    return subject
+
+
+# --- user record + store ----------------------------------------------------
+
+
+@dataclass(slots=True)
+class UserRecord:
+    id: str
+    email: str
+    hashed_password: str
+    is_active: bool = True
+    is_verified: bool = False
+    created_at: float = 0.0
+    updated_at: float = 0.0
+
+
+@runtime_checkable
+class UserStore(Protocol):
+    """Persistence seam for users — supply your own, or use InMemory/an ORM adapter."""
+
+    async def get_by_email(self, email: str) -> UserRecord | None: ...
+    async def get_by_id(self, user_id: str) -> UserRecord | None: ...
+    async def create(self, email: str, hashed_password: str) -> UserRecord: ...
+    async def update(self, user: UserRecord) -> UserRecord: ...
+
+
+def _normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+@dataclass(slots=True)
+class InMemoryUserStore:
+    """A dict-backed store for dev and tests. Emails are normalized (lower/trim)."""
+
+    _by_id: dict[str, UserRecord] = field(default_factory=dict)
+    _by_email: dict[str, str] = field(default_factory=dict)
+    _seq: int = 0
+
+    async def get_by_email(self, email: str) -> UserRecord | None:
+        user_id = self._by_email.get(_normalize_email(email))
+        return self._by_id.get(user_id) if user_id else None
+
+    async def get_by_id(self, user_id: str) -> UserRecord | None:
+        return self._by_id.get(user_id)
+
+    async def create(self, email: str, hashed_password: str) -> UserRecord:
+        self._seq += 1
+        now = time.time()
+        record = UserRecord(
+            id=str(self._seq), email=_normalize_email(email),
+            hashed_password=hashed_password, created_at=now, updated_at=now,
+        )
+        self._by_id[record.id] = record
+        self._by_email[record.email] = record.id
+        return record
+
+    async def update(self, user: UserRecord) -> UserRecord:
+        user.updated_at = time.time()
+        self._by_id[user.id] = user
+        self._by_email[_normalize_email(user.email)] = user.id
+        return user
+
+
+# --- email hook -------------------------------------------------------------
+
+
+@runtime_checkable
+class EmailSender(Protocol):
+    """Delivery seam. Actual transport (SMTP/SES) is the separate email gap (#5)."""
+
+    async def send_verification(self, email: str, link: str) -> None: ...
+    async def send_password_reset(self, email: str, link: str) -> None: ...
+
+
+class LogEmailSender:
+    """Default dev sender — prints the link instead of delivering it."""
+
+    def __init__(self, printer: Callable[[str], None] = print) -> None:
+        self._print = printer
+
+    async def send_verification(self, email: str, link: str) -> None:
+        self._print(f"[wreath.users] verify {email}: {link}")
+
+    async def send_password_reset(self, email: str, link: str) -> None:
+        self._print(f"[wreath.users] reset {email}: {link}")
+
+
+@dataclass(slots=True)
+class CapturingEmailSender:
+    """Test sender — records (email, link) pairs instead of sending."""
+
+    verifications: list[tuple[str, str]] = field(default_factory=list)
+    resets: list[tuple[str, str]] = field(default_factory=list)
+
+    async def send_verification(self, email: str, link: str) -> None:
+        self.verifications.append((email, link))
+
+    async def send_password_reset(self, email: str, link: str) -> None:
+        self.resets.append((email, link))
+
+
+# --- flow logic (framework-agnostic) ----------------------------------------
+#
+# Each returns plain data (bool / UserRecord | None) — the router glue in
+# wreath.users maps these to JSON responses + session writes. Responses are kept
+# uniform for register/forgot so an attacker can't enumerate accounts.
+
+_VERIFY = "verify"
+_RESET = "reset"
+
+
+async def register(
+    store: UserStore,
+    mailer: EmailSender,
+    *,
+    secret: str,
+    email: str,
+    password: str,
+    link_builder: Callable[[str, str], str],
+    ttl: int = 24 * 3600,
+    now: float | None = None,
+) -> None:
+    """Create an unverified user (if new) and email a verification link. Uniform, no leak."""
+    existing = await store.get_by_email(email)
+    if existing is not None:
+        # Do not reveal existence; optionally the app could email a "you already
+        # have an account" notice here. We stay silent + uniform.
+        return None
+    user = await store.create(email, hash_password(password))
+    # Verify tokens are idempotent + expiry-limited; no fingerprint binding (that
+    # single-use mechanism is reserved for password resets).
+    token = sign_token(secret, _VERIFY, user.id, ttl=ttl, now=now)
+    await mailer.send_verification(user.email, link_builder(_VERIFY, token))
+    return None
+
+
+async def authenticate(store: UserStore, email: str, password: str) -> UserRecord | None:
+    """Return the user iff credentials are valid AND the account is active. Uniform failure."""
+    user = await store.get_by_email(email)
+    if user is None:
+        # Spend comparable work to blunt timing-based enumeration.
+        verify_password(password, "scrypt$16384$8$1$AAAA$AAAA")
+        return None
+    if not verify_password(password, user.hashed_password) or not user.is_active:
+        return None
+    return user
+
+
+async def verify_email(
+    store: UserStore, *, secret: str, token: str, now: float | None = None
+) -> bool:
+    """Mark a user verified from a valid verification token."""
+    subject = verify_token(secret, _VERIFY, token, now=now)
+    if subject is None:
+        return False
+    user = await store.get_by_id(subject)
+    if user is None:
+        return False
+    if not user.is_verified:
+        await store.update(replace(user, is_verified=True))
+    return True
+
+
+async def start_password_reset(
+    store: UserStore,
+    mailer: EmailSender,
+    *,
+    secret: str,
+    email: str,
+    link_builder: Callable[[str, str], str],
+    ttl: int = 3600,
+    now: float | None = None,
+) -> None:
+    """Email a reset link if the account exists. Uniform response regardless."""
+    user = await store.get_by_email(email)
+    if user is None:
+        return None
+    token = sign_token(secret, _RESET, user.id, ttl=ttl,
+                       bound=fingerprint(user.hashed_password), now=now)
+    await mailer.send_password_reset(user.email, link_builder(_RESET, token))
+    return None
+
+
+async def reset_password(
+    store: UserStore, *, secret: str, token: str, new_password: str, now: float | None = None
+) -> bool:
+    """Set a new password from a valid, single-use reset token.
+
+    The token's fingerprint is bound to the password hash that was current when it
+    was minted, so we peek the (still-untrusted) subject, load that user, then
+    verify the token against the user's CURRENT fingerprint — a token minted
+    before the latest password change fails, giving single-use semantics.
+    """
+    subject = _token_subject(token)
+    if subject is None:
+        return False
+    user = await store.get_by_id(subject)
+    if user is None:
+        return False
+    if verify_token(secret, _RESET, token, now=now,
+                    bound=fingerprint(user.hashed_password)) != user.id:
+        return False
+    await store.update(replace(user, hashed_password=hash_password(new_password)))
+    return True
+
+
+def _token_subject(token: str) -> str | None:
+    """Peek the subject from a token WITHOUT trusting it (caller must verify)."""
+    try:
+        encoded = token.split(".", 1)[0]
+        return _unb64(encoded).decode("utf-8").split(":", 3)[1]
+    except (ValueError, TypeError, IndexError):
+        return None

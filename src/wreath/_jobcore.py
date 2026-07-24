@@ -1,0 +1,215 @@
+"""Pure-Python core for the durable-jobs and messaging coordinator.
+
+Everything here is deterministic, allocation-light, and free of I/O so it can be
+unit-tested without a database and, later, replaced by a native ``_queue``
+accelerator behind a byte-identical twin (see ``docs/plans`` / design 01).
+
+TODO(native-queue): the state-machine validator, backoff arithmetic, and dedup
+hashing are the concerns design 01 earmarks for ``_native/_queue/`` (envelope /
+jobstate / backoff / dedup). They live in pure Python for this cut; a native
+fast-path plus pure twin can drop in without changing the coordinator API.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Callable
+from typing import Final
+
+# --- job/message lifecycle state machine -----------------------------------
+#
+# ``ready`` -> ``leased`` (a worker claims it) -> ``done`` | ``failed`` (retry,
+# back to ``ready``) | ``dead`` (attempts exhausted). ``leased`` -> ``ready`` is
+# the lease-expiry reclaim path. Every transition a worker performs is checked
+# against this table so a fenced/stale worker can never drive an illegal move.
+
+READY: Final = "ready"
+LEASED: Final = "leased"
+DONE: Final = "done"
+FAILED: Final = "failed"
+DEAD: Final = "dead"
+
+STATES: Final = frozenset({READY, LEASED, DONE, FAILED, DEAD})
+
+_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
+    READY: frozenset({LEASED}),
+    # A leased item completes, goes back to ready for retry, or dies.
+    LEASED: frozenset({DONE, READY, DEAD}),
+    # Terminal-ish: failed is a transient label a retry leaves via ready; done
+    # and dead are absorbing.
+    FAILED: frozenset({READY, DEAD}),
+    DONE: frozenset(),
+    DEAD: frozenset(),
+}
+
+
+class TransitionError(ValueError):
+    """An illegal job/message state transition was attempted."""
+
+
+def valid_transition(old: str, new: str) -> bool:
+    """Return whether ``old -> new`` is a legal lifecycle move."""
+    if old not in STATES or new not in STATES:
+        return False
+    return new in _TRANSITIONS[old]
+
+
+def check_transition(old: str, new: str) -> None:
+    """Raise :class:`TransitionError` unless ``old -> new`` is legal."""
+    if not valid_transition(old, new):
+        raise TransitionError(f"illegal job transition: {old!r} -> {new!r}")
+
+
+# --- retry backoff ----------------------------------------------------------
+
+BackoffKind = str  # "exp" | "linear" | "fixed"
+
+
+def compute_backoff(
+    attempt: int,
+    *,
+    kind: BackoffKind = "exp",
+    base: float = 1.0,
+    factor: float = 2.0,
+    cap: float = 3600.0,
+    jitter: float = 0.0,
+    jitter_fn: Callable[[], float] | None = None,
+) -> float:
+    """Seconds to wait before retry ``attempt`` (1-based).
+
+    Deterministic given ``jitter_fn`` (injected in tests). ``jitter`` is the
+    fraction of the computed delay added as bounded random jitter, so a thundering
+    herd of same-age failures does not retry in lockstep.
+    """
+    if attempt < 1:
+        raise ValueError("attempt must be >= 1")
+    if kind == "fixed":
+        delay = base
+    elif kind == "linear":
+        delay = base * attempt
+    elif kind == "exp":
+        # base * factor**(attempt-1), guarded against overflow at large attempts.
+        exponent = min(attempt - 1, 32)
+        delay = base * (factor ** exponent)
+    else:
+        raise ValueError(f"unknown backoff kind: {kind!r}")
+    delay = min(delay, cap)
+    if jitter > 0.0:
+        source = jitter_fn() if jitter_fn is not None else _default_jitter()
+        # source in [0,1); scale to +/- jitter fraction of the delay.
+        delay += delay * jitter * (source * 2.0 - 1.0)
+    return max(0.0, delay)
+
+
+def _default_jitter() -> float:
+    # Imported lazily so importing this module never trips a "no top-level
+    # random" lint, and so tests always inject a deterministic jitter_fn.
+    import random
+
+    return random.random()
+
+
+# --- idempotency / dedup ----------------------------------------------------
+
+
+def dedup_key(scope: str, key: str) -> str:
+    """A stable idempotency key for ``(scope, key)``.
+
+    Hashed rather than concatenated so an arbitrary user key can't collide with a
+    different scope's key by sharing a delimiter, and so the stored key is a
+    bounded fixed width regardless of user input length.
+    """
+    digest = hashlib.blake2s(
+        b"%b\x00%b" % (scope.encode("utf-8"), key.encode("utf-8")), digest_size=16
+    )
+    return digest.hexdigest()
+
+
+# --- NOTIFY payload bounds --------------------------------------------------
+
+# PostgreSQL caps a NOTIFY payload at 8000 bytes; leave headroom for the channel
+# envelope so an ephemeral publish that would be truncated is rejected up front
+# and routed to the durable path instead.
+MAX_NOTIFY_PAYLOAD: Final = 7000
+
+
+class PayloadTooLarge(ValueError):
+    """An ephemeral publish payload exceeded the NOTIFY size bound."""
+
+
+def check_notify_payload(payload: bytes) -> None:
+    if len(payload) > MAX_NOTIFY_PAYLOAD:
+        raise PayloadTooLarge(
+            f"ephemeral payload is {len(payload)} bytes; "
+            f"limit is {MAX_NOTIFY_PAYLOAD} — publish with durable=True instead"
+        )
+
+
+# --- minimal 5-field cron ---------------------------------------------------
+#
+# Standard ``minute hour day-of-month month day-of-week`` with ``*``, lists
+# (``1,2``), ranges (``1-5``), and steps (``*/5``, ``0-30/10``). No named months
+# or special strings — enough for scheduled jobs without a cron dependency.
+
+
+class CronSchedule:
+    """A parsed 5-field cron expression with a ``next_after`` computation."""
+
+    __slots__ = ("_expr", "_minute", "_hour", "_dom", "_month", "_dow")
+
+    _BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))
+
+    def __init__(self, expression: str) -> None:
+        fields = expression.split()
+        if len(fields) != 5:
+            raise ValueError(
+                f"cron expression must have 5 fields, got {len(fields)}: {expression!r}"
+            )
+        self._expr = expression
+        sets = [
+            _parse_cron_field(field, low, high)
+            for field, (low, high) in zip(fields, self._BOUNDS, strict=True)
+        ]
+        self._minute, self._hour, self._dom, self._month, self._dow = sets
+
+    @property
+    def expression(self) -> str:
+        return self._expr
+
+    def matches(self, *, minute: int, hour: int, day: int, month: int, weekday: int) -> bool:
+        """Whether a wall-clock instant matches (weekday: Monday=0..Sunday=6 -> cron Sun=0)."""
+        cron_dow = (weekday + 1) % 7  # Python Mon=0 -> cron Sun=0
+        if minute not in self._minute or hour not in self._hour or month not in self._month:
+            return False
+        # Vixie-cron semantics: when both day-of-month and day-of-week are
+        # restricted, either matching is sufficient; otherwise both must match.
+        dom_restricted = len(self._dom) != 31
+        dow_restricted = len(self._dow) != 7
+        dom_ok = day in self._dom
+        dow_ok = cron_dow in self._dow
+        if dom_restricted and dow_restricted:
+            return dom_ok or dow_ok
+        return dom_ok and dow_ok
+
+
+def _parse_cron_field(field: str, low: int, high: int) -> frozenset[int]:
+    values: set[int] = set()
+    for part in field.split(","):
+        step = 1
+        body = part
+        if "/" in part:
+            body, _, step_text = part.partition("/")
+            step = int(step_text)
+            if step < 1:
+                raise ValueError(f"cron step must be >= 1: {part!r}")
+        if body == "*":
+            start, end = low, high
+        elif "-" in body:
+            start_text, _, end_text = body.partition("-")
+            start, end = int(start_text), int(end_text)
+        else:
+            start = end = int(body)
+        if start < low or end > high or start > end:
+            raise ValueError(f"cron field out of range [{low},{high}]: {part!r}")
+        values.update(range(start, end + 1, step))
+    return frozenset(values)
