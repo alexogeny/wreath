@@ -11,14 +11,20 @@ connection pooling, retries, redirect handling, and a destination policy that ca
 restrict where requests are even allowed to go:
 
 ```python
-from wreath.http_client import HTTPClient
+client = app.http_client("payments", base_url="https://api.example")
 
-client = HTTPClient()
-response = await client.get("https://api.example/health")
+@app.get("/health-check")
+async def health_check(request) -> dict:
+    response = await client.get("/health")
+    return {"upstream": response.status}
 ```
 
-Open and close the client with your application lifespan so its connection pool
-is managed cleanly rather than leaking between requests.
+A client is named, carries its `base_url`, and makes requests against paths
+resolved under it. Registered on the application like this, its connection pool
+is opened during lifespan startup and closed at shutdown — nothing to leak
+between requests. Outside an application, construct
+`HTTPClient("payments", base_url=...)` directly and manage its lifecycle
+yourself.
 
 ## Webhooks
 

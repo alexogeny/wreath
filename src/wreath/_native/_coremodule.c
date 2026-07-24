@@ -58,6 +58,14 @@ static PyMethodDef core_methods[] = {
      "csrf_validate(secret, token, now, max_age) -> (bool, int)"},
     {"host_allowed", wreath_host_allowed, METH_VARARGS,
      "host_allowed(host, patterns) -> bool"},
+    {"jose_b64url_decode", wreath_jose_b64url_decode, METH_O,
+     "jose_b64url_decode(data) -> bytes\nStrict unpadded URL-safe base64 decode."},
+    {"jose_parse", wreath_jose_parse, METH_VARARGS,
+     "jose_parse(token, max_segment_bytes) -> (header, payload, signing_input, signature)"},
+    {"jose_verify_hs", wreath_jose_verify_hs, METH_VARARGS,
+     "jose_verify_hs(digestmod, key, signing_input, signature) -> bool"},
+    {"jose_validate_claims", wreath_jose_validate_claims, METH_VARARGS,
+     "jose_validate_claims(claims, now, leeway, issuer, audiences, required) -> int"},
     {"request_id_valid", wreath_request_id_valid, METH_VARARGS,
      "request_id_valid(value, max_len) -> bool"},
     {"format_server_timing", wreath_format_server_timing, METH_VARARGS,
@@ -67,6 +75,9 @@ static PyMethodDef core_methods[] = {
     {"normalize_authorization_decision", wreath_normalize_authorization_decision,
      METH_VARARGS,
      "normalize_authorization_decision(result, decision_type) -> decision"},
+    {"cedar_is_authorized", wreath_cedar_is_authorized, METH_VARARGS,
+     "cedar_is_authorized(policies, principal, action, resource, context, store)"
+     " -> (allowed, reason, diagnostics)"},
     {"find_header", wreath_find_header, METH_VARARGS,
      "find_header(headers, name) -> bytes | None\n"
      "Return the first value for a lowercase header name."},
@@ -152,7 +163,7 @@ PyInit__core(void)
     if (module == NULL) {
         return NULL;
     }
-    if (wreath_security_ready() < 0 ||
+    if (wreath_security_ready() < 0 || wreath_jose_ready() < 0 ||
         wreath_register_router(module) < 0 || wreath_register_dtrouter(module) < 0 ||
         wreath_register_dtbitset(module) < 0 ||
         wreath_register_webpolicy(module) < 0 || wreath_register_proxy(module) < 0 ||

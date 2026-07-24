@@ -4,7 +4,7 @@ The top level is intentionally small. Less common types live in their obvious
 modules — for example ``wreath.response.ProblemResponse``,
 ``wreath.binding.Query``, ``wreath.middleware.CORSMiddleware``,
 ``wreath.webhooks.WebhookHub``, ``wreath.http_client.HTTPClient``,
-``wreath.authorization.Policy``, ``wreath.testing.TestClient``.
+``wreath.authorization.CedarPolicies``, ``wreath.testing.TestClient``.
 """
 
 from .app import Wreath

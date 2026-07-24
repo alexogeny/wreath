@@ -256,6 +256,7 @@ class Wreath:
         "_match",
         "_middleware",
         "_middleware_order",
+        "_oidc_providers",
         "_orm_registries",
         "_preflight_fallback",
         "_probe",
@@ -334,6 +335,7 @@ class Wreath:
         self._databases: dict[str, Any] = {}
         self._http_clients: dict[str, Any] = {}
         self._orm_registries: dict[str, Any] = {}
+        self._oidc_providers: dict[str, Any] = {}
         self._webhook_hubs: dict[str, Any] = {}
 
     def webhooks(self, name: str) -> Any:
@@ -357,6 +359,71 @@ class Wreath:
         self._http_clients[name] = client
         self.state.__setattr__(f"http_{name}", client)
         return client
+
+    def oidc_provider(
+        self,
+        name: str,
+        *,
+        issuer: str,
+        audience: Any = None,
+        http_client: Any,
+        **options: Any,
+    ) -> Any:
+        """Register an OIDC identity provider (Cognito/Auth0/Okta/…).
+
+        ``http_client`` is the name of an :meth:`http_client` pinned to the
+        issuer origin, or an ``HTTPClient`` instance. Discovery and the first
+        JWKS fetch run during lifespan startup (after HTTP clients start), so
+        the first request never pays for them.
+        """
+        from ._auth.oidc import OidcProvider
+
+        if name in self._oidc_providers:
+            raise ValueError(f"duplicate OIDC provider: {name}")
+        client = self._http_clients[http_client] if isinstance(http_client, str) else http_client
+        provider = OidcProvider(
+            name, issuer=issuer, audience=audience, http_client=client, **options
+        )
+        self._oidc_providers[name] = provider
+        self.state.__setattr__(f"oidc_{name}", provider)
+
+        async def _discover(_app: Any) -> None:
+            await provider.discover()
+
+        self._startup_handlers.append(_discover)
+        self._dirty = True
+        return provider
+
+    def oauth2_login(
+        self,
+        name: str,
+        *,
+        provider: Any,
+        client_id: str,
+        client_secret: str,
+        redirect_uri: str,
+        scopes: tuple[str, ...] = ("openid", "email"),
+        **options: Any,
+    ) -> None:
+        """Register ``/auth/login`` + ``/auth/callback`` for ``provider``.
+
+        Env/auth gating is the app's business; this only wires the routes. See
+        the design's SSO bridge: the callback verifies the id_token with the
+        provider's own JWKS verifier and writes a principal into the session.
+        """
+        from ._auth.oauth2 import register_oauth2_login
+
+        resolved = self._oidc_providers[provider] if isinstance(provider, str) else provider
+        register_oauth2_login(
+            self,
+            name,
+            provider=resolved,
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=redirect_uri,
+            scopes=scopes,
+            **options,
+        )
 
     def postgres(
         self,
@@ -391,6 +458,7 @@ class Wreath:
         models: Iterable[type],
         validate_schema: Literal["off", "warn", "error"] = "error",
         query_cache_size: int = 512,
+        schema_mode: Any = None,
     ) -> Any:
         """Compile ``models`` against an existing ``app.postgres()`` database.
 
@@ -412,6 +480,7 @@ class Wreath:
             tuple(models),
             validate_schema=validate_schema,
             query_cache_size=query_cache_size,
+            schema_mode=schema_mode,
         )
         self._orm_registries[database] = registry
         self.state.__setattr__(f"orm_{database}", registry)

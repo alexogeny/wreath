@@ -12,13 +12,22 @@
 - [Getting started](getting-started/index.md): install and first app.
 - [Deployment](getting-started/deployment.md): project layout, running behind ASGI or the native server.
 
+## Coming from FastAPI, Pydantic, SQLModel, or Alembic
+
+Read these first if you (or the code you are translating) use the FastAPI stack.
+
+- [Wreath for FastAPI developers](from-fastapi/index.md): the same app in both dialects; full equivalence table; the deliberate differences (request is always the first handler parameter; markers live in Annotated with plain Python defaults; no response_model; errors are RFC 9457 problem+json, not {"detail": ...}; docs are opt-in via enable_docs(); TestClient is async and responses expose .status).
+- [Pydantic and validation](from-fastapi/pydantic.md): BaseModel → dataclass or ORM-model bodies (extra fields always rejected); Field(ge/le) → Query(minimum/maximum/overflow) and ORM check= constraints; validators → narrow()/@rule; BaseSettings → wreath.config.load_env + WREATH_* + required_env.
+- [SQLModel, SQLAlchemy, and the ORM](from-fastapi/sqlmodel.md): Model(table=...) with explicit PG types and NOT NULL defaults; Annotated[Session, FromORM(...)] instead of a session dependency; Hero.select().where(...) queries; loading is always explicit (no lazy N+1); no create_all — startup validation only.
+- [Alembic and migrations](from-fastapi/alembic.md): the full single-schema loop ships — wreath migrations detect/check/generate/show/status/apply and a first-class inverse `down` (derived in metal from the same artifact; refuses to strand live ORM code unless --force). Keep Alembic only for MANUAL objects (composite constraints, full FK actions, expression/partial indexes) and tenant-fleet execution.
+
 ## Guides (one per extension)
 
 - [Routing](guides/routing.md): app and Router, route decorators, composition.
 - [Requests and responses](guides/requests-responses.md): the Request, and every response type.
 - [Binding and validation](guides/binding.md): typed parameters, validation, Depends.
 - [Middleware](guides/middleware.md): the protocol and built-ins.
-- [Auth](guides/auth.md): authentication (identity) and authorization (roles, permissions, Cedar).
+- [Auth](guides/auth.md): authentication (identity) and authorization (roles, permissions, and a built-in dependency-free Cedar engine: CedarPolicies parses at startup, native evaluation, forbid-overrides-permit, default deny; extensions/schema validation fail loudly at parse time).
 - [WebSockets](guides/websockets.md), [Native server](guides/server.md), [Outbound HTTP and webhooks](guides/http-client.md).
 - [PostgreSQL](guides/postgres.md) and [ORM](guides/orm.md): strict direction orm → postgres.
 - [FastAPI and Alembic migration](guides/migrations.md): staged SaaS adoption of logical schemas and metal readiness resolution.
@@ -28,8 +37,9 @@
 ## Reference
 
 - One page per public module under [reference/](reference/app.md), generated from the code.
-- [`wreath.migrations`](reference/migrations.md): metal-only readiness policy, configuration, and bounded fleet results.
-- [Reserved modules](reference/roadmap.md): telemetry, recording, and replay (not implemented yet).
+- [`wreath.migrations`](reference/migrations.md): metal-only readiness policy, configuration, and bounded fleet results. `resolve_fleet`/`TenantState` classify a whole tenant directory in one native call; `wreath.orm.TenantContext` binds a request's tenant schema/role transaction-locally (SET LOCAL search_path/ROLE) for isolated registries — tenant sessions require an explicit transaction.
+- [Telemetry](reference/telemetry.md), [Recording policies](reference/recording.md), [Replay and fault injection](reference/replay.md): the Native Flight Recorder surfaces (recording is policy types only; no capture engine yet).
+- [Reserved and in-progress surfaces](reference/roadmap.md): what genuinely isn't shipped — the migration DDL runner, the recording capture engine, isolated tenant session execution.
 
 ## For coding agents
 

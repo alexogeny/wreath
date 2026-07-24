@@ -22,6 +22,7 @@ from .migrations import (
     connect_migration,
     detect_single,
     generate_single_plan,
+    revert_single_artifact,
 )
 
 
@@ -257,6 +258,43 @@ async def _apply(namespace: argparse.Namespace, application: Any) -> dict[str, A
     }
 
 
+async def _down(namespace: argparse.Namespace, application: Any) -> dict[str, Any]:
+    registries = getattr(application, "_orm_registries", {})
+    registry = registries.get(namespace.database)
+    if registry is None:
+        known = ", ".join(sorted(registries)) or "none"
+        raise ValueError(
+            f"application has no ORM registry {namespace.database!r}; configured: {known}"
+        )
+    dsn = os.environ.get(namespace.dsn_env)
+    if not dsn:
+        raise ValueError(
+            f"migration credential variable {namespace.dsn_env!r} is not set; "
+            "downgrade never falls back to request-pool credentials"
+        )
+    artifact_data = _read_artifact(namespace.artifact)
+    connection = await connect_migration(dsn)
+    try:
+        result = await revert_single_artifact(
+            registry,
+            connection,
+            artifact_data,
+            allow_destructive=namespace.allow_destructive,
+            force=namespace.force,
+        )
+    finally:
+        await connection.close()
+    return {
+        "reverted": True,
+        "migration_id": result.migration_id.hex(),
+        "checksum": result.checksum.hex(),
+        "source_fingerprint": result.source_fingerprint.hex(),
+        "target_fingerprint": result.target_fingerprint.hex(),
+        "destructive_approved": result.destructive_approved,
+        "forced": result.forced,
+    }
+
+
 async def _status(namespace: argparse.Namespace, application: Any) -> dict[str, Any]:
     artifact_data = _read_artifacts(namespace.artifacts)
     first = _load_native_artifact(artifact_data[0])
@@ -378,6 +416,10 @@ def execute(
         application = load_application(namespace.target, factory=namespace.factory)
         payload = asyncio.run(_apply(namespace, application))
         title = f"applied migration {payload['migration_id']}"
+    elif namespace.migration_action == "down":
+        application = load_application(namespace.target, factory=namespace.factory)
+        payload = asyncio.run(_down(namespace, application))
+        title = f"reverted migration {payload['migration_id']}"
     else:
         raise ValueError(f"unsupported migration command {namespace.migration_action!r}")
     if namespace.json:

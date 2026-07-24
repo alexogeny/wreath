@@ -8,24 +8,37 @@ starts, so validation costs almost nothing at request time. Anything that
 doesn't fit becomes a structured `422` before your handler runs.
 
 ```python
+from typing import Annotated
+
 from wreath import Request
 from wreath.binding import Path, Query, Header, Cookie, Body, Form, File, Depends
 
 @app.get("/items/{id}")
 async def show(
     request: Request,
-    id: int = Path(),
-    fields: list[str] = Query(default=()),
-    trace: str | None = Header(default=None),
+    id: int,
+    limit: Annotated[int, Query(minimum=1, maximum=100)] = 20,
+    trace: Annotated[str | None, Header(alias="x-trace-id")] = None,
 ) -> dict:
-    return {"id": id, "fields": fields}
+    return {"id": id, "limit": limit, "trace": trace}
 ```
 
 Each marker names exactly where the value is read from — the path, the query
 string, a header, a cookie, the body, a form field, an uploaded file. There is
 no cleverness to memorize: `Query` reads the query string, `Header` reads a
-header. A body annotated as an [ORM model](orm.md) is validated against that
-model's own columns, so the same definition guards your database and your API.
+header. Markers ride inside `Annotated`, and a default stays an ordinary Python
+default on the parameter — the signature never stops being plain Python. Most
+of the time you need no marker at all: a name matching a path placeholder is a
+path parameter, a parameter annotated with a dataclass (or an ORM model) is the
+JSON body, and remaining scalar parameters read from the query string. A body
+validated against an [ORM model](orm.md) is checked by that model's own
+columns, so the same definition guards your database and your API.
+
+`Query` also carries numeric bounds — `minimum`, `maximum`, and an `overflow`
+of `"error"` (a structured `422`) or `"clamp"` (pin to the nearest bound, the
+right answer for pagination). Query, header, and cookie values are scalars:
+`str`, `int`, `float`, `bool`, or optional unions of them. Anything more
+structured belongs in the body.
 
 ## Dependencies
 

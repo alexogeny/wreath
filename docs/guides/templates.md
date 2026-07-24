@@ -11,11 +11,16 @@ from wreath.templates import TemplateDirectory
 from wreath.response import HTMLResponse
 
 templates = TemplateDirectory("templates")
+home_template = templates.compile("home.html")   # compile once, at startup
 
 @app.get("/")
 async def home(request) -> HTMLResponse:
-    return HTMLResponse(templates.render("home.html", title="Wreath"))
+    return HTMLResponse(home_template.render(title="Wreath"))
 ```
+
+A template compiles once — into a flat opcode tape, at startup — and rendering
+never touches the disk. That split is deliberate: syntax errors surface when
+the application boots, not on the first request that happens to hit the page.
 
 Use `escape` and `Markup` when you need to control escaping by hand, and expect
 clear, typed errors for syntax and render mistakes rather than a stack trace from

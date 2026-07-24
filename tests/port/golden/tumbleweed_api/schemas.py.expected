@@ -1,0 +1,23 @@
+# GOLDEN PLACEHOLDER — regenerate when wreath port Phase 1 lands.
+#
+# This is NOT real emitted output. It sketches the *expected shape* of the
+# translation of corpus/tumbleweed_api/schemas.py so the golden harness has a
+# target file in place. Replace with reviewed tool output when Phase 1 ships.
+#
+# Expected translation notes (design 07 §2, from-fastapi/pydantic.md):
+#   - `class X(BaseModel)`            -> `@dataclass` class
+#   - `model_config = ConfigDict(extra="forbid")` -> dropped (always-on in wreath)
+#   - `add_ons: list = []`           -> `field(default_factory=list)`
+#   - `Field(ge=1, le=12)` on a DTO  -> lossy: no column to hang the constraint
+#                                        on; emit + `# TODO(wreath-port:)` note
+#   - `@field_validator` / `@model_validator` -> lossy: annotate, never auto-map
+#
+# from dataclasses import dataclass, field
+# from typing import Optional
+#
+# @dataclass
+# class BookingCreate:
+#     llama_id: str
+#     guests: int  # TODO(wreath-port: move ge=1/le=12 to a model check) [pydantic-field-constraint]
+#     notes: Optional[str] = None
+#     add_ons: list = field(default_factory=list)

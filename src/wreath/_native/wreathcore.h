@@ -12,6 +12,9 @@
 PyObject *wreath_build_capability_mask(PyObject *self, PyObject *args);
 PyObject *wreath_normalize_authorization_decision(PyObject *self, PyObject *args);
 
+/* cedar.c */
+PyObject *wreath_cedar_is_authorized(PyObject *self, PyObject *args);
+
 /* env.c */
 PyObject *wreath_parse_dotenv(PyObject *self, PyObject *arg);
 PyObject *wreath_read_osenv(PyObject *self, PyObject *ignored);
@@ -23,6 +26,15 @@ PyObject *wreath_csrf_new_token(PyObject *self, PyObject *args);
 PyObject *wreath_csrf_validate(PyObject *self, PyObject *args);
 /* Resolves _hashlib.hmac_digest once; returns -1 on failure. */
 int wreath_security_ready(void);
+
+/* jose.c: JWT/JOSE fast paths (base64url, split, HS* verify, claim checks).
+ * RSA (RS and PS family) verification lives in the wreath._auth.jwt facade. */
+PyObject *wreath_jose_b64url_decode(PyObject *self, PyObject *arg);
+PyObject *wreath_jose_parse(PyObject *self, PyObject *args);
+PyObject *wreath_jose_verify_hs(PyObject *self, PyObject *args);
+PyObject *wreath_jose_validate_claims(PyObject *self, PyObject *args);
+/* Resolves _hashlib.hmac_digest once; returns -1 on failure. */
+int wreath_jose_ready(void);
 
 /* observability.c */
 PyObject *wreath_request_id_valid(PyObject *self, PyObject *args);

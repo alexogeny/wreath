@@ -80,13 +80,21 @@ def _schema_identifier(value: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ColumnRef:
-    """A resolved foreign-key target."""
+    """A resolved foreign-key target, with its referential actions.
+
+    ``on_delete``/``on_update`` are single PostgreSQL ``confdeltype``-style codes
+    (``a`` no action, ``r`` restrict, ``c`` cascade, ``n`` set null, ``d`` set
+    default) so the desired signature compares byte-for-byte with the catalog.
+    """
 
     schema: str | SchemaRef
     table: str
     column: str
     position: int
     model_type: type[Model]
+    on_delete: str = "a"
+    on_update: str = "a"
+    deferrable: bool = False
 
 
 # The spec graph is cyclic (a relationship points at a model that points back),
@@ -112,6 +120,11 @@ class ColumnSpec:
     @property
     def index(self) -> int:
         return self.column.index
+
+    @property
+    def index_method(self) -> str | None:
+        """The access method ("btree"/"gin") for this column's index, if any."""
+        return self.column.index_method
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -155,6 +168,10 @@ class ModelSpec:
     by_database_name: dict[str, ColumnSpec]
     #: Filled in by Registry.compile() once relationships resolve.
     by_relationship_name: dict[str, RelationshipSpec] = field(default_factory=dict)
+    #: Table-level composite unique constraints and multi-column indexes,
+    #: declared with ``unique(...)`` / ``index(...)`` in the model body.
+    table_uniques: tuple[Any, ...] = ()
+    table_indexes: tuple[Any, ...] = ()
     fingerprint: bytes = b""
 
     @property
@@ -215,12 +232,15 @@ def fingerprint_model(
     table: str,
     columns: tuple[ColumnSpec, ...],
     relationships: tuple[RelationshipSpec, ...],
+    table_uniques: tuple[Any, ...] = (),
+    table_indexes: tuple[Any, ...] = (),
 ) -> bytes:
     """A stable SHA-256 fingerprint of one compiled model.
 
     The encoding is versioned and canonical: it never uses ``repr()`` or
     Python's randomized ``hash()``, so a fingerprint is comparable across
-    processes and runs.
+    processes and runs. Table-level constraints append nothing when a model
+    declares none, so a model without them fingerprints exactly as before.
     """
     digest = hashlib.sha256()
     digest.update(FINGERPRINT_VERSION)
@@ -232,6 +252,14 @@ def fingerprint_model(
     for item in relationships:
         digest.update(b"\x1e")
         digest.update(_encode_relationship(item))
+    for unique_constraint in table_uniques:
+        digest.update(b"\x1e")
+        digest.update(b"u\x1f")
+        digest.update(",".join(unique_constraint.columns).encode("utf-8"))
+    for table_index in table_indexes:
+        digest.update(b"\x1e")
+        digest.update(b"ui\x1f" if table_index.unique else b"i\x1f")
+        digest.update(",".join(table_index.columns).encode("utf-8"))
     return digest.digest()
 
 

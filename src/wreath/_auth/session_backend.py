@@ -1,0 +1,76 @@
+"""Authentication backends for the SSO session bridge.
+
+After an OAuth2 login writes a principal into the signed session, the
+:class:`SessionIdentityBackend` turns it back into an :class:`Identity`, so a
+browser SSO session and an API bearer token converge on the same Identity shape
+— and therefore the same Cedar authorization path. :class:`CompositeBackend`
+tries several backends in order (bearer first, then session).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from ..request import Request
+from .backends import AuthenticationBackend
+from .models import Identity
+
+__all__ = ["CompositeBackend", "SessionIdentityBackend"]
+
+
+class SessionIdentityBackend:
+    """Yield an Identity from a principal previously stored in the session."""
+
+    __slots__ = ("_session_key",)
+
+    def __init__(self, *, session_key: str = "principal") -> None:
+        self._session_key = session_key
+
+    async def authenticate(self, request: Request) -> Identity | None:
+        session = getattr(request.state, "session", None)
+        if not isinstance(session, Mapping):
+            return None
+        principal = session.get(self._session_key)
+        if not isinstance(principal, Mapping):
+            return None
+        subject = principal.get("sub")
+        if not isinstance(subject, str) or not subject:
+            return None
+        roles = principal.get("roles") or ()
+        return Identity(
+            id=subject,
+            type=str(principal.get("type", "User")),
+            roles=frozenset(str(role) for role in roles),
+            claims=dict(principal),
+        )
+
+    def challenge(self, request: Request) -> str | None:
+        # A browser session has no bearer challenge; the login route is the
+        # remediation, so nothing is advertised here.
+        return None
+
+
+class CompositeBackend:
+    """Try each backend in order; the first Identity wins."""
+
+    __slots__ = ("_backends",)
+
+    def __init__(self, *backends: AuthenticationBackend) -> None:
+        if not backends:
+            raise ValueError("CompositeBackend requires at least one backend")
+        self._backends = backends
+
+    async def authenticate(self, request: Request) -> Identity | None:
+        for backend in self._backends:
+            identity = await backend.authenticate(request)
+            if identity is not None:
+                return identity
+        return None
+
+    def challenge(self, request: Request) -> str | None:
+        for backend in self._backends:
+            value = backend.challenge(request)
+            if value is not None:
+                return value
+        return None

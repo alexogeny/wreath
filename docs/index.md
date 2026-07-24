@@ -49,12 +49,15 @@ own named module so the whole stays easy to hold in your head.
   `Request`, `Response`, `JSONResponse`, `Depends` — and a cohesive module for
   everything else, from `wreath.middleware` to `wreath.orm`.
 - **The whole circle, not a starter kit.** Middleware, authentication and
-  authorization (with a Cedar policy engine), WebSockets, an outbound HTTP
+  authorization (with a built-in, dependency-free Cedar policy engine),
+  WebSockets, an outbound HTTP
   client, signed webhooks, templates, an ORM over a native Postgres driver,
   OpenAPI with typed client generation, and an in-process test client.
-- **A measured path away from per-tenant Python loops.** The
-  [FastAPI and Alembic migration guide](guides/migrations.md) shows SaaS teams how
-  to introduce logical schemas and Wreath-metal readiness without a dangerous
+- **A short walk from FastAPI.** If you build with FastAPI, Pydantic, SQLModel,
+  or Alembic today, [Wreath for FastAPI developers](from-fastapi/index.md) shows
+  your application in both dialects and maps every habit to its Wreath home —
+  and the [migration guide](guides/migrations.md) gives SaaS teams a measured
+  path to logical schemas and Wreath-metal readiness without a dangerous
   flag-day change of DDL authority.
 - **Correctness before cleverness.** Validation compiled at startup, a firm line
   between configuration and runtime state, and a test suite that treats ASGI
@@ -64,6 +67,9 @@ own named module so the whole stays easy to hold in your head.
 
 - **[Getting started](getting-started/index.md)** — install Wreath and build
   your first application, start to finish.
+- **[Coming from FastAPI](from-fastapi/index.md)** — for developers (and coding
+  agents) fluent in FastAPI, Pydantic, SQLModel, or Alembic: side-by-side
+  translations and every equivalence in one table.
 - **[Guides](guides/routing.md)** — a page for each part of the framework, with
   the reasoning behind it, not just the syntax.
 - **[Cookbook](cookbook/index.md)** — practical recipes for developers, and a

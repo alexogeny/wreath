@@ -77,6 +77,11 @@ nav:
   - Getting started:
       - Installation and first app: getting-started/index.md
       - Project structure and deployment: getting-started/deployment.md
+  - Coming from FastAPI:
+      - Wreath for FastAPI developers: from-fastapi/index.md
+      - Pydantic and validation: from-fastapi/pydantic.md
+      - SQLModel, SQLAlchemy, and the ORM: from-fastapi/sqlmodel.md
+      - Alembic and migrations: from-fastapi/alembic.md
   - Guides:
       - Routing: guides/routing.md
       - Requests and responses: guides/requests-responses.md
@@ -136,13 +141,15 @@ nav:
       - Testing: reference/testing.md
       - Configuration: reference/config.md
       - Inspector: reference/inspector.md
+      - Telemetry: reference/telemetry.md
+      - Recording policies: reference/recording.md
       - Replay and fault injection: reference/replay.md
       - State: reference/state.md
       - OpenAPI: reference/openapi.md
       - Client type generation: reference/typegen.md
       - Exceptions: reference/exceptions.md
       - CLI: reference/cli.md
-      - Reserved modules: reference/roadmap.md
+      - Reserved and in-progress surfaces: reference/roadmap.md
   - Explorations:
       - The timer that wouldn't settle: explorations/the-timer-that-wouldnt-settle.md
   - Release notes: release_notes/index.md

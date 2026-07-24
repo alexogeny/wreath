@@ -61,10 +61,14 @@ from .model import Model
 from .query import Select
 from .registry import Registry
 from .relations import relationship
-from .session import FromORM, RawQuery, Session
+from .schema import CENTRAL_SCHEMA, TENANT_SCHEMA, SchemaMode, SchemaRef
+from .session import FromORM, RawQuery, Session, TenantContext
+from .table import Index, Unique, index, unique
 
 __all__ = [
+    "CENTRAL_SCHEMA",
     "MISSING",
+    "TENANT_SCHEMA",
     "Check",
     "CheckViolation",
     "DeclarationError",
@@ -72,6 +76,7 @@ __all__ = [
     "FromORM",
     "Ge",
     "Gt",
+    "Index",
     "Le",
     "Length",
     "Lt",
@@ -87,17 +92,23 @@ __all__ = [
     "Registry",
     "RegistryError",
     "SchemaMismatchError",
+    "SchemaMode",
+    "SchemaRef",
     "Select",
     "Session",
     "SessionClosedError",
     "SessionError",
+    "TenantContext",
+    "Unique",
     "UnloadedAttributeError",
     "UnloadedRelationshipError",
     "and_",
     "column",
+    "index",
     "narrow",
     "not_",
     "or_",
     "rule",
     "relationship",
+    "unique",
 ]

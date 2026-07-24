@@ -369,7 +369,8 @@ def test_registry_plan_uses_column_names_for_reviewable_constraints() -> None:
     }
     assert index_names == {"i:account_id"}
     assert any(
-        sql == 'create index on "app"."entries" ("account_id");'
+        sql
+        == 'create index "wreath_ea3fbb435d8399de" on "app"."entries" ("account_id");'
         for _flags, sql in sql_statements(native._migration_render_sql(plan))
     )
 
@@ -418,7 +419,11 @@ def test_native_sql_tape_is_dependency_ordered_and_marks_manual_work() -> None:
         (0, 'create table "app"."new_table" ();'),
         (0, 'alter table "app"."new_table" add column "id" bigint not null;'),
         (2, ""),
-        (0, 'alter table "app"."new_table" add primary key ("id");'),
+        (
+            0,
+            'alter table "app"."new_table" add constraint '
+            '"wreath_5bf9abf315583891" primary key ("id");',
+        ),
     ]
 
 

@@ -12,6 +12,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from .errors import DeclarationError
+from .types import Json, Jsonb, Text, TextArray, _ArrayType
+
 # Operator tokens are matched against an allowlist in the compiler, so a node
 # can never inject SQL even if one is constructed directly.
 EQ = "="
@@ -29,6 +32,20 @@ IS_NULL = "IS NULL"
 IS_NOT_NULL = "IS NOT NULL"
 IN = "IN"
 NOT_IN = "NOT IN"
+
+# JSONB and array operators. The two-word "= ANY"/"= ALL" tokens are rendered
+# specially by the compiler (``value = ANY(column)``); the rest render as an
+# ordinary ``left <op> right`` and only widen the operator allowlist.
+CONTAINS = "@>"
+CONTAINED_BY = "<@"
+HAS_KEY = "?"
+HAS_ANY = "?|"
+HAS_ALL = "?&"
+PATH_TEXT = "#>>"
+PATH_JSON = "#>"
+OVERLAPS = "&&"
+ANY_EQ = "= ANY"
+ALL_EQ = "= ALL"
 
 ASC = "ASC"
 DESC = "DESC"
@@ -129,6 +146,80 @@ class ColumnExpr(Expression):
 
     def not_in(self, values: Any) -> InExpr:
         return InExpr(NOT_IN, self, _bind_many(self.column, values))
+
+    # -- JSONB and array operators ----------------------------------------
+    #
+    # ``contains``/``contained_by`` work on both jsonb and array columns (the
+    # operand takes the column's own type); the jsonb key operators require a
+    # ``Jsonb`` column and the array operators require an ``Array`` column, both
+    # checked at build time so a mistyped query fails at the call site.
+
+    def contains(self, other: Any) -> BinaryExpr:
+        """``self @> other`` -- jsonb/array containment."""
+        return BinaryExpr(CONTAINS, self, _bind(self.column, other))
+
+    def contained_by(self, other: Any) -> BinaryExpr:
+        """``self <@ other`` -- reverse jsonb/array containment."""
+        return BinaryExpr(CONTAINED_BY, self, _bind(self.column, other))
+
+    def has_key(self, key: str) -> BinaryExpr:
+        """``self ? key`` -- the jsonb object has this top-level key."""
+        self._require_jsonb("has_key")
+        return BinaryExpr(HAS_KEY, self, _bind_as(key, Text))
+
+    def has_any(self, keys: Any) -> BinaryExpr:
+        """``self ?| keys`` -- the jsonb object has any of these keys."""
+        self._require_jsonb("has_any")
+        return BinaryExpr(HAS_ANY, self, _bind_as(_nonempty(keys, "has_any"), TextArray))
+
+    def has_all(self, keys: Any) -> BinaryExpr:
+        """``self ?& keys`` -- the jsonb object has all of these keys."""
+        self._require_jsonb("has_all")
+        return BinaryExpr(HAS_ALL, self, _bind_as(_nonempty(keys, "has_all"), TextArray))
+
+    def path(self, elements: Any, *, as_json: bool = False) -> _JsonPath:
+        """A jsonb path extraction completed by a comparison.
+
+        ``Model.data.path(["a", "b"]) == "x"`` renders ``(data #>> $1) = $2``.
+        ``as_json=True`` extracts a sub-document with ``#>`` instead, usable with
+        the jsonb operators.
+        """
+        if self.column.pg_type is not Json and self.column.pg_type is not Jsonb:
+            raise DeclarationError(
+                f".path() requires a json or jsonb column, not {self.column.pg_type.name}"
+            )
+        return _JsonPath(self, tuple(elements), as_json)
+
+    def overlaps(self, other: Any) -> BinaryExpr:
+        """``self && other`` -- the arrays share at least one element."""
+        self._require_array("overlaps")
+        return BinaryExpr(
+            OVERLAPS, self, _bind_as(_nonempty(other, "overlaps"), self.column.pg_type)
+        )
+
+    def any_eq(self, value: Any) -> BinaryExpr:
+        """``value = ANY(self)`` -- ``value`` is an element of the array."""
+        element = self._require_array("any_eq")
+        return BinaryExpr(ANY_EQ, _bind_as(value, element), self)
+
+    def all_eq(self, value: Any) -> BinaryExpr:
+        """``value = ALL(self)`` -- every array element equals ``value``."""
+        element = self._require_array("all_eq")
+        return BinaryExpr(ALL_EQ, _bind_as(value, element), self)
+
+    def _require_jsonb(self, method: str) -> None:
+        if self.column.pg_type is not Jsonb:
+            raise DeclarationError(
+                f".{method}() requires a Jsonb column, not {self.column.pg_type.name}"
+            )
+
+    def _require_array(self, method: str) -> Any:
+        pg_type = self.column.pg_type
+        if not isinstance(pg_type, _ArrayType):
+            raise DeclarationError(
+                f".{method}() requires an Array column, not {pg_type.name}"
+            )
+        return pg_type.element
 
     def asc(self) -> OrderExpr:
         return OrderExpr(self, ASC)
@@ -264,6 +355,104 @@ def _bind_many(column: Any, values: Any) -> tuple[ValueExpr, ...]:
     return bound
 
 
+def _bind_as(value: Any, pg_type: Any) -> ValueExpr:
+    """Bind ``value`` against an explicit type rather than the column's own.
+
+    The jsonb key operators take ``text``/``text[]`` operands and ``any_eq``
+    takes the array's element type, so those bind through this rather than
+    ``_bind`` (which would coerce against the column type).
+    """
+    if isinstance(value, Expression):
+        raise TypeError(
+            "column-to-column comparison is not supported; compare against a value"
+        )
+    return ValueExpr(pg_type.coerce(value), pg_type)
+
+
+def _nonempty(values: Any, label: str) -> list[Any]:
+    if isinstance(values, (str, bytes)) or not hasattr(values, "__iter__"):
+        raise TypeError(f"{label}() requires an iterable of values")
+    materialized = list(values)
+    if not materialized:
+        raise ValueError(f"{label}() requires at least one value")
+    return materialized
+
+
+class _JsonPath:
+    """A pending jsonb path extraction, completed by a comparison.
+
+    ``Model.data.path(["a", "b"])`` renders nothing on its own; comparing it
+    (or, for ``as_json`` paths, applying a jsonb operator) builds the predicate.
+    Text paths compare against ``text`` (``#>>``); json paths against ``jsonb``
+    (``#>``). It is intentionally unhashable and cannot be used in a boolean
+    context, for the same reason column expressions cannot.
+    """
+
+    __slots__ = ("_as_json", "_column", "_elements")
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __init__(self, column: ColumnExpr, elements: tuple[Any, ...], as_json: bool) -> None:
+        if not elements:
+            raise ValueError("path() requires at least one path element")
+        self._column = column
+        self._elements = elements
+        self._as_json = as_json
+
+    def _extract(self) -> BinaryExpr:
+        operator = PATH_JSON if self._as_json else PATH_TEXT
+        path = _bind_as([str(item) for item in self._elements], TextArray)
+        return BinaryExpr(operator, self._column, path)
+
+    def _operand_type(self) -> Any:
+        return Jsonb if self._as_json else Text
+
+    def _compare(self, operator: str, other: Any) -> BinaryExpr:
+        return BinaryExpr(operator, self._extract(), _bind_as(other, self._operand_type()))
+
+    def __bool__(self) -> bool:
+        raise TypeError(
+            "SQL predicates cannot be used in Python boolean context; "
+            "combine them with & and | rather than and/or"
+        )
+
+    def __eq__(self, other: Any) -> BinaryExpr:  # type: ignore[override]
+        return self._compare(EQ, other)
+
+    def __ne__(self, other: Any) -> BinaryExpr:  # type: ignore[override]
+        return self._compare(NE, other)
+
+    def __lt__(self, other: Any) -> BinaryExpr:
+        return self._compare(LT, other)
+
+    def __le__(self, other: Any) -> BinaryExpr:
+        return self._compare(LE, other)
+
+    def __gt__(self, other: Any) -> BinaryExpr:
+        return self._compare(GT, other)
+
+    def __ge__(self, other: Any) -> BinaryExpr:
+        return self._compare(GE, other)
+
+    def like(self, pattern: str) -> BinaryExpr:
+        return self._compare(LIKE, pattern)
+
+    def ilike(self, pattern: str) -> BinaryExpr:
+        return self._compare(ILIKE, pattern)
+
+    def contains(self, other: Any) -> BinaryExpr:
+        """``(data #> path) @> other`` -- containment on the sub-document."""
+        if not self._as_json:
+            raise DeclarationError("contains() on a path requires path(..., as_json=True)")
+        return BinaryExpr(CONTAINS, self._extract(), _bind_as(other, Jsonb))
+
+    def has_key(self, key: str) -> BinaryExpr:
+        """``(data #> path) ? key`` -- key test on the sub-document."""
+        if not self._as_json:
+            raise DeclarationError("has_key() on a path requires path(..., as_json=True)")
+        return BinaryExpr(HAS_KEY, self._extract(), _bind_as(key, Text))
+
+
 def and_(*predicates: Predicate) -> Predicate:
     """Combine predicates with ``AND``; a single predicate passes through."""
     if not predicates:
@@ -287,12 +476,19 @@ def not_(predicate: Predicate) -> UnaryExpr:
 
 
 __all__ = [
+    "ALL_EQ",
     "AND",
+    "ANY_EQ",
     "ASC",
+    "CONTAINED_BY",
+    "CONTAINS",
     "DESC",
     "EQ",
     "GE",
     "GT",
+    "HAS_ALL",
+    "HAS_ANY",
+    "HAS_KEY",
     "ILIKE",
     "IN",
     "IS_NOT_NULL",
@@ -304,6 +500,9 @@ __all__ = [
     "NOT",
     "NOT_IN",
     "OR",
+    "OVERLAPS",
+    "PATH_JSON",
+    "PATH_TEXT",
     "BinaryExpr",
     "BooleanExpr",
     "ColumnExpr",

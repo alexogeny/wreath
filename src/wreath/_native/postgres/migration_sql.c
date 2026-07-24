@@ -60,6 +60,24 @@ read_u32_le(const unsigned char *value)
 }
 
 
+static uint64_t
+read_u64_le(const unsigned char *value)
+{
+    uint64_t result = 0;
+    for (int byte = 0; byte < 8; byte++)
+        result |= (uint64_t)value[byte] << (byte * 8);
+    return result;
+}
+
+
+static int
+append_u16_le(WreathPgBuffer *buffer, uint16_t value)
+{
+    unsigned char bytes[2] = {(unsigned char)value, (unsigned char)(value >> 8)};
+    return wreath_pg_buffer_append(buffer, bytes, 2);
+}
+
+
 static int
 append_u32_le(WreathPgBuffer *buffer, uint32_t value)
 {
@@ -110,14 +128,18 @@ append_qualified(WreathPgBuffer *buffer, const WreathSqlOperation *operation)
 static uint32_t
 operation_rank(const WreathSqlOperation *operation)
 {
-    if (operation->action == OP_DROP && operation->kind == KIND_CONSTRAINT) return 0;
-    if (operation->action == OP_DROP && operation->kind == KIND_COLUMN) return 1;
-    if (operation->action == OP_DROP && operation->kind == KIND_TABLE) return 2;
-    if (operation->action == OP_ADD && operation->kind == KIND_TABLE) return 3;
-    if (operation->action == OP_ADD && operation->kind == KIND_COLUMN) return 4;
-    if (operation->action == OP_ALTER && operation->kind == KIND_COLUMN) return 5;
-    if (operation->action == OP_ADD && operation->kind == KIND_CONSTRAINT) return 6;
-    if (operation->action == OP_ADD && operation->kind == KIND_INDEX) return 7;
+    /* Drops run inner-to-outer (index, constraint, column, table); adds run
+       outer-to-inner (table, column, alter, constraint, index). The reverse of
+       any forward plan is therefore itself a valid forward-shaped plan. */
+    if (operation->action == OP_DROP && operation->kind == KIND_INDEX) return 0;
+    if (operation->action == OP_DROP && operation->kind == KIND_CONSTRAINT) return 1;
+    if (operation->action == OP_DROP && operation->kind == KIND_COLUMN) return 2;
+    if (operation->action == OP_DROP && operation->kind == KIND_TABLE) return 3;
+    if (operation->action == OP_ADD && operation->kind == KIND_TABLE) return 4;
+    if (operation->action == OP_ADD && operation->kind == KIND_COLUMN) return 5;
+    if (operation->action == OP_ALTER && operation->kind == KIND_COLUMN) return 6;
+    if (operation->action == OP_ADD && operation->kind == KIND_CONSTRAINT) return 7;
+    if (operation->action == OP_ADD && operation->kind == KIND_INDEX) return 8;
     return 99;
 }
 
@@ -130,6 +152,26 @@ operation_object_id(const WreathSqlOperation *operation)
         operation->schema, operation->schema_length,
         operation->table, operation->table_length,
         operation->name, operation->name_length);
+}
+
+
+/* Constraints and indexes are named deterministically from their object id so
+   that a downgrade can drop by name exactly what an upgrade created by name.
+   ``"wreath_" + 16 hex digits`` is 23 bytes, well inside PostgreSQL's 63-byte
+   identifier limit, and collision-free because the object id already folds in
+   kind, schema, table, and the logical name. */
+static int
+append_derived_object_name(
+    WreathPgBuffer *buffer, const WreathSqlOperation *operation)
+{
+    static const char digits[] = "0123456789abcdef";
+    const uint64_t object_id = operation_object_id(operation);
+    unsigned char name[23];
+    memcpy(name, "wreath_", 7);
+    for (int nibble = 0; nibble < 16; nibble++)
+        name[7 + nibble] =
+            (unsigned char)digits[(object_id >> ((15 - nibble) * 4)) & 0xFU];
+    return append_identifier(buffer, name, 23);
 }
 
 
@@ -306,6 +348,22 @@ sql_type_for_oid(uint32_t oid)
         case 1700: return "numeric";
         case 2950: return "uuid";
         case 3802: return "jsonb";
+        /* One-dimensional array types, spelled with a trailing "[]". */
+        case 1000: return "boolean[]";
+        case 1001: return "bytea[]";
+        case 1016: return "bigint[]";
+        case 1005: return "smallint[]";
+        case 1007: return "integer[]";
+        case 1009: return "text[]";
+        case 199: return "json[]";
+        case 1021: return "real[]";
+        case 1022: return "double precision[]";
+        case 1015: return "character varying[]";
+        case 1182: return "date[]";
+        case 1115: return "timestamp without time zone[]";
+        case 1185: return "timestamp with time zone[]";
+        case 2951: return "uuid[]";
+        case 3807: return "jsonb[]";
         default: return NULL;
     }
 }
@@ -429,16 +487,51 @@ append_identifier_list(WreathPgBuffer *buffer, const WreathSqlPart *part)
 }
 
 
+/* Index names are "<prefix>:<cols>" for btree, or "<prefix>:<cols>:<method>"
+   for a non-default access method. ``method`` is filled with the parsed method
+   ("btree" when the name has none). ``parts[1]`` always holds the columns. */
+static int
+index_form(
+    const WreathSqlOperation *operation,
+    WreathSqlPart parts[3],
+    int *unique,
+    WreathSqlPart *method)
+{
+    if (split_value(operation->name, operation->name_length, ':', parts, 3) == 0) {
+        *method = parts[2];
+    }
+    else if (split_value(operation->name, operation->name_length, ':', parts, 2) == 0) {
+        method->data = (const unsigned char *)"btree";
+        method->length = 5;
+    }
+    else {
+        return 0;
+    }
+    if (part_equals(parts, "i")) { *unique = 0; return 1; }
+    if (part_equals(parts, "ui")) { *unique = 1; return 1; }
+    return 0;
+}
+
+
 static int
 render_index(WreathPgBuffer *statement, const WreathSqlOperation *operation)
 {
-    WreathSqlPart parts[2];
-    if (split_value(
-            operation->name, operation->name_length, ':', parts, 2) < 0 ||
-        !part_equals(parts, "i")) return 1;
-    if (append_literal(statement, "create index on ") < 0 ||
-        append_qualified(statement, operation) < 0 ||
-        append_literal(statement, " (") < 0 ||
+    WreathSqlPart parts[3];
+    WreathSqlPart method;
+    int unique;
+    int is_btree, is_gin;
+    if (!index_form(operation, parts, &unique, &method)) return 1;
+    is_btree = method.length == 5 && memcmp(method.data, "btree", 5) == 0;
+    is_gin = method.length == 3 && memcmp(method.data, "gin", 3) == 0;
+    /* Only the access methods wreath emits are honored; anything else falls
+       back to a MANUAL statement rather than injecting the token verbatim. */
+    if (!is_btree && !is_gin) return 1;
+    if (append_literal(statement, unique ? "create unique index " : "create index ") < 0 ||
+        append_derived_object_name(statement, operation) < 0 ||
+        append_literal(statement, " on ") < 0 ||
+        append_qualified(statement, operation) < 0) return -1;
+    if (is_gin && append_literal(statement, " using gin") < 0) return -1;
+    if (append_literal(statement, " (") < 0 ||
         append_identifier_list(statement, parts + 1) < 0 ||
         append_literal(statement, ");") < 0) return -1;
     return 0;
@@ -446,27 +539,72 @@ render_index(WreathPgBuffer *statement, const WreathSqlOperation *operation)
 
 
 static int
+render_drop_index(WreathPgBuffer *statement, const WreathSqlOperation *operation)
+{
+    WreathSqlPart parts[3];
+    WreathSqlPart method;
+    int unique;
+    if (!index_form(operation, parts, &unique, &method)) return 1;
+    if (append_literal(statement, "drop index ") < 0 ||
+        append_identifier(statement, operation->schema, operation->schema_length) < 0 ||
+        append_literal(statement, ".") < 0 ||
+        append_derived_object_name(statement, operation) < 0 ||
+        append_literal(statement, ";") < 0) return -1;
+    return 0;
+}
+
+
+static int
+constraint_form(const WreathSqlOperation *operation, WreathSqlPart parts[5])
+{
+    if (split_value(operation->name, operation->name_length, ':', parts, 5) < 0)
+        return 0;
+    return part_equals(parts, "p") || part_equals(parts, "u") ||
+           part_equals(parts, "f");
+}
+
+
+static int
+render_fk_action(
+    WreathPgBuffer *statement, const char *clause, const WreathSqlPart *code)
+{
+    const char *action;
+    if (part_equals(code, "a")) return 0;  /* NO ACTION is the PostgreSQL default */
+    else if (part_equals(code, "r")) action = " restrict";
+    else if (part_equals(code, "c")) action = " cascade";
+    else if (part_equals(code, "n")) action = " set null";
+    else if (part_equals(code, "d")) action = " set default";
+    else return 1;  /* unknown referential-action code -> MANUAL */
+    return append_literal(statement, clause) < 0 ||
+           append_literal(statement, action) < 0 ? -1 : 0;
+}
+
+
+static int
 render_constraint(WreathPgBuffer *statement, const WreathSqlOperation *operation)
 {
     WreathSqlPart parts[5];
-    if (split_value(
-            operation->name, operation->name_length, ':', parts, 5) < 0) return 1;
+    if (!constraint_form(operation, parts)) return 1;
     if (append_literal(statement, "alter table ") < 0 ||
-        append_qualified(statement, operation) < 0) return -1;
+        append_qualified(statement, operation) < 0 ||
+        append_literal(statement, " add constraint ") < 0 ||
+        append_derived_object_name(statement, operation) < 0) return -1;
     if (part_equals(parts, "p")) {
-        if (append_literal(statement, " add primary key (") < 0 ||
+        if (append_literal(statement, " primary key (") < 0 ||
             append_identifier_list(statement, parts + 1) < 0 ||
             append_literal(statement, ");") < 0) return -1;
         return 0;
     }
     if (part_equals(parts, "u")) {
-        if (append_literal(statement, " add unique (") < 0 ||
+        if (append_literal(statement, " unique (") < 0 ||
             append_identifier_list(statement, parts + 1) < 0 ||
             append_literal(statement, ");") < 0) return -1;
         return 0;
     }
-    if (part_equals(parts, "f")) {
-        if (append_literal(statement, " add foreign key (") < 0 ||
+    {
+        WreathSqlPart signature[8];
+        int rendered;
+        if (append_literal(statement, " foreign key (") < 0 ||
             append_identifier_list(statement, parts + 1) < 0 ||
             append_literal(statement, ") references ") < 0 ||
             append_identifier(statement, parts[2].data, parts[2].length) < 0 ||
@@ -474,10 +612,37 @@ render_constraint(WreathPgBuffer *statement, const WreathSqlOperation *operation
             append_identifier(statement, parts[3].data, parts[3].length) < 0 ||
             append_literal(statement, " (") < 0 ||
             append_identifier_list(statement, parts + 4) < 0 ||
-            append_literal(statement, ");") < 0) return -1;
-        return 0;
+            append_literal(statement, ")") < 0) return -1;
+        /* The signature carries three trailing referential-action fields the
+           name does not: on-delete code, on-update code, and deferrability. */
+        if (split_value(
+                operation->after, operation->after_length, ':', signature, 8) < 0)
+            return 1;
+        rendered = render_fk_action(statement, " on delete", signature + 5);
+        if (rendered != 0) return rendered;
+        rendered = render_fk_action(statement, " on update", signature + 6);
+        if (rendered != 0) return rendered;
+        if (part_equals(signature + 7, "1")) {
+            if (append_literal(statement, " deferrable initially deferred") < 0)
+                return -1;
+        }
+        else if (!part_equals(signature + 7, "0")) return 1;
+        return append_literal(statement, ";");
     }
-    return 1;
+}
+
+
+static int
+render_drop_constraint(WreathPgBuffer *statement, const WreathSqlOperation *operation)
+{
+    WreathSqlPart parts[5];
+    if (!constraint_form(operation, parts)) return 1;
+    if (append_literal(statement, "alter table ") < 0 ||
+        append_qualified(statement, operation) < 0 ||
+        append_literal(statement, " drop constraint ") < 0 ||
+        append_derived_object_name(statement, operation) < 0 ||
+        append_literal(statement, ";") < 0) return -1;
+    return 0;
 }
 
 
@@ -524,8 +689,12 @@ render_operation(
         return render_column_change(statement, operation);
     if (operation->action == OP_ADD && operation->kind == KIND_CONSTRAINT)
         return render_constraint(statement, operation);
+    if (operation->action == OP_DROP && operation->kind == KIND_CONSTRAINT)
+        return render_drop_constraint(statement, operation);
     if (operation->action == OP_ADD && operation->kind == KIND_INDEX)
         return render_index(statement, operation);
+    if (operation->action == OP_DROP && operation->kind == KIND_INDEX)
+        return render_drop_index(statement, operation);
     *flags_out |= SQL_FLAG_MANUAL;
     return 1;
 }
@@ -641,6 +810,178 @@ done:
 }
 
 
+/* Invert one WMP1 named plan into the plan that undoes it: each add becomes a
+   drop and vice versa, and every operation's before/after signatures swap so an
+   alter reverses too. Because every operation already carries both its source
+   and target signature, the inverse is exact and needs no database. The emitted
+   plan is re-normalised (sorted, WMO1/WMS1 re-derived) by the same code paths as
+   any forward plan. */
+PyObject *
+wreath_pg_migration_reverse_plan(
+    const unsigned char *plan, Py_ssize_t plan_length)
+{
+    WreathSqlOperation *operations = NULL;
+    uint32_t count;
+    WreathPgBuffer output = {0};
+    PyObject *result = NULL;
+    if (parse_plan(plan, plan_length, &operations, &count) < 0) return NULL;
+    if (wreath_pg_buffer_append(&output, "WMP1", 4) < 0 ||
+        append_u32_le(&output, 1) < 0 || append_u32_le(&output, count) < 0) goto done;
+    for (uint32_t index = 0; index < count; index++) {
+        const WreathSqlOperation *operation = operations + index;
+        const uint32_t reversed_action =
+            operation->action == OP_ADD ? OP_DROP :
+            operation->action == OP_DROP ? OP_ADD : OP_ALTER;
+        if (append_u32_le(&output, reversed_action) < 0 ||
+            append_u32_le(&output, operation->kind) < 0 ||
+            append_u16_le(&output, operation->schema_length) < 0 ||
+            append_u16_le(&output, operation->table_length) < 0 ||
+            append_u16_le(&output, operation->name_length) < 0 ||
+            append_u16_le(&output, operation->after_length) < 0 ||
+            append_u16_le(&output, operation->before_length) < 0 ||
+            append_u16_le(&output, 0) < 0 ||
+            wreath_pg_buffer_append(
+                &output, operation->schema, operation->schema_length) < 0 ||
+            wreath_pg_buffer_append(
+                &output, operation->table, operation->table_length) < 0 ||
+            wreath_pg_buffer_append(
+                &output, operation->name, operation->name_length) < 0 ||
+            wreath_pg_buffer_append(
+                &output, operation->after, operation->after_length) < 0 ||
+            wreath_pg_buffer_append(
+                &output, operation->before, operation->before_length) < 0) goto done;
+    }
+    result = wreath_pg_buffer_finish(&output);
+done:
+    PyMem_Free(operations);
+    wreath_pg_buffer_clear(&output);
+    return result;
+}
+
+
+/* Locate (kind, object_id) in a WMI1 desired image whose 24-byte records are
+   ordered by (kind, object_id). Returns the stored signature on a hit. */
+static int
+image_lookup(
+    const unsigned char *records, uint32_t count,
+    uint32_t kind, uint64_t object_id, uint32_t *signature_out)
+{
+    uint32_t low = 0, high = count;
+    while (low < high) {
+        const uint32_t mid = low + (high - low) / 2;
+        const unsigned char *record = records + (Py_ssize_t)mid * 24;
+        const uint32_t record_kind = read_u32_le(record + 16);
+        const uint64_t record_id = read_u64_le(record);
+        if (record_kind < kind || (record_kind == kind && record_id < object_id)) {
+            low = mid + 1;
+        }
+        else if (record_kind > kind || (record_kind == kind && record_id > object_id)) {
+            high = mid;
+        }
+        else {
+            *signature_out = read_u32_le(record + 20);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+
+/* Compare the plan that a downgrade would run against the live ORM's desired
+   image and report every table/column the downgrade would remove, or column
+   whose type the downgrade would change, while the running code still maps it.
+   These are exactly the dereferences that would break after the downgrade. */
+PyObject *
+wreath_pg_migration_downgrade_hazards(
+    const unsigned char *plan, Py_ssize_t plan_length,
+    const unsigned char *image, Py_ssize_t image_length)
+{
+    WreathSqlOperation *operations = NULL;
+    uint32_t count, image_count;
+    PyObject *result = NULL;
+    if (image_length < 16 || memcmp(image, "WMI1", 4) != 0 ||
+        read_u32_le(image + 4) != 1 || read_u32_le(image + 8) != 24) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "invalid desired WMI1 image: expected WMI1 magic, format 1, and 24-byte records");
+        return NULL;
+    }
+    image_count = read_u32_le(image + 12);
+    if (image_count > (uint32_t)((image_length - 16) / 24) ||
+        16 + (Py_ssize_t)image_count * 24 != image_length) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "invalid WMI1 image: record count does not match its byte length");
+        return NULL;
+    }
+    if (parse_plan(plan, plan_length, &operations, &count) < 0) return NULL;
+    result = PyList_New(0);
+    if (result == NULL) goto done;
+    for (uint32_t index = 0; index < count; index++) {
+        const WreathSqlOperation *operation = operations + index;
+        const uint64_t object_id = operation_object_id(operation);
+        const char *reason = NULL;
+        uint32_t signature = 0;
+        PyObject *entry;
+        if (!image_lookup(
+                image + 16, image_count, operation->kind, object_id, &signature))
+            continue;
+        if (operation->action == OP_DROP &&
+            (operation->kind == KIND_TABLE || operation->kind == KIND_COLUMN)) {
+            reason = "removed";
+        }
+        else if (operation->action == OP_ALTER && operation->kind == KIND_COLUMN) {
+            const uint32_t after = operation->after_length == 0 ? 0 :
+                wreath_pg_migration_signature(
+                    operation->after, operation->after_length);
+            if (signature != after) reason = "retyped";
+        }
+        if (reason == NULL) continue;
+        entry = Py_BuildValue(
+            "(s#s#s#Is)",
+            operation->schema, (Py_ssize_t)operation->schema_length,
+            operation->table, (Py_ssize_t)operation->table_length,
+            operation->name, (Py_ssize_t)operation->name_length,
+            operation->kind, reason);
+        if (entry == NULL || PyList_Append(result, entry) < 0) {
+            Py_XDECREF(entry);
+            Py_CLEAR(result);
+            goto done;
+        }
+        Py_DECREF(entry);
+    }
+done:
+    PyMem_Free(operations);
+    return result;
+}
+
+
+static PyObject *
+migration_reverse_plan(PyObject *module, PyObject *args)
+{
+    const unsigned char *plan;
+    Py_ssize_t plan_length;
+    (void)module;
+    if (!PyArg_ParseTuple(
+            args, "y#:_migration_reverse_plan", &plan, &plan_length)) return NULL;
+    return wreath_pg_migration_reverse_plan(plan, plan_length);
+}
+
+
+static PyObject *
+migration_downgrade_hazards(PyObject *module, PyObject *args)
+{
+    const unsigned char *plan, *image;
+    Py_ssize_t plan_length, image_length;
+    (void)module;
+    if (!PyArg_ParseTuple(
+            args, "y#y#:_migration_downgrade_hazards",
+            &plan, &plan_length, &image, &image_length)) return NULL;
+    return wreath_pg_migration_downgrade_hazards(
+        plan, plan_length, image, image_length);
+}
+
+
 static PyObject *
 migration_operations_from_plan(PyObject *module, PyObject *args)
 {
@@ -670,6 +1011,10 @@ static PyMethodDef migration_sql_methods[] = {
      PyDoc_STR("Derive the authoritative WMO1 operation tape from WMP1 in metal.")},
     {"_migration_render_sql", migration_render_sql, METH_VARARGS,
      PyDoc_STR("Derive one deterministic bounded WMS1 SQL statement tape from WMP1.")},
+    {"_migration_reverse_plan", migration_reverse_plan, METH_VARARGS,
+     PyDoc_STR("Invert a WMP1 named plan into the plan that undoes it, in metal.")},
+    {"_migration_downgrade_hazards", migration_downgrade_hazards, METH_VARARGS,
+     PyDoc_STR("List ORM-mapped objects a downgrade plan would strand or retype.")},
     {NULL, NULL, 0, NULL},
 };
 

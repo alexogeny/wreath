@@ -97,6 +97,21 @@ def test_migration_apply_parser_requires_explicit_artifact_and_supports_approval
     assert namespace.dsn_env == "DEPLOY_DATABASE_URL"
 
 
+def test_migration_down_parser_takes_an_artifact_and_a_force_override() -> None:
+    namespace = build_parser().parse_args(
+        [
+            "migrations", "down", "example:app", "migrations/0002/migration.bin",
+            "--allow-destructive", "--force", "--dsn-env", "DEPLOY_DATABASE_URL",
+        ]
+    )
+
+    assert namespace.migration_action == "down"
+    assert namespace.artifact == "migrations/0002/migration.bin"
+    assert namespace.allow_destructive is True
+    assert namespace.force is True
+    assert namespace.dsn_env == "DEPLOY_DATABASE_URL"
+
+
 @pytest.mark.asyncio
 async def test_apply_never_falls_back_to_request_pool_credentials(monkeypatch) -> None:
     monkeypatch.delenv("MISSING_MIGRATION_DSN", raising=False)

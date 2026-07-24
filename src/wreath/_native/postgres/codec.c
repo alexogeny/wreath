@@ -75,6 +75,65 @@ wreath_pg_decode_hex_bytea(const unsigned char *data, Py_ssize_t length)
 #define PG_UUID 2950
 #define PG_JSONB 3802
 
+/* One-dimensional array OIDs, and the map back to their element OID. An array
+   reuses its element's scalar codec value-by-value, so no per-type array code
+   is needed beyond the shared binary framing below. */
+#define PG_BOOL_ARRAY 1000
+#define PG_BYTEA_ARRAY 1001
+#define PG_INT8_ARRAY 1016
+#define PG_INT2_ARRAY 1005
+#define PG_INT4_ARRAY 1007
+#define PG_TEXT_ARRAY 1009
+#define PG_JSON_ARRAY 199
+#define PG_FLOAT4_ARRAY 1021
+#define PG_FLOAT8_ARRAY 1022
+#define PG_VARCHAR_ARRAY 1015
+#define PG_DATE_ARRAY 1182
+#define PG_TIMESTAMP_ARRAY 1115
+#define PG_TIMESTAMPTZ_ARRAY 1185
+#define PG_UUID_ARRAY 2951
+#define PG_JSONB_ARRAY 3807
+
+/* The element OID for an array OID, or 0 when the OID is not a supported array.
+ * TODO(pure-twin): the pure backend (_pure/postgres.py) has no array codec yet,
+ * so Array(...) columns require the native build until that twin is added. */
+static uint32_t
+array_element_oid(uint32_t oid)
+{
+    switch (oid) {
+    case PG_BOOL_ARRAY: return PG_BOOL;
+    case PG_BYTEA_ARRAY: return PG_BYTEA;
+    case PG_INT8_ARRAY: return PG_INT8;
+    case PG_INT2_ARRAY: return PG_INT2;
+    case PG_INT4_ARRAY: return PG_INT4;
+    case PG_TEXT_ARRAY: return PG_TEXT;
+    case PG_JSON_ARRAY: return PG_JSON;
+    case PG_FLOAT4_ARRAY: return PG_FLOAT4;
+    case PG_FLOAT8_ARRAY: return PG_FLOAT8;
+    case PG_VARCHAR_ARRAY: return PG_VARCHAR;
+    case PG_DATE_ARRAY: return PG_DATE;
+    case PG_TIMESTAMP_ARRAY: return PG_TIMESTAMP;
+    case PG_TIMESTAMPTZ_ARRAY: return PG_TIMESTAMPTZ;
+    case PG_UUID_ARRAY: return PG_UUID;
+    case PG_JSONB_ARRAY: return PG_JSONB;
+    default: return 0;
+    }
+}
+
+static void
+write_be32(unsigned char *out, uint32_t value)
+{
+    out[0] = (unsigned char)(value >> 24);
+    out[1] = (unsigned char)(value >> 16);
+    out[2] = (unsigned char)(value >> 8);
+    out[3] = (unsigned char)value;
+}
+
+/* Mutually recursive with the scalar encoder/decoder (an array frames its
+   elements through them), so both are forward-declared here. */
+static PyObject *encode_binary_array(PyObject *value, uint32_t element_oid);
+static PyObject *decode_binary_array(const unsigned char *raw, Py_ssize_t length);
+
 /* PostgreSQL counts date/timestamp binary values from 2000-01-01 and reserves
    the integer extremes for the infinities datetime cannot represent. */
 #define PG_EPOCH_UNIX_DAYS 10957
@@ -588,10 +647,111 @@ wreath_pg_encode_binary_value(PyObject *value, uint32_t oid)
         Py_DECREF(payload);
         return versioned;
     }
-    default:
+    default: {
+        uint32_t element_oid = array_element_oid(oid);
+        if (element_oid != 0) {
+            return encode_binary_array(value, element_oid);
+        }
         PyErr_Format(PyExc_TypeError, "no binary encoder for PostgreSQL OID %u", oid);
         return NULL;
     }
+    }
+}
+
+/* Encode a Python list/tuple as one binary PostgreSQL array. Elements are the
+   element type's own wire values (Array.to_wire has already mapped element
+   to_wire over the sequence), so each frames through the scalar encoder. */
+static PyObject *
+encode_binary_array(PyObject *value, uint32_t element_oid)
+{
+    PyObject *seq;
+    PyObject *result = NULL;
+    PyObject **payloads = NULL;
+    Py_ssize_t count = 0;
+    Py_ssize_t total;
+    int has_null = 0;
+    unsigned char *out;
+    Py_ssize_t offset;
+
+    seq = PySequence_Fast(value, "array codec requires a list or tuple");
+    if (seq == NULL) return NULL;
+    count = PySequence_Fast_GET_SIZE(seq);
+    if (count > 0) {
+        payloads = PyMem_Calloc((size_t)count, sizeof(PyObject *));
+        if (payloads == NULL) {
+            Py_DECREF(seq);
+            return PyErr_NoMemory();
+        }
+    }
+
+    /* header: ndim(4) + has_null(4) + element_oid(4); one dimension block(8)
+       when non-empty; then per element len(4) + payload. */
+    total = 12 + (count > 0 ? 8 : 0);
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *item = PySequence_Fast_GET_ITEM(seq, index);  /* borrowed */
+        PyObject *encoded;
+        if (item == Py_None) {
+            has_null = 1;
+            payloads[index] = Py_NewRef(Py_None);
+            total += 4;
+            continue;
+        }
+        encoded = wreath_pg_encode_binary_value(item, element_oid);
+        if (encoded == NULL) goto cleanup;
+        if (encoded == Py_None) {
+            has_null = 1;
+            payloads[index] = encoded;
+            total += 4;
+            continue;
+        }
+        if (!PyBytes_Check(encoded)) {
+            Py_DECREF(encoded);
+            PyErr_SetString(PyExc_TypeError, "array element encoder did not return bytes");
+            goto cleanup;
+        }
+        if (PyBytes_GET_SIZE(encoded) > INT32_MAX ||
+            total > PY_SSIZE_T_MAX - 4 - PyBytes_GET_SIZE(encoded)) {
+            Py_DECREF(encoded);
+            PyErr_SetString(PyExc_OverflowError, "array parameter too large");
+            goto cleanup;
+        }
+        payloads[index] = encoded;
+        total += 4 + PyBytes_GET_SIZE(encoded);
+    }
+
+    result = PyBytes_FromStringAndSize(NULL, total);
+    if (result == NULL) goto cleanup;
+    out = (unsigned char *)PyBytes_AS_STRING(result);
+    write_be32(out, count > 0 ? 1u : 0u);       /* ndim */
+    write_be32(out + 4, has_null ? 1u : 0u);    /* has-null flags */
+    write_be32(out + 8, element_oid);           /* element oid */
+    offset = 12;
+    if (count > 0) {
+        write_be32(out + offset, (uint32_t)count);  /* dimension length */
+        write_be32(out + offset + 4, 1u);           /* lower bound */
+        offset += 8;
+    }
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *payload = payloads[index];
+        Py_ssize_t size;
+        if (payload == Py_None) {
+            write_be32(out + offset, (uint32_t)(int32_t)-1);
+            offset += 4;
+            continue;
+        }
+        size = PyBytes_GET_SIZE(payload);
+        write_be32(out + offset, (uint32_t)size);
+        memcpy(out + offset + 4, PyBytes_AS_STRING(payload), (size_t)size);
+        offset += 4 + size;
+    }
+
+cleanup:
+    if (payloads != NULL) {
+        for (Py_ssize_t index = 0; index < count; index++) Py_XDECREF(payloads[index]);
+        PyMem_Free(payloads);
+    }
+    Py_DECREF(seq);
+    return result;
 }
 
 /* Append one Bind parameter (length prefix plus binary payload) directly to
@@ -789,6 +949,12 @@ wreath_pg_decode_value(uint32_t oid, int format, PyObject *data)
         case PG_JSONB:
             return PyUnicode_DecodeUTF8((const char *)raw, length, "strict");
         default:
+            if (array_element_oid(oid) != 0) {
+                PyErr_SetString(
+                    PyExc_ValueError,
+                    "text-format array decoding is not supported; request binary results");
+                return NULL;
+            }
             return Py_NewRef(data);
         }
     }
@@ -878,7 +1044,93 @@ wreath_pg_decode_value(uint32_t oid, int format, PyObject *data)
         }
         return PyUnicode_DecodeUTF8((const char *)raw + 1, length - 1, "strict");
     }
+    if (array_element_oid(oid) != 0) {
+        return decode_binary_array(raw, length);
+    }
     return Py_NewRef(data);
+}
+
+/* Decode one binary PostgreSQL array (format 1). Only 0- and 1-dimensional
+   arrays are supported; each element is decoded through the scalar decoder for
+   the wire's element OID, and NULL elements (length -1) become Py_None. The
+   returned list is the element types' wire values; Array.from_wire finishes
+   them (e.g. jsonb text -> object). */
+static PyObject *
+decode_binary_array(const unsigned char *raw, Py_ssize_t length)
+{
+    uint32_t ndim, element_oid;
+    int64_t dim_length;
+    PyObject *list;
+    Py_ssize_t offset;
+
+    if (length < 12) {
+        PyErr_SetString(PyExc_ValueError, "binary array header is truncated");
+        return NULL;
+    }
+    ndim = (uint32_t)read_unsigned(raw, 4);
+    /* raw + 4 is the has-null flag word; element lengths carry NULLs directly. */
+    element_oid = (uint32_t)read_unsigned(raw + 8, 4);
+    if (ndim == 0) {
+        return PyList_New(0);
+    }
+    if (ndim != 1) {
+        PyErr_SetString(PyExc_ValueError, "only one-dimensional arrays are supported");
+        return NULL;
+    }
+    if (length < 20) {
+        PyErr_SetString(PyExc_ValueError, "binary array dimension is truncated");
+        return NULL;
+    }
+    dim_length = (int64_t)(int32_t)(uint32_t)read_unsigned(raw + 12, 4);
+    /* raw + 16 is the lower bound, which the element order already encodes. */
+    if (dim_length < 0) {
+        PyErr_SetString(PyExc_ValueError, "invalid array dimension length");
+        return NULL;
+    }
+    list = PyList_New((Py_ssize_t)dim_length);
+    if (list == NULL) return NULL;
+    offset = 20;
+    for (int64_t index = 0; index < dim_length; index++) {
+        int64_t element_length;
+        PyObject *chunk;
+        PyObject *element;
+        if (length - offset < 4) {
+            Py_DECREF(list);
+            PyErr_SetString(PyExc_ValueError, "binary array element length is truncated");
+            return NULL;
+        }
+        element_length = (int64_t)(int32_t)(uint32_t)read_unsigned(raw + offset, 4);
+        offset += 4;
+        if (element_length == -1) {
+            PyList_SET_ITEM(list, (Py_ssize_t)index, Py_NewRef(Py_None));
+            continue;
+        }
+        if (element_length < 0 || length - offset < element_length) {
+            Py_DECREF(list);
+            PyErr_SetString(PyExc_ValueError, "binary array element is truncated");
+            return NULL;
+        }
+        chunk = PyBytes_FromStringAndSize(
+            (const char *)raw + offset, (Py_ssize_t)element_length);
+        if (chunk == NULL) {
+            Py_DECREF(list);
+            return NULL;
+        }
+        element = wreath_pg_decode_value(element_oid, 1, chunk);
+        Py_DECREF(chunk);
+        if (element == NULL) {
+            Py_DECREF(list);
+            return NULL;
+        }
+        PyList_SET_ITEM(list, (Py_ssize_t)index, element);
+        offset += element_length;
+    }
+    if (offset != length) {
+        Py_DECREF(list);
+        PyErr_SetString(PyExc_ValueError, "binary array has trailing bytes");
+        return NULL;
+    }
+    return list;
 }
 
 static PyObject *

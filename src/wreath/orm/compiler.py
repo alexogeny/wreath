@@ -39,7 +39,14 @@ from .schema import ColumnSpec, ModelSpec, RelationshipSpec
 
 # Only these operator tokens can reach SQL text. Anything else is a bug in a
 # node constructor rather than user input, and must not be rendered.
-_BINARY_OPERATORS = frozenset({"=", "<>", "<", "<=", ">", ">=", "LIKE", "ILIKE"})
+_BINARY_OPERATORS = frozenset({
+    "=", "<>", "<", "<=", ">", ">=", "LIKE", "ILIKE",
+    # jsonb / array operators; "= ANY"/"= ALL" render specially (see below).
+    "@>", "<@", "?", "?|", "?&", "#>>", "#>", "&&", "= ANY", "= ALL",
+})
+#: Operators that render ``left = ANY(right)`` / ``left = ALL(right)`` rather
+#: than the ordinary infix form, with the array column on the right.
+_ARRAY_QUANTIFIERS = {"= ANY": "ANY", "= ALL": "ALL"}
 _BOOLEAN_OPERATORS = frozenset({"AND", "OR"})
 _UNARY_OPERATORS = frozenset({"NOT", "IS NULL", "IS NOT NULL"})
 _IN_OPERATORS = frozenset({"IN", "NOT IN"})
@@ -120,6 +127,8 @@ def quote(identifier: str) -> str:
 
 
 def qualified(spec: ModelSpec) -> str:
+    if spec.sql_namespace == "tenant_search_path":
+        return quote(spec.table)
     return f"{quote(spec.schema)}.{quote(spec.table)}"
 
 
@@ -513,6 +522,15 @@ def _render_predicate(
     if isinstance(node, BinaryExpr):
         if node.operator not in _BINARY_OPERATORS:
             raise ORMError(f"invalid SQL operator {node.operator!r}")
+        quantifier = _ARRAY_QUANTIFIERS.get(node.operator)
+        if quantifier is not None:
+            # ``value = ANY(column)`` -- the bound value is on the left, the
+            # array column on the right, wrapped in the quantifier function.
+            _render_operand(node.left, builder, alias, joins)
+            builder.text(f" = {quantifier}(")
+            _render_operand(node.right, builder, alias, joins)
+            builder.text(")")
+            return
         _render_operand(node.left, builder, alias, joins)
         builder.text(f" {node.operator} ")
         _render_operand(node.right, builder, alias, joins)
@@ -567,6 +585,17 @@ def _render_operand(
         return
     if isinstance(node, ValueExpr):
         builder.text(builder.bind(node.pg_type.to_wire(node.value), node.pg_type.oid))
+        return
+    # A nested binary node appears as an operand for jsonb path extraction:
+    # ``(data #>> $1) = $2``. Parenthesize so operator precedence is explicit.
+    if isinstance(node, BinaryExpr):
+        if node.operator not in _BINARY_OPERATORS or node.operator in _ARRAY_QUANTIFIERS:
+            raise ORMError(f"invalid SQL operator {node.operator!r}")
+        builder.text("(")
+        _render_operand(node.left, builder, alias, joins)
+        builder.text(f" {node.operator} ")
+        _render_operand(node.right, builder, alias, joins)
+        builder.text(")")
         return
     raise ORMError(f"cannot render {type(node).__name__} as an operand")
 

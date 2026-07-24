@@ -1,9 +1,10 @@
 # Static files
 
 `wreath.staticfiles` serves files from a directory — your CSS, your images, a
-built frontend bundle — with the details handled for you: correct caching
-headers, range requests for large files, and firm protection against
-path-traversal attempts that try to escape the directory you offered.
+built frontend bundle — with the details handled for you: conditional requests
+(`ETag` / `If-None-Match`) so an unchanged file comes back as a `304`, streamed
+bodies for large files, and firm protection against path-traversal attempts
+that try to escape the directory you offered.
 
 ```python
 app.static("/assets", "static/")

@@ -61,9 +61,10 @@ pages disagree.
 - **Reference is generated, guides are written.** Never hand-transcribe
   signatures into a guide; link to the reference and let mkdocstrings keep it
   accurate.
-- **Reserved scaffolds** (`telemetry`, `inspector`, `recording`, `replay`,
-  `migrations`) are listed on `docs/reference/roadmap.md`. When you implement
-  one, remove its row there and give it a real reference page and guide.
+- **Reserved and in-progress surfaces** are listed on
+  `docs/reference/roadmap.md` — check the page, not a remembered list. When
+  you finish one, remove its row there and make sure its reference page and
+  guide tell the full story.
 
 ## Verify
 

@@ -47,6 +47,20 @@ wheels = [
 ]
 
 [[package]]
+name = "alembic"
+version = "1.18.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "mako" },
+    { name = "sqlalchemy" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1a/cc/ac0bed8e562e7407fe55c3ba85a4dce86e6dbd8730887bd1e406a6c5c18a/alembic-1.18.5.tar.gz", hash = "sha256:1554982221dd17e9a749b53902407578eb305e453f71999e8c7f0a48389fff8e", size = 2060480, upload-time = "2026-06-25T15:20:54.888Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/96/78/5fe6dc3a3a5b2f5a2a4faef8bfe336d5fa049a38884ab3172e0098160c01/alembic-1.18.5-py3-none-any.whl", hash = "sha256:06d8ba9d04558022f5395e9317de03d270f3dced49cee01f89fe7a13c26f14bc", size = 264664, upload-time = "2026-06-25T15:20:56.673Z" },
+]
+
+[[package]]
 name = "annotated-doc"
 version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -174,6 +188,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/21/28/9b3f50ce0e048515135495f198351908d99540d69bfdc8c1d15b73dc55ce/blinker-1.9.0.tar.gz", hash = "sha256:b4ce2265a7abece45e7cc896e98dbebe6cead56bcf805a3d23136d145f5445bf", size = 22460, upload-time = "2024-11-08T17:25:47.436Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/cb/f2ad4230dc2eb1a74edf38f1a38b9b52277f75bef262d8908e60d957e13c/blinker-1.9.0-py3-none-any.whl", hash = "sha256:ba0efaa9080b619ff2f3459d1d500c57bddea4a6b424b60a91141db6fd2f08bc", size = 8458, upload-time = "2024-11-08T17:25:46.184Z" },
+]
+
+[[package]]
+name = "cedarpy"
+version = "4.8.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4e/f9/80f202d8a393e30e7f30c240c3adcb730aea699e1e167c08c742a5ccac07/cedarpy-4.8.7.tar.gz", hash = "sha256:bcce86f71a0071d3af5631d4d9e311b4cc66b131d19d1be018810799fc577171", size = 460525, upload-time = "2026-07-10T14:22:30.143Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/21/9c9e8e8eaba43e1638036694898b14397162f240e3812b17007b9444fbcd/cedarpy-4.8.7-cp314-cp314-macosx_10_12_x86_64.whl", hash = "sha256:ebbad67672f7b58ce64b1a3eecd2ec5545dfd9dcd64a87345a2ddd922e1dd2f7", size = 4373873, upload-time = "2026-07-10T14:22:28.59Z" },
+    { url = "https://files.pythonhosted.org/packages/03/45/3eaaae39a94aac6de05e4035471a5e678b70ce24169fb1fcb991f5c5ddc0/cedarpy-4.8.7-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:51fec10645fc6a2a8f6c038e791d05297f3afcd3d9513a9c5685e50724debf1b", size = 4244404, upload-time = "2026-07-10T14:22:20.787Z" },
+    { url = "https://files.pythonhosted.org/packages/95/46/ffb4e704f87223111138bc34905c84756f31e179dc2ca59bf663cee98983/cedarpy-4.8.7-cp314-cp314-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:3ff337cc540775ef7c043cd01a127b145a47e7565f9e50bc8557ea5fcd8097b5", size = 4689860, upload-time = "2026-07-10T14:21:49.122Z" },
+    { url = "https://files.pythonhosted.org/packages/70/5f/ce938ee078289743c51c6ed3b318563088e5a9c103b8594895e6b5ee92b1/cedarpy-4.8.7-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9763dd6cdbebb2df6e12d94fcfc07ce0b6c7e77d7cc9da3cf94c9fd05da0a1cd", size = 4670161, upload-time = "2026-07-10T14:22:05.759Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/fa/a4bfc0c52ff8beaf0bd45e73fbb39ec5dab61b4df0ab5a31b2e9016bf13d/cedarpy-4.8.7-cp314-cp314-win_amd64.whl", hash = "sha256:c63af3a6d41f273655e348203c6475e6eaeb46b8e2aa42e7c9a70b25880d25c9", size = 4138054, upload-time = "2026-07-10T14:22:39.884Z" },
+    { url = "https://files.pythonhosted.org/packages/26/96/537f03f5d865517d21f096235a666436f2f0af0f415a8c908a49f3ad36b4/cedarpy-4.8.7-cp314-cp314t-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:bc6f911e210502c1572a861ebbfe3533885e2738f1e4f492bd6067132a11d2e0", size = 4688760, upload-time = "2026-07-10T14:21:51.186Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/dc/a7ae1f14c74bd67b6023c59f6fa4ad4e5e99de8e9cae9e4c1693339b68ce/cedarpy-4.8.7-cp314-cp314t-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:149a89f910a937bec3835de1f0ccb5f96c955434b6eeb8c357d159bf9da81fcf", size = 4669488, upload-time = "2026-07-10T14:22:08.501Z" },
 ]
 
 [[package]]
@@ -699,6 +728,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/3f/b9/7e296aa1adada25cce8e5f89a996b0e38d852d93b1b656a2058226c542a2/litestar_htmx-0.5.0.tar.gz", hash = "sha256:e02d1a3a92172c874835fa3e6749d65ae9fc626d0df46719490a16293e2146fb", size = 119755, upload-time = "2025-06-11T21:19:45.573Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f2/24/8d99982f0aa9c1cd82073c6232b54a0dbe6797c7d63c0583a6c68ee3ddf2/litestar_htmx-0.5.0-py3-none-any.whl", hash = "sha256:92833aa47e0d0e868d2a7dbfab75261f124f4b83d4f9ad12b57b9a68f86c50e6", size = 9970, upload-time = "2025-06-11T21:19:44.465Z" },
+]
+
+[[package]]
+name = "mako"
+version = "1.3.12"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "markupsafe" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/00/62/791b31e69ae182791ec67f04850f2f062716bbd205483d63a215f3e062d3/mako-1.3.12.tar.gz", hash = "sha256:9f778e93289bd410bb35daadeb4fc66d95a746f0b75777b942088b7fd7af550a", size = 400219, upload-time = "2026-04-28T19:01:08.512Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bc/b1/a0ec7a5a9db730a08daef1fdfb8090435b82465abbf758a596f0ea88727e/mako-1.3.12-py3-none-any.whl", hash = "sha256:8f61569480282dbf557145ce441e4ba888be453c30989f879f0d652e39f53ea9", size = 78521, upload-time = "2026-04-28T19:01:10.393Z" },
 ]
 
 [[package]]
@@ -1784,8 +1825,10 @@ source = { editable = "." }
 [package.dev-dependencies]
 benchmark = [
     { name = "aioquic" },
+    { name = "alembic" },
     { name = "asyncpg" },
     { name = "blacksheep" },
+    { name = "cedarpy" },
     { name = "django" },
     { name = "fastapi" },
     { name = "flask" },
@@ -1819,8 +1862,10 @@ docs = [
 [package.metadata.requires-dev]
 benchmark = [
     { name = "aioquic", specifier = ">=1.2" },
+    { name = "alembic", specifier = ">=1.16" },
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "blacksheep", specifier = ">=2.2" },
+    { name = "cedarpy", specifier = ">=4.1" },
     { name = "django", specifier = ">=5.2" },
     { name = "fastapi", specifier = ">=0.116" },
     { name = "flask", specifier = ">=3.1" },

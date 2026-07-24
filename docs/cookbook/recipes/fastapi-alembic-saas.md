@@ -45,26 +45,41 @@ Treat `VERIFY`, `AMBIGUOUS`, and `BLOCKED` as operational states, not as aliases
 for “apply whatever seems necessary.” Resolve every disagreement before moving
 on.
 
-## 5. Keep Alembic applying DDL
+## 5. Generate and apply on one staging schema
 
-The Wreath artifact generator and DDL runner are not released yet. Continue to
-run your reviewed Alembic deployment job. Application startup may reject or warn
-about an outdated schema, but it should not call `upgrade head`.
+The Wreath artifact generator and single-schema runner have shipped, so prove
+them on one staging tenant before you touch the fleet:
 
-## 6. Prepare the eventual cutover
+- `wreath migrations generate app:app --database main --output migrations/NNNN …`
+  writes a checksummed artifact; `wreath migrations show` verifies it from bytes.
+- `wreath migrations apply app:app migrations/NNNN/migration.bin --database main`
+  locks the schema, checks the live source fingerprint, runs one transactional
+  DDL block, requires the target fingerprint, and records history — using a
+  dedicated `WREATH_MIGRATION_DSN`, never the request pool.
+- `wreath migrations down app:app migrations/NNNN/migration.bin --database main`
+  reverses that same artifact in metal and refuses if the running ORM still maps
+  a column the downgrade removes (override with `--force` for local rewinds).
 
-Before transferring authority, require all of the following:
+Application startup still only *checks* readiness — it never calls the runner.
+Keep Alembic authoritative for any schema that uses objects Wreath still marks
+`MANUAL` (composite constraints, full foreign-key actions, expression/partial
+indexes) and for **fleet execution**: `resolve_fleet` classifies every tenant in
+one native call, but there is not yet a per-tenant apply loop.
+
+## 6. Prepare the eventual fleet cutover
+
+Before transferring authority for the whole fleet, require all of the following:
 
 - byte-stable Wreath artifacts generated from the intended schema;
 - source and target fingerprint agreement with live PostgreSQL;
-- destructive/manual operation review;
+- destructive/manual operation review, and a rehearsed `down` for each artifact;
 - lock, cancellation, process-loss, and resume tests;
 - a role-isolation test proving tenant A cannot name tenant B's objects;
 - a restore and recovery drill;
 - repeated benchmark samples that verify returned tenant markers.
 
-Until those gates exist and pass, the safe migration is coexistence—not a flag
-day.
+Until those gates pass for the fleet, the safe path is coexistence—apply per
+schema, keep Alembic where objects are unsupported—not a flag day.
 
 See [From FastAPI and Alembic to Wreath-metal migrations](../../guides/migrations.md)
 for the architecture and configuration choices.

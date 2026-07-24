@@ -314,6 +314,20 @@ def build_parser() -> argparse.ArgumentParser:
     migration_apply.add_argument("--allow-destructive", action="store_true")
     migration_apply.add_argument("--dsn-env", default="WREATH_MIGRATION_DSN")
     migration_apply.add_argument("--json", action="store_true")
+    migration_down = migration_actions.add_parser(
+        "down", help="revert the most recently applied artifact, inverted in metal"
+    )
+    migration_down.add_argument("target", help="application target as module:attribute")
+    migration_down.add_argument("artifact", metavar="ARTIFACT")
+    migration_down.add_argument("--database", default="main")
+    migration_down.add_argument("--factory", action="store_true")
+    migration_down.add_argument("--allow-destructive", action="store_true")
+    migration_down.add_argument(
+        "--force", action="store_true",
+        help="downgrade even when live ORM code still maps a dropped/retyped object",
+    )
+    migration_down.add_argument("--dsn-env", default="WREATH_MIGRATION_DSN")
+    migration_down.add_argument("--json", action="store_true")
     inspect_parser = commands.add_parser(
         "inspect", help="query a running server's read-only telemetry Inspector"
     )

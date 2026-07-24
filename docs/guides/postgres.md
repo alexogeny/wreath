@@ -8,22 +8,23 @@ between them is strict and one-directional: `wreath.orm` depends on
 boundary is deliberate — it keeps the driver a clean, general PostgreSQL client
 that you can use directly whenever the ORM would only get in your way.
 
-You open a pool over a DSN, acquire connections from it, and run your queries
-inside transactions. Prepared operations and native codecs let a query decode its
-rows straight into records — or into [ORM models](orm.md) — without building an
-intermediate list first, which is much of where the driver's speed comes from.
+You declare a database over a DSN, acquire connections from its workload pools,
+and run your queries inside transactions. Prepared operations and native codecs
+let a query decode its rows straight into records — or into [ORM models](orm.md)
+— without building an intermediate list first, which is much of where the
+driver's speed comes from.
 
 ```python
-from wreath.postgres import Pool
-
-pool = Pool("postgres://user:pass@localhost/app")
-await pool.start()
+app.postgres("main", dsn="postgres://user:pass@localhost/app")
 ```
 
-Tie the pool's lifetime to your application lifespan (the
+Declared this way, the database's pools are started during lifespan startup and
+stopped gracefully at shutdown — the
 [database pool recipe](../cookbook/recipes/database-lifespan.md) shows the
-pattern), and declare `DATABASE_URL` as a boot-critical variable so a missing or
-malformed DSN is caught at startup rather than on the first query.
+pattern. (Outside an application, `wreath.postgres.Database` gives you the same
+object with explicit `start()` and `stop()`.) Declare `DATABASE_URL` as a
+boot-critical variable so a missing or malformed DSN is caught at startup rather
+than on the first query.
 
 Each connection's automatic prepared-plan LRU is bounded twice: by
 `PoolConfig.statement_cache_size` and by the approximate retained-byte limit

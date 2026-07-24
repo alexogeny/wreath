@@ -10,6 +10,8 @@
 #include "postgres/migration_artifact.h"
 #include "postgres/migration_image.h"
 #include "postgres/migration_resolver.h"
+#include "postgres/migration_runner.h"
+#include "postgres/migration_sql.h"
 #include "postgres/model.h"
 #include "postgres/operation.h"
 #include "postgres/plan.h"
@@ -59,6 +61,8 @@ PyInit__postgres(void)
         wreath_pg_migration_artifact_init(module) < 0 ||
         wreath_pg_migration_image_init(module) < 0 ||
         wreath_pg_migration_resolver_init(module) < 0 ||
+        wreath_pg_migration_runner_init(module) < 0 ||
+        wreath_pg_migration_sql_init(module) < 0 ||
         wreath_pg_protocol_init(module) < 0 ||
         wreath_pg_plan_init(module) < 0 ||
         wreath_pg_connection_init(module) < 0 ||

@@ -38,6 +38,8 @@ from .errors import (
 )
 from .fields import MISSING, Column, resolve_default
 from .relations import Relationship
+from .schema import SchemaRef
+from .table import Index, Unique
 
 
 def _load_native() -> Any:
@@ -112,13 +114,15 @@ class ModelMeta(_MetaBase):
         namespace: dict[str, Any],
         *,
         table: str | None = None,
-        schema: str = "public",
+        schema: str | SchemaRef = "public",
         **kwargs: Any,
     ) -> ModelMeta:
         inherited_columns: list[Column] = []
         inherited_relations: list[Relationship] = []
         inherited_narrows: list[Narrow] = []
         inherited_rules: list[Rule] = []
+        inherited_uniques: list[Unique] = []
+        inherited_indexes: list[Index] = []
         for base in bases:
             if getattr(base, "__wreath_table__", None) is not None:
                 raise DeclarationError(
@@ -129,6 +133,8 @@ class ModelMeta(_MetaBase):
             inherited_relations.extend(getattr(base, "__wreath_proto_relations__", ()))
             inherited_narrows.extend(getattr(base, "__wreath_proto_narrows__", ()))
             inherited_rules.extend(getattr(base, "__wreath_proto_rules__", ()))
+            inherited_uniques.extend(getattr(base, "__wreath_proto_uniques__", ()))
+            inherited_indexes.extend(getattr(base, "__wreath_proto_indexes__", ()))
 
         own_columns = [
             (key, value)
@@ -161,11 +167,21 @@ class ModelMeta(_MetaBase):
             *inherited_rules,
             *(value for value in namespace.values() if isinstance(value, Rule)),
         ]
+        uniques = [
+            *inherited_uniques,
+            *(value for value in namespace.values() if isinstance(value, Unique)),
+        ]
+        indexes = [
+            *inherited_indexes,
+            *(value for value in namespace.values() if isinstance(value, Index)),
+        ]
 
         namespace["__wreath_proto_columns__"] = tuple(columns)
         namespace["__wreath_proto_relations__"] = tuple(relations)
         namespace["__wreath_proto_narrows__"] = tuple(narrows)
         namespace["__wreath_proto_rules__"] = tuple(rules)
+        namespace["__wreath_proto_uniques__"] = tuple(uniques)
+        namespace["__wreath_proto_indexes__"] = tuple(indexes)
         namespace["__wreath_table__"] = table
         namespace["__wreath_schema__"] = schema
         namespace.setdefault("__slots__", ())
@@ -184,7 +200,12 @@ class ModelMeta(_MetaBase):
             return super().__new__(mcls, name, bases, namespace, **kwargs)
 
         validate_identifier(table, "table name")
-        validate_identifier(schema, "schema name")
+        if isinstance(schema, str):
+            validate_identifier(schema, "schema name")
+        elif not isinstance(schema, SchemaRef):
+            raise DeclarationError(
+                f"schema {schema!r} must be a PostgreSQL identifier or logical schema role"
+            )
         for item in columns:
             validate_identifier(item.python_name, "column name")
         if not any(item.primary_key for item in columns):
@@ -368,6 +389,8 @@ class Model(metaclass=ModelMeta):
     __wreath_proto_relations__: ClassVar[tuple[Relationship, ...]]
     __wreath_proto_narrows__: ClassVar[tuple[Narrow, ...]]
     __wreath_proto_rules__: ClassVar[tuple[Rule, ...]]
+    __wreath_proto_uniques__: ClassVar[tuple[Unique, ...]]
+    __wreath_proto_indexes__: ClassVar[tuple[Index, ...]]
     __wreath_rules__: ClassVar[tuple[Rule, ...]]
     __wreath_compiled_rules__: ClassVar[tuple[Any, ...]]
 

@@ -17,6 +17,8 @@ PARENT = bytes(32)
 SOURCE = b"s" * 32
 TARGET = b"t" * 32
 EMPTY_TAPE = b"WMO1\x01\x00\x00\x00\x00\x00\x00\x00"
+EMPTY_PLAN = b"WMP1\x01\x00\x00\x00\x00\x00\x00\x00"
+EMPTY_SQL = b"WMS1\x01\x00\x00\x00\x00\x00\x00\x00"
 
 
 def test_native_artifact_round_trips_verified_metadata_and_tape() -> None:
@@ -26,11 +28,13 @@ def test_native_artifact_round_trips_verified_metadata_and_tape() -> None:
         source_fingerprint=SOURCE,
         target_fingerprint=TARGET,
         operation_tape=EMPTY_TAPE,
+        named_plan=EMPTY_PLAN,
+        sql_tape=EMPTY_SQL,
     )
 
     assert artifact.data[:4] == b"WMA1"
     assert artifact.checksum == hashlib.sha256(
-        artifact.data[:128] + bytes(32) + artifact.data[160:]
+        artifact.data[:136] + bytes(32) + artifact.data[168:]
     ).digest()
     loaded = _load_native_artifact(artifact.data)
     assert loaded == artifact
@@ -39,6 +43,8 @@ def test_native_artifact_round_trips_verified_metadata_and_tape() -> None:
     assert loaded.source_fingerprint == SOURCE
     assert loaded.target_fingerprint == TARGET
     assert loaded.operation_tape == EMPTY_TAPE
+    assert loaded.named_plan == EMPTY_PLAN
+    assert loaded.sql_tape == EMPTY_SQL
 
 
 def test_native_chain_verifies_parent_and_schema_continuity_in_one_call() -> None:
@@ -48,6 +54,8 @@ def test_native_chain_verifies_parent_and_schema_continuity_in_one_call() -> Non
         source_fingerprint=SOURCE,
         target_fingerprint=TARGET,
         operation_tape=EMPTY_TAPE,
+        named_plan=EMPTY_PLAN,
+        sql_tape=EMPTY_SQL,
     )
     second = _build_native_artifact(
         migration_id=b"2" * 16,
@@ -55,6 +63,8 @@ def test_native_chain_verifies_parent_and_schema_continuity_in_one_call() -> Non
         source_fingerprint=first.target_fingerprint,
         target_fingerprint=b"u" * 32,
         operation_tape=EMPTY_TAPE,
+        named_plan=EMPTY_PLAN,
+        sql_tape=EMPTY_SQL,
     )
 
     chain = _verify_native_chain(
@@ -82,6 +92,8 @@ def test_native_artifact_generation_is_byte_deterministic() -> None:
         "source_fingerprint": SOURCE,
         "target_fingerprint": TARGET,
         "operation_tape": EMPTY_TAPE,
+        "named_plan": EMPTY_PLAN,
+        "sql_tape": EMPTY_SQL,
     }
 
     assert _build_native_artifact(**arguments).data == _build_native_artifact(**arguments).data
@@ -94,6 +106,8 @@ def test_artifact_checksum_detects_any_mutation() -> None:
         source_fingerprint=SOURCE,
         target_fingerprint=TARGET,
         operation_tape=EMPTY_TAPE,
+        named_plan=EMPTY_PLAN,
+        sql_tape=EMPTY_SQL,
     )
     corrupted = bytearray(artifact.data)
     corrupted[-1] ^= 1
@@ -110,6 +124,8 @@ def test_artifact_checksum_detects_any_mutation() -> None:
         ("source_fingerprint", b"short"),
         ("target_fingerprint", b"short"),
         ("operation_tape", b"not a tape"),
+        ("named_plan", b"not a plan"),
+        ("sql_tape", b"not sql"),
     ],
 )
 def test_artifact_rejects_invalid_fixed_fields(field: str, value: bytes) -> None:
@@ -119,6 +135,8 @@ def test_artifact_rejects_invalid_fixed_fields(field: str, value: bytes) -> None
         "source_fingerprint": SOURCE,
         "target_fingerprint": TARGET,
         "operation_tape": EMPTY_TAPE,
+        "named_plan": EMPTY_PLAN,
+        "sql_tape": EMPTY_SQL,
     }
     arguments[field] = value
 
@@ -133,6 +151,8 @@ def test_every_artifact_byte_is_covered_by_structure_or_checksum() -> None:
         source_fingerprint=SOURCE,
         target_fingerprint=TARGET,
         operation_tape=EMPTY_TAPE,
+        named_plan=EMPTY_PLAN,
+        sql_tape=EMPTY_SQL,
     ).data
 
     for index in range(len(artifact)):

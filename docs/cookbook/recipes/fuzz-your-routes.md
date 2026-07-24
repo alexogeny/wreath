@@ -89,6 +89,9 @@ within it — so a schedule is bit-for-bit reproducible. The transport kinds are
 | `TRUNCATE` | drop this segment past `value` and suppress every later one |
 | `RESET` | inject a peer reset (abort) after the segment |
 | `HALF_CLOSE` | inject a peer half-close (read EOF) after the segment |
+| `CLOCK_JUMP` | advance the virtual clock by `value` µs before the segment |
+| `DUPLICATE` | feed this segment's bytes twice (peer retransmission) |
+| `TIMEOUT` | fire the owned request/keep-alive timeout after the segment |
 
 A good sweep: split a recorded request finely, then truncate at *every* offset and
 assert the parser never crashes, never fabricates a `200`, and gives the same

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import struct
+from collections import deque
 from typing import Any
 
 import pytest
@@ -192,6 +193,12 @@ def test_asynchronous_messages_are_ignored_during_an_operation(
     this is the only place that pins the behaviour without a real server.
     """
     connection = pure_postgres.Connection.__new__(pure_postgres.Connection)
+    # A NotificationResponse ('A') is now captured into the per-connection ring
+    # rather than discarded, so give the bare connection the notify slots that
+    # __init__ would set. It still must not become an error on the operation.
+    connection._notifications = deque()
+    connection._notifications_dropped = 0
+    connection._notify_event = asyncio.Event()
     operation = _operation()
     connection._consume_message(operation, kind, payload)
     assert operation.error is None

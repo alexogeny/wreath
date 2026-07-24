@@ -65,6 +65,31 @@ class PgType:
         return f"<PgType {self.name} oid={self.oid}>"
 
 
+class _ArrayType(PgType):
+    """A one-dimensional PostgreSQL array type that remembers its element type.
+
+    An array reuses its element's scalar codec value-by-value, so it only needs
+    to carry the element ``PgType`` around: coercion validates each element with
+    it, and ``any_eq``/``all_eq`` bind a scalar against it.
+    """
+
+    __slots__ = ("element",)
+
+    def __init__(
+        self,
+        element: "PgType",
+        name: str,
+        oid: int,
+        sql: str,
+        coerce: Callable[[Any], Any],
+        *,
+        to_wire: Callable[[Any], Any] | None = None,
+        from_wire: Callable[[Any], Any] | None = None,
+    ) -> None:
+        super().__init__(name, oid, sql, coerce, to_wire=to_wire, from_wire=from_wire)
+        self.element = element
+
+
 def _type_error(expected: str, value: object) -> TypeError:
     return TypeError(f"expected {expected}, got {type(value).__name__}")
 
@@ -169,6 +194,77 @@ Jsonb = PgType(
     "jsonb", 3802, "jsonb", _check_json, to_wire=_json_to_wire, from_wire=_json_loads
 )
 
+
+#: PostgreSQL array OID for each element OID Wreath can frame. Element types
+#: absent here have no scalar codec, so they have no array form either.
+_ARRAY_OID: dict[int, int] = {
+    16: 1000,    # boolean[]
+    17: 1001,    # bytea[]
+    20: 1016,    # bigint[]
+    21: 1005,    # smallint[]
+    23: 1007,    # integer[]
+    25: 1009,    # text[]
+    114: 199,    # json[]
+    700: 1021,   # real[]
+    701: 1022,   # double precision[]
+    1043: 1015,  # varchar[]
+    1082: 1182,  # date[]
+    1114: 1115,  # timestamp[]
+    1184: 1185,  # timestamptz[]
+    2950: 2951,  # uuid[]
+    3802: 3807,  # jsonb[]
+}
+
+
+def Array(element: PgType, *, nullable_elements: bool = False) -> _ArrayType:
+    """Declare a one-dimensional PostgreSQL array of ``element``.
+
+    Each element is validated and wired through ``element``'s own rules, so
+    ``Array(Uuid)`` accepts a ``list``/``tuple`` of UUIDs and rejects anything
+    else. Elements are non-nullable unless ``nullable_elements=True``. Nested
+    arrays are not supported: an element type may not itself be an array.
+    """
+    if not isinstance(element, PgType):
+        raise TypeError(f"Array() requires a PgType element, got {element!r}")
+    if isinstance(element, _ArrayType):
+        raise TypeError("nested arrays are not supported")
+    array_oid = _ARRAY_OID.get(element.oid)
+    if array_oid is None:
+        raise TypeError(f"{element.name} has no array type")
+
+    def coerce(value: Any) -> list[Any]:
+        if not isinstance(value, (list, tuple)):
+            raise _type_error("list or tuple", value)
+        out: list[Any] = []
+        for item in value:
+            if item is None:
+                if not nullable_elements:
+                    raise TypeError(
+                        f"{element.name}[] elements are not nullable; pass "
+                        "nullable_elements=True to allow NULL entries"
+                    )
+                out.append(None)
+            else:
+                out.append(element.coerce(item))
+        return out
+
+    def to_wire(value: list[Any]) -> list[Any]:
+        return [None if item is None else element.to_wire(item) for item in value]
+
+    def from_wire(value: list[Any]) -> list[Any]:
+        return [None if item is None else element.from_wire(item) for item in value]
+
+    return _ArrayType(
+        element,
+        f"{element.name}[]",
+        array_oid,
+        f"{element.sql}[]",
+        coerce,
+        to_wire=to_wire,
+        from_wire=from_wire,
+    )
+
+
 # PostgreSQL-spelled aliases for the integer and float widths.
 Int2 = Int16
 Int4 = Int32
@@ -185,8 +281,24 @@ BY_OID: dict[int, PgType] = {
     )
 }
 
+# Canonical array types, one per supported element, registered so result
+# validation and introspection can decode an array column by its OID. ``Array``
+# always returns the same OID for a given element, so any of these decodes any
+# column of that array type.
+for _element in (
+    Bool, Int16, Int32, Int64, Float32, Float64, Text, Varchar,
+    Bytea, Uuid, Date, Timestamp, TimestampTz, Json, Jsonb,
+):
+    _canonical_array = Array(_element)
+    BY_OID[_canonical_array.oid] = _canonical_array
+
+#: The ``text[]`` type the jsonb key operators (``?|``, ``?&``, ``#>>`` paths)
+#: bind their operands as.
+TextArray = Array(Text)
+
 __all__ = [
     "BY_OID",
+    "Array",
     "Bool",
     "Bytea",
     "Date",
@@ -204,6 +316,7 @@ __all__ = [
     "Jsonb",
     "PgType",
     "Text",
+    "TextArray",
     "Timestamp",
     "TimestampTz",
     "Uuid",

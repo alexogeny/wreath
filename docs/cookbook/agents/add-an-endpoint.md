@@ -2,7 +2,7 @@
 
 ## An endpoint
 
-The smallest correct endpoint is three small things, in order:
+The smallest correct endpoint is four small things, in order:
 
 1. Add the route to a `Router` module (or the app), with **typed parameters** —
    so it validates its input and appears in the OpenAPI document for free.

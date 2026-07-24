@@ -93,8 +93,9 @@ accepted descriptors from the CQ in bounded batches. Accepted descriptors are
 validated against the listener generation before connection construction, so a
 completion from a closed or reused listener is discarded.
 
-Plaintext socket ingress uses a separate receive ring with sixteen registered
-16-KiB provided buffers. Each offered buffer owns a generational descriptor token;
+Plaintext socket ingress uses the unified ring with 1024 registered 16-KiB
+provided buffers, sized so pool exhaustion coincides with CQ saturation. Each
+offered buffer owns a generational descriptor token;
 a CQE's kernel buffer ID must claim the current token before protocol code accesses
 the memory. Duplicate and stale ownership epochs are rejected in O(1), with slab
 occupancy, high-water, exhaustion, stale-token, and wrap diagnostics. Wreath
@@ -110,9 +111,10 @@ exhaustion and rearms only at the bounded post-drain retry point, after selected
 buffers have been recycled. If provided-buffer registration is unavailable, metal
 loop startup fails instead of changing the transport architecture.
 
-Plaintext TCP output uses `IORING_OP_SEND_ZC` on the unified ring. Each send SQE
-carries a generational operation token and retains an immutable payload until its
-data CQE and every zero-copy ownership-notification CQE have arrived. Partial
+Plaintext TCP output uses `IORING_OP_SEND` on the unified ring. Each send SQE
+carries a generational operation token and retains an immutable payload until
+its data CQE arrives; `MSG_WAITALL` lets the kernel retry short sends, so one
+CQE normally covers the whole payload. Partial
 sends advance a cursor and resubmit the remaining bytes; writes that arrive behind
 an active send enter the transport's bounded flow-control buffer. Completion releases the
 operation slot, resumes a paused producer at the low watermark, and submits the
@@ -126,9 +128,10 @@ boundaries rather than entering the kernel for every operation. The poller
 reports submitted SQEs separately from submission batches.
 
 After an empty completion probe, the adaptive polling controller learns an EWMA
-of empty-CQ-to-arrival time and its absolute deviation. It spins only after eight
-samples, only below a 50-microsecond prediction, and suppresses spinning when
-deviation exceeds 75% of the mean. Every spin is clamped to 50 microseconds,
+of empty-CQ-to-arrival time and its absolute deviation. It spins only after
+eight samples and only below a 100-microsecond predicted arrival gap; the
+per-spin budget is the prediction plus twice the deviation, clamped between 2
+and 50 microseconds. Every spin
 releases the GIL, and falls through to ordinary blocking on a miss. Timers, ready
 Python callbacks, and immediate control work bypass spinning. Telemetry exposes
 attempts, hits, misses, spin time, blocking entries, samples, EWMA, and deviation.
@@ -152,8 +155,8 @@ from another OS thread are rejected rather than reaching its connection table.
 Metal allocates its hot ownership tables once, before serving, and never grows
 them on the request path. Tune per-worker baseline RSS and concurrency limits with
 `WREATH_METAL_CONNECTION_CAPACITY` (default 4096),
-`WREATH_METAL_OPERATION_CAPACITY` (default 16 for synchronous epoll and 4096 for
-io_uring in-flight ownership), and `WREATH_METAL_RECV_BUFFERS` (default 16).
+`WREATH_METAL_OPERATION_CAPACITY` (default 4096 io_uring in-flight ownership
+slots), and `WREATH_METAL_RECV_BUFFERS` (default 1024).
 Values must be at least 16; receive
 buffer count must be a power of two. Invalid or excessive values fail loop startup
 rather than being rounded or triggering hidden dynamic growth. The poller exposes

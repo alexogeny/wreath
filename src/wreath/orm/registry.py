@@ -152,7 +152,14 @@ class Registry:
             object.__setattr__(
                 spec,
                 "fingerprint",
-                fingerprint_model(spec.schema, spec.table, spec.columns, spec.relationships),
+                fingerprint_model(
+                    spec.schema,
+                    spec.table,
+                    spec.columns,
+                    spec.relationships,
+                    spec.table_uniques,
+                    spec.table_indexes,
+                ),
             )
         for spec in self._specs.values():
             self._check_back_populates(spec)
@@ -199,6 +206,16 @@ class Registry:
         primary_key = tuple(item for item in columns if item.primary_key)
         if not primary_key:
             raise DeclarationError(f"{model.__name__} declares no primary-key column")
+        db_names = {item.database_name for item in columns}
+        table_uniques = tuple(getattr(model, "__wreath_proto_uniques__", ()))
+        table_indexes = tuple(getattr(model, "__wreath_proto_indexes__", ()))
+        for declaration in (*table_uniques, *table_indexes):
+            for name in declaration.columns:
+                if name not in db_names:
+                    raise DeclarationError(
+                        f"{model.__name__} {declaration!r} names unknown column "
+                        f"{name!r}; declare it as a column first"
+                    )
         declared_schema = model.__wreath_schema__
         schema_ref = (
             declared_schema
@@ -223,6 +240,8 @@ class Registry:
             ),
             by_name={item.python_name: item for item in columns},
             by_database_name={item.database_name: item for item in columns},
+            table_uniques=table_uniques,
+            table_indexes=table_indexes,
         )
         return spec
 
@@ -488,6 +507,16 @@ class Registry:
         )
 
 
+_FK_ACTION_CODE = {
+    None: "a",
+    "no action": "a",
+    "restrict": "r",
+    "cascade": "c",
+    "set null": "n",
+    "set default": "d",
+}
+
+
 def _column_ref(item: Column) -> ColumnRef | None:
     reference = item.references
     if reference is None:
@@ -505,6 +534,9 @@ def _column_ref(item: Column) -> ColumnRef | None:
         column=target.database_name,
         position=target.index + 1,
         model_type=owner,
+        on_delete=_FK_ACTION_CODE[item.on_delete],
+        on_update=_FK_ACTION_CODE[item.on_update],
+        deferrable=item.deferrable,
     )
 
 

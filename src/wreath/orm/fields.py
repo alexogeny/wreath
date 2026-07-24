@@ -54,8 +54,12 @@ class Column:
         "_expression",
         "checks",
         "default",
+        "deferrable",
         "index",
+        "index_method",
         "nullable",
+        "on_delete",
+        "on_update",
         "order",
         "owner",
         "pg_type",
@@ -82,7 +86,11 @@ class Column:
         default: Any,
         server_default: str | None,
         references: Any,
+        on_delete: str | None = None,
+        on_update: str | None = None,
+        deferrable: bool = False,
         checks: tuple[Check, ...] = (),
+        index_method: str | None = None,
     ) -> None:
         global _ORDER
         _ORDER += 1
@@ -91,9 +99,16 @@ class Column:
         self.nullable = nullable
         self.unique = unique
         self.indexed = indexed
+        #: The access method for this column's index ("btree"/"gin"), or None
+        #: when it has no index. Kept separate from ``indexed`` so the column
+        #: fingerprint (which encodes only index *presence*) is unchanged.
+        self.index_method = index_method
         self.default = default
         self.server_default = server_default
         self.references = references
+        self.on_delete = on_delete
+        self.on_update = on_update
+        self.deferrable = deferrable
         self.checks = checks
         self.order = _ORDER
         self.python_name: str = ""
@@ -122,7 +137,11 @@ class Column:
             default=self.default,
             server_default=self.server_default,
             references=self.references,
+            on_delete=self.on_delete,
+            on_update=self.on_update,
+            deferrable=self.deferrable,
             checks=self.checks,
+            index_method=self.index_method,
         )
         copy.order = self.order
         copy.owner = owner
@@ -176,23 +195,51 @@ class Column:
         return f"<Column {owner}.{self.python_name} {self.pg_type.name}>"
 
 
+_FK_ACTIONS = frozenset({"no action", "restrict", "cascade", "set null", "set default"})
+
+_INDEX_METHODS = frozenset({"btree", "gin"})
+
+
+def _resolve_index(index: bool | str) -> tuple[bool, str | None]:
+    """Normalize ``index=`` into an (present, method) pair.
+
+    ``False``/``None`` -> no index; ``True`` -> btree; a method name -> that
+    access method. ``indexed`` stays a plain bool so the column fingerprint is
+    unchanged for existing btree/none columns.
+    """
+    if index is False or index is None:
+        return False, None
+    if index is True:
+        return True, "btree"
+    if isinstance(index, str) and index in _INDEX_METHODS:
+        return True, index
+    raise DeclarationError(
+        f"index= must be True, False, or one of {sorted(_INDEX_METHODS)}, got {index!r}"
+    )
+
+
 def column(
     pg_type: PgType,
     *,
     primary_key: bool = False,
     nullable: bool = False,
     unique: bool = False,
-    index: bool = False,
+    index: bool | str = False,
     default: Any = MISSING,
     server_default: str | None = None,
     references: Any = None,
+    on_delete: str | None = None,
+    on_update: str | None = None,
+    deferrable: bool = False,
     check: Any = None,
 ) -> Any:
     """Declare a mapped column.
 
     ``default`` is a Python value or a zero-argument callable applied when a
     constructor omits the field. ``index=True`` declares one ordinary btree index
-    on this column. ``server_default`` names a database-side
+    on this column; ``index="gin"`` declares a GIN index instead (the right
+    choice for ``Jsonb`` and ``Array`` columns queried with the containment and
+    key operators). ``server_default`` names a database-side
     default, which makes the column optional on insert and returned by
     ``RETURNING``. ``references`` takes another model's column expression
     (``references=User.id``) and records a foreign key.
@@ -219,15 +266,29 @@ def column(
         )
     if server_default is not None and not isinstance(server_default, str):
         raise DeclarationError("server_default= must be SQL text")
+    for label, action in (("on_delete", on_delete), ("on_update", on_update)):
+        if action is not None and action not in _FK_ACTIONS:
+            raise DeclarationError(
+                f"{label}={action!r} must be one of {sorted(_FK_ACTIONS)}"
+            )
+    if (on_delete or on_update or deferrable) and references is None:
+        raise DeclarationError(
+            "on_delete=/on_update=/deferrable= only apply to a references= column"
+        )
+    indexed, index_method = _resolve_index(index)
     return Column(
         pg_type,
         primary_key=primary_key,
         nullable=nullable,
         unique=unique,
-        indexed=index,
+        indexed=indexed,
+        index_method=index_method,
         default=default,
         server_default=server_default,
         references=references,
+        on_delete=on_delete,
+        on_update=on_update,
+        deferrable=deferrable,
         checks=collect_checks(check, f"column({pg_type.name})"),
     )
 

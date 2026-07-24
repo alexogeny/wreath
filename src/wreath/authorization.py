@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from ._auth.backends import AuthorizationProvider
 from ._auth.cedar import CedarAuthorizer, CedarEngine
+from ._auth.cedar_engine import CedarEntity, CedarParseError, CedarPolicies, EntityUid
 from ._auth.decorators import authorize, permissions, roles
 from ._auth.models import AuthorizationDecision
 from ._auth.requirements import AuthRequirement
@@ -19,6 +20,10 @@ __all__ = [
     "AuthorizationProvider",
     "CedarAuthorizer",
     "CedarEngine",
+    "CedarEntity",
+    "CedarParseError",
+    "CedarPolicies",
+    "EntityUid",
     "authorize",
     "permissions",
     "roles",

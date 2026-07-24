@@ -22,7 +22,7 @@ canonical model. Your frontend's understanding of your API can't drift from the
 API itself, because both come from one source:
 
 ```bash
-wreath typegen --out ./client
+wreath typegen app:app --output ./client --react-query
 ```
 
 **Reference:** [`wreath.openapi`](../reference/openapi.md),

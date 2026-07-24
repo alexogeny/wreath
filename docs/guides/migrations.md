@@ -13,11 +13,16 @@ mapping — start with [Coming from FastAPI](../from-fastapi/index.md).
 
 !!! warning "Implementation status"
 
-    Catalog-driven generation and locked single-schema application are available
-    for the object kinds documented below. WMA1 binds operations, literal metadata,
-    and metal-derived SQL as one authority. Indexes, composite constraints, rename
-    hints, and tenant-fleet execution are not complete, so keep Alembic for schemas
-    that use unsupported objects rather than treating partial coverage as parity.
+    Catalog-driven generation, locked single-schema application, and inverse
+    downgrade are available for the object kinds documented below: tables,
+    columns, primary keys (including composite), per-column *and* composite
+    unique constraints, foreign keys with referential actions and deferrability,
+    and single- and multi-column btree indexes (including unique indexes). WMA1
+    binds operations, literal metadata, and metal-derived SQL as one authority.
+    Expression, partial, covering, and non-btree indexes, rename hints, and
+    tenant-fleet *execution* are not complete and are emitted as `MANUAL`, so
+    keep Alembic for schemas that use them rather than treating partial coverage
+    as parity.
 
 ## What changes
 
@@ -77,6 +82,65 @@ registry = app.orm(
 Choose `isolation="role"` when PostgreSQL must enforce hostile-tenant isolation.
 Namespace selection alone prevents accidental crossover in Wreath; it does not
 stop privileged raw SQL from naming another schema.
+
+## Bind a tenant request context
+
+An isolated registry compiles tenant-template models to *unqualified* SQL that
+resolves through PostgreSQL's `search_path`. A request selects which tenant that
+is by binding a `TenantContext` on its session:
+
+```python
+from wreath.orm import Session, TenantContext
+
+context = TenantContext(schema="tenant_7", role="tenant_7_role")
+session = Session(registry, "write", tenant=context)
+
+async with session.begin():
+    orders = await session.fetch(Order.select())
+```
+
+The context is bound *transaction-locally*: on `begin()` the session issues
+`SET LOCAL search_path` (and, under role isolation, `SET LOCAL ROLE`) before any
+tenant-template statement runs, and PostgreSQL discards the binding at
+`COMMIT`/`ROLLBACK`, so a pooled connection never carries one tenant's namespace
+into the next lease. Because the binding is transaction-scoped, a tenant session
+requires an explicit transaction: a read outside `async with session.begin()`
+is refused rather than run under whatever namespace the connection last held.
+
+Resolve the schema and role from an application-owned tenant directory — never
+from a request host, path, header, or token. `TenantContext` validates both as
+unquoted identifiers, so the `SET LOCAL` statements can never carry injected
+text, but only the directory can say *which* tenant a request is.
+
+## Resolve fleet readiness
+
+To ask, in one metal call, how a whole fleet stands against a target migration,
+hand the runner your directory's per-tenant state:
+
+```python
+from wreath.migrations import HISTORY_VERIFIED, TenantState, resolve_fleet
+
+states = [
+    TenantState(tenant_id, migration, checksum, generation, HISTORY_VERIFIED)
+    for tenant_id, migration, checksum, generation in directory_rows
+]
+result = resolve_fleet(
+    states,
+    target_migration=head_migration,
+    target_checksum=head_checksum,
+    directory_generation=current_generation,
+)
+# result.current / apply / verify / ambiguous / blocked — bounded counts, not
+# one Python object per tenant.
+```
+
+The runner packs the directory into the native snapshot and classifies every
+tenant in a single Wreath-metal invocation: a tenant is `current` only when its
+trusted, verified history sits at the target for the current directory
+generation; unknown, stale, or wrong-generation tenants fall to `verify`
+(catalog audit), and `ambiguous`/`blocked` stay terminal. Classification reads
+no database and holds no DDL authority — turning a `verify` count into per-tenant
+catalog audits is a separate, explicitly privileged step.
 
 ## Choose a readiness policy
 
@@ -181,16 +245,68 @@ is compiled once into the same canonical representation; SHA-256 fingerprints
 and the linear merge diff are native. The command stops the selected database
 before returning and never starts ASGI lifespan, clients, or user startup hooks.
 
-The current detector covers ordinary/permanent tables, columns, primary keys,
-per-column uniqueness, foreign keys, and declared single-column btree indexes.
-Column signatures include OID,
-nullability, identity/generated flags, and server-default text. Physical `attnum`
-position is deliberately excluded because PostgreSQL leaves gaps after dropped
-columns and Wreath does not mistake those gaps for schema drift. Composite unique
-constraints, full foreign-key actions/deferrability, expression/partial/covering
-indexes, and index-method options are still being implemented, so `detect` is not
-yet a complete Alembic replacement and must not be used as the sole production
-drift gate.
+The current detector covers ordinary/permanent tables, columns, primary keys
+(single and composite), per-column and composite unique constraints, foreign
+keys with their referential actions and deferrability, and single- and
+multi-column btree indexes (including unique indexes). Column signatures include
+OID, nullability, identity/generated flags, and server-default text. Physical
+`attnum` position is deliberately excluded because PostgreSQL leaves gaps after
+dropped columns and Wreath does not mistake those gaps for schema drift.
+Expression, partial, covering, and non-btree indexes and index-method options
+are still being implemented and are emitted as `MANUAL`; changing an existing
+foreign key's action is likewise `MANUAL` (drop and recreate it). So `detect` is
+not yet a complete Alembic replacement and must not be used as the sole
+production drift gate.
+
+## Downgrade an artifact
+
+A downgrade is not a second migration you have to write and hope matches. Every
+WMP1 operation already carries both its *before* and its *after* signature, so
+the exact inverse is derivable in metal: `_migration_reverse_plan` flips each add
+to a drop (and back), swaps every before/after, and the reversed plan re-derives
+its own WMO1 and WMS1 through the same code the forward plan used. The reverse of
+a create-table plan is a drop-table plan; the reverse of a type change restores
+the old type. Nothing is guessed.
+
+```bash
+wreath migrations down app:app migrations/0007/migration.bin \
+  --database main --allow-destructive
+```
+
+`down` is the precise inverse of `apply`. It requires the artifact to be the
+current history tip, verifies the live catalog matches the artifact *target*,
+runs one transactional reverse DDL block, requires the catalog to return to the
+artifact *source*, deletes the tip history row, and commits — or rolls the whole
+transaction back. Reapplying afterwards works exactly as before, because history
+and schema are returned to precisely their pre-`apply` state. A downgrade drops
+what an upgrade added, so it is destructive by nature: `--allow-destructive` is
+required and the approval is recorded.
+
+### The downgrade will not strand your running code
+
+The danger of any downgrade is dereferencing production: you roll a column back
+while the deployed release still reads it. Before it runs, `down` scans the
+reverse plan against your application's live compiled ORM image — a bounded
+native intersection — and refuses if the code you are running still maps any
+table or column the downgrade would remove, or any column whose type it would
+change:
+
+```text
+refusing to downgrade schema 'tenant_7': the running ORM still maps 1 object(s)
+this downgrade removes or retypes, so the deployed code would dereference
+columns that no longer exist:
+  - would drop column tenant_7.orders.loyalty_points, still mapped by the ORM
+Roll the models back with the code, or pass force=True (CLI: --force) …
+```
+
+Roll the model change back together with the release and the scan goes quiet and
+the downgrade proceeds. When you genuinely intend to rewind ahead of the code —
+rebuilding a local stack to re-migrate, say — pass `--force` to apply anyway. The
+guard is on by default precisely so that a production downgrade cannot quietly
+outrun the code that depends on it.
+
+Only automatic operations reverse automatically: a forward artifact containing a
+`MANUAL` operation is as ineligible for `down` as it is for `apply`.
 
 ## Inspect an artifact
 

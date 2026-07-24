@@ -34,7 +34,7 @@ from wreath import Wreath
 from routes.items import router as items
 
 app = Wreath()
-app.include(items)
+app.include_router(items)
 ```
 
 ## Configuration

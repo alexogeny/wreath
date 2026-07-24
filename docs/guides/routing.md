@@ -36,19 +36,22 @@ you weave into the application when you're ready:
 ```python
 from wreath import Router
 
-items = Router()
+items = Router(prefix="/items", tags=("items",))
 
-@items.get("/items/{id}")
+@items.get("/{id}")
 async def show(request, id: int) -> dict:
     return {"id": id}
 
-app.include(items)
+app.include_router(items)
 ```
 
-A router can carry its own middleware and its own authentication requirements.
-When you include it, those are flattened into the application alongside the
-route, so the arrangement you see in the file is exactly the arrangement that
-runs — no hidden precedence to reason about.
+A router can carry a prefix, tags, middleware, dependencies, and permission
+requirements — and routers include other routers, so a versioned API composes
+naturally: `app.include_router(v1, prefix="/v1")`. Including a router takes a
+snapshot of its routes and folds all of that context into each one, so the
+arrangement you see in the file is exactly the arrangement that runs — no
+hidden precedence to reason about, and no request-time sub-application
+dispatch.
 
 **Reference:** [`wreath.router`](../reference/router.md),
 [`wreath.app`](../reference/app.md).

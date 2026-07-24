@@ -47,6 +47,12 @@ docs = [
   "mkdocstrings[python]>=0.30",
 ]
 benchmark = [
+  "alembic>=1.16",
+  # Bench-only competitor for bench_cedar: the official Rust Cedar engine via
+  # its Python bindings. Never a runtime dependency — Wreath's own engine is
+  # built in; this exists so the benchmark can verify agreement and compare
+  # per-call cost against the reference implementation.
+  "cedarpy>=4.1",
   # Sanic's HTTP/3 backend. Sanic serves h1 and h3 and never implemented h2, so
   # without this the protocol comparison has no h3 competitor at all -- and
   # Sanic degrades to HTTP/1.1 silently rather than refusing to start.

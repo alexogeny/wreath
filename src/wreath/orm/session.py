@@ -35,7 +35,7 @@ from .errors import (
     SessionClosedError,
     SessionError,
 )
-from .model import DELETED, DETACHED, PERSISTENT, TRANSIENT, Model
+from .model import DELETED, DETACHED, PERSISTENT, TRANSIENT, Model, validate_identifier
 from .query import Select
 from .relations import LoadOption, Relationship, RelationshipExpr
 from .schema import ColumnSpec, ModelSpec, RelationshipSpec
@@ -181,6 +181,39 @@ def _count_probes() -> Iterator[list[int]]:
         _probes = previous
 
 
+@dataclass(frozen=True, slots=True)
+class TenantContext:
+    """A validated, request-scoped tenant binding for an isolated registry.
+
+    ``schema`` is the tenant's physical PostgreSQL schema; ``role`` is an
+    optional database role selected transaction-locally when the deployment
+    relies on PostgreSQL to enforce hostile-tenant isolation. Both are
+    validated as unquoted identifiers at construction, so the transaction-local
+    ``SET LOCAL`` statements the session issues can never carry untrusted text.
+
+    A context must be resolved from an application-owned tenant directory, never
+    from a request host, path, header, or token. It is transaction-local by
+    construction: the session binds it after ``BEGIN`` and PostgreSQL discards
+    it at transaction end, so a pooled connection never leaks one tenant's
+    binding into the next lease.
+    """
+
+    schema: str
+    role: str | None = None
+
+    def __post_init__(self) -> None:
+        validate_identifier(self.schema, "tenant schema")
+        if self.role is not None:
+            validate_identifier(self.role, "tenant role")
+
+    def _bind_statements(self) -> tuple[str, ...]:
+        """The transaction-local statements that bind this context."""
+        statements = [f"SET LOCAL search_path = {quote(self.schema)}"]
+        if self.role is not None:
+            statements.append(f"SET LOCAL ROLE {quote(self.role)}")
+        return tuple(statements)
+
+
 class Session:
     """One unit of work over one leased connection."""
 
@@ -197,15 +230,29 @@ class Session:
         "_new_stale",
         "_ordinal",
         "_registry",
+        "_tenant",
         "_workload",
     )
 
-    def __init__(self, registry: Any, workload: Workload) -> None:
-        if getattr(getattr(registry, "schema_mode", None), "kind", None) == "isolated":
+    def __init__(
+        self,
+        registry: Any,
+        workload: Workload,
+        *,
+        tenant: TenantContext | None = None,
+    ) -> None:
+        isolated = getattr(getattr(registry, "schema_mode", None), "kind", None) == "isolated"
+        if isolated and tenant is None:
             raise SessionError(
-                "isolated tenant sessions require the unreleased metal schema-context "
-                "binder; registry compilation is available, query execution is not"
+                "an isolated tenant registry needs a tenant context; pass "
+                "Session(registry, workload, tenant=TenantContext(schema=...))"
             )
+        if tenant is not None and not isolated:
+            raise SessionError(
+                "tenant context is only meaningful for an isolated registry; this "
+                "registry resolves every model to a qualified schema"
+            )
+        self._tenant = tenant
         self._registry = registry
         self._workload = workload
         self._connection: Any = None
@@ -285,6 +332,22 @@ class Session:
         if self._closed:
             raise SessionClosedError("this ORM session is closed")
 
+    def _check_tenant_bound(self) -> None:
+        """Tenant SQL runs only under a bound context transaction.
+
+        A tenant registry compiles its tenant-template models to unqualified
+        SQL that resolves through ``search_path``. That binding is transaction
+        local, so a statement outside a transaction would run with whatever
+        namespace the pooled connection last held — a cross-tenant hazard. A
+        tenant session therefore requires an explicit ``async with
+        session.begin()`` around its work, exactly as ``for_update`` does.
+        """
+        if self._tenant is not None and self._depth == 0:
+            raise SessionError(
+                "a tenant session must run inside an explicit transaction so its "
+                "search_path is bound; wrap the work in 'async with session.begin():'"
+            )
+
     # -- reads --------------------------------------------------------------
 
     async def get(self, model: type, primary_key: Any, *, load: Iterable[Any] = ()) -> Any:
@@ -303,6 +366,7 @@ class Session:
     async def fetch(self, query: Select) -> list[Any]:
         """Run ``query`` and hydrate every row."""
         self._check_usable()
+        self._check_tenant_bound()
         compiled = compile_select(self._registry, query)
         self._check_locking(query)
         connection = await self._acquire()
@@ -404,6 +468,7 @@ class Session:
     async def load(self, target: Any, relationship: Any) -> None:
         """Load ``relationship`` on one object or a sequence, in one batch."""
         self._check_usable()
+        self._check_tenant_bound()
         if isinstance(relationship, RelationshipExpr):
             declared = relationship.relationship
         elif isinstance(relationship, Relationship):
@@ -783,6 +848,13 @@ class Session:
         depth = self._depth
         savepoint = f"wreath_sp_{depth}"
         await connection.execute("BEGIN" if depth == 0 else f"SAVEPOINT {savepoint}")
+        if depth == 0 and self._tenant is not None:
+            # Bind the tenant namespace (and role) transaction-locally, before
+            # any tenant-template SQL runs. SET LOCAL is scoped to this
+            # transaction, so PostgreSQL discards it at COMMIT/ROLLBACK and the
+            # pooled connection carries no binding into its next lease.
+            for statement in self._tenant._bind_statements():
+                await connection.execute(statement)
         self._depth = depth + 1
         try:
             yield self
@@ -827,6 +899,68 @@ class Session:
                 "for_update() needs an explicit transaction; wrap the query in "
                 "async with session.begin()"
             )
+
+    async def lock(
+        self,
+        key: str,
+        *,
+        scope: str = "xact",
+        mode: str = "exclusive",
+        namespace: str | None = None,
+    ) -> None:
+        """Take a transaction-scoped PostgreSQL advisory lock on this session.
+
+        ``scope="xact"`` (the default and recommended form) takes a lock that
+        PostgreSQL releases automatically at ``COMMIT``/``ROLLBACK``; it must run
+        inside ``async with session.begin():`` and rides the connection the
+        transaction already pins, so there is no explicit unlock and no
+        connection-affinity bookkeeping.
+
+        Advisory locks ignore ``search_path``, so for an isolated-tenant session
+        the tenant schema is folded into the lock namespace automatically -- two
+        tenants never collide on the same *key*. Pass *namespace* to override
+        (for example, to take a deliberately fleet-global lock).
+
+        Session-*scoped* locks (held beyond the transaction) are intentionally not
+        offered here: releasing them correctly is bound to returning the pooled
+        connection, which ``database.lock(...)`` / ``database.try_lock(...)`` own.
+        """
+        self._check_usable()
+        if mode not in ("exclusive", "shared"):
+            raise SessionError(
+                f"advisory lock mode must be 'exclusive' or 'shared', not {mode!r}"
+            )
+        if scope == "session":
+            raise SessionError(
+                "session-scoped advisory locks are not available on Session; use "
+                "database.lock(...) / database.try_lock(...), which pin and release "
+                "a dedicated connection. Session.lock supports scope='xact' only."
+            )
+        if scope != "xact":
+            raise SessionError(f"advisory lock scope must be 'xact', not {scope!r}")
+        if self._depth == 0:
+            raise SessionError(
+                "session.lock(scope='xact') needs an open transaction so the lock "
+                "is released at COMMIT/ROLLBACK; wrap the work in "
+                "'async with session.begin():'"
+            )
+        if namespace is None:
+            namespace = (
+                self._tenant.schema
+                if self._tenant is not None
+                else self._registry.database.name
+            )
+        function = (
+            "pg_advisory_xact_lock"
+            if mode == "exclusive"
+            else "pg_advisory_xact_lock_shared"
+        )
+        connection = await self._acquire()
+        await connection.fetchval(
+            f"SELECT {function}(hashtext($1::text), hashtext($2::text))",
+            namespace,
+            key,
+        )
 
     def __repr__(self) -> str:
         state = "closed" if self._closed else "open"
@@ -953,4 +1087,4 @@ def compile_session_binding(
     return name, registry
 
 
-__all__ = ["FromORM", "RawQuery", "Session", "compile_session_binding"]
+__all__ = ["FromORM", "RawQuery", "Session", "TenantContext", "compile_session_binding"]

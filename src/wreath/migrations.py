@@ -65,21 +65,29 @@ WITH migration_objects AS (
             ), '')
         )::text AS object_name,
         3::int4,
-        concat_ws(
-            ':', con.contype::text,
-            COALESCE((
-                SELECT string_agg(a.attname, ',' ORDER BY key.ord)
-                FROM unnest(con.conkey) WITH ORDINALITY AS key(attnum, ord)
-                JOIN pg_catalog.pg_attribute a
-                  ON a.attrelid = con.conrelid AND a.attnum = key.attnum
-            ), ''),
-            COALESCE(fn.nspname, ''), COALESCE(fc.relname, ''),
-            COALESCE((
-                SELECT string_agg(a.attname, ',' ORDER BY key.ord)
-                FROM unnest(con.confkey) WITH ORDINALITY AS key(attnum, ord)
-                JOIN pg_catalog.pg_attribute a
-                  ON a.attrelid = con.confrelid AND a.attnum = key.attnum
-            ), '')
+        concat(
+            concat_ws(
+                ':', con.contype::text,
+                COALESCE((
+                    SELECT string_agg(a.attname, ',' ORDER BY key.ord)
+                    FROM unnest(con.conkey) WITH ORDINALITY AS key(attnum, ord)
+                    JOIN pg_catalog.pg_attribute a
+                      ON a.attrelid = con.conrelid AND a.attnum = key.attnum
+                ), ''),
+                COALESCE(fn.nspname, ''), COALESCE(fc.relname, ''),
+                COALESCE((
+                    SELECT string_agg(a.attname, ',' ORDER BY key.ord)
+                    FROM unnest(con.confkey) WITH ORDINALITY AS key(attnum, ord)
+                    JOIN pg_catalog.pg_attribute a
+                      ON a.attrelid = con.confrelid AND a.attnum = key.attnum
+                ), '')
+            ),
+            CASE WHEN con.contype = 'f'
+                THEN concat(
+                    ':', con.confdeltype::text, ':', con.confupdtype::text,
+                    ':', con.condeferrable::int::text)
+                ELSE ''
+            END
         )::text AS signature
     FROM pg_catalog.pg_constraint con
     JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
@@ -96,12 +104,15 @@ WITH migration_objects AS (
         c.relname::text,
         concat(
             CASE WHEN i.indisunique THEN 'ui:' ELSE 'i:' END,
-            columns.column_names
+            columns.column_names,
+            -- btree stays implicit so its object name is unchanged; a non-btree
+            -- access method is appended so it round-trips against the ORM image.
+            CASE WHEN am.amname = 'btree' THEN '' ELSE ':' || am.amname END
         )::text,
         4::int4,
         concat(
             'index:', CASE WHEN i.indisunique THEN 'ui:' ELSE 'i:' END,
-            columns.column_names, ':btree'
+            columns.column_names, ':', am.amname
         )::text
     FROM pg_catalog.pg_index i
     JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
@@ -115,7 +126,7 @@ WITH migration_objects AS (
           ON a.attrelid = i.indrelid AND a.attnum = key.attnum
     ) columns
     WHERE n.nspname = $1
-      AND am.amname = 'btree'
+      AND am.amname IN ('btree', 'gin')
       AND i.indisvalid
       AND i.indisready
       AND i.indpred IS NULL
@@ -129,6 +140,115 @@ SELECT schema_name, table_name, object_name, object_kind, signature
 FROM migration_objects
 ORDER BY object_kind, schema_name, table_name, object_name
 """
+
+# History status codes shared with the native fleet resolver
+# (wreath/_native/postgres/migration_resolver.c). A tenant-directory row
+# carries one of these to say how much the control plane trusts its recorded
+# migration state before the metal resolver classifies it.
+HISTORY_UNKNOWN = 0
+HISTORY_VERIFIED = 1
+HISTORY_AMBIGUOUS = 2
+HISTORY_BLOCKED = 3
+
+# One packed tenant-directory row, matching WREATH_MIGRATION_ROW_SIZE (32B) and
+# the field offsets the native resolver reads: migration@8, checksum@16,
+# generation@24, status@28. The leading id is carried for the caller's benefit
+# and is not read by the resolver.
+_FLEET_ROW = struct.Struct("<QQQIB3x")
+assert _FLEET_ROW.size == 32
+
+
+@dataclass(frozen=True, slots=True)
+class TenantState:
+    """One tenant's recorded migration state, as the directory knows it.
+
+    ``status`` is one of the ``HISTORY_*`` codes. ``VERIFIED`` means the
+    checksummed history was proven and can be trusted as the fast readiness
+    authority; ``UNKNOWN`` forces catalog verification; ``AMBIGUOUS`` and
+    ``BLOCKED`` are terminal operational states the resolver never treats as
+    current. Applications build these from their own tenant directory; the
+    runner never invents tenant identity.
+    """
+
+    tenant_id: int
+    migration: int
+    checksum: int
+    generation: int
+    status: int = HISTORY_UNKNOWN
+
+    def __post_init__(self) -> None:
+        for name in ("tenant_id", "migration", "checksum", "generation"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or value < 0:
+                raise ValueError(f"TenantState.{name} must be a non-negative integer")
+        if self.status not in (
+            HISTORY_UNKNOWN,
+            HISTORY_VERIFIED,
+            HISTORY_AMBIGUOUS,
+            HISTORY_BLOCKED,
+        ):
+            raise ValueError(f"TenantState.status {self.status!r} is not a HISTORY_* code")
+        if self.tenant_id > 0xFFFFFFFFFFFFFFFF or self.migration > 0xFFFFFFFFFFFFFFFF:
+            raise ValueError("tenant_id and migration must fit in 64 bits")
+        if self.checksum > 0xFFFFFFFFFFFFFFFF:
+            raise ValueError("checksum must fit in 64 bits")
+        if self.generation > 0xFFFFFFFF:
+            raise ValueError("generation must fit in 32 bits")
+
+
+def pack_tenant_directory(tenants: Any) -> bytes:
+    """Pack tenant-directory rows into the resolver's contiguous snapshot.
+
+    The layout is the one the native metal resolver consumes; keeping the pack
+    here (rather than in each caller) means the wire format has exactly one
+    author.
+    """
+    buffer = bytearray()
+    for state in tenants:
+        buffer += _FLEET_ROW.pack(
+            state.tenant_id,
+            state.migration,
+            state.checksum,
+            state.generation,
+            state.status,
+        )
+    return bytes(buffer)
+
+
+def resolve_fleet(
+    tenants: Any,
+    *,
+    target_migration: int,
+    target_checksum: int,
+    directory_generation: int,
+) -> FleetResolution:
+    """Classify a whole tenant fleet's readiness in one metal invocation.
+
+    This is the managed fleet runner: it packs the caller's tenant directory
+    into the native snapshot and resolves it with a single Wreath-metal call,
+    returning bounded per-bucket counts rather than one Python object per
+    tenant. A tenant is ``current`` only when its trusted, verified history is
+    at the target migration and checksum for the current directory generation;
+    unknown, stale, or wrong-generation tenants fall to ``verify`` (catalog
+    audit), and ``ambiguous``/``blocked`` stay terminal.
+
+    The runner reads no live database and acquires no DDL authority. Turning a
+    ``verify`` count into per-tenant catalog audits is a separate, explicitly
+    privileged step; classification is deliberately side-effect free.
+    """
+    if not isinstance(target_migration, int) or target_migration < 0:
+        raise ValueError("target_migration must be a non-negative integer")
+    if not isinstance(target_checksum, int) or target_checksum < 0:
+        raise ValueError("target_checksum must be a non-negative integer")
+    if not isinstance(directory_generation, int) or directory_generation < 0:
+        raise ValueError("directory_generation must be a non-negative integer")
+    snapshot = pack_tenant_directory(tenants)
+    return _resolve_managed_snapshot(
+        snapshot,
+        target_migration=target_migration,
+        target_checksum=target_checksum,
+        directory_generation=directory_generation,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +380,54 @@ class MigrationApplyResult:
 
 
 @dataclass(frozen=True, slots=True)
+class MigrationRevertResult:
+    """Verified result of one locked, transactional single-schema downgrade."""
+
+    migration_id: bytes
+    checksum: bytes
+    source_fingerprint: bytes
+    target_fingerprint: bytes
+    destructive_approved: bool
+    forced: bool
+
+
+_HAZARD_KIND_NAMES = {1: "table", 2: "column", 3: "constraint", 4: "index"}
+
+
+@dataclass(frozen=True, slots=True)
+class DowngradeHazard:
+    """One ORM-mapped object a downgrade would strand or retype under the code."""
+
+    schema: str
+    table: str
+    name: str
+    kind: str
+    reason: str
+
+    def describe(self) -> str:
+        target = ".".join(part for part in (self.table, self.name) if part)
+        verb = "would drop" if self.reason == "removed" else "would change the type of"
+        return f"{verb} {self.kind} {self.schema}.{target}, still mapped by the ORM"
+
+
+class DowngradeWouldStrandCode(RuntimeError):
+    """A downgrade was refused because live ORM code still references what it removes."""
+
+    def __init__(self, schema: str, hazards: tuple[DowngradeHazard, ...]) -> None:
+        self.schema = schema
+        self.hazards = hazards
+        listing = "\n".join(f"  - {hazard.describe()}" for hazard in hazards)
+        super().__init__(
+            f"refusing to downgrade schema {schema!r}: the running ORM still maps "
+            f"{len(hazards)} object(s) this downgrade removes or retypes, so the "
+            "deployed code would dereference columns that no longer exist:\n"
+            f"{listing}\n"
+            "Roll the models back with the code, or pass force=True "
+            "(CLI: --force) to downgrade anyway (e.g. to re-migrate a local stack)."
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class MigrationGeneration:
     """Review metadata retained by the native named operation planner."""
 
@@ -368,14 +536,19 @@ def _registry_descriptor(registry: Any) -> bytes:
                     )
                 )
             if column.indexed:
-                index_name = f"i:{column.database_name}"
+                # btree keeps the bare "i:<col>" name so its object id (and the
+                # derived index name) is unchanged; a non-btree method is folded
+                # into the name so the renderer can emit "using <method>".
+                method = column.index_method or "btree"
+                base = f"i:{column.database_name}"
+                index_name = base if method == "btree" else f"{base}:{method}"
                 records.append(
                     _descriptor_record(
                         spec.schema,
                         spec.table,
                         index_name,
                         4,
-                        f"index:{index_name}:btree",
+                        f"index:{base}:{method}",
                     )
                 )
             reference = column.reference
@@ -386,11 +559,35 @@ def _registry_descriptor(registry: Any) -> bytes:
                     f"f:{column.database_name}:{target.schema}:{target.table}:"
                     f"{target_column.database_name}"
                 )
+                # The name is the FK's identity (columns + target); the signature
+                # adds the referential actions so a changed ON DELETE/UPDATE or
+                # deferrability shows up as drift. Codes match pg_constraint.
+                foreign_signature = (
+                    f"{foreign_name}:{reference.on_delete}:{reference.on_update}:"
+                    f"{1 if reference.deferrable else 0}"
+                )
                 records.append(
                     _descriptor_record(
-                        spec.schema, spec.table, foreign_name, 3, foreign_name
+                        spec.schema, spec.table, foreign_name, 3, foreign_signature
                     )
                 )
+        for constraint in spec.table_uniques:
+            unique_name = f"u:{','.join(constraint.columns)}:::"
+            records.append(
+                _descriptor_record(spec.schema, spec.table, unique_name, 3, unique_name)
+            )
+        for table_index in spec.table_indexes:
+            prefix = "ui" if table_index.unique else "i"
+            index_name = f"{prefix}:{','.join(table_index.columns)}"
+            records.append(
+                _descriptor_record(
+                    spec.schema,
+                    spec.table,
+                    index_name,
+                    4,
+                    f"index:{index_name}:btree",
+                )
+            )
     return b"WMD1" + struct.pack("<II", 1, len(records)) + b"".join(records)
 
 
@@ -703,6 +900,136 @@ async def apply_single_artifact(
     )
 
 
+def _downgrade_hazards(
+    registry: Any, reverse_plan: bytes
+) -> tuple[DowngradeHazard, ...]:
+    """Scan the reverse plan against live ORM intent for stranded references."""
+    module = _metal()
+    desired_image = _compile_registry_image(registry)
+    raw = module._migration_downgrade_hazards(reverse_plan, desired_image)
+    return tuple(
+        DowngradeHazard(
+            schema=schema,
+            table=table,
+            name=name,
+            kind=_HAZARD_KIND_NAMES.get(kind, str(kind)),
+            reason=reason,
+        )
+        for schema, table, name, kind, reason in raw
+    )
+
+
+async def revert_single_artifact(
+    registry: Any,
+    connection: Any,
+    artifact_data: bytes,
+    *,
+    allow_destructive: bool = False,
+    force: bool = False,
+) -> MigrationRevertResult:
+    """Undo one authoritative artifact: the exact inverse of ``apply_single_artifact``.
+
+    The named plan is inverted in metal (every add becomes a drop, every
+    signature swaps), so the downgrade tape is derived from the same authority
+    the upgrade was — never guessed. The artifact must be the current history
+    tip; the transaction verifies the live catalog matches the artifact target,
+    runs the reverse DDL block, requires the catalog to return to the artifact
+    source, deletes the tip history row, and commits — or rolls everything back.
+
+    Unless ``force`` is set, the downgrade is refused when the running ORM still
+    maps a column or table the reverse would drop (or a type it would change):
+    downgrading production under code that still references those objects strands
+    the deployed code. ``force`` exists for the legitimate case of rewinding a
+    local stack to re-migrate.
+    """
+    artifact = _load_native_artifact(artifact_data)
+    schemas = {spec.schema for spec in registry.specs}
+    if len(schemas) != 1:
+        raise ValueError(
+            "revert_single_artifact requires exactly one resolved physical schema"
+        )
+    schema = next(iter(schemas))
+    module = _metal()
+    reverse_plan = module._migration_reverse_plan(artifact.named_plan)
+    reverse_sql = module._migration_render_sql(reverse_plan)
+    if not force:
+        hazards = _downgrade_hazards(registry, reverse_plan)
+        if hazards:
+            raise DowngradeWouldStrandCode(schema, hazards)
+    ddl_block = module._migration_build_ddl_block(reverse_sql, allow_destructive)
+    history = _qualified_history_table()
+    await _bootstrap_migration_history(connection)
+    await connection.execute("BEGIN")
+    committed = False
+    try:
+        await connection.fetchval(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+            f"wreath:migrations:{schema}",
+        )
+        previous = await connection.fetchrow(
+            f"""SELECT checksum, target_fingerprint
+                FROM {history}
+                WHERE target_schema = $1
+                ORDER BY sequence DESC
+                LIMIT 1""",
+            schema,
+        )
+        if previous is None:
+            raise RuntimeError(
+                "cannot downgrade migration: database has no Wreath history for schema "
+                f"{schema!r}"
+            )
+        if bytes(previous[0]) != artifact.checksum:
+            raise RuntimeError(
+                "cannot downgrade migration: artifact checksum "
+                f"{artifact.checksum.hex()} is not the current history tip "
+                f"{bytes(previous[0]).hex()} for schema {schema!r}; only the most "
+                "recently applied migration can be reverted"
+            )
+        actual = await _decode_catalog_snapshot(
+            connection, _SINGLE_CATALOG_SQL, (schema,)
+        )
+        actual_fingerprint = _fingerprint_image(actual.image)
+        if actual_fingerprint != artifact.target_fingerprint:
+            raise RuntimeError(
+                "cannot downgrade migration: live catalog fingerprint "
+                f"{actual_fingerprint.hex()} does not match artifact target "
+                f"{artifact.target_fingerprint.hex()} for schema {schema!r}"
+            )
+        await connection.execute(ddl_block)
+        resulting = await _decode_catalog_snapshot(
+            connection, _SINGLE_CATALOG_SQL, (schema,)
+        )
+        resulting_fingerprint = _fingerprint_image(resulting.image)
+        if resulting_fingerprint != artifact.source_fingerprint:
+            raise RuntimeError(
+                "downgrade DDL ran but source verification failed: live catalog "
+                f"fingerprint {resulting_fingerprint.hex()} does not match artifact "
+                f"source {artifact.source_fingerprint.hex()} for schema {schema!r}; "
+                "the transaction will be rolled back"
+            )
+        await connection.execute(
+            f"""DELETE FROM {history}
+                WHERE target_schema = $1 AND migration_id = $2 AND checksum = $3""",
+            schema,
+            artifact.migration_id,
+            artifact.checksum,
+        )
+        await connection.execute("COMMIT")
+        committed = True
+    finally:
+        if not committed:
+            await connection.execute("ROLLBACK")
+    return MigrationRevertResult(
+        migration_id=artifact.migration_id,
+        checksum=artifact.checksum,
+        source_fingerprint=artifact.source_fingerprint,
+        target_fingerprint=artifact.target_fingerprint,
+        destructive_approved=allow_destructive,
+        forced=force,
+    )
+
+
 def _build_native_artifact(
     *,
     migration_id: bytes,
@@ -780,11 +1107,18 @@ def _load_native_artifact(data: bytes) -> NativeMigrationArtifact:
 
 
 __all__ = [
+    "HISTORY_AMBIGUOUS",
+    "HISTORY_BLOCKED",
+    "HISTORY_UNKNOWN",
+    "HISTORY_VERIFIED",
+    "DowngradeHazard",
+    "DowngradeWouldStrandCode",
     "FleetResolution",
     "MigrationConfig",
     "MigrationDetection",
     "MigrationGeneration",
     "MigrationApplyResult",
+    "MigrationRevertResult",
     "NativeCatalogSnapshot",
     "NativeMigrationArtifact",
     "NativeMigrationChain",
@@ -792,8 +1126,12 @@ __all__ = [
     "NativeMigrationPlan",
     "NativeMigrationSql",
     "ResolutionPolicy",
+    "TenantState",
     "apply_single_artifact",
     "connect_migration",
     "detect_single",
     "generate_single_plan",
+    "pack_tenant_directory",
+    "resolve_fleet",
+    "revert_single_artifact",
 ]

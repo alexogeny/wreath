@@ -14,14 +14,72 @@ import struct
 import sys
 import uuid
 from collections import OrderedDict, deque
-from collections.abc import Awaitable, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, overload
+from typing import Any, Literal, NamedTuple, overload
 from urllib.parse import parse_qs, unquote, urlsplit
 
 _IMPLEMENTATION = "pure"
 _implementation = _IMPLEMENTATION
 _MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+
+# LISTEN/NOTIFY. Async NotificationResponse ('A') frames are captured into a
+# bounded per-connection ring rather than discarded, so a consumer can drain
+# them via ``Connection.notifications()``. The ring is intentionally lossy:
+# correctness never depends on a notification arriving (the durable-queue path
+# treats NOTIFY as a latency doorbell and still polls the table), so on overflow
+# the oldest notification is dropped and a counter is bumped instead of letting
+# an idle-but-noisy channel grow memory without bound.
+_NOTIFY_RING_CAPACITY = 1024
+# NAMEDATALEN - 1; PostgreSQL truncates longer identifiers, so reject them up
+# front rather than silently listen on a different channel than requested.
+_MAX_CHANNEL_NAME = 63
+
+
+class Notification(NamedTuple):
+    """A single asynchronous ``NOTIFY`` delivered to a listening connection."""
+
+    pid: int
+    channel: str
+    payload: str
+
+
+def _validate_channel(channel: str) -> str:
+    """Validate a LISTEN/UNLISTEN channel name.
+
+    The name is emitted as a double-quoted identifier, so restricting it to
+    identifier characters (and bounding its length) keeps the emitted SQL
+    injection-free and preserves the exact case the caller asked for.
+    """
+    if not isinstance(channel, str) or not channel:
+        raise ValueError("channel name must be a non-empty string")
+    if len(channel.encode("utf-8")) > _MAX_CHANNEL_NAME:
+        raise ValueError(f"channel name exceeds {_MAX_CHANNEL_NAME} bytes")
+    for character in channel:
+        if not (character.isalnum() or character in "_$"):
+            raise ValueError(f"invalid channel name character: {character!r}")
+    return channel
+
+
+def _parse_notification(payload: bytes) -> Notification | None:
+    """Decode a NotificationResponse body: int32 pid, then two C strings.
+
+    Returns ``None`` for a malformed frame (too short, or missing the channel
+    terminator) so a corrupt async message is dropped rather than raised into
+    the reader loop, where it would tear down an otherwise healthy connection.
+    """
+    if len(payload) < 4:
+        return None
+    pid = int.from_bytes(payload[:4], "big")
+    channel, separator, tail = payload[4:].partition(b"\x00")
+    if not separator:
+        return None
+    body = tail.partition(b"\x00")[0]
+    return Notification(
+        pid,
+        channel.decode("utf-8", "replace"),
+        body.decode("utf-8", "replace"),
+    )
 
 _BOOL = 16
 _BYTEA = 17
@@ -753,6 +811,8 @@ class Connection:
     max_emitted_operations = 64
     max_outbound_batch = 256 * 1024
     _eager_flush_idle = True
+    #: Capacity of the per-connection async-notification ring (see module docs).
+    notify_ring_capacity = _NOTIFY_RING_CAPACITY
 
     __slots__ = (
         "_backend_key",
@@ -766,7 +826,11 @@ class Connection:
         "_flush_handle",
         "_idle_event",
         "_info",
+        "_listen_channels",
         "_loop",
+        "_notifications",
+        "_notifications_dropped",
+        "_notify_event",
         "_pending_closes",
         "_plan_costs",
         "_plans",
@@ -834,15 +898,31 @@ class Connection:
         self._write_blocked = False
         self._write_count = 0
         self._closed = False
+        # LISTEN/NOTIFY state. ``_listen_channels`` keeps the reader task alive
+        # while non-empty (so async notifications are drained even when no
+        # operation is in flight); notifications land in the bounded ring and
+        # wake any ``notifications()`` iterator via the event.
+        self._listen_channels: set[str] = set()
+        self._notifications: deque[Notification] = deque()
+        self._notifications_dropped = 0
+        self._notify_event = asyncio.Event()
 
     @property
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def dropped_notifications(self) -> int:
+        """Async notifications discarded because the ring overflowed."""
+        return self._notifications_dropped
+
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        # Wake any notifications() iterator so it observes the close and exits
+        # rather than blocking forever on a connection that will never notify.
+        self._notify_event.set()
         if self._flush_handle is not None:
             self._flush_handle.cancel()
             self._flush_handle = None
@@ -870,6 +950,67 @@ class Connection:
         self._plans.clear()
         self._plan_costs.clear()
         self._plans_bytes = 0
+
+    async def listen(self, channel: str) -> None:
+        """Subscribe this connection to asynchronous ``NOTIFY`` on ``channel``.
+
+        Issues ``LISTEN`` and registers interest so the reader task stays alive
+        while idle and routes incoming notifications into the ring. Notifications
+        are delivered through ``notifications()``. A dedicated connection should
+        be held for listening: leasing it back to a pool between notifications
+        would stop draining them (that lifecycle is the caller's concern).
+        """
+        name = _validate_channel(channel)
+        # Register before issuing the SQL: LISTEN flushes an operation which
+        # starts the reader, and a non-empty channel set keeps that reader from
+        # exiting when the operation drains.
+        self._listen_channels.add(name)
+        try:
+            await self.execute(f'LISTEN "{name}"')
+        except BaseException:
+            self._listen_channels.discard(name)
+            raise
+
+    async def unlisten(self, channel: str) -> None:
+        """Stop listening on ``channel`` (issues ``UNLISTEN``).
+
+        The channel is deregistered immediately; if it was the last one the
+        idle reader may stay parked on the socket until the next message or
+        ``close()`` before it observes the empty channel set and exits.
+        """
+        name = _validate_channel(channel)
+        self._listen_channels.discard(name)
+        await self.execute(f'UNLISTEN "{name}"')
+
+    async def notifications(self) -> AsyncIterator[Notification]:
+        """Yield captured ``NOTIFY`` messages, awaiting new ones when drained.
+
+        The iterator ends when the connection closes. It never blocks while the
+        ring is non-empty, so a burst is delivered without interleaved awaits.
+        """
+        while True:
+            while self._notifications:
+                yield self._notifications.popleft()
+            if self._closed:
+                return
+            # Clear then re-check to close the race with an enqueue that set the
+            # event between the drain above and here.
+            self._notify_event.clear()
+            if self._notifications:
+                continue
+            await self._notify_event.wait()
+
+    def _enqueue_notification(self, payload: bytes) -> None:
+        notification = _parse_notification(payload)
+        if notification is None:
+            return
+        ring = self._notifications
+        if len(ring) >= self.notify_ring_capacity:
+            ring.popleft()
+            self._notifications_dropped += 1
+        ring.append(notification)
+        if not self._notify_event.is_set():
+            self._notify_event.set()
 
     async def execute(self, sql: str, *args: object) -> str:
         return await self._submit("execute", sql, args)
@@ -1118,10 +1259,29 @@ class Connection:
 
     async def _read_pipeline(self) -> None:
         try:
-            while self._emitted and not self._closed:
-                operation = self._emitted[0]
-                self._current = operation
+            # Stay alive while there are operations in flight OR active LISTEN
+            # channels, so asynchronous notifications are drained even when the
+            # connection is otherwise idle. Without a listen channel the loop
+            # still exits as soon as the pipeline drains.
+            while (self._emitted or self._listen_channels) and not self._closed:
+                # Publish the head-of-line operation as current BEFORE blocking
+                # on the socket: a concurrent cancel must observe an active
+                # operation while its query is still running server-side, so it
+                # sends a CancelRequest instead of tearing the connection down.
+                # (The LISTEN/NOTIFY rewrite briefly moved this below the await,
+                # which left _current None mid-query and broke active cancel.)
+                self._current = self._emitted[0] if self._emitted else None
                 kind, payload = await self._receive_message()
+                if not self._emitted:
+                    # Idle but listening: only asynchronous messages
+                    # (NotificationResponse, NoticeResponse, ParameterStatus)
+                    # can legitimately arrive with no operation in flight.
+                    self._consume_async_message(kind, payload)
+                    continue
+                operation = self._emitted[0]
+                # Re-publish in case the queue filled while we were parked on the
+                # socket with no operation in flight (idle-listening -> emitted).
+                self._current = operation
                 if kind == b"Z":
                     if len(payload) != 1:
                         raise ProtocolError("invalid ReadyForQuery")
@@ -1146,6 +1306,20 @@ class Connection:
         finally:
             self._reader_task = None
             self._current = None
+
+    def _consume_async_message(self, kind: bytes, payload: bytes) -> None:
+        """Route a message received while idle but listening.
+
+        NotificationResponse is captured into the ring; NoticeResponse and
+        ParameterStatus are ignored exactly as they are mid-operation. Any other
+        message with no operation in flight means the wire is desynchronised.
+        """
+        if kind == b"A":
+            self._enqueue_notification(payload)
+        elif kind in {b"N", b"S"}:
+            return
+        else:
+            raise ProtocolError(f"unexpected asynchronous message {kind!r}")
 
     def _consume_message(self, operation: Operation, kind: bytes, payload: bytes) -> None:
         if kind == b"t":
@@ -1201,14 +1375,20 @@ class Connection:
             operation.command = payload.rstrip(b"\x00").decode("utf-8", "replace")
         elif kind == b"E":
             operation.error = _parse_error(payload)
+        # b"A" is NotificationResponse: an asynchronous NOTIFY that may be
+        # interleaved into any operation's message stream. Capture it into the
+        # per-connection ring instead of discarding it, so notifications sent
+        # while an operation happens to be in flight are not lost.
+        elif kind == b"A":
+            self._enqueue_notification(payload)
         # b"S" is ParameterStatus (b"s" is PortalSuspended -- different message).
         # The server may send it at any time, not just during startup: any
         # GUC_REPORT setting that changes mid-session reports itself, and
         # `SET default_transaction_read_only = on` -- which Database._open runs
         # for every read pool -- is one of them from PostgreSQL 14 on. Ignored
-        # here for the same reason as NoticeResponse and NotificationResponse:
-        # it is asynchronous and carries nothing this operation asked for.
-        elif kind in {b"1", b"2", b"3", b"n", b"s", b"S", b"N", b"A"} or (
+        # here for the same reason as NoticeResponse: it is asynchronous and
+        # carries nothing this operation asked for.
+        elif kind in {b"1", b"2", b"3", b"n", b"s", b"S", b"N"} or (
             kind == b"D" and (operation.error is not None or operation.discarded)
         ):
             # b"3" is CloseComplete, acknowledging a prepared-statement Close

@@ -1,10 +1,11 @@
 # Compression
 
-`wreath.compression` holds the reusable pieces of response compression: the
-codecs (gzip, built on CPython's well-maintained zlib) and the content-encoding
-negotiation that decides whether and how to compress. Keeping these as a real,
-importable module — rather than burying them inside one middleware — means you
-can compress a payload anywhere you need to, not only on the response path.
+`wreath.compression` holds the reusable codec pieces of response compression —
+`GzipCompressor` and `gzip_compress`, built on CPython's well-maintained zlib.
+Keeping the codec as a real, importable module — rather than burying it inside
+one middleware — means you can compress a payload anywhere you need to, not
+only on the response path. The content-encoding negotiation that decides
+whether and how to compress belongs to `CompressionMiddleware` itself.
 
 For the ordinary case, though, you don't touch the codec directly. You add
 `CompressionMiddleware` from the [middleware](middleware.md) module, which reads

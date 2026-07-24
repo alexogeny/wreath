@@ -1,0 +1,22 @@
+# GOLDEN PLACEHOLDER — regenerate when wreath port Phase 1/2 lands.
+#
+# This is NOT real emitted output. It sketches the *expected shape* of the
+# translation of corpus/tumbleweed_api/models.py so the golden harness has a
+# target file in place. Replace with reviewed tool output when Phase 2 (ORM
+# models) ships.
+#
+# Expected translation notes (design 07 §2, from-fastapi/sqlmodel.md):
+#   - `class X(ormar.Model, AuditMixin)` + `ormar_config = base.copy(tablename="x")`
+#         -> `class X(Model, table="x")`  (mixin must be resolved; lossy)
+#   - `ormar.UUID(primary_key=True, default_factory=generate_guid)`
+#         -> `Mapped[UUID] = column(Uuid, primary_key=True, default=generate_guid)`
+#   - `ormar.String(max_length=n)` -> `Varchar` / `Text(check=Length(..., n))`
+#   - `ormar.Integer(minimum=0, server_default="0")`
+#         -> `column(Int64, check=Ge(0), server_default="0")`
+#   - `ormar.ForeignKey(Ranch, index=True)`
+#         -> `column(Uuid, references=Ranch.id)` + `relationship(Ranch, load="raise")`
+#            (FK column + relationship split; lossy — annotate load= and FK type)
+#   - `ormar.JSON(nullable=True)` -> `column(Jsonb, nullable=True)`
+#   - `ARRAY(item_type=String())` -> `column(Array(Text))`   (ties to design 04)
+#   - NULLABILITY INVERTS: wreath is NOT NULL by default — every inferred
+#     nullable column is emitted + flagged (data-integrity policy).

@@ -11,6 +11,7 @@ from wreath.orm import (
     Model,
     SchemaMode,
     Session,
+    TenantContext,
     column,
     relationship,
 )
@@ -67,11 +68,20 @@ def test_isolated_schema_compiles_shared_unqualified_tenant_sql() -> None:
     ).sql
 
 
-def test_isolated_session_execution_is_blocked_until_context_binder_lands() -> None:
+def test_isolated_session_requires_a_tenant_context() -> None:
     compiled = registry(SchemaMode.isolated(central="wreath_core", isolation="role"))
 
-    with pytest.raises(SessionError, match="schema-context binder"):
+    with pytest.raises(SessionError, match="needs a tenant context"):
         Session(compiled, "read")
+
+
+def test_isolated_session_binds_a_tenant_context() -> None:
+    compiled = registry(SchemaMode.isolated(central="wreath_core", isolation="role"))
+
+    session = Session(
+        compiled, "read", tenant=TenantContext(schema="tenant_9", role="tenant_9_role")
+    )
+    assert not session.closed
 
 
 def test_template_fingerprint_ignores_single_deployment_schema() -> None:

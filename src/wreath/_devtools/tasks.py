@@ -318,6 +318,18 @@ def bench(argv: list[str] | None = None) -> int:
         print("\n=== wreath-metal timer " + "=" * 35)
         _run([sys.executable, "-m", "benchmarks.bench_timing_wheel",
               "--output", "benchmark-results-timing-wheel/latest.json"])
+
+        print("\n=== migration resolution " + "=" * 32)
+        migrations = repo_root() / "benchmark-results-migrations" / "latest.json"
+        if _run([sys.executable, "-m", "benchmarks.bench_migration_resolution",
+                 "--output", str(migrations)]) == 0 and migrations.exists():
+            report_inputs.append(migrations)
+
+        print("\n=== cedar authorization " + "=" * 33)
+        cedar = repo_root() / "benchmark-results-cedar" / "latest.json"
+        if _run([sys.executable, "-m", "benchmarks.bench_cedar",
+                 "--output", str(cedar)]) == 0 and cedar.exists():
+            report_inputs.append(cedar)
         if not args.no_db:
             print("\n=== database battery (ORM, PostgreSQL webhooks, lifecycle) " + "=" * 8)
             report_inputs.extend(_db_battery())

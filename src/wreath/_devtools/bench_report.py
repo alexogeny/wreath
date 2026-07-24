@@ -55,6 +55,8 @@ _KIND_ROUTING_MEMORY = "routing-memory"
 _KIND_ROUTING_BACKENDS = "routing-backends"
 _KIND_POSTGRES = "postgres-workload"
 _KIND_ORM = "orm-competitors"
+_KIND_MIGRATIONS = "migration-resolution"
+_KIND_CEDAR = "cedar-authorization"
 
 
 def classify(document: dict[str, Any]) -> str:
@@ -66,6 +68,10 @@ def classify(document: dict[str, Any]) -> str:
         return _KIND_ROUTING_BACKENDS
     if tool == "benchmarks.postgres.bench_orm_competitors":
         return _KIND_ORM
+    if tool == "benchmarks.bench_migration_resolution":
+        return _KIND_MIGRATIONS
+    if tool == "benchmarks.bench_cedar":
+        return _KIND_CEDAR
     if isinstance(document.get("scenarios"), dict) and "results" not in document:
         return _KIND_POSTGRES
     if document.get("results"):
@@ -618,6 +624,169 @@ def _orm_section(documents: list[dict[str, Any]]) -> str:
     )
 
 
+def _migration_section(documents: list[dict[str, Any]]) -> str:
+    """Equivalent already-current plan resolution across migration tools."""
+    tools: dict[str, list[float]] = {}
+    fleet: list[tuple[int, float]] = []
+    fairness = ""
+    for document in documents:
+        fairness = str(document.get("fairness", fairness))
+        for name, values in document.get("results", {}).items():
+            if isinstance(values, dict) and "median_ns" in values:
+                tools.setdefault(name, []).append(float(values["median_ns"]))
+        values = document.get("fleet")
+        if isinstance(values, dict) and "median_ns_per_tenant" in values:
+            fleet.append((
+                int(values.get("tenants", 0)),
+                float(values["median_ns_per_tenant"]),
+            ))
+    if not tools:
+        return ""
+    medians = {name: statistics.median(values) for name, values in tools.items()}
+    ranked = list(medians.values())
+    body = []
+    for name, value in medians.items():
+        cls = _extreme_class(value, ranked, lower_better=True)
+        rate = 1_000_000_000 / value
+        body.append(
+            "<tr>"
+            f"<td>{escape(name)}</td>"
+            + _cell(f"{value:,.0f}", cls.get("best", False), cls.get("worst", False))
+            + _cell(f"{rate:,.0f}", cls.get("best", False), cls.get("worst", False))
+            + "</tr>"
+        )
+    fleet_note = ""
+    if fleet:
+        tenants, ns = max(fleet, key=lambda item: item[0])
+        fleet_note = (
+            f"<p><b>Wreath-metal packed fleet:</b> {tenants:,} already-current tenants at "
+            f"{ns:,.1f} ns/tenant ({1_000_000_000 / ns:,.0f} tenants/s). "
+            "This row is informative and unranked.</p>"
+        )
+    return (
+        '<section class="block"><h2>Migration resolution</h2>'
+        '<p class="sub">Already-current migration-plan resolution, median nanoseconds per '
+        "schema; lower is better. This measures in-memory control-plane resolution after "
+        "current state is known—not catalog I/O or DDL.</p>"
+        f'<p class="within-noise">{escape(fairness)}</p>'
+        '<div class="scroll"><table><thead><tr><th>tool</th><th>ns/schema</th>'
+        f"<th>resolutions/s</th></tr></thead><tbody>{''.join(body)}</tbody></table></div>"
+        f"{fleet_note}{_migration_generation_block(documents)}"
+        f"{_migration_artifact_block(documents)}</section>"
+    )
+
+
+def _migration_generation_block(documents: list[dict[str, Any]]) -> str:
+    """Plan generation for the shared drift; side by side, deliberately unranked."""
+    tools: dict[str, list[float]] = {}
+    operations: dict[str, int] = {}
+    fairness = ""
+    for document in documents:
+        section = document.get("generation")
+        if not isinstance(section, dict):
+            continue
+        fairness = str(section.get("fairness", fairness))
+        for name, values in section.get("results", {}).items():
+            if isinstance(values, dict) and "median_ns" in values:
+                tools.setdefault(name, []).append(float(values["median_ns"]))
+                operations[name] = int(values.get("operations", 0))
+    if not tools:
+        return ""
+    body = []
+    for name, values in tools.items():
+        median = statistics.median(values)
+        body.append(
+            "<tr>"
+            f"<td>{escape(name)}</td>"
+            f"<td>{operations.get(name, 0):,}</td>"
+            f"<td>{median:,.0f}</td>"
+            f"<td>{1_000_000_000 / median:,.0f}</td>"
+            "</tr>"
+        )
+    return (
+        "<h3>Plan generation (side by side, not ranked)</h3>"
+        f'<p class="within-noise">{escape(fairness)}</p>'
+        '<div class="scroll"><table><thead><tr><th>tool</th><th>ops</th>'
+        "<th>ns/plan</th><th>plans/s</th></tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table></div>"
+    )
+
+
+def _migration_artifact_block(documents: list[dict[str, Any]]) -> str:
+    """Checksummed artifact verification; Wreath-only and unranked."""
+    for document in documents:
+        section = document.get("artifact")
+        if not isinstance(section, dict) or "median_ns" not in section:
+            continue
+        median = float(section["median_ns"])
+        return (
+            f"<p><b>WMA1 artifact verification:</b> {int(section.get('bytes', 0)):,}-byte "
+            f"artifact verified from bytes in {median:,.0f} ns "
+            f"({1_000_000_000 / median:,.0f} verifications/s). "
+            f"{escape(str(section.get('fairness', '')))}</p>"
+        )
+    return ""
+
+
+def _cedar_section(documents: list[dict[str, Any]]) -> str:
+    """Cedar authorization latency: built-in engine, pure twin, and cedarpy."""
+    evaluate: dict[str, list[float]] = {}
+    stateless: dict[str, list[float]] = {}
+    fairness = ""
+    skipped: dict[str, str] = {}
+    for document in documents:
+        fairness = str(document.get("fairness", fairness))
+        skipped.update({str(k): str(v) for k, v in document.get("skipped", {}).items()})
+        for target, key in ((evaluate, "evaluate"), (stateless, "parse_and_evaluate")):
+            for name, values in document.get(key, {}).items():
+                if isinstance(values, dict) and "median_ns" in values:
+                    target.setdefault(name, []).append(float(values["median_ns"]))
+    if not evaluate and not stateless:
+        return ""
+
+    def table(title: str, tools: dict[str, list[float]], ranked: bool) -> str:
+        if not tools:
+            return ""
+        medians = {name: statistics.median(values) for name, values in tools.items()}
+        spread = list(medians.values())
+        body = []
+        for name, value in medians.items():
+            cls = _extreme_class(value, spread, lower_better=True) if ranked else {}
+            body.append(
+                "<tr>"
+                f"<td>{escape(name)}</td>"
+                + _cell(f"{value:,.0f}", cls.get("best", False), cls.get("worst", False))
+                + _cell(
+                    f"{1_000_000_000 / value:,.0f}",
+                    cls.get("best", False),
+                    cls.get("worst", False),
+                )
+                + "</tr>"
+            )
+        return (
+            f"<h3>{escape(title)}</h3>"
+            '<div class="scroll"><table><thead><tr><th>engine</th><th>ns/call</th>'
+            f"<th>calls/s</th></tr></thead><tbody>{''.join(body)}</tbody></table></div>"
+        )
+
+    skip_note = "".join(
+        f"<p><b>{escape(name)}:</b> skipped ({escape(reason)}).</p>"
+        for name, reason in skipped.items()
+    )
+    return (
+        '<section class="block"><h2>Cedar authorization</h2>'
+        '<p class="sub">Two authorizations (one allow, one deny) against a six-policy set '
+        "per call, median nanoseconds; lower is better. Decisions are verified to agree "
+        "across engines before timing.</p>"
+        f'<p class="within-noise">{escape(fairness)}</p>'
+        + table("Evaluate (policies compiled once; Wreath engine vs pure twin)",
+                evaluate, ranked=False)
+        + table("Parse and evaluate (full per-call cost, both arms)", stateless, ranked=True)
+        + skip_note
+        + "</section>"
+    )
+
+
 def _postgres_section(documents: list[dict[str, Any]]) -> str:
     """Driver latency per operation against the ecosystem drivers."""
     ops: dict[str, dict[str, list[float]]] = {}
@@ -845,6 +1014,8 @@ def render(document: dict[str, Any], extra: list[dict[str, Any]] | None = None) 
         _routing_backends_section(by_kind.get(_KIND_ROUTING_BACKENDS, [])),
         _routing_memory_section(by_kind.get(_KIND_ROUTING_MEMORY, [])),
         _orm_section(by_kind.get(_KIND_ORM, [])),
+        _migration_section(by_kind.get(_KIND_MIGRATIONS, [])),
+        _cedar_section(by_kind.get(_KIND_CEDAR, [])),
         _postgres_section(by_kind.get(_KIND_POSTGRES, [])),
     ))
 

@@ -37,6 +37,7 @@ from ._flight_markers import (
 from ._flight_markers import (
     phase_marker as _phase_marker,
 )
+from ._locks import AdvisoryLock, AdvisoryTryLock, SingletonRunner
 
 Workload = Literal["security_read", "read", "write"]
 _READ_ONLY = frozenset({"security_read", "read"})
@@ -511,6 +512,65 @@ class Database:
     async def release(self, workload: Workload, connection: Any) -> None:
         await self.pool(workload).release(connection)
 
+    # -- distributed advisory locks ----------------------------------------
+    # Cluster-global mutexes built on PostgreSQL advisory locks. See
+    # ``wreath._locks`` for the connection-affinity contract; xact-scoped locks
+    # live on ``wreath.orm.session.Session.lock``.
+
+    def lock(
+        self,
+        key: str,
+        *,
+        namespace: str | None = None,
+        mode: str = "exclusive",
+        workload: Workload = "write",
+    ) -> AdvisoryLock:
+        """A blocking, session-scoped advisory lock held across an ``async with``.
+
+        The lock pins one connection from *workload* (the primary by default) for
+        the block's duration. Prefer ``Session.lock(scope="xact")`` for
+        request-path exclusion; use this for long-lived fleet locks.
+        """
+        return AdvisoryLock(self, key, namespace=namespace, mode=mode, workload=workload)
+
+    def try_lock(
+        self,
+        key: str,
+        *,
+        timeout: float | None = None,
+        namespace: str | None = None,
+        mode: str = "exclusive",
+        workload: Workload = "write",
+    ) -> AdvisoryTryLock:
+        """A non-blocking advisory lock: ``async with db.try_lock(k) as held:``.
+
+        *held* is the handle when acquired or ``None`` otherwise. With *timeout*
+        set, acquisition blocks up to that many seconds via ``lock_timeout``.
+        """
+        return AdvisoryTryLock(
+            self, key, timeout=timeout, namespace=namespace, mode=mode, workload=workload
+        )
+
+    def run_singleton(
+        self,
+        key: str,
+        work: Callable[[], Awaitable[Any]],
+        *,
+        namespace: str | None = None,
+        workload: Workload = "write",
+        poll_interval: float = 5.0,
+    ) -> SingletonRunner:
+        """Run *work* once across the fleet, guarded by an advisory lock.
+
+        *work* is a zero-argument callable returning a fresh awaitable. Returns a
+        handle with ``await handle.stop()``; wire it through ``on_startup`` /
+        ``on_shutdown``. The guarded critical section must be idempotent.
+        """
+        return SingletonRunner(
+            self, key, work, namespace=namespace, workload=workload,
+            poll_interval=poll_interval,
+        )
+
 
 async def _prepare(connection: Any, sql: str) -> None:
     prepare = getattr(connection, "prepare", None)
@@ -534,7 +594,8 @@ def _pool_config(value: PoolConfig | Mapping[str, Any]) -> PoolConfig:
 
 
 __all__ = [
-    "Connection", "Database", "FromDatabase", "InterfaceError", "OperationalError",
-    "PipelineFullError", "Pool", "PoolConfig", "PostgresError", "ProtocolError",
-    "Record", "Statement", "Workload", "connect",
+    "AdvisoryLock", "AdvisoryTryLock", "Connection", "Database", "FromDatabase",
+    "InterfaceError", "OperationalError", "PipelineFullError", "Pool", "PoolConfig",
+    "PostgresError", "ProtocolError", "Record", "SingletonRunner", "Statement",
+    "Workload", "connect",
 ]

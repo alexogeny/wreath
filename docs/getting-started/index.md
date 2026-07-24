@@ -5,6 +5,12 @@ explaining each step rather than rushing past it. By the end you will have a
 Wreath service that handles requests, validates input, and can be tested without
 opening a socket.
 
+!!! tip "Coming from FastAPI?"
+
+    If you already build with FastAPI, Pydantic, SQLModel, or Alembic, start
+    with [Wreath for FastAPI developers](../from-fastapi/index.md) — the same
+    application in both dialects, and a table of every equivalence.
+
 ## Install
 
 Wreath targets Python 3.14 and newer.
@@ -63,14 +69,24 @@ and Wreath compiles a validator for it when the app starts. Bad input becomes a
 clear `422` response before your handler ever runs:
 
 ```python
+from typing import Annotated
+
 from wreath import Request
 from wreath.binding import Query
 from wreath.response import JSONResponse
 
 @app.get("/search")
-async def search(request: Request, q: str, limit: int = Query(20)) -> JSONResponse:
+async def search(
+    request: Request,
+    q: str,
+    limit: Annotated[int, Query(minimum=1, maximum=100)] = 20,
+) -> JSONResponse:
     return JSONResponse({"q": q, "limit": limit})
 ```
+
+A marker like `Query` rides inside `Annotated` and says where the value comes
+from and what bounds it; the default stays an ordinary Python default, so the
+signature remains plain, callable Python.
 
 This is the heart of everyday Wreath work; the [Binding, validation, and
 dependencies](../guides/binding.md) guide covers it in full.
