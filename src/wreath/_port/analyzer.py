@@ -36,7 +36,7 @@ def _is_true_c(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and node.value is True
 
 
-def module_pk_types(tree: ast.Module, imports: "_Imports") -> dict[str, str]:
+def module_pk_types(tree: ast.Module, imports: _Imports) -> dict[str, str]:
     """{ORM model name -> wreath PgType of its primary key}, resolved within one module.
 
     Used to give a ForeignKey its real column type instead of a guess. Cross-module
@@ -76,7 +76,7 @@ class _Imports:
         self.names: dict[str, str] = {}
         self.has_star = False
 
-    def visit(self, tree: ast.AST) -> "_Imports":
+    def visit(self, tree: ast.AST) -> _Imports:
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -87,7 +87,8 @@ class _Imports:
                     if alias.name == "*":
                         self.has_star = True
                         continue
-                    self.names[alias.asname or alias.name] = f"{mod}.{alias.name}" if mod else alias.name
+                    qualified = f"{mod}.{alias.name}" if mod else alias.name
+                    self.names[alias.asname or alias.name] = qualified
         return self
 
     def origin(self, node: ast.AST | None) -> str:
@@ -140,7 +141,8 @@ def _index_tree(files: list[Path]) -> dict[str, set[str]]:
 class _Analyzer(ast.NodeVisitor):
     def __init__(self, path: Path, root: Path, imports: _Imports, index: dict[str, set[str]],
                  pk_types: dict[str, str] | None = None) -> None:
-        self.rel = str(path.relative_to(root)) if root in path.parents or root == path else str(path)
+        under_root = root in path.parents or root == path
+        self.rel = str(path.relative_to(root)) if under_root else str(path)
         self.imports = imports
         self.index = index
         self.pk_types = pk_types or {}
@@ -161,12 +163,16 @@ class _Analyzer(ast.NodeVisitor):
             self._emit(rule_id, line)
 
     # -- loops (dynamic include_router) ---------------------------------------
-    def visit_For(self, node: ast.For) -> None:
+    def _visit_loop(self, node: ast.For | ast.AsyncFor) -> None:
         self._loop_depth += 1
         self.generic_visit(node)
         self._loop_depth -= 1
 
-    visit_AsyncFor = visit_For
+    def visit_For(self, node: ast.For) -> None:
+        self._visit_loop(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._visit_loop(node)
 
     # -- classes (models / settings) ------------------------------------------
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
@@ -195,7 +201,8 @@ class _Analyzer(ast.NodeVisitor):
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 if stmt.target.id == "model_config":
                     continue
-                if self._is_field_with_constraints(stmt.value) or self._annotation_is_constrained(stmt.annotation):
+                if (self._is_field_with_constraints(stmt.value)
+                        or self._annotation_is_constrained(stmt.annotation)):
                     self._emit("pydantic.field_constraint", stmt.lineno)
                 else:
                     self._emit("pydantic.field", stmt.lineno)
@@ -214,7 +221,8 @@ class _Analyzer(ast.NodeVisitor):
                 if stmt.target.id == "model_config":
                     continue
                 ann_origin = self.imports.origin(stmt.annotation)
-                if ann_origin.split(".")[-1] in self.index["settings"] or self._value_is_settings(stmt.value):
+                if (ann_origin.split(".")[-1] in self.index["settings"]
+                        or self._value_is_settings(stmt.value)):
                     self._emit("settings.nested", stmt.lineno)
                 else:
                     self._emit("settings.field", stmt.lineno)
@@ -238,7 +246,8 @@ class _Analyzer(ast.NodeVisitor):
                 target = value.args[0] if value.args else None
                 target_name = target.id if isinstance(target, ast.Name) else (
                     target.attr if isinstance(target, ast.Attribute) else None)
-                self._emit("orm.fk_typed" if target_name in self.pk_types else "orm.fk", stmt.lineno)
+                typed = target_name in self.pk_types
+                self._emit("orm.fk_typed" if typed else "orm.fk", stmt.lineno)
             elif origin.startswith("ormar.") or origin.endswith(".ARRAY") or (
                 kind == "sqlmodel" and origin.split(".")[-1] == "Field"
             ):
@@ -290,20 +299,25 @@ class _Analyzer(ast.NodeVisitor):
                     and isinstance(node.body[0], ast.Return)
                     and node.body[0].value is not None
                 )
-                self._emit("route.status_code_return" if literal and single_return else "route.status_code", dec.lineno)
+                rewritable = literal and single_return
+                self._emit("route.status_code_return" if rewritable else "route.status_code",
+                           dec.lineno)
             elif kw.arg == "include_in_schema" and _is_false(kw.value):
                 self._emit("route.include_in_schema", dec.lineno)
 
     def _scan_params(self, node) -> None:
         args = node.args
-        defaults = dict(zip([a.arg for a in args.args[len(args.args) - len(args.defaults):]], args.defaults))
+        # The tail of `args.args` is exactly as long as `args.defaults`.
+        defaulted = args.args[len(args.args) - len(args.defaults):]
+        defaults = dict(zip([a.arg for a in defaulted], args.defaults, strict=True))
         for arg in list(args.args) + list(args.kwonlyargs):
             default = defaults.get(arg.arg)
             ann_origin = self.imports.origin(arg.annotation) if arg.annotation else ""
             if isinstance(default, ast.Call):
                 marker = self.imports.origin(default.func).split(".")[-1]
                 rule_id = _MARKER_RULE.get(marker)
-                if rule_id == "param.query" and any(k.arg in _STR_CONSTRAINTS for k in default.keywords):
+                if rule_id == "param.query" and any(k.arg in _STR_CONSTRAINTS
+                                                    for k in default.keywords):
                     self._emit("param.query_strconstraint", arg.lineno)
                     continue
                 if rule_id:
@@ -322,7 +336,8 @@ class _Analyzer(ast.NodeVisitor):
         if isinstance(func, ast.Attribute):
             attr = func.attr
             if attr == "include_router":
-                self._emit("route.include_dynamic" if self._loop_depth else "route.include_static", node.lineno)
+                self._emit("route.include_dynamic" if self._loop_depth else "route.include_static",
+                           node.lineno)
             elif attr == "add_middleware":
                 self._scan_add_middleware(node)
             elif attr in ("delay", "apply_async"):
@@ -398,19 +413,25 @@ class _Analyzer(ast.NodeVisitor):
 
     # -- small predicates -----------------------------------------------------
     def _annotation_is_model(self, ann: ast.AST) -> bool:
-        name = ann.id if isinstance(ann, ast.Name) else (ann.attr if isinstance(ann, ast.Attribute) else "")
+        name = ""
+        if isinstance(ann, ast.Name):
+            name = ann.id
+        elif isinstance(ann, ast.Attribute):
+            name = ann.attr
         return name in self.index["pydantic"] or name in self.index["orm"]
 
     def _annotation_is_constrained(self, ann: ast.AST | None) -> bool:
         """pydantic v1 constrained-type annotation (confloat/conint/constr/...)."""
         if isinstance(ann, ast.Call):
             return self.imports.origin(ann.func).split(".")[-1] in (
-                "confloat", "conint", "constr", "condecimal", "conbytes", "conlist", "conset", "condate"
+                "confloat", "conint", "constr", "condecimal", "conbytes", "conlist",
+                "conset", "condate",
             )
         return False
 
     def _is_field_with_constraints(self, value: ast.AST | None) -> bool:
-        if isinstance(value, ast.Call) and self.imports.origin(value.func).split(".")[-1] == "Field":
+        if (isinstance(value, ast.Call)
+                and self.imports.origin(value.func).split(".")[-1] == "Field"):
             return any(
                 k.arg in _STR_CONSTRAINTS or k.arg in ("ge", "le", "gt", "lt", "multiple_of")
                 for k in value.keywords
@@ -421,7 +442,11 @@ class _Analyzer(ast.NodeVisitor):
         if isinstance(value, ast.Call):
             for kw in value.keywords:
                 if kw.arg == "extra" and isinstance(kw.value, ast.Constant):
-                    return kw.value.value
+                    # A Constant holds any literal; only a string is an `extra=`
+                    # setting. Callers compare against "forbid"/"ignore", so a
+                    # non-string was already as good as absent.
+                    extra = kw.value.value
+                    return extra if isinstance(extra, str) else None
         return None
 
     def _value_is_settings(self, value: ast.AST | None) -> bool:

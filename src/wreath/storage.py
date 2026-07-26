@@ -28,13 +28,26 @@ import zlib
 from collections.abc import AsyncIterable, AsyncIterator, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from xml.etree import ElementTree as _ET
 
-try:  # normal package import
+if TYPE_CHECKING:
+    # In any real install the module is there, and assuming so keeps `_sigv4.sign`
+    # and friends precisely typed at the S3 call sites below.
     from . import _sigv4
-except ImportError:  # storage.py loaded standalone (zip-only tests never touch S3)
-    _sigv4 = None  # type: ignore[assignment]
+else:
+    try:  # normal package import
+        from . import _sigv4
+    except ImportError:  # storage.py loaded standalone; zip-only tests never touch S3
+        _sigv4 = None
+
+#: `list` is part of the public Storage API (``await storage.list(prefix=...)``),
+#: so inside the class bodies below the name resolves to that method rather than
+#: to the builtin. `from __future__ import annotations` means runtime is
+#: unaffected -- annotations there are never evaluated -- but the shadowing is
+#: real, and anything that does evaluate them (``typing.get_type_hints``) would
+#: get the method. Class-scope annotations spell the builtin as `_List`.
+_List = list
 
 _CHUNK = 1 << 16
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
@@ -421,7 +434,7 @@ class LocalStorage:
             dir_fd=parent_fd,
         )
 
-    def _open_parent(self, parts: list[str], create: bool) -> tuple[int, list[int], str]:
+    def _open_parent(self, parts: _List[str], create: bool) -> tuple[int, _List[int], str]:
         """Walk (optionally creating) parent dirs beneath the root, refusing symlinks.
 
         Returns ``(parent_fd, opened_fds_to_close, final_name)``; ``parent_fd`` is the
@@ -481,7 +494,7 @@ class LocalStorage:
                 except StorageError:
                     continue
 
-    def _walk(self) -> list[str]:
+    def _walk(self) -> _List[str]:
         keys: list[str] = []
         for dirpath, _dirnames, filenames in os.walk(self._root, followlinks=False):
             rel = os.path.relpath(dirpath, self._root)
@@ -705,7 +718,7 @@ class S3Storage:
         method: str,
         path: str,
         *,
-        params: list[tuple[str, str]] | None = None,
+        params: _List[tuple[str, str]] | None = None,
         body: bytes = b"",
         payload_hash: str | None = None,
     ) -> Any:
@@ -842,7 +855,7 @@ class S3Storage:
         )
         return (resp.header(b"etag") or b"").decode("ascii")
 
-    async def _complete(self, path: str, upload_id: str, parts: list[tuple[int, str]]) -> Any:
+    async def _complete(self, path: str, upload_id: str, parts: _List[tuple[int, str]]) -> Any:
         body = "".join(
             f"<Part><PartNumber>{n}</PartNumber><ETag>{e}</ETag></Part>" for n, e in parts
         )

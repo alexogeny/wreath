@@ -2,6 +2,25 @@
 
 PostgreSQL's `jsonb` and array types are first-class in the wreath ORM — the containment operators and array predicates you'd otherwise drop to raw SQL for are methods on a column, compiled and parameterised like any other expression.
 
+## User story: find rows by what's inside a JSONB column
+
+> *As an API author, my `llama` rows carry a free-form `metadata` document and a
+> `tags` array. I want to answer "which guides are tagged for trekking?" as one
+> parameterised query — not a `LIKE` over serialized JSON.*
+
+```python
+guides = await session.fetch(
+    Llama.select()
+    .where(Llama.metadata.contains({"role": "guide"}))   # metadata @> $1
+    .where(Llama.tags.overlaps(["trek", "boarding"]))    # tags && $2
+)
+```
+
+Both predicates compile to real PostgreSQL operators against the `gin` index the
+column declares, and every value binds as a parameter — the document and the
+array each go over the wire as a single `$N`, so the plan cache key doesn't vary
+with the array's length. The operator methods are documented below.
+
 ## Columns
 
 ```python

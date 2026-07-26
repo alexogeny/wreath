@@ -22,6 +22,7 @@ from .compiler import (
     CompiledQuery,
     JoinedStep,
     SelectinStep,
+    compile_count,
     compile_select,
     qualified,
     quote,
@@ -112,9 +113,14 @@ class RawQuery:
         connection = await session._acquire()
         rows = await connection.fetch(self._sql, *self._args)
         order = _validate_raw_result(connection, self._sql, spec)
+        if not rows:
+            return []
+        offsets = _pk_offsets(spec, order)     # once, not once per row
         return [
             item
-            for item in (session._hydrate(spec, order, row, 0) for row in rows)
+            for item in (
+                session._hydrate(spec, order, row, 0, offsets) for row in rows
+            )
             if item is not None
         ]
 
@@ -179,6 +185,65 @@ def _count_probes() -> Iterator[list[int]]:
         yield counter
     finally:
         _probes = previous
+
+
+# Test-only, same contract as `_probes`: counts how many times a projection's
+# primary-key offsets were resolved. The invariant is that this is a function of
+# the query *shape*, not of the row count.
+_key_map_builds: list[int] | None = None
+
+
+@contextmanager
+def _count_key_map_builds() -> Iterator[list[int]]:
+    """Count primary-key offset resolutions performed inside the block."""
+    global _key_map_builds
+    counter = [0]
+    previous, _key_map_builds = _key_map_builds, counter
+    try:
+        yield counter
+    finally:
+        _key_map_builds = previous
+
+
+def _pk_offsets(spec: ModelSpec, columns: tuple[ColumnSpec, ...]) -> tuple[int, ...]:
+    """Where ``spec``'s primary-key columns sit within ``columns``.
+
+    Depends only on the compiled projection, so it is resolved once per query
+    and reused for every row. It used to be rebuilt inside `_hydrate`, which
+    made hydration O(rows x columns) in pure repetition -- and every joined
+    load pays that per row *per join step*, because a joined shape always takes
+    this Record path rather than the native hydrate plan.
+    """
+    if _key_map_builds is not None:
+        _key_map_builds[0] += 1
+    positions = {item.python_name: index for index, item in enumerate(columns)}
+    try:
+        return tuple(positions[item.python_name] for item in spec.primary_key)
+    except KeyError:
+        raise MappingError(
+            f"{spec.model_type.__name__} was selected without its primary key"
+        ) from None
+
+
+@dataclass(frozen=True, slots=True)
+class _JoinCursor:
+    """A joined step with its primary-key offsets already resolved."""
+
+    step: JoinedStep
+    pk_offsets: tuple[int, ...]
+    nested: tuple[_JoinCursor, ...]
+
+
+def _join_cursors(steps: tuple[JoinedStep, ...]) -> tuple[_JoinCursor, ...]:
+    """Resolve the whole joined tree's key offsets once, before any row."""
+    return tuple(
+        _JoinCursor(
+            step,
+            _pk_offsets(step.relationship.target, step.columns),
+            _join_cursors(step.nested),
+        )
+        for step in steps
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -458,6 +523,22 @@ class Session:
             )
         return results[0] if results else None
 
+    async def count(self, query: Select) -> int:
+        """Count the rows ``query`` matches, without fetching or hydrating them.
+
+        Emits ``SELECT COUNT(*)`` with the query's filters (and any to-one
+        filter joins), ignoring its projection, ordering, and paging. This is
+        what :func:`wreath.pagination.paginate` uses for the page total, so a
+        large result set costs one aggregate round trip rather than transferring
+        and materializing every matching row.
+        """
+        self._check_usable()
+        self._check_tenant_bound()
+        sql, values, _oids = compile_count(self._registry, query)
+        connection = await self._acquire()
+        total = await connection.fetchval(sql, *values)
+        return int(total) if total is not None else 0
+
     def raw(self, sql: str, *args: Any) -> RawQuery:
         """Run SQL exactly as written on this session's connection."""
         self._check_usable()
@@ -503,25 +584,41 @@ class Session:
         assert spec is not None
         plan = compiled.load_plan
         objects: list[Any] = []
+        if not rows:
+            # Resolving offsets here would raise MappingError for a projection
+            # missing its primary key even when nothing matched; an empty
+            # result has never done that, so stay out of the way.
+            return objects
+        # Once per query, not once per row -- and once for the whole joined
+        # tree, not once per step per row.
+        pk_offsets = _pk_offsets(spec, plan.columns)
+        cursors = _join_cursors(plan.joined)
         seen: set[int] = set()
         for row in rows:
-            root = self._hydrate(spec, plan.columns, row, 0)
+            root = self._hydrate(spec, plan.columns, row, 0, pk_offsets)
             if root is None:
                 continue
             if id(root) not in seen:
                 seen.add(id(root))
                 objects.append(root)
-            self._assemble_joins(plan.joined, root, row)
+            self._assemble_joins(cursors, root, row)
         return objects
 
     def _assemble_joins(
-        self, steps: tuple[JoinedStep, ...], parent: Any, row: Any
+        self, cursors: tuple[_JoinCursor, ...], parent: Any, row: Any
     ) -> None:
-        for step in steps:
-            child = self._hydrate(step.relationship.target, step.columns, row, step.offset)
+        for cursor in cursors:
+            step = cursor.step
+            child = self._hydrate(
+                step.relationship.target,
+                step.columns,
+                row,
+                step.offset,
+                cursor.pk_offsets,
+            )
             parent._orm_set_relation(step.relationship.index, child)
             if child is not None:
-                self._assemble_joins(step.nested, child, row)
+                self._assemble_joins(cursor.nested, child, row)
 
     def _hydrate(
         self,
@@ -529,15 +626,10 @@ class Session:
         columns: tuple[ColumnSpec, ...],
         row: Any,
         offset: int,
+        pk_offsets: tuple[int, ...],
     ) -> Any:
-        positions = {item.python_name: index for index, item in enumerate(columns)}
         key: list[Any] = []
-        for item in spec.primary_key:
-            index = positions.get(item.python_name)
-            if index is None:
-                raise MappingError(
-                    f"{spec.model_type.__name__} was selected without its primary key"
-                )
+        for item, index in zip(spec.primary_key, pk_offsets, strict=True):
             value = row[offset + index]
             if value is None:
                 # A LEFT JOIN that matched nothing; not an object.
@@ -596,12 +688,15 @@ class Session:
             return
 
         children: list[Any] = []
+        # The projection is the target's own column tuple for every batch and
+        # every row, so its key offsets resolve once for the whole load.
+        child_offsets = _pk_offsets(target, target.columns)
         for batch in _batches(tuple(keys), len(remote)):
             sql, values = _selectin_sql(target, remote, batch)
             connection = await self._acquire()
             rows = await connection.fetch(sql, *values)
             for row in rows:
-                child = self._hydrate(target, target.columns, row, 0)
+                child = self._hydrate(target, target.columns, row, 0, child_offsets)
                 if child is None:
                     continue
                 children.append(child)

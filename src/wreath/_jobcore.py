@@ -43,6 +43,22 @@ _TRANSITIONS: Final[dict[str, frozenset[str]]] = {
 }
 
 
+def validate_identifier(value: str, kind: str) -> str:
+    """Validate a bounded SQL-safe identifier (queue/schema/channel/task name).
+
+    The shared rule for every config-time name the jobs and messaging
+    coordinators derive Postgres object names and LISTEN/NOTIFY channels from:
+    1..63 UTF-8 bytes, each character alphanumeric or ``_``/``$``. ``kind``
+    names the identifier in the error so callers get an actionable message.
+    """
+    if not value or len(value.encode("utf-8")) > 63:
+        raise ValueError(f"{kind} must be 1..63 bytes: {value!r}")
+    for character in value:
+        if not (character.isalnum() or character in "_$"):
+            raise ValueError(f"invalid {kind} character {character!r} in {value!r}")
+    return value
+
+
 class TransitionError(ValueError):
     """An illegal job/message state transition was attempted."""
 

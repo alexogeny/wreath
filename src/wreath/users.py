@@ -28,6 +28,7 @@ from ._userkit import (  # re-export the stdlib-only surface
     EmailSender,
     InMemoryUserStore,
     LogEmailSender,
+    SmtpEmailSender,
     UserRecord,
     UserStore,
     hash_password,
@@ -43,6 +44,7 @@ __all__ = [
     "InMemoryUserStore",
     "LogEmailSender",
     "OrmUserStore",
+    "SmtpEmailSender",
     "UserRecord",
     "UserStore",
     "default_user_model",
@@ -199,7 +201,7 @@ def user_router(
 # expected columns; the app may supply its own model instead.
 
 
-def default_user_model(table: str = "users") -> type:
+def default_user_model(table: str = "users") -> type[Any]:
     """Build a reference ORM user model. Import-lazy so importing ``users`` needs no DB.
 
     The uuid primary key auto-generates via ``default=uuid.uuid4`` (wreath's
@@ -232,30 +234,37 @@ class OrmUserStore:
 
     __slots__ = ("_model", "_session")
 
-    def __init__(self, session: Any, model: type) -> None:
+    # The model is whatever ORM class the application supplied, so its columns --
+    # `select()`, `email`, and the rest -- exist only at runtime. `type[Any]` says
+    # that honestly; a bare `type` claims the attributes are absent.
+    def __init__(self, session: Any, model: type[Any]) -> None:
         self._session = session
         self._model = model
 
-    def _to_record(self, row: Any) -> UserRecord | None:
-        if row is None:
-            return None
+    def _to_record(self, row: Any) -> UserRecord:
         return UserRecord(
             id=str(row.id), email=row.email, hashed_password=row.hashed_password,
             is_active=bool(row.is_active), is_verified=bool(row.is_verified),
         )
 
+    def _found(self, row: Any) -> UserRecord | None:
+        """`_to_record` for the lookups, where a miss is a legitimate answer."""
+        return None if row is None else self._to_record(row)
+
     async def get_by_email(self, email: str) -> UserRecord | None:
         query = self._model.select().where(self._model.email == email.strip().lower())
-        return self._to_record(await self._session.fetch_one(query))
+        return self._found(await self._session.fetch_one(query))
 
     async def get_by_id(self, user_id: str) -> UserRecord | None:
-        return self._to_record(await self._session.get(self._model, user_id))
+        return self._found(await self._session.get(self._model, user_id))
 
     async def create(self, email: str, hashed_password: str) -> UserRecord:
         instance = self._model(email=email.strip().lower(), hashed_password=hashed_password)
         self._session.add(instance)
         await self._session.flush()
-        return self._to_record(instance)  # type: ignore[return-value]
+        # The instance was just constructed, so this is never a miss -- which is
+        # why it calls the total `_to_record` and needs no ignore.
+        return self._to_record(instance)
 
     async def update(self, user: UserRecord) -> UserRecord:
         row = await self._session.get(self._model, user.id)

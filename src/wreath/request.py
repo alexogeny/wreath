@@ -436,7 +436,9 @@ class Request:
         cached = self._form
         if cached is not _MISSING:
             return cast(FormData, cached)
-        content_type = find_header(self.scope.get("headers", ()), b"content-type")
+        # Via the `headers` property, not `self.scope`: on the native path the
+        # ASGI scope is lazily built, and reading one header should not force it.
+        content_type = find_header(self.headers, b"content-type")
         body = await self.body()
         if content_type is not None and content_type.startswith(b"multipart/form-data"):
             boundary = _multipart_boundary(content_type)

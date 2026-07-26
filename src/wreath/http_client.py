@@ -14,17 +14,12 @@ import random
 import socket
 import ssl
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, cast
 from urllib.parse import SplitResult, urljoin, urlsplit
 
 from . import _client_codec
-
-try:  # accelerated transport-facing stream; optional like every native piece
-    from wreath._native._client import Http1ClientStream as _NativeClientStream
-except ImportError:  # pragma: no cover - pure tier
-    _NativeClientStream = None
-if os.environ.get("WREATH_CLIENT_NATIVE_STREAM") == "0":
-    _NativeClientStream = None
+from ._native import _client as _native_client
 from time import monotonic as _monotonic
 from time import monotonic_ns as _monotonic_ns
 
@@ -55,6 +50,16 @@ from ._flight_markers import (
 from ._flight_markers import (
     phase_marker as _phase_marker,
 )
+
+# Accelerated transport-facing stream; optional like every native piece. Resolved
+# through the `_native` loader rather than imported straight from the compiled
+# submodule, so it takes the same Any-typed, None-on-absence path as `_core`: a
+# direct import names a module that need not have been built.
+_NativeClientStream = (
+    None if _native_client is None else getattr(_native_client, "Http1ClientStream", None)
+)
+if os.environ.get("WREATH_CLIENT_NATIVE_STREAM") == "0":
+    _NativeClientStream = None
 
 type _AddressInfo = tuple[int, int, int, str, tuple[object, ...]]
 
@@ -226,15 +231,36 @@ _DEFAULT_RATE = RatePolicy()
 
 
 def _parse_retry_after(raw: bytes | None) -> float | None:
-    """Parse a ``Retry-After`` header. Only the delta-seconds form is honoured;
-    the HTTP-date form falls back to normal backoff (returns None)."""
+    """Parse a ``Retry-After`` header into seconds-from-now (RFC 9110 §10.2.3).
+
+    Both forms are honoured: delta-seconds (``120``) and an HTTP-date
+    (``Wed, 21 Oct 2026 07:28:00 GMT``), the latter converted to a non-negative
+    delay relative to now. Anything unparseable returns None so the caller falls
+    back to ordinary backoff.
+    """
     if raw is None:
         return None
+    text = raw.decode("latin-1").strip()
     try:
-        seconds = int(raw.decode("ascii").strip())
-    except (ValueError, UnicodeDecodeError):
-        return None
+        seconds = int(text)
+    except ValueError:
+        return _http_date_delay(text)
     return float(seconds) if seconds >= 0 else None
+
+
+def _http_date_delay(text: str) -> float | None:
+    """Seconds from now until an HTTP-date, clamped at 0; None if unparseable."""
+    from email.utils import parsedate_to_datetime
+
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max(0.0, (when - datetime.now(UTC)).total_seconds())
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,12 +357,14 @@ class _NativeStreamWriter:
 
     __slots__ = ("_transport", "_protocol")
 
-    def __init__(self, transport: asyncio.BaseTransport, protocol: Any) -> None:
+    def __init__(self, transport: asyncio.Transport, protocol: Any) -> None:
+        # create_connection hands back a write-capable Transport, so this is
+        # typed Transport (not BaseTransport) and .write() resolves.
         self._transport = transport
         self._protocol = protocol
 
     def write(self, data: bytes) -> None:
-        self._transport.write(data)  # type: ignore[attr-defined]
+        self._transport.write(data)
 
     async def drain(self) -> None:
         waiter = self._protocol._drain()

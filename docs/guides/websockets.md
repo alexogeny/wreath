@@ -27,4 +27,29 @@ bounds how many messages and fragments one connection may accumulate — see
 handler in a test with `WebSocketTestSession` from
 [`wreath.testing`](../reference/testing.md), no server required.
 
+## User story: a live feed the client subscribes to
+
+> *As an API author, my dashboard opens a socket and I want to push it live
+> updates — but first it tells me which channel it cares about. I need to read
+> that opening message, then stream until the tab closes.*
+
+```python
+from wreath.websocket import WebSocket, WebSocketDisconnect
+
+@app.websocket("/live")
+async def live(connection: WebSocket) -> None:
+    await connection.accept()
+    channel = await connection.receive_text()   # first message: the channel name
+    try:
+        async for update in updates_for(channel):
+            await connection.send_text(update)
+    except WebSocketDisconnect:
+        pass
+```
+
+You accept, read the opening message, then write for as long as the client
+stays. The disconnect surfaces as a `WebSocketDisconnect` wherever you happen to
+be awaiting — inside the `async for` above included — so cleanup is a plain
+`except`.
+
 **Reference:** [`wreath.websocket`](../reference/websocket.md).

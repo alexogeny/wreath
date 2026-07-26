@@ -741,3 +741,34 @@ async def test_scheduling_and_ordering_work_stays_linear(session: Session) -> No
     assert probes_for(500) == 1000
     assert probes_for(1000) == 2000
     assert probes_for(2000) == 4000
+
+
+# -- count ---------------------------------------------------------------------
+
+
+async def test_count_runs_one_aggregate_and_returns_the_scalar(
+    registry: Registry, database: FakeDatabase, session: Session
+) -> None:
+    database.connection.script("COUNT(*)", [(7,)])
+    total = await session.count(User.select().where(User.name == "A"))
+    assert total == 7
+    sql, args = database.connection.calls[-1]
+    assert sql.startswith("SELECT COUNT(*) FROM ")
+    assert "LIMIT" not in sql and "ORDER BY" not in sql
+    assert args == ("A",)
+
+
+async def test_count_of_no_rows_is_zero_not_none(
+    registry: Registry, database: FakeDatabase, session: Session
+) -> None:
+    # fetchval yields None for an empty result; count must normalize to 0.
+    total = await session.count(User.select())
+    assert total == 0
+
+
+async def test_count_on_a_closed_session_is_rejected(
+    registry: Registry, session: Session
+) -> None:
+    await session.close()
+    with pytest.raises(SessionClosedError):
+        await session.count(User.select())

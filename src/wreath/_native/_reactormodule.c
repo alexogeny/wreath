@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <time.h>
 #include <sys/socket.h>
 #include <sys/uio.h>

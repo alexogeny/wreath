@@ -2,6 +2,27 @@
 
 Three small conveniences that every production service reaches for. None needs a dependency.
 
+## User story: ship a feature to 25% of users, deterministically
+
+> *As an API author, I want to roll `new_checkout` out to a quarter of users and
+> have each user stay on the same side of the line every request — not flicker
+> between the old and new path as they click around.*
+
+```python
+app.flags(new_checkout="25%")
+
+flags = app.state.flags     # the registered FeatureFlags provider
+
+if flags.enabled("new_checkout", {"id": user.id}):
+    return new_checkout(request)
+return old_checkout(request)
+```
+
+The bucket is computed from the flag name and the subject in the context
+(`id`/`key`/`user`) with blake2s, not a coin flip, so the same user lands the same
+way across requests and processes. The rule language and the other two
+conveniences are below.
+
 ## Health and readiness
 
 Liveness answers "is the process up?"; readiness answers "should the load balancer send it traffic?". `app.health()` mounts both:

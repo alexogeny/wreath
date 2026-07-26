@@ -13,6 +13,7 @@ from .cache import CacheControlMiddleware
 from .compression import CompressionMiddleware
 from .cors import CORSMiddleware
 from .csrf import CSRFMiddleware, csrf_token
+from .idempotency import IdempotencyMiddleware
 from .proxy import ProxyHeadersMiddleware
 from .ratelimit import (
     MemoryRateLimitStore,
@@ -31,6 +32,7 @@ __all__ = [
     "CacheControlMiddleware",
     "CompressionMiddleware",
     "CallNext",
+    "IdempotencyMiddleware",
     "MemoryRateLimitStore",
     "Middleware",
     "MiddlewareHooks",

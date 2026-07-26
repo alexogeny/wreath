@@ -35,22 +35,19 @@ def render_api_docs(app: Any, *, title: str, version: str, spec_path: str = "/op
 
 
 def discover_static_dirs(app: Any) -> list[str]:
-    """The directories behind the app's mounted ``static()`` handlers, by walking the
-    static-matcher trie. Empty when the app mounts no static trees or the internals move."""
+    """The directories behind the app's mounted ``static()`` handlers.
+
+    Reads the static matcher's registered mounts. Empty when the app mounts no
+    static trees or the internals move."""
     matcher = getattr(app, "_static_matcher", None)
-    root = getattr(matcher, "_root", None)
-    if root is None:
+    mounts = getattr(matcher, "_mounts", None)
+    if mounts is None:
         return []
     dirs: set[str] = set()
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        mount = getattr(node, "mount", None)
-        if mount is not None:
-            directory = getattr(mount[2], "_root", None)
-            if directory is not None:
-                dirs.add(str(directory))
-        stack.extend(getattr(node, "children", {}).values())
+    for _prefix, handler in mounts:
+        directory = getattr(handler, "_root", None)
+        if directory is not None:
+            dirs.add(str(directory))
     return sorted(dirs)
 
 

@@ -41,12 +41,34 @@ import dataclasses
 import selectors
 import socket
 from asyncio import events as _events
-from asyncio.tasks import (  # C-accelerated task-state helpers
-    _enter_task,
-    _leave_task,
-    _register_task,
-)
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # `serve()` imports wreath.server lazily; borrow only the protocol-name
+    # literal so its signature names the values ServerConfig actually accepts.
+    from .server import HttpProtocolName
+
+    # The C task-state helpers, restated with the shape they actually accept.
+    # typeshed types them for `asyncio.Task`, but `WreathTask` below is a
+    # duck-typed task: it subclasses `Future` on purpose, because `Task.__init__`
+    # schedules the first step and skipping that scheduling is the entire point
+    # of the class. The registry only needs the future/task protocol, which it
+    # satisfies -- so widen the parameter rather than claim a Task it is not.
+    def _register_task(task: asyncio.Future[Any]) -> None: ...
+    def _enter_task(loop: asyncio.AbstractEventLoop, task: asyncio.Future[Any]) -> None: ...
+    def _leave_task(loop: asyncio.AbstractEventLoop, task: asyncio.Future[Any]) -> None: ...
+else:
+    from asyncio.tasks import (  # C-accelerated task-state helpers
+        _enter_task,
+        _leave_task,
+        _register_task,
+    )
+
+#: The timing-wheel/poller extension, or None when it was not built. Resolved
+#: through the `_native` loader so it is Any-typed like `_core`; a direct import
+#: of the compiled submodule is invisible to static analysis.
+from ._native import _reactor as _wheel_ext
 
 __all__ = [
     "new_event_loop",
@@ -150,17 +172,22 @@ class WreathTask(asyncio.Future):
         finally:
             if outer is not None:
                 _enter_task(loop, outer)
+        # `Future._loop` is declared `AbstractEventLoop`; this task is only ever
+        # built by `EventLoop.create_task`, so the stats dict is always there.
+        # Redeclaring `_loop` as `EventLoop` would fix these three reads and cost
+        # five more on `loop.call_soon` below, which the per-instance shadowing in
+        # `EventLoop.__init__` turns into a method/attribute union.
         if self.done():
-            loop._reactor_stats["inline_completions"] += 1
+            loop._reactor_stats["inline_completions"] += 1  # ty: ignore[unresolved-attribute]
         else:
-            loop._reactor_stats["tasks_promoted"] += 1
+            loop._reactor_stats["tasks_promoted"] += 1  # ty: ignore[unresolved-attribute]
 
     def __step(self, exc=None):
         loop = self._loop
         coro = self._coro
         self._fut_waiter = None
         _enter_task(loop, self)
-        loop._reactor_stats["coro_steps"] += 1
+        loop._reactor_stats["coro_steps"] += 1  # ty: ignore[unresolved-attribute]
         try:
             if exc is None:
                 result = coro.send(None)
@@ -220,13 +247,56 @@ class WreathTask(asyncio.Future):
             self.__step()
 
 
-try:
-    from wreath._native import _reactor as _wheel_ext
-except ImportError:  # pragma: no cover - extension always built in-tree
-    _wheel_ext = None
+if TYPE_CHECKING:
+
+    class _LoopBase(asyncio.SelectorEventLoop):
+        """CPython's private ``BaseEventLoop``/``BaseSelectorEventLoop`` surface.
+
+        typeshed declares no private members, but this loop deliberately
+        overrides and calls several of them -- that is what "replace the loop
+        internals behind the same observable contract" means here. Stating them
+        once, in a base that exists only for type checking, keeps
+        ``super()._run_once()`` and friends honest instead of waiving the same
+        fact at eight separate call sites. At runtime the base is exactly
+        ``asyncio.SelectorEventLoop``: no extra class, no MRO change, no cost.
+
+        These signatures track CPython's; if a release changes one, the mismatch
+        is supposed to show up here rather than at each use.
+        """
+
+        _selector: selectors.BaseSelector
+        _ssock: socket.socket | None
+        _write_to_self: Callable[[], None]
+
+        def _read_from_self(self) -> None: ...
+        def _run_once(self) -> None: ...
+        def _process_events(self, event_list: Any) -> None: ...
+        def _start_serving(
+            self,
+            protocol_factory: Any,
+            sock: socket.socket,
+            sslcontext: Any = None,
+            server: Any = None,
+            backlog: int = 100,
+            ssl_handshake_timeout: float | None = None,
+            ssl_shutdown_timeout: float | None = None,
+        ) -> None: ...
+        def _stop_serving(self, sock: socket.socket) -> None: ...
+        def _make_socket_transport(
+            self,
+            sock: socket.socket,
+            protocol: Any,
+            waiter: Any = None,
+            *,
+            extra: Any = None,
+            server: Any = None,
+        ) -> asyncio.Transport: ...
+
+else:
+    _LoopBase = asyncio.SelectorEventLoop
 
 
-class EventLoop(asyncio.SelectorEventLoop):
+class EventLoop(_LoopBase):
     """SelectorEventLoop augmented with the reactor's fast path and telemetry.
 
     ``timers="wheel"`` routes every ``call_later``/``call_at`` deadline through
@@ -259,7 +329,10 @@ class EventLoop(asyncio.SelectorEventLoop):
         self._wreath_reuse_port = reuse_port
         self._poller = None
         self._reactor_stats = _stats_template()
-        self._wheel = None
+        # Native objects, so Any like `_core` everywhere else in the package;
+        # None until timers="wheel" builds them. The wheel-only methods below are
+        # reached solely from the wheel branch, so they never see the None.
+        self._wheel: Any = None
         self._wheel_schedule = None  # cached bound schedule_call: no per-timer attr lookup
         self._wheel_res = wheel_resolution
         self._wheel_tick_handle = None
@@ -279,9 +352,13 @@ class EventLoop(asyncio.SelectorEventLoop):
             self._wheel_schedule = self._wheel.schedule_call
         if not stats:
             # No introspection: shadow the counting call_soon/_run_once with the
-            # base C implementations so the hot path pays no Python override frame.
-            self.call_soon = super().call_soon
-            self._run_once = super()._run_once
+            # base C implementations so the hot path pays no Python override
+            # frame. Rebinding a method as a per-instance attribute is the point
+            # -- and is exactly what a type checker cannot model, since the name
+            # is a method on the class and a bound method on the instance. Both
+            # assignments are waived rather than the technique disguised.
+            self.call_soon = super().call_soon  # ty: ignore[invalid-assignment]
+            self._run_once = super()._run_once  # ty: ignore[invalid-assignment]
         if self._native_loop:
             self._install_native_loop()
 
@@ -337,12 +414,32 @@ class EventLoop(asyncio.SelectorEventLoop):
             self._poller.close()
         super().close()
 
-    def create_task(self, coro, *, name=None, context=None):
+    # Returns a duck-typed task, not an `asyncio.Task`, whenever the inline tier
+    # is on -- which is the reason this module exists (see `WreathTask`). That is
+    # a real Liskov departure and is waived here rather than hidden by widening
+    # the base class's return type for every caller.
+    def create_task(  # ty: ignore[invalid-method-override]
+        self,
+        coro: Any,
+        *,
+        name: str | None = None,
+        context: contextvars.Context | None = None,
+    ) -> Any:
         if self._tasks == "inline":
             return WreathTask(coro, loop=self, name=name, context=context)
         return super().create_task(coro, name=name, context=context)
 
-    def call_soon(self, callback, *args, context=None):
+    # BaseEventLoop.call_soon binds its argument types with a TypeVarTuple
+    # (`callback: Callable[[*Ts], object], *args: *Ts`). Reproducing that shape
+    # here does not currently type-check either -- ty renders the starred
+    # parameter as unresolved -- so this takes the plain form and waives the
+    # resulting Liskov complaint. The forwarding below is unchanged.
+    def call_soon(  # ty: ignore[invalid-method-override]
+        self,
+        callback: Callable[..., object],
+        *args: Any,
+        context: contextvars.Context | None = None,
+    ) -> asyncio.Handle:
         if self._stats_on:
             self._reactor_stats["call_soon_scheduled"] += 1
         return super().call_soon(callback, *args, context=context)
@@ -382,7 +479,10 @@ class EventLoop(asyncio.SelectorEventLoop):
         self._wheel.advance_run(self.time())
         self._ensure_wheel_tick()
 
-    def _run_once(self):
+    # Waived for the same reason as the assignment in `__init__`: shadowing this
+    # per instance makes the name a method-or-bound-method union, which no
+    # class-level definition can then be substitutable for.
+    def _run_once(self) -> None:  # ty: ignore[invalid-method-override]
         if self._stats_on:
             self._reactor_stats["poll_calls"] += 1
         return super()._run_once()
@@ -510,7 +610,7 @@ async def serve(
     *,
     host: str = "127.0.0.1",
     port: int = 0,
-    protocols: tuple[str, ...] = ("http/1.1",),
+    protocols: tuple[HttpProtocolName, ...] = ("http/1.1",),
     config: Any = None,
     loop: asyncio.AbstractEventLoop | None = None,
 ) -> _ServerHandle:

@@ -106,7 +106,39 @@ class Response:
         samesite: str | None = "lax",
     ) -> None:
         """Append a Set-Cookie header. Values are sent verbatim; callers quote
-        or encode values that contain separators."""
+        or encode values that contain separators.
+
+        Enforces the browser-mandated attribute rules so a cookie is never
+        emitted in a form every browser silently drops: ``SameSite`` must be one
+        of ``strict``/``lax``/``none`` and ``SameSite=None`` requires ``Secure``
+        (RFC 6265bis 5.4.7); the ``__Secure-``/``__Host-`` name prefixes require
+        ``Secure`` (and, for ``__Host-``, ``Path=/`` with no ``Domain``) per
+        RFC 6265bis 4.1.3.
+        """
+        if samesite is not None:
+            samesite = samesite.lower()
+            if samesite not in ("strict", "lax", "none"):
+                raise ValueError(
+                    f"samesite must be 'strict', 'lax', or 'none', got {samesite!r}"
+                )
+            if samesite == "none" and not secure:
+                raise ValueError(
+                    "SameSite=None cookies must be Secure (RFC 6265bis 5.4.7); "
+                    "pass secure=True"
+                )
+        # Fail at the call, not later at the native serializer: a control
+        # character (CR/LF especially) in a cookie name or value is a
+        # header-injection vector and never valid (RFC 6265 §4.1.1).
+        for field_name, field_value in (("name", name), ("value", value)):
+            if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in field_value):
+                raise ValueError(f"cookie {field_name} contains a control character")
+        if name.startswith("__Secure-") and not secure:
+            raise ValueError("__Secure- cookies must be Secure; pass secure=True")
+        if name.startswith("__Host-") and not (secure and path == "/" and domain is None):
+            raise ValueError(
+                "__Host- cookies must be Secure, have Path=/, and set no Domain "
+                "(RFC 6265bis 4.1.3)"
+            )
         parts = [f"{name}={value}"]
         if max_age is not None:
             parts.append(f"Max-Age={max_age}")
@@ -125,6 +157,9 @@ class Response:
         self.headers.append((b"set-cookie", "; ".join(parts).encode("latin-1")))
 
     def delete_cookie(self, name: str, *, path: str = "/", domain: str | None = None) -> None:
+        # A prefixed cookie can only be cleared by a Set-Cookie that still meets
+        # the prefix's attribute rules, so carry Secure for those names.
+        secure = name.startswith(("__Secure-", "__Host-"))
         self.set_cookie(
             name,
             "",
@@ -132,6 +167,7 @@ class Response:
             expires="Thu, 01 Jan 1970 00:00:00 GMT",
             path=path,
             domain=domain,
+            secure=secure,
             samesite=None,
         )
 

@@ -15,6 +15,32 @@ Treating one as the other — reading request state as if it were startup config
 or mutating config at runtime — is a category error, so the two never share an
 interface.
 
+## User story: compute a value once per request, read it downstream
+
+> *As an API author, my auth middleware resolves the current tenant from the
+> request. Every handler needs it. I want to compute it once, early, and read it
+> later without re-parsing anything — and I want it gone when the request ends.*
+
+```python
+from wreath.middleware import MiddlewareHooks
+
+async def resolve_tenant(request):
+    request.state.tenant = tenant_from_host(request.headers)
+    return None                         # None → continue to the handler
+
+app.add_middleware(MiddlewareHooks(before=resolve_tenant))
+
+@app.get("/dashboard")
+async def dashboard(request):
+    return {"tenant": request.state.tenant}
+```
+
+`request.state` is a fresh, per-request bag: set an attribute on it in a
+`before` hook and any later stage sees it; it's discarded when the request ends,
+and two concurrent requests never share it. Values that must outlive a single
+request live on `app.state` instead — that's where `app.http_client(...)` and the
+other application resources register themselves.
+
 ## Reading the environment
 
 ```python

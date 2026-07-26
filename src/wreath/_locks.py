@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import warnings
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -55,7 +56,7 @@ def _validate_mode(mode: str) -> None:
         )
 
 
-def _reject_read_only(database: Database, workload: str) -> None:
+def _reject_read_only(database: Database, workload: Workload) -> None:
     # Imported lazily to avoid an import cycle (postgres imports this module).
     from .postgres import _READ_ONLY
 
@@ -70,6 +71,46 @@ def _reject_read_only(database: Database, workload: str) -> None:
 def _default_jitter(base: float) -> float:
     # Bounded non-negative jitter so followers do not thundering-herd the lock.
     return random.random() * base * 0.25
+
+
+# Each session-scoped advisory lock pins a pooled connection for its whole
+# lifetime, so holding too many at once starves the pool of connections for
+# ordinary queries. Track the live count per (database, workload) so an acquire
+# that would exhaust the pool's headroom warns loudly instead of deadlocking
+# silently at request time.
+_held_locks: dict[tuple[int, str], int] = {}
+
+
+def _pool_max_size(database: Database, workload: Workload) -> int | None:
+    try:
+        return database._configs[workload].max_size
+    except (KeyError, AttributeError):
+        return None
+
+
+def _enter_held(database: Database, workload: Workload) -> None:
+    key = (id(database), workload)
+    held = _held_locks.get(key, 0) + 1
+    _held_locks[key] = held
+    max_size = _pool_max_size(database, workload)
+    if max_size is not None and held >= max_size:
+        warnings.warn(
+            f"{held} session-scoped advisory lock(s) held on the {workload!r} pool "
+            f"(max_size={max_size}); each pins a connection for its whole lifetime, "
+            "leaving no headroom for ordinary queries -- raise the pool max_size, or "
+            "prefer xact-scoped Session.lock for request-path exclusion.",
+            ResourceWarning,
+            stacklevel=3,
+        )
+
+
+def _exit_held(database: Database, workload: Workload) -> None:
+    key = (id(database), workload)
+    remaining = _held_locks.get(key, 0) - 1
+    if remaining > 0:
+        _held_locks[key] = remaining
+    else:
+        _held_locks.pop(key, None)
 
 
 class AdvisoryLock:
@@ -119,6 +160,7 @@ class AdvisoryLock:
             self._connection = None
             await self._database.release(self._workload, connection)
             raise
+        _enter_held(self._database, self._workload)
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
@@ -126,6 +168,7 @@ class AdvisoryLock:
         self._connection = None
         if connection is None:
             return False
+        _exit_held(self._database, self._workload)
         await _release(self._database, self._workload, connection, self._mode,
                        self._namespace, self._key, unlock=True)
         return False
@@ -179,6 +222,7 @@ class AdvisoryTryLock:
                            self._namespace, self._key, unlock=False)
             return None
         self._connection = connection
+        _enter_held(self._database, self._workload)
         # The handle is this object; presence (not None) signals the lock is held.
         return self
 
@@ -217,6 +261,7 @@ class AdvisoryTryLock:
         self._connection = None
         if connection is None:
             return False
+        _exit_held(self._database, self._workload)
         await _release(self._database, self._workload, connection, self._mode,
                        self._namespace, self._key, unlock=True)
         return False
@@ -267,6 +312,7 @@ class SingletonRunner:
         while not self._stopped:
             connection = await self._database.acquire(self._workload)
             held = False
+            counted = False
             try:
                 held = bool(
                     await connection.fetchval(
@@ -277,6 +323,8 @@ class SingletonRunner:
                 )
                 if held:
                     # We are the leader for as long as we hold this connection.
+                    _enter_held(self._database, self._workload)
+                    counted = True
                     await self._work()
                     return  # work() returned -> voluntarily relinquish leadership
             except asyncio.CancelledError:
@@ -294,6 +342,8 @@ class SingletonRunner:
                 connection = None
                 held = False
             finally:
+                if counted:
+                    _exit_held(self._database, self._workload)
                 if connection is not None:
                     await _release(self._database, self._workload, connection,
                                    "exclusive", self._namespace, self._key,

@@ -82,7 +82,9 @@ async def test_structured_hsts_is_https_only() -> None:
     )
 
     class Request:
-        scope = {"scheme": "https"}
+        # `scheme` is the member the middleware reads; going through `scope`
+        # would materialize the lazy native scope dict on every response.
+        scheme = "https"
 
     class Response:
         headers: list[tuple[bytes, bytes]] = []

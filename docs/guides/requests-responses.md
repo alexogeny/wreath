@@ -4,6 +4,30 @@ Every handler sits between two things: the `Request` that came in, and the
 response you send back. Wreath tries to make the common case effortless and the
 uncommon case fully within reach.
 
+## User story: a created record and a redirect
+
+> *As an API author, most of my handlers just return a dict and I want that to
+> Just Work as JSON. But my create endpoint should answer `201 Created`, not the
+> default `200`, and one legacy path has to redirect. I don't want to drop to raw
+> ASGI for either.*
+
+```python
+from wreath.response import JSONResponse, RedirectResponse
+
+@app.post("/users")
+async def create_user(request) -> JSONResponse:
+    user = await save(await request.json())
+    return JSONResponse({"id": user.id}, status=201)
+
+@app.get("/old-path")
+async def moved(request) -> RedirectResponse:
+    return RedirectResponse("/new-path", status=308)
+```
+
+Return a plain dict for the ordinary case and Wreath sends `200
+application/json`; reach for a response type only when you need to say something
+more — a specific status, a redirect, a stream, or a file.
+
 ## The request
 
 The `Request` carries everything about the incoming call — method, URL, headers,

@@ -29,10 +29,26 @@ Read these first if you (or the code you are translating) use the FastAPI stack.
 - [Middleware](guides/middleware.md): the protocol and built-ins.
 - [Auth](guides/auth.md): authentication (identity) and authorization (roles, permissions, and a built-in dependency-free Cedar engine: CedarPolicies parses at startup, native evaluation, forbid-overrides-permit, default deny; extensions/schema validation fail loudly at parse time).
 - [WebSockets](guides/websockets.md), [Native server](guides/server.md), [Outbound HTTP and webhooks](guides/http-client.md).
+- [Calling another service](guides/service-client.md): `ServiceClient` binds a base path and an auto-refreshing bearer token onto an origin-pinned `Client`.
 - [PostgreSQL](guides/postgres.md) and [ORM](guides/orm.md): strict direction orm → postgres.
 - [FastAPI and Alembic migration](guides/migrations.md): staged SaaS adoption of logical schemas and metal readiness resolution.
 - [Templates](guides/templates.md), [Caching](guides/caching.md), [Compression](guides/compression.md), [Static files](guides/static-files.md).
-- [Configuration and state](guides/config-state.md), [OpenAPI and typed clients](guides/openapi-typegen.md), [Testing](guides/testing.md).
+- [Caching responses](guides/response-cache.md): `@cached` over a bounded in-process store — public/shared by default, never caches a cookie-setting or no-store/private response; pass `key` to scope it to a principal.
+- [Idempotent writes](guides/idempotency.md): `IdempotencyMiddleware` replays the first response for a repeated `Idempotency-Key`, from a bounded in-process store — no Redis.
+- [Configuration and state](guides/config-state.md), [OpenAPI and typed clients](guides/openapi-typegen.md), [API docs](guides/api-docs.md), [Testing](guides/testing.md).
+- [Server-sent events](guides/sse.md) and [Forms and uploads](guides/forms.md): the response type and the multipart binding path.
+- [Content negotiation](guides/content-negotiation.md): `serialize(request, data)` picks the format from `Accept` (q-values per RFC 9110 §12.5.1); JSON stays the default.
+- [Durable jobs, messaging, and services](guides/jobs.md): PostgreSQL is the queue — no broker; the supervisor starts after databases and drains in-flight work on shutdown.
+- [Task progress](guides/progress.md): a bounded in-process registry a slow task writes to and a status endpoint or stream reads.
+- [Users](guides/users.md): registration, sessions, and the ready-made user router.
+- [Object storage](guides/storage.md), [Pagination](guides/pagination.md), [Distributed locks](guides/distributed-locks.md): advisory locks and SingletonRunner come from the `wreath.postgres` facade.
+- [Generating CRUD](guides/crud.md): `crud_router` / `Wreath.crud`, off by default (app-level + per-model opt-in); sensitive columns hidden unless `expose`d; per-operation `authorize={op: Access.roles/permissions/cedar/deny}` plus `object_authorizer` for row-level checks.
+- [Building a docs site](guides/docs-ssg.md): `wreath docs build` — the native SSG (typed-Python config, no YAML), themes/feels, build-time charts, `:::` API reference; mints wreath's own docs.
+- [JSONB and arrays](guides/jsonb-arrays.md): the ORM's PostgreSQL container types.
+- [Health, flags, and versioning](guides/health-flags-versioning.md): probes, feature flags, API versions.
+- [Observability](guides/observability.md): telemetry configuration, exporters, and the Flight Recorder in practice.
+- [Auditing](guides/auditing.md): `wreath audit` runs a curated zero-dependency accessibility (WCAG 2.2 A/AA) and performance ruleset over generated HTML; see [the rule reference](reference/audit.md) for adding one.
+- [Porting from FastAPI](guides/porting.md): `wreath port` analyzes an app statically and never imports it; report-only today.
 
 ## Reference
 

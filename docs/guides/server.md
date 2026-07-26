@@ -6,6 +6,22 @@ the "native" in Wreath earns its keep: an HTTP/1.1, HTTP/2, and optional HTTP/3
 server that moves the parsing and dispatch hot path into C, on top of an asyncio
 (or uvloop) transport.
 
+## User story: use every core behind one port in production
+
+> *As an API author, I want to use every core in production — several worker
+> processes behind one port — without a separate process manager or an nginx out
+> front to fan connections out.*
+
+```console
+wreath run example:app --loop metal --workers 4
+```
+
+The metal loop runs one independently owned io_uring event loop per worker, and
+the workers share a single `SO_REUSEPORT` listener group, so the kernel balances
+connections across them. Multiworker mode is metal-only and requires a fixed
+port; on `SIGHUP` it brings up a complete replacement generation and only drains
+the old one once every child reports ready.
+
 The simplest way to run it is from the command line:
 
 ```bash

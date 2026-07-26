@@ -19,7 +19,7 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .analyzer import HTTP_METHODS, _Imports, _base_kind, _iter_py, module_pk_types
+from .analyzer import HTTP_METHODS, _base_kind, _Imports, _iter_py, module_pk_types
 from .rules import RULES
 
 _PHASE1_ONLY = (
@@ -109,7 +109,10 @@ _ORMAR_TYPE = {
 }
 _SA_ELEM_TYPE = {"String": "Text", "Text": "Text", "Integer": "Int64", "Boolean": "Bool"}
 # wreath PgType name -> the Python annotation for a FK column of that PK type.
-_PG_PYANN = {"Uuid": "uuid.UUID", "Int64": "int", "Int32": "int", "Int16": "int", "Varchar": "str", "Text": "str"}
+_PG_PYANN = {
+    "Uuid": "uuid.UUID", "Int64": "int", "Int32": "int", "Int16": "int",
+    "Varchar": "str", "Text": "str",
+}
 
 # rule_ids Phase 1 fully rewrites (or that map 1:1 needing no edit) → no annotation.
 _REWRITTEN = frozenset({
@@ -131,6 +134,27 @@ class PortResult:
     written_files: list[Path] = field(default_factory=list)
     regenerated: list[Path] = field(default_factory=list)
     skipped: list[Path] = field(default_factory=list)
+
+
+#: AST nodes that carry a source span. `ast.AST` itself declares none of
+#: `lineno`/`col_offset`/`end_lineno`/`end_col_offset` -- only statements and
+#: expressions do (plus `ast.arg` and `ast.keyword`, for signature and call-site
+#: surgery) -- so annotating a span argument as `ast.AST` claims more than the
+#: type provides.
+_Positioned = ast.stmt | ast.expr | ast.arg | ast.keyword
+
+
+def _span_end(node: _Positioned) -> tuple[int, int]:
+    """The (line, col) just past `node`.
+
+    `end_lineno`/`end_col_offset` are optional on the AST classes because a
+    node synthesized by hand need not carry them. Every node here came from
+    `ast.parse`, which always populates them; if one somehow has not, the span
+    is unknown and rewriting it would silently corrupt the output, so refuse.
+    """
+    if node.end_lineno is None or node.end_col_offset is None:
+        raise ValueError(f"{type(node).__name__} at line {node.lineno} has no end position")
+    return node.end_lineno, node.end_col_offset
 
 
 # --------------------------------------------------------------------------- edits
@@ -155,15 +179,17 @@ class _Buffer:
         raw = self.b[start:(end if end != -1 else len(self.b))]
         return raw[: len(raw) - len(raw.lstrip(b" \t"))].decode("utf-8")
 
-    def replace(self, node: ast.AST, text: str) -> None:
-        s = self._off(node.lineno, node.col_offset)
-        e = self._off(node.end_lineno, node.end_col_offset)
-        self._edits.append((s, e, text.encode("utf-8")))
+    def start_of(self, node: _Positioned) -> int:
+        return self._off(node.lineno, node.col_offset)
 
-    def replace_span(self, s_node: ast.AST, e_node: ast.AST, text: str) -> None:
-        s = self._off(s_node.lineno, s_node.col_offset)
-        e = self._off(e_node.end_lineno, e_node.end_col_offset)
-        self._edits.append((s, e, text.encode("utf-8")))
+    def end_of(self, node: _Positioned) -> int:
+        return self._off(*_span_end(node))
+
+    def replace(self, node: _Positioned, text: str) -> None:
+        self._edits.append((self.start_of(node), self.end_of(node), text.encode("utf-8")))
+
+    def replace_span(self, s_node: _Positioned, e_node: _Positioned, text: str) -> None:
+        self._edits.append((self.start_of(s_node), self.end_of(e_node), text.encode("utf-8")))
 
     def insert_before_line(self, line: int, text: str) -> None:
         off = self._starts[line - 1]
@@ -184,7 +210,9 @@ class _Buffer:
 
 # --------------------------------------------------------------------------- walker
 class _Emitter(ast.NodeVisitor):
-    def __init__(self, source: str, imports: _Imports, pk_types: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, source: str, imports: _Imports, pk_types: dict[str, str] | None = None
+    ) -> None:
         self.buf = _Buffer(source)
         self.src = source
         self.imports = imports
@@ -209,25 +237,31 @@ class _Emitter(ast.NodeVisitor):
         if extra:
             message = f"{message} ({extra})"
         indent = self.buf.line_indent(line)
-        self.buf.insert_before_line(line, f"{indent}# TODO(wreath-port: [{tag}] {message} [{rule_id}])")
+        self.buf.insert_before_line(
+            line, f"{indent}# TODO(wreath-port: [{tag}] {message} [{rule_id}])"
+        )
 
     # -- imports -----------------------------------------------------------------
     def rewrite_imports(self, tree: ast.Module) -> None:
         last_import_line = 0
         for node in tree.body:
             if isinstance(node, (ast.Import, ast.ImportFrom)):
-                last_import_line = max(last_import_line, node.end_lineno)
+                last_import_line = max(last_import_line, _span_end(node)[0])
             if isinstance(node, ast.ImportFrom) and node.module == "fastapi" and node.level == 0:
                 self._rewrite_from_fastapi(node)
             elif isinstance(node, ast.ImportFrom) and node.module == "pydantic" and node.level == 0:
                 self._rewrite_from_pydantic(node)
             elif (
                 isinstance(node, ast.ImportFrom)
-                and (node.module or "").startswith("fastapi.middleware")
+                and (module := node.module) is not None
+                and module.startswith("fastapi.middleware")
                 and any(a.name == "CORSMiddleware" for a in node.names)
             ):
                 self.needs.add("CORSMiddleware")
-                self.buf.replace(node, self._keep_leftover(node, drop={"CORSMiddleware"}, module=node.module))
+                self.buf.replace(
+                    node,
+                    self._keep_leftover(node, drop={"CORSMiddleware"}, module=module),
+                )
         self._last_import_line = last_import_line
 
     def _rewrite_from_fastapi(self, node: ast.ImportFrom) -> None:
@@ -253,13 +287,17 @@ class _Emitter(ast.NodeVisitor):
         if any(a.name in ("BaseModel", "Field") for a in node.names):
             self.needs_dataclass = True
         if keep:
-            self.buf.replace(node, "from pydantic import " + ", ".join(self._alias_str(a) for a in keep))
+            self.buf.replace(
+                node, "from pydantic import " + ", ".join(self._alias_str(a) for a in keep)
+            )
         else:
             self.buf.replace(node, "")
 
     def _keep_leftover(self, node: ast.ImportFrom, drop: set[str], module: str) -> str:
         keep = [a for a in node.names if a.name not in drop]
-        return f"from {module} import " + ", ".join(self._alias_str(a) for a in keep) if keep else ""
+        if not keep:
+            return ""
+        return f"from {module} import " + ", ".join(self._alias_str(a) for a in keep)
 
     @staticmethod
     def _alias_str(a: ast.alias) -> str:
@@ -291,7 +329,8 @@ class _Emitter(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         for dec in node.decorator_list:
             if self.imports.origin(dec).split(".")[-1] == "as_form":
-                self._delete_decorator(dec)  # translated: whole-model Annotated[Model, Form()] replaces it
+                # translated: whole-model Annotated[Model, Form()] replaces it
+                self._delete_decorator(dec)
         kind = _base_kind(self.imports, node)
         if kind == "pydantic":
             self._rewrite_pydantic_class(node)
@@ -300,9 +339,11 @@ class _Emitter(ast.NodeVisitor):
         elif kind == "ormar":
             self._rewrite_ormar_class(node)
         elif kind == "sqlmodel":
-            self._annotate(node.lineno, "orm.model", "SQLModel/SQLAlchemy translation is manual (Phase 2 targets ormar)")
+            self._annotate(node.lineno, "orm.model",
+                           "SQLModel/SQLAlchemy translation is manual (Phase 2 targets ormar)")
         elif any(self.imports.origin(b).endswith("BaseHTTPMiddleware") for b in node.bases):
-            self._annotate(node.lineno, "mw.custom", "subclass — rework onto wreath's fused middleware base")
+            self._annotate(node.lineno, "mw.custom",
+                           "subclass — rework onto wreath's fused middleware base")
         self.generic_visit(node)
 
     def _rewrite_pydantic_class(self, node: ast.ClassDef) -> None:
@@ -314,15 +355,16 @@ class _Emitter(ast.NodeVisitor):
         if base_origins == ["pydantic.BaseModel"]:
             self._strip_all_bases(node)  # `class X(BaseModel):` -> `class X:`
         elif "pydantic.BaseModel" in base_origins:
-            self._annotate(node.lineno, "pydantic.model", "multiple bases — remove BaseModel by hand")
+            self._annotate(node.lineno, "pydantic.model",
+                           "multiple bases — remove BaseModel by hand")
         for stmt in node.body:
             self._rewrite_pydantic_field(stmt)
 
     def _strip_all_bases(self, node: ast.ClassDef) -> None:
         """Remove the whole ``(...)`` base list — correct only when it is the sole base."""
         b = self.buf.b
-        pstart = self.buf._off(node.bases[0].lineno, node.bases[0].col_offset)
-        pend = self.buf._off(node.bases[-1].end_lineno, node.bases[-1].end_col_offset)
+        pstart = self.buf.start_of(node.bases[0])
+        pend = self.buf.end_of(node.bases[-1])
         open_i = b.rfind(b"(", 0, pstart)
         close_i = b.find(b")", pend)
         if open_i != -1 and close_i != -1:
@@ -338,8 +380,11 @@ class _Emitter(ast.NodeVisitor):
             if name == "model_config":
                 extra = _config_extra(stmt.value)
                 if extra == "forbid":
-                    indent = self.buf.line_indent(stmt.lineno)
-                    self.buf.replace(stmt, f"# wreath-port: extra='forbid' is wreath's default (dropped)")
+                    # `replace` spans from the node's own col_offset, so the
+                    # source indentation in front of it is left alone.
+                    self.buf.replace(
+                        stmt, "# wreath-port: extra='forbid' is wreath's default (dropped)"
+                    )
                 elif extra == "ignore":
                     self._annotate(stmt.lineno, "pydantic.config_ignore")
                 return
@@ -347,21 +392,25 @@ class _Emitter(ast.NodeVisitor):
             if _is_field_constraint(stmt.value, self.imports) or (
                 isinstance(ann, ast.Call)
                 and self.imports.origin(ann.func).split(".")[-1]
-                in ("confloat", "conint", "constr", "condecimal", "conbytes", "conlist", "conset", "condate")
+                in ("confloat", "conint", "constr", "condecimal", "conbytes", "conlist",
+                    "conset", "condate")
             ):
                 self._annotate(stmt.lineno, "pydantic.field_constraint")
                 return
             # mutable literal defaults -> field(default_factory=...)
-            factory = _mutable_factory(stmt.value)
-            if factory:
+            default = stmt.value
+            factory = _mutable_factory(default) if default is not None else None
+            if factory and default is not None:
                 self.needs_dataclass = True
-                self.buf.replace(stmt.value, f"field(default_factory={factory})")
+                self.buf.replace(default, f"field(default_factory={factory})")
         elif isinstance(stmt, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == "model_config" for t in stmt.targets
         ):
             extra = _config_extra(stmt.value)
             if extra == "forbid":
-                self.buf.replace(stmt, "# wreath-port: extra='forbid' is wreath's default (dropped)")
+                self.buf.replace(
+                    stmt, "# wreath-port: extra='forbid' is wreath's default (dropped)"
+                )
             elif extra == "ignore":
                 self._annotate(stmt.lineno, "pydantic.config_ignore")
 
@@ -382,21 +431,26 @@ class _Emitter(ast.NodeVisitor):
                 mixins.append(base)
         if table is not None and node.bases:
             last = node.bases[-1]
-            e = self.buf._off(last.end_lineno, last.end_col_offset)
-            self.buf._edits.append((e, e, f', table="{table}"'.encode("utf-8")))
+            e = self.buf.end_of(last)
+            self.buf._edits.append((e, e, f', table="{table}"'.encode()))
         else:
-            self._annotate(node.lineno, "orm.model", "add table=<name> by hand (tablename not found)")
+            self._annotate(node.lineno, "orm.model",
+                           "add table=<name> by hand (tablename not found)")
         if config_stmt is not None:
             self.buf.replace(config_stmt, "")
         if mixins:
-            self._annotate(node.lineno, "orm.model", "mixin base(s) hold ormar columns — translate the mixin by hand")
-        self._annotate(node.lineno, "orm.column", "verify nullability: wreath columns are NOT NULL by default")
+            self._annotate(node.lineno, "orm.model",
+                           "mixin base(s) hold ormar columns — translate the mixin by hand")
+        self._annotate(node.lineno, "orm.column",
+                       "verify nullability: wreath columns are NOT NULL by default")
         for stmt in node.body:
-            if stmt is not config_stmt and isinstance(stmt, ast.AnnAssign) and isinstance(stmt.value, ast.Call):
-                self._rewrite_ormar_column(stmt)
+            if (stmt is not config_stmt and isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.value, ast.Call)):
+                # Pass the narrowed call along: `AnnAssign.value` is Optional, and
+                # re-reading it in the callee would throw that narrowing away.
+                self._rewrite_ormar_column(stmt, stmt.value)
 
-    def _rewrite_ormar_column(self, stmt: ast.AnnAssign) -> None:
-        call = stmt.value
+    def _rewrite_ormar_column(self, stmt: ast.AnnAssign, call: ast.Call) -> None:
         tail = self.imports.origin(call.func).split(".")[-1]
         ann_src = self._seg(stmt.annotation)
         if tail == "ForeignKey":
@@ -404,12 +458,14 @@ class _Emitter(ast.NodeVisitor):
             return
         pgtype = self._ormar_pgtype(tail, call)
         if pgtype is None:
-            self._annotate(stmt.lineno, "orm.column", f"no wreath PgType for ormar.{tail} — map by hand")
+            self._annotate(stmt.lineno, "orm.column",
+                           f"no wreath PgType for ormar.{tail} — map by hand")
             return
         self.needs.update({"Mapped", "column"})
         kwargs = self._ormar_kwargs(stmt, call)
         self.buf.replace(stmt.annotation, f"Mapped[{ann_src}]")
-        self.buf.replace(call, f"column({pgtype}" + ("" if not kwargs else ", " + ", ".join(kwargs)) + ")")
+        args = "" if not kwargs else ", " + ", ".join(kwargs)
+        self.buf.replace(call, f"column({pgtype}{args})")
 
     def _rewrite_ormar_fk(self, stmt: ast.AnnAssign, call: ast.Call, ann_src: str) -> None:
         if not isinstance(stmt.target, ast.Name) or not call.args:
@@ -418,20 +474,29 @@ class _Emitter(ast.NodeVisitor):
         name = stmt.target.id
         arg0 = call.args[0]
         target = self._seg(arg0)
-        target_name = arg0.id if isinstance(arg0, ast.Name) else (arg0.attr if isinstance(arg0, ast.Attribute) else None)
+        target_name = None
+        if isinstance(arg0, ast.Name):
+            target_name = arg0.id
+        elif isinstance(arg0, ast.Attribute):
+            target_name = arg0.attr
         idx = any(kw.arg == "index" and _is_true(kw.value) for kw in call.keywords)
         indent = self.buf.line_indent(stmt.lineno)
         pg = self.pk_types.get(target_name)
         if pg is not None:  # translated: PK type resolved from the referenced model in-module
             pyann = _PG_PYANN.get(pg, "int")
             self.needs.update({"Mapped", "column", "relationship", pg})
-            col = f"{name}_id: Mapped[{pyann}] = column({pg}, references={target}.id{', index=True' if idx else ''})"
+            index = ", index=True" if idx else ""
+            col = (f"{name}_id: Mapped[{pyann}] = "
+                   f"column({pg}, references={target}.id{index})")
             self.buf.replace(stmt, f'{col}\n{indent}{name} = relationship({target}, load="raise")')
         else:  # needs-review: referenced PK not resolvable in this module -> Uuid default + flag
             self.needs.update({"Mapped", "column", "relationship", "Uuid"})
-            col = f"{name}_id: Mapped[uuid.UUID] = column(Uuid, references={target}.id{', index=True' if idx else ''})"
+            index = ", index=True" if idx else ""
+            col = (f"{name}_id: Mapped[uuid.UUID] = "
+                   f"column(Uuid, references={target}.id{index})")
             self.buf.replace(stmt, f'{col}\n{indent}{name} = relationship({target}, load="raise")')
-            self._annotate(stmt.lineno, "orm.fk", "FK column type unresolved; defaulted to Uuid — set by hand")
+            self._annotate(stmt.lineno, "orm.fk",
+                           "FK column type unresolved; defaulted to Uuid — set by hand")
 
     def _ormar_pgtype(self, tail: str, call: ast.Call) -> str | None:
         if tail == "ARRAY":
@@ -458,7 +523,8 @@ class _Emitter(ast.NodeVisitor):
         dropped: list[str] = []
         minimum = maximum = None
         for kw in call.keywords:
-            if kw.arg in ("primary_key", "nullable", "unique", "index", "server_default", "default"):
+            if kw.arg in ("primary_key", "nullable", "unique", "index", "server_default",
+                          "default"):
                 out.append(f"{kw.arg}={self._seg(kw.value)}")
             elif kw.arg == "default_factory":
                 out.append(f"default={self._seg(kw.value)}")
@@ -486,10 +552,12 @@ class _Emitter(ast.NodeVisitor):
     def visit_FunctionDef(self, node) -> None:
         route_dec = None
         for dec in node.decorator_list:
-            if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute) and dec.func.attr in HTTP_METHODS:
+            attr = dec.func.attr if (isinstance(dec, ast.Call)
+                                     and isinstance(dec.func, ast.Attribute)) else None
+            if attr in HTTP_METHODS:
                 route_dec = dec
                 self._rewrite_route_options(dec, node)
-            elif isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute) and dec.func.attr == "websocket":
+            elif attr == "websocket":
                 self._annotate(dec.lineno, "route.websocket")
             dec_origin = self.imports.origin(dec.func if isinstance(dec, ast.Call) else dec)
             tail = dec_origin.split(".")[-1]
@@ -517,7 +585,7 @@ class _Emitter(ast.NodeVisitor):
         self.needs.add("Request")
         if args:
             first = args[0]
-            s = self.buf._off(first.lineno, first.col_offset)
+            s = self.buf.start_of(first)
             self.buf._edits.append((s, s, b"request: Request, "))
         # zero-arg handlers are rare; annotate rather than risk paren surgery
         elif not (node.args.kwonlyargs or node.args.vararg or node.args.kwarg):
@@ -531,39 +599,54 @@ class _Emitter(ast.NodeVisitor):
         self.buf._edits.append((start, end, b""))
 
     def _rewrite_as_form_params(self, node) -> None:
-        """`x: T = Depends(<Model>.as_form)` -> `x: Annotated[T, Form()]` (whole-model Form binding)."""
+        """`x: T = Depends(<Model>.as_form)` -> `x: Annotated[T, Form()]`.
+
+        Whole-model Form binding.
+        """
         args = node.args
-        defaulted = list(zip(args.args[len(args.args) - len(args.defaults):], args.defaults))
-        defaulted += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None]
+        # Both pairings are equal-length by construction: the tail of `args.args`
+        # is sliced to `len(args.defaults)`, and the AST keeps `kw_defaults` the
+        # same length as `kwonlyargs`, padding with None.
+        defaulted = list(zip(args.args[len(args.args) - len(args.defaults):], args.defaults,
+                             strict=True))
+        defaulted += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults, strict=True)
+                      if d is not None]
         for arg, default in defaulted:
-            if not (isinstance(default, ast.Call)
-                    and self.imports.origin(default.func).split(".")[-1] == "Depends" and default.args):
+            if not (isinstance(default, ast.Call) and default.args
+                    and self.imports.origin(default.func).split(".")[-1] == "Depends"):
                 continue
             dep = default.args[0]
-            if isinstance(dep, ast.Attribute) and dep.attr == "as_form" and arg.annotation is not None:
+            if (isinstance(dep, ast.Attribute) and dep.attr == "as_form"
+                    and arg.annotation is not None):
                 self.needs_annotated = True
                 self.needs.add("Form")  # -> wreath.binding via _WREATH_MODULE
                 new = f"{arg.arg}: Annotated[{self._seg(arg.annotation)}, Form()]"
-                s = self.buf._off(arg.lineno, arg.col_offset)
-                e = self.buf._off(default.end_lineno, default.end_col_offset)
+                s = self.buf.start_of(arg)
+                e = self.buf.end_of(default)
                 self.buf._edits.append((s, e, new.encode("utf-8")))
 
     def _rewrite_route_options(self, dec: ast.Call, node) -> None:
         """Translate `status_code=`/`response_model=`; annotate what can't be done safely."""
         drop: set[str] = set()
         single_return = (
-            len(node.body) == 1 and isinstance(node.body[0], ast.Return) and node.body[0].value is not None
+            len(node.body) == 1
+            and isinstance(node.body[0], ast.Return)
+            and node.body[0].value is not None
         )
         sc = next((kw for kw in dec.keywords if kw.arg == "status_code"), None)
-        if sc is not None and isinstance(sc.value, ast.Constant) and isinstance(sc.value.value, int) and single_return:
+        literal_status = (sc is not None and isinstance(sc.value, ast.Constant)
+                          and isinstance(sc.value.value, int))
+        if literal_status and single_return:
             ret = node.body[0]
             self.needs.add("JSONResponse")
-            self.buf.replace(ret.value, f"JSONResponse({self._seg(ret.value)}, status={sc.value.value})")
+            self.buf.replace(ret.value,
+                             f"JSONResponse({self._seg(ret.value)}, status={sc.value.value})")
             drop.add("status_code")
         elif sc is not None:
             self._annotate(dec.lineno, "route.status_code")
         if any(kw.arg == "response_model" for kw in dec.keywords):
-            drop.add("response_model")  # translated: drop the kwarg (return annotation is the schema source)
+            # translated: drop the kwarg (the return annotation is the schema source)
+            drop.add("response_model")
         if any(kw.arg == "include_in_schema" and _is_false(kw.value) for kw in dec.keywords):
             self._annotate(dec.lineno, "route.include_in_schema")
         if drop:
@@ -577,7 +660,7 @@ class _Emitter(ast.NodeVisitor):
     def _split_markers(self, node) -> None:
         args = node.args
         defaulted = args.args[len(args.args) - len(args.defaults):]
-        for arg, default in zip(defaulted, args.defaults):
+        for arg, default in zip(defaulted, args.defaults, strict=True):
             if not isinstance(default, ast.Call):
                 continue
             marker = self.imports.origin(default.func).split(".")[-1]
@@ -589,7 +672,9 @@ class _Emitter(ast.NodeVisitor):
         ann = self._seg(arg.annotation)
         # positional[0] is the default value (skip Ellipsis => required).
         default_src = None
-        if call.args and not (isinstance(call.args[0], ast.Constant) and call.args[0].value is Ellipsis):
+        required = (call.args and isinstance(call.args[0], ast.Constant)
+                    and call.args[0].value is Ellipsis)
+        if call.args and not required:
             default_src = self._seg(call.args[0])
         # A REQUIRED marker (no default) would become a non-default param, which cannot
         # legally follow a defaulted one after the split. Leave it and flag it, rather
@@ -614,11 +699,12 @@ class _Emitter(ast.NodeVisitor):
         if default_src is not None:
             new += f" = {default_src}"
         # replace the whole "arg: T = Marker(...)" span
-        s = self.buf._off(arg.lineno, arg.col_offset)
-        e = self.buf._off(call.end_lineno, call.end_col_offset)
+        s = self.buf.start_of(arg)
+        e = self.buf.end_of(call)
         self.buf._edits.append((s, e, new.encode("utf-8")))
         if dropped:
-            self._annotate(arg.lineno, "param.query_strconstraint", "dropped kwargs: " + ", ".join(dropped))
+            self._annotate(arg.lineno, "param.query_strconstraint",
+                           "dropped kwargs: " + ", ".join(dropped))
 
     # -- calls (FastAPI/APIRouter name, HTTPException, CORS, queries, infra) ------
     def visit_Call(self, node: ast.Call) -> None:
@@ -626,7 +712,8 @@ class _Emitter(ast.NodeVisitor):
         origin = self.imports.origin(func)
         tail = origin.split(".")[-1]
         if isinstance(func, ast.Name) and origin in ("fastapi.FastAPI", "fastapi.APIRouter"):
-            self.buf.replace(func, _FASTAPI_RENAMED[func.id if func.id in _FASTAPI_RENAMED else tail])
+            key = func.id if func.id in _FASTAPI_RENAMED else tail
+            self.buf.replace(func, _FASTAPI_RENAMED[key])
             self.needs.add(_FASTAPI_RENAMED.get(tail, tail))
             if tail == "APIRouter":
                 self._router_deps(node)
@@ -638,7 +725,8 @@ class _Emitter(ast.NodeVisitor):
             self._annotate(node.lineno, "route.include_dynamic")
         elif isinstance(func, ast.Attribute) and func.attr in ("delay", "apply_async"):
             self._annotate(node.lineno, "bg.celery")
-        elif isinstance(func, ast.Attribute) and func.attr == "create_task" and self.imports.origin(func.value) == "asyncio":
+        elif (isinstance(func, ast.Attribute) and func.attr == "create_task"
+              and self.imports.origin(func.value) == "asyncio"):
             self._annotate(node.lineno, "bg.asyncio_loop")
         elif tail == "GraphQL":
             self._annotate(node.lineno, "graphql.mount")
@@ -717,14 +805,19 @@ def _config_extra(value: ast.AST | None) -> str | None:
     if isinstance(value, ast.Call):
         for kw in value.keywords:
             if kw.arg == "extra" and isinstance(kw.value, ast.Constant):
-                return kw.value.value
+                # A Constant holds any literal; only a string is an `extra=`
+                # setting. Callers compare against "forbid"/"ignore", so a
+                # non-string was already as good as absent.
+                extra = kw.value.value
+                return extra if isinstance(extra, str) else None
     return None
 
 
 def _is_field_constraint(value: ast.AST | None, imports: _Imports) -> bool:
     if isinstance(value, ast.Call) and imports.origin(value.func).split(".")[-1] == "Field":
         return any(
-            k.arg in ("ge", "le", "gt", "lt", "multiple_of", "min_length", "max_length", "regex", "pattern")
+            k.arg in ("ge", "le", "gt", "lt", "multiple_of", "min_length", "max_length",
+                      "regex", "pattern")
             for k in value.keywords
         )
     return False
@@ -737,7 +830,8 @@ def _mutable_factory(value: ast.AST | None) -> str | None:
         return "dict"
     if isinstance(value, ast.Set):
         return "set"
-    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in ("list", "dict", "set") and not value.args:
+    if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and value.func.id in ("list", "dict", "set") and not value.args):
         return value.func.id
     return None
 
@@ -755,7 +849,10 @@ def _copy_tablename(value: ast.AST | None) -> str | None:
     if isinstance(value, ast.Call):
         for kw in value.keywords:
             if kw.arg == "tablename" and isinstance(kw.value, ast.Constant):
-                return kw.value.value
+                # Only a string literal is a usable table name; anything else
+                # leaves the caller to emit its "add table=<name> by hand" note.
+                table = kw.value.value
+                return table if isinstance(table, str) else None
     return None
 
 
@@ -825,7 +922,13 @@ def _recorded_hashes(text: str) -> tuple[str | None, str | None]:
     return src, out
 
 
-def port_tree(root, output=None, *, in_place: bool = False, force: bool = False) -> PortResult:
+def port_tree(
+    root: str | Path,
+    output: str | Path | None = None,
+    *,
+    in_place: bool = False,
+    force: bool = False,
+) -> PortResult:
     """Port every ``.py`` under ``root`` into a sister tree (or in place).
 
     Idempotent: an unchanged source whose output still carries a matching provenance
@@ -835,9 +938,12 @@ def port_tree(root, output=None, *, in_place: bool = False, force: bool = False)
     root = Path(root)
     if in_place and not force:
         raise ValueError("wreath port --in-place requires --force (or use --output <dir>)")
-    if not in_place and output is None:
+    if in_place:
+        out_root = root
+    elif output is None:
         raise ValueError("wreath port needs --output <dir> (or --in-place --force)")
-    out_root = root if in_place else Path(output)
+    else:
+        out_root = Path(output)
     result = PortResult()
     for src_path in _iter_py(root):
         rel = src_path.relative_to(root) if root != src_path else src_path.name

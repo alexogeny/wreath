@@ -2,6 +2,37 @@
 
 A single form field binds with a `Form()` marker. A whole *model* — the ten-field settings form, the multi-part upload with metadata — used to mean pulling fields out of `request.form()` by hand, or importing a decorator to teach a model how to read a form. Wreath binds the whole model in one marker.
 
+## User story: an avatar form with fields and a file
+
+> *As an API author, my "set avatar" form posts an image together with a display
+> name and a caption. I want the text fields validated as a model and the
+> uploaded file handed to me in the same handler — not pulled out of
+> `request.form()` by hand.*
+
+```python
+from dataclasses import dataclass
+from typing import Annotated
+from wreath.binding import Form, File
+from wreath.request import UploadedFile
+
+@dataclass
+class AvatarForm:
+    display_name: str
+    caption: str = ""
+
+@app.post("/avatar")
+async def set_avatar(
+    request,
+    data: Annotated[AvatarForm, Form()],
+    image: Annotated[UploadedFile, File()],
+) -> dict:
+    return {"name": data.display_name, "filename": image.filename}
+```
+
+The `AvatarForm` fields are read from the multipart body and validated by the
+same tape that checks a JSON body; the uploaded `image` arrives beside them as an
+`UploadedFile`. One handler, one form, both halves typed.
+
 ## Bind an entire model from a form
 
 Annotate the parameter with your model and `Form()`:

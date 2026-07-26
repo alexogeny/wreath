@@ -517,12 +517,9 @@ write_error(WreathHttpProtocol *self, int status)
         goto done;
     }
     {
-        PyObject *defaults = PyObject_GetAttrString(self->config, "_default_response_headers");
-        PyObject *headers = defaults ? PyObject_GetAttrString(defaults, "headers") : NULL;
-        Py_XDECREF(defaults);
-        if (headers == NULL) goto done;
-        PyObject *items = PySequence_Fast(headers, "default response headers must be a sequence");
-        Py_DECREF(headers);
+        /* Cached in http_protocol_init; see begin_response_parts. */
+        PyObject *items = PySequence_Fast(self->default_response_headers,
+                                          "default response headers must be a sequence");
         if (items == NULL) goto done;
         for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(items); i++) {
             PyObject *pair = PySequence_Fast_GET_ITEM(items, i);
@@ -1188,18 +1185,10 @@ begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *h
         Py_CLEAR(items);
     }
     {
-        PyObject *defaults = PyObject_GetAttrString(self->config, "_default_response_headers");
-        PyObject *default_headers;
-        if (defaults == NULL) {
-            goto error;
-        }
-        default_headers = PyObject_GetAttrString(defaults, "headers");
-        Py_DECREF(defaults);
-        if (default_headers == NULL) {
-            goto error;
-        }
-        items = PySequence_Fast(default_headers, "default response headers must be a sequence");
-        Py_DECREF(default_headers);
+        /* Resolved once in http_protocol_init (config is immutable while
+         * serving), so the hot egress path just replays the cached sequence. */
+        items = PySequence_Fast(self->default_response_headers,
+                                "default response headers must be a sequence");
         if (items == NULL) {
             goto error;
         }
@@ -1965,6 +1954,19 @@ decode_path(const char *data, Py_ssize_t size, int *bad)
 }
 
 
+/*
+ * Decide how to read the request body, rejecting the malformed and
+ * request-smuggling framings. These are load-bearing MUSTs -- do not relax one
+ * without re-reading the clause:
+ *   - Transfer-Encoding AND Content-Length together   -> 400 (RFC 9112 s6.1)
+ *   - Transfer-Encoding whose final token != "chunked" -> 400 (RFC 9112 s6.1)
+ *   - more than one "chunked" coding                   -> 400 (RFC 9112 s6.1)
+ *   - duplicate Content-Length with differing values   -> 400 (RFC 9110 s8.6)
+ *   - non-numeric / empty Content-Length               -> 400 (RFC 9110 s8.6)
+ *   - Expect other than 100-continue, or repeated       -> 417 (RFC 9110 s10.1.1)
+ * Returns 0 on success (with kind, length, and send_continue set) or when it
+ * sets err_status to the status to reject with; -1 on a Python error.
+ */
 static int
 decide_framing(WreathHttpProtocol *self, PyObject *headers, int *kind, Py_ssize_t *length,
                int *err_status, int *send_continue)
@@ -4163,6 +4165,7 @@ http_protocol_traverse(WreathHttpProtocol *self, visitproc visit, void *arg)
     Py_VISIT(self->http_version_10);
     Py_VISIT(self->http_version_11);
     Py_VISIT(self->root_path);
+    Py_VISIT(self->default_response_headers);
     Py_VISIT(self->loop_create_future);
     Py_VISIT(self->loop_create_task);
     Py_VISIT(self->loop_call_later);
@@ -4205,6 +4208,7 @@ http_protocol_clear(WreathHttpProtocol *self)
     Py_CLEAR(self->http_version_10);
     Py_CLEAR(self->http_version_11);
     Py_CLEAR(self->root_path);
+    Py_CLEAR(self->default_response_headers);
     Py_CLEAR(self->loop_create_future);
     Py_CLEAR(self->loop_create_task);
     Py_CLEAR(self->loop_call_later);
@@ -4332,6 +4336,24 @@ http_protocol_init(WreathHttpProtocol *self, PyObject *args, PyObject *kwargs)
     Py_XSETREF(self->loop, loop);
     Py_INCREF(registry);
     Py_XSETREF(self->registry, registry);
+
+    /* Resolve the default response header sequence once per connection (config
+     * is immutable while serving), so begin_response_parts does not re-walk the
+     * attribute protocol twice on every response. Config-dependent, so this
+     * runs on every init rather than only the first. */
+    {
+        PyObject *defaults = PyObject_GetAttrString(config, "_default_response_headers");
+        PyObject *header_seq;
+        if (defaults == NULL) {
+            return -1;
+        }
+        header_seq = PyObject_GetAttrString(defaults, "headers");
+        Py_DECREF(defaults);
+        if (header_seq == NULL) {
+            return -1;
+        }
+        Py_XSETREF(self->default_response_headers, header_seq);
+    }
 
     if (read_ssize_attr(config, "max_request_line", &self->max_request_line) < 0 ||
         read_ssize_attr(config, "max_header_count", &self->max_header_count) < 0 ||

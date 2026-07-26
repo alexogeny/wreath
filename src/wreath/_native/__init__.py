@@ -26,3 +26,14 @@ if not os.environ.get("WREATH_PURE"):
         _client = importlib.import_module("wreath._native._client")
     except ImportError:
         _client = None
+
+# Loaded regardless of WREATH_PURE, unlike the two above: it backs the metal
+# tier, which is native by definition and has no pure twin to fall back to, so
+# gating it here would turn `timers="wheel"` into a failure under WREATH_PURE=1
+# rather than leaving that choice to the caller. `wreath.reactor` raises a clear
+# error when it is absent. Any-typed for the same reason as `_core`.
+_reactor: Any = None
+try:
+    _reactor = importlib.import_module("wreath._native._reactor")
+except ImportError:
+    _reactor = None

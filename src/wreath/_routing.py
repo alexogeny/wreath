@@ -28,7 +28,20 @@ from ._native import _core
 if TYPE_CHECKING:
     from .request import Request
 
-Handler = Callable[["Request"], Awaitable[Any]]
+#: What a route decorator accepts, and what `RouteDefinition.endpoint` holds: the
+#: handler as the user declared it. Its first parameter is the `Request`; any
+#: further parameters are bound by name from the path, query, headers, or body
+#: during startup compilation. That per-route shape cannot be spelled in the type
+#: system, hence `...`. Narrowing this to `[Request]` would reject the framework's
+#: own documented signature -- `async def hello(request: Request, name: str)` --
+#: and every handler in the guides with it.
+Handler = Callable[..., Awaitable[Any]]
+
+#: What the dispatcher calls once compilation has bound the extra parameters away.
+#: Assignable to `Handler`, so the route table can hold either: it is loaded with
+#: declared handlers at registration and reloaded with compiled ones at startup.
+CompiledHandler = Callable[["Request"], Awaitable[Any]]
+
 RoutingMode = Literal["decision", "trie", "bitset"]
 
 if _core is not None:

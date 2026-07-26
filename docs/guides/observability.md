@@ -2,6 +2,18 @@
 
 Wreath's Native Flight Recorder already collects the metrics, traces, and events your app produces. Getting them *out* is a matter of picking a bridge — each reads the same recorder snapshot, so no two exports can disagree, and none pulls in a vendor SDK.
 
+## User story: metrics on Lambda with zero infrastructure
+
+> *As an API author, I run on Lambda where I can't stand up a metrics agent or a scrape target. I still want per-route metrics in CloudWatch — without pulling in `boto3` or running a sidecar.*
+
+```python
+from wreath import telemetry
+
+telemetry.activate_cloudwatch_emf(projector, namespace="Llamacam")
+```
+
+CloudWatch's Embedded Metric Format is just structured JSON written to stdout, which the Lambda/ECS platform parses into metrics automatically — no agent, no `boto3`, no network call from your process. Like every bridge here it reads the same recorder snapshot, so switching later to a Prometheus scrape or a StatsD push never changes what the numbers *mean*, only where they land.
+
 ## Metrics: pull and push
 
 Prometheus (scrape) mounts a `/metrics` endpoint straight from the app:

@@ -27,6 +27,26 @@ if the conversion fails, the caller gets a `422` and your handler is never
 entered. The [Binding, validation, and dependencies](binding.md) guide picks up
 that thread.
 
+## User story: a resource with a typed id
+
+> *As an API author, I'm exposing an `orders` resource: fetch one by id, and
+> create one. I want the id typed as an integer, so a request to `/orders/abc`
+> is turned away before my handler runs — not parsed and re-checked inside it.*
+
+```python
+@app.get("/orders/{id}")
+async def get_order(request: Request, id: int) -> dict:
+    return {"id": id}
+
+@app.post("/orders")
+async def create_order(request: Request) -> dict:
+    return await request.json()
+```
+
+Because `id` is annotated `int`, `/orders/42` reaches the handler as the integer
+`42` while `/orders/abc` never does — the caller gets a `422` and the conversion
+happens once, on the way in, instead of scattered through your code.
+
 ## Composing routers
 
 As an application grows you will want to keep related routes together and out of

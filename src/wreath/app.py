@@ -26,7 +26,14 @@ from ._native import _core
 from ._pure.authz import build_capability_mask as _pure_build_capability_mask
 from ._routing import _CLASSIFYING, Handler, RoutingMode
 from ._routing import Router as CompiledRouter
-from .binding import BindingSpec, Depends, ValidationError, compile_binder, inspect_handler
+from .binding import (
+    AppScope,
+    BindingSpec,
+    Depends,
+    ValidationError,
+    compile_binder,
+    inspect_handler,
+)
 from .cache_control import CacheControl
 from .exceptions import Forbidden, HTTPException, Unauthorized
 from .middleware.base import Middleware, MiddlewareRoute, compile_middleware
@@ -189,45 +196,39 @@ class _ApplicationImage:
         return self._binding_specs
 
 
-class _StaticNode:
-    __slots__ = ("children", "mount")
-
-    def __init__(self) -> None:
-        self.children: dict[str, _StaticNode] = {}
-        self.mount: tuple[int, str, Handler] | None = None
-
-
 class _StaticMatcher:
-    """Prefix trie preserving the previous first-registration precedence."""
+    """Mount prefixes in registration order; the first that matches wins.
 
-    __slots__ = ("_next_order", "_root")
+    Precedence is first-registration, not longest-prefix, so scanning the
+    mounts in order and taking the first hit is exact -- the scan stops at the
+    winner rather than having to see every candidate.
+
+    This was a character trie, which is asymptotically better in the mount
+    count but pays one *Python* loop iteration and dict lookup per path
+    character, bounded by the longest registered prefix. `str.startswith` does
+    the same comparison in one C call, so at realistic mount counts (apps mount
+    a handful of directories, not hundreds) the scan is the cheaper shape.
+    The trade is pinned by the `static-mount-match-scale` complexity probe.
+    """
+
+    __slots__ = ("_mounts",)
 
     def __init__(self) -> None:
-        self._root = _StaticNode()
-        self._next_order = 0
+        #: (prefix, handler) in registration order -- the match precedence.
+        self._mounts: list[tuple[str, Handler]] = []
 
     def add(self, prefix: str, handler: Handler) -> None:
-        node = self._root
-        for character in prefix:
-            node = node.children.setdefault(character, _StaticNode())
-        if node.mount is None:
-            node.mount = (self._next_order, prefix, handler)
-        self._next_order += 1
+        # A repeated prefix keeps the first registration, as the trie did.
+        for existing, _handler in self._mounts:
+            if existing == prefix:
+                return
+        self._mounts.append((prefix, handler))
 
     def match(self, path: str) -> tuple[Handler, dict[str, str]] | None:
-        node = self._root
-        best: tuple[int, str, Handler] | None = None
-        for character in path:
-            node = node.children.get(character)
-            if node is None:
-                break
-            mount = node.mount
-            if mount is not None and (best is None or mount[0] < best[0]):
-                best = mount
-        if best is None:
-            return None
-        _order, prefix, handler = best
-        return handler, {"path": path[len(prefix):]}
+        for prefix, handler in self._mounts:
+            if path.startswith(prefix):
+                return handler, {"path": path[len(prefix):]}
+        return None
 
 
 class Wreath:
@@ -237,9 +238,11 @@ class Wreath:
         "_all_capability_mask",
         "_application_image",
         "_auth_backend",
+        "_app_scope",
         "_authorizer",
         "_capabilities",
         "_classify",
+        "_crud_enabled",
         "_dirty",
         "_databases",
         "_exception_handlers",
@@ -271,6 +274,7 @@ class Wreath:
         "_startup_handlers",
         "_stage_hooks",
         "_static_matcher",
+        "_validation_formatter",
         "_status_handlers",
         "_webhook_hubs",
         "_ws_router",
@@ -300,6 +304,11 @@ class Wreath:
         self.debug = debug
         self._auth_backend: AuthenticationBackend | None = None
         self._authorizer: AuthorizationProvider | None = None
+        # Values from `Depends(..., scope="app")`. Owned by this application
+        # and torn down by its lifespan shutdown -- never a module global, so
+        # two apps in one process do not share dependency instances.
+        self._app_scope = AppScope()
+        self._validation_formatter: Any = None
         self._capabilities: dict[str, int] = {"authenticated": 1}
         self._all_capability_mask = 1
         self._fallback_exception_handler: ExceptionHandler | None = None
@@ -336,6 +345,7 @@ class Wreath:
         self._exception_handlers: dict[type[Exception], ExceptionHandler] = {}
         self._status_handlers: dict[int, ExceptionHandler] = {}
         self._dirty = False
+        self._crud_enabled = False
         self._databases: dict[str, Any] = {}
         self._http_clients: dict[str, Any] = {}
         self._orm_registries: dict[str, Any] = {}
@@ -664,6 +674,32 @@ class Wreath:
         self.include_router(router)
         return router
 
+    def enable_crud(self) -> None:
+        """Allow :meth:`crud` to mount auto-generated CRUD routers.
+
+        CRUD is off by default: generating write endpoints from a model is a
+        deliberate, app-wide decision, so it must be turned on explicitly before
+        any model can opt in.
+        """
+        self._crud_enabled = True
+
+    def crud(self, model: type, open_session: Any, **options: Any) -> Any:
+        """Mount auto-generated CRUD routes for one ``model`` (requires opt-in).
+
+        Off unless :meth:`enable_crud` was called (config-level opt-in) *and* you
+        call this per model (model-level opt-in). Sensitive columns are hidden and
+        unwritable unless named in ``expose=``. See :mod:`wreath.crud`.
+        """
+        if not getattr(self, "_crud_enabled", False):
+            raise RuntimeError(
+                "CRUD is disabled by default; call app.enable_crud() before app.crud(...)"
+            )
+        from .crud import crud_router
+
+        router = crud_router(model, open_session, **options)
+        self.include_router(router)
+        return router
+
     def route(
         self,
         path: str,
@@ -873,6 +909,16 @@ class Wreath:
 
     def add_status_handler(self, status: int, handler: ExceptionHandler) -> None:
         self._status_handlers[status] = handler
+
+    def set_validation_formatter(self, formatter: Any) -> None:
+        """Shape 422 bodies with ``formatter(errors, request) -> ProblemDetail``.
+
+        ``errors`` is the raw list of ``{"loc", "msg", "type"}`` dicts from the
+        validator. Pass ``None`` to restore the built-in RFC 9457 output.
+        ``wreath.validation_errors`` ships a catalogue-backed formatter that
+        translates on ``type`` and negotiates ``Accept-Language``.
+        """
+        self._validation_formatter = formatter
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Send) -> None:
         if self._dirty:
@@ -1195,7 +1241,12 @@ class Wreath:
         active_global: int,
     ) -> None:
         hooks = self._global_hooks
-        for _before, after, _sync in reversed(hooks[:active_global]) if active_global else ():
+        # Counted down by index rather than `reversed(hooks[:active_global])`,
+        # which allocated a fresh list slice on every response.
+        index = active_global
+        while index:
+            index -= 1
+            after = hooks[index][1]
             if after is not None:
                 try:
                     response = _coerce_response(await after(request, response))
@@ -1256,16 +1307,23 @@ class Wreath:
     async def _handle_exception(
         self, request: Request, error: Exception
     ) -> Response | StreamingResponse | FileResponse | PreparedResponse:
-        for error_type in type(error).__mro__:
-            handler = self._exception_handlers.get(error_type)
-            if handler is not None:
-                return _coerce_response(await handler(request, error))
+        # Guarded: most applications register no exception handlers at all, and
+        # the walk was paying one dict lookup per class in the MRO to find that
+        # out on every error response.
+        if self._exception_handlers:
+            for error_type in type(error).__mro__:
+                handler = self._exception_handlers.get(error_type)
+                if handler is not None:
+                    return _coerce_response(await handler(request, error))
         if isinstance(error, ValidationError):
-            return ProblemResponse(
-                status=422,
-                detail="Request validation failed",
-                extensions={"errors": error.errors},
-            )
+            formatter = self._validation_formatter
+            if formatter is None:
+                return ProblemResponse(
+                    status=422,
+                    detail="Request validation failed",
+                    extensions={"errors": error.errors},
+                )
+            return ProblemResponse(formatter(error.errors, request))
         if isinstance(error, HTTPException):
             handler = self._status_handlers.get(error.status)
             if handler is not None:
@@ -1333,6 +1391,7 @@ class Wreath:
                 orm_registries=self._orm_registries,
                 dependencies=definition.dependencies,
                 binding_spec=binding_spec,
+                app_scope=self._app_scope,
             )
             chain = app_middleware + definition.middleware
             if chain:
@@ -1838,6 +1897,10 @@ class Wreath:
                     if self._supervisor is not None:
                         await self._supervisor.stop()
                         self._supervisor = None
+                    # App-scoped dependencies before the resources they were
+                    # built from: an app-scoped generator may still want to
+                    # talk to a database or HTTP client on the way out.
+                    await self._app_scope.aclose()
                     for store in reversed(tuple(self._storages.values())):
                         close = getattr(store, "close", None)
                         if close is not None:
@@ -1876,6 +1939,14 @@ def _ensure_response(endpoint: Handler) -> Handler:
 
 
 def _coerce_response(value: Any) -> Response | StreamingResponse | FileResponse | PreparedResponse:
+    """Turn a handler's return value into a response object.
+
+    Two deliberate tiers, not redundant checks: the exact-type ``kind is`` arms
+    are the common fast path (str/dict/bytes build a response in one frame,
+    skipping the ladder); the ``isinstance`` arms below the response-type check
+    then catch the rarer subclasses (a str/bytes subclass, or a dict/list/scalar
+    for JSON) that the exact-type tests miss.
+    """
     kind = type(value)
     if kind is str:
         return coerce_text(value)

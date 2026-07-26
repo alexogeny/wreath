@@ -14,7 +14,6 @@ compiled _core present (default) and once with WREATH_PURE=1.
 from __future__ import annotations
 
 import base64
-import hashlib
 import hmac
 import json
 import time
@@ -43,7 +42,8 @@ def _segments(header: dict, claims: dict) -> tuple[str, str, bytes]:
     return hb, pb, f"{hb}.{pb}".encode("ascii")
 
 
-def _hs(claims: dict, *, secret: bytes = SECRET, alg: str = "HS256", header_extra: dict | None = None) -> str:
+def _hs(claims: dict, *, secret: bytes = SECRET, alg: str = "HS256",
+        header_extra: dict | None = None) -> str:
     header = {"alg": alg, "typ": "JWT", **(header_extra or {})}
     hb, pb, signing_input = _segments(header, claims)
     sig = hmac.new(secret, signing_input, _HS_DIGEST[alg]).digest()
@@ -51,7 +51,8 @@ def _hs(claims: dict, *, secret: bytes = SECRET, alg: str = "HS256", header_extr
 
 
 def _claims(**overrides) -> dict:
-    base = {"sub": "user-123", "exp": int(time.time()) + 3600, "iss": "https://issuer.example", "aud": "my-api"}
+    base = {"sub": "user-123", "exp": int(time.time()) + 3600,
+            "iss": "https://issuer.example", "aud": "my-api"}
     base.update(overrides)
     return base
 
@@ -181,7 +182,7 @@ def test_eddsa_is_a_loud_unsupported_error():
 
 @pytest.fixture(scope="module")
 def rsa_keypair():
-    crypto = pytest.importorskip("cryptography")
+    pytest.importorskip("cryptography")
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
 

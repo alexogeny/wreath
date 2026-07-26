@@ -6,6 +6,22 @@ templates, static files), the audit is precise: it renders the exact bytes users
 and checks them against a curated **WCAG 2.1 A/AA** ruleset plus a set of performance
 budgets derived from your app's actual middleware stack.
 
+## User story: keep an accessibility regression out of main
+
+> *As an API author, my docs surface and static pages need to stay WCAG-clean. I
+> want CI to fail the moment someone ships an image with no `alt` text or a
+> contrast regression — without standing up a headless browser.*
+
+```bash
+wreath audit static app.main:app --strict
+```
+
+It renders the exact bytes your app serves and checks them against the WCAG 2.1
+A/AA ruleset, exiting non-zero on any **error** so the pipeline blocks on a
+regression. `--strict` promotes warnings to failures too; add `--json` for a
+machine-readable report to annotate the PR. No browser, no network — the auditor
+is offline and reasons about the server-generated markup directly.
+
 ## Run it
 
 ```bash
@@ -86,6 +102,13 @@ library:
 ```bash
 wreath audit runtime http://localhost:8000 --strict
 ```
+
+It also runs the **HTTP-compliance & security** rules against the actual bytes on the
+wire: cookie flags and `__Host-`/`__Secure-` prefixes (RFC 6265bis), HSTS (RFC 6797), the
+`401`→`WWW-Authenticate` and `405`→`Allow` MUSTs (RFC 9110), CORS
+wildcard-with-credentials, and `nosniff`/`Referrer-Policy`. Point it at a staging or
+production URL to get a compliance report for your own service — see the
+[audit reference](../reference/audit.md#security-http-compliance-runtime) for every rule.
 
 ## Dev middleware
 

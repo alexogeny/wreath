@@ -22,7 +22,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 __all__ = [
     "render_exposition",
@@ -144,10 +144,19 @@ class _Writer:
 def _resolve_route_labels(route_labels: RouteLabels, route_id: int) -> dict[str, str]:
     if route_labels is None:
         return {"route_id": str(route_id)}
-    if callable(route_labels):
-        resolved = route_labels(route_id)
+    # Test for the Mapping arm, not `callable()`: a Mapping is not callable, so
+    # this narrows both arms cleanly, where `callable()` leaves the mapping case
+    # as a callable intersection that cannot be resolved.
+    resolved: Mapping[str, str] | None
+    if isinstance(route_labels, Mapping):
+        # The two arms of RouteLabels are not separable by narrowing -- nothing
+        # stops a Mapping subclass from defining __call__ -- so state the arm the
+        # isinstance established. Testing Mapping rather than callable() also
+        # keeps the else-branch a plain callable instead of an intersection.
+        table = cast("Mapping[int, Mapping[str, str]]", route_labels)
+        resolved = table.get(route_id)
     else:
-        resolved = route_labels.get(route_id)
+        resolved = route_labels(route_id)
     if not resolved:
         return {"route_id": str(route_id)}
     return {k: str(v) for k, v in resolved.items()}

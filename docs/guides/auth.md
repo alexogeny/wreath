@@ -9,6 +9,32 @@ bugs hide. Wreath keeps them apart, in plain terms:
 
 Identity first, permission second — always in that order.
 
+## User story: a "who am I" endpoint for signed-in users
+
+> *As an API author, my `/me` endpoint should work for any signed-in user and
+> turn away anyone who isn't — and inside it I want the caller's identity, not to
+> re-parse the token myself.*
+
+```python
+from wreath.auth import BearerTokenBackend, Identity, authenticated
+
+async def verify(token: str) -> Identity | None:
+    user = await lookup(token)
+    return Identity(user.id, roles=frozenset(user.roles)) if user else None
+
+app.configure_auth(BearerTokenBackend(verify))
+
+@app.get("/me")
+@authenticated()
+async def me(request) -> dict:
+    return {"id": request.identity.id, "roles": sorted(request.identity.roles)}
+```
+
+`configure_auth` installs the backend that turns a bearer token into an
+`Identity`; `@authenticated()` rejects a request without one with a `401` and a
+`WWW-Authenticate: Bearer` challenge. Past that gate, `request.identity` is
+guaranteed to be there. Deciding *what* that identity may do is the next step.
+
 ## Establishing identity
 
 Configure a backend that turns a credential into an `Identity`, or into nothing

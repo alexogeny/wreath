@@ -10,7 +10,6 @@ tries several backends in order (bearer first, then session).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
 
 from ..request import Request
 from .backends import AuthenticationBackend

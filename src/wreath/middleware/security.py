@@ -106,9 +106,10 @@ class SecurityHeadersMiddleware:
         )
 
     async def after(self, request: Request, response):
-        additions = (
-            self.https_headers if request.scope.get("scheme") == "https" else self.headers
-        )
+        # `request.scheme`, not `request.scope[...]`: this hook is global, so
+        # reading the scope here materialized the lazy native scope dict on
+        # every single response just to compare one string.
+        additions = self.https_headers if request.scheme == "https" else self.headers
         append_missing_headers(response.headers, additions)
         return response
 

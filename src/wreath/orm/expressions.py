@@ -250,6 +250,9 @@ class RelatedColumnExpr(ColumnExpr):
     """
 
     __slots__ = ("path",)
+    #: The relationship trail to this column. Declared so the type checker sees
+    #: an attribute here, not the ``path()`` jsonb method inherited from ColumnExpr.
+    path: tuple[Any, ...]
 
     def __init__(self, column: Any, path: tuple[Any, ...]) -> None:
         super().__init__(column)
@@ -416,10 +419,10 @@ class _JsonPath:
             "combine them with & and | rather than and/or"
         )
 
-    def __eq__(self, other: Any) -> BinaryExpr:  # type: ignore[override]
+    def __eq__(self, other: Any) -> BinaryExpr:  # ty: ignore[invalid-method-override]
         return self._compare(EQ, other)
 
-    def __ne__(self, other: Any) -> BinaryExpr:  # type: ignore[override]
+    def __ne__(self, other: Any) -> BinaryExpr:  # ty: ignore[invalid-method-override]
         return self._compare(NE, other)
 
     def __lt__(self, other: Any) -> BinaryExpr:

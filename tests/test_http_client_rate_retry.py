@@ -72,7 +72,12 @@ def test_parse_retry_after() -> None:
     assert _parse_retry_after(b"0") == 0.0
     assert _parse_retry_after(None) is None
     assert _parse_retry_after(b"-3") is None
-    assert _parse_retry_after(b"Wed, 21 Oct 2099 07:28:00 GMT") is None  # date form unsupported
+    assert _parse_retry_after(b"garbage") is None
+    # HTTP-date form (RFC 9110 10.2.3): a far-future date is a large positive delay,
+    # a past date clamps to 0, and a malformed date is ignored.
+    assert _parse_retry_after(b"Wed, 21 Oct 2099 07:28:00 GMT") > 1_000_000
+    assert _parse_retry_after(b"Wed, 21 Oct 1999 07:28:00 GMT") == 0.0
+    assert _parse_retry_after(b"Wed, 99 Xxx 2099") is None
 
 
 # -- throttle path (native TokenBucket) --------------------------------------

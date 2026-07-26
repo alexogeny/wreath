@@ -239,6 +239,34 @@ def compile_select(registry: Any, select: Select) -> CompiledQuery:
     )
 
 
+def compile_count(registry: Any, select: Select) -> tuple[str, tuple[Any, ...], tuple[int, ...]]:
+    """Compile ``SELECT COUNT(*)`` for the rows ``select`` matches.
+
+    Reuses the filter-join and predicate machinery but drops projection, load
+    joins, ordering, paging, and row locking -- none of them change how many
+    parent rows match. Filter joins are always to-one (the compiler rejects
+    to-many filter joins), so ``COUNT(*)`` over the joined-and-filtered rows
+    equals the parent-row count; no subquery wrapper is needed.
+
+    Unlike :func:`compile_select` this is not plan-cached: it is called at most
+    once per page request, not per row, so rendering fresh -- which lets the
+    bound values be captured directly, without the cached bind program -- is
+    both simpler and cheap enough. Returns ``(sql, values, oids)``.
+    """
+    spec = registry.spec_for(select.model)
+    counting = select._replace(orderings=(), limit_=None, offset_=None, includes=())
+    builder = _Builder()
+    clauses: list[str] = []
+    filter_aliases = _plan_filter_joins(registry, spec, counting, clauses)
+    builder.text(f"SELECT COUNT(*) FROM {qualified(spec)} AS {quote('t0')}")
+    for clause in clauses:
+        builder.text(clause)
+    if counting.predicates:
+        builder.text(" WHERE ")
+        _render_predicate(_conjoin(counting.predicates), builder, "t0", filter_aliases)
+    return builder.sql(), tuple(builder.values), tuple(builder.oids)
+
+
 def _build_plan(registry: Any, select: Select, spec: ModelSpec) -> _CachedPlan:
     requested = _projection(spec, select)
     projected = requested
@@ -292,27 +320,35 @@ def _build_plan(registry: Any, select: Select, spec: ModelSpec) -> _CachedPlan:
     )
 
 
-def _filter_paths(node: Expression, out: list[tuple[Any, ...]]) -> None:
-    """Every distinct relationship path a predicate reaches through."""
+def _filter_paths(
+    node: Expression, out: list[tuple[Any, ...]], seen: set[tuple[Any, ...]]
+) -> None:
+    """Collect each distinct relationship path a predicate reaches through.
+
+    ``seen`` deduplicates in O(1); a plain ``not in out`` list scan would be
+    O(paths^2) across a predicate tree touching many related columns. First-seen
+    order is preserved (the join-emission order downstream depends on it).
+    """
     if isinstance(node, RelatedColumnExpr):
-        if node.path not in out:
+        if node.path not in seen:
+            seen.add(node.path)
             out.append(node.path)
         return
     if isinstance(node, BinaryExpr):
-        _filter_paths(node.left, out)
-        _filter_paths(node.right, out)
+        _filter_paths(node.left, out, seen)
+        _filter_paths(node.right, out, seen)
         return
     if isinstance(node, InExpr):
-        _filter_paths(node.left, out)
+        _filter_paths(node.left, out, seen)
         for item in node.values:
-            _filter_paths(item, out)
+            _filter_paths(item, out, seen)
         return
     if isinstance(node, BooleanExpr):
         for operand in node.operands:
-            _filter_paths(operand, out)
+            _filter_paths(operand, out, seen)
         return
     if isinstance(node, UnaryExpr):
-        _filter_paths(node.operand, out)
+        _filter_paths(node.operand, out, seen)
 
 
 def _plan_filter_joins(
@@ -327,8 +363,9 @@ def _plan_filter_joins(
     the join.
     """
     paths: list[tuple[Any, ...]] = []
+    seen: set[tuple[Any, ...]] = set()
     for predicate in select.predicates:
-        _filter_paths(predicate, paths)
+        _filter_paths(predicate, paths, seen)
     if not paths:
         return {}
 
@@ -801,6 +838,7 @@ __all__ = [
     "JoinedStep",
     "LoadPlan",
     "SelectinStep",
+    "compile_count",
     "compile_select",
     "qualified",
     "quote",

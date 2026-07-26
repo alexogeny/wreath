@@ -1461,10 +1461,14 @@ def _curl_has_http3() -> bool:
 
 def test_metal_serves_http3_over_quic():
     pytest.importorskip("cryptography")
-    import importlib.util
 
-    if importlib.util.find_spec("wreath._native._http3") is None:
-        pytest.skip("native HTTP/3 extension not built")
+    from wreath.server import _http3_available
+
+    # Loadability, not discoverability: find_spec still reports "present" for a
+    # partial build whose .so exists but whose QUIC shared libraries are gone,
+    # and this test would then run and fail on the ImportError rather than skip.
+    if not _http3_available():
+        pytest.skip("native HTTP/3 extension not built or not loadable")
     if not _curl_has_http3():
         pytest.skip("curl without HTTP/3 support")
 

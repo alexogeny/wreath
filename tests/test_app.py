@@ -24,6 +24,60 @@ def test_static_matcher_preserves_first_registration_precedence() -> None:
     assert matcher.match("/assets/private/key.txt") == (first, {"path": "private/key.txt"})
 
 
+def test_static_matcher_precedence_is_registration_order_not_prefix_length() -> None:
+    """The narrower mount registered first must still shadow the wider one.
+
+    Registration order, not longest-prefix: a scan that stops at the first hit
+    is only equivalent to the old trie because of this rule.
+    """
+
+    async def deep(request):
+        return None
+
+    async def shallow(request):
+        return None
+
+    matcher = _StaticMatcher()
+    matcher.add("/assets/private/", deep)
+    matcher.add("/assets/", shallow)
+
+    # Registered first wins even though the other prefix also matches.
+    assert matcher.match("/assets/private/key.txt") == (deep, {"path": "key.txt"})
+    assert matcher.match("/assets/site.css") == (shallow, {"path": "site.css"})
+
+
+def test_static_matcher_ignores_a_repeated_prefix() -> None:
+    async def first(request):
+        return None
+
+    async def second(request):
+        return None
+
+    matcher = _StaticMatcher()
+    matcher.add("/assets/", first)
+    matcher.add("/assets/", second)
+
+    assert matcher.match("/assets/x") == (first, {"path": "x"})
+
+
+def test_static_matcher_without_mounts_matches_nothing() -> None:
+    assert _StaticMatcher().match("/anything/at/all") is None
+
+
+def test_static_matcher_requires_the_whole_prefix() -> None:
+    """A path that merely shares a leading substring is not a mount hit."""
+
+    async def handler(request):
+        return None
+
+    matcher = _StaticMatcher()
+    matcher.add("/assets/", handler)
+
+    assert matcher.match("/asset") is None
+    assert matcher.match("/assetsx/y") is None
+    assert matcher.match("/assets/") == (handler, {"path": ""})
+
+
 async def invoke(
     app: Wreath,
     path: str = "/",

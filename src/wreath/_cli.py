@@ -328,6 +328,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     migration_down.add_argument("--dsn-env", default="WREATH_MIGRATION_DSN")
     migration_down.add_argument("--json", action="store_true")
+
+    docs_parser = commands.add_parser(
+        "docs", help="build the native static-site generator (wreath's mkdocs replacement)"
+    )
+    docs_actions = docs_parser.add_subparsers(dest="docs_action", required=True)
+    for _action, _help in (
+        ("build", "render the site to its output directory"),
+        ("check", "build strictly and report orphan pages / dead links"),
+        ("serve", "build then preview the site over HTTP"),
+    ):
+        _sub = docs_actions.add_parser(_action, help=_help)
+        _sub.add_argument(
+            "config", nargs="?", default="wreath_docs.py",
+            help="the Python config module exposing `site = Site(...)`",
+        )
+        if _action == "serve":
+            _sub.add_argument("--port", type=int, default=8000, help="preview port")
+
     port_parser = commands.add_parser(
         "port", help="port an existing FastAPI app to Wreath (report or emit)"
     )
@@ -340,7 +358,8 @@ def build_parser() -> argparse.ArgumentParser:
                              help="emit the machine-readable report JSON")
     port_emit = port_parser.add_mutually_exclusive_group()
     port_emit.add_argument("--in-place", action="store_true",
-                           help="rewrite files in place (Phase 1 declarative emit; requires --force)")
+                           help="rewrite files in place "
+                                "(Phase 1 declarative emit; requires --force)")
     port_emit.add_argument("--output", metavar="DIR",
                            help="write ported code to a sister tree (Phase 1 declarative emit)")
     port_parser.add_argument("--force", action="store_true",
@@ -1297,6 +1316,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return execute_migrations(namespace, load_application)
             except (OSError, RuntimeError, ValueError) as error:
                 raise CliError(str(error), exit_code=2) from error
+        if namespace.command == "docs":
+            from ._docs_cli import execute as execute_docs
+
+            return execute_docs(namespace)
         if namespace.command == "port":
             from ._port.cli import execute as execute_port
 

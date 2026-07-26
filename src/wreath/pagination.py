@@ -20,12 +20,19 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from .binding import Query
 from .orm.query import Select
 
-T = TypeVar("T")
+if TYPE_CHECKING:
+    from .orm.model import Model
+
+
+def _as_model(model: type) -> type[Model]:
+    """Narrow a ``Select.model`` (typed ``type``) to a wreath model for the type
+    checker, so the ORM-injected ``__wreath_*__`` class attributes resolve."""
+    return cast("type[Model]", model)
 
 DEFAULT_SIZE = 20
 MAX_SIZE = 100
@@ -45,7 +52,7 @@ __all__ = [
 
 
 @dataclass(frozen=True, slots=True)
-class Page(Generic[T]):
+class Page[T]:
     """One page of results plus the totals needed to render pagination controls."""
 
     items: Sequence[T]
@@ -106,7 +113,7 @@ def page_params(
 
 def sortable_fields(model: type) -> tuple[str, ...]:
     """Every column name of ``model`` -- the default sort/filter allow-list."""
-    return tuple(model.__wreath_column_map__)
+    return tuple(_as_model(model).__wreath_column_map__)
 
 
 def _column(model: type, name: str, allowed: frozenset[str], what: str) -> Any:
@@ -116,15 +123,22 @@ def _column(model: type, name: str, allowed: frozenset[str], what: str) -> Any:
 
 
 def apply_sort(query: Select, sort: Iterable[str], *, allow: Iterable[str] | None = None) -> Select:
-    """Apply ``sort`` tokens (``field`` / ``-field``) against an allow-list."""
-    model = query.model
+    """Apply ``sort`` tokens (``field`` / ``-field``) against an allow-list.
+
+    All tokens are folded into a *single* ``order_by`` call. ``Select`` is
+    immutable, so a per-token ``order_by`` would recopy a growing tuple on every
+    step -- O(k^2) in the request-controlled token count. Building the orderings
+    once and applying them together keeps this O(k).
+    """
+    model = _as_model(query.model)
     allowed = frozenset(allow) if allow is not None else frozenset(model.__wreath_column_map__)
+    orderings = []
     for token in sort:
         descending = token[:1] == "-"
         name = token[1:] if descending else token
         column = _column(model, name, allowed, "sort")
-        query = query.order_by(column.desc() if descending else column.asc())
-    return query
+        orderings.append(column.desc() if descending else column.asc())
+    return query.order_by(*orderings) if orderings else query
 
 
 def apply_filters(
@@ -136,12 +150,15 @@ def apply_filters(
     column's type -- an out-of-range or wrong-typed value fails at bind time.
     Richer operators (ranges, ``in``, ``ilike``) are a deliberate follow-up.
     """
-    model = query.model
+    model = _as_model(query.model)
     allowed = frozenset(allow) if allow is not None else frozenset(model.__wreath_column_map__)
+    predicates = []
     for name, value in filters.items():
         column = _column(model, name, allowed, "filter")
-        query = query.where(column == value)
-    return query
+        predicates.append(column == value)
+    # One combined ``where`` call: repeated per-filter calls would recopy the
+    # immutable predicate tuple each time -- O(k^2) in the filter count.
+    return query.where(*predicates) if predicates else query
 
 
 async def paginate(
@@ -172,11 +189,16 @@ async def paginate(
 async def _count(session: Any, query: Select) -> int:
     """Total rows matching ``query`` (ignoring paging/order).
 
-    Correctness-first fallback: re-project to the primary key and count rows.
-    TODO: an efficient ``SELECT COUNT(*)`` once the compiler grows an aggregate
-    projection -- that is a compiler change, out of this module's scope.
+    Uses the session's efficient ``SELECT COUNT(*)`` (``Session.count``) when it
+    exposes one, so counting a large result set is a single aggregate round trip
+    rather than transferring every matching row. Falls back to re-projecting to
+    the primary key and counting client-side for a minimal session that only
+    implements ``fetch`` (e.g. a lightweight test double).
     """
-    model = query.model
+    counter = getattr(session, "count", None)
+    if callable(counter):
+        return await counter(query)
+    model = _as_model(query.model)
     primary_key = model.__wreath_primary_key__[0].python_name
     count_query = query._replace(
         projection=(getattr(model, primary_key),),

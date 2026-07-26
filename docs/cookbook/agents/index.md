@@ -8,6 +8,12 @@ and can prove it works. Start with
 [`repo-map.md`](https://github.com/alexogeny/wreath/blob/main/repo-map.md); the map
 points you at the source, tests, and benchmarks for every subsystem.
 
+Before grepping for where something lives, look it up in
+`docs/agents/manifest.json`. Every subsystem is there with its guides, reference
+pages, sources, focused tests, the invariants it must hold, and the decisions
+behind it — and `uv run wreath-map-lint` fails the build if any of that drifts
+from the repository, so it is safe to trust.
+
 - **[The gates](checks.md)** — every check a change must pass, and what each one
   is actually protecting.
 - **[Add an endpoint or model](add-an-endpoint.md)** — the smallest correct

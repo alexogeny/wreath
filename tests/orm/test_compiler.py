@@ -6,7 +6,12 @@ import pytest
 
 from wreath.orm import and_, not_, or_
 from wreath.orm import compiler as compiler_module
-from wreath.orm.compiler import _collect_binds, compile_select, shape_of
+from wreath.orm.compiler import (
+    _collect_binds,
+    compile_count,
+    compile_select,
+    shape_of,
+)
 from wreath.orm.errors import DeclarationError, ORMError
 from wreath.orm.registry import Registry
 from wreath.orm.types import Int64, Text
@@ -329,3 +334,49 @@ def test_registries_do_not_share_cached_plans() -> None:
     compile_select(first, User.select(User.id))
     assert first.cached_plan_count == 1
     assert second.cached_plan_count == 0
+
+
+# --- COUNT(*) compilation ---------------------------------------------------
+
+
+def test_count_selects_star_aggregate_not_columns(registry: Registry) -> None:
+    sql, values, oids = compile_count(registry, User.select())
+    assert sql == f'SELECT COUNT(*) FROM {USERS}'
+    assert values == () and oids == ()
+
+
+def test_count_keeps_predicates_and_binds_their_values(registry: Registry) -> None:
+    sql, values, oids = compile_count(registry, User.select().where(User.id == 42))
+    assert sql == f'SELECT COUNT(*) FROM {USERS} WHERE "t0"."id" = $1'
+    assert values == (42,) and oids == (Int64.oid,)
+
+
+def test_count_drops_projection_ordering_and_paging(registry: Registry) -> None:
+    query = (
+        User.select(User.email)
+        .where(User.name == "A")
+        .order_by(User.id.desc())
+        .limit(10)
+        .offset(20)
+    )
+    sql, values, _ = compile_count(registry, query)
+    assert sql == f'SELECT COUNT(*) FROM {USERS} WHERE "t0"."name" = $1'
+    assert "ORDER BY" not in sql and "LIMIT" not in sql and "OFFSET" not in sql
+    assert values == ("A",)
+
+
+def test_count_emits_inner_join_for_a_relationship_filter(registry: Registry) -> None:
+    sql, values, _ = compile_count(registry, Post.select().where(Post.author.email == "x@y.z"))
+    assert sql.startswith("SELECT COUNT(*) FROM ")
+    assert "JOIN" in sql and '"users"' in sql
+    assert values == ("x@y.z",)
+
+
+def test_count_ignores_a_projected_count_query_never_returns_star(registry: Registry) -> None:
+    # A to-one filter join must not multiply the count; the shared prefix rule
+    # in _plan_filter_joins means one join even for two columns of the relation.
+    sql, _, _ = compile_count(
+        registry,
+        Post.select().where((Post.author.email == "x") & (Post.author.name == "y")),
+    )
+    assert sql.count("JOIN") == 1

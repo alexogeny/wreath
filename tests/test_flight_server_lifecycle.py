@@ -18,8 +18,12 @@ from wreath.inspector import InspectorClient, InspectorConfig
 from wreath.server import ServerConfig, serve
 from wreath.telemetry import Mode, TelemetryConfig
 
-pytest.importorskip("wreath._native._server")
-pytest.importorskip("wreath._native._flight")
+# exc_type=ImportError, not the default: a built-but-disabled extension raises
+# plain ImportError ("requires the _core C API ... WREATH_PURE=1 disables it"),
+# and pytest only auto-skips on ModuleNotFoundError, so these modules failed
+# collection under WREATH_PURE=1 instead of skipping as the docstring says.
+pytest.importorskip("wreath._native._server", exc_type=ImportError)
+pytest.importorskip("wreath._native._flight", exc_type=ImportError)
 
 
 def _app() -> wreath.Wreath:

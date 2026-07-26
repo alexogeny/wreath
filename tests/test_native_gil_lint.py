@@ -47,6 +47,30 @@ static int broken(int fd, char *buffer) {
 """)
 
 
+def test_struct_member_call_named_like_a_syscall_is_not_blocking_io() -> None:
+    """`capi->write(...)` dispatches through a function pointer, not to write(2).
+
+    A POSIX syscall is always called by bare name, so a member call can never be
+    one -- and the metal transport's egress path is exactly this shape.
+    """
+    assert "NG002" not in codes("""
+static int fused(WreathTransportCAPI *capi, PyObject *transport, PyObject *data) {
+    if (capi->write(transport, data) < 0) {
+        return -1;
+    }
+    return capi->read(transport, data);
+}
+""")
+
+
+def test_bare_syscall_still_reports_after_member_calls_are_excluded() -> None:
+    assert "NG002" in codes("""
+static int broken(int fd, const char *buffer) {
+    return write(fd, buffer, 1024);
+}
+""")
+
+
 def test_blocking_io_inside_allow_threads_is_accepted() -> None:
     assert "NG002" not in codes("""
 static int safe(int fd, char *buffer) {

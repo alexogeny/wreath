@@ -84,7 +84,9 @@ class Report:
     def categories(self) -> dict:
         cats: dict[str, dict] = {}
         for f in self.findings:
-            slot = cats.setdefault(f.category, {"translated": 0, "needs_review": 0, "unsupported": 0})
+            slot = cats.setdefault(
+                f.category, {"translated": 0, "needs_review": 0, "unsupported": 0}
+            )
             slot[_COUNT_KEY[f.tag]] += 1
         return cats
 
@@ -126,11 +128,12 @@ class Report:
         if not flagged:
             lines.append("_none_")
         for f in flagged:
-            lines.append(f"- `{f.tag}` **{f.construct}** — {f.file}:{f.line} — {f.message} _[{f.rule_id}]_")
+            lines.append(f"- `{f.tag}` **{f.construct}** — {f.file}:{f.line} — "
+                         f"{f.message} _[{f.rule_id}]_")
         return "\n".join(lines) + "\n"
 
     @classmethod
-    def merge(cls, reports: list["Report"]) -> "Report":
+    def merge(cls, reports: list[Report]) -> Report:
         findings: list[Finding] = []
         roots: list[str] = []
         for r in reports:

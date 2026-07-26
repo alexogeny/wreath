@@ -24,6 +24,25 @@ mapping — start with [Coming from FastAPI](../from-fastapi/index.md).
     keep Alembic for schemas that use them rather than treating partial coverage
     as parity.
 
+## User story: fail CI when the models and the database disagree
+
+> *As an API author, I keep changing my ORM models, and I want CI to fail the
+> moment the models and the live schema have drifted apart — before a deploy, not
+> after — without hand-writing a migration just to find out.*
+
+```bash
+wreath migrations check app:app --database main
+# exits 1 when the compiled ORM and the live schema differ; 0 when they agree
+```
+
+`check` imports the application, starts only the selected database, and compares
+one resolved physical schema against its compiled ORM intent in metal. Use
+`detect` for the same comparison as human-readable output that always exits `0`,
+and reach for `generate` / `apply` once you're ready to turn a detected diff into
+a reviewed artifact. (Within the coverage in the status note above — unsupported
+alterations surface as `MANUAL`, so `check` is not yet a complete drift gate on
+its own.)
+
 ## What changes
 
 A typical FastAPI SaaS application combines FastAPI request handling, SQLAlchemy

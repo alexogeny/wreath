@@ -345,6 +345,7 @@ def bench(argv: list[str] | None = None) -> int:
 
 #: The gates a change has to pass, in the order that fails cheapest first.
 _CHECKS: tuple[tuple[str, list[str]], ...] = (
+    ("map-lint", [sys.executable, "-m", "wreath._devtools.map_lint"]),
     ("ruff", [sys.executable, "-m", "ruff", "check", "."]),
     ("ty", [sys.executable, "-m", "ty", "check"]),
     ("pytest", [sys.executable, "-m", "pytest", "-q"]),

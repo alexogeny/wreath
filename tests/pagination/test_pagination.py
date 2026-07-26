@@ -43,7 +43,7 @@ def test_page_params_defaults():
 # --- ORM query shaping (needs the built package for the model layout) --------
 
 def _model():
-    from wreath.orm import Model, Mapped, column
+    from wreath.orm import Mapped, Model, column
     from wreath.orm.types import Int64, Text
 
     class Widget(Model, table="widget_pag_test"):
@@ -85,3 +85,29 @@ async def test_paginate_shapes_and_counts():
     assert page.total == 42 and page.page == 2 and page.size == 10 and page.pages == 5
     # last fetch was the page query: LIMIT 10 OFFSET 10
     assert (10, 10) == session.calls[-1][:2]
+
+
+class _CountingSession(_FakeSession):
+    """A session that exposes an efficient ``count`` (like the real one)."""
+
+    def __init__(self, items, total):
+        super().__init__(items, total)
+        self.count_queries = []
+
+    async def count(self, query):
+        self.count_queries.append(query)
+        return self._total
+
+
+@pytest.mark.asyncio
+async def test_paginate_prefers_the_efficient_count_when_available():
+    from wreath.pagination import paginate
+
+    Widget = _model()
+    session = _CountingSession(items=[{"id": 1}], total=42)
+    page = await paginate(session, Widget.select(), PageParams(page=1, size=10))
+    assert page.total == 42
+    # The total came from session.count, not from materializing PK rows: every
+    # fetch call was the page query (projection wider than the lone PK).
+    assert len(session.count_queries) == 1
+    assert all(projection != 1 for _, _, projection in session.calls)

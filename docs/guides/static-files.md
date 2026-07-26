@@ -14,4 +14,26 @@ Static responses travel the same path as everything else, so your global
 middleware still applies to them — the security headers and compression you set
 up once cover your assets as well as your API.
 
+## User story: cache a fingerprinted asset bundle hard
+
+> *As an API author, I ship a built frontend whose asset filenames are
+> content-hashed (`app.9f3a.js`). A file never changes under a given name, so I
+> want browsers to cache those hard — a year, `immutable` — instead of
+> revalidating them on every visit.*
+
+```python
+from wreath.cache_control import CacheControl
+
+app.static(
+    "/assets",
+    "dist/assets",
+    cache_control=CacheControl(public=True, max_age=31536000, immutable=True),
+)
+```
+
+Because the filenames are fingerprinted, a hard `Cache-Control: public,
+max-age=31536000, immutable` is safe — a new build ships new names, so a cached
+file can never go stale under the name it was served with. Files you don't set a
+policy for still get `ETag` / `If-None-Match` revalidation for free.
+
 **Reference:** [`wreath.staticfiles`](../reference/staticfiles.md).

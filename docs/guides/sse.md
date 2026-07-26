@@ -4,6 +4,29 @@ When the browser only needs to *listen* — a progress bar, a live feed, a token
 
 `SSEResponse` is the transport. It sets the `text/event-stream` content type and the no-buffering headers (`cache-control: no-cache`, `x-accel-buffering: no`) that keep proxies from swallowing the stream, then frames each item your async iterator yields. What you send over it — a progress convention, an event schema — is yours to define.
 
+## User story: a live notifications feed
+
+> *As an API author, my web app has a notification bell that should light up the
+> moment something happens — a mention, a finished export. The browser only needs
+> to listen, so I want a plain `EventSource` endpoint that pushes typed events as
+> they occur and reconnects on its own.*
+
+```python
+from wreath.response import SSEResponse, ServerSentEvent
+
+@app.get("/notifications")
+async def notifications(request):
+    async def stream():
+        async for note in notifications_for(request.identity.id):
+            yield ServerSentEvent(data=note.text, event=note.kind, id=note.id)
+    return SSEResponse(stream())
+```
+
+The browser opens it with `new EventSource("/notifications")` and can listen per
+`event` type; the `id` on each event lets it resume with `Last-Event-ID` after a
+dropped connection. No polling, no WebSocket — just an HTTP response that stays
+open.
+
 ## An event stream
 
 ```python

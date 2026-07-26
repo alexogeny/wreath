@@ -128,6 +128,54 @@ async def test_delete_cookie() -> None:
     assert b"Max-Age=0" in cookie and b"Expires=Thu, 01 Jan 1970" in cookie
 
 
+def test_samesite_none_requires_secure() -> None:
+    # RFC 6265bis 5.4.7: SameSite=None cookies are dropped by browsers unless Secure.
+    with pytest.raises(ValueError, match="Secure"):
+        Response(b"").set_cookie("sid", "1", samesite="none")
+    ok = Response(b"")
+    ok.set_cookie("sid", "1", samesite="none", secure=True)
+    assert b"SameSite=None" in dict(ok.headers)[b"set-cookie"]
+
+
+def test_samesite_value_is_validated() -> None:
+    with pytest.raises(ValueError, match="samesite must be"):
+        Response(b"").set_cookie("sid", "1", samesite="strictish")
+
+
+def test_host_and_secure_cookie_prefixes_are_enforced() -> None:
+    # RFC 6265bis 4.1.3.
+    with pytest.raises(ValueError, match="__Secure-"):
+        Response(b"").set_cookie("__Secure-sid", "1")  # secure defaults False
+    with pytest.raises(ValueError, match="__Host-"):
+        Response(b"").set_cookie("__Host-sid", "1", secure=True, domain="example.com")
+    ok = Response(b"")
+    ok.set_cookie("__Host-sid", "1", secure=True)  # Path=/ and no Domain by default
+    assert dict(ok.headers)[b"set-cookie"].startswith(b"__Host-sid=1")
+    # A prefixed cookie can still be deleted (delete carries Secure for it).
+    deleted = Response(b"")
+    deleted.delete_cookie("__Host-sid")
+    assert b"Secure" in dict(deleted.headers)[b"set-cookie"]
+
+
+def test_cookie_value_rejects_control_characters() -> None:
+    # A CR/LF in a cookie value is header injection; caught at the call (RFC 6265).
+    with pytest.raises(ValueError, match="control character"):
+        Response(b"").set_cookie("sid", "abc\r\nSet-Cookie: evil=1")
+    with pytest.raises(ValueError, match="control character"):
+        Response(b"").set_cookie("sid\n", "ok")
+
+
+def test_method_not_allowed_carries_allow_header() -> None:
+    # RFC 9110 15.5.6: a 405 MUST carry Allow.
+    from wreath.exceptions import MethodNotAllowed, TooManyRequests
+
+    exc = MethodNotAllowed(allow=["GET", "POST"])
+    assert exc.status == 405
+    assert (b"allow", b"GET, POST") in exc.headers
+    # RFC 9110 10.2.3: 429 may carry Retry-After.
+    assert (b"retry-after", b"30") in TooManyRequests(retry_after=30).headers
+
+
 # --- background tasks -----------------------------------------------------------
 
 

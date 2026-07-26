@@ -89,6 +89,8 @@ wreath-native-gil-status = "wreath._devtools.native_gil_status:main"
 wreath-native-memory-lint = "wreath._devtools.native_memory_lint:main"
 wreath-native-profile = "wreath._devtools.native_profile:main"
 wreath-complexity-probe = "wreath._devtools.complexity_probe:main"
+# Checks that the agent-facing maps still describe the repository.
+wreath-map-lint = "wreath._devtools.map_lint:main"
 wreath-request-trace = "wreath._devtools.request_trace:main"
 wreath-tape-decomp = "wreath._devtools.tape_decomp:main"
 wreath-decomp = "wreath._devtools.decomp:main"
@@ -135,8 +137,14 @@ line-length = 100
 # Generated sanitizer build roots hold copies of the sources they were built
 # from; linting them reports drift in artifacts rather than in the tree. The
 # nghttp2 tree is a locally built h2load (benchmarks/README.md) and is upstream's
-# source, not ours.
-extend-exclude = [".sanitizers", "nghttp2"]
+# source, not ours. `tests/port/corpus` is the same idea: it is *input text* for
+# the `wreath port` codemod -- deliberately idiomatic FastAPI/Pydantic/SQLModel
+# applications that are read as source and never imported (see
+# tests/port/conftest.py, which excludes them from pytest collection for the
+# same reason). Linting them reports style findings in someone else's dialect,
+# and "fixing" one would delete the pattern the analyzer exists to recognize:
+# UP045 would rewrite the `Optional[X]` that tests/port/golden asserts on.
+extend-exclude = [".sanitizers", "nghttp2", "tests/port/corpus"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
@@ -146,6 +154,13 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 extend-immutable-calls = ["wreath.binding.Depends", "Depends"]
 
 [tool.ruff.lint.per-file-ignores]
+# The `wreath port` rule catalog is a data table, not code: one line per rule,
+# `rule_id -> (construct, category, tag, message)`, where the message is the
+# prose a reviewer reads in the report. Rule ids appear in that report so a
+# reviewer can grep a worklist, which only works while a rule stays on one line
+# -- wrapping the 50 entries to fit would cost the property the file exists for.
+# Scoped deliberately: E501 only, and only here.
+"src/wreath/_port/rules.py" = ["E501"]
 "benchmarks/apps.py" = ["E402"]
 "benchmarks/lifecycle_apps.py" = ["E402"]
 "benchmarks/lifecycle.py" = ["ASYNC220", "ASYNC240"]

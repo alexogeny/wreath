@@ -26,18 +26,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ._jobcore import CronSchedule, compute_backoff, dedup_key
+from ._jobcore import CronSchedule, compute_backoff, dedup_key, validate_identifier
 
 JobHandler = Callable[..., Awaitable[None]]
 
 
-def _validate_identifier(value: str, kind: str) -> str:
-    if not value or len(value.encode("utf-8")) > 63:
-        raise ValueError(f"{kind} must be 1..63 bytes: {value!r}")
-    for character in value:
-        if not (character.isalnum() or character in "_$"):
-            raise ValueError(f"invalid {kind} character {character!r} in {value!r}")
-    return value
+# The bounded SQL-safe identifier rule lives in ``_jobcore`` so jobs and
+# messaging share one definition; kept as a module-local alias for readability.
+_validate_identifier = validate_identifier
 
 
 def _channel(schema: str, queue: str) -> str:

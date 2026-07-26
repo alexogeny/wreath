@@ -2,6 +2,35 @@
 
 List endpoints all want the same three things — a page, a sort, a filter — and all invent them slightly differently. Wreath gives you one dependency and one helper.
 
+## User story: a data table of orders
+
+> *As an API author, my `/orders` list backs a frontend data table: it asks for a
+> page, a size, and a sort column, and expects the rows plus a total so it can
+> draw the pager. I want one dependency to parse the query and one call to run
+> the page — with sorting locked to columns I trust.*
+
+```python
+from typing import Annotated
+from wreath.binding import Depends
+from wreath.pagination import PageParams, page_params, paginate
+
+@app.get("/orders")
+async def list_orders(
+    request, params: Annotated[PageParams, Depends(page_params)]
+) -> dict:
+    query = Order.select().where(Order.status == "paid")
+    page = await paginate(
+        request.app.state.session, query, params,
+        allow_sort=("created_at", "total"),
+    )
+    return page.as_dict()
+```
+
+`page_params` binds `?page=&size=&sort=`; `paginate` returns a `Page` with
+`items`, `total`, and the derived `pages`/`has_next`, and `as_dict()` is the JSON
+your table wants. `allow_sort` is a hard allow-list — `?sort=secret_column` is
+rejected, never handed to the SQL.
+
 ## Bind the query parameters
 
 `page_params` is a `Depends`-able that binds `?page=&size=&sort=` into a `PageParams`:
@@ -32,4 +61,6 @@ query = apply_sort(query, params.sort, allow=("name", "created_at"))
 query = apply_filters(query, {"ranch_id": ranch_id}, allow=("ranch_id",))
 ```
 
-The total defaults to a `COUNT` over the filtered query; pass an explicit `total=` if you already know it (or want to skip the count on a hot path).
+Both helpers fold every token into a **single** query-builder call, so applying a request full of `?sort=` fields costs time linear in their number, not quadratic — a client cannot turn a long sort string into disproportionate server work. (Pinned by the `pagination-apply-sort` complexity probe.)
+
+The total defaults to counting the rows that match the filtered query; pass an explicit `total=` if you already know it (or want to skip the count on a hot path).

@@ -13,13 +13,17 @@ giving single-use semantics without server-side token storage.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import os
+import smtplib
+import ssl
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from email.message import EmailMessage
 from typing import Protocol, runtime_checkable
 
 __all__ = [
@@ -27,6 +31,7 @@ __all__ = [
     "EmailSender",
     "InMemoryUserStore",
     "LogEmailSender",
+    "SmtpEmailSender",
     "UserRecord",
     "UserStore",
     "fingerprint",
@@ -226,6 +231,69 @@ class CapturingEmailSender:
 
     async def send_password_reset(self, email: str, link: str) -> None:
         self.resets.append((email, link))
+
+
+@dataclass(slots=True)
+class SmtpEmailSender:
+    """Real SMTP delivery via stdlib ``smtplib``/``email`` (zero-dep).
+
+    STARTTLS by default (or implicit TLS on ``port=465``). The blocking
+    ``smtplib`` work runs in a worker thread so the event loop is never blocked.
+    Build from env with :meth:`from_env`
+    (``WREATH_SMTP_HOST``/``_FROM``/``_PORT``/``_USER``/``_PASSWORD``/``_TLS``).
+    """
+
+    host: str
+    from_addr: str
+    port: int = 587
+    username: str | None = None
+    password: str | None = None
+    use_tls: bool = True
+    timeout: float = 30.0
+    verify_subject: str = "Verify your email"
+    reset_subject: str = "Reset your password"
+
+    @classmethod
+    def from_env(cls) -> SmtpEmailSender:
+        return cls(
+            host=os.environ["WREATH_SMTP_HOST"],
+            from_addr=os.environ["WREATH_SMTP_FROM"],
+            port=int(os.environ.get("WREATH_SMTP_PORT", "587")),
+            username=os.environ.get("WREATH_SMTP_USER"),
+            password=os.environ.get("WREATH_SMTP_PASSWORD"),
+            use_tls=os.environ.get("WREATH_SMTP_TLS", "1") not in ("0", "false", "False"),
+        )
+
+    async def send_verification(self, email: str, link: str) -> None:
+        await self._send(email, self.verify_subject, f"Verify your email:\n\n{link}\n")
+
+    async def send_password_reset(self, email: str, link: str) -> None:
+        await self._send(email, self.reset_subject, f"Reset your password:\n\n{link}\n")
+
+    async def _send(self, to_addr: str, subject: str, body: str) -> None:
+        await asyncio.to_thread(self._send_blocking, to_addr, subject, body)
+
+    def _send_blocking(self, to_addr: str, subject: str, body: str) -> None:
+        message = EmailMessage()
+        message["From"] = self.from_addr
+        message["To"] = to_addr
+        message["Subject"] = subject
+        message.set_content(body)
+        context = ssl.create_default_context()
+        if self.port == 465:
+            smtp: smtplib.SMTP = smtplib.SMTP_SSL(
+                self.host, self.port, timeout=self.timeout, context=context
+            )
+        else:
+            smtp = smtplib.SMTP(self.host, self.port, timeout=self.timeout)
+        try:
+            if self.use_tls and self.port != 465:
+                smtp.starttls(context=context)
+            if self.username is not None and self.password is not None:
+                smtp.login(self.username, self.password)
+            smtp.send_message(message)
+        finally:
+            smtp.close()
 
 
 # --- flow logic (framework-agnostic) ----------------------------------------

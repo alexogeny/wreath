@@ -27,6 +27,7 @@ Validation failures raise :class:`wreath.exceptions.UnprocessableEntity` with a
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import inspect
 import types
@@ -451,33 +452,154 @@ class Depends:
             ...
 
     Within one request, each callable resolves at most once (``use_cache``).
+
+    ``scope`` decides how long that value lives:
+
+    ``"request"`` (default)
+        Resolved per request, cleaned up when the handler returns. What every
+        dependency did before scopes existed.
+    ``"app"``
+        Resolved once, on first use, and shared by every later request. An
+        async generator's cleanup runs at lifespan shutdown instead of after
+        the request. Use it for something expensive and stateless -- a client,
+        a compiled ruleset, a warmed lookup table.
+
+    An app-scoped dependency may not depend on a request-scoped one: the value
+    would outlive the request it was built from. That is a **compile-time**
+    error, raised when routes compile, not a surprise on request 2.
     """
 
-    __slots__ = ("fn", "use_cache")
+    __slots__ = ("fn", "scope", "use_cache")
 
-    def __init__(self, fn: Callable[..., Any], *, use_cache: bool = True) -> None:
+    def __init__(
+        self,
+        fn: Callable[..., Any],
+        *,
+        use_cache: bool = True,
+        scope: str = "request",
+    ) -> None:
+        if scope not in ("request", "app"):
+            raise ValueError(f"scope must be 'request' or 'app', got {scope!r}")
         self.fn = fn
+        self.scope = scope
         self.use_cache = use_cache
 
 
 Resolver = Callable[[Request, dict, list], Awaitable[Any]]
 
 
-def _compile_dependency(fn: Callable[..., Any], seen: tuple) -> Resolver:
+class AppScope:
+    """Values that outlive a request, owned by one application.
+
+    Explicitly owned rather than global: the container hangs off the `Wreath`
+    instance, is passed into binder compilation, and is torn down by that app's
+    lifespan shutdown. Two apps in one process do not share values.
+
+    First use resolves; later uses read. A burst of concurrent first requests
+    constructs once, not once per request in flight.
+
+    Single-flighting is **per key, not per container**. A container-wide lock
+    deadlocks the moment one app-scoped dependency resolves another: the outer
+    factory holds the lock and the inner one waits for it forever. Per-key
+    in-flight futures let a nested chain resolve while still collapsing
+    concurrent callers of the same key. (Recursion through the *same* key would
+    still hang, but that is a dependency cycle, and `_compile_dep` rejects
+    those at compile time.)
+    """
+
+    __slots__ = ("_cleanups", "_pending", "_values")
+
+    def __init__(self) -> None:
+        self._values: dict[Callable[..., Any], Any] = {}
+        self._pending: dict[Callable[..., Any], asyncio.Future[Any]] = {}
+        self._cleanups: list[Any] = []
+
+    def __contains__(self, fn: Callable[..., Any]) -> bool:
+        return fn in self._values
+
+    async def get_or_create(
+        self, fn: Callable[..., Any], factory: Callable[[], Awaitable[Any]]
+    ) -> Any:
+        # The warm path: one dict lookup, no lock, no future.
+        try:
+            return self._values[fn]
+        except KeyError:
+            pass
+        pending = self._pending.get(fn)
+        if pending is not None:
+            # Someone else is building this key; wait on their result.
+            return await pending
+        future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        self._pending[fn] = future
+        try:
+            value = await factory()
+        except BaseException as error:
+            # A failed construction is not cached: the next request retries.
+            self._pending.pop(fn, None)
+            if not future.done():
+                future.set_exception(error)
+            # Nobody may be awaiting it; keep the loop from reporting it.
+            future.exception()
+            raise
+        self._values[fn] = value
+        self._pending.pop(fn, None)
+        if not future.done():
+            future.set_result(value)
+        return value
+
+    def track_cleanup(self, generator: Any) -> None:
+        self._cleanups.append(generator)
+
+    async def aclose(self) -> None:
+        """Resume every app-scoped generator for cleanup, innermost first.
+
+        Every leg runs even when one fails, so a single bad teardown cannot
+        strand the rest. The first failure is re-raised once all have run.
+        """
+        failure: BaseException | None = None
+        for generator in reversed(self._cleanups):
+            try:
+                await anext(generator)
+            except StopAsyncIteration:
+                continue
+            except Exception as error:  # noqa: BLE001 - re-raised below
+                failure = failure or error
+                continue
+            try:
+                await generator.aclose()
+            except Exception as error:  # noqa: BLE001 - re-raised below
+                failure = failure or error
+        self._cleanups.clear()
+        self._values.clear()
+        if failure is not None:
+            raise failure
+
+
+def _compile_dependency(
+    fn: Callable[..., Any],
+    seen: tuple,
+    *,
+    scope: str = "request",
+    app_scope: AppScope | None = None,
+) -> Resolver:
     # `seen` is accepted for the existing call sites. Compilation memoizes a
     # resolver per callable and tracks the active path in a set, so a shared
     # dependency DAG compiles each callable once (not once per path, which is
     # exponential) and a depth-D chain does O(D) membership work (not O(D^2)).
-    return _compile_dep(fn, {}, set(), [])
+    return _compile_dep(fn, {}, set(), [], scope, app_scope)
 
 
 def _compile_dep(
     fn: Callable[..., Any],
-    memo: dict[Callable[..., Any], Resolver],
+    memo: dict[tuple[Callable[..., Any], str], Resolver],
     active: set[Callable[..., Any]],
     active_order: list[Callable[..., Any]],
+    scope: str = "request",
+    app_scope: AppScope | None = None,
 ) -> Resolver:
-    cached = memo.get(fn)
+    # Memoized per (callable, scope): the same factory may legitimately appear
+    # both request- and app-scoped, and the two compile to different resolvers.
+    cached = memo.get((fn, scope))
     if cached is not None:
         return cached
     if fn in active:
@@ -496,9 +618,29 @@ def _compile_dep(
         for parameter in parameters[1:]:
             default = parameter.default
             if isinstance(default, Depends):
-                nested.append(
-                    (parameter.name, default, _compile_dep(default.fn, memo, active, active_order))
-                )
+                # A lifetime inversion is caught here, at compile time. An
+                # app-scoped value built from a request-scoped one would
+                # capture the first request that happened to construct it and
+                # hand it to every caller afterwards -- a data-leak shape, not
+                # just a bug, so it must never reach a request.
+                if scope == "app" and default.scope != "app":
+                    raise TypeError(
+                        f"app-scoped dependency {fn!r} cannot depend on "
+                        f"{default.scope}-scoped {default.fn!r}: the value would "
+                        "outlive the request it was built from. Mark the inner "
+                        "dependency scope='app', or make the outer one "
+                        "request-scoped."
+                    )
+                # An app-scoped dependency nested under a request-scoped one is
+                # fine, and compiles in its own scope.
+                nested.append((
+                    parameter.name,
+                    default,
+                    _compile_dep(
+                        default.fn, memo, active, active_order,
+                        default.scope, app_scope,
+                    ),
+                ))
             elif default is inspect.Parameter.empty:
                 raise TypeError(
                     f"dependency {fn!r} parameter {parameter.name!r} must be a "
@@ -510,15 +652,19 @@ def _compile_dep(
     is_async_gen = inspect.isasyncgenfunction(fn)
     is_coroutine = inspect.iscoroutinefunction(fn)
 
-    async def resolve(request: Request, cache: dict, cleanups: list) -> Any:
+    async def _construct(request: Request, cache: dict, cleanups: list) -> Any:
         kwargs: dict[str, Any] = {}
         for name, marker, resolver in nested:
-            if marker.use_cache and marker.fn in cache:
-                kwargs[name] = cache[marker.fn]
+            # Keyed by (callable, scope): the same factory used at both scopes
+            # is two different values with two different lifetimes, and must
+            # not collide in one request's cache.
+            key = (marker.fn, marker.scope)
+            if marker.use_cache and key in cache:
+                kwargs[name] = cache[key]
             else:
                 value = await resolver(request, cache, cleanups)
                 if marker.use_cache:
-                    cache[marker.fn] = value
+                    cache[key] = value
                 kwargs[name] = value
         if is_async_gen:
             generator = fn(request, **kwargs)
@@ -530,7 +676,31 @@ def _compile_dep(
             return await result
         return result
 
-    memo[fn] = resolve
+    if scope == "app":
+        if app_scope is None:
+            raise TypeError(
+                f"app-scoped dependency {fn!r} was compiled without an "
+                "application scope container; app scope is only available to "
+                "dependencies reached through a route on a Wreath application"
+            )
+        container = app_scope
+
+        async def resolve(request: Request, cache: dict, cleanups: list) -> Any:
+            # Cleanup is tracked on the container, not the request: an
+            # app-scoped generator is resumed at lifespan shutdown, so it must
+            # not be handed the per-request cleanup list.
+            async def factory() -> Any:
+                app_cleanups: list[Any] = []
+                value = await _construct(request, {}, app_cleanups)
+                for generator in app_cleanups:
+                    container.track_cleanup(generator)
+                return value
+
+            return await container.get_or_create(fn, factory)
+    else:
+        resolve = _construct
+
+    memo[(fn, scope)] = resolve
     return resolve
 
 
@@ -904,6 +1074,7 @@ def compile_binder(
     orm_registries: Mapping[str, Any] | None = None,
     dependencies: tuple[Depends, ...] = (),
     binding_spec: BindingSpec | None | object = _BINDING_SPEC_UNSET,
+    app_scope: AppScope | None = None,
 ) -> Handler:
     """Wrap ``handler`` so typed parameters are bound per request.
 
@@ -939,11 +1110,14 @@ def compile_binder(
         )
     )
     resolvers: tuple[tuple[str, Depends, Resolver], ...] = tuple(
-        (name, marker, _compile_dependency(marker.fn, ()))
+        (name, marker, _compile_dependency(
+            marker.fn, (), scope=marker.scope, app_scope=app_scope))
         for name, marker in (() if spec is None else spec.depends)
     )
     side_effect_resolvers = tuple(
-        (marker, _compile_dependency(marker.fn, ())) for marker in dependencies
+        (marker, _compile_dependency(
+            marker.fn, (), scope=marker.scope, app_scope=app_scope))
+        for marker in dependencies
     )
     configured = databases or {}
     connections: list[tuple[str, Any, Any]] = []
@@ -982,7 +1156,11 @@ def compile_binder(
                 annotation, request.path_params[alias], ("path", alias)
             )
         if query_specs:
-            query = parse_qs(request.scope.get("query_string", b""))
+            # `request.query_string`, not `request.scope[...]`: on the native
+            # server the scope is a lazily materialized dict over
+            # `_RequestContext`, so reading it here built the whole thing on
+            # every bound handler purely to reach one member.
+            query = parse_qs(request.query_string)
             values: dict[str, str] = {}
             for key, value in query:
                 values.setdefault(key, value)
@@ -1059,18 +1237,20 @@ def compile_binder(
                         opened.append(session)
                     kwargs[name] = session
             for marker, resolver in side_effect_resolvers:
-                if marker.use_cache and marker.fn in cache:
+                key = (marker.fn, marker.scope)
+                if marker.use_cache and key in cache:
                     continue
                 value = await resolver(request, cache, cleanups)
                 if marker.use_cache:
-                    cache[marker.fn] = value
+                    cache[key] = value
             for name, marker, resolver in resolvers:
-                if marker.use_cache and marker.fn in cache:
-                    kwargs[name] = cache[marker.fn]
+                key = (marker.fn, marker.scope)
+                if marker.use_cache and key in cache:
+                    kwargs[name] = cache[key]
                 else:
                     value = await resolver(request, cache, cleanups)
                     if marker.use_cache:
-                        cache[marker.fn] = value
+                        cache[key] = value
                     kwargs[name] = value
             result = await handler(request, **kwargs)
             if borrowed or opened:
@@ -1138,6 +1318,7 @@ __all__ = [
     "BindingSpec",
     "Body",
     "Cookie",
+    "AppScope",
     "Depends",
     "File",
     "Form",

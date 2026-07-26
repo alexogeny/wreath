@@ -9,7 +9,7 @@ async ``Verifier`` for :class:`wreath.auth.BearerTokenBackend`; the resulting
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 from urllib.parse import urlsplit
 

@@ -1,6 +1,6 @@
 # Repository map
 
-A quick routing guide for Wreath contributors and coding agents. Start with `AGENTS.md` for repository rules, then use `docs/agents/manifest.json` for the machine-readable subsystem map and focused test locations.
+A quick routing guide for Wreath contributors and coding agents. Start with `AGENTS.md` for repository rules, then use `docs/agents/manifest.json` for the machine-readable subsystem map — it gives every subsystem's guides, reference pages, sources, tests, invariant `policy`, and the ADRs behind it, and `uv run wreath-map-lint` fails if it drifts from what is actually here.
 
 ## Top level
 
@@ -16,51 +16,68 @@ A quick routing guide for Wreath contributors and coding agents. Start with `AGE
 | `mkdocs.yml` | Documentation site structure and configuration. |
 | `README.md` | Public project overview and quick start. |
 | `AGENTS.md` | Repository-wide engineering, testing, documentation, and benchmark rules. |
+| `CLAUDE.md` | Pointer file so a coding agent loads those rules without being told to. |
 
-Generated or local-only directories such as `build/`, `site/`, `.venv/`, caches, `.sanitizers/`, and the root `benchmark-results*`/`benchmark-diagnosis*` trees are artifacts rather than source-of-truth code.
+Generated or local-only directories such as `build/`, `site/`, `.venv/`, caches, `.sanitizers/`, and the root `benchmark-results`/`benchmark-diagnosis` trees are artifacts rather than source-of-truth code.
 
 ## Framework package: `src/wreath/`
+
+**The public API is literal**: each feature lives in the module its name implies,
+so `wreath.pagination` is `src/wreath/pagination.py` and `wreath.jobs` is
+`src/wreath/jobs.py`. Guess first; the guess is usually right. A leading
+underscore means implementation — reach it through the facade that exports it,
+not directly.
+
+The table below is the shape of the package. For a specific subsystem's tests,
+invariants, and design decisions, look it up in `docs/agents/manifest.json`
+rather than reading here.
 
 ### Main Python surfaces
 
 | Area | Primary paths | Notes |
 | --- | --- | --- |
-| Application/lifecycle | `app.py`, `state.py`, `exceptions.py` | `Wreath` registration, startup compilation, ASGI dispatch, lifespan, state, and error handling. |
-| Routing | `router.py`, `routing.py` | Public router composition and route declarations; implementation backends live under `_pure/` and `_native/`. |
-| HTTP and webhooks | `request.py`, `response.py`, `background.py`, `http.py`, `http_client.py`, `webhooks.py`, `_client_codec.py`, `headers.py`, `codecs.py`, `json.py`, `multipart.py` | Inbound HTTP objects, response emission/background work, managed outbound pooling and native codecs, signed webhook delivery, and durable inbox/outbox contracts. |
-| Binding/OpenAPI | `binding.py`, `openapi.py`, `_native/validate.c` | Handler parameter resolution, dependency markers, native body validation (plan interpreter, pure twin in `binding.validate`), schema generation, and docs endpoints. |
-| Type generation | `typegen/`, `_pure/typegen.py` | Canonical IR from routes/binding, TypeScript + fetch + React Query targets, `wreath typegen` CLI; pure reference renderer (native gated). |
-| Server/protocols | `server.py`, `cli.py`, `_cli.py`, `_devserver.py`, `__main__.py`, `websocket.py`, `ws.py` | Server configuration, CLI application loading/reload supervision, transport selection, lifespan, WebSocket API, and pure/native protocol dispatch. |
-| Services | `postgres.py`, `cache.py`, `compression.py`, `config.py`, `staticfiles.py`, `testing.py`, `webpolicy.py` | PostgreSQL facade, configuration, caching/compression, static files, test client, and web policy. |
-| Authentication | `auth/` | Backends, identity models, requirements/decorators, and Cedar support. |
-| Middleware | `middleware/` | Base pipeline plus CORS, CSRF, sessions, security, cache, and compression middleware. |
-| ORM | `orm/`, `_native/orm_shape.c` | Models/fields, expressions, constraints, compiler (native query cache-key `shape_of`, pure twin `_shape_of_pure`), relations, registry, validation, introspection, and request-scoped sessions. |
+| Application/lifecycle | `app.py`, `router.py`, `state.py`, `exceptions.py` | `Wreath` registration, startup compilation, ASGI dispatch, lifespan, state, and RFC 9457 error handling. |
+| Routing | `_routing.py` | Route declaration lives on the app and `Router`; the matcher backends are in `_pure/router.py` and `_native/router.c`. |
+| Requests and responses | `request.py`, `response.py`, `background.py`, `_http.py`, `_headers.py`, `_codecs.py`, `_json.py`, `_multipart.py` | Inbound HTTP objects, every response type including SSE and streaming, and response-bound background work. |
+| Outbound HTTP | `http_client.py`, `webhooks.py`, `_client_codec.py` | Managed pooling with native codecs, and signed webhook delivery with durable inbox/outbox contracts. |
+| Binding/OpenAPI | `binding.py`, `openapi.py`, `_native/validate.c` | Handler parameter resolution, dependency markers, native body validation (plan interpreter, pure twin in `binding.validate`), schema generation, and opt-in docs endpoints. |
+| Type generation | `typegen/`, `_pure/typegen.py` | Canonical IR from routes/binding, TypeScript + fetch + React Query targets, `wreath typegen` CLI. |
+| Middleware | `middleware/`, `compression.py`, `cache_control.py`, `_webpolicy.py` | Base pipeline plus CORS, CSRF, sessions, security headers, rate limiting, request IDs, timing, proxy headers, cache, and compression. |
+| Auth | `auth.py`, `authorization.py`, `_auth/` | Authentication (identity) and authorization (roles, permissions, the built-in Cedar engine), kept firmly apart. |
+| Users | `users.py`, `_userkit.py` | Registration, sessions, and the ready-made user router. |
+| Data | `postgres.py`, `orm/`, `migrations.py`, `_locks.py` | The PostgreSQL driver, the ORM on top of it (strict one-way direction), the migration stack, and advisory locks reached through the `postgres` facade. |
+| Durable work | `jobs.py`, `_jobcore.py`, `messaging.py`, `services.py` | PostgreSQL-backed job runner, message bus, and the supervisor owning their process-lifetime tasks. |
+| Application services | `storage.py`, `pagination.py`, `cache.py`, `templates.py`, `staticfiles.py`, `config.py`, `testing.py` | Object storage, cursor pagination, the read-mostly snapshot cache, safe HTML templates, static files, configuration, and the in-process test client. |
+| Operations | `health.py`, `flags.py`, `versioning.py` | Health probes, feature flags, and API versioning. |
+| Observability | `telemetry.py`, `recording.py`, `replay.py`, `inspector.py` | The Native Flight Recorder surfaces: telemetry configuration and the OpenTelemetry bridge, recording policy types, replay and fault injection, and the read-only local inspector. Exporters are the `_otlp.py`/`_prometheus.py`/`_statsd.py`/`_cloudwatch_emf.py` group. |
+| Server/protocols | `server.py`, `cli.py`, `_cli.py`, `_devserver.py`, `websocket.py`, `reactor.py` | Server configuration, CLI application loading/reload supervision, transport selection, lifespan, the WebSocket API, and the metal tier's native event loop. |
+| Auditing and porting | `_audit/`, `port.py`, `_port/` | The `wreath audit` accessibility/performance ruleset, and the `wreath port` codemod that analyzes a FastAPI app without importing it. |
 
 ### Backend split
 
 - `src/wreath/_pure/` contains the Python reference/fallback implementations for routing, codecs, HTTP, server protocols, PostgreSQL, compression, security, and WebSocket behavior.
 - `src/wreath/_native/` contains optional CPython C accelerators. Module entry files are `_coremodule.c`, `_clientmodule.c`, `_servermodule.c`, `_postgresmodule.c`, and `_http3module.c`.
 - `src/wreath/_native/postgres/` owns native PostgreSQL protocol, buffering, decoding, codecs, model storage/hydration, and related plans/records.
-- `src/wreath/_devtools/` contains native complexity, boundary, GIL, memory, and error linters, profiling support, and `request_trace.py` (`wreath-request-trace`), which counts the Python/native boundary crossings of one request against the realistic app in `sample_app.py` and diffs them against `docs/agents/request-boundary-baseline.json`. `tape_decomp.py` (`wreath-tape-decomp`) prices that same tape, reporting a measured noise floor and refusing to attribute deltas below it. `decomp.py` (`wreath-decomp`) prices the rest of the request -- lifecycle stages, one ORM read, and ns-per-frame/ns-per-await calibrations -- over the shared harness in `measure.py`, which documents the measurement rules. `tasks.py` provides `wreath-check`/`wreath-docs`/`wreath-bench`, which install their own dependency group with `uv sync --inexact` so one job never uninstalls another's.
+- `src/wreath/_devtools/` contains native complexity, boundary, GIL, memory, and error linters, profiling support, and `request_trace.py` (`wreath-request-trace`), which counts the Python/native boundary crossings of one request against the realistic app in `sample_app.py` and diffs them against `docs/agents/request-boundary-baseline.json`. `tape_decomp.py` (`wreath-tape-decomp`) prices that same tape, reporting a measured noise floor and refusing to attribute deltas below it. `decomp.py` (`wreath-decomp`) prices the rest of the request -- lifecycle stages, one ORM read, and ns-per-frame/ns-per-await calibrations -- over the shared harness in `measure.py`, which documents the measurement rules. `map_lint.py` (`wreath-map-lint`) checks that this file, `AGENTS.md`, `docs/llms.txt`, and the manifest still describe the repository. `tasks.py` provides `wreath-check`/`wreath-docs`/`wreath-bench`, which install their own dependency group with `uv sync --inexact` so one job never uninstalls another's.
 
 When changing an accelerated feature, preserve parity between its public facade, `_pure` implementation, `_native` implementation, and parity tests. Keep framework and server layers separable.
 
 ## Tests
 
-- Root `tests/test_*.py` files cover application behavior, binding, routing, request/response handling, middleware/auth/security, server behavior, native parity/lints, and benchmark contracts.
-- `tests/http2/` covers frames, HPACK, flow control, connection state, ASGI behavior, networking, and shutdown.
-- `tests/http3/` covers availability, headers/settings, stream state, limits/timeouts, ASGI behavior, networking, and interoperability.
-- `tests/postgres/` covers codecs, protocol/connection/pool behavior, receive buffering, pipelines, direct paths, and app/auth integration.
-- `tests/orm/` covers declarations, binding, compilation, constraints, validation, sessions, introspection, and pure/native storage/hydration parity.
+Every subsystem's focused tests are listed in `docs/agents/manifest.json`; look
+there before grepping. The broad shape:
+
+- Root `tests/test_*.py` files cover application behavior, binding, routing, request/response handling, middleware/auth/security, server behavior, the Flight Recorder, native parity/lints, and benchmark contracts.
+- Subsystem packages hold their own: `tests/orm/`, `tests/postgres/`, `tests/migrations/`, `tests/jobs/`, `tests/messaging/`, `tests/storage/`, `tests/pagination/`, `tests/audit/`, `tests/health/`, `tests/flags/`, `tests/versioning/`, `tests/port/`, `tests/reactor/`, `tests/typegen/`.
+- `tests/http2/` and `tests/http3/` cover frames, HPACK, flow control, connection and stream state, limits/timeouts, ASGI behavior, networking, and shutdown.
 - `tests/fixtures/` holds reusable test data; `tests/_routing_impls.py` and `tests/_server_ingest.py` provide cross-backend test helpers.
 
 Prefer a focused test near the changed subsystem. The canonical commands and marker guidance remain in `AGENTS.md`.
 
 ## Benchmarks and native tooling
 
-- `benchmarks/run.py`, `apps.py`, and `scenarios.py` drive framework comparisons.
-- `benchmarks/load.py`, `lifecycle.py`, and `report.py` provide load generation, lifecycle measurement, and reporting.
-- `benchmarks/bench_*.py` target native HTTP storage/pressure, request bridging, outbound HTTP, signed webhooks, webhook dispatcher backlog/outcomes, routing, pipelines, web policy, response-bound background tasks, and type generation.
+- `benchmarks/run.py`, `benchmarks/apps.py`, and `benchmarks/scenarios.py` drive framework comparisons.
+- `benchmarks/load.py`, `benchmarks/lifecycle.py`, and `benchmarks/report.py` provide load generation, lifecycle measurement, and reporting.
 - `benchmarks/postgres/` contains PostgreSQL and ORM microbenchmarks/workloads.
 - `tools/sanitizers/` builds isolated server, PostgreSQL, and HTTP/3 sanitizer variants.
 - Keep raw benchmark results and environment metadata; follow `AGENTS.md` before making performance claims.
@@ -71,13 +88,14 @@ Prefer a focused test near the changed subsystem. The canonical commands and mar
 | --- | --- |
 | Agent workflow and subsystem lookup | `docs/cookbook/agents/index.md`, `docs/agents/manifest.json` |
 | Behavioral invariants | `AGENTS.md`, per-subsystem `policy` fields in `docs/agents/manifest.json` |
-| Change playbooks | `docs/cookbook/agents/` (add-an-endpoint, verify-a-change, checks) |
-| User-facing behavior | `docs/guides/`, `docs/getting-started/`, `docs/cookbook/` |
+| Change playbooks | `docs/cookbook/agents/` (add-an-endpoint, verify-a-change, checks, documenting-a-module) |
+| User-facing behavior | `docs/guides/`, `docs/getting-started/`, `docs/cookbook/recipes/` |
 | Public API | `docs/reference/` |
-| Request/ASGI concepts | `docs/concepts/` |
-| Native implementation details | `docs/native/`, `docs/internals/performance.md` |
+| Coming from the FastAPI stack | `docs/from-fastapi/` |
+| What is deliberately not shipped yet | `docs/reference/roadmap.md` |
+| Native implementation details | `docs/plans/` (the `native-*` designs), `docs/decisions/`, `docs/agents/python-complexity-audit.md` |
 | Architectural decisions | `docs/decisions/` |
 | Active or historical design work | `docs/plans/` |
 | Compact LLM documentation index | `docs/llms.txt` |
 
-Update the relevant guide/reference/agent map whenever public behavior or subsystem routing changes.
+Update the relevant guide, reference page, and `docs/agents/manifest.json` whenever public behavior or subsystem routing changes; `uv run wreath-map-lint` enforces the manifest half of that.

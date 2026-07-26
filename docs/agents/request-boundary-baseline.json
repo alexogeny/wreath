@@ -4,7 +4,7 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 128,
+        "c": 127,
         "python": 2
       },
       "pre_activation": {
@@ -29,7 +29,7 @@
           "python": 0
         },
         "handler": {
-          "c": 59,
+          "c": 58,
           "python": 1
         },
         "egress": {
@@ -38,7 +38,7 @@
         }
       },
       "c_calls": {
-        "dict.get": 38,
+        "dict.get": 37,
         "builtins.isinstance": 12,
         "list.append": 8,
         "str.encode": 5,

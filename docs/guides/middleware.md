@@ -25,6 +25,25 @@ middleware** wraps matched handlers — it runs when a request lands on a route.
 nothing. Request IDs, security headers, and timing belong at the global level,
 because a `404` needs an ID and its headers just as much as a `200` does.
 
+## User story: put a ceiling on abusive clients
+
+> *As an API author, a few clients hammer my API and occasionally knock it over.
+> I want a ceiling — every client gets so many requests a minute, and the ones
+> over the line get a clean `429`, without me hand-rolling a token bucket.*
+
+```python
+from wreath.middleware import RateLimitMiddleware
+
+app.add_middleware(RateLimitMiddleware(limit=100, window=60.0))
+```
+
+The default key is the client address, so each caller gets its own bucket; a
+request over the limit gets a `429 Too Many Requests` (an RFC 9457 problem body)
+with a whole-second `Retry-After`. Pass `key=` to bucket by API key or
+authenticated user instead. Rate limiting is inherently global — it registers on
+every request, misses included — so a flood of `404`s counts against the bucket
+too.
+
 ## Behind a proxy
 
 If Wreath runs behind a TLS-terminating proxy or load balancer, requests arrive

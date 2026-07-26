@@ -14,7 +14,7 @@ import asyncio
 import json
 from typing import Any
 
-from .jwt import RsaPublicKey, SymmetricKey, key_from_jwk
+from .jwt import JwtKey, key_from_jwk
 
 __all__ = ["JwksCache"]
 
@@ -46,7 +46,7 @@ class JwksCache:
     ) -> None:
         self._client = http_client
         self._jwks_path = jwks_path
-        self._keys: dict[str, SymmetricKey | RsaPublicKey] = {}
+        self._keys: dict[str, JwtKey] = {}
         self._lock = asyncio.Lock()
         self._expires_at = 0.0
         self._last_refresh = 0.0
@@ -56,7 +56,7 @@ class JwksCache:
     def _now(self) -> float:
         return asyncio.get_running_loop().time()
 
-    def _lookup(self, kid: str | None) -> SymmetricKey | RsaPublicKey | None:
+    def _lookup(self, kid: str | None) -> JwtKey | None:
         if kid is not None:
             return self._keys.get(kid)
         # A token without a kid is only unambiguous when the set holds one key.
@@ -64,7 +64,7 @@ class JwksCache:
             return next(iter(self._keys.values()))
         return None
 
-    async def resolve(self, kid: str | None) -> SymmetricKey | RsaPublicKey | None:
+    async def resolve(self, kid: str | None) -> JwtKey | None:
         """Return the key for ``kid``, refreshing once if it is unknown/stale."""
         now = self._now()
         key = self._lookup(kid)
@@ -100,7 +100,7 @@ class JwksCache:
         if len(body) > _MAX_JWKS_BYTES:
             raise ValueError("JWKS document exceeds size cap")
         document = json.loads(body)
-        keys: dict[str, SymmetricKey | RsaPublicKey] = {}
+        keys: dict[str, JwtKey] = {}
         for index, jwk in enumerate(document.get("keys", ())):
             use = jwk.get("use")
             if use not in (None, "sig"):

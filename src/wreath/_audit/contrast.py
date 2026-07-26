@@ -1,4 +1,4 @@
-"""WCAG 1.4.3 colour-contrast checking over a design-token stylesheet (Tier 2).
+"""WCAG 1.4.3 (text) and 1.4.11 (non-text) contrast over a design-token stylesheet.
 
 Tokens are declared as CSS custom properties in up to three theme contexts — light
 ``:root``, ``@media (prefers-color-scheme: dark)``, and ``:root[data-theme=...]`` — and
@@ -176,6 +176,69 @@ def _resolve_expr(expr: str, tokens: dict[str, str]) -> str | None:
     if expr.lower() in _NAMED:
         return _NAMED[expr.lower()]
     return expr if _hex_to_rgb(expr) else None
+
+
+#: Selectors whose border/outline is (usually) the only visual boundary of a UI
+#: component, so 1.4.11 applies. Scoped tight to avoid flagging decorative borders.
+_UI_SELECTOR = re.compile(r"(?:^|[\s,>~+])(?:input|select|textarea|button)\b|:focus")
+
+
+def _border_pairs(css: str) -> list[tuple[str, str]]:
+    """(border/outline colour, base surface) for UI-component selectors only."""
+    base_bg: str | None = None
+    for selector, body in _rules(css):
+        bg = _prop(body, "background-color") or _bg_color(_prop(body, "background"))
+        if bg and selector in ("body", ":root"):
+            base_bg = bg
+    if base_bg is None:
+        return []
+    pairs: list[tuple[str, str]] = []
+    for selector, body in _rules(css):
+        if not _UI_SELECTOR.search(selector):
+            continue
+        for prop in ("border-color", "outline-color"):
+            value = _prop(body, prop)
+            if value:
+                pairs.append((value, base_bg))
+        for shorthand in ("border", "outline"):
+            value = _bg_color(_prop(body, shorthand))
+            if value:
+                pairs.append((value, base_bg))
+    return pairs
+
+
+def nontext_contrast_findings(css: str, surface: str) -> Iterator[Finding]:
+    """WCAG 1.4.11 — a UI component's boundary needs 3:1 against its surface.
+
+    Conservative like :func:`contrast_findings`: only form-control and focus-state
+    borders/outlines (the boundaries a component's identity depends on) are
+    checked, against the base surface, at the 3:1 non-text threshold.
+    """
+    themes = parse_tokens(css)
+    # Form borders are often literal hex, not tokens; fall back to a token-less
+    # theme so a plain `border-color:#ddd` is still resolvable and checked.
+    active = {name: tokens for name, tokens in themes.items() if tokens} or {"default": {}}
+    seen: set[tuple] = set()
+    for fg_expr, bg_expr in _border_pairs(css):
+        for theme_name, tokens in active.items():
+            fg = _resolve_expr(fg_expr, tokens)
+            bg = _resolve_expr(bg_expr, tokens)
+            if fg is None or bg is None:
+                continue
+            ratio = contrast_ratio(fg, bg)
+            if ratio is None or ratio >= _LARGE_AA:
+                continue
+            key = (fg_expr, bg_expr, theme_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield Finding(
+                "non-text-contrast", Severity.WARN, surface,
+                f"UI border {fg_expr} on {bg_expr} is {ratio:.2f}:1 in the {theme_name} "
+                f"theme (WCAG 1.4.11 needs {_LARGE_AA}:1 for component boundaries)",
+                "WCAG 1.4.11", "",
+                "raise the border/outline colour contrast to at least 3:1",
+            )
 
 
 def contrast_findings(css: str, surface: str) -> Iterator[Finding]:

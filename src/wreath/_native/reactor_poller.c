@@ -744,6 +744,10 @@ rp_drain_accept_completions(ReactorPoller *p, unsigned budget,
                 continue;
             }
             uint64_t value;
+            /* native-gil-lint: allow NG002 -- wake_fd is an eventfd created with
+             * EFD_NONBLOCK (see rp_init), so this read cannot block: it either
+             * consumes the counter or fails EAGAIN. Releasing the GIL for it
+             * would cost two state transitions per wakeup on the poll path. */
             while (read(p->wake_fd, &value, sizeof(value)) < 0 &&
                    errno == EINTR) {
                 /* Retry only interrupted reads; EAGAIN means fully drained. */
@@ -1626,8 +1630,13 @@ rp_run_once(PyObject *op, PyObject *Py_UNUSED(ignored))
         } else {
             double delay = Py_HUGE_VAL;
             if (PyList_GET_SIZE(p->scheduled) > 0) {
-                PyObject *h0 = PyList_GET_ITEM(p->scheduled, 0);  /* borrowed */
-                PyObject *whenobj = PyObject_GetAttr(h0, g_s_when);
+                /* Named apart from the `head` borrowed in the due-timer loop
+                 * below: that one is taken after this function releases the GIL,
+                 * and sharing a name would read -- to a person or to
+                 * wreath-native-gil-lint, which is line-based and cannot see C
+                 * block scope -- as one borrow carried across the release. */
+                PyObject *soonest = PyList_GET_ITEM(p->scheduled, 0);  /* borrowed */
+                PyObject *whenobj = PyObject_GetAttr(soonest, g_s_when);
                 if (whenobj == NULL) {
                     return NULL;
                 }
@@ -1733,8 +1742,8 @@ rp_run_once(PyObject *op, PyObject *Py_UNUSED(ignored))
     /* --- 4. due timers -> ready ----------------------------------------- */
     double end_time = loop_now + p->clock_res;
     while (PyList_GET_SIZE(p->scheduled) > 0) {
-        PyObject *h0 = PyList_GET_ITEM(p->scheduled, 0);  /* borrowed */
-        PyObject *whenobj = PyObject_GetAttr(h0, g_s_when);
+        PyObject *head = PyList_GET_ITEM(p->scheduled, 0);  /* borrowed */
+        PyObject *whenobj = PyObject_GetAttr(head, g_s_when);
         if (whenobj == NULL) {
             return NULL;
         }
@@ -1859,6 +1868,11 @@ rp_wake(PyObject *op, PyObject *Py_UNUSED(ignored))
     uint64_t value = 1;
     ssize_t written;
     do {
+        /* native-gil-lint: allow NG002 -- wake_fd is an eventfd created with
+         * EFD_NONBLOCK (see rp_init); an 8-byte counter increment cannot block,
+         * and the EAGAIN case below is the "already saturated" path, not a
+         * would-block wait. This is the call_soon_threadsafe/signal wakeup, so
+         * it must stay safe to issue while holding the GIL briefly. */
         written = write(p->wake_fd, &value, sizeof(value));
     } while (written < 0 && errno == EINTR);
     if (written < 0 && errno != EAGAIN) {

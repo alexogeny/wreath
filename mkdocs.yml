@@ -77,6 +77,7 @@ nav:
   - Getting started:
       - Installation and first app: getting-started/index.md
       - Project structure and deployment: getting-started/deployment.md
+  - Performance: perf/index.md
   - Coming from FastAPI:
       - Wreath for FastAPI developers: from-fastapi/index.md
       - Pydantic and validation: from-fastapi/pydantic.md
@@ -84,45 +85,95 @@ nav:
       - Alembic and migrations: from-fastapi/alembic.md
       - Automated porting (wreath port): guides/porting.md
   - Guides:
-      - Routing: guides/routing.md
-      - Requests and responses: guides/requests-responses.md
-      - Binding, validation, and dependencies: guides/binding.md
-      - Middleware: guides/middleware.md
-      - Authentication and authorization: guides/auth.md
-      - WebSockets: guides/websockets.md
-      - Native server and protocols: guides/server.md
-      - Outbound HTTP and webhooks: guides/http-client.md
-      - PostgreSQL: guides/postgres.md
-      - ORM: guides/orm.md
-      - FastAPI and Alembic migration: guides/migrations.md
-      - Templates: guides/templates.md
-      - Caching: guides/caching.md
-      - Compression: guides/compression.md
-      - Static files: guides/static-files.md
-      - Configuration and state: guides/config-state.md
-      - OpenAPI and typed clients: guides/openapi-typegen.md
-      - Testing: guides/testing.md
-      - Auditing (a11y & performance): guides/auditing.md
-      - Object storage: guides/storage.md
-      - Server-Sent Events: guides/sse.md
-      - Form-model binding: guides/forms.md
-      - Durable jobs and messaging: guides/jobs.md
-      - Distributed locks: guides/distributed-locks.md
-      - JSONB and arrays: guides/jsonb-arrays.md
-      - Pagination, filtering, and sorting: guides/pagination.md
-      - Health, flags, and versioning: guides/health-flags-versioning.md
-      - User management: guides/users.md
-      - Interactive API docs: guides/api-docs.md
-      - Observability bridges: guides/observability.md
+      - Handling a request:
+          - Routing: guides/routing.md
+          - Requests and responses: guides/requests-responses.md
+          - Binding, validation, and dependencies: guides/binding.md
+          - Middleware: guides/middleware.md
+          - Form-model binding: guides/forms.md
+          - Templates: guides/templates.md
+      - Working with data:
+          - PostgreSQL: guides/postgres.md
+          - ORM: guides/orm.md
+          - JSONB and arrays: guides/jsonb-arrays.md
+          - Pagination, filtering, and sorting: guides/pagination.md
+          - Generating CRUD: guides/crud.md
+          - Distributed locks: guides/distributed-locks.md
+          - FastAPI and Alembic migration: guides/migrations.md
+      - Users, auth, and security:
+          - Authentication and authorization: guides/auth.md
+          - User management: guides/users.md
+          - Idempotent writes: guides/idempotency.md
+      - Realtime and background work:
+          - WebSockets: guides/websockets.md
+          - Server-Sent Events: guides/sse.md
+          - Task progress: guides/progress.md
+          - Durable jobs and messaging: guides/jobs.md
+      - Talking to other services:
+          - Outbound HTTP and webhooks: guides/http-client.md
+          - Calling another service: guides/service-client.md
+          - Object storage: guides/storage.md
+      - Speed and delivery:
+          - Caching: guides/caching.md
+          - Response caching: guides/response-cache.md
+          - Compression: guides/compression.md
+          - Static files: guides/static-files.md
+          - Content negotiation: guides/content-negotiation.md
+      - Your API's surface:
+          - OpenAPI and typed clients: guides/openapi-typegen.md
+          - Interactive API docs: guides/api-docs.md
+          - Building a docs site: guides/docs-ssg.md
+      - Configuration and operations:
+          - Configuration and state: guides/config-state.md
+          - Health, flags, and versioning: guides/health-flags-versioning.md
+          - Observability bridges: guides/observability.md
+          - Native server and protocols: guides/server.md
+      - Testing and quality:
+          - Testing: guides/testing.md
+          - Auditing (a11y & performance): guides/auditing.md
   - Cookbook:
       - Overview: cookbook/index.md
-      - Deploy behind a proxy: cookbook/recipes/behind-a-proxy.md
-      - Rate-limit an endpoint: cookbook/recipes/rate-limiting.md
-      - Handle file uploads: cookbook/recipes/file-uploads.md
-      - Run work after the response: cookbook/recipes/background-jobs.md
-      - Manage a database pool: cookbook/recipes/database-lifespan.md
-      - Move a FastAPI + Alembic SaaS app: cookbook/recipes/fastapi-alembic-saas.md
-      - Fuzz your own routes: cookbook/recipes/fuzz-your-routes.md
+      - Handling requests:
+          - Handle file uploads: cookbook/recipes/file-uploads.md
+          - Rate-limit an endpoint: cookbook/recipes/rate-limiting.md
+          - JSON or MessagePack from one handler: cookbook/recipes/negotiate-format.md
+      - Users, auth, and security:
+          - Add OIDC / OAuth2 login: cookbook/recipes/oauth2-login.md
+          - Authenticate with an API key: cookbook/recipes/api-key-auth.md
+          - Authorize with Cedar (RBAC): cookbook/recipes/cedar-rbac.md
+          - Make a POST safe to retry: cookbook/recipes/idempotent-writes.md
+      - Working with data:
+          - Paginate, sort, and filter: cookbook/recipes/paginate-a-list.md
+          - Build an admin console: cookbook/recipes/build-an-admin-console.md
+          - Query JSONB and arrays: cookbook/recipes/jsonb-query.md
+          - Run a transaction: cookbook/recipes/unit-of-work.md
+          - Generate CRUD safely: cookbook/recipes/safe-crud.md
+          - Manage a database pool: cookbook/recipes/database-lifespan.md
+      - Realtime and background work:
+          - Live progress for a long task: cookbook/recipes/stream-job-progress.md
+          - Broadcast over WebSockets: cookbook/recipes/websocket-broadcast.md
+          - Enqueue a durable job: cookbook/recipes/durable-job.md
+          - Run work after the response: cookbook/recipes/background-jobs.md
+      - Talking to other services:
+          - Call a service with a token: cookbook/recipes/call-a-service.md
+          - Send a signed webhook: cookbook/recipes/send-webhook.md
+          - Presign an upload: cookbook/recipes/presign-upload.md
+      - Speed and delivery:
+          - Cache an expensive endpoint: cookbook/recipes/cache-an-endpoint.md
+      - Your API's surface:
+          - Generate a typed client: cookbook/recipes/typed-client.md
+          - Interactive API docs: cookbook/recipes/interactive-docs.md
+          - Build a docs site: cookbook/recipes/build-a-docs-site.md
+      - Operations:
+          - Liveness and readiness: cookbook/recipes/health-checks.md
+          - Feature-flag a rollout: cookbook/recipes/feature-flag-rollout.md
+          - Version your API: cookbook/recipes/api-versioning.md
+          - Prometheus metrics: cookbook/recipes/prometheus-metrics.md
+          - OpenTelemetry tracing: cookbook/recipes/otel-tracing.md
+          - Deploy behind a proxy: cookbook/recipes/behind-a-proxy.md
+      - Migrating and quality:
+          - Move a FastAPI + Alembic SaaS app: cookbook/recipes/fastapi-alembic-saas.md
+          - Fuzz your own routes: cookbook/recipes/fuzz-your-routes.md
       - For coding agents:
           - Overview: cookbook/agents/index.md
           - The gates: cookbook/agents/checks.md
@@ -160,6 +211,9 @@ nav:
       - User management: reference/users.md
       - Pagination: reference/pagination.md
       - Health checks: reference/health.md
+      - Rooms: reference/rooms.md
+      - Session store: reference/session_store.md
+      - Validation errors: reference/validation_errors.md
       - Feature flags: reference/flags.md
       - API versioning: reference/versioning.md
       - Codemod (wreath port): reference/port.md

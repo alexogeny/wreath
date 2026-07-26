@@ -77,7 +77,7 @@ class _ArrayType(PgType):
 
     def __init__(
         self,
-        element: "PgType",
+        element: PgType,
         name: str,
         oid: int,
         sql: str,

@@ -16,8 +16,16 @@ Run them individually while you work:
 | `uv run pytest -m '' -n 4` | Everything, including network, fuzz, and performance. |
 | `uv run ruff check .` | Lint and import hygiene. |
 | `uv run ty check` | Types. |
+| `uv run wreath-map-lint` | The maps you arrived by — that `docs/agents/manifest.json`, `AGENTS.md`, `repo-map.md`, and `docs/llms.txt` still describe this repository. |
 | `uv run wreath-native-lint` | C complexity patterns; its siblings `wreath-native-error-lint`, `wreath-native-gil-lint`, and `wreath-native-memory-lint` cover error-handling, GIL, and memory. `0` means clean. |
 | `uv run wreath-request-trace --check` | The Python↔native boundary — that you didn't add crossings. |
+
+`wreath-map-lint` is the cheapest gate and runs first. It fails when the manifest
+cites a path that isn't there, when a public module under `src/wreath` belongs to
+no subsystem, when a prose map names a file that no longer exists, or when a
+guide is missing from `docs/llms.txt`. If you moved a file or added a module,
+update `docs/agents/manifest.json` in the same change — the map is how the next
+agent finds your work without reading the whole tree.
 
 The request-trace baseline lives at `docs/agents/request-boundary-baseline.json`.
 If a change *intentionally* alters the number of boundary crossings, re-record it

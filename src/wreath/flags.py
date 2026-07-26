@@ -75,7 +75,7 @@ class FeatureFlags:
         self._values = {key.lower(): str(val) for key, val in (values or {}).items()}
 
     @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> "FeatureFlags":
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> FeatureFlags:
         """Collect ``WREATH_FLAG_<NAME>`` entries from the environment."""
         env = environ if environ is not None else read_osenv()
         values = {
@@ -94,7 +94,7 @@ class FeatureFlags:
     def all(self, context: Mapping[str, Any] | None = None) -> dict[str, bool]:
         return {name: evaluate_rule(raw, name, context) for name, raw in self._values.items()}
 
-    def view(self, context: Mapping[str, Any] | None = None) -> "FlagView":
+    def view(self, context: Mapping[str, Any] | None = None) -> FlagView:
         return FlagView(self, context)
 
 

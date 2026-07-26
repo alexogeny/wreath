@@ -28,7 +28,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ._jobcore import check_notify_payload, compute_backoff, dedup_key
+from ._jobcore import (
+    check_notify_payload,
+    compute_backoff,
+    dedup_key,
+    validate_identifier,
+)
 
 MessageHandler = Callable[["Message"], Awaitable[None]]
 
@@ -38,12 +43,8 @@ _REJECT = "reject"
 
 
 def _validate_channel(value: str) -> str:
-    if not value or len(value.encode("utf-8")) > 63:
-        raise ValueError(f"channel must be 1..63 bytes: {value!r}")
-    for character in value:
-        if not (character.isalnum() or character in "_$"):
-            raise ValueError(f"invalid channel character {character!r} in {value!r}")
-    return value
+    """A LISTEN/NOTIFY channel is just a bounded SQL-safe identifier."""
+    return validate_identifier(value, "channel")
 
 
 @dataclass(slots=True)

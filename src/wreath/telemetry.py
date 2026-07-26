@@ -20,6 +20,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Type-only: the exporter bridges are imported lazily inside each activate_*
+    # function so importing telemetry stays cheap. Borrowing just the alias keeps
+    # that property while giving the wrappers below the real parameter contract.
+    from ._prometheus import RouteLabels
 
 from ._flight_schema import (
     CELL_SIZE,
@@ -407,7 +414,7 @@ def activate_prometheus(
     source: object,
     *,
     namespace: str = "wreath",
-    route_labels: object = None,
+    route_labels: RouteLabels = None,
 ) -> object:
     """Wrap a metrics snapshot source in a Prometheus exposition bridge.
 
@@ -432,7 +439,7 @@ def activate_openmetrics(
     source: object,
     *,
     namespace: str = "wreath",
-    route_labels: object = None,
+    route_labels: RouteLabels = None,
 ) -> object:
     """Like :func:`activate_prometheus`, but the bridge renders OpenMetrics 1.0.0.
 
@@ -455,7 +462,7 @@ def activate_statsd(
     prefix: str = "wreath",
     dogstatsd: bool = False,
     tags: dict | None = None,
-    route_labels: object = None,
+    route_labels: RouteLabels = None,
 ) -> object:
     """Wrap a snapshot source in a StatsD/DogStatsD UDP push bridge.
 
@@ -479,7 +486,7 @@ def activate_cloudwatch_emf(
     *,
     namespace: str = "Wreath",
     dimensions: dict | None = None,
-    route_labels: object = None,
+    route_labels: RouteLabels = None,
     cumulative: bool = False,
 ) -> object:
     """Wrap a snapshot source in a CloudWatch EMF bridge.

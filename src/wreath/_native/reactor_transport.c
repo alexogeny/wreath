@@ -129,6 +129,12 @@ metal_recv(SocketTransport *t, void *buffer, size_t size)
     }
     ssize_t result;
     do {
+        /* native-gil-lint: allow NG002 -- t->fd is always O_NONBLOCK: accepted
+         * with SOCK_NONBLOCK on the native path, and forced in st_init on the
+         * Python-constructed path. A nonblocking recv returns EAGAIN instead of
+         * waiting, so there is no blocking region to release the GIL around --
+         * and doing so per readiness event would cost two state transitions on
+         * the hottest path in the loop. */
         result = recv(t->fd, buffer, size, 0);
     } while (result < 0 && errno == EINTR);
     return result;
@@ -139,6 +145,8 @@ metal_send(SocketTransport *t, const void *buffer, size_t size)
 {
     ssize_t result;
     do {
+        /* native-gil-lint: allow NG002 -- see metal_recv: t->fd is guaranteed
+         * O_NONBLOCK, so a full send buffer reports EAGAIN rather than waiting. */
         result = send(t->fd, buffer, size, MSG_NOSIGNAL);
     } while (result < 0 && errno == EINTR);
     return result;
@@ -149,6 +157,8 @@ metal_sendmsg(SocketTransport *t, const struct msghdr *message)
 {
     ssize_t result;
     do {
+        /* native-gil-lint: allow NG002 -- see metal_recv: t->fd is guaranteed
+         * O_NONBLOCK, so a full send buffer reports EAGAIN rather than waiting. */
         result = sendmsg(t->fd, message, MSG_NOSIGNAL);
     } while (result < 0 && errno == EINTR);
     return result;
@@ -1246,7 +1256,15 @@ st_lazy_extra_address(SocketTransport *t, PyObject *name)
     }
     PyObject *value = PyObject_CallMethod(t->sock, method, NULL);
     if (value == NULL) {
+        /* Contract: NULL from this helper means "no value", never "error" --
+         * st_get_extra_info returns its caller's default on NULL and never
+         * inspects PyErr_Occurred(), matching asyncio's get_extra_info(name,
+         * default), which reports a missing key by returning the default rather
+         * than raising. A closed or half-torn-down socket makes getsockname
+         * fail routinely, so leaving that exception set would surface later as a
+         * spurious error at an unrelated call site. */
         PyErr_Clear();
+        /* native-error-lint: allow NE003 -- documented NULL-means-absent contract, see above */
         return NULL;
     }
     if (PyDict_SetItem(t->extra, name, value) < 0) {
@@ -1480,6 +1498,16 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
         Py_DECREF(fdobj);
         if (t->fd < 0 && PyErr_Occurred()) {
             return -1;
+        }
+        /* The accept path above gets O_NONBLOCK from accept4(SOCK_NONBLOCK); a
+         * socket handed in from Python has only asyncio's convention behind it,
+         * and metal_recv/metal_send issue recv/send while holding the GIL, so a
+         * blocking descriptor here would stall the entire loop instead of
+         * returning EAGAIN. Make the invariant true rather than assumed -- once,
+         * off the accept hot path, which already pays nothing for it. */
+        int flags = fcntl(t->fd, F_GETFL, 0);
+        if (flags >= 0 && !(flags & O_NONBLOCK)) {
+            fcntl(t->fd, F_SETFL, flags | O_NONBLOCK);
         }
     }
     /* TCP_NODELAY (best effort) */

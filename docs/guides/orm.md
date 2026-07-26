@@ -28,6 +28,55 @@ request-scoped session in a handler with
 from SQLAlchemy or SQLModel, [the translation page](../from-fastapi/sqlmodel.md)
 maps the whole surface.
 
+## User story: one model validates the body and writes the row
+
+> *As an API author, I want `POST /widgets` to check the request body against the
+> very model that defines the table — no second schema to keep in sync — and then
+> persist it on a write session.*
+
+```python
+from typing import Annotated
+from wreath.orm import FromORM, Session
+
+@app.post("/widgets")
+async def create(
+    request,
+    widget: Widget,                                          # the body, validated by the model
+    session: Annotated[Session, FromORM("main", workload="write")],
+):
+    session.add(widget)
+    await session.flush()                                    # INSERT runs; widget.id is populated
+    return {"id": widget.id, "name": widget.name}
+```
+
+Binding the body to `Widget` runs it through the same column rules the database
+will enforce, so the check and the schema can't drift apart. `flush()` outside an
+explicit transaction opens one for the write and commits it atomically.
+
+## User story: fetch a row, or a filtered page
+
+> *As an API author, I want to read one row by id and run a small filtered query
+> on a request-scoped session that only leases a read connection when I actually
+> touch it.*
+
+```python
+@app.get("/widgets/{id}")
+async def read(
+    request,
+    session: Annotated[Session, FromORM("main", workload="read")],
+):
+    widget = await session.get(Widget, request.path_params["id"])   # None on a miss
+    if widget is None:
+        return Response(status_code=404)
+    cheap = await session.fetch(
+        Widget.select().where(Widget.price < 1000).order_by(Widget.price).limit(20)
+    )
+    return {"widget": widget.name, "cheap": [w.name for w in cheap]}
+```
+
+`session.get` returns `None` for a missing primary key rather than raising, and a
+session that is never queried leases no connection at all.
+
 ## Constraints and indexes
 
 A single column carries its own constraints as keywords: `unique=True`,

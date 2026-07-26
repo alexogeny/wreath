@@ -6,18 +6,19 @@ stdlib fallbacks so verification also works under ``WREATH_PURE=1``. RSA (RS*/PS
 verification is done here with CPython's bigint ``pow`` and the stdlib — RSA
 verify is a public-key operation whose only risk is correctness, not timing, and
 its padding checks are far safer read against the stdlib than hand-written in C.
+ES256 (ECDSA/P-256) and EdDSA (Ed25519) have no CPython path, so they are
+implemented as zero-dependency verify-only primitives in :mod:`._ecverify`.
 
 Algorithm confusion is prevented structurally: a verifier's algorithm allow-list
 is frozen at construction, the token ``alg`` may only *select from* that list
 (so ``alg=none`` or any unlisted alg is rejected before any verify runs), and
-each key is bound to exactly one algorithm *family* — a symmetric secret can
-never satisfy an RS*/PS* check and an RSA public key can never satisfy an HS*
-check.
+each key is bound to exactly one algorithm *family* (HS / RSA / EC / OKP) — a
+symmetric secret can never satisfy an RS*/PS*/ES256/EdDSA check, and vice versa.
 
-TODO(pure-twin): a byte-identical ``wreath._pure.jose`` twin and a Project
-Wycheproof + ``cryptography`` differential-oracle harness are deferred per the
-C-first directive. The review fork MUST run RSA/PSS test vectors against an
-external oracle before this is trusted in production.
+Every family's verifier is differentially tested against the ``cryptography``
+oracle plus RFC 8032 / NIST known-answer vectors in
+``tests/compliance/test_jwt_ec.py``. A byte-identical ``wreath._pure.jose`` twin
+is still deferred per the C-first directive.
 """
 
 from __future__ import annotations
@@ -26,11 +27,12 @@ import base64
 import hashlib
 import hmac
 import json
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from .._native import _core
+from ._ecverify import verify_ed25519, verify_es256
 from .models import Identity
 
 # Resolve the native accelerators once, tolerating a _core built before jose.c
@@ -42,9 +44,11 @@ _native_hs = getattr(_core, "jose_verify_hs", None) if _core is not None else No
 _native_claims = getattr(_core, "jose_validate_claims", None) if _core is not None else None
 
 __all__ = [
+    "EcPublicKey",
     "InvalidToken",
     "JwtError",
     "JwtVerifier",
+    "OkpPublicKey",
     "RsaPublicKey",
     "SymmetricKey",
     "UnsupportedAlgorithm",
@@ -80,15 +84,23 @@ class InvalidToken(JwtError):
 _HS = {"HS256": "sha256", "HS384": "sha384", "HS512": "sha512"}
 _RS = {"RS256": "sha256", "RS384": "sha384", "RS512": "sha512"}
 _PS = {"PS256": "sha256", "PS384": "sha384", "PS512": "sha512"}
+#: ECDSA over NIST P-256 (SHA-256). ES384/512 need P-384/P-521 curves, still deferred.
+_EC = {"ES256": "sha256"}
+#: EdDSA over edwards25519. "EdDSA" (RFC 8037) and "Ed25519" both name it.
+_OKP = frozenset({"EdDSA", "Ed25519"})
 
 # Algorithms recognised but deliberately not implemented in this cut. Requesting
 # one is a loud configuration error, never a silent accept.
-_DEFERRED = frozenset(
-    {"ES256", "ES384", "ES512", "ES256K", "EdDSA", "Ed25519", "Ed448", "none"}
-)
+_DEFERRED = frozenset({"ES384", "ES512", "ES256K", "Ed448", "none"})
 
-_FAMILY = {**{a: "HS" for a in _HS}, **{a: "RSA" for a in _RS}, **{a: "RSA" for a in _PS}}
-_HASH = {**_HS, **_RS, **_PS}
+_FAMILY = {
+    **{a: "HS" for a in _HS},
+    **{a: "RSA" for a in _RS},
+    **{a: "RSA" for a in _PS},
+    **{a: "EC" for a in _EC},
+    **{a: "OKP" for a in _OKP},
+}
+_HASH = {**_HS, **_RS, **_PS, **_EC}
 _SUPPORTED = frozenset(_FAMILY)
 
 # DER DigestInfo prefixes for EMSA-PKCS1-v1.5 (RFC 8017 §9.2, notes).
@@ -126,8 +138,29 @@ class RsaPublicKey:
         return (self.n.bit_length() + 7) // 8
 
 
-def key_from_jwk(jwk: Mapping[str, Any]) -> SymmetricKey | RsaPublicKey:
-    """Build a key from a single JWK. Supports ``oct`` (HMAC) and ``RSA``."""
+@dataclass(frozen=True, slots=True)
+class EcPublicKey:
+    """A NIST P-256 public key (affine coordinates). Usable only for ES256."""
+
+    x: int
+    y: int
+    family: str = field(default="EC", init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class OkpPublicKey:
+    """An Ed25519 public key (32 raw bytes). Usable only for EdDSA."""
+
+    public: bytes
+    family: str = field(default="OKP", init=False)
+
+
+#: Any key an algorithm family can be verified with.
+JwtKey = SymmetricKey | RsaPublicKey | EcPublicKey | OkpPublicKey
+
+
+def key_from_jwk(jwk: Mapping[str, Any]) -> JwtKey:
+    """Build a key from a single JWK. Supports ``oct``/``RSA``/``EC``/``OKP``."""
     kty = jwk.get("kty")
     if kty == "oct":
         return SymmetricKey(_b64url_decode(jwk["k"]))
@@ -137,10 +170,17 @@ def key_from_jwk(jwk: Mapping[str, Any]) -> SymmetricKey | RsaPublicKey:
         if n <= 0 or e <= 0:
             raise JwtError("invalid RSA JWK parameters")
         return RsaPublicKey(n, e)
-    if kty in {"EC", "OKP"}:
-        raise UnsupportedAlgorithm(
-            f"JWK key type {kty!r} (EC/EdDSA) is not supported in this build"
-        )
+    if kty == "EC":
+        if jwk.get("crv") != "P-256":
+            raise UnsupportedAlgorithm(f"EC curve {jwk.get('crv')!r} is not supported (P-256 only)")
+        x = int.from_bytes(_b64url_decode(jwk["x"]), "big")
+        y = int.from_bytes(_b64url_decode(jwk["y"]), "big")
+        return EcPublicKey(x, y)
+    if kty == "OKP":
+        if jwk.get("crv") != "Ed25519":
+            raise UnsupportedAlgorithm(
+                f"OKP curve {jwk.get('crv')!r} is not supported (Ed25519 only)")
+        return OkpPublicKey(_b64url_decode(jwk["x"]))
     raise JwtError(f"unsupported JWK key type: {kty!r}")
 
 
@@ -337,7 +377,7 @@ def _verify_ps(
     if top_bits and (masked_db[0] & (0xFF << (8 - top_bits)) & 0xFF):
         return False
     db_mask = _mgf1(h, em_len - h_len - 1, hash_name)
-    db = bytes(a ^ b for a, b in zip(masked_db, db_mask))
+    db = bytes(a ^ b for a, b in zip(masked_db, db_mask, strict=True))
     if top_bits:
         db = bytes([db[0] & (0xFF >> top_bits)]) + db[1:]
     pad_len = em_len - h_len - s_len - 2
@@ -353,7 +393,7 @@ def _verify_ps(
 
 def _verify_signature(
     alg: str,
-    key: SymmetricKey | RsaPublicKey,
+    key: JwtKey,
     signing_input: bytes,
     signature: bytes,
 ) -> bool:
@@ -364,6 +404,12 @@ def _verify_signature(
     if family == "HS":
         assert isinstance(key, SymmetricKey)
         return _verify_hs(alg, key.secret, signing_input, signature)
+    if family == "EC":
+        assert isinstance(key, EcPublicKey)
+        return verify_es256(key.x, key.y, signing_input, signature)
+    if family == "OKP":
+        assert isinstance(key, OkpPublicKey)
+        return verify_ed25519(key.public, signing_input, signature)
     assert isinstance(key, RsaPublicKey)
     hash_name = _HASH[alg]
     if alg in _PS:
@@ -395,7 +441,7 @@ def default_identity(claims: Mapping[str, Any]) -> Identity:
 
 
 IdentityMapper = Callable[[Mapping[str, Any]], Identity]
-KeyResolver = Callable[[Mapping[str, Any]], "SymmetricKey | RsaPublicKey | None"]
+KeyResolver = Callable[[Mapping[str, Any]], "JwtKey | None"]
 
 
 def _reason_valid(
@@ -470,7 +516,7 @@ class JwtVerifier:
         self,
         *,
         algorithms: Iterable[str],
-        key: SymmetricKey | RsaPublicKey | bytes | str,
+        key: JwtKey | bytes | str,
         issuer: str | None = None,
         audience: str | Sequence[str] | None = None,
         leeway: int = 60,
@@ -594,8 +640,8 @@ def _freeze_audiences(audience: str | Sequence[str] | None) -> tuple[str, ...]:
     return tuple(audience)
 
 
-def _coerce_key(key: SymmetricKey | RsaPublicKey | bytes | str) -> SymmetricKey | RsaPublicKey:
-    if isinstance(key, (SymmetricKey, RsaPublicKey)):
+def _coerce_key(key: JwtKey | bytes | str) -> JwtKey:
+    if isinstance(key, (SymmetricKey, RsaPublicKey, EcPublicKey, OkpPublicKey)):
         return key
     if isinstance(key, (bytes, bytearray)):
         return SymmetricKey(bytes(key))

@@ -4,6 +4,37 @@ Most services also *make* requests — to a payment provider, an internal API, a
 partner's webhook endpoint. Wreath brings the tools for that into the same
 circle, so you don't reach for a third dependency and a second mental model.
 
+## User story: sign an outgoing webhook
+
+> *As an API author, I notify a partner's endpoint whenever an order ships. They
+> reject anything without a valid HMAC signature, so every call I make has to
+> carry a signed, timestamped envelope — and I don't want to hand-roll the
+> signing scheme.*
+
+```python
+from datetime import UTC, datetime
+from wreath.webhooks import HMACWebhookSigner, WebhookEnvelope
+
+client = app.http_client("partner", base_url="https://partner.example")
+signer = HMACWebhookSigner({"current": settings.webhook_secret}, key_id="current")
+
+async def notify_shipped(order_id: str, body: bytes) -> None:
+    envelope = WebhookEnvelope(
+        id=order_id,
+        type="order.shipped",
+        version="1",
+        timestamp=datetime.now(UTC),
+        content_type="application/json",
+        body=body,
+    )
+    await client.post("/hooks", headers=signer.headers(envelope), body=envelope.body)
+```
+
+`signer.headers(envelope)` returns the signed, timestamped headers — HMAC-SHA256
+over the exact body — that the partner's `HMACWebhookVerifier` checks. Key
+rotation is built in: sign with `key_id="current"` while a verifier still accepts
+a `"previous"` key through the overlap.
+
 ## The outbound client
 
 `wreath.http_client` is a dependency-free, lifespan-managed HTTP/1.1 client with
@@ -25,6 +56,29 @@ is opened during lifespan startup and closed at shutdown — nothing to leak
 between requests. Outside an application, construct
 `HTTPClient("payments", base_url=...)` directly and manage its lifecycle
 yourself.
+
+## Rate limiting and retries
+
+An outbound client can throttle itself and retry transient failures without a
+wrapper library. Pass a `RatePolicy` and/or `RetryPolicy` when you register it —
+both are forwarded straight through to the client:
+
+```python
+from wreath.http_client import RatePolicy, RetryPolicy
+
+app.http_client(
+    "payments",
+    base_url="https://api.example.com",
+    rate=RatePolicy(enabled=True, rate=20, capacity=40),   # 20 req/s, burst 40
+    retry=RetryPolicy(attempts=3),                          # + backoff + Retry-After
+)
+```
+
+`RatePolicy` is a continuous token bucket — the same native `TokenBucket` the
+inbound rate-limiter uses — so a request *parks* until a token frees (up to
+`max_wait`) rather than being rejected. `RetryPolicy` retries idempotent requests
+on transient statuses (`408/425/429/500/502/503/504`) with exponential backoff
+and bounded jitter, and honours a `Retry-After` header on `429`/`503`.
 
 ## Webhooks
 

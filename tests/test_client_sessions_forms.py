@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from wreath import Wreath
+from wreath._json import dumps as _json_dumps
 from wreath.middleware.sessions import SessionMiddleware
 from wreath.response import TextResponse
 from wreath.testing import TestClient
@@ -155,6 +156,99 @@ async def test_session_cleared_deletes_cookie() -> None:
     response = await client.get("/logout", headers={"cookie": f"wreath_session={token}"})
     cookie = response.header("set-cookie")
     assert cookie is not None and "Max-Age=0" in cookie
+
+
+@pytest.mark.asyncio
+async def test_session_read_only_request_writes_no_cookie_for_a_populated_session() -> None:
+    """The change detector diffs against the decoded payload, not a re-dump.
+
+    `before` used to serialize the freshly decoded session purely to have
+    something for `after` to compare against -- two JSON passes per request
+    where one will do. The bytes it decoded *are* that serialization, so the
+    contract this pins is that a request which only reads a non-empty session
+    still emits no Set-Cookie.
+    """
+    app = Wreath()
+    middleware = SessionMiddleware(secret="s")
+    app.add_middleware(middleware)
+
+    @app.get("/read")
+    async def read(request: Any) -> Any:
+        return {"user": request.state.session.get("user")}
+
+    token = middleware._sign(_json_dumps({"user": "ada", "n": 3}), 2_000_000_000)
+
+    client = TestClient(app)
+    response = await client.get("/read", headers={"cookie": f"wreath_session={token}"})
+    assert response.json() == {"user": "ada"}
+    assert response.header("set-cookie") is None
+
+
+@pytest.mark.asyncio
+async def test_session_mutation_still_reissues_the_cookie() -> None:
+    app = Wreath()
+    middleware = SessionMiddleware(secret="s")
+    app.add_middleware(middleware)
+
+    @app.get("/bump")
+    async def bump(request: Any) -> Any:
+        request.state.session["n"] = request.state.session.get("n", 0) + 1
+        return {"n": request.state.session["n"]}
+
+    token = middleware._sign(_json_dumps({"user": "ada", "n": 3}), 2_000_000_000)
+
+    client = TestClient(app)
+    response = await client.get("/bump", headers={"cookie": f"wreath_session={token}"})
+    assert response.json() == {"n": 4}
+    assert (response.header("set-cookie") or "").startswith("wreath_session=")
+
+
+@pytest.mark.asyncio
+async def test_session_payload_that_does_not_round_trip_is_reissued() -> None:
+    """A foreign encoding is reissued, never misread.
+
+    Diffing against the decoded bytes assumes they are what `_json_dumps`
+    would produce. A validly signed cookie carrying differently-formatted JSON
+    (whitespace here) breaks that assumption; the safe outcome is a reissued
+    cookie with identical content, not a dropped write.
+    """
+    app = Wreath()
+    middleware = SessionMiddleware(secret="s")
+    app.add_middleware(middleware)
+
+    @app.get("/read")
+    async def read(request: Any) -> Any:
+        return {"user": request.state.session.get("user")}
+
+    token = middleware._sign(b'{"user": "ada"}', 2_000_000_000)   # note the space
+
+    client = TestClient(app)
+    response = await client.get("/read", headers={"cookie": f"wreath_session={token}"})
+    # The session still reads correctly ...
+    assert response.json() == {"user": "ada"}
+    # ... and is rewritten in wreath's own encoding rather than silently kept.
+    cookie = response.header("set-cookie")
+    assert cookie is not None and cookie.startswith("wreath_session=")
+
+
+@pytest.mark.asyncio
+async def test_absent_and_rejected_sessions_both_write_nothing() -> None:
+    app = Wreath()
+    middleware = SessionMiddleware(secret="s")
+    app.add_middleware(middleware)
+
+    @app.get("/read")
+    async def read(request: Any) -> Any:
+        return {"empty": not request.state.session}
+
+    client = TestClient(app)
+    absent = await client.get("/read")
+    assert absent.json() == {"empty": True}
+    assert absent.header("set-cookie") is None
+
+    forged = await client.get("/read", headers={"cookie": "wreath_session=a.b.c"})
+    assert forged.json() == {"empty": True}
+    assert forged.header("set-cookie") is None
 
 
 # --- forms ---------------------------------------------------------------------------

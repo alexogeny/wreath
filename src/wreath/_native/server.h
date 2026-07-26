@@ -87,6 +87,9 @@ typedef struct {
     PyObject *http_version_10;
     PyObject *http_version_11;
     PyObject *root_path;
+    /* config._default_response_headers.headers, resolved once per connection so
+     * the egress path does not re-run two GetAttrString calls per response. */
+    PyObject *default_response_headers;
     PyObject *loop_create_future;
     PyObject *loop_create_task;
     PyObject *loop_call_later;

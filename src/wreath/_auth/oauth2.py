@@ -14,7 +14,8 @@ import base64
 import hashlib
 import json
 import secrets
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlencode
 
 from ..response import JSONResponse, RedirectResponse
@@ -26,6 +27,14 @@ if TYPE_CHECKING:
 __all__ = ["ClientCredentials", "register_oauth2_login"]
 
 _TOKEN_SKEW = 30.0
+
+
+def _bearer_401(error: str) -> JSONResponse:
+    """A 401 with the RFC 6750 §3 Bearer challenge (RFC 9110 §15.5.2 requires
+    a 401 to carry WWW-Authenticate)."""
+    response = JSONResponse({"error": error}, status=401)
+    response.headers.append((b"www-authenticate", b'Bearer error="invalid_token"'))
+    return response
 
 
 class ClientCredentials:
@@ -83,7 +92,10 @@ class ClientCredentials:
         }
         if self._scope:
             form["scope"] = self._scope
-        path = self._token_path() if callable(self._token_path) else self._token_path
+        token_path = self._token_path
+        # isinstance(str), not callable(): ty narrows the else-branch to the
+        # Callable so the call resolves.
+        path = token_path if isinstance(token_path, str) else token_path()
         response = await self._client.post(
             path,
             headers=((b"content-type", b"application/x-www-form-urlencoded"),),
@@ -128,7 +140,7 @@ def register_oauth2_login(
     verifier_key = f"_oidc_verifier_{name}"
 
     @app.get(login_path)
-    async def login(request: Request) -> RedirectResponse:  # noqa: ANN001
+    async def login(request: Request) -> RedirectResponse | JSONResponse:  # noqa: ANN001
         if provider.authorization_endpoint is None:
             return JSONResponse({"error": "provider_not_discovered"}, status=503)
         verifier, challenge = _pkce_pair()
@@ -185,10 +197,10 @@ def register_oauth2_login(
         document = json.loads(response.body)
         id_token = document.get("id_token")
         if not isinstance(id_token, str):
-            return JSONResponse({"error": "missing_id_token"}, status=401)
+            return _bearer_401("missing_id_token")
         identity = await provider.bearer_verifier()(id_token)
         if identity is None:
-            return JSONResponse({"error": "invalid_id_token"}, status=401)
+            return _bearer_401("invalid_id_token")
         session[session_key] = {
             "sub": identity.id,
             "type": identity.type,

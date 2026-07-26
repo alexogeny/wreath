@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "project": "wreath",
   "python": ">=3.14",
   "status": "pre-1.0",
@@ -8,14 +8,21 @@
     "agent_docs": "docs/cookbook/agents/index.md",
     "llm_map": "docs/llms.txt",
     "repository_rules": "AGENTS.md",
+    "repository_map": "repo-map.md",
     "site_config": "mkdocs.yml"
   },
   "commands": {
+    "all_gates": "uv run wreath-check",
+    "all_gates_with_docs": "uv run wreath-check --docs",
     "tests": "uv run pytest",
+    "tests_full": "uv run pytest -m '' -n 4",
     "lint": "uv run ruff check .",
     "types": "uv run ty check",
-    "docs_install": "uv sync --group docs",
-    "docs_build": "uv run --group docs mkdocs build --strict",
+    "map_lint": "uv run wreath-map-lint",
+    "native_lint": "uv run wreath-native-lint",
+    "request_trace": "uv run wreath-request-trace --check",
+    "docs_build": "uv run wreath-docs",
+    "benchmarks": "uv run wreath-bench",
     "server_sanitizer_build": "uv run python tools/sanitizers/build_server.py",
     "core_sanitizer_build": "uv run python tools/sanitizers/build_core.py",
     "postgres_sanitizer_build": "uv run python tools/sanitizers/build_postgres.py"
@@ -23,25 +30,106 @@
   "subsystems": [
     {
       "name": "application",
-      "guide": "docs/guides/routing.md",
+      "guides": [
+        "docs/guides/routing.md",
+        "docs/guides/config-state.md"
+      ],
+      "reference": [
+        "docs/reference/app.md",
+        "docs/reference/router.md",
+        "docs/reference/state.md",
+        "docs/reference/exceptions.md"
+      ],
       "sources": [
         "src/wreath/app.py",
         "src/wreath/router.py",
-        "src/wreath/state.py"
+        "src/wreath/state.py",
+        "src/wreath/exceptions.py"
       ],
       "tests": [
-        "tests/test_app.py"
+        "tests/test_app.py",
+        "tests/test_app_factories.py",
+        "tests/test_state.py",
+        "tests/test_request_pipeline.py",
+        "tests/test_problem_details.py"
+      ],
+      "policy": "Configuration is how Wreath starts; state is what it holds while running. They do not share an API. Route tables compile at startup, never per request."
+    },
+    {
+      "name": "routing",
+      "guides": [
+        "docs/guides/routing.md"
+      ],
+      "sources": [
+        "src/wreath/_routing.py",
+        "src/wreath/_pure/router.py",
+        "src/wreath/_native/router.c",
+        "src/wreath/_pure/dtrouter.py",
+        "src/wreath/_native/dtrouter.c"
+      ],
+      "tests": [
+        "tests/test_routing_parity.py",
+        "tests/test_routing_modes.py",
+        "tests/test_router_modules.py",
+        "tests/test_router_complexity.py",
+        "tests/_routing_impls.py"
+      ],
+      "decisions": [
+        "docs/decisions/0014-composable-router-inheritance.md",
+        "docs/decisions/0015-protected-decision-tree-pruning.md",
+        "docs/decisions/0017-single-pass-route-classification-with-global-pipeline-hooks.md"
       ]
     },
     {
       "name": "http",
-      "guide": "docs/guides/requests-responses.md",
+      "guides": [
+        "docs/guides/requests-responses.md",
+        "docs/guides/sse.md",
+        "docs/guides/content-negotiation.md"
+      ],
+      "reference": [
+        "docs/reference/request.md",
+        "docs/reference/response.md",
+        "docs/reference/background.md"
+      ],
       "sources": [
         "src/wreath/request.py",
         "src/wreath/response.py",
+        "src/wreath/negotiation.py",
         "src/wreath/background.py",
         "src/wreath/_http.py",
+        "src/wreath/_headers.py",
+        "src/wreath/_codecs.py",
+        "src/wreath/_json.py",
+        "src/wreath/_multipart.py"
+      ],
+      "tests": [
+        "tests/test_request.py",
+        "tests/test_response.py",
+        "tests/test_response_fast_path.py",
+        "tests/test_background.py",
+        "tests/test_sse_response.py",
+        "tests/test_negotiation.py",
+        "tests/test_native_parity.py",
+        "tests/test_native_response_regressions.py"
+      ],
+      "decisions": [
+        "docs/decisions/0020-json-object-key-cache-ownership.md"
+      ]
+    },
+    {
+      "name": "http-client",
+      "guides": [
+        "docs/guides/http-client.md",
+        "docs/guides/service-client.md"
+      ],
+      "reference": [
+        "docs/reference/http_client.md",
+        "docs/reference/webhooks.md"
+      ],
+      "sources": [
         "src/wreath/http_client.py",
+        "src/wreath/service_client.py",
         "src/wreath/webhooks.py",
         "src/wreath/_client_codec.py",
         "src/wreath/_pure/http_client.py",
@@ -49,90 +137,189 @@
         "src/wreath/_native/http.c"
       ],
       "tests": [
-        "tests/test_request.py",
-        "tests/test_response.py",
-        "tests/test_background.py",
         "tests/test_http_client.py",
         "tests/test_http_client_protocol.py",
+        "tests/test_http_client_native_stream.py",
+        "tests/test_http_client_rate_retry.py",
+        "tests/test_service_client.py",
         "tests/test_webhooks.py",
-        "tests/test_native_parity.py"
-      ]
-    },
-    {
-      "name": "routing",
-      "guide": "docs/guides/routing.md",
-      "sources": [
-        "src/wreath/_routing.py",
-        "src/wreath/_pure/router.py",
-        "src/wreath/_native/router.c",
-        "src/wreath/_pure/dtrouter.py",
-        "src/wreath/_native/dtrouter.c"
+        "tests/test_webhooks_postgres.py"
+      ],
+      "decisions": [
+        "docs/decisions/0018-keep-webhook-replay-and-signature-base-construction-in-python.md"
       ]
     },
     {
       "name": "binding",
-      "guide": "docs/guides/binding.md",
+      "guides": [
+        "docs/guides/binding.md",
+        "docs/guides/forms.md"
+      ],
+      "reference": [
+        "docs/reference/binding.md"
+      ],
       "sources": [
         "src/wreath/binding.py",
-        "src/wreath/_native/validate.c"
+        "src/wreath/_native/validate.c",
+        "src/wreath/validation_errors.py"
       ],
       "tests": [
         "tests/test_binding.py",
-        "tests/test_native_validate_parity.py"
+        "tests/test_binding_sources.py",
+        "tests/test_binding_complexity.py",
+        "tests/test_native_validate_parity.py",
+        "tests/test_form_model_binding.py",
+        "tests/test_validation_errors.py",
+        "tests/test_dependency_scopes.py"
       ],
       "policy": "Native body validation executes a plan compiled once in Python; the pure binding.validate stays the reference and native must match it byte-for-byte (errors included); recursive dataclasses fall back to pure"
     },
     {
-      "name": "typegen",
-      "guide": "docs/guides/openapi-typegen.md",
+      "name": "openapi",
+      "guides": [
+        "docs/guides/api-docs.md",
+        "docs/guides/openapi-typegen.md"
+      ],
+      "reference": [
+        "docs/reference/openapi.md",
+        "docs/reference/typegen.md"
+      ],
       "sources": [
+        "src/wreath/openapi.py",
         "src/wreath/typegen/",
-        "src/wreath/_pure/typegen.py",
-        "src/wreath/openapi.py"
+        "src/wreath/_pure/typegen.py"
       ],
       "tests": [
+        "tests/test_openapi.py",
+        "tests/test_api_docs.py",
         "tests/test_typegen.py",
         "tests/test_typegen_cli.py",
-        "tests/test_openapi.py",
         "tests/typegen/"
       ],
-      "policy": "Python owns annotation analysis; renderers consume prevalidated tuples and are byte-identical pure/native; generation adds no request-time work; the native renderer is benchmark-gated and currently not justified"
+      "policy": "Python owns annotation analysis; renderers consume prevalidated tuples and are byte-identical pure/native; generation adds no request-time work; the native renderer is benchmark-gated and currently not justified. Docs endpoints are opt-in via enable_docs()."
     },
     {
       "name": "configuration",
-      "guide": "docs/guides/config-state.md",
+      "guides": [
+        "docs/guides/config-state.md"
+      ],
+      "reference": [
+        "docs/reference/config.md"
+      ],
       "sources": [
         "src/wreath/config.py",
         "src/wreath/_pure/env.py",
         "src/wreath/_native/env.c"
       ],
       "tests": [
-        "tests/test_config.py"
+        "tests/test_config.py",
+        "tests/test_server_env.py"
+      ],
+      "decisions": [
+        "docs/decisions/0016-environment-and-problem-response-defaults.md"
       ]
     },
     {
       "name": "middleware",
-      "guide": "docs/guides/middleware.md",
-      "sources": [
-        "src/wreath/middleware/"
+      "guides": [
+        "docs/guides/middleware.md",
+        "docs/guides/compression.md",
+        "docs/guides/caching.md",
+        "docs/guides/idempotency.md"
       ],
-      "decision": "docs/decisions/0009-middleware-fusion-execution-model.md"
+      "reference": [
+        "docs/reference/middleware.md",
+        "docs/reference/compression.md",
+        "docs/reference/cache_control.md"
+      ],
+      "sources": [
+        "src/wreath/middleware/",
+        "src/wreath/compression.py",
+        "src/wreath/cache_control.py",
+        "src/wreath/_webpolicy.py",
+        "src/wreath/session_store.py"
+      ],
+      "tests": [
+        "tests/test_middleware.py",
+        "tests/test_middleware_fusion.py",
+        "tests/test_request_pipeline.py",
+        "tests/test_security_middleware.py",
+        "tests/test_csrf_middleware.py",
+        "tests/test_csrf_native_parity.py",
+        "tests/test_cache_control.py",
+        "tests/test_compression_middleware.py",
+        "tests/test_compression_parity.py",
+        "tests/test_proxy_middleware.py",
+        "tests/test_ratelimit_middleware.py",
+        "tests/test_request_id_middleware.py",
+        "tests/test_timing_middleware.py",
+        "tests/test_idempotency.py",
+        "tests/test_webpolicy_parity.py",
+        "tests/test_session_store.py"
+      ],
+      "decisions": [
+        "docs/decisions/0009-middleware-fusion-execution-model.md",
+        "docs/decisions/0018-use-signed-double-submit-csrf-tokens.md",
+        "docs/decisions/0019-use-cpython-zlib-instead-of-shipping-direct-zlib-extension.md"
+      ]
     },
     {
       "name": "auth",
-      "guide": "docs/guides/auth.md",
+      "guides": [
+        "docs/guides/auth.md"
+      ],
+      "reference": [
+        "docs/reference/auth.md",
+        "docs/reference/authorization.md"
+      ],
       "sources": [
         "src/wreath/auth.py",
         "src/wreath/authorization.py",
         "src/wreath/_auth/",
         "src/wreath/_pure/authz.py",
         "src/wreath/_native/authz.c"
+      ],
+      "tests": [
+        "tests/test_authentication.py",
+        "tests/test_auth_pipeline.py",
+        "tests/test_auth_routing.py",
+        "tests/test_auth_verifier_call_count.py",
+        "tests/test_authz_native.py",
+        "tests/test_rbac.py",
+        "tests/test_cedar.py",
+        "tests/test_cedar_engine.py",
+        "tests/test_jwt.py"
+      ],
+      "policy": "Authentication (identity) and authorization (roles, permissions, Cedar) stay firmly apart. The Cedar engine is built in and dependency-free: policies parse at startup, evaluation is native with a pure twin, forbid overrides permit, default deny.",
+      "decisions": [
+        "docs/decisions/0023-built-in-cedar-engine.md"
+      ]
+    },
+    {
+      "name": "users",
+      "guides": [
+        "docs/guides/users.md"
+      ],
+      "reference": [
+        "docs/reference/users.md"
+      ],
+      "sources": [
+        "src/wreath/users.py",
+        "src/wreath/_userkit.py"
+      ],
+      "tests": [
+        "tests/test_userkit.py",
+        "tests/test_users_router.py"
       ]
     },
     {
       "name": "postgres",
-      "guide": "docs/guides/postgres.md",
-      "internals": "docs/reference/postgres.md",
+      "guides": [
+        "docs/guides/postgres.md"
+      ],
+      "reference": [
+        "docs/reference/postgres.md"
+      ],
       "sources": [
         "src/wreath/postgres.py",
         "src/wreath/_pure/postgres.py",
@@ -141,44 +328,34 @@
       "tests": [
         "tests/postgres/"
       ],
-      "policy": " Connection.map/Statement.map run one Sync-delimited operation per input in input order (no coalescing/dedup); Connection.transaction() orders reads before dependent writes and discards a connection whose synchronization cannot be proven."
+      "policy": "Connection.map/Statement.map run one Sync-delimited operation per input in input order (no coalescing/dedup); Connection.transaction() orders reads before dependent writes and discards a connection whose synchronization cannot be proven.",
+      "decisions": [
+        "docs/decisions/0010-keep-postgresql-execute-completion-ownership-in-python.md",
+        "docs/decisions/0011-eagerly-flush-idle-postgresql-connections.md"
+      ]
     },
     {
-      "name": "server",
-      "guide": "docs/guides/server.md",
+      "name": "locks",
+      "guides": [
+        "docs/guides/distributed-locks.md"
+      ],
       "sources": [
-        "src/wreath/server.py",
-        "src/wreath/cli.py",
-        "src/wreath/_cli.py",
-        "src/wreath/_devserver.py",
-        "src/wreath/__main__.py",
-        "src/wreath/_pure/server.py",
-        "src/wreath/_native/server_http1.c",
-        "src/wreath/_native/server_http2.c",
-        "src/wreath/_native/http3_asgi.c"
+        "src/wreath/_locks.py"
       ],
       "tests": [
-        "tests/test_cli.py",
-        "tests/test_devserver.py",
-        "tests/test_server.py",
-        "tests/test_server_protocol.py",
-        "tests/test_server_fuzz.py",
-        "tests/test_server_websocket.py"
-      ]
-    },
-    {
-      "name": "testing",
-      "guide": "docs/guides/testing.md",
-      "sources": [
-        "src/wreath/testing.py",
-        "src/wreath/websocket.py",
-        "src/wreath/staticfiles.py"
-      ]
+        "tests/postgres/test_advisory_locks.py"
+      ],
+      "policy": "Advisory locks and SingletonRunner are reached through the wreath.postgres facade, not imported from _locks directly."
     },
     {
       "name": "orm",
-      "guide": "docs/guides/orm.md",
-      "reference": "docs/reference/orm.md",
+      "guides": [
+        "docs/guides/orm.md",
+        "docs/guides/jsonb-arrays.md"
+      ],
+      "reference": [
+        "docs/reference/orm.md"
+      ],
       "sources": [
         "src/wreath/orm/",
         "src/wreath/_native/postgres/model.c",
@@ -189,19 +366,253 @@
         "tests/orm/",
         "tests/orm/test_native_shape_parity.py"
       ],
-      "policy": "Attribute access never performs I/O; raw SQL and wreath.postgres stay unchanged; no migrations or DDL; pure and native storage must match behavior, not representation; the native query cache-key (orm_shape) must produce bytes identical to _shape_of_pure or the plan cache splits"
+      "policy": "The dependency direction is one-way: wreath.orm imports wreath.postgres, never the reverse. Attribute access never performs I/O; loading is explicit (no lazy N+1). Pure and native storage must match behavior, not representation; the native query cache-key (orm_shape) must produce bytes identical to _shape_of_pure or the plan cache splits."
     },
     {
-      "name": "performance",
-      "guide": "benchmarks/README.md",
-      "sources": [
-        "benchmarks/"
+      "name": "migrations",
+      "guides": [
+        "docs/guides/migrations.md"
       ],
-      "policy": "Retain raw repeated trials; bundled generator is development-only"
+      "reference": [
+        "docs/reference/migrations.md"
+      ],
+      "sources": [
+        "src/wreath/migrations.py",
+        "src/wreath/_migrations_cli.py"
+      ],
+      "tests": [
+        "tests/migrations/"
+      ],
+      "policy": "Readiness resolution is metal-only. The inverse `down` is derived from the same artifact as the forward migration and refuses to strand live ORM code unless --force. The DDL runner is still unshipped; see docs/reference/roadmap.md.",
+      "decisions": [
+        "docs/decisions/0001-keep-fixed-and-named-migration-representations-separate.md"
+      ]
+    },
+    {
+      "name": "jobs",
+      "guides": [
+        "docs/guides/jobs.md",
+        "docs/guides/progress.md"
+      ],
+      "reference": [
+        "docs/reference/jobs.md",
+        "docs/reference/messaging.md",
+        "docs/reference/services.md"
+      ],
+      "sources": [
+        "src/wreath/jobs.py",
+        "src/wreath/_jobcore.py",
+        "src/wreath/messaging.py",
+        "src/wreath/services.py",
+        "src/wreath/progress.py",
+        "src/wreath/rooms.py"
+      ],
+      "tests": [
+        "tests/jobs/",
+        "tests/messaging/",
+        "tests/test_progress.py",
+        "tests/test_rooms.py"
+      ],
+      "policy": "PostgreSQL is the queue; there is no broker to operate. The service supervisor starts after databases and before user startup handlers, and stops in reverse: stop fetching, drain bounded in-flight work, then cancel."
+    },
+    {
+      "name": "storage",
+      "guides": [
+        "docs/guides/storage.md"
+      ],
+      "reference": [
+        "docs/reference/storage.md"
+      ],
+      "sources": [
+        "src/wreath/storage.py",
+        "src/wreath/_sigv4.py"
+      ],
+      "tests": [
+        "tests/storage/"
+      ]
+    },
+    {
+      "name": "pagination",
+      "guides": [
+        "docs/guides/pagination.md"
+      ],
+      "reference": [
+        "docs/reference/pagination.md"
+      ],
+      "sources": [
+        "src/wreath/pagination.py"
+      ],
+      "tests": [
+        "tests/pagination/"
+      ]
+    },
+    {
+      "name": "crud",
+      "guides": [
+        "docs/guides/crud.md"
+      ],
+      "sources": [
+        "src/wreath/crud.py"
+      ],
+      "tests": [
+        "tests/test_crud.py"
+      ],
+      "policy": "Generate REST routes from an ORM model, off by default: enabled at the app level (Wreath.enable_crud) and opted into per model (Wreath.crud / crud_router). Sensitive columns (password, *_hash, token, ...) are hidden from output and rejected from input unless named in expose=. Authorization is per operation via authorize={op|group|'*': Access.*}: Access.roles/permissions/cedar attach AuthRequirement metadata the app enforces in its single-pass pipeline; Access.deny() 403s unconditionally; object_authorizer=(request, op, instance) covers row-level checks that need the loaded row. Single-column primary key only."
+    },
+    {
+      "name": "audit",
+      "guides": [
+        "docs/guides/auditing.md"
+      ],
+      "reference": [
+        "docs/reference/audit.md"
+      ],
+      "sources": [
+        "src/wreath/_audit/",
+        "src/wreath/_audit/rules/"
+      ],
+      "tests": [
+        "tests/audit/"
+      ],
+      "policy": "The ruleset is curated and zero-dependency. A new rule is a module under src/wreath/_audit/rules/ registered in that package's __init__, plus a row in docs/reference/audit.md giving its WCAG success criterion or performance budget, its severity, and whether --fix can remediate it. Reached through `wreath audit`, not a public module."
+    },
+    {
+      "name": "operations",
+      "guides": [
+        "docs/guides/health-flags-versioning.md"
+      ],
+      "reference": [
+        "docs/reference/health.md",
+        "docs/reference/flags.md",
+        "docs/reference/versioning.md"
+      ],
+      "sources": [
+        "src/wreath/health.py",
+        "src/wreath/flags.py",
+        "src/wreath/versioning.py"
+      ],
+      "tests": [
+        "tests/health/",
+        "tests/flags/",
+        "tests/versioning/"
+      ]
+    },
+    {
+      "name": "observability",
+      "guides": [
+        "docs/guides/observability.md"
+      ],
+      "reference": [
+        "docs/reference/telemetry.md",
+        "docs/reference/recording.md",
+        "docs/reference/replay.md",
+        "docs/reference/inspector.md"
+      ],
+      "sources": [
+        "src/wreath/telemetry.py",
+        "src/wreath/recording.py",
+        "src/wreath/replay.py",
+        "src/wreath/inspector.py",
+        "src/wreath/_flight_markers.py",
+        "src/wreath/_flight_metadata.py",
+        "src/wreath/_flight_schema.py",
+        "src/wreath/_projector.py",
+        "src/wreath/_export.py",
+        "src/wreath/_recording_format.py",
+        "src/wreath/_replay_adapters.py",
+        "src/wreath/_replay_plan.py",
+        "src/wreath/_otlp.py",
+        "src/wreath/_prometheus.py",
+        "src/wreath/_statsd.py",
+        "src/wreath/_cloudwatch_emf.py",
+        "src/wreath/_metricdelta.py"
+      ],
+      "tests": [
+        "tests/test_flight_schema.py",
+        "tests/test_flight_capture.py",
+        "tests/test_flight_projector.py",
+        "tests/test_flight_inspector.py",
+        "tests/test_flight_otlp.py",
+        "tests/test_flight_recording.py",
+        "tests/test_replay.py",
+        "tests/test_replay_faults.py",
+        "tests/test_replay_adversarial.py",
+        "tests/test_prometheus.py",
+        "tests/test_statsd.py",
+        "tests/test_cloudwatch_emf.py"
+      ],
+      "policy": "Recording is policy value types only and deny-by-default; the capture engine and WFR1 sink are not shipped (see docs/reference/roadmap.md). The projector drains the recorder's ring off the request path.",
+      "decisions": [
+        "docs/decisions/0021-native-flight-recorder-provisional-parameters.md",
+        "docs/decisions/0022-native-flight-recorder-stage-1-followups.md"
+      ]
+    },
+    {
+      "name": "server",
+      "guides": [
+        "docs/guides/server.md"
+      ],
+      "reference": [
+        "docs/reference/server.md",
+        "docs/reference/cli.md",
+        "docs/reference/websocket.md"
+      ],
+      "sources": [
+        "src/wreath/server.py",
+        "src/wreath/cli.py",
+        "src/wreath/_cli.py",
+        "src/wreath/_devserver.py",
+        "src/wreath/websocket.py",
+        "src/wreath/_websocket.py",
+        "src/wreath/_h2_codec.py",
+        "src/wreath/_pure/server.py",
+        "src/wreath/_native/server_http1.c",
+        "src/wreath/_native/server_http2.c",
+        "src/wreath/_native/http3_asgi.c"
+      ],
+      "tests": [
+        "tests/test_server.py",
+        "tests/test_server_protocol.py",
+        "tests/test_server_fuzz.py",
+        "tests/test_server_websocket.py",
+        "tests/test_server_tls_ingress.py",
+        "tests/test_cli.py",
+        "tests/test_devserver.py",
+        "tests/http2/",
+        "tests/http3/"
+      ],
+      "policy": "Framework and server layers stay separable: Wreath must remain usable on any conforming ASGI server. ASGI semantics come before implementation speed.",
+      "decisions": [
+        "docs/decisions/0008-native-http-server-boundary.md",
+        "docs/decisions/0011-optional-quic-backend.md",
+        "docs/decisions/0012-serialize-native-http-1-responses-directly-into-transport-owned-bytes.md",
+        "docs/decisions/0013-use-an-inline-one-pass-builder-for-small-native-http-1-responses.md"
+      ]
+    },
+    {
+      "name": "reactor",
+      "guides": [
+        "docs/guides/server.md"
+      ],
+      "sources": [
+        "src/wreath/reactor.py"
+      ],
+      "tests": [
+        "tests/reactor/"
+      ],
+      "policy": "The metal tier's loop. Free-threading and the optional JIT are separately tested execution modes, not assumptions. See tests/reactor/README.md for the tier layout and counter contracts.",
+      "decisions": [
+        "docs/decisions/0001-keep-generic-asyncio-timers-separate-from-server-deadlines.md"
+      ]
     },
     {
       "name": "templates",
-      "guide": "docs/guides/templates.md",
+      "guides": [
+        "docs/guides/templates.md"
+      ],
+      "reference": [
+        "docs/reference/templates.md"
+      ],
       "sources": [
         "src/wreath/templates.py",
         "src/wreath/_pure/templates.py",
@@ -213,46 +624,115 @@
       "policy": "Safe HTML templates escape by default (Markup opts out). Parsing/compilation is startup-time Python producing a flat opcode tape; the native engine renders the tape byte-identically to _pure.templates.render_tape and raises the same errors. No arbitrary Python evaluation."
     },
     {
-      "name": "snapshot",
-      "guide": "docs/guides/caching.md",
+      "name": "cache",
+      "guides": [
+        "docs/guides/caching.md",
+        "docs/guides/response-cache.md"
+      ],
+      "reference": [
+        "docs/reference/cache.md"
+      ],
       "sources": [
         "src/wreath/cache.py",
+        "src/wreath/response_cache.py",
         "src/wreath/_pure/snapshot.py"
       ],
       "tests": [
-        "tests/test_snapshot_parity.py"
+        "tests/test_snapshot_parity.py",
+        "tests/test_bounded_cache.py",
+        "tests/test_response_cache.py"
       ],
-      "policy": "Read-mostly application cache by atomic generation publication. Reads perform no hidden I/O; misses are explicit. Refresh is single-flight and failure preserves the previous generation. Shipped pure-first (dict-backed read path); facade selects a native SnapshotCache only if one is measured in."
+      "policy": "Read-mostly application cache by atomic generation publication. Reads perform no hidden I/O; misses are explicit. Refresh is single-flight and failure preserves the previous generation. Shipped pure-first (dict-backed read path); the facade selects a native SnapshotCache only if one is measured in. `response_cache.cached` is a shared/public cache by default: it never stores a response that sets a cookie or is marked no-store/private, and a per-principal response needs an explicit `key`."
+    },
+    {
+      "name": "staticfiles",
+      "guides": [
+        "docs/guides/static-files.md"
+      ],
+      "reference": [
+        "docs/reference/staticfiles.md"
+      ],
+      "sources": [
+        "src/wreath/staticfiles.py",
+        "src/wreath/_fsguard.py"
+      ],
+      "tests": [
+        "tests/test_fsguard.py"
+      ]
+    },
+    {
+      "name": "testing",
+      "guides": [
+        "docs/guides/testing.md"
+      ],
+      "reference": [
+        "docs/reference/testing.md"
+      ],
+      "sources": [
+        "src/wreath/testing.py"
+      ],
+      "tests": [
+        "tests/test_framework_features.py",
+        "tests/test_client_sessions_forms.py"
+      ],
+      "policy": "TestClient is async and drives the real pipeline in-process; responses expose .status."
+    },
+    {
+      "name": "port",
+      "guides": [
+        "docs/guides/porting.md"
+      ],
+      "reference": [
+        "docs/reference/port.md"
+      ],
+      "sources": [
+        "src/wreath/port.py",
+        "src/wreath/_port/"
+      ],
+      "tests": [
+        "tests/port/"
+      ],
+      "policy": "`wreath port` statically analyzes a FastAPI/Pydantic/ormar/SQLModel app and never imports the target. Phase 0 is report-only; code emission is deferred."
+    },
+    {
+      "name": "devtools",
+      "guides": [
+        "docs/cookbook/agents/checks.md"
+      ],
+      "sources": [
+        "src/wreath/_devtools/",
+        "tools/"
+      ],
+      "tests": [
+        "tests/test_native_lint.py",
+        "tests/test_native_error_lint.py",
+        "tests/test_native_gil_lint.py",
+        "tests/test_native_memory_lint.py",
+        "tests/test_native_boundary_lint.py",
+        "tests/test_map_lint.py",
+        "tests/test_devtool_tasks.py",
+        "tests/test_request_trace.py",
+        "tests/test_decomp.py",
+        "tests/test_tape_decomp.py",
+        "tests/test_complexity_probe.py"
+      ],
+      "policy": "The gates themselves. Measure before building a fix, and do not use cProfile to decide: ablate instead. The rules live in src/wreath/_devtools/measure.py."
+    },
+    {
+      "name": "performance",
+      "guides": [
+        "benchmarks/README.md"
+      ],
+      "sources": [
+        "benchmarks/"
+      ],
+      "tests": [
+        "tests/test_benchmark_protocols.py",
+        "tests/test_benchmark_scenarios.py"
+      ],
+      "policy": "Retain raw repeated trials; the bundled generator is development-only. Never claim a win from a single run."
     }
   ],
   "invariants": "AGENTS.md",
-  "playbooks": "docs/cookbook/agents/index.md",
-  "subsystems[5]": {
-    "tests": [
-      "tests/test_middleware.py",
-      "tests/test_request_pipeline.py",
-      "tests/test_security_middleware.py",
-      "tests/test_csrf_middleware.py",
-      "tests/test_cache_control.py",
-      "tests/test_compression_middleware.py",
-      "tests/test_proxy_middleware.py",
-      "tests/test_ratelimit_middleware.py",
-      "tests/test_request_id_middleware.py",
-      "tests/test_timing_middleware.py",
-      "tests/test_webpolicy_parity.py"
-    ]
-  },
-  "subsystems[0]": {
-    "tests": [
-      "tests/test_app.py",
-      "tests/test_request_pipeline.py"
-    ]
-  },
-  "subsystems[2]": {
-    "tests": [
-      "tests/test_routing_parity.py",
-      "tests/test_auth_pipeline.py",
-      "tests/test_request_pipeline.py"
-    ]
-  }
+  "playbooks": "docs/cookbook/agents/index.md"
 }

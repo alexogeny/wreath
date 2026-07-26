@@ -54,9 +54,31 @@ def test_framework_imports_without_quic_libraries() -> None:
     assert hasattr(wreath.server, "serve")
 
 
-def test_http3_available_matches_extension_presence() -> None:
-    present = importlib.util.find_spec("wreath._native._http3") is not None
-    assert _http3_available() is present
+def _http3_loadable() -> bool:
+    """Whether the extension actually imports, not merely whether a file exists.
+
+    ``find_spec`` finds a loader without running module init, so it still says
+    "present" for a partial build whose ``.so`` is there but whose transitive
+    QUIC libraries (``libngtcp2_crypto_ossl`` and friends) are not. That state is
+    real -- a machine that built the extension and later lost or upgraded the
+    system libraries lands in it -- and ``_http3_available`` documents that it
+    must report ``False`` there, so that ``serve()`` raises its actionable "not
+    built" error instead of a raw ImportError from deep in the import machinery.
+    """
+    if importlib.util.find_spec("wreath._native._http3") is None:
+        return False
+    try:
+        importlib.import_module("wreath._native._http3")
+    except ImportError:
+        return False
+    return True
+
+
+def test_http3_available_matches_extension_usability() -> None:
+    # Loadability, not discoverability: that is the contract _http3_available
+    # states, and comparing against find_spec instead made a partial build look
+    # like a defect in wreath rather than an incomplete install.
+    assert _http3_available() is _http3_loadable()
 
 
 @pytest.mark.skipif(

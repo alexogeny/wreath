@@ -40,6 +40,32 @@ right answer for pagination). Query, header, and cookie values are scalars:
 `str`, `int`, `float`, `bool`, or optional unions of them. Anything more
 structured belongs in the body.
 
+## User story: a search endpoint with safe bounds
+
+> *As an API author, my `/search` endpoint takes a required `q`, an optional
+> `limit` I never want above 100, and an optional category filter. I want bad
+> input rejected with a clear `422` before my code runs — and I don't want to
+> write the parsing or the bounds check by hand.*
+
+```python
+from typing import Annotated
+from wreath.binding import Query
+
+@app.get("/search")
+async def search(
+    request,
+    q: str,
+    limit: Annotated[int, Query(minimum=1, maximum=100, overflow="clamp")] = 20,
+    category: str | None = None,
+) -> dict:
+    return await run_search(q, limit=limit, category=category)
+```
+
+`q` has no default, so its absence is a `422`; `limit` is pinned into `[1, 100]`
+rather than trusted; `category` is an optional query scalar. Your handler only
+ever sees clean, typed values — the raw query string never makes it past the
+door.
+
 ## Dependencies
 
 Handlers often need the same prepared value — the current user, a database

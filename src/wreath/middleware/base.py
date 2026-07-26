@@ -108,31 +108,70 @@ type _Instruction = (
 _UNSET = object()
 
 
+#: Instruction opcodes, decided once at compile time. The dispatch loop used to
+#: re-derive them per instruction per request with an `isinstance` ladder --
+#: one boundary crossing per test, up to three per instruction. The kind of an
+#: instruction is fixed when the tape is compiled, so the ladder was re-deriving
+#: a constant on every request.
+#:
+#: Not visible in docs/agents/request-boundary-baseline.json: the traced sample
+#: app registers global middleware, which runs from `_global_hooks` rather than
+#: a route tape, so that scenario never enters this loop. The
+#: `middleware-tape-mixed-dispatch` complexity probe covers it instead.
+_OP_FUSED_BEFORE = 0
+_OP_BEFORE = 1
+_OP_ENDPOINT = 2
+_OP_AFTER = 3
+
+_OPCODES: tuple[tuple[type, int, str], ...] = (
+    (_FusedBeforeInstruction, _OP_FUSED_BEFORE, "fused_before"),
+    (_BeforeInstruction, _OP_BEFORE, "before"),
+    (_EndpointInstruction, _OP_ENDPOINT, "endpoint"),
+    (_AfterInstruction, _OP_AFTER, "after"),
+)
+
+
+def _opcode(instruction: _Instruction) -> tuple[int, str]:
+    for kind, code, name in _OPCODES:
+        if isinstance(instruction, kind):
+            return code, name
+    raise TypeError(f"unknown middleware instruction: {instruction!r}")
+
+
 class MiddlewareTape:
     """One immutable, linear middleware program compiled for a route."""
 
-    __slots__ = ("_instructions", "operations")
+    __slots__ = ("_program", "operations")
 
     def __init__(self, instructions: tuple[_Instruction, ...]) -> None:
-        self._instructions = instructions
-        self.operations = tuple(
-            "fused_before"
-            if isinstance(instruction, _FusedBeforeInstruction)
-            else "before"
-            if isinstance(instruction, _BeforeInstruction)
-            else "endpoint"
-            if isinstance(instruction, _EndpointInstruction)
-            else "after"
-            for instruction in instructions
+        decoded = tuple(_opcode(instruction) for instruction in instructions)
+        # (opcode, instruction) pairs -- the executable form. The instruction is
+        # typed `Any` deliberately: the opcode is the discriminator, and it is
+        # what the dispatch loop below branches on. A type checker cannot narrow
+        # on an int tag, and the alternatives both cost per instruction per
+        # request -- re-testing with `isinstance` (what this replaced) or calling
+        # `cast`, which is a real function call at runtime, not a no-op.
+        self._program: tuple[tuple[int, Any], ...] = tuple(
+            (code, instruction)
+            for (code, _name), instruction in zip(decoded, instructions, strict=True)
         )
+        self.operations = tuple(name for _code, name in decoded)
 
     async def __call__(self, request: Request) -> ResponseValue:
-        instructions = self._instructions
+        program = self._program
+        count = len(program)
         response: ResponseValue = _UNSET
         position = 0
-        while position < len(instructions):
-            instruction = instructions[position]
-            if isinstance(instruction, _FusedBeforeInstruction):
+        while position < count:
+            opcode, instruction = program[position]
+            if opcode == _OP_BEFORE:
+                candidate = await instruction.hook(request)
+                if candidate is None:
+                    position += 1
+                else:
+                    response = candidate
+                    position = instruction.failure_target
+            elif opcode == _OP_FUSED_BEFORE:
                 # One synchronous pass over the run: no coroutine, no await.
                 position += 1
                 for hook, failure_target in instruction.pairs:
@@ -141,14 +180,7 @@ class MiddlewareTape:
                         response = candidate
                         position = failure_target
                         break
-            elif isinstance(instruction, _BeforeInstruction):
-                candidate = await instruction.hook(request)
-                if candidate is None:
-                    position += 1
-                else:
-                    response = candidate
-                    position = instruction.failure_target
-            elif isinstance(instruction, _EndpointInstruction):
+            elif opcode == _OP_ENDPOINT:
                 response = await instruction.endpoint(request)
                 position += 1
             else:

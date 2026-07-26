@@ -10,10 +10,11 @@ import gzip
 import urllib.error
 import urllib.request
 from collections.abc import Iterable
+from urllib.parse import urlsplit
 
 from .dom import parse_html
 from .model import Finding, Report, Severity
-from .rules import A11Y_RULES, HTML_PERF_RULES
+from .rules import A11Y_RULES, HTML_PERF_RULES, RESPONSE_SECURITY_RULES, ResponseView
 
 
 def _header_findings(headers: dict[str, str], surface: str):
@@ -33,9 +34,21 @@ def _header_findings(headers: dict[str, str], surface: str):
 
 
 def audit_response(
-    status: int, headers: dict[str, str], body: str, surface: str, report: Report
+    status: int,
+    headers: dict[str, str],
+    body: str,
+    surface: str,
+    report: Report,
+    *,
+    scheme: str = "http",
+    set_cookies: Iterable[str] = (),
 ) -> None:
-    """Apply the a11y + perf rules to one live response (headers + HTML body)."""
+    """Apply the a11y + perf + security rules to one live response.
+
+    ``headers`` is the collapsed single-value map; ``set_cookies`` carries every
+    ``Set-Cookie`` value separately, because a response often sets more than one
+    and a dict would hide all but the last.
+    """
     content_type = next((v for k, v in headers.items() if k.lower() == "content-type"), "")
     if "text/html" in content_type.lower() and body:
         root = parse_html(body)
@@ -44,9 +57,19 @@ def audit_response(
         for rule in HTML_PERF_RULES:
             report.extend(rule(root, body, surface))
     report.extend(_header_findings(headers, surface))
+    view = ResponseView(
+        status=status,
+        scheme=scheme,
+        surface=surface,
+        headers={k.lower(): v for k, v in headers.items()},
+        set_cookies=tuple(set_cookies),
+    )
+    for rule in RESPONSE_SECURITY_RULES:
+        report.extend(rule(view))
 
 
 def run_runtime_audit(base_url: str, paths: Iterable[str] = ("/",)) -> Report:
+    scheme = urlsplit(base_url).scheme or "http"
     report = Report()
     for path in paths:
         url = base_url.rstrip("/") + "/" + path.lstrip("/")
@@ -57,9 +80,11 @@ def run_runtime_audit(base_url: str, paths: Iterable[str] = ("/",)) -> Report:
                 if "gzip" in response.headers.get("Content-Encoding", ""):
                     raw = gzip.decompress(raw)
                 headers = {k: v for k, v in response.headers.items()}
+                # get_all preserves every Set-Cookie; the dict above keeps only one.
+                set_cookies = response.headers.get_all("Set-Cookie") or ()
                 audit_response(
                     response.status, headers, raw.decode("utf-8", "replace"),
-                    f"runtime:{path}", report,
+                    f"runtime:{path}", report, scheme=scheme, set_cookies=set_cookies,
                 )
         except (urllib.error.URLError, OSError) as exc:
             report.add(Finding("runtime-fetch", Severity.ERROR, f"runtime:{path}",

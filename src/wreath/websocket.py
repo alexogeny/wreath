@@ -23,6 +23,17 @@ from ._headers import find_header
 
 Message = dict[str, Any]
 
+#: Close codes an endpoint may put in an outgoing Close frame (RFC 6455 §7.4.1):
+#: the assigned 1000-range codes, excluding 1004 (reserved) and 1005/1006/1015
+#: (which MUST NOT appear on the wire). 3000-4999 are registered/private-use.
+_SENDABLE_CLOSE_CODES = frozenset(
+    {1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014}
+)
+
+
+def _valid_close_code(code: int) -> bool:
+    return code in _SENDABLE_CLOSE_CODES or 3000 <= code <= 4999
+
 
 class WebSocketDisconnect(Exception):
     """The peer closed or dropped the connection."""
@@ -128,6 +139,12 @@ class WebSocket:
         await self._send({"type": "websocket.send", "bytes": data})
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
+        if not _valid_close_code(code):
+            raise ValueError(
+                f"invalid WebSocket close code {code!r}: send an assigned 1000-range "
+                "code (not 1004/1005/1006/1015) or a 3000-4999 application code "
+                "(RFC 6455 7.4.1)"
+            )
         await self._ensure_connect()
         await self._send({"type": "websocket.close", "code": code, "reason": reason})
 

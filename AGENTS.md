@@ -80,6 +80,7 @@ uv run pytest -m '' -n 4      # everything, including network/fuzz/performance
 uv run ruff check .
 uv run ty check
 uv run wreath-native-lint        # C complexity patterns (see below); 0 = clean
+uv run wreath-map-lint           # the agent-facing maps still describe this repo
 uv run wreath-request-trace      # Python/native crossings for one request lifecycle
 uv run wreath-request-trace --check   # ... vs docs/agents/request-boundary-baseline.json
 uv run wreath-tape-decomp        # what the global middleware tape costs a request
@@ -104,6 +105,14 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
 - The machine-oriented docs live under `docs/cookbook/agents/`; start at its
   `index.md`. `docs/agents/manifest.json` and `request-boundary-baseline.json`
   are operational data files (referenced by tooling), not prose.
+- **A new module or a moved file updates `docs/agents/manifest.json` in the same
+  change.** The manifest is how an agent finds a subsystem's sources, tests, and
+  invariants without reading the tree, and it is only worth reading if it is
+  true. `uv run wreath-map-lint` enforces that: no dangling paths, no public
+  module without a subsystem, no guide missing from `docs/llms.txt`, and no
+  repository path cited in `AGENTS.md`/`repo-map.md`/`README.md` that isn't
+  there. It exists because all four of those had drifted at once — including
+  three subsystems whose test lists a bad patch had made unreachable.
 - When you add or change a public module, follow
   `docs/cookbook/agents/documenting-a-module.md`: it lists the reference page,
   guide, and recipes a change must ship with, and the voice they must be in.

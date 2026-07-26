@@ -83,7 +83,9 @@ def _referer_origin(value: str) -> bytes | None:
 
 
 def _request_origin(request: Request, headers: dict[bytes, bytes]) -> bytes | None:
-    scheme = str(request.scope.get("scheme", "http")).lower()
+    # `request.scheme` reads the native context member directly; going through
+    # `request.scope` materialized the whole lazy scope dict per unsafe request.
+    scheme = str(request.scheme).lower()
     if scheme not in {"http", "https"}:
         return None
     host = headers.get(b"host")
@@ -179,7 +181,7 @@ class CSRFMiddleware:
                 return False
             referer_origin = _referer_origin(referer_text)
             return referer_origin is not None and origin_matches(referer_origin, allowed)
-        return not self._secure and request.scope.get("scheme", "http") == "http"
+        return not self._secure and request.scheme == "http"
 
     async def before(self, request: Request):
         now = int(time.time())

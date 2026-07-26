@@ -961,6 +961,57 @@ def _middleware_tape_fused_dispatch(n: int):
     return asyncio.run(run())
 
 
+@probe(
+    "middleware-tape-mixed-dispatch", expect=1.0, sizes=(8, 16, 32, 64),
+    axis="mixed async before/after middleware pair count",
+    assumption="tape dispatch is O(instructions), with a per-instruction cost "
+               "that does not grow with the number of instruction kinds",
+    stage="middleware", group="metal-http1",
+)
+def _middleware_tape_mixed_dispatch(n: int):
+    """A tape of n async before+after pairs dispatches in O(instructions).
+
+    Covers the branch the fused probe does not: a mixed tape runs the general
+    dispatch loop, which decides what each instruction *is* before running it.
+    That decision is made once at compile time (an opcode stored beside the
+    instruction), not per instruction per request -- the previous `isinstance`
+    ladder re-derived a compile-time constant on every step, at one C crossing
+    per test. The request-boundary baseline does not cover this: its sample app
+    registers *global* middleware, which runs from `_global_hooks` rather than
+    a route tape, so that scenario never enters this loop. A regression to
+    anything that rescans the tape shows up here as a higher exponent."""
+    import asyncio
+
+    from wreath.middleware.base import MiddlewareHooks, _compile_tape
+
+    async def endpoint(request):
+        return "ok"
+
+    async def before(request):
+        return None
+
+    async def after(request, response):
+        return response
+
+    tape = _compile_tape(
+        endpoint,
+        tuple(MiddlewareHooks(before=before, after=after) for _ in range(n)),
+    )
+    assert len(tape.operations) == 2 * n + 1
+    request: Any = object()
+    loops = 2000
+
+    async def run() -> float:
+        for _ in range(200):         # warm up
+            await tape(request)
+        start = time.perf_counter()
+        for _ in range(loops):
+            await tape(request)
+        return time.perf_counter() - start
+
+    return asyncio.run(run())
+
+
 # --- baseline probe: response coercion fast path --------------------------
 
 
@@ -982,6 +1033,237 @@ def _response_coerce_text(n: int):
     start = time.perf_counter()
     for _ in range(loops):
         coerce_text(body)
+    return time.perf_counter() - start
+
+
+# --- probes: pure-Python consumer subsystems (web/orm facade) -------------
+#
+# The probes above pin the native tier (_core / reactor / server). These pin
+# the pure-Python request-facing helpers an app actually calls per request:
+# pagination query-shaping, AWS SigV4 signing, and retry backoff. Each scales a
+# request- or config-controlled dimension, so a regression to superlinear here
+# is a latency (or, for pagination, a mild DoS) cliff a native lint cannot see.
+
+
+_PAG_MODEL: Any = None
+
+
+def _pagination_model() -> Any:
+    """A one-column ORM model reused across sizes (avoid re-registration)."""
+    global _PAG_MODEL
+    if _PAG_MODEL is None:
+        from wreath.orm import Mapped, Model, column
+        from wreath.orm.types import Int64, Text
+
+        class _ProbePagRow(Model, table="_wreath_probe_pagination"):
+            id: Mapped[int] = column(Int64, primary_key=True)
+            name: Mapped[str] = column(Text)
+
+        _PAG_MODEL = _ProbePagRow
+    return _PAG_MODEL
+
+
+@probe(
+    "pagination-apply-sort", expect=1.0, sizes=(1000, 2000, 4000, 8000),
+    axis="request ?sort= token count",
+    assumption="folding sort tokens into the query is O(tokens)",
+    stage="request", group="web",
+)
+def _pagination_apply_sort(n: int):
+    """Applying n request-controlled sort tokens is O(n), not O(n^2).
+
+    ``Select`` is immutable; a per-token ``order_by`` recopies a growing tuple
+    (1+2+...+k) -- O(k^2) in the attacker-controlled ``?sort=`` token count.
+    ``apply_sort`` folds every token into one ``order_by`` call, so this stays
+    linear. A regression back to the per-token loop turns this quadratic."""
+    from wreath.pagination import apply_sort
+
+    base = _pagination_model().select()
+    tokens = ("name",) * n
+    start = time.perf_counter()
+    shaped = apply_sort(base, tokens, allow=("name",))
+    elapsed = time.perf_counter() - start
+    assert len(shaped.orderings) == n
+    return elapsed
+
+
+@probe(
+    "orm-hydrate-key-maps", expect=0.0, sizes=(250, 500, 1000, 2000),
+    axis="rows in one hydrated result set",
+    assumption="primary-key offsets are resolved per query shape, not per row",
+    stage="handler", group="web", metric="key_map_builds",
+)
+def _orm_hydrate_key_maps(rows: int):
+    """Resolving a projection's key offsets is O(1) in the row count.
+
+    `_hydrate` used to rebuild a `{python_name: index}` dict for every row, off
+    a mapping that is fixed by the compiled projection -- O(rows x columns) of
+    pure repetition, paid again per join step per row on any joined shape (a
+    joined load always takes this Record path rather than the native hydrate
+    plan). Fitted on the deterministic build counter rather than wall time, so
+    the contract holds regardless of machine noise; the timing column still
+    shows the linear per-row hydration underneath it."""
+    from wreath.orm.session import _count_key_map_builds
+
+    spec, columns, session, make_row = _orm_hydrate_fixture()
+    batch = [make_row(index) for index in range(rows)]
+    with _count_key_map_builds() as counter:
+        start = time.perf_counter()
+        offsets = _orm_pk_offsets(spec, columns)
+        for row in batch:
+            session._hydrate(spec, columns, row, 0, offsets)
+        elapsed = time.perf_counter() - start
+    return elapsed, {"key_map_builds": counter[0]}
+
+
+def _orm_pk_offsets(spec: Any, columns: Any) -> Any:
+    from wreath.orm.session import _pk_offsets
+
+    return _pk_offsets(spec, columns)
+
+
+_ORM_HYDRATE_FIXTURE: Any = None
+
+
+def _orm_hydrate_fixture() -> Any:
+    """A registered model, its projection, and a detached session to hydrate into."""
+    global _ORM_HYDRATE_FIXTURE
+    if _ORM_HYDRATE_FIXTURE is None:
+        import datetime
+
+        from wreath.orm import Mapped, Model, column
+        from wreath.orm.registry import Registry
+        from wreath.orm.session import Session
+        from wreath.orm.types import Int64, Text, Timestamp
+
+        class _ProbeHydrateRow(Model, table="_wreath_probe_hydrate"):
+            id: Mapped[int] = column(Int64, primary_key=True)
+            email: Mapped[str] = column(Text)
+            name: Mapped[str] = column(Text)
+            created_at: Mapped[object] = column(Timestamp, nullable=True)
+
+        registry = Registry(None, [_ProbeHydrateRow])
+        spec = registry.spec_for(_ProbeHydrateRow)
+        stamp = datetime.datetime(2026, 1, 1)
+
+        def make_row(index: int) -> list[Any]:
+            return [index, f"{index}@example.test", f"name{index}", stamp]
+
+        _ORM_HYDRATE_FIXTURE = (
+            spec, spec.columns, Session(registry, "read"), make_row,
+        )
+    return _ORM_HYDRATE_FIXTURE
+
+
+@probe(
+    "static-mount-match-scale", expect=1.0, sizes=(4, 8, 16, 32),
+    axis="registered static mount count",
+    assumption="an unmatched request scans mounts in registration order, and "
+               "costs nothing per request-path character",
+    stage="routing", group="web",
+)
+def _static_mount_match_scale(mounts: int):
+    """Static-mount matching is O(mounts) and O(1) in path length.
+
+    Precedence is first-registration, so the scan stops at the winner. The
+    linear-in-mounts shape is the deliberate trade: this was a character trie,
+    which is O(1) in mounts but pays a Python loop iteration and dict lookup
+    per path character. Apps mount a handful of directories, so the scan wins
+    at realistic sizes -- but that only holds while mount counts stay small,
+    which is exactly what this pins. The measured path is long and matches the
+    *last* mount, so it is the worst case for the scan."""
+    from wreath.app import _StaticMatcher
+
+    async def handler(request):
+        return None
+
+    matcher = _StaticMatcher()
+    for index in range(mounts):
+        matcher.add(f"/mount{index:04d}/", handler)
+    # Deep path under the last-registered mount: full scan, and long enough
+    # that a per-character implementation would show up in the constant.
+    path = f"/mount{mounts - 1:04d}/" + "/".join(f"seg{i}" for i in range(24))
+    loops = 20_000
+    start = time.perf_counter()
+    for _ in range(loops):
+        result = matcher.match(path)
+    elapsed = time.perf_counter() - start
+    assert result is not None
+    return elapsed
+
+
+@probe(
+    "static-mount-path-length", expect=0.0,
+    sizes=(2000, 4000, 8000, 16000),
+    axis="unmatched request path bytes",
+    assumption="a missed static match does not scan the request path",
+    stage="routing", group="web",
+)
+def _static_mount_path_length(length: int):
+    """A request that matches no mount is O(1) in the path length.
+
+    Reached on every 404, with an attacker-controlled path. `str.startswith`
+    compares only the prefix, so a long path is rejected on its first bytes."""
+    from wreath.app import _StaticMatcher
+
+    async def handler(request):
+        return None
+
+    matcher = _StaticMatcher()
+    for index in range(4):
+        matcher.add(f"/mount{index}/", handler)
+    path = "/other/" + "x" * length
+    loops = 20_000
+    start = time.perf_counter()
+    for _ in range(loops):
+        result = matcher.match(path)
+    elapsed = time.perf_counter() - start
+    assert result is None
+    return elapsed
+
+
+@probe(
+    "sigv4-canonical-request", expect=1.0, sizes=(500, 1000, 2000, 4000),
+    axis="signed request header count",
+    assumption="SigV4 header signing is O(headers log headers)",
+    stage="egress", group="web",
+)
+def _sigv4_canonical_request(n: int):
+    """Signing a request with n headers is O(n log n): the canonical form sorts
+    the headers once and joins them in a single pass, not a per-header rescan."""
+    from wreath import _sigv4
+
+    headers = {f"x-amz-meta-{i:05d}": f"value-{i}" for i in range(n)}
+    start = time.perf_counter()
+    _sigv4.sign(
+        method="GET", host="bucket.s3.amazonaws.com", path="/obj",
+        region="us-east-1", service="s3",
+        access_key="AKIDEXAMPLE", secret_key="secret",
+        amz_date="20260726T000000Z", headers=headers,
+    )
+    return time.perf_counter() - start
+
+
+@probe(
+    "compute-backoff-attempt", expect=0.0,
+    sizes=(10_000, 20_000, 40_000, 80_000),
+    axis="retry attempt number",
+    assumption="backoff arithmetic is O(1) in the attempt number",
+    stage="component", group="web",
+)
+def _compute_backoff_attempt(attempt: int):
+    """Retry backoff is O(1) in the attempt number, not O(attempt).
+
+    ``base * factor**(attempt-1)`` would grow the bignum exponent with the
+    attempt count; the ``min(attempt-1, 32)`` cap holds the exponent constant so
+    the arithmetic stays flat. A regression that drops the cap makes a hot
+    retry-scheduling call scale with (and overflow at) large attempt counts."""
+    from wreath._jobcore import compute_backoff
+
+    loops = 20_000
+    start = time.perf_counter()
+    for _ in range(loops):
+        compute_backoff(attempt, kind="exp")
     return time.perf_counter() - start
 
 
