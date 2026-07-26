@@ -26,12 +26,12 @@
         "assumption": "advance() over k same-tick timers: linear, exactly one slot rescan.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.142,
-        "tail_exponent": 1.291,
+        "fitted_exponent": 1.114,
+        "tail_exponent": 1.27,
         "local_exponents": [
-          0.908,
-          0.957,
-          1.625
+          0.856,
+          0.95,
+          1.59
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -42,10 +42,10 @@
           16000
         ],
         "seconds": [
-          1.3390032108873129e-05,
-          2.511899219825864e-05,
-          4.874897422268987e-05,
-          0.00015036697732284665
+          1.3210054021328688e-05,
+          2.391001908108592e-05,
+          4.619901301339269e-05,
+          0.00013909698463976383
         ],
         "counters": [
           {
@@ -87,12 +87,12 @@
         "assumption": "cancel() of k same-deadline timers: linear, exactly one slot rescan.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.986,
-        "tail_exponent": 0.987,
+        "fitted_exponent": 0.991,
+        "tail_exponent": 1.0,
         "local_exponents": [
-          0.984,
-          0.993,
-          0.98
+          0.973,
+          0.996,
+          1.004
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -103,10 +103,10 @@
           16000
         ],
         "seconds": [
-          3.290001768618822e-05,
-          6.505899364128709e-05,
-          0.0001295069814659655,
-          0.0002554849488660693
+          3.248901339247823e-05,
+          6.375799421221018e-05,
+          0.0001271470100618899,
+          0.00025500397896394134
         ],
         "counters": [
           {
@@ -148,12 +148,12 @@
         "assumption": "advance() across one idle rotation with n parked long timers: O(1).",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.367,
-        "tail_exponent": 0.14,
+        "fitted_exponent": 0.326,
+        "tail_exponent": 0.196,
         "local_exponents": [
-          0.709,
-          0.703,
-          -0.422
+          0.464,
+          0.697,
+          -0.306
         ],
         "class": "O(1)",
         "status": "PASS",
@@ -164,10 +164,10 @@
           400000
         ],
         "seconds": [
-          7.399939931929111e-07,
-          1.2100208550691605e-06,
-          1.9700382836163044e-06,
-          1.469976268708706e-06
+          6.300397217273712e-07,
+          8.689821697771549e-07,
+          1.4090328477323055e-06,
+          1.1399970389902592e-06
         ],
         "counters": [
           {},
@@ -217,10 +217,10 @@
           2000
         ],
         "seconds": [
-          1.7380021745339035e-07,
-          2.5454501155763866e-07,
-          4.142901161685586e-07,
-          7.97380052972585e-07
+          1.746951602399349e-07,
+          2.5404500775039196e-07,
+          4.161900142207742e-07,
+          7.986847776919603e-07
         ],
         "counters": [
           {
@@ -262,12 +262,12 @@
         "assumption": "k call_later+cancel cycles on the metal-config loop: linear, no rot.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.037,
-        "tail_exponent": 1.066,
+        "fitted_exponent": 1.014,
+        "tail_exponent": 1.049,
         "local_exponents": [
-          0.987,
-          1.011,
-          1.121
+          0.951,
+          0.989,
+          1.109
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -278,10 +278,10 @@
           40000
         ],
         "seconds": [
-          0.0005658490117639303,
-          0.0011218180297873914,
-          0.0022614849731326103,
-          0.004917944024782628
+          0.0006000570137985051,
+          0.001159784966148436,
+          0.0023021399974823,
+          0.004965932050254196
         ],
         "counters": [
           {
@@ -323,12 +323,12 @@
         "assumption": "one pop plus one push is amortized O(1) in queue capacity",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": -0.033,
-        "tail_exponent": 0.029,
+        "fitted_exponent": 0.008,
+        "tail_exponent": 0.012,
         "local_exponents": [
-          -0.165,
-          -0.008,
-          0.067
+          0.0,
+          0.007,
+          0.017
         ],
         "class": "O(1)",
         "status": "PASS",
@@ -339,10 +339,10 @@
           131072
         ],
         "seconds": [
-          4.049600102007389e-05,
-          3.611051943153143e-05,
-          3.590976120904088e-05,
-          3.760692197829485e-05
+          3.6168203223496675e-05,
+          3.6175770219415426e-05,
+          3.635830944404006e-05,
+          3.679079236462712e-05
         ],
         "counters": [
           {},
@@ -376,12 +376,12 @@
         "assumption": "incremental delimiter scans visit each buffered byte O(1) times",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.687,
-        "tail_exponent": 0.802,
+        "fitted_exponent": 0.662,
+        "tail_exponent": 0.791,
         "local_exponents": [
-          0.428,
-          0.775,
-          0.828
+          0.383,
+          0.722,
+          0.861
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -392,10 +392,10 @@
           16000
         ],
         "seconds": [
-          0.00011024798732250929,
-          0.0001483370433561504,
-          0.00025375495897606015,
-          0.0004506109980866313
+          0.00011708703823387623,
+          0.00015270605217665434,
+          0.0002518849796615541,
+          0.00045733997831121087
         ],
         "counters": [
           {},
@@ -429,12 +429,12 @@
         "assumption": "request parsing, activation, and response emission are O(requests)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.991,
-        "tail_exponent": 0.999,
+        "fitted_exponent": 0.977,
+        "tail_exponent": 0.982,
         "local_exponents": [
-          0.969,
-          1.012,
-          0.987
+          0.968,
+          0.973,
+          0.992
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -445,10 +445,10 @@
           4000
         ],
         "seconds": [
-          0.0009280520025640726,
-          0.0018162850174121559,
-          0.0036620189785026014,
-          0.007257696008309722
+          0.0009368599858134985,
+          0.0018331899773329496,
+          0.003598470997530967,
+          0.007156253966968507
         ],
         "counters": [
           {},
@@ -482,12 +482,12 @@
         "assumption": "one-shot response validation and serialization are O(header bytes)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.719,
-        "tail_exponent": 0.787,
+        "fitted_exponent": 0.721,
+        "tail_exponent": 0.771,
         "local_exponents": [
-          0.503,
-          0.965,
-          0.608
+          0.618,
+          0.732,
+          0.811
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -498,10 +498,10 @@
           16000
         ],
         "seconds": [
-          0.00011939700925722718,
-          0.00016921700444072485,
-          0.0003304029814898968,
-          0.0005034999921917915
+          0.00010994699550792575,
+          0.0001687559997662902,
+          0.00028021400794386864,
+          0.0004917189944535494
         ],
         "counters": [
           {},
@@ -535,12 +535,12 @@
         "assumption": "native egress enqueue is amortized O(writes) under backpressure",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.935,
-        "tail_exponent": 0.951,
+        "fitted_exponent": 0.967,
+        "tail_exponent": 1.008,
         "local_exponents": [
-          0.903,
-          0.94,
-          0.961
+          0.876,
+          0.991,
+          1.024
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -551,10 +551,10 @@
           8000
         ],
         "seconds": [
-          3.109895624220371e-05,
-          5.8169011026620865e-05,
-          0.00011158798588439822,
-          0.00021727598505094647
+          3.1328992918133736e-05,
+          5.747895920649171e-05,
+          0.00011427700519561768,
+          0.00023245502961799502
         ],
         "counters": [
           {
@@ -596,12 +596,12 @@
         "assumption": "Rejecting a body with n extra keys against an n-field schema: O(n).",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.032,
-        "tail_exponent": 1.015,
+        "fitted_exponent": 1.034,
+        "tail_exponent": 1.032,
         "local_exponents": [
-          1.089,
-          0.963,
-          1.066
+          1.046,
+          1.004,
+          1.06
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -612,10 +612,10 @@
           3200
         ],
         "seconds": [
-          0.00012320909881964327,
-          0.0002620088489493355,
-          0.0005107630015118048,
-          0.0010695019998820498
+          0.00012370079930406063,
+          0.0002555014507379383,
+          0.0005124063522089273,
+          0.001068651198875159
         ],
         "counters": [
           {},
@@ -649,12 +649,12 @@
         "assumption": "A nested-union validation bomb stays bounded regardless of depth: O(1).",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.205,
-        "tail_exponent": 0.255,
+        "fitted_exponent": -0.584,
+        "tail_exponent": -1.16,
         "local_exponents": [
-          0.099,
-          0.28,
-          0.227
+          0.727,
+          -1.695,
+          -0.567
         ],
         "class": "O(1)",
         "status": "PASS",
@@ -665,10 +665,10 @@
           28
         ],
         "seconds": [
-          0.42895958200097084,
-          0.43265896901721135,
-          0.44245217699790373,
-          0.4499568500323221
+          0.4687926589976996,
+          0.4994189999997616,
+          0.436068010982126,
+          0.4181167329661548
         ],
         "counters": [
           {},
@@ -702,12 +702,12 @@
         "assumption": "Encoding an n-element structure is O(n): the writer buffer grows",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.012,
-        "tail_exponent": 1.024,
+        "fitted_exponent": 1.014,
+        "tail_exponent": 1.011,
         "local_exponents": [
-          0.988,
-          1.011,
-          1.038
+          1.029,
+          0.99,
+          1.031
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -718,10 +718,10 @@
           160000
         ],
         "seconds": [
-          0.0001761169987730682,
-          0.0003492030082270503,
-          0.0007035959861241281,
-          0.00144506199285388
+          0.0001710359938442707,
+          0.0003490620292723179,
+          0.0006934039993211627,
+          0.001416819985024631
         ],
         "counters": [
           {},
@@ -755,12 +755,12 @@
         "assumption": "Decoding an n-element document is O(n): single-pass scan, parser-local",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.998,
-        "tail_exponent": 0.993,
+        "fitted_exponent": 0.997,
+        "tail_exponent": 0.973,
         "local_exponents": [
-          1.003,
-          1.01,
-          0.976
+          1.059,
+          0.949,
+          0.997
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -771,10 +771,10 @@
           160000
         ],
         "seconds": [
-          0.0003985320217907429,
-          0.0007984940311871469,
-          0.0016084880335256457,
-          0.003164038003887981
+          0.00040110101690515876,
+          0.0008359620114788413,
+          0.001614145003259182,
+          0.003221650025807321
         ],
         "counters": [
           {},
@@ -808,12 +808,12 @@
         "assumption": "Parsing an n-cookie header is O(n): one forward pass, O(1) dict ops.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.99,
-        "tail_exponent": 1.004,
+        "fitted_exponent": 1.019,
+        "tail_exponent": 1.042,
         "local_exponents": [
-          0.964,
-          0.985,
-          1.022
+          0.974,
+          1.011,
+          1.074
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -824,10 +824,10 @@
           16000
         ],
         "seconds": [
-          0.0001480280188843608,
-          0.0002887939917854965,
-          0.0005715579609386623,
-          0.0011608070344664156
+          0.00014577701222151518,
+          0.00028628396103158593,
+          0.0005767769762314856,
+          0.0012142930063419044
         ],
         "counters": [
           {},
@@ -861,12 +861,12 @@
         "assumption": "Parsing an n-field query string is O(n): one forward pass, list append.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.039,
-        "tail_exponent": 1.023,
+        "fitted_exponent": 0.999,
+        "tail_exponent": 0.923,
         "local_exponents": [
-          1.066,
-          1.058,
-          0.989
+          1.212,
+          0.815,
+          1.032
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -877,10 +877,10 @@
           16000
         ],
         "seconds": [
-          0.00016300700372084975,
-          0.00034117401810362935,
-          0.0007100959774106741,
-          0.0014098029932938516
+          0.00015523703768849373,
+          0.00035972200566902757,
+          0.0006327459705062211,
+          0.0012936320272274315
         ],
         "counters": [
           {},
@@ -914,12 +914,12 @@
         "assumption": "Building the header map from n headers is O(n): one pass into a dict.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.986,
-        "tail_exponent": 0.996,
+        "fitted_exponent": 1.021,
+        "tail_exponent": 1.029,
         "local_exponents": [
-          0.966,
-          0.987,
-          1.005
+          1.012,
+          1.0,
+          1.057
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -930,10 +930,10 @@
           16000
         ],
         "seconds": [
-          7.107900455594063e-05,
-          0.00013880699407309294,
-          0.000275083992164582,
-          0.0005521290004253387
+          7.043901132419705e-05,
+          0.00014208699576556683,
+          0.00028426398057490587,
+          0.0005915769725106657
         ],
         "counters": [
           {},
@@ -967,12 +967,12 @@
         "assumption": "Injecting a fixed set of default headers into an n-header response stays",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.958,
-        "tail_exponent": 0.956,
+        "fitted_exponent": 1.07,
+        "tail_exponent": 1.042,
         "local_exponents": [
-          0.944,
-          1.015,
-          0.896
+          1.149,
+          1.0,
+          1.085
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -983,10 +983,10 @@
           8000
         ],
         "seconds": [
-          0.0002465160214342177,
-          0.00047432101564481854,
-          0.0009588509565219283,
-          0.0017841350054368377
+          0.0002171360538341105,
+          0.0004816799773834646,
+          0.0009631389984861016,
+          0.0020434859907254577
         ],
         "counters": [
           {},
@@ -1020,12 +1020,12 @@
         "assumption": "Parsing an n-part multipart body is O(body): the boundary search advances",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.007,
-        "tail_exponent": 0.998,
+        "fitted_exponent": 1.014,
+        "tail_exponent": 1.01,
         "local_exponents": [
-          1.04,
-          0.964,
-          1.033
+          1.029,
+          0.994,
+          1.026
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -1036,10 +1036,10 @@
           8000
         ],
         "seconds": [
-          0.000254795013461262,
-          0.0005238699959591031,
-          0.001021869946271181,
-          0.002091079019010067
+          0.00024943496100604534,
+          0.0005088889738544822,
+          0.0010136280325241387,
+          0.002064335043542087
         ],
         "counters": [
           {},
@@ -1073,12 +1073,12 @@
         "assumption": "static route activation is O(1) in total route count",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.002,
-        "tail_exponent": 0.004,
+        "fitted_exponent": 0.004,
+        "tail_exponent": 0.006,
         "local_exponents": [
-          -0.001,
-          -0.002,
-          0.011
+          0.001,
+          0.003,
+          0.008
         ],
         "class": "O(1)",
         "status": "PASS",
@@ -1089,10 +1089,10 @@
           64000
         ],
         "seconds": [
-          0.0001359970192424953,
-          0.00013582699466496706,
-          0.00013535801554098725,
-          0.00013751705409958959
+          0.0001355669810436666,
+          0.00013574701733887196,
+          0.00013632699847221375,
+          0.00013784697512164712
         ],
         "counters": [
           {},
@@ -1126,12 +1126,12 @@
         "assumption": "worst-case bitset activation is O(group size / 64)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.718,
-        "tail_exponent": 0.907,
+        "fitted_exponent": 0.899,
+        "tail_exponent": 0.926,
         "local_exponents": [
-          0.286,
-          0.876,
-          0.938
+          0.838,
+          0.924,
+          0.929
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -1142,10 +1142,10 @@
           64000
         ],
         "seconds": [
-          0.0019247320014983416,
-          0.002347333007492125,
-          0.0043076949659734964,
-          0.008253158011939377
+          0.0012833119835704565,
+          0.0022941899951547384,
+          0.00435146497329697,
+          0.008284070005174726
         ],
         "counters": [
           {},
@@ -1179,12 +1179,12 @@
         "assumption": "Trie match cost is independent of route count: O(1) in N.",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.026,
-        "tail_exponent": 0.018,
+        "fitted_exponent": 0.035,
+        "tail_exponent": 0.024,
         "local_exponents": [
-          0.056,
-          -0.01,
-          0.045
+          0.062,
+          0.019,
+          0.029
         ],
         "class": "O(1)",
         "status": "PASS",
@@ -1195,10 +1195,10 @@
           4000
         ],
         "seconds": [
-          0.0005094899679534137,
-          0.000529579003341496,
-          0.0005259399767965078,
-          0.0005425889976322651
+          0.0005071689956821501,
+          0.0005293880240060389,
+          0.0005365780089050531,
+          0.0005474379868246615
         ],
         "counters": [
           {},
@@ -1232,12 +1232,12 @@
         "assumption": "request-head parsing is O(headers plus header bytes)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.047,
-        "tail_exponent": 1.127,
+        "fitted_exponent": 1.08,
+        "tail_exponent": 1.083,
         "local_exponents": [
-          0.849,
-          1.166,
-          1.088
+          1.035,
+          1.195,
+          0.97
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -1248,10 +1248,10 @@
           4000
         ],
         "seconds": [
-          4.3898995500057936e-05,
-          7.907801773399115e-05,
-          0.00017740600742399693,
-          0.0003770019975490868
+          4.2808998841792345e-05,
+          8.77479906193912e-05,
+          0.0002008749870583415,
+          0.00039355101762339473
         ],
         "counters": [
           {},
@@ -1285,12 +1285,12 @@
         "assumption": "Decoding an object with n distinct keys is O(n): the parser-local key",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.056,
-        "tail_exponent": 1.078,
+        "fitted_exponent": 1.034,
+        "tail_exponent": 1.01,
         "local_exponents": [
-          1.012,
-          1.063,
-          1.093
+          1.099,
+          0.979,
+          1.042
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -1301,10 +1301,10 @@
           80000
         ],
         "seconds": [
-          0.0007286550244316459,
-          0.001469401002395898,
-          0.00306928000645712,
-          0.006546302989590913
+          0.0010450870031490922,
+          0.002238741028122604,
+          0.00441185396630317,
+          0.009085291996598244
         ],
         "counters": [
           {},
@@ -1338,12 +1338,12 @@
         "assumption": "Percent-decoding an n-byte target is O(n): one forward pass.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.977,
-        "tail_exponent": 0.985,
+        "fitted_exponent": 0.941,
+        "tail_exponent": 0.915,
         "local_exponents": [
-          0.96,
-          0.978,
-          0.992
+          0.973,
+          0.998,
+          0.832
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -1354,10 +1354,10 @@
           160000
         ],
         "seconds": [
-          4.8779009375721216e-05,
-          9.4907998573035e-05,
-          0.00018694601021707058,
-          0.0003719130181707442
+          4.845898365601897e-05,
+          9.514804696664214e-05,
+          0.0001900360221043229,
+          0.0003383830189704895
         ],
         "counters": [
           {},
@@ -1391,12 +1391,12 @@
         "assumption": "XOR-unmasking an n-byte WebSocket payload is O(n): a single word-at-a-",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.954,
-        "tail_exponent": 1.014,
+        "fitted_exponent": 0.861,
+        "tail_exponent": 0.87,
         "local_exponents": [
-          0.903,
-          0.751,
-          1.277
+          0.849,
+          0.836,
+          0.904
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -1407,10 +1407,10 @@
           400000
         ],
         "seconds": [
-          3.600027412176132e-06,
-          6.729969754815102e-06,
-          1.1330004781484604e-05,
-          2.7448986656963825e-05
+          3.8800062611699104e-06,
+          6.988993845880032e-06,
+          1.247902400791645e-05,
+          2.3358967155218124e-05
         ],
         "counters": [
           {},
@@ -1444,12 +1444,12 @@
         "assumption": "middleware dispatch is O(active hooks)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.645,
-        "tail_exponent": 0.739,
+        "fitted_exponent": 0.646,
+        "tail_exponent": 0.738,
         "local_exponents": [
-          0.454,
-          0.649,
-          0.829
+          0.462,
+          0.647,
+          0.83
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -1460,10 +1460,10 @@
           64
         ],
         "seconds": [
-          0.009083762008231133,
-          0.01244724600110203,
-          0.019523737020790577,
-          0.0346861089929007
+          0.009223119006492198,
+          0.012705523986369371,
+          0.019898595986887813,
+          0.03536232898477465
         ],
         "counters": [
           {},
@@ -1497,11 +1497,11 @@
         "assumption": "tape dispatch is O(instructions), with a per-instruction cost that does not grow with the number of instruction kinds",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.935,
-        "tail_exponent": 0.959,
+        "fitted_exponent": 0.936,
+        "tail_exponent": 0.956,
         "local_exponents": [
-          0.884,
-          0.945,
+          0.895,
+          0.94,
           0.972
         ],
         "class": "O(n)",
@@ -1513,10 +1513,10 @@
           64
         ],
         "seconds": [
-          0.003455782018136233,
-          0.006376355013344437,
-          0.012272689025849104,
-          0.02407952694920823
+          0.003520382975693792,
+          0.00654497800860554,
+          0.012558115995489061,
+          0.024631153035443276
         ],
         "counters": [
           {},
@@ -1550,12 +1550,12 @@
         "assumption": "response coercion is O(encoded body bytes)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.684,
-        "tail_exponent": 0.763,
+        "fitted_exponent": 0.687,
+        "tail_exponent": 0.748,
         "local_exponents": [
-          0.525,
-          0.693,
-          0.833
+          0.564,
+          0.689,
+          0.807
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -1566,10 +1566,10 @@
           160000
         ],
         "seconds": [
-          0.00013791798846796155,
-          0.00019840605091303587,
-          0.00032065401319414377,
-          0.0005713389837183058
+          0.00013459700858220458,
+          0.0001989650190807879,
+          0.00032073300099000335,
+          0.0005611379747278988
         ],
         "counters": [
           {},
@@ -1603,12 +1603,12 @@
         "assumption": "folding sort tokens into the query is O(tokens)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.95,
-        "tail_exponent": 0.929,
+        "fitted_exponent": 0.954,
+        "tail_exponent": 0.969,
         "local_exponents": [
-          1.003,
-          0.914,
-          0.944
+          0.92,
+          0.972,
+          0.966
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -1619,10 +1619,10 @@
           8000
         ],
         "seconds": [
-          0.00024589599343016744,
-          0.0004927800036966801,
-          0.000928821973502636,
-          0.0017871250165626407
+          0.00024944497272372246,
+          0.0004718489944934845,
+          0.0009253500029444695,
+          0.0018074000254273415
         ],
         "counters": [
           {},
@@ -1672,10 +1672,10 @@
           2000
         ],
         "seconds": [
-          0.0002880039974115789,
-          0.0005144699825905263,
-          0.001034569984767586,
-          0.0020710290409624577
+          0.0002569350181147456,
+          0.0005102389841340482,
+          0.0010495169553905725,
+          0.002057884994428605
         ],
         "counters": [
           {
@@ -1717,12 +1717,12 @@
         "assumption": "an unmatched request scans mounts in registration order, and costs nothing per request-path character",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.665,
-        "tail_exponent": 0.734,
+        "fitted_exponent": 0.672,
+        "tail_exponent": 0.747,
         "local_exponents": [
-          0.534,
-          0.645,
-          0.823
+          0.523,
+          0.673,
+          0.82
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -1733,10 +1733,10 @@
           32
         ],
         "seconds": [
-          0.0041201289859600365,
-          0.005965752003248781,
-          0.009329797001555562,
-          0.016508117027115077
+          0.004081140970811248,
+          0.00586440198821947,
+          0.00935172603931278,
+          0.01650743995560333
         ],
         "counters": [
           {},
@@ -1770,12 +1770,12 @@
         "assumption": "a missed static match does not scan the request path",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": -0.004,
-        "tail_exponent": -0.002,
+        "fitted_exponent": 0.003,
+        "tail_exponent": 0.005,
         "local_exponents": [
-          -0.007,
-          -0.006,
-          0.001
+          -0.004,
+          0.006,
+          0.004
         ],
         "class": "O(1)",
         "status": "PASS",
@@ -1786,10 +1786,116 @@
           16000
         ],
         "seconds": [
-          0.002481831004843116,
-          0.0024701219517737627,
-          0.0024600010365247726,
-          0.00246169202728197
+          0.002476195979397744,
+          0.002469545986969024,
+          0.0024799759848974645,
+          0.0024870660272426903
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "graphql-parse-scale": {
+      "contract": {
+        "group": "web",
+        "stage": "request",
+        "axis": "selected fields in one document",
+        "assumption": "parsing is O(document size), never superlinear in field count",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ]
+      },
+      "observation": {
+        "probe": "graphql-parse-scale",
+        "group": "web",
+        "stage": "request",
+        "axis": "selected fields in one document",
+        "assumption": "parsing is O(document size), never superlinear in field count",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 1.021,
+        "tail_exponent": 1.028,
+        "local_exponents": [
+          1.003,
+          1.034,
+          1.022
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "seconds": [
+          0.0006029803509591148,
+          0.0012088621500879527,
+          0.00247494105133228,
+          0.0050254419504199175
+        ],
+        "counters": [
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    "graphql-depth-rejection": {
+      "contract": {
+        "group": "web",
+        "stage": "request",
+        "axis": "nesting depth of a hostile document",
+        "assumption": "rejecting an over-deep document is O(document size), and it is `max_document_bytes` -- not the depth check -- that bounds it",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ]
+      },
+      "observation": {
+        "probe": "graphql-depth-rejection",
+        "group": "web",
+        "stage": "request",
+        "axis": "nesting depth of a hostile document",
+        "assumption": "rejecting an over-deep document is O(document size), and it is `max_document_bytes` -- not the depth check -- that bounds it",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.991,
+        "tail_exponent": 0.988,
+        "local_exponents": [
+          1.002,
+          0.982,
+          0.993
+        ],
+        "class": "O(n)",
+        "status": "PASS",
+        "sizes": [
+          2000,
+          4000,
+          8000,
+          16000
+        ],
+        "seconds": [
+          0.0008884346490958706,
+          0.00177933519880753,
+          0.003515008301474154,
+          0.0069975633989088236
         ],
         "counters": [
           {},
@@ -1823,12 +1929,12 @@
         "assumption": "SigV4 header signing is O(headers log headers)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.913,
-        "tail_exponent": 0.919,
+        "fitted_exponent": 0.92,
+        "tail_exponent": 0.909,
         "local_exponents": [
-          0.917,
-          0.863,
-          0.974
+          0.983,
+          0.793,
+          1.025
         ],
         "class": "O(n)",
         "status": "PASS",
@@ -1839,10 +1945,10 @@
           4000
         ],
         "seconds": [
-          0.00021498603746294975,
-          0.0004060629871673882,
-          0.0007387950317934155,
-          0.001450931013096124
+          0.0002200050512328744,
+          0.00043487100629135966,
+          0.0007537130150012672,
+          0.0015333969495259225
         ],
         "counters": [
           {},
@@ -1876,12 +1982,12 @@
         "assumption": "backoff arithmetic is O(1) in the attempt number",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": -0.0,
-        "tail_exponent": -0.004,
+        "fitted_exponent": 0.0,
+        "tail_exponent": 0.004,
         "local_exponents": [
-          0.005,
-          0.005,
-          -0.012
+          -0.011,
+          0.01,
+          -0.001
         ],
         "class": "O(1)",
         "status": "PASS",
@@ -1892,10 +1998,10 @@
           80000
         ],
         "seconds": [
-          0.0038281260058283806,
-          0.0038412139983847737,
-          0.003854004025924951,
-          0.0038214040105231106
+          0.0038540249806828797,
+          0.003825246007181704,
+          0.0038505460252054036,
+          0.00384869595291093
         ],
         "counters": [
           {},

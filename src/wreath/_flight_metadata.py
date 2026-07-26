@@ -329,8 +329,15 @@ def _ws_operation_id(path: str) -> str:
 
 
 def _model_names(registry: Any) -> list[str]:
+    """The model class names a registry holds, for the image's models table.
+
+    A registry exposes ``specs`` (a tuple of ``ModelSpec``) whose ``model_type``
+    is the class; the other attribute names are tolerated so a registry-shaped
+    test double or a future container still resolves. Anything that yields
+    neither a class nor a spec is skipped rather than guessed at.
+    """
     names: set[str] = set()
-    for attr in ("models", "_models", "specs", "_specs"):
+    for attr in ("specs", "_specs", "models", "_models"):
         container = getattr(registry, attr, None)
         if container is None:
             continue
@@ -339,9 +346,11 @@ def _model_names(registry: Any) -> list[str]:
         except Exception:  # noqa: BLE001
             continue
         for item in items:
-            name = getattr(item, "__qualname__", None) or getattr(item, "__name__", None)
-            if name is None:
-                name = getattr(getattr(item, "model", None), "__qualname__", None)
+            model = getattr(item, "model_type", None) or getattr(item, "model", None)
+            source = model if model is not None else item
+            name = getattr(source, "__qualname__", None) or getattr(
+                source, "__name__", None
+            )
             if name:
                 names.add(str(name))
     return sorted(names)

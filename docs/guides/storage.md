@@ -83,10 +83,10 @@ await store.delete("reports/q3.csv")
 A `StoragePath` gives the `s3path` ergonomics without threading the store through your code:
 
 ```python
-p = store.path("org/acme") / "project" / "state.json"
+p = store.path("org/trailhead") / "project" / "state.json"
 p.name          # "state.json"
 p.suffix        # ".json"
-p.parent        # StoragePath("org/acme/project")
+p.parent        # StoragePath("org/trailhead/project")
 
 await p.write_bytes(payload)
 raw = await p.read_bytes()

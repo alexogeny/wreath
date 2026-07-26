@@ -9,7 +9,7 @@ Wreath's Native Flight Recorder already collects the metrics, traces, and events
 ```python
 from wreath import telemetry
 
-telemetry.activate_cloudwatch_emf(projector, namespace="Llamacam")
+telemetry.activate_cloudwatch_emf(projector, namespace="Trailhead")
 ```
 
 CloudWatch's Embedded Metric Format is just structured JSON written to stdout, which the Lambda/ECS platform parses into metrics automatically — no agent, no `boto3`, no network call from your process. Like every bridge here it reads the same recorder snapshot, so switching later to a Prometheus scrape or a StatsD push never changes what the numbers *mean*, only where they land.
@@ -31,7 +31,7 @@ from wreath import telemetry
 telemetry.activate_prometheus(projector)            # scrape (text 0.0.4)
 telemetry.activate_openmetrics(projector)           # OpenMetrics 1.0.0 + exemplars
 telemetry.activate_statsd(projector, dogstatsd=True)  # UDP push, DogStatsD tags
-telemetry.activate_cloudwatch_emf(projector, namespace="Llamacam")  # EMF JSON to stdout
+telemetry.activate_cloudwatch_emf(projector, namespace="Trailhead")  # EMF JSON to stdout
 ```
 
 - **Prometheus / OpenMetrics** — counters, gauges, and per-route histograms in the exposition format; OpenMetrics adds the terminating `# EOF` and the richer content type.

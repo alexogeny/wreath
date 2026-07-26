@@ -13,8 +13,16 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
+from time import monotonic_ns as _monotonic_ns
 from typing import Any
 
+from .. import _nplusone
+from .._flight_markers import COV_PYTHON as _COV_PYTHON
+from .._flight_markers import PH_ORM_HYDRATE as _PH_ORM_HYDRATE
+from .._flight_markers import phase_marker as _phase_marker
+from .._nplusone import query_ledger as _query_ledger
+from .._orm_events import has_subscribers as _has_write_subscribers
+from .._orm_events import publish_write as _publish_write
 from ..postgres import _WORKLOADS, Workload
 from .compiler import (
     MAX_BIND_PARAMETERS,
@@ -288,6 +296,7 @@ class Session:
         "_connection",
         "_deleted",
         "_deleted_ids",
+        "_written",
         "_depth",
         "_identity",
         "_new_items",
@@ -329,6 +338,8 @@ class Session:
         self._deleted_ids: set[int] = set()
         self._ordinal = 0
         self._depth = 0
+        # Model names written inside an open transaction, published on commit.
+        self._written: frozenset[str] = frozenset()
         self._closed = False
         self._broken = False
 
@@ -434,12 +445,65 @@ class Session:
         self._check_tenant_bound()
         compiled = compile_select(self._registry, query)
         self._check_locking(query)
+        if _nplusone.WATCHING:
+            # Gated on a module flag rather than reading the ContextVar
+            # unconditionally: `ContextVar.get` is a boundary crossing, and an
+            # application with no guard installed -- which is every production
+            # one -- should not pay one per query to learn that.
+            self._count_read(compiled.result_model)
         connection = await self._acquire()
-        objects = await self._fetch_objects(
-            connection, compiled, compiled.sql, compiled.bind_values
-        )
+        model_ids = self._registry._flight_model_ids
+        if not model_ids:
+            # No metadata image, so nothing is recording and there is no ID to
+            # attribute to. Same reasoning: an empty dict is a truth test, not
+            # a crossing.
+            objects = await self._fetch_objects(
+                connection, compiled, compiled.sql, compiled.bind_values
+            )
+        else:
+            objects = await self._fetch_recorded(model_ids, connection, compiled)
         await self._run_selectin(compiled.load_plan.selectin, objects)
         return objects
+
+    def _count_read(self, spec: ModelSpec | None) -> None:
+        """Tell the request's query ledger which model this read hydrates.
+
+        The N+1 seam. The ledger may raise -- that is the point, and it happens
+        before the statement runs, so the traceback lands on the loop rather
+        than on the row that finally overflowed it.
+        """
+        ledger = _query_ledger.get(None)
+        if ledger is not None and spec is not None:
+            ledger.record(spec.model_type.__qualname__)
+
+    async def _fetch_recorded(
+        self, model_ids: dict[Any, int], connection: Any, compiled: CompiledQuery
+    ) -> list[Any]:
+        """``_fetch_objects`` under a recording app, timed and attributed.
+
+        Split out so the ordinary path keeps its single branch and no clock
+        reads. The phase carries the model's metadata-image ID, which is what
+        lets a recorded trace say *fifty of them hydrated Trek* rather than
+        *fifty queries*.
+        """
+        spec = compiled.result_model
+        model_id = model_ids.get(spec.model_type, 0) if spec is not None else 0
+        marker = _phase_marker.get(None) if model_id else None
+        if marker is None:
+            # Unsampled, or a model outside the image: attributing to ID 0 would
+            # put these rows on whichever model happens to be first.
+            return await self._fetch_objects(
+                connection, compiled, compiled.sql, compiled.bind_values
+            )
+        started = _monotonic_ns()
+        try:
+            return await self._fetch_objects(
+                connection, compiled, compiled.sql, compiled.bind_values
+            )
+        finally:
+            # In a finally so a statement that raised still shows that it ran:
+            # an N+1 that fails halfway is still an N+1.
+            marker(_PH_ORM_HYDRATE, model_id, _COV_PYTHON, _monotonic_ns() - started)
 
     async def _fetch_objects(
         self,
@@ -819,10 +883,23 @@ class Session:
         if not self._has_pending():
             return
         if self._depth:
-            await self._flush_inner()
+            # Inside a caller's transaction: names accumulate on the session and
+            # the outermost commit publishes them. A flush that is later rolled
+            # back must not have invalidated anything.
+            self._written |= await self._flush_inner()
             return
         async with self.begin():
-            await self._flush_inner()
+            written = await self._flush_inner()
+        # Published only once the transaction has committed.
+        if written:
+            _publish_write(written)
+
+    def _collect_written(self) -> frozenset[str]:
+        """Model names in the pending set, for write subscribers."""
+        names = {type(item).__name__ for item in self._new}
+        names.update(type(item).__name__ for item in self._dirty_objects())
+        names.update(type(item).__name__ for item in self._deleted)
+        return frozenset(names)
 
     def _has_pending(self) -> bool:
         # The ordinal map answers this without compacting the pending list.
@@ -843,7 +920,10 @@ class Session:
         except RegistryError:
             raise RegistryError(f"{model.__name__} is not registered") from None
 
-    async def _flush_inner(self) -> None:
+    async def _flush_inner(self) -> frozenset[str]:
+        # Collected before the pending set is cleared, and only when something
+        # is listening -- an app with no cache subscribers pays one bool read.
+        written = self._collect_written() if _has_write_subscribers() else frozenset()
         ordinals = self._new_ordinals
         for instance in sorted(
             self._new, key=lambda item: (self._order(type(item)), ordinals[id(item)])
@@ -861,6 +941,7 @@ class Session:
         ):
             await self._delete(instance)
         self._clear_pending()
+        return written
 
     async def _insert(self, instance: Any) -> None:
         spec = self._registry.spec_for(type(instance))
@@ -956,10 +1037,18 @@ class Session:
         except BaseException:
             self._depth = depth
             await self._unwind(connection, depth, savepoint, commit=False)
+            if depth == 0:
+                # Rolled back: those writes never happened, so nothing is stale.
+                self._written = frozenset()
             raise
         else:
             self._depth = depth
             await self._unwind(connection, depth, savepoint, commit=True)
+            if depth == 0 and self._written:
+                # The outermost commit succeeded: everything written inside it
+                # is now durable, so invalidation is safe to announce.
+                written, self._written = self._written, frozenset()
+                _publish_write(written)
 
     async def _unwind(
         self, connection: Any, depth: int, savepoint: str, *, commit: bool

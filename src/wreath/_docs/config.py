@@ -154,7 +154,7 @@ class Site:
         strict: fail the build on an orphan page (a ``.md`` not in ``nav``), a
             dead internal link, or a broken ``#anchor``. On by default — a docs
             build should not rot.
-        base_url: canonical site URL (e.g. ``https://docs.acme.com``). When set,
+        base_url: canonical site URL (e.g. ``https://docs.trailhead.example``). When set,
             a ``sitemap.xml`` and absolute URLs in ``llms.txt`` are generated.
         description: one-line site description (used in ``llms.txt`` and page
             ``<meta>`` when a page has none of its own).

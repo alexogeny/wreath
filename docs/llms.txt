@@ -28,7 +28,7 @@ Read these first if you (or the code you are translating) use the FastAPI stack.
 - [Binding and validation](guides/binding.md): typed parameters, validation, Depends.
 - [Middleware](guides/middleware.md): the protocol and built-ins.
 - [Auth](guides/auth.md): authentication (identity) and authorization (roles, permissions, and a built-in dependency-free Cedar engine: CedarPolicies parses at startup, native evaluation, forbid-overrides-permit, default deny; extensions/schema validation fail loudly at parse time).
-- [WebSockets](guides/websockets.md), [Native server](guides/server.md), [Outbound HTTP and webhooks](guides/http-client.md).
+- [WebSockets](guides/websockets.md), [Native server](guides/server.md), [Outbound HTTP and webhooks](guides/http-client.md). [GraphQL](guides/graphql.md).
 - [Calling another service](guides/service-client.md): `ServiceClient` binds a base path and an auto-refreshing bearer token onto an origin-pinned `Client`.
 - [PostgreSQL](guides/postgres.md) and [ORM](guides/orm.md): strict direction orm → postgres.
 - [FastAPI and Alembic migration](guides/migrations.md): staged SaaS adoption of logical schemas and metal readiness resolution.
@@ -39,7 +39,7 @@ Read these first if you (or the code you are translating) use the FastAPI stack.
 - [Server-sent events](guides/sse.md) and [Forms and uploads](guides/forms.md): the response type and the multipart binding path.
 - [Content negotiation](guides/content-negotiation.md): `serialize(request, data)` picks the format from `Accept` (q-values per RFC 9110 §12.5.1); JSON stays the default.
 - [Durable jobs, messaging, and services](guides/jobs.md): PostgreSQL is the queue — no broker; the supervisor starts after databases and drains in-flight work on shutdown.
-- [Task progress](guides/progress.md): a bounded in-process registry a slow task writes to and a status endpoint or stream reads.
+- [Task progress](guides/progress.md): a bounded registry a slow task writes to and a status endpoint or SSE stream reads; give it the bus and it is fleet-wide. `jobs.launch(...)` returns a `TaskHandle` whose `task_id` *is* the job id, seeds it `queued` so an immediate poll is not a 404, and lets the runner set `done`/`failed` itself (a retry stays `running`).
 - [Users](guides/users.md): registration, sessions, and the ready-made user router.
 - [Object storage](guides/storage.md), [Pagination](guides/pagination.md), [Distributed locks](guides/distributed-locks.md): advisory locks and SingletonRunner come from the `wreath.postgres` facade.
 - [Generating CRUD](guides/crud.md): `crud_router` / `Wreath.crud`, off by default (app-level + per-model opt-in); sensitive columns hidden unless `expose`d; per-operation `authorize={op: Access.roles/permissions/cedar/deny}` plus `object_authorizer` for row-level checks.
@@ -47,6 +47,7 @@ Read these first if you (or the code you are translating) use the FastAPI stack.
 - [JSONB and arrays](guides/jsonb-arrays.md): the ORM's PostgreSQL container types.
 - [Health, flags, and versioning](guides/health-flags-versioning.md): probes, feature flags, API versions.
 - [Observability](guides/observability.md): telemetry configuration, exporters, and the Flight Recorder in practice.
+- [Finding the N+1 query](guides/n-plus-one.md): `NPlusOneGuard` raises from inside the query that crossed the limit (dev/staging; the seam is inert until a guard exists), and `wreath doctor n-plus-one <socket>` diagnoses a running server from recorded `ORM_HYDRATE` phases without reproducing anything.
 - [Auditing](guides/auditing.md): `wreath audit` runs a curated zero-dependency accessibility (WCAG 2.2 A/AA) and performance ruleset over generated HTML; see [the rule reference](reference/audit.md) for adding one.
 - [Porting from FastAPI](guides/porting.md): `wreath port` analyzes an app statically and never imports it; report-only today.
 

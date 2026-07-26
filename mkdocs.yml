@@ -126,10 +126,12 @@ nav:
       - Configuration and operations:
           - Configuration and state: guides/config-state.md
           - Health, flags, and versioning: guides/health-flags-versioning.md
+          - GraphQL: guides/graphql.md
           - Observability bridges: guides/observability.md
           - Native server and protocols: guides/server.md
       - Testing and quality:
           - Testing: guides/testing.md
+          - Finding the N+1 query: guides/n-plus-one.md
           - Auditing (a11y & performance): guides/auditing.md
   - Cookbook:
       - Overview: cookbook/index.md
@@ -203,6 +205,7 @@ nav:
       - Background tasks: reference/background.md
       - Static files: reference/staticfiles.md
       - Testing: reference/testing.md
+      - Diagnostics: reference/doctor.md
       - Audit rules: reference/audit.md
       - Object storage: reference/storage.md
       - Durable jobs: reference/jobs.md
@@ -214,6 +217,7 @@ nav:
       - Rooms: reference/rooms.md
       - Session store: reference/session_store.md
       - Validation errors: reference/validation_errors.md
+      - GraphQL: reference/graphql.md
       - Feature flags: reference/flags.md
       - API versioning: reference/versioning.md
       - Codemod (wreath port): reference/port.md

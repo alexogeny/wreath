@@ -74,6 +74,21 @@ async def create(request):
 
 Claiming uses `SELECT … FOR UPDATE SKIP LOCKED` with a per-row **fence token**: a stale worker whose lease expired can never complete a job that was reclaimed. Delivery is **at-least-once**, so the idempotency `key` is your defence against duplicate side effects — and it's on by default, not an afterthought. Enqueue without a `tx` and it runs on its own write connection.
 
+## Work the caller wants to watch
+
+A job the client is waiting on needs an id to watch and a percentage to read.
+Give the runner a [progress registry](progress.md) and both come with it:
+
+```python
+jobs = app.jobs("work", database="app", progress=ProgressRegistry(bus))
+
+handle = await jobs.launch("import_herd", path)   # {"task_id": "8821", ...}
+```
+
+The task id *is* the job id, `ctx.report(...)` inside the handler updates it,
+and the runner sets `done`/`failed` itself — a retry stays `running`, because a
+retry is not an ending. See [Reporting task progress](progress.md#user-story-the-mutation-that-takes-ninety-seconds).
+
 ## Scheduled work
 
 ```python

@@ -76,14 +76,14 @@ def test_route_and_global_blobs_shape():
     snap = _Snap(assembled=10, pending=2,
                  routes=[_Route(7, count=5, errors=1, dsum=4000.0, dmax=900.0)],
                  loss=_Loss(decode_error=3))
-    b = emf.EmfBridge(_Src(snap), namespace="Llamacam", dimensions={"Service": "api"})
+    b = emf.EmfBridge(_Src(snap), namespace="Trailhead", dimensions={"Service": "api"})
     blobs = b.blobs(snap, timestamp_ms=1710000000000)
     assert len(blobs) == 2  # one route + one global
     route, glob = blobs
 
     # route blob: static + route dimensions, values at root, units correct.
     cw = route["_aws"]["CloudWatchMetrics"][0]
-    assert cw["Namespace"] == "Llamacam"
+    assert cw["Namespace"] == "Trailhead"
     assert cw["Dimensions"] == [["Service", "route_id"]]
     assert route["Service"] == "api" and route["route_id"] == "7"
     names = _metric_names(route)

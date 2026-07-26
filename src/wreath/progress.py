@@ -25,15 +25,25 @@ stream reads it.
 Inside the task, ``reporter.update(42, "processing invoices")`` /
 ``reporter.done()`` / ``reporter.fail(exc)``.
 
-The registry is in-process and bounded — perfect for tasks running in the web
-process. For a **durable, multi-process** job whose worker is elsewhere, keep the
-percentage on the job row in Postgres and read it in the status endpoint; the
-same ``Progress`` shape applies.
+**Across workers.** The registry is in-process, which is exactly wrong for the
+case that matters most: the durable job runs on worker 3 and the browser is
+connected to worker 1. Give the registry the message bus and every report
+reaches every worker, so whichever one holds the stream can answer it::
+
+    progress = ProgressRegistry(app.messaging("bus", database="app"))
+
+No Redis — the bus is the database you already have. Delivery is at-most-once,
+as ephemeral fan-out is: a worker that missed an update gets the next one, and
+percentages are a running commentary rather than a ledger.
+
+The natural pairing is :meth:`wreath.jobs.JobRunner.launch`, which uses the job
+id as the task id and lets the runner set the terminal states itself.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,6 +52,7 @@ from .cache import BoundedCache
 from .response import JSONResponse, Response, ServerSentEvent, SSEResponse
 
 __all__ = [
+    "PROGRESS_CHANNEL",
     "Progress",
     "ProgressRegistry",
     "ProgressReporter",
@@ -49,6 +60,10 @@ __all__ = [
     "push_progress",
     "status_response",
 ]
+
+#: Default bus channel carrying every task's progress. A valid SQL identifier,
+#: because `wreath.messaging` validates channel names as one.
+PROGRESS_CHANNEL = "wreath_progress"
 
 _TERMINAL = ("done", "failed")
 
@@ -81,18 +96,91 @@ class Progress:
 
 
 class ProgressRegistry:
-    """A bounded in-process map of task id -> latest :class:`Progress`."""
+    """A bounded map of task id -> latest :class:`Progress`.
 
-    __slots__ = ("_store",)
+    Pass the message bus to make it fleet-wide: every report is applied here and
+    published once, and every other worker applies what it receives without
+    relaying it onward. Omit it for single-process work, which is the right
+    default for tests and one-worker deployments.
+    """
 
-    def __init__(self, *, max_tasks: int = 4096, ttl: float | None = 3600) -> None:
+    __slots__ = ("_bus", "_channel", "_inflight", "_origin", "_store")
+
+    def __init__(
+        self,
+        bus: Any = None,
+        *,
+        max_tasks: int = 4096,
+        ttl: float | None = 3600,
+        channel: str = PROGRESS_CHANNEL,
+    ) -> None:
         self._store: BoundedCache = BoundedCache(max_entries=max_tasks, ttl=ttl)
+        self._bus = bus
+        self._channel = channel
+        self._inflight: set[asyncio.Future[Any]] = set()
+        # Identifies reports this worker published, so the copy NOTIFY hands
+        # back to the sender is not applied twice. Same device as `rooms.py`.
+        self._origin = f"{id(self):x}"
+        if bus is not None:
+            # Registered at construction: the bus collects subscriptions before
+            # it starts, so a registry built later would never listen.
+            bus.subscribe(channel)(self._on_bus_message)
 
     def report(
         self, task_id: str, percent: float, message: str = "",
         *, state: str = "running", error: str | None = None,
     ) -> None:
-        self._store.set(task_id, Progress(_clamp(percent), message, state, error))
+        progress = Progress(_clamp(percent), message, state, error)
+        self._store.set(task_id, progress)
+        if self._bus is not None:
+            self._carry(task_id, progress)
+
+    # -- across workers --------------------------------------------------------
+
+    def _carry(self, task_id: str, progress: Progress) -> None:
+        """Publish a local report without making the reporting task wait."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # A synchronous caller has no loop to publish on. Reporting from
+            # outside the event loop is not something a job handler does.
+            return
+        future = asyncio.ensure_future(self._publish(task_id, progress))
+        self._inflight.add(future)
+        future.add_done_callback(self._inflight.discard)
+
+    async def _publish(self, task_id: str, progress: Progress) -> None:
+        # A bus that is down must not fail the work being reported on. The
+        # percentage is commentary; losing one costs the client a stale bar
+        # until the next update, and the terminal state is what matters.
+        with contextlib.suppress(Exception):
+            await self._bus.publish(
+                self._channel,
+                {"task_id": task_id, "origin": self._origin, **progress.as_dict()},
+            )
+
+    async def _on_bus_message(self, message: Any) -> None:
+        """Apply another worker's report. Never republished -- one hop only."""
+        payload = message.payload
+        if not isinstance(payload, dict):
+            return
+        if payload.get("origin") == self._origin:
+            return  # our own NOTIFY, already applied locally
+        task_id = payload.get("task_id")
+        percent = payload.get("percent")
+        if not isinstance(task_id, str) or not isinstance(percent, (int, float)):
+            return
+        state = payload.get("state")
+        error = payload.get("error")
+        self._store.set(
+            task_id,
+            Progress(
+                _clamp(percent),
+                str(payload.get("message") or ""),
+                state if isinstance(state, str) else "running",
+                error if isinstance(error, str) else None,
+            ),
+        )
 
     def reporter(self, task_id: str) -> ProgressReporter:
         """A handle bound to ``task_id`` to hand to the running task."""

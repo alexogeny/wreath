@@ -33,9 +33,13 @@ import inspect
 import types
 import typing
 from collections.abc import Awaitable, Callable, Mapping
+from time import monotonic_ns as _monotonic_ns
 from typing import Any
 
 from ._codecs import parse_qs
+from ._flight_markers import COV_PYTHON as _COV_PYTHON
+from ._flight_markers import PH_DI_CONSTRUCT as _PH_DI_CONSTRUCT
+from ._flight_markers import phase_marker as _phase_marker
 from ._json import loads as _json_loads
 from ._native import _core
 from .exceptions import BadRequest, UnprocessableEntity
@@ -691,7 +695,17 @@ def _compile_dep(
             # not be handed the per-request cleanup list.
             async def factory() -> Any:
                 app_cleanups: list[Any] = []
+                # Construction happens once, so a slow singleton would otherwise
+                # be invisible -- charged to whichever unlucky request built it.
+                # The marker read is one ContextVar.get on an armed request and
+                # nothing at all on the warm path, which never gets here.
+                marker = _phase_marker.get(None)
+                started = _monotonic_ns() if marker is not None else 0
                 value = await _construct(request, {}, app_cleanups)
+                if marker is not None:
+                    marker(
+                        _PH_DI_CONSTRUCT, 0, _COV_PYTHON, _monotonic_ns() - started
+                    )
                 for generator in app_cleanups:
                     container.track_cleanup(generator)
                 return value

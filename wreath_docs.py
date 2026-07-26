@@ -231,7 +231,10 @@ site = Site(
     nav=nav,
     palette=THEMES["wreath"],
     base_url="https://alexogeny.github.io/wreath/",
-    description="Guides, cookbook, and API reference for the Wreath ASGI framework and native server.",
+    description=(
+        "Guides, cookbook, and API reference for the Wreath ASGI framework "
+        "and native server."
+    ),
     # Working notes, ADRs, and agent manifests live under docs/ but aren't
     # published — mirrors mkdocs' exclude_docs / not_in_nav. Per-version release
     # notes are generated and linked from release_notes/index.md, not the nav.

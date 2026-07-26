@@ -1223,6 +1223,83 @@ def _static_mount_path_length(length: int):
 
 
 @probe(
+    "graphql-parse-scale", expect=1.0, sizes=(500, 1000, 2000, 4000),
+    axis="selected fields in one document",
+    assumption="parsing is O(document size), never superlinear in field count",
+    stage="request", group="web",
+)
+def _graphql_parse_scale(fields: int):
+    """Parsing an n-field document is O(n).
+
+    The document is attacker-controlled, so a superlinear parser is a
+    denial-of-service primitive: a modest body would buy unbounded server work.
+    Tokenizing is one `findall` and the descent visits each token a constant
+    number of times, which is what keeps this linear. A regression to
+    re-scanning (an earlier design re-skipped whitespace on every peek) shows
+    up here as a higher constant; a regression to backtracking shows up as a
+    higher exponent."""
+    from wreath._graphql.parser import Limits, parse
+
+    source = "{ " + " ".join(f"f{index}" for index in range(fields)) + " }"
+    limits = Limits(
+        max_complexity=10 * fields,
+        max_steps=20 * fields,
+        max_document_bytes=len(source) + 1,
+    )
+    loops = 20
+    start = time.perf_counter()
+    for _ in range(loops):
+        document = parse(source, limits)
+    elapsed = (time.perf_counter() - start) / loops
+    assert document.complexity == fields
+    return elapsed
+
+
+@probe(
+    "graphql-depth-rejection", expect=1.0, sizes=(2000, 4000, 8000, 16000),
+    axis="nesting depth of a hostile document",
+    assumption="rejecting an over-deep document is O(document size), and it is "
+               "`max_document_bytes` -- not the depth check -- that bounds it",
+    stage="request", group="web",
+)
+def _graphql_depth_rejection(depth: int):
+    """Rejecting an over-nested document costs O(document size), not O(depth
+    beyond the limit).
+
+    This probe was written expecting O(1) and **failed**, which was the probe
+    being wrong rather than the parser. The depth limit fires during the
+    descent, but tokenization runs over the whole document first, so an
+    over-deep document is fully tokenized before anything rejects it. Making
+    the descent short-circuit tokenization would mean interleaving the two --
+    the original design, measured slower for every legitimate document.
+
+    The real bound is `max_document_bytes`, which is checked on `len()` before
+    a character is scanned and therefore caps this whole curve regardless of
+    how the depth check behaves. That is the right place for the O(1) guard,
+    and it is why the shape here is allowed to be linear.
+
+    What this still pins: rejection must not become *superlinear* in depth,
+    which is what a backtracking or rescanning parser would produce."""
+    from wreath._graphql.parser import GraphQLSyntaxError, Limits, parse
+
+    source = "{" + "a{" * depth + "b" + "}" * depth + "}"
+    limits = Limits(
+        max_depth=8, max_complexity=10 * depth, max_steps=20 * depth,
+        max_document_bytes=len(source) + 1,
+    )
+    loops = 20
+    start = time.perf_counter()
+    for _ in range(loops):
+        try:
+            parse(source, limits)
+        except GraphQLSyntaxError as error:
+            code = error.code
+    elapsed = (time.perf_counter() - start) / loops
+    assert code == "depth", code
+    return elapsed
+
+
+@probe(
     "sigv4-canonical-request", expect=1.0, sizes=(500, 1000, 2000, 4000),
     axis="signed request header count",
     assumption="SigV4 header signing is O(headers log headers)",

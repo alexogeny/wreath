@@ -56,6 +56,7 @@ class Registry:
         "_by_table",
         "_cache",
         "_cache_bytes",
+        "_flight_model_ids",
         "_lock",
         "_model_order",
         "_specs",
@@ -101,6 +102,12 @@ class Registry:
         # scanning every spec, so registry compilation is O(M + R) not O(M * R).
         self._by_name: dict[str, ModelSpec | None] = {}
         self.specs: tuple[ModelSpec, ...] = ()
+        # Model class -> Flight Recorder metadata-image ID, stamped at startup
+        # the way a Database's `_flight_dep_id` is, so an armed query attributes
+        # its ORM_HYDRATE phase with one dict lookup and no name formatting.
+        # Empty until an app builds the image; an unstamped model records no
+        # phase rather than attributing to a made-up ID.
+        self._flight_model_ids: dict[type[Model], int] = {}
         self.fingerprint = b""
         self.template_fingerprint = b""
         self.deployment_fingerprint = b""

@@ -53,6 +53,39 @@ class JobContext:
     fence: int
     tenant: str
     key: str | None
+    #: The runner's :class:`~wreath.progress.ProgressRegistry`, or None.
+    progress: Any = None
+
+    @property
+    def task_id(self) -> str:
+        """This job's progress key. The job id, so there is one identifier."""
+        return str(self.job_id)
+
+    def report(self, percent: float, message: str = "") -> None:
+        """Tell whoever is watching how far along this job is.
+
+        A no-op when the runner has no progress registry, so a handler can
+        report unconditionally. Only *progress* -- the runner sets ``done`` and
+        ``failed`` itself, because it is the thing that actually knows whether
+        the job finished, is about to retry, or was dead-lettered.
+        """
+        if self.progress is not None:
+            self.progress.report(self.task_id, percent, message)
+
+
+@dataclass(frozen=True, slots=True)
+class TaskHandle:
+    """What a caller gets back from :meth:`JobRunner.launch`.
+
+    Small on purpose: an id to watch and the state at hand-back time. Everything
+    after that comes from the progress stream.
+    """
+
+    task_id: str
+    state: str = "queued"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"task_id": self.task_id, "state": self.state}
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +141,7 @@ class JobRunner:
         poll_interval: float = 5.0,
         schema: str = "wreath",
         batch: int = 1,
+        progress: Any = None,
     ) -> None:
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
@@ -123,6 +157,7 @@ class JobRunner:
         self._lease = lease
         self._poll = poll_interval
         self._batch = batch
+        self._progress = progress
         self._tasks: dict[str, _Task] = {}
         self._schedules: list[_Schedule] = []
         self._table = f'"{self._schema}".jobs'
@@ -137,6 +172,11 @@ class JobRunner:
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def progress(self) -> Any:
+        """The registry this runner reports to, for the status/stream endpoints."""
+        return self._progress
 
     # -- registration --------------------------------------------------------
 
@@ -239,6 +279,62 @@ class JobRunner:
             await self._db.release(self._workload, connection)
         return job_id
 
+    async def launch(
+        self,
+        task: str,
+        *args: Any,
+        tx: Any = None,
+        run_at: Any = None,
+        key: str | None = None,
+        tenant: str = "",
+        max_attempts: int | None = None,
+    ) -> TaskHandle:
+        """Enqueue ``task`` and return a handle the client can watch.
+
+        The long-mutation shape: a request that cannot finish in a request
+        enqueues durable work and hands back an id instead of a timeout::
+
+            @app.post("/herd/imports")
+            async def start_import(request, path: str):
+                return (await jobs.launch("import_herd", path)).as_dict()
+
+            @app.get("/herd/imports/{task_id}/stream")
+            async def watch(request):
+                return progress_stream(jobs.progress, request.path_params["task_id"])
+
+        The **job id is the task id**, so there is one identifier rather than
+        two to correlate. With a progress registry configured the task is seeded
+        as ``queued`` right here, so a client that starts polling immediately
+        sees a pending task rather than a 404 it will read as a failure.
+
+        A ``key`` that deduplicates does not lose the caller: the surviving row
+        is looked up and its handle returned, so submitting the same work twice
+        yields the same task to watch rather than nothing at all.
+        """
+        job_id = await self.enqueue(
+            task, *args, tx=tx, run_at=run_at, key=key, tenant=tenant,
+            max_attempts=max_attempts,
+        )
+        if job_id is not None:
+            if self._progress is not None:
+                self._progress.report(str(job_id), 0, "queued", state="queued")
+            return TaskHandle(task_id=str(job_id))
+        # Deduplicated by `key`: the work is already queued or running, and the
+        # caller still needs to know which task to watch.
+        existing = await self._existing_job_id(key, tx=tx)
+        return TaskHandle(task_id=str(existing), state="running")
+
+    async def _existing_job_id(self, key: str | None, *, tx: Any = None) -> Any:
+        sql = f"SELECT id FROM {self._table} WHERE queue=$1 AND dedup_key=$2"
+        params = (self._name, dedup_key(self._name, key) if key is not None else None)
+        if tx is not None:
+            return await tx.fetchval(sql, *params)
+        connection = await self._db.acquire(self._workload)
+        try:
+            return await connection.fetchval(sql, *params)
+        finally:
+            await self._db.release(self._workload, connection)
+
     # -- schema --------------------------------------------------------------
 
     def schema_sql(self) -> str:
@@ -333,7 +429,7 @@ class JobRunner:
         handler = self._tasks.get(job.task)
         ctx = JobContext(
             job_id=job.id, task=job.task, attempt=job.attempts + 1, fence=job.fence,
-            tenant=job.tenant, key=job.key,
+            tenant=job.tenant, key=job.key, progress=self._progress,
         )
         if handler is None:
             await self._fail(job, f"no handler registered for task {job.task!r}")
@@ -360,7 +456,10 @@ class JobRunner:
                 "updated_at=now() WHERE id=$1 AND fence=$2",
                 job.id, job.fence, attempts, error[:2000],
             )
+            self._report_terminal(job, "failed", error)
             return
+        # A retry is not an ending. Reporting `failed` here would tell a watching
+        # client the work is over while the runner is about to try again.
         delay = 0.0
         if handler is not None:
             delay = compute_backoff(
@@ -384,6 +483,29 @@ class JobRunner:
             "WHERE id=$1 AND fence=$2",
             job.id, job.fence,
         )
+        self._report_terminal(job, "done", None)
+
+    def _report_terminal(self, job: _Claimed, state: str, error: str | None) -> None:
+        """Close out the task, so a handler never has to remember to.
+
+        Only the runner knows whether a raised exception means "retrying" or
+        "given up", and only it sees a job that completed without the handler
+        reporting anything. Leaving this to handlers is how progress bars end
+        up stuck at 90% forever.
+        """
+        if self._progress is None:
+            return
+        self._progress.report(
+            str(job.id),
+            100 if state == "done" else self._last_percent(job.id),
+            state,
+            state=state,
+            error=error,
+        )
+
+    def _last_percent(self, job_id: int) -> float:
+        current = self._progress.get(str(job_id))
+        return current.percent if current is not None else 0.0
 
     async def _claim(self, batch: int) -> list[_Claimed]:
         sql = (

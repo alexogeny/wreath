@@ -9,7 +9,7 @@ code — the request path never constructs a Python OpenTelemetry object. When y
 from wreath import telemetry
 from opentelemetry import trace
 
-tracer = trace.get_tracer("llamacam")
+tracer = trace.get_tracer("trailhead")
 
 @app.get("/checkout")
 async def checkout(request):

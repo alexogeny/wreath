@@ -36,9 +36,27 @@ capture_marker: ContextVar[Any] = ContextVar("wreath_flight_capture_marker")
 #: the IntEnum machinery on a hot path.
 PH_DB_POOL_WAIT = int(PhaseKind.DB_POOL_WAIT)
 PH_DB_QUERY = int(PhaseKind.DB_QUERY)
+PH_ORM_HYDRATE = int(PhaseKind.ORM_HYDRATE)
 PH_HTTP_CLIENT = int(PhaseKind.HTTP_CLIENT)
+PH_DI_CONSTRUCT = int(PhaseKind.DI_CONSTRUCT)
+PH_WS_FANOUT = int(PhaseKind.WS_FANOUT)
+PH_RESOLVER = int(PhaseKind.RESOLVER)
 COV_PYTHON = int(PhaseCoverage.PYTHON)
 COV_EXTERNAL = int(PhaseCoverage.EXTERNAL)
+
+
+def record_phase(phase_id: int, duration_ns: int, *, dependency_id: int = 0,
+                 coverage: int = COV_PYTHON) -> None:
+    """Record one phase against the armed request, if there is one.
+
+    The whole cost on an unsampled request is one ``ContextVar.get(None)`` and a
+    predicted branch, so call sites can time unconditionally only when the timing
+    itself is free; otherwise gate on ``phase_marker.get(None)`` first and skip
+    the clock reads too.
+    """
+    marker = phase_marker.get(None)
+    if marker is not None:
+        marker(phase_id, dependency_id, coverage, duration_ns)
 
 #: Plain-int dependency capture field classes for the seam call sites.
 CAP_DB_PARAM = int(CaptureFieldClass.DB_PARAM)
@@ -55,7 +73,12 @@ __all__ = [
     "COV_PYTHON",
     "PH_DB_POOL_WAIT",
     "PH_DB_QUERY",
+    "PH_DI_CONSTRUCT",
     "PH_HTTP_CLIENT",
+    "PH_ORM_HYDRATE",
+    "PH_RESOLVER",
+    "PH_WS_FANOUT",
     "capture_marker",
     "phase_marker",
+    "record_phase",
 ]

@@ -22,7 +22,7 @@ app.enable_api_docs(
 app.enable_api_docs(
     environments=("dev", "staging"),          # never registered elsewhere
     auth=BearerTokenBackend(verify),          # guards just the docs routes
-    title="Llamacam", version="2.1.0",
+    title="Trailhead", version="2.1.0",
 )
 ```
 

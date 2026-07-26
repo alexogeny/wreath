@@ -18,7 +18,10 @@ implementation is the shipped one; the facade still selects a native
 
 from __future__ import annotations
 
+from typing import Any
+
 from ._native import _core
+from ._orm_events import WRITE_CHANNEL, WriteBroadcast
 
 if _core is not None and hasattr(_core, "SnapshotCache"):
     SnapshotCache = _core.SnapshotCache
@@ -42,4 +45,36 @@ else:
 # here exactly the way `SnapshotCache` is above if that day comes.
 from ._pure.bounded import BoundedCache, CacheStats
 
-__all__ = ["BoundedCache", "CacheStats", "SnapshotCache"]
+
+def invalidate_across_workers(bus: Any, *, channel: str = WRITE_CHANNEL) -> WriteBroadcast:
+    """Make ORM-driven cache invalidation fleet-wide, over the message bus::
+
+        invalidate_across_workers(app.messaging("bus", database="app"))
+
+        @app.get("/herd/report")
+        @cached(ttl=300, invalidate_on=[Llama])
+        async def herd_report(request): ...
+
+    Without it, a write on worker A clears only worker A. With it, the model
+    names the committing session announces are carried to every worker on one
+    channel and applied there, so four workers behave like one -- and still no
+    Redis, because the bus is the database you already have.
+
+    Returns the :class:`~wreath._orm_events.WriteBroadcast` carrying them, whose
+    ``close()`` stops it. Call once per process, before startup: the bus
+    collects its subscriptions before it begins listening.
+
+    Delivery is at-most-once, as ephemeral fan-out is. A worker that misses the
+    notification holds its entries until they expire, which is what the ``ttl``
+    is now for -- a backstop rather than the mechanism.
+    """
+    return WriteBroadcast(bus, channel=channel)
+
+
+__all__ = [
+    "BoundedCache",
+    "CacheStats",
+    "SnapshotCache",
+    "WriteBroadcast",
+    "invalidate_across_workers",
+]

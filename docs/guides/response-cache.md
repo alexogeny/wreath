@@ -42,6 +42,88 @@ The decorated handler exposes `.invalidate(request=None)` and `.cache_store` (a
 [`BoundedCache`](../reference/cache.md)) so you can read `summary.cache_store.stats`
 — hits, misses, evictions, hit rate.
 
+## User story: letting the ORM invalidate for you
+
+> *I keep forgetting to call `.invalidate()`, and a TTL is a guess. I want the
+> cache to know when its data changed.*
+
+Name the models the response depends on:
+
+```python
+@cached(ttl=300, invalidate_on=[Llama, Trek])
+async def herd_report(request):
+    ...
+```
+
+Now any committed write to `Llama` or `Trek` — from a handler, a CRUD route, a
+GraphQL mutation, a background job, anywhere — clears this cache. You do not
+call anything.
+
+This works because Wreath owns both layers. The session announces the model
+names it wrote; caches that named those models clear. A cache library bolted on
+beside the framework cannot do this, because it cannot see your writes.
+
+Three properties worth knowing:
+
+* **It fires on commit, never before.** A write inside a transaction that then
+  rolls back invalidates nothing — the data never changed, so nothing cached is
+  stale.
+* **Once per transaction**, not once per flush.
+* **Model-grained, not row-grained.** Writing one llama drops the cached llama
+  responses, not just the ones mentioning that llama. Row-grained invalidation
+  would mean recording which rows fed which response — real work on every read
+  to save a few misses on the rare write.
+
+`invalidate_on` composes with `ttl`: the TTL becomes a backstop for staleness
+Wreath cannot see (a row changed by another system, say), rather than the only
+line of defence.
+
+## User story: four workers, one truth
+
+> *We run four workers behind a load balancer. Someone renames a llama, the
+> POST lands on worker 2, and workers 1, 3 and 4 keep serving the old name until
+> the TTL runs out. I want the write to clear all of them — and I do not want to
+> stand up Redis to do it.*
+
+One line, before startup:
+
+```python
+from wreath.cache import invalidate_across_workers
+
+bus = app.messaging("bus", database="app")
+invalidate_across_workers(bus)
+```
+
+Nothing else changes. `@cached(invalidate_on=[Llama])` now clears on *any*
+worker's committed write to `Llama`, because the announcement the session
+already makes is carried over the PostgreSQL message bus — the database you
+already have, no new moving part.
+
+```text
+POST /llamas/7  ->  worker 2   COMMIT
+                    worker 2   caches naming Llama clear          (immediately)
+                    worker 2   NOTIFY wreath_writes {"models": ["Llama"]}
+                       |
+   PostgreSQL  --------+------> workers 1, 3, 4
+                                caches naming Llama clear
+```
+
+The properties that make it safe to leave on:
+
+* **The local clear happens first.** The worker that took the write is never the
+  one waiting on a notification to stop being wrong.
+* **A worker never relays what it received.** Announcements travel one hop, out
+  from the writer, so adding workers cannot turn one write into a storm.
+* **A bus that is down cannot fail a write.** The row is already committed;
+  publishing is best-effort behind it.
+* **Delivery is at-most-once**, as ephemeral fan-out is. A worker that missed
+  the notification holds its entries until they expire — which is exactly what
+  the `ttl` is for now: a backstop, not the mechanism.
+
+`invalidate_across_workers` returns the bridge, whose `close()` stops it. Call it
+once per process and before startup, since the bus collects its subscriptions
+before it begins listening.
+
 ## Safe by default
 
 `@cached` refuses to cache anything that would leak one caller's data to another:

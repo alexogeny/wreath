@@ -11,7 +11,7 @@ Describe the site in a `wreath_docs.py` at your project root:
 from wreath._docs import Site, Nav, Page, Section, Palette
 
 site = Site(
-    name="Acme",
+    name="Trailhead",
     source="docs",
     output="site",
     nav=Nav(

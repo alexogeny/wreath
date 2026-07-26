@@ -432,9 +432,45 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", dest="as_json",
         help="print versioned JSON instead of tables",
     )
+    _add_doctor_parser(commands)
     _add_capture_parser(commands)
     _add_replay_parser(commands)
     return parser
+
+
+def _add_doctor_parser(commands: Any) -> None:
+    """`wreath doctor n-plus-one` -- diagnose a running server's recorded traces.
+
+    A protocol client like `inspect`: it never imports the application. The
+    diagnosis comes entirely from what the Flight Recorder already recorded.
+    """
+    doctor_parser = commands.add_parser(
+        "doctor", help="diagnose defects a green test suite cannot see"
+    )
+    actions = doctor_parser.add_subparsers(dest="action", required=True)
+    n_plus_one = actions.add_parser(
+        "n-plus-one",
+        help="find requests that queried one model over and over",
+    )
+    n_plus_one.add_argument(
+        "socket", help="path to the Inspector's Unix-domain socket"
+    )
+    n_plus_one.add_argument(
+        "--threshold", type=int, default=10,
+        help="queries of one model within one request before it counts (default: 10)",
+    )
+    n_plus_one.add_argument(
+        "--limit", type=int, default=256,
+        help="how many recent traces to scan (default: 256)",
+    )
+    n_plus_one.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="print versioned JSON instead of a report",
+    )
+    n_plus_one.add_argument(
+        "--strict", action="store_true",
+        help="exit non-zero when anything is found, for a CI gate",
+    )
 
 
 def _add_replay_parser(commands: Any) -> None:
@@ -1030,6 +1066,74 @@ def execute_inspect(namespace: argparse.Namespace) -> int:
     return 0
 
 
+def execute_doctor(namespace: argparse.Namespace) -> int:
+    # A protocol client, like `inspect`: the diagnosis is assembled entirely
+    # from what the recorder already holds, so nothing has to be reproduced.
+    import asyncio
+    import json as _json
+
+    from .doctor import diagnose_n_plus_one
+    from .inspector import InspectorClient, InspectorError
+
+    async def query() -> list:
+        async with InspectorClient(namespace.socket) as client:
+            return await diagnose_n_plus_one(
+                client, threshold=namespace.threshold, limit=namespace.limit
+            )
+
+    try:
+        findings = asyncio.run(query())
+    except InspectorError as error:
+        print(f"wreath doctor: error: {error}", file=sys.stderr)
+        return 1
+    except (ConnectionError, FileNotFoundError) as error:
+        print(f"wreath doctor: cannot reach inspector: {error}", file=sys.stderr)
+        return 1
+
+    if namespace.as_json:
+        print(_json.dumps({
+            "version": 1,
+            "check": "n-plus-one",
+            "threshold": namespace.threshold,
+            "findings": [
+                {
+                    "route": f.route,
+                    "request_id": f.request_id,
+                    "queries": f.queries,
+                    "summary": f.describe(),
+                    "repetitions": [
+                        {"model": r.model, "count": r.count, "total_us": r.total_us}
+                        for r in f.repetitions
+                    ],
+                }
+                for f in findings
+            ],
+        }))
+    else:
+        _print_n_plus_one(findings, namespace.threshold)
+    return 1 if findings and namespace.strict else 0
+
+
+def _print_n_plus_one(findings: list, threshold: int) -> None:
+    if not findings:
+        print(
+            f"no request queried one model {threshold} or more times. "
+            "Note this reads sampled traces: a Detailed recorder sees more."
+        )
+        return
+    print(f"{len(findings)} request(s) queried one model {threshold}+ times:\n")
+    for finding in findings:
+        print(f"  {finding.describe()}")
+        for repetition in finding.repetitions:
+            millis = repetition.total_us / 1000
+            print(
+                f"      {repetition.model:<24} {repetition.count:>5} queries "
+                f"{millis:>8.1f}ms"
+            )
+        print(f"      replay it: wreath replay --request {finding.request_id}\n")
+    print("An eager load usually collapses these into one statement.")
+
+
 def execute_capture(namespace: argparse.Namespace) -> int:
     # A protocol client, like `inspect`: it never imports the application. The
     # token comes from --token or the environment so it stays off the process
@@ -1305,6 +1409,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return execute_typegen(namespace)
         if namespace.command == "inspect":
             return execute_inspect(namespace)
+        if namespace.command == "doctor":
+            return execute_doctor(namespace)
         if namespace.command == "capture":
             return execute_capture(namespace)
         if namespace.command == "replay":

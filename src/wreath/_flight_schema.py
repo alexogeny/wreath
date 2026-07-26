@@ -94,6 +94,9 @@ class PhaseKind(IntEnum):
     HTTP_CLIENT = 10  # an outbound Wreath HTTP call
     MIDDLEWARE = 11  # a middleware hook
     RESPONSE_WRITE = 12  # response framing/egress
+    DI_CONSTRUCT = 13  # building an app-scoped dependency (first use only)
+    WS_FANOUT = 14  # broadcasting to a WebSocket room
+    RESOLVER = 15  # one GraphQL field resolver
 
 
 class PhaseCoverage(IntEnum):

@@ -411,9 +411,10 @@
         "tests/jobs/",
         "tests/messaging/",
         "tests/test_progress.py",
+        "tests/test_live_progress.py",
         "tests/test_rooms.py"
       ],
-      "policy": "PostgreSQL is the queue; there is no broker to operate. The service supervisor starts after databases and before user startup handlers, and stops in reverse: stop fetching, drain bounded in-flight work, then cancel."
+      "policy": "PostgreSQL is the queue; there is no broker to operate. The service supervisor starts after databases and before user startup handlers, and stops in reverse: stop fetching, drain bounded in-flight work, then cancel. Watchable work: `JobRunner(progress=ProgressRegistry(...))` makes the job id the task id -- one identifier, no correlation -- and `launch()` seeds it `queued` so a client polling before a worker claims it does not get a 404. The runner owns the terminal states because only it can tell a retry from a dead-letter: success reports `done`, dead-letter reports `failed` with the error, and a retry leaves the task `running`. A handler never reports terminal state itself. `ProgressRegistry(bus)` carries reports to every worker on one channel with the rooms.py origin guard (apply locally, publish once, never relay what arrived); at-most-once, and a bus failure cannot fail the work being reported on."
     },
     {
       "name": "storage",
@@ -635,14 +636,33 @@
       "sources": [
         "src/wreath/cache.py",
         "src/wreath/response_cache.py",
-        "src/wreath/_pure/snapshot.py"
+        "src/wreath/_pure/snapshot.py",
+        "src/wreath/_orm_events.py"
       ],
       "tests": [
         "tests/test_snapshot_parity.py",
         "tests/test_bounded_cache.py",
-        "tests/test_response_cache.py"
+        "tests/test_response_cache.py",
+        "tests/test_cache_invalidation.py"
       ],
-      "policy": "Read-mostly application cache by atomic generation publication. Reads perform no hidden I/O; misses are explicit. Refresh is single-flight and failure preserves the previous generation. Shipped pure-first (dict-backed read path); the facade selects a native SnapshotCache only if one is measured in. `response_cache.cached` is a shared/public cache by default: it never stores a response that sets a cookie or is marked no-store/private, and a per-principal response needs an explicit `key`."
+      "policy": "Read-mostly application cache by atomic generation publication. Reads perform no hidden I/O; misses are explicit. Refresh is single-flight and failure preserves the previous generation. Shipped pure-first (dict-backed read path); the facade selects a native SnapshotCache only if one is measured in. `response_cache.cached` is a shared/public cache by default: it never stores a response that sets a cookie or is marked no-store/private, and a per-principal response needs an explicit `key`. Cache invalidation is driven by the ORM: a session announces the model names it wrote once its transaction commits, and caches that named those models clear. Published after commit, never before -- a rolled-back write must invalidate nothing. `cache.invalidate_across_workers(bus)` carries the same announcement to the other workers over the message bus. Subscribers (react to a write) and bridges (carry it off-worker) are separate lists so a received announcement is applied locally and never relayed onward; a bridge failure cannot fail a committed write, and cross-worker delivery is at-most-once, leaving the TTL as the backstop."
+    },
+    {
+      "name": "doctor",
+      "guides": [
+        "docs/guides/n-plus-one.md"
+      ],
+      "reference": [
+        "docs/reference/doctor.md"
+      ],
+      "sources": [
+        "src/wreath/doctor.py",
+        "src/wreath/_nplusone.py"
+      ],
+      "tests": [
+        "tests/test_doctor.py"
+      ],
+      "policy": "Defects a green test suite cannot see, over layers only Wreath holds together. N+1: the ORM stamps each read's model onto the recorder's ORM_HYDRATE phase (dependency_id = the metadata image's model entry id, stamped onto `Registry._flight_model_ids` at startup like a Database's `_flight_dep_id`), and the completion carries the route, so a trace can name the shape rather than only the endpoint. Two surfaces, one vocabulary: `NPlusOneGuard` trips inside the query that crossed the limit so the traceback names the loop, and `diagnose_n_plus_one` / `wreath doctor n-plus-one` reads the same finding out of a running server's Inspector without reproducing anything. Both produce a `Finding`. Cost discipline: the ORM seam reads no ContextVar until a guard exists (`_nplusone.WATCHING`, a module attribute, not a crossing) and reads no phase marker until a metadata image exists (`_flight_model_ids` non-empty), so `wreath-request-trace` records zero added crossings for an app that uses neither. The guard is for development and staging; a guard that fails production requests is a worse outage than the N+1."
     },
     {
       "name": "staticfiles",
@@ -731,6 +751,23 @@
         "tests/test_benchmark_scenarios.py"
       ],
       "policy": "Retain raw repeated trials; the bundled generator is development-only. Never claim a win from a single run."
+    },
+    {
+      "name": "graphql",
+      "guides": [
+        "docs/guides/graphql.md"
+      ],
+      "reference": [
+        "docs/reference/graphql.md"
+      ],
+      "sources": [
+        "src/wreath/graphql.py",
+        "src/wreath/_graphql/"
+      ],
+      "tests": [
+        "tests/test_graphql.py"
+      ],
+      "policy": "The schema is derived from ModelSpec, never hand-written, so GraphQL cannot drift from REST or from the database. Safety limits (document size, depth, complexity, aliases, token budget) are enforced during the parse and may be widened but not removed. Relationship fields resolve through Session._load_relationship so a selection is batched, never N+1. Introspection is opt-in."
     }
   ],
   "invariants": "AGENTS.md",

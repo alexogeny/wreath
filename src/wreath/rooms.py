@@ -38,7 +38,12 @@ durable delivery.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from time import monotonic_ns as _monotonic_ns
 from typing import Any
+
+from ._flight_markers import COV_PYTHON as _COV_PYTHON
+from ._flight_markers import PH_WS_FANOUT as _PH_WS_FANOUT
+from ._flight_markers import phase_marker as _phase_marker
 
 __all__ = ["RoomRegistry"]
 
@@ -132,6 +137,11 @@ class RoomRegistry:
         members = self._rooms.get(room)
         if not members:
             return 0
+        # Fan-out is the one part of a room that scales with something the
+        # application does not control, so it is worth its own phase: the
+        # recorder shows both how long the room took and how big it was.
+        marker = _phase_marker.get(None)
+        started = _monotonic_ns() if marker is not None else 0
         # Snapshot: a send may close a socket, and `leave` mutates the set.
         # The payload object is built once and shared by every recipient.
         delivered = 0
@@ -147,6 +157,12 @@ class RoomRegistry:
                 delivered += 1
         for websocket in dead:
             await self.leave(room, websocket)
+        if marker is not None:
+            # `dependency_id` carries the member count, so a slow broadcast can
+            # be told apart from a merely large one.
+            marker(
+                _PH_WS_FANOUT, delivered, _COV_PYTHON, _monotonic_ns() - started
+            )
         return delivered
 
     async def _on_bus_message(self, message: Any) -> None:

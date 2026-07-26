@@ -36,7 +36,7 @@ class EmfBridge:
     """Renders projector metrics as CloudWatch EMF blobs.
 
     ``source`` exposes ``snapshot()`` (and optionally ``recorder_loss()``).
-    ``dimensions`` is a static dimension mapping (e.g. ``{"Service": "llamacam"}``)
+    ``dimensions`` is a static dimension mapping (e.g. ``{"Service": "trailhead"}``)
     applied to every blob; per-route blobs add the route labels as dimensions.
     """
 

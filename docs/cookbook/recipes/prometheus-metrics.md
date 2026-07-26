@@ -21,7 +21,7 @@ those ids into meaningful scrape labels, and `namespace=` to prefix the metric
 family names:
 
 ```python
-app.metrics(projector, path="/metrics", namespace="llamacam",
+app.metrics(projector, path="/metrics", namespace="trailhead",
             route_labels={1: {"method": "GET", "path": "/llamas"}})
 ```
 
@@ -32,7 +32,7 @@ OpenMetrics instead — reach for `wreath.telemetry` directly:
 ```python
 from wreath import telemetry
 
-bridge = telemetry.activate_prometheus(projector, namespace="llamacam")
+bridge = telemetry.activate_prometheus(projector, namespace="trailhead")
 # mount bridge.handler() on a route you control, or:
 # telemetry.activate_openmetrics(projector)   # OpenMetrics 1.0.0 + # EOF
 ```

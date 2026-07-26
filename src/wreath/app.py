@@ -537,11 +537,18 @@ class Wreath:
         poll_interval: float = 5.0,
         schema: str = "wreath",
         batch: int = 1,
+        progress: Any = None,
     ) -> Any:
         """Configure a durable job runner on an existing ``app.postgres()`` database.
 
         Its workers, sweeper, and scheduler run for the process lifetime, started
         during lifespan after the databases come up. See :mod:`wreath.jobs`.
+
+        Pass a :class:`~wreath.progress.ProgressRegistry` to make the queue
+        watchable: :meth:`~wreath.jobs.JobRunner.launch` hands back a task id, a
+        handler reports through ``ctx.report()``, and the runner sets the
+        terminal state itself. Give the registry the message bus and a job
+        running on any worker is watchable from every worker.
         """
         from .jobs import JobRunner
 
@@ -553,7 +560,7 @@ class Wreath:
         runner = JobRunner(
             self._databases[database], name=name, workload=workload,
             concurrency=concurrency, lease=lease, poll_interval=poll_interval,
-            schema=schema, batch=batch,
+            schema=schema, batch=batch, progress=progress,
         )
         self._job_runners[name] = runner
         self.state.__setattr__(f"jobs_{name}", runner)
@@ -1468,6 +1475,15 @@ class Wreath:
             client = self._http_clients.get(named.name)
             if client is not None:
                 client._flight_dep_id = named.entry_id
+        # Models get the same treatment, so an ORM read can attribute its
+        # ORM_HYDRATE phase to a model without formatting a name per query.
+        # That attribution is what `wreath doctor n-plus-one` reads back.
+        model_ids = {named.name: named.entry_id for named in image.models}
+        for registry in self._orm_registries.values():
+            for spec in getattr(registry, "specs", ()):
+                entry_id = model_ids.get(spec.model_type.__qualname__)
+                if entry_id is not None:
+                    registry._flight_model_ids[spec.model_type] = entry_id
         self._flight_route_ids = mapping
         return mapping
 

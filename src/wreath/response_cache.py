@@ -26,10 +26,11 @@ a response depends on who is asking, pass a ``key`` that includes the principal
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from functools import wraps
 from typing import Any
 
+from ._orm_events import subscribe_writes
 from .cache import BoundedCache
 from .response import Response
 
@@ -92,6 +93,7 @@ def cached(
     key: Callable[[Any], str] = default_cache_key,
     methods: tuple[str, ...] = ("GET",),
     store: BoundedCache | None = None,
+    invalidate_on: Iterable[Any] = (),
 ) -> Any:
     """Cache a route handler's response in a bounded in-process store.
 
@@ -102,13 +104,20 @@ def cached(
         methods: request methods that may be served from cache.
         store: an explicit :class:`BoundedCache` to share across handlers; a
             private one is created if omitted.
+        invalidate_on: models whose writes drop this cache. A TTL is a guess --
+            too short and the cache does nothing, too long and the application
+            serves stale data. Naming the models makes it exact: the ORM
+            announces what it wrote once the transaction commits, and the
+            matching caches clear. Wreath can do this because it owns both
+            layers; a bolt-on cache cannot see your writes.
 
     The wrapped handler gains ``.cache_store`` (the store, for ``.stats``) and
     ``.invalidate(request=None)`` — drop one key, or clear all when omitted.
     """
     if fn is not None:
         return cached(ttl=ttl, max_entries=max_entries, key=key,
-                      methods=methods, store=store)(fn)
+                      methods=methods, store=store,
+                      invalidate_on=invalidate_on)(fn)
 
     the_store: BoundedCache = store if store is not None else BoundedCache(
         max_entries=max_entries, ttl=ttl)
@@ -133,6 +142,22 @@ def cached(
                 the_store.clear()
             else:
                 the_store.delete(key(request))
+
+        watched = frozenset(
+            getattr(model, "__name__", str(model)) for model in invalidate_on
+        )
+        if watched:
+            def _on_write(written: frozenset[str]) -> None:
+                # Model-grained, not row-grained: dropping a model's responses
+                # when that model is written costs one set intersection per
+                # write and nothing per read. Row-grained would need a read set
+                # recorded per request -- real work on the hot path to save a
+                # few misses on the cold one.
+                if written & watched:
+                    the_store.clear()
+
+            subscribe_writes(_on_write)
+            wrapper.invalidated_by = watched  # ty: ignore[unresolved-attribute]
 
         wrapper.cache_store = the_store       # ty: ignore[unresolved-attribute]
         wrapper.invalidate = invalidate       # ty: ignore[unresolved-attribute]
