@@ -120,6 +120,7 @@ class CSRFMiddleware:
         "_secret",
         "_secure",
         "_trusted_origins",
+        "_allow_missing_origin",
     )
 
     def __init__(
@@ -133,6 +134,7 @@ class CSRFMiddleware:
         same_site: str = "lax",
         trusted_origins: Iterable[str] = (),
         exempt: Callable[[Request], bool] | None = None,
+        allow_missing_origin: bool = False,
     ) -> None:
         secret_bytes = secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
         if len(secret_bytes) < 32:
@@ -155,6 +157,7 @@ class CSRFMiddleware:
         self._same_site = normalized_same_site
         self._trusted_origins = tuple(_normalize_origin(value) for value in trusted_origins)
         self._exempt = exempt
+        self._allow_missing_origin = allow_missing_origin
 
     def _sign(self, issued: int, nonce: str) -> str:
         return _csrf_sign(self._secret, issued, nonce)
@@ -181,7 +184,12 @@ class CSRFMiddleware:
                 return False
             referer_origin = _referer_origin(referer_text)
             return referer_origin is not None and origin_matches(referer_origin, allowed)
-        return not self._secure and request.scheme == "http"
+        # Neither header. Refused unless the application explicitly asked for
+        # the fallback: it used to be inferred from `secure=False`, which is
+        # what a TLS-terminating proxy leaves you with when ProxyHeaders is not
+        # mounted -- so a deployment could lose the origin check as a side
+        # effect of an unrelated flag it never connected to CSRF.
+        return self._allow_missing_origin
 
     async def before(self, request: Request):
         now = int(time.time())
@@ -205,10 +213,13 @@ class CSRFMiddleware:
         cookie = request.cookies.get(self._cookie_name)
         submitted = headers.get(self._header_name_bytes)
         valid = False
+        # `latin-1` cannot raise on a str that came out of header parsing,
+        # where `ascii` could: a cookie value is attacker-controlled, and an
+        # encode error there turned a would-be 403 into a 500.
         if (
             cookie is not None
             and submitted is not None
-            and hmac.compare_digest(cookie.encode("ascii"), submitted)
+            and hmac.compare_digest(cookie.encode("latin-1", "replace"), submitted)
         ):
             valid, _issued = self._validate(cookie, now)
         if not valid or not self._origin_valid(request, headers):

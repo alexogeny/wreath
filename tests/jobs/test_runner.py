@@ -163,6 +163,120 @@ async def test_launch_never_hands_back_a_stringified_none():
     assert "nightly" in message and "import_herd" in message
 
 
+async def test_a_deduplicated_launch_seeds_progress_when_this_worker_has_none():
+    """The other route to an unwatchable handle.
+
+    Progress fan-out is at-most-once with no replay, so a worker that started
+    after the original `launch` has no registry entry for it. Handing back a
+    `running` handle for a task this worker knows nothing about gives a client
+    something that 404s on status and hangs on the SSE stream -- the same
+    failure as a stringified `None`, arrived at differently.
+    """
+    from wreath.progress import ProgressRegistry
+
+    registry = ProgressRegistry()
+    db = FakeDatabase()
+    runner = _runner(db, progress=registry)
+
+    @runner.task("import_herd")
+    async def import_herd(ctx):
+        pass
+
+    db.connection.fetchval_script = [None, 17]
+    handle = await runner.launch("import_herd", key="nightly")
+
+    seeded = registry.get(handle.task_id)
+    assert seeded is not None, "the handle points at a task the registry cannot describe"
+    assert seeded.state == "running"
+
+
+async def test_a_deduplicated_launch_never_rewinds_real_progress():
+    """...but a worker that *does* know is not reset to zero.
+
+    The original may be at 70% on this very worker; re-seeding unconditionally
+    would tell every watching client the import had started over.
+    """
+    from wreath.progress import ProgressRegistry
+
+    registry = ProgressRegistry()
+    registry.report("17", 70.0, "halfway through the herd", state="running")
+    db = FakeDatabase()
+    runner = _runner(db, progress=registry)
+
+    @runner.task("import_herd")
+    async def import_herd(ctx):
+        pass
+
+    db.connection.fetchval_script = [None, 17]
+    handle = await runner.launch("import_herd", key="nightly")
+
+    live = registry.get(handle.task_id)
+    assert live is not None
+    assert live.percent == 70.0, "a deduplicated launch rewound the original's progress"
+    assert live.message == "halfway through the herd"
+
+
+async def test_a_pass_that_cannot_be_started_is_counted_not_swallowed():
+    """A pass that is never driven does nothing at all, silently.
+
+    `_start_passes` wrapped the whole per-pass body in `suppress(Exception)`, so
+    a database that would not answer at startup left the pass unqueued with
+    nothing anywhere to say so -- the "nothing is driving this pass" state the
+    CLI can print but nothing set.
+    """
+
+    class UnreachableDatabase:
+        async def acquire(self, workload):
+            raise ConnectionError("database is down")
+
+        async def release(self, workload, connection):
+            pass
+
+    class Walk:
+        name = "purge_replays"
+        tenant = ""
+        shift = 5.0
+        recurring = True
+
+        async def status(self, db):
+            return None
+
+    runner = _runner(UnreachableDatabase())
+    runner.drive(Walk(), cron="*/5 * * * *")
+
+    assert runner.pass_drive_errors == 0
+    await runner._start_passes()
+    assert runner.pass_drive_errors == 1, "a pass that never started was not counted"
+
+
+async def test_one_unstartable_pass_does_not_strand_the_others():
+    """Isolation is per pass, not around the loop."""
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    class Walk:
+        def __init__(self, name, ok):
+            self.name = name
+            self.tenant = ""
+            self.shift = 5.0
+            self.recurring = True
+            self._ok = ok
+
+        async def status(self, db):
+            if not self._ok:
+                raise ConnectionError("this pass's ledger read failed")
+            return None
+
+    runner.drive(Walk("broken", ok=False), cron="*/5 * * * *")
+    runner.drive(Walk("healthy", ok=True), cron="*/5 * * * *")
+
+    await runner._start_passes()
+
+    assert runner.pass_drive_errors == 1
+    enqueued = [sql for sql, _ in db.connection.calls if "INSERT INTO" in sql]
+    assert enqueued, "the healthy pass was stranded by the broken one"
+
+
 def test_schema_sql_has_table_and_indexes():
     sql = _runner(FakeDatabase()).schema_sql()
     assert "CREATE TABLE IF NOT EXISTS" in sql and ".jobs" in sql

@@ -18,6 +18,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlencode
 
+from ..middleware.sessions import rotate_session
 from ..response import JSONResponse, RedirectResponse
 from .oidc import OidcProvider, _same_origin_path
 
@@ -138,6 +139,7 @@ def register_oauth2_login(
 
     state_key = f"_oidc_state_{name}"
     verifier_key = f"_oidc_verifier_{name}"
+    nonce_key = f"_oidc_nonce_{name}"
 
     @app.get(login_path)
     async def login(request: Request) -> RedirectResponse | JSONResponse:  # noqa: ANN001
@@ -145,11 +147,17 @@ def register_oauth2_login(
             return JSONResponse({"error": "provider_not_discovered"}, status=503)
         verifier, challenge = _pkce_pair()
         state = secrets.token_urlsafe(24)
+        # `state` protects the callback; `nonce` protects the *token*. Without
+        # it an id_token minted for another session of the same client is
+        # accepted here, because nothing ties the token to this login attempt
+        # (OIDC Core §3.1.2.1, §3.1.3.7 step 11).
+        nonce = secrets.token_urlsafe(24)
         session = getattr(request.state, "session", None)
         if session is None:
             return JSONResponse({"error": "session_middleware_required"}, status=500)
         session[state_key] = state
         session[verifier_key] = verifier
+        session[nonce_key] = nonce
         params = urlencode(
             {
                 "response_type": "code",
@@ -157,6 +165,7 @@ def register_oauth2_login(
                 "redirect_uri": redirect_uri,
                 "scope": " ".join(scopes),
                 "state": state,
+                "nonce": nonce,
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
             }
@@ -173,6 +182,7 @@ def register_oauth2_login(
             return JSONResponse({"error": "session_middleware_required"}, status=500)
         expected_state = session.pop(state_key, None)
         verifier = session.pop(verifier_key, None)
+        expected_nonce = session.pop(nonce_key, None)
         if not code or not state or state != expected_state or not verifier:
             return JSONResponse({"error": "invalid_state"}, status=400)
         if provider.token_endpoint is None:
@@ -201,9 +211,22 @@ def register_oauth2_login(
         identity = await provider.bearer_verifier()(id_token)
         if identity is None:
             return _bearer_401("invalid_id_token")
+        # The verifier checked the signature and the registered claims; the
+        # nonce is this flow's own binding and has to be checked here.
+        if expected_nonce and identity.claims.get("nonce") != expected_nonce:
+            return _bearer_401("nonce_mismatch")
+        # The caller's privileges change here, so the id they arrived with must
+        # not survive: an attacker who fixed a session id beforehand would
+        # otherwise hold one that is now authenticated. A no-op for cookie-backed
+        # sessions, which carry no server-side id.
+        rotate_session(request)
         session[session_key] = {
             "sub": identity.id,
             "type": identity.type,
             "roles": sorted(identity.roles),
+            # Carried so an SSO caller and a bearer caller reach the authorizer
+            # with the same shape. Without it, `@authorize(permissions=...)`
+            # refused every SSO session while admitting the same person's token.
+            "permissions": sorted(identity.permissions),
         }
         return RedirectResponse(post_login_redirect, status=302)

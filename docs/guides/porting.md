@@ -275,36 +275,37 @@ It once went *down*, when the catalog learned to recognise more of what a real c
 
 ## What the exit code says
 
-CI reads the process, not the markdown — so the exit code has to draw the same
-distinction the report does, between *your code needs work* and *the run did not
-work*.
+CI reads the process, not the markdown. `wreath port` uses the same three codes
+as the rest of the CLI — the ones `wreath docs` and `wreath inspect` already use.
 
 | code | meaning |
 | --- | --- |
-| `0` | The analysis completed, and everything it recognised translates cleanly. |
-| `1` | The analysis completed; **unsupported constructs were found.** A fact about the application. |
-| `2` | The analysis is **incomplete**: files could not be read, or nothing was recognised at all. A fact about the run. |
+| `0` | It ran and left you nothing to do. Everything recognised translates, and every file was read. |
+| `1` | It ran and left work: **unsupported constructs, files it could not read, or both.** The report names which. |
+| `2` | It never ran over anything — no Python file was analysed, or the source path does not exist. |
 
-**`2` outranks `1`, and that ordering is the point.** It is normal to whitelist a
-nonzero exit — *"we know we have twelve unsupported constructs; gate on the count
-instead"* — and a pipeline that whitelists `1` would otherwise silently accept a
-run that analysed nothing. Worse, when files were skipped the unsupported count
-is a **lower bound rather than a count**, so the very number such a gate compares
-against is untrustworthy in exactly the case `2` reports. One collapsed nonzero
-cannot express that; two codes can.
+**An app that has already been ported exits `0`.** It recognises nothing, because
+there is no FastAPI left in it — and that is a successful run with nothing to do,
+not a failure. If you re-run `wreath port` as a regression check, green is the
+answer you want and the answer you get. What separates that from a wrong
+directory is `files_analyzed`: fifty-two files read and nothing recognised is a
+finished port; zero files read is a path problem, and that is the `2`.
 
-Two consequences worth knowing before you wire this into a pipeline. A tree with
-**one** unreadable file exits `2`, even if the other three thousand were fine —
-the report is incomplete, and that is what the code says. And pointing
-`wreath port` at something it recognises nothing in exits `2` as well, which
-includes pointing it at an app that has *already* been ported. Both are the
-honest answer to "did this run produce a number you can trust?"; neither is a
-claim that your code is broken. The `skipped` list and `files_analyzed` in the
-JSON tell you which of the two you are looking at.
+The one consequence worth knowing before you wire this into a pipeline: a tree
+with **one** unreadable file exits `1`, even if the other three thousand were
+fine. That is deliberate. A file nobody could read is a file nobody has ported,
+and it belongs on the same list as a construct nobody can translate.
 
-Emit mode (`--output` / `--in-place`) uses the same `0`/`2` split: sources that
-could not be read leave the output tree incomplete, which is a failed run even
-though every file it did reach was written correctly.
+Skipped files share `1` with unsupported constructs rather than getting a code of
+their own, so read the report to tell them apart — and read it anyway when
+anything was skipped, because **an unsupported count taken over a partial tree is
+a lower bound rather than a count**. The summary line, the skipped section, and
+`files_analyzed` in the JSON all say so.
+
+Emit mode (`--output` / `--in-place`) reads the same way: a source that could not
+be read is work remaining (`1`), a tree with nothing to emit at all is `2`, and a
+re-run over an unchanged tree — where every file is skipped because it is already
+correct — is `0`.
 
 ## The report as a checklist
 

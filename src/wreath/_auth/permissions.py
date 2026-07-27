@@ -432,7 +432,11 @@ def permissions_router(
                 return _bad(
                     f"undeclared action(s) for {resource_type}: {', '.join(unknown)}"
                 )
-            actions = tuple(actions)
+            # Deduplicated, order preserved. `max_ids` bounds one side of the
+            # ids x actions product and nothing bounded the other, so a repeated
+            # action was a way to multiply the work past the ceiling this
+            # endpoint refuses ids over.
+            actions = tuple(dict.fromkeys(str(action) for action in actions))
 
         permissions = {}
         for identifier in identifiers:
@@ -473,8 +477,8 @@ def _manifest_etag(
 ) -> str:
     """A tag over every input that can change the answer.
 
-    The policy set is fingerprinted through the engine so a deploy that widens
-    a rule invalidates every cached manifest; the roles are included so a
+    The policy set is fingerprinted through the authorizer so a deploy that
+    widens a rule invalidates every cached manifest; the roles are included so a
     promotion invalidates one. Nothing else can move the answer, which is why
     a client can hold the manifest until this changes.
     """
@@ -558,20 +562,28 @@ def _policy_fingerprint(authorizer: Any) -> bytes:
 
     Content first, because a content-derived tag is the same on every worker
     and across a restart -- which is what lets a client hold its manifest
-    through a rolling deploy that did not touch the policies. An engine that
-    exposes nothing gets :func:`_instance_token` instead, which cannot say
+    through a rolling deploy that did not touch the policies. An authorizer
+    that exposes nothing gets :func:`_instance_token` instead, which cannot say
     *which* policy set this is but does reliably say *a different one*.
     """
-    engine = getattr(authorizer, "_engine", authorizer)
-    # Opportunistic hooks: the `CedarEngine` protocol requires only
-    # `is_authorized`, so none of these is guaranteed. The built-in
-    # `CedarPolicies` exposes `source`, which is why the shipped configuration
-    # gets a content-derived tag rather than falling through to a per-instance
-    # one and losing cross-worker revalidation.
+    # Opportunistic hooks, asked of the authorizer itself: neither the
+    # `Authorizer` nor the `CedarEngine` protocol requires any of them.
+    # `CedarAuthorizer` delegates all three to its engine, and the built-in
+    # `CedarPolicies` answers `source`, which is why the shipped configuration
+    # gets a content-derived tag rather than a per-instance one and keeps
+    # cross-worker revalidation. Asking the authorizer rather than digging out
+    # its engine is what keeps the private name in the file that owns it.
     for attribute in ("fingerprint", "source", "policies"):
-        value = getattr(engine, attribute, None)
+        value = getattr(authorizer, attribute, None)
         if isinstance(value, bytes):
             return value
         if isinstance(value, str):
             return value.encode("utf-8")
-    return _instance_token(engine)
+    # The reach survives here alone, and only to keep the token *per engine*:
+    # two authorizers over one policy set must agree, or a second adapter over
+    # the same engine would mint a second tag and every client would refetch a
+    # manifest that had not moved. The asymmetry is the point -- on this path a
+    # renamed `_engine` costs a redundant refetch, where on the content path
+    # above it silently served a stale manifest forever. `tests/test_permissions.py`
+    # pins the name so the rename fails loudly instead.
+    return _instance_token(getattr(authorizer, "_engine", authorizer))

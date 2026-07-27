@@ -27,14 +27,16 @@ a response depends on who is asking, pass a ``key`` that includes the principal
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from copy import deepcopy
 from functools import wraps
 from typing import Any
 
+from ._codecs import parse_qs as _parse_qs
 from ._orm_events import subscribe_writes
 from .cache import BoundedCache
 from .response import Response
 
-__all__ = ["cached", "default_cache_key"]
+__all__ = ["cache_key_for", "cached", "default_cache_key"]
 
 #: Response types whose body is produced lazily/streamed and must never be cached.
 _UNCACHEABLE_BODY = ("StreamingResponse", "FileResponse", "SSEResponse", "PreparedResponse")
@@ -47,15 +49,56 @@ def default_cache_key(request: Any) -> str:
     return f"{base}?{query}" if query else base
 
 
+def cache_key_for(names: Iterable[str]) -> Callable[[Any], str]:
+    """A public key built from *declared* query parameters only.
+
+    :func:`default_cache_key` puts the whole query string in the key, so every
+    distinct one is a distinct entry -- and an unauthenticated caller varying a
+    parameter the handler ignores (``?_=1``, ``?utm_source=…``) fills the store
+    and evicts everything real. Naming the parameters that actually change the
+    answer bounds the keyspace to what the handler can distinguish.
+
+    Parameters are read in the declared order, so the key does not change with
+    the order the client happened to send them in; repeats keep the first value,
+    matching how the binding layer reads them.
+    """
+    declared = tuple(names)
+
+    def key(request: Any) -> str:
+        base = f"{request.method} {request.path}"
+        if not declared:
+            return base
+        values: dict[str, str] = {}
+        for name, value in _parse_qs(request.query_string, 0):
+            values.setdefault(name, value)
+        selected = "&".join(
+            f"{name}={values[name]}" for name in declared if name in values
+        )
+        return f"{base}?{selected}" if selected else base
+
+    return key
+
+
 def _cacheable_response(response: Response) -> bool:
     if type(response).__name__ in _UNCACHEABLE_BODY:
         return False
-    if response.status >= 400:
+    # 2xx only. A 3xx used to qualify as "not an error", but a redirect is
+    # exactly the response whose `Location` is most often per-caller -- an OAuth
+    # hand-off, a post-login bounce, a signed download URL -- and serving one
+    # caller's Location to the next is the same leak a cached body would be.
+    if not (200 <= response.status < 300):
         return False
     for name, value in response.headers:
         lname = name.lower()
         if lname == b"set-cookie":
             return False   # per-user cookie must never be shared
+        if lname == b"vary" and value.strip():
+            # `Vary` names request headers the answer depends on, and this
+            # cache's key is method+path+query -- it cannot represent them. One
+            # entry would be served to every variant: the msgpack body from
+            # `serialize()` handed to a JSON client, one locale's copy to every
+            # locale, one caller's `Authorization`-shaped answer to the next.
+            return False
         if lname == b"cache-control":
             directives = value.lower()
             if b"no-store" in directives or b"private" in directives:
@@ -70,8 +113,16 @@ def _snapshot(result: Any) -> tuple[str, Any] | None:
             return None
         # Body is immutable bytes (shareable); headers are copied on revive.
         return ("response", (result.status, tuple(result.headers), result.body))
-    if isinstance(result, (str, bytes, dict, list)):
+    if isinstance(result, (str, bytes)):
+        # Immutable: the same object is safe to hand out repeatedly.
         return ("value", result)
+    if isinstance(result, (dict, list)):
+        # Copied on the way in *and* on the way out. A cache entry is shared by
+        # every later caller, so storing the handler's own object means one
+        # mutation anywhere -- the handler keeping a reference, a serializer
+        # normalising in place, a caller editing what it was given -- silently
+        # rewrites what everyone else is served.
+        return ("copy", deepcopy(result))
     return None
 
 
@@ -82,6 +133,8 @@ def _revive(entry: tuple[str, Any]) -> Any:
         # A fresh headers list per hit, so downstream middleware mutations do
         # not poison the shared cache entry.
         return Response(body, status=status, headers=list(headers))
+    if kind == "copy":
+        return deepcopy(payload)
     return payload
 
 
@@ -94,6 +147,7 @@ def cached(
     methods: tuple[str, ...] = ("GET",),
     store: BoundedCache | None = None,
     invalidate_on: Iterable[Any] = (),
+    query_params: Iterable[str] | None = None,
 ) -> Any:
     """Cache a route handler's response in a bounded in-process store.
 
@@ -117,7 +171,15 @@ def cached(
     if fn is not None:
         return cached(ttl=ttl, max_entries=max_entries, key=key,
                       methods=methods, store=store,
-                      invalidate_on=invalidate_on)(fn)
+                      invalidate_on=invalidate_on, query_params=query_params)(fn)
+
+    if query_params is not None:
+        if key is not default_cache_key:
+            raise ValueError("pass either `key` or `query_params`, not both")
+        key = cache_key_for(query_params)
+    # Whether this is the shared/public key or one the caller wrote. A public
+    # key cannot be used for an identified caller; see the wrapper below.
+    public_key = key is default_cache_key or getattr(key, "_wreath_public", False)
 
     the_store: BoundedCache = store if store is not None else BoundedCache(
         max_entries=max_entries, ttl=ttl)
@@ -126,6 +188,14 @@ def cached(
         @wraps(handler)
         async def wrapper(request: Any, *args: Any, **kwargs: Any) -> Any:
             if request.method not in methods:
+                return await handler(request, *args, **kwargs)
+            if public_key and getattr(request, "identity", None) is not None:
+                # The default key is a *shared* key: it carries no principal, so
+                # an entry stored for one caller would be served to the next.
+                # The docstring said to pass a `key` that includes the
+                # principal; nothing enforced it, and the failure is silent and
+                # cross-user. An identified caller therefore bypasses the cache
+                # entirely rather than being served -- or stored -- under it.
                 return await handler(request, *args, **kwargs)
             cache_key = key(request)
             hit = the_store.get(cache_key)

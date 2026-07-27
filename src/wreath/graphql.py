@@ -31,6 +31,7 @@ default, because a schema dump is reconnaissance.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 from ._graphql.execute import ExecutionError, execute
@@ -60,6 +61,13 @@ __all__ = [
 ]
 
 
+#: Content types the POST endpoint accepts. Deliberately excludes the three a
+#: cross-origin <form> can send (`text/plain`, `application/x-www-form-urlencoded`,
+#: `multipart/form-data`), which is what keeps a simple request from reaching a
+#: mutation with the caller's cookies attached.
+_ACCEPTED_CONTENT_TYPES = frozenset({"application/json", "application/graphql+json"})
+
+
 class GraphQL:
     """A GraphQL endpoint over one ORM registry."""
 
@@ -74,6 +82,7 @@ class GraphQL:
         registry: Any,
         *,
         models: list[Any] | None = None,
+        expose: Iterable[str] = (),
         limits: Limits | None = None,
         authorizer: Any = None,
         introspection: bool = False,
@@ -84,7 +93,7 @@ class GraphQL:
         if on_denied not in ("error", "null"):
             raise ValueError("on_denied must be 'error' or 'null'")
         self._registry = registry
-        self._schema = build_schema(registry, models)
+        self._schema = build_schema(registry, models, expose=expose)
         self._limits = limits or Limits()
         self._authorizer = authorizer
         self._introspection = introspection
@@ -315,6 +324,22 @@ class GraphQL:
 
         @router.post(path)
         async def _run(request: Request) -> JSONResponse:
+            # A GraphQL POST must be JSON. Accepting any body that happens to
+            # parse made this endpoint reachable by a cross-origin <form>: a
+            # `text/plain` POST is a "simple request", so the browser sends it
+            # (with cookies) without a preflight the CORS policy could refuse.
+            # Requiring a content-type that forms cannot produce is what the
+            # GraphQL-over-HTTP spec asks for, and it is the whole defence for a
+            # cookie-authenticated schema.
+            content_type = (request.header("content-type") or "").split(";")[0].strip()
+            if content_type not in _ACCEPTED_CONTENT_TYPES:
+                return JSONResponse(
+                    {"errors": [{"message": (
+                        "a GraphQL request must be sent as "
+                        f"{' or '.join(sorted(_ACCEPTED_CONTENT_TYPES))}"
+                    )}]},
+                    status=415,
+                )
             try:
                 payload = await request.json()
             except ValueError:

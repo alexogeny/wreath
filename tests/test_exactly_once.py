@@ -176,11 +176,11 @@ async def test_a_retry_on_the_same_worker_never_reaches_the_handler() -> None:
         return Response(b'{"order":7}', status=201)
 
     first = _request()
-    assert await middleware.before(first) is None
+    assert await middleware.action(first) is None
     await middleware.after(first, await handle(first))
 
     second = _request()
-    replay = await middleware.before(second)
+    replay = await middleware.action(second)
 
     assert runs == 1
     assert replay.status == 201 and replay.body == b'{"order":7}'
@@ -191,9 +191,9 @@ async def test_a_failed_write_stays_retryable() -> None:
     """Replaying a 500 would strand the client on an error that was transient."""
     middleware = IdempotencyMiddleware()
     first = _request()
-    await middleware.before(first)
+    await middleware.action(first)
     await middleware.after(first, Response(b"boom", status=500))
-    assert await middleware.before(_request()) is None
+    assert await middleware.action(_request()) is None
 
 
 # --- link 2: the database is the guarantee, not the middleware ----------------
@@ -216,12 +216,12 @@ async def test_a_retry_on_another_worker_still_enqueues_once() -> None:
     worker_a, worker_b = IdempotencyMiddleware(), IdempotencyMiddleware()
 
     request_a = _request()
-    assert await worker_a.before(request_a) is None
+    assert await worker_a.action(request_a) is None
     first_id = await handler()
     await worker_a.after(request_a, Response(first_id.encode(), status=201))
 
     request_b = _request()
-    assert await worker_b.before(request_b) is None      # B has no memory of it
+    assert await worker_b.action(request_b) is None      # B has no memory of it
     second_id = await handler()                          # ... so it runs again
 
     assert database.inserts == 1                         # but the job exists once

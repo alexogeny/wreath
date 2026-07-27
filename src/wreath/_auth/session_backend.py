@@ -37,10 +37,15 @@ class SessionIdentityBackend:
         if not isinstance(subject, str) or not subject:
             return None
         roles = principal.get("roles") or ()
+        # Permissions as well as roles: a bearer identity carries both, and an
+        # SSO identity that dropped them made `@authorize(permissions=...)`
+        # refuse the same person a token would have admitted.
+        granted = principal.get("permissions") or ()
         return Identity(
             id=subject,
             type=str(principal.get("type", "User")),
             roles=frozenset(str(role) for role in roles),
+            permissions=frozenset(str(item) for item in granted),
             claims=dict(principal),
         )
 

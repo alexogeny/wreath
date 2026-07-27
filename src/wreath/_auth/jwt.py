@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .._native import _core
-from ._ecverify import verify_ed25519, verify_es256
+from ._ecverify import on_p256_curve, verify_ed25519, verify_es256
 from .models import Identity
 
 # Resolve the native accelerators once, tolerating a _core built before jose.c
@@ -56,6 +56,17 @@ __all__ = [
     "key_from_jwk",
     "key_from_pem",
 ]
+
+#: Minimum length for an HMAC secret given as a bare string. RFC 8725 §3.5 and
+#: RFC 2104 both put the floor at the hash output size; SymmetricKey(...) stays
+#: unchecked, so a caller who genuinely holds a short key can still say so.
+MIN_HMAC_KEY_BYTES = 32
+
+#: Minimum RSA modulus. NIST SP 800-131A has disallowed anything below this
+#: since 2014, and a JWKS is fetched from a remote party -- an endpoint that
+#: advertises a 512-bit key is either broken or hostile, and verifying against
+#: one is worse than failing to verify at all.
+MIN_RSA_MODULUS_BITS = 2048
 
 # Hard caps (decoded bytes) to keep a hostile token from feeding a giant string
 # to the JSON parser or allocating without bound.
@@ -169,12 +180,19 @@ def key_from_jwk(jwk: Mapping[str, Any]) -> JwtKey:
         e = int.from_bytes(_b64url_decode(jwk["e"]), "big")
         if n <= 0 or e <= 0:
             raise JwtError("invalid RSA JWK parameters")
+        if n.bit_length() < MIN_RSA_MODULUS_BITS:
+            raise JwtError(
+                f"RSA modulus is {n.bit_length()} bits; at least "
+                f"{MIN_RSA_MODULUS_BITS} are required"
+            )
         return RsaPublicKey(n, e)
     if kty == "EC":
         if jwk.get("crv") != "P-256":
             raise UnsupportedAlgorithm(f"EC curve {jwk.get('crv')!r} is not supported (P-256 only)")
         x = int.from_bytes(_b64url_decode(jwk["x"]), "big")
         y = int.from_bytes(_b64url_decode(jwk["y"]), "big")
+        if not on_p256_curve(x, y):
+            raise JwtError("EC JWK point is not on the P-256 curve")
         return EcPublicKey(x, y)
     if kty == "OKP":
         if jwk.get("crv") != "Ed25519":
@@ -202,6 +220,11 @@ def key_from_pem(pem: str | bytes) -> RsaPublicKey:
     n, e = _rsa_public_from_der(der, kind)
     if n <= 0 or e <= 0:
         raise JwtError("invalid RSA public key")
+    if n.bit_length() < MIN_RSA_MODULUS_BITS:
+        raise JwtError(
+            f"RSA modulus is {n.bit_length()} bits; at least "
+            f"{MIN_RSA_MODULUS_BITS} are required"
+        )
     return RsaPublicKey(n, e)
 
 
@@ -649,8 +672,16 @@ def _coerce_key(key: JwtKey | bytes | str) -> JwtKey:
         stripped = key.lstrip()
         if stripped.startswith("-----BEGIN"):
             return key_from_pem(key)
-        # A bare string secret is treated as an HMAC key (UTF-8).
-        return SymmetricKey(key.encode("utf-8"))
+        # A bare string secret is treated as an HMAC key (UTF-8). It is the only
+        # key form a caller can supply by typing a word, so it is the one that
+        # needs a floor: an HS256 verifier is exactly as strong as this string.
+        encoded = key.encode("utf-8")
+        if len(encoded) < MIN_HMAC_KEY_BYTES:
+            raise JwtError(
+                f"an HMAC secret must contain at least {MIN_HMAC_KEY_BYTES} bytes; "
+                "pass SymmetricKey(...) explicitly to use a shorter one"
+            )
+        return SymmetricKey(encoded)
     raise JwtError(f"unsupported key type: {type(key)!r}")
 
 

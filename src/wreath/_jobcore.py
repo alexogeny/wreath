@@ -183,8 +183,10 @@ class CronSchedule:
             )
         self._expr = expression
         sets = [
-            _parse_cron_field(field, low, high)
-            for field, (low, high) in zip(fields, self._BOUNDS, strict=True)
+            _parse_cron_field(field, low, high, wrap=index == 4)
+            for index, (field, (low, high)) in enumerate(
+                zip(fields, self._BOUNDS, strict=True)
+            )
         ]
         self._minute, self._hour, self._dom, self._month, self._dow = sets
 
@@ -208,7 +210,17 @@ class CronSchedule:
         return dom_ok and dow_ok
 
 
-def _parse_cron_field(field: str, low: int, high: int) -> frozenset[int]:
+def _parse_cron_field(
+    field: str, low: int, high: int, *, wrap: bool = False
+) -> frozenset[int]:
+    """Parse one cron field into the set of values it matches.
+
+    ``wrap`` is the day-of-week field, where every crontab accepts **7** as a
+    second spelling of Sunday (``0``). Refusing it made `0 0 * * 7` -- a form
+    people copy straight out of a crontab -- a startup error.
+    """
+    if wrap:
+        high = 7
     values: set[int] = set()
     for part in field.split(","):
         step = 1
@@ -228,4 +240,6 @@ def _parse_cron_field(field: str, low: int, high: int) -> frozenset[int]:
         if start < low or end > high or start > end:
             raise ValueError(f"cron field out of range [{low},{high}]: {part!r}")
         values.update(range(start, end + 1, step))
+    if wrap:
+        values = {0 if value == 7 else value for value in values}
     return frozenset(values)

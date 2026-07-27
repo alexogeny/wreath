@@ -19,6 +19,7 @@ layer is already solved one level down.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -188,14 +189,40 @@ def _plural(name: str) -> str:
     return lowered + "s"
 
 
-def build_schema(registry: Any, models: list[Any] | None = None) -> Schema:
+def _is_exposed(model_name: str, column_name: str, expose: frozenset[str]) -> bool:
+    """Whether a column that *looks* sensitive was explicitly opted back in.
+
+    Accepts ``"Model.column"`` and a bare ``"column"``, the second so a name
+    like ``api_key`` can be exposed once rather than per model.
+    """
+    return f"{model_name}.{column_name}" in expose or column_name in expose
+
+
+def build_schema(
+    registry: Any,
+    models: list[Any] | None = None,
+    *,
+    expose: Iterable[str] = (),
+) -> Schema:
     """Build a schema from ``registry``, optionally narrowed to ``models``.
 
     **Exposure is opt-in when ``models`` is given**, and that is the intended
     use: a registry holds every table the application has, including ones with
     no business being queryable from the internet. Passing None exposes them
     all, which is convenient in development and rarely right in production.
+
+    **Columns whose names look sensitive are left out of the schema**, on the
+    same rule and the same regex :func:`wreath.crud.sensitive_fields` uses --
+    ``password``, ``*_hash``, ``token``, ``secret``, ``api_key``, and the rest.
+    Both surfaces are generated from one ``ModelSpec``, so it would be strange
+    for the REST one to hide a password hash and the GraphQL one to answer
+    ``{ user { passwordHash } }``. Name a column in ``expose`` to put it back,
+    which is the same deliberate, auditable act ``crud_router(expose=...)``
+    asks for.
     """
+    from ..crud import SENSITIVE_FIELD
+
+    exposed_names = frozenset(expose)
     specs = []
     if models is None:
         specs = list(getattr(registry, "_specs", {}).values())
@@ -207,6 +234,10 @@ def build_schema(registry: Any, models: list[Any] | None = None) -> Schema:
         name = spec.model_type.__name__
         object_type = ObjectType(name=name, spec=spec, fields={})
         for column in spec.columns:
+            if SENSITIVE_FIELD.search(column.python_name) and not _is_exposed(
+                name, column.python_name, exposed_names
+            ):
+                continue
             object_type.fields[column.python_name] = SchemaField(
                 name=column.python_name,
                 type_name=_SCALARS.get(column.pg_type.name, "String"),

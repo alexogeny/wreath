@@ -101,7 +101,7 @@ async def test_client_websocket_rejection() -> None:
 @pytest.mark.asyncio
 async def test_session_roundtrip_and_tamper_resistance() -> None:
     app = Wreath()
-    app.add_middleware(SessionMiddleware(secret="test-secret"))
+    app.add_middleware(SessionMiddleware(secret="test-secret" * 4))
 
     @app.get("/visit")
     async def visit(request: Any) -> Any:
@@ -128,7 +128,7 @@ async def test_session_roundtrip_and_tamper_resistance() -> None:
 @pytest.mark.asyncio
 async def test_session_unchanged_sets_no_cookie() -> None:
     app = Wreath()
-    app.add_middleware(SessionMiddleware(secret="s"))
+    app.add_middleware(SessionMiddleware(secret="s" * 32))
 
     @app.get("/read")
     async def read(request: Any) -> Any:
@@ -142,7 +142,7 @@ async def test_session_unchanged_sets_no_cookie() -> None:
 @pytest.mark.asyncio
 async def test_session_cleared_deletes_cookie() -> None:
     app = Wreath()
-    middleware = SessionMiddleware(secret="s")
+    middleware = SessionMiddleware(secret="s" * 32)
     app.add_middleware(middleware)
 
     @app.get("/logout")
@@ -169,7 +169,7 @@ async def test_session_read_only_request_writes_no_cookie_for_a_populated_sessio
     still emits no Set-Cookie.
     """
     app = Wreath()
-    middleware = SessionMiddleware(secret="s")
+    middleware = SessionMiddleware(secret="s" * 32)
     app.add_middleware(middleware)
 
     @app.get("/read")
@@ -187,7 +187,7 @@ async def test_session_read_only_request_writes_no_cookie_for_a_populated_sessio
 @pytest.mark.asyncio
 async def test_session_mutation_still_reissues_the_cookie() -> None:
     app = Wreath()
-    middleware = SessionMiddleware(secret="s")
+    middleware = SessionMiddleware(secret="s" * 32)
     app.add_middleware(middleware)
 
     @app.get("/bump")
@@ -213,7 +213,7 @@ async def test_session_payload_that_does_not_round_trip_is_reissued() -> None:
     cookie with identical content, not a dropped write.
     """
     app = Wreath()
-    middleware = SessionMiddleware(secret="s")
+    middleware = SessionMiddleware(secret="s" * 32)
     app.add_middleware(middleware)
 
     @app.get("/read")
@@ -234,7 +234,7 @@ async def test_session_payload_that_does_not_round_trip_is_reissued() -> None:
 @pytest.mark.asyncio
 async def test_absent_and_rejected_sessions_both_write_nothing() -> None:
     app = Wreath()
-    middleware = SessionMiddleware(secret="s")
+    middleware = SessionMiddleware(secret="s" * 32)
     app.add_middleware(middleware)
 
     @app.get("/read")

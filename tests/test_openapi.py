@@ -102,7 +102,9 @@ def test_paths_parameters_and_schemas() -> None:
 @pytest.mark.asyncio
 async def test_enable_docs_routes() -> None:
     app = build_app()
-    app.enable_docs(title="Test API")
+    # `enable_docs` is environment-gated now (production registers neither
+    # route); `environments=None` is the explicit "everywhere" this test wants.
+    assert app.enable_docs(title="Test API", environments=None) is True
 
     async def receive() -> dict:
         return {"type": "http.request", "body": b"", "more_body": False}

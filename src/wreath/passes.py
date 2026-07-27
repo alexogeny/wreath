@@ -303,7 +303,7 @@ def _render_filter(where: Any, binds: Any, *, model: Any, alias: str) -> str | N
         return binds.splice(where.text, where.values)
     if isinstance(where, str):
         return where
-    from .orm.compiler import _Builder, _render_predicate, check_predicate_columns
+    from .orm.compiler import SqlBuilder, check_predicate_columns, render_predicate
 
     if model is None:
         raise PassDeclarationError(
@@ -311,11 +311,11 @@ def _render_filter(where: Any, binds: Any, *, model: Any, alias: str) -> str | N
             "own, write the fragment as Sql('...', [...])"
         )
     check_predicate_columns(model, where)
-    builder = _Builder()
+    builder = SqlBuilder()
     # Seed the builder with the binds already placed so its placeholders continue
     # the same numbering rather than restarting at $1.
     builder.values.extend(binds.values)
-    _render_predicate(where, builder, alias, {})
+    render_predicate(where, builder, alias, {})
     binds.values.extend(builder.values[len(binds.values) :])
     return builder.sql()
 

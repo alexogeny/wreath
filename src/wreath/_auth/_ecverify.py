@@ -71,6 +71,20 @@ def _p256_on_curve(x: int, y: int) -> bool:
     return (y * y - (x * x * x + _P256_A * x + _P256_B)) % _P256_P == 0
 
 
+def on_p256_curve(x: int, y: int) -> bool:
+    """Whether ``(x, y)`` is a point on P-256 (and not the point at infinity).
+
+    A public key is attacker-supplied whenever it comes from a JWKS, and a point
+    that is not on the curve is not a public key -- it is a value that makes the
+    group arithmetic below mean something other than ECDSA.
+    """
+    if not (0 <= x < _P256_P and 0 <= y < _P256_P):
+        return False
+    if x == 0 and y == 0:
+        return False
+    return (y * y - (x * x * x + _P256_A * x + _P256_B)) % _P256_P == 0
+
+
 def verify_es256(x: int, y: int, signing_input: bytes, signature: bytes) -> bool:
     """Verify an ES256 (ECDSA/P-256/SHA-256) JWS signature.
 

@@ -79,9 +79,17 @@ class MemoryRateLimitStore:
         self._policy: tuple[float, float] | None = None
 
     def configure(self, capacity: float, rate: float) -> None:
-        if self._policy is not None and self._policy != (capacity, rate):
+        # Any second call, not merely a conflicting one -- matching
+        # `PostgresRateLimitStore`, so the two halves of one middleware cannot
+        # disagree about what sharing a store means. A second `configure` is
+        # always two middlewares over one keyspace, and identical numbers do not
+        # make that harmless: requests to one route consume the other's budget.
+        # Accepting the same-policy case was worse than laxer, because it
+        # rebuilt the `TokenBucket` and so silently reset every caller's
+        # consumption -- a throttled client let straight back through.
+        if self._policy is not None:
             raise ValueError(
-                "this store is already configured with a different rate limit; "
+                "this store is already configured; "
                 "give each RateLimitMiddleware its own store"
             )
         self._policy = (capacity, rate)
@@ -321,10 +329,18 @@ class RateLimitMiddleware:
             self.before = self._before_remote
             self.before_sync = None
 
+    #: The bucket a request lands in when the key function cannot name one.
+    #: Shared by every such request on purpose: a limiter that *skips* the
+    #: request instead is not a limiter, and "no client address in the scope"
+    #: (a unix socket, an unusual server, a proxy chain that would not parse) is
+    #: exactly the condition an ingress limiter exists to survive. Use `exempt`
+    #: to let a request past deliberately.
+    UNKEYED = "\x00unkeyed"
+
     def _identify(self, request: Request) -> str | None:
         if self._exempt is not None and self._exempt(request):
             return None
-        return self._key(request)
+        return self._key(request) or self.UNKEYED
 
     def _limited(self, retry_after: float) -> ProblemResponse:
         response = ProblemResponse(

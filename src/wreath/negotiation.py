@@ -99,12 +99,20 @@ def negotiate(
     parsed = parse_accept(accept)
     if not parsed:
         return serializers[0] if serializers else None
+    # `q=0` means *not acceptable* (RFC 9110 §12.5.1), and it has to be applied
+    # as an exclusion across the whole header rather than skipped in place:
+    # `application/json;q=0, */*` ranks the wildcard first, so matching in order
+    # served exactly the type the client had just refused.
+    excluded = tuple(media_range for media_range, q in parsed if q <= 0.0)
     for media_range, q in parsed:
         if q <= 0.0:
             continue
         for serializer in serializers:
-            if _matches(serializer.media_type, media_range):
-                return serializer
+            if not _matches(serializer.media_type, media_range):
+                continue
+            if any(_matches(serializer.media_type, denied) for denied in excluded):
+                continue
+            return serializer
     return None
 
 

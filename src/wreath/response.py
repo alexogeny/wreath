@@ -11,7 +11,7 @@ from collections.abc import AsyncIterable, Awaitable, Callable, Iterable, Mappin
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, cast
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from ._json import dumps as _json_dumps
 
@@ -128,10 +128,23 @@ class Response:
                 )
         # Fail at the call, not later at the native serializer: a control
         # character (CR/LF especially) in a cookie name or value is a
-        # header-injection vector and never valid (RFC 6265 §4.1.1).
-        for field_name, field_value in (("name", name), ("value", value)):
+        # header-injection vector and never valid (RFC 6265 §4.1.1). `path` and
+        # `domain` are interpolated into the same header line and are just as
+        # injectable, so they are checked here too rather than trusted for
+        # being "configuration" -- a router that builds a cookie path from a
+        # request is ordinary code.
+        for field_name, field_value in (
+            ("name", name),
+            ("value", value),
+            ("path", path),
+            ("domain", domain),
+        ):
+            if field_value is None:
+                continue
             if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in field_value):
                 raise ValueError(f"cookie {field_name} contains a control character")
+            if field_name in ("path", "domain") and ";" in field_value:
+                raise ValueError(f"cookie {field_name} contains an attribute separator")
         if name.startswith("__Secure-") and not secure:
             raise ValueError("__Secure- cookies must be Secure; pass secure=True")
         if name.startswith("__Host-") and not (secure and path == "/" and domain is None):
@@ -304,9 +317,25 @@ class HTMLResponse(Response):
 class RedirectResponse(Response):
     media_type = b""
 
+    #: Schemes a redirect may name. A relative target (no scheme) is always
+    #: allowed; so is a protocol-relative ``//host/path``, which inherits the
+    #: current one.
+    allowed_schemes = frozenset({"http", "https"})
+
     def __init__(
         self, url: str, status: int = 307, *, background: Background | None = None
     ) -> None:
+        # `javascript:` and `data:` in a Location are script execution on the
+        # origin that redirected, so the scheme is checked rather than trusted.
+        # Parsed rather than string-matched because urlsplit applies the same
+        # tab/newline stripping a browser does -- "java\nscript:" is a scheme
+        # here exactly as it would be there.
+        scheme = urlsplit(url).scheme.lower()
+        if scheme and scheme not in self.allowed_schemes:
+            raise ValueError(
+                f"redirect scheme {scheme!r} is not allowed; expected one of "
+                f"{', '.join(sorted(self.allowed_schemes))} or a relative target"
+            )
         # Encode like a URL: characters outside the URL-safe set percent-escape.
         location = quote(url, safe=":/%#?=@[]!$&'()*+,;")
         super().__init__(
@@ -377,6 +406,21 @@ class ServerSentEvent:
         self.comment = comment
 
 
+def _sse_single_line(field: str, value: str) -> str:
+    """One single-line SSE field, refusing a value that would inject a frame.
+
+    ``data`` and ``comment`` are multi-line by construction and are re-framed
+    per line by :func:`_sse_lines`. ``event`` and ``id`` are not: a CR or LF in
+    either ends the field -- and a blank line ends the *event* -- so a caller
+    passing user text through one could append arbitrary frames to the stream.
+    Refused rather than stripped, because silently sending a different event
+    name than the caller asked for is its own bug.
+    """
+    if "\r" in value or "\n" in value:
+        raise ValueError(f"SSE {field} must not contain a newline")
+    return f"{field}: {value}"
+
+
 def _sse_lines(field: str, value: str, out: list[str]) -> None:
     # An SSE field value cannot contain CR or LF, so a multi-line value becomes
     # one repeated field per line (normalising CRLF/CR to LF first).
@@ -415,9 +459,9 @@ def _encode_sse(event: ServerSentEvent | str | bytes | Mapping[str, Any]) -> byt
     if comment is not None:
         _sse_lines("", str(comment), lines)
     if name is not None:
-        lines.append(f"event: {name}")
+        lines.append(_sse_single_line("event", str(name)))
     if ident is not None:
-        lines.append(f"id: {ident}")
+        lines.append(_sse_single_line("id", str(ident)))
     if retry is not None:
         lines.append(f"retry: {int(retry)}")
     if data is not None:
@@ -564,6 +608,29 @@ async def _send_native_descriptor(
     return True
 
 
+def _disposition(filename: str) -> bytes:
+    """``content-disposition`` for an attachment named ``filename``.
+
+    The name reaches a quoted-string, so a bare interpolation lets a ``"`` end
+    the quoting and a CR/LF end the header. RFC 6266 §4.1 wants the quoted form
+    escaped and a non-ASCII name carried in ``filename*`` (RFC 5987) with an
+    ASCII fallback, which is also what keeps the latin-1 encode below from
+    raising on an ordinary accented name.
+    """
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in filename):
+        raise ValueError("attachment filename contains a control character")
+    escaped = filename.replace("\\", "\\\\").replace('"', '\\"')
+    if filename.isascii():
+        return f'attachment; filename="{escaped}"'.encode("ascii")
+    # The fallback keeps only ASCII so every client can read something; the
+    # `filename*` parameter carries the real name for those that support it.
+    fallback = escaped.encode("ascii", "replace").decode("ascii")
+    encoded = quote(filename, safe="")
+    return (
+        f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
+    ).encode("ascii")
+
+
 def _open_fd(path: str) -> tuple[int, int]:
     """Open a file for reading and return its descriptor and size (one worker)."""
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
@@ -598,8 +665,7 @@ class FileResponse:
         self.media_type = media_type
         self.headers.append((_CONTENT_TYPE, media_type))
         if filename is not None:
-            disposition = f'attachment; filename="{filename}"'
-            self.headers.append((b"content-disposition", disposition.encode("latin-1")))
+            self.headers.append((b"content-disposition", _disposition(filename)))
         self.background = background
         self._fd: int | None = None
         self._stat: os.stat_result | None = None

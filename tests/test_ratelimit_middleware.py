@@ -223,6 +223,41 @@ def test_postgres_store_refuses_a_second_policy() -> None:
         store.configure(3.0, 1.0)
 
 
+def test_memory_store_refuses_a_second_policy_even_an_identical_one() -> None:
+    """The two stores must agree, and the strict rule is the right one.
+
+    A second `configure` means two middlewares sharing one store, and that is a
+    configuration error whether or not the numbers match: one keyspace means
+    requests to one route consume the other's budget. "Same policy" does not
+    make it harmless -- it makes it harder to notice.
+    """
+    store = MemoryRateLimitStore()
+    store.configure(3.0, 1.0)
+    with pytest.raises(ValueError, match="already configured"):
+        store.configure(3.0, 1.0)
+
+
+def test_a_reconfigure_can_never_hand_a_throttled_caller_a_full_bucket() -> None:
+    """The defect underneath the rule.
+
+    A same-policy `configure` used to be accepted and rebuilt the `TokenBucket`,
+    discarding every accumulated bucket -- so it did not merely re-state the
+    policy, it reset every caller's consumption. A client that had just been
+    throttled was immediately let through again.
+    """
+    store = MemoryRateLimitStore()
+    store.configure(10.0, 1.0)
+    for _ in range(10):
+        store.try_acquire("alice", 1.0, 100.0)
+    assert store.try_acquire("alice", 1.0, 100.0) > 0.0, "alice should be throttled"
+
+    with pytest.raises(ValueError):
+        store.configure(10.0, 1.0)
+
+    # Still throttled: the refusal left the buckets alone.
+    assert store.try_acquire("alice", 1.0, 100.0) > 0.0
+
+
 # --- Postgres store ---------------------------------------------------------
 #
 # These pin the store's contract against a fake connection. The SQL itself is

@@ -45,8 +45,18 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 __all__ = [
+    "BUCKETS",
+    "Bucket",
+    "Day",
+    "Hour",
     "Instant",
+    "Minute",
+    "Month",
+    "Quarter",
     "TemporalError",
+    "Week",
+    "Year",
+    "bucket",
     "format_duration",
     "format_iso",
     "jsonable",
@@ -204,6 +214,166 @@ def _utc_now() -> Instant:
 def parse(text: str) -> Instant:
     """An ISO-8601 timestamp that carries an offset. See :meth:`Instant.parse`."""
     return Instant.parse(text)
+
+
+# --- buckets ---------------------------------------------------------------------
+#
+# Bucketing is a timezone problem before it is an aggregation problem: "daily"
+# means daily *where the reader is*. A bucket therefore has to say the same
+# thing in three places at once -- the SQL that assigns a row to a bucket, the
+# SQL that generates the run of buckets a range covers, and the Python that
+# reasons about a boundary without asking the database. Keeping those three in
+# one object is what stops them drifting apart.
+
+
+def _wall_clock(value: datetime.datetime, tz: datetime.tzinfo) -> datetime.datetime:
+    """``value`` as a plain naive ``datetime`` on ``tz``'s wall clock.
+
+    Built component-wise rather than with ``replace(tzinfo=None)`` because
+    ``replace`` preserves the subclass, and an :class:`Instant` refuses to exist
+    without an offset -- correctly, since that is the bug it is here to prevent.
+    ``fold`` is deliberately dropped: a truncated boundary resolves to the first
+    of an ambiguous local time's two instants, which is the conventional reading
+    and the one :meth:`Bucket.floor` documents.
+    """
+    local = Instant.of(value).astimezone(tz)
+    return datetime.datetime(
+        local.year, local.month, local.day,
+        local.hour, local.minute, local.second, local.microsecond,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Bucket:
+    """One interval width, in the three vocabularies that have to agree.
+
+    ``trunc`` is the PostgreSQL ``date_trunc`` unit that assigns a row to a
+    bucket; ``step`` is the ``generate_series`` interval that walks from one
+    bucket to the next; and :meth:`floor` and :meth:`end_of` are the Python
+    answers to the same two questions, for code that has a moment in hand and
+    no connection.
+
+    Both SQL fragments are drawn from :data:`BUCKETS` rather than from a
+    caller, so neither is ever user input -- :func:`bucket` is the only way to
+    reach one by name, and it refuses anything not in the table.
+    """
+
+    #: The name a caller writes and a payload carries -- ``"day"``.
+    name: str
+    #: The ``date_trunc`` unit. Equal to :attr:`name` for every unit today, and
+    #: kept separate because the two are not the same kind of thing.
+    trunc: str
+    #: The ``generate_series`` step, as an interval literal: ``"1 day"``.
+    step: str
+    #: Calendar months per step, for the units a ``timedelta`` cannot hold.
+    #: Zero means :attr:`delta` is the width instead.
+    months: int = 0
+    #: Fixed width, for the units that have one. ``None`` for calendar units.
+    delta: datetime.timedelta | None = None
+
+    def floor(self, value: datetime.datetime, in_zone: str | datetime.tzinfo) -> Instant:
+        """The instant this bucket starts, for the wall clock in ``in_zone``.
+
+        The mirror of ``date_trunc(unit, value AT TIME ZONE zone)``: read the
+        moment on the zone's wall clock, truncate there, and convert back. Doing
+        it in that order is what makes a "day" the reader's calendar day rather
+        than a fixed 24 hours -- see :meth:`end_of` for why that distinction has
+        teeth.
+
+        On the two days a year a zone changes offset, a local wall clock can be
+        ambiguous or absent. An ambiguous local time resolves to the *first*
+        of its two instants (``fold=0``, the pre-transition one); a local time
+        that a spring-forward skipped does not exist, and ``zoneinfo`` maps it
+        to the offset in force before the jump. Both are the conventional
+        readings, and both deserve a live-PostgreSQL cross-check before any
+        guide states they match ``date_trunc``.
+
+        **Comparing the result across zones needs care**, and this is CPython's
+        rule rather than this module's: by PEP 495 a datetime inside an
+        ambiguous hour compares *unequal* to the same instant expressed in
+        another zone, so that comparison stays transitive when one local time
+        names two instants. Convert with ``astimezone`` before comparing, or
+        compare two values in the same zone. The trap is that the naive form is
+        correct on every day but one.
+        """
+        tz = _tzinfo(in_zone)
+        return Instant.of(self._truncate(_wall_clock(value, tz)).replace(tzinfo=tz))
+
+    def end_of(
+        self, value: datetime.datetime, in_zone: str | datetime.tzinfo
+    ) -> Instant:
+        """The instant the *next* bucket starts -- this one's exclusive end.
+
+        Ranges here are half-open throughout, so a bucket runs from
+        :meth:`floor` up to but not including this. Sealing (when a bucket
+        becomes final) is the other caller: a bucket cannot settle before the
+        moment it stops accepting rows, and that moment is this one.
+
+        The step is added on the *local* wall clock and then converted back, so
+        a day spanning a DST change is 23 or 25 hours rather than 24, and a
+        month is a calendar month rather than an approximation.
+        """
+        tz = _tzinfo(in_zone)
+        local = self._truncate(_wall_clock(value, tz))
+        return Instant.of(self._advance(local).replace(tzinfo=tz))
+
+    def _truncate(self, local: datetime.datetime) -> datetime.datetime:
+        """Truncate a naive local wall clock to this bucket's start."""
+        if self.name == "minute":
+            return local.replace(second=0, microsecond=0)
+        if self.name == "hour":
+            return local.replace(minute=0, second=0, microsecond=0)
+        midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+        if self.name == "day":
+            return midnight
+        if self.name == "week":
+            # PostgreSQL's `date_trunc('week', ...)` is ISO-8601: weeks start on
+            # Monday, and `weekday()` is 0 there too.
+            return midnight - datetime.timedelta(days=midnight.weekday())
+        if self.name == "month":
+            return midnight.replace(day=1)
+        if self.name == "quarter":
+            return midnight.replace(month=1 + 3 * ((midnight.month - 1) // 3), day=1)
+        return midnight.replace(month=1, day=1)
+
+    def _advance(self, local: datetime.datetime) -> datetime.datetime:
+        """One step forward from a truncated naive local wall clock."""
+        if not self.months:
+            # `delta` is set for every non-calendar unit in the table below.
+            return local + self.delta  # ty: ignore[unsupported-operator]
+        total = (local.year * 12 + local.month - 1) + self.months
+        return local.replace(year=total // 12, month=total % 12 + 1)
+
+    def __repr__(self) -> str:
+        return f"<Bucket {self.name}>"
+
+
+Minute = Bucket("minute", "minute", "1 minute", delta=datetime.timedelta(minutes=1))
+Hour = Bucket("hour", "hour", "1 hour", delta=datetime.timedelta(hours=1))
+Day = Bucket("day", "day", "1 day", delta=datetime.timedelta(days=1))
+Week = Bucket("week", "week", "1 week", delta=datetime.timedelta(weeks=1))
+Month = Bucket("month", "month", "1 month", months=1)
+Quarter = Bucket("quarter", "quarter", "3 months", months=3)
+Year = Bucket("year", "year", "1 year", months=12)
+
+#: Every bucket, by name. The SQL fragments a query interpolates come from
+#: here and nowhere else, so a bucket named by a caller is looked up rather
+#: than trusted.
+BUCKETS: dict[str, Bucket] = {
+    item.name: item for item in (Minute, Hour, Day, Week, Month, Quarter, Year)
+}
+
+
+def bucket(name: str | Bucket) -> Bucket:
+    """The named bucket, or a :class:`TemporalError` listing the real ones."""
+    if isinstance(name, Bucket):
+        return name
+    found = BUCKETS.get(name) if isinstance(name, str) else None
+    if found is None:
+        raise TemporalError(
+            f"unknown bucket {name!r}; one of {', '.join(sorted(BUCKETS))}"
+        )
+    return found
 
 
 # --- durations -------------------------------------------------------------------

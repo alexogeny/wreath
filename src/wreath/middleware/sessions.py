@@ -38,6 +38,10 @@ def rotate_session(request: Request) -> None:
     """
     request.state._session_rotate = True
 
+#: Minimum session-secret length, matching `CSRFMiddleware`. 32 bytes is the
+#: HMAC-SHA256 block-equivalent floor below which a secret adds no strength.
+MIN_SECRET_BYTES = 32
+
 #: The serialization of an absent/rejected session, so a request that never
 #: touches it compares equal and writes no cookie.
 _EMPTY_SESSION = _json_dumps({})
@@ -58,18 +62,26 @@ class SessionMiddleware:
         cookie: str = "wreath_session",
         max_age: int = 14 * 24 * 3600,
         same_site: str = "lax",
-        secure: bool = False,
+        secure: bool = True,
         http_only: bool = True,
         store: Any = None,
     ) -> None:
-        if not secret:
-            raise ValueError("session secret must not be empty")
+        if len(secret.encode("utf-8")) < MIN_SECRET_BYTES:
+            # The same floor `CSRFMiddleware` applies. This secret signs the
+            # cookie that *is* the session, so a short one is a forgeable
+            # session, and "not empty" was not a meaningful bar.
+            raise ValueError(
+                f"session secret must contain at least {MIN_SECRET_BYTES} bytes"
+            )
         self._secret = secret.encode("utf-8")
         self._cookie = cookie
         self._max_age = max_age
         self._same_site = same_site
         self._secure = secure
         self._http_only = http_only
+        # `secure` defaults to True, matching `CSRFMiddleware`: this cookie *is*
+        # the session, so the weaker default belonged to the less sensitive
+        # cookie. Pass secure=False for local plaintext development.
         # With a store the cookie carries only a signed session id and the
         # contents live server-side, so a session becomes revocable and is no
         # longer bounded by the 4 KiB a cookie holds. Without one the whole

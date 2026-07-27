@@ -95,6 +95,8 @@ class Message:
     payload: Any
     id: int | None = None
     fence: int | None = None
+    #: Attempts already recorded on the row, so a retry's backoff can grow.
+    attempts: int = 0
     _disposition: str = _ACK
 
     def ack(self) -> None:
@@ -180,6 +182,10 @@ class MessageBus:
         #: them apart from `doorbell_reconnects` is the point: a bug in a
         #: handler must never read as a flapping database.
         self.handler_errors = 0
+        #: Failures *after* a message was claimed -- recording its outcome, not
+        #: running the handler. Non-zero means messages are being redelivered on
+        #: lease expiry rather than completing.
+        self.delivery_errors = 0
 
     @property
     def name(self) -> str:
@@ -212,7 +218,20 @@ class MessageBus:
         return sorted(local | self._remote_groups.get(channel, frozenset()))
 
     def _channel_wire(self, channel: str) -> str:
-        return f"wm_{self._schema}_{channel}"[:63]
+        """The wire channel for a user channel name.
+
+        Refused rather than truncated: PostgreSQL truncates silently, and two
+        channels sharing a wire name means ephemeral payloads are dispatched to
+        the wrong subscribers -- a delivery bug that looks like a handler bug.
+        """
+        wire = f"wm_{self._schema}_{channel}"
+        if len(wire.encode("utf-8")) > 63:
+            raise ValueError(
+                f"the wire channel for {channel!r} is {len(wire.encode('utf-8'))} "
+                "bytes; PostgreSQL truncates a channel name at 63, which would "
+                "collide with another channel. Shorten the channel or the schema."
+            )
+        return wire
 
     # -- registration --------------------------------------------------------
 
@@ -696,7 +715,17 @@ class MessageBus:
                 continue
             if stopping.is_set():
                 break
-            await self._deliver(sub, claimed)
+            try:
+                await self._deliver(sub, claimed)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - as in wreath.jobs._worker
+                # The claim was guarded and the delivery was not, so a database
+                # error while recording ack/retry/dead ended this consumer for
+                # the life of the process. The message stays leased and the
+                # sweeper reclaims it.
+                self.delivery_errors += 1
+                await self._park()
 
     async def _deliver(self, sub: _Subscription, message: Message) -> None:
         future = asyncio.ensure_future(sub.handler(message))
@@ -726,7 +755,7 @@ class MessageBus:
             f"UPDATE {self._table} m SET state='leased', owner=$3, "
             "lease_expiry = now() + ($4 || ' seconds')::interval, fence = m.fence + 1, "
             "updated_at=now() FROM claimable c WHERE m.id=c.id "
-            "RETURNING m.id, m.payload, m.tenant, m.fence"
+            "RETURNING m.id, m.payload, m.tenant, m.fence, m.attempts"
         )
         connection = await self._db.acquire(self._workload)
         try:
@@ -741,7 +770,8 @@ class MessageBus:
         if isinstance(payload, (str, bytes)):
             payload = json.loads(payload)
         return Message(channel=sub.channel, group=sub.group, tenant=row["tenant"],
-                       payload=payload, id=row["id"], fence=row["fence"])
+                       payload=payload, id=row["id"], fence=row["fence"],
+                       attempts=row["attempts"])
 
     async def _complete(self, message: Message) -> None:
         await self._exec(
@@ -759,29 +789,52 @@ class MessageBus:
 
     async def _retry(self, sub: _Subscription, message: Message, error: str) -> None:
         # attempts is incremented in SQL so concurrent sweeps stay consistent.
-        delay = compute_backoff(1, kind="exp", jitter=0.2)
+        # The *delay* is computed from the attempts the claimed row carried:
+        # passing a constant 1 here made every retry wait the same ~1s, so the
+        # exponential backoff this calls into never actually backed off.
+        delay = compute_backoff(message.attempts + 1, kind="exp", jitter=0.2)
+        # `sub.retries` is the consumer's configured budget. The row's
+        # `max_attempts` is the publisher's ceiling, chosen without knowing which
+        # consumers exist, so the effective cap is whichever is stricter --
+        # before this, `retries=` was accepted by `subscribe()` and read by
+        # nothing.
         await self._exec(
             f"UPDATE {self._table} SET "
             "attempts = attempts + 1, "
-            "state = CASE WHEN attempts + 1 >= max_attempts THEN 'dead' ELSE 'ready' END, "
+            "state = CASE WHEN attempts + 1 >= LEAST(max_attempts, $5::int) "
+            "THEN 'dead' ELSE 'ready' END, "
             "run_at = now() + ($3 || ' seconds')::interval, last_error=$4, "
             "owner=NULL, lease_expiry=NULL, updated_at=now() "
             "WHERE id=$1 AND fence=$2",
-            message.id, message.fence, f"{delay:.3f}", error[:2000],
+            message.id, message.fence, f"{delay:.3f}", error[:2000], sub.retries + 1,
         )
 
     async def _sweeper(self, sub: _Subscription) -> None:
         stopping = self._supervisor.stopping
         while not stopping.is_set():
             with contextlib.suppress(Exception):
-                await self._exec(
-                    f"UPDATE {self._table} SET state='ready', owner=NULL, "
-                    "lease_expiry=NULL, fence=fence+1, updated_at=now() "
-                    'WHERE channel=$1 AND "group"=$2 AND state=\'leased\' '
-                    "AND lease_expiry < now()",
-                    sub.channel, sub.group,
-                )
+                await self._reclaim_expired(sub)
             await _sleep_or_stop(stopping, self._lease)
+
+    async def _reclaim_expired(self, sub: _Subscription) -> None:
+        """Return this group's expired leases to `ready`, counting the attempt.
+
+        Same reasoning as :meth:`wreath.jobs.JobRunner._reclaim_expired`: a
+        consumer that dies mid-handler never reaches :meth:`_retry`, so a
+        reclaim that did not count the attempt made a message which reliably
+        kills its consumer immortal -- redelivered on every sweep, never
+        dead-lettered.
+        """
+        await self._exec(
+            f"UPDATE {self._table} SET "
+            "attempts = attempts + 1, "
+            "state = CASE WHEN attempts + 1 >= max_attempts THEN 'dead' ELSE 'ready' END, "
+            "last_error = COALESCE(last_error, 'lease expired before completion'), "
+            "owner=NULL, lease_expiry=NULL, fence=fence+1, updated_at=now() "
+            'WHERE channel=$1 AND "group"=$2 AND state=\'leased\' '
+            "AND lease_expiry < now()",
+            sub.channel, sub.group,
+        )
 
     async def _exec(self, sql: str, *args: Any) -> None:
         connection = await self._db.acquire(self._workload)

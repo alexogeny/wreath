@@ -37,8 +37,15 @@ def _as_model(model: type) -> type[Model]:
 DEFAULT_SIZE = 20
 MAX_SIZE = 100
 
+#: Highest page number a request may ask for. `LIMIT/OFFSET` makes the database
+#: walk and discard every row before the offset, so an unbounded page number is
+#: a full scan an anonymous caller can ask for repeatedly. Past this, use a
+#: keyset filter -- which is what a page this deep should have been doing.
+MAX_PAGE = 10_000
+
 __all__ = [
     "DEFAULT_SIZE",
+    "MAX_PAGE",
     "MAX_SIZE",
     "Page",
     "PageParams",
@@ -103,12 +110,12 @@ def parse_sort(raw: str) -> tuple[str, ...]:
 
 
 def page_params(
-    page: Annotated[int, Query(minimum=1)] = 1,
+    page: Annotated[int, Query(minimum=1, maximum=MAX_PAGE)] = 1,
     size: Annotated[int, Query(minimum=1, maximum=MAX_SIZE)] = DEFAULT_SIZE,
     sort: Annotated[str, Query()] = "",
 ) -> PageParams:
     """A ``Depends``-able that binds ``?page=&size=&sort=`` into ``PageParams``."""
-    return PageParams(page=page, size=size, sort=parse_sort(sort))
+    return PageParams(page=min(page, MAX_PAGE), size=size, sort=parse_sort(sort))
 
 
 def sortable_fields(model: type) -> tuple[str, ...]:

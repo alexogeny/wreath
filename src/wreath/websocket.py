@@ -46,7 +46,15 @@ class WebSocketDisconnect(Exception):
 class WebSocket:
     """One WebSocket connection, backed directly by the ASGI scope."""
 
-    __slots__ = ("_accepted", "_connected", "_receive", "_send", "path_params", "scope")
+    __slots__ = (
+        "_accepted",
+        "_connected",
+        "_receive",
+        "_send",
+        "identity",
+        "path_params",
+        "scope",
+    )
 
     def __init__(
         self,
@@ -54,11 +62,16 @@ class WebSocket:
         receive: Any,
         send: Any,
         path_params: dict[str, str] | None = None,
+        *,
+        identity: Any = None,
     ) -> None:
         self.scope = scope
         self._receive = receive
         self._send = send
         self.path_params = path_params or {}
+        #: The caller, when the route declared an auth requirement the
+        #: application enforced before the handshake; None on an open route.
+        self.identity = identity
         self._connected = False
         self._accepted = False
 

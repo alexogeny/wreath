@@ -248,6 +248,17 @@ def crud_router(
                 page, size = _page_params(request, page_size)
                 query = spec.select().limit(size).offset((page - 1) * size)
                 rows = await session.fetch(query)
+                if object_authorizer is not None:
+                    # The same row-level check the other operations run. Without
+                    # it, a model whose rows are protected on retrieve was
+                    # readable in bulk here -- the one operation that returns
+                    # every row at once. A page may therefore come back shorter
+                    # than `size`; that is the honest answer, and paging over a
+                    # filtered set is the caller's to reconcile.
+                    rows = [
+                        row for row in rows
+                        if not await object_denied(request, "list", row)
+                    ]
                 return JSONResponse({
                     "items": [serialize(row) for row in rows],
                     "page": page, "size": size,
@@ -415,8 +426,12 @@ async def _object_ok(
 def _page_params(request: Any, default_size: int) -> tuple[int, int]:
     from urllib.parse import parse_qs
 
+    from .pagination import MAX_PAGE
+
     query = parse_qs(request.query_string.decode("latin-1"))
-    page = max(1, _as_int(query.get("page", ["1"])[0], 1))
+    # Bounded above as well as below: `OFFSET (page-1)*size` makes the database
+    # walk every skipped row, so an unbounded page number is a scan on request.
+    page = min(MAX_PAGE, max(1, _as_int(query.get("page", ["1"])[0], 1)))
     raw_size = _as_int(query.get("size", [str(default_size)])[0], default_size)
     return page, min(_MAX_PAGE_SIZE, max(1, raw_size))
 

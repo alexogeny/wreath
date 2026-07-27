@@ -44,9 +44,17 @@ _TRY = {"exclusive": "pg_try_advisory_lock", "shared": "pg_try_advisory_lock_sha
 _UNLOCK = {"exclusive": "pg_advisory_unlock", "shared": "pg_advisory_unlock_shared"}
 
 # Both advisory-lock key operands are hashed in the server so Python and
-# PostgreSQL can never disagree on the derived int32 (the migration runner hashes
+# PostgreSQL can never disagree on the derived key (the migration runner hashes
 # the same way). ``$1`` is the namespace, ``$2`` the caller's key.
-_KEYED = "hashtext($1::text), hashtext($2::text)"
+#
+# One 64-bit key, not two 32-bit ones. The two-argument form fills each operand
+# with `hashtext`, so distinct (namespace, key) pairs collided at roughly 77 000
+# of them -- and a collision is silent, appearing only as one caller waiting on
+# a lock that has nothing to do with it. `hashtextextended` is the 64-bit
+# variant, already what `wreath.migrations` uses; seeding the namespace hash
+# into the key hash keeps the pair unambiguous without needing a separator that
+# text cannot contain.
+_KEYED = "hashtextextended($2::text, hashtextextended($1::text, 0))"
 
 
 def _validate_mode(mode: str) -> None:

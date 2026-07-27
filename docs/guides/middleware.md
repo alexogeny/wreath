@@ -37,6 +37,22 @@ from wreath.middleware import RateLimitMiddleware
 app.add_middleware(RateLimitMiddleware(limit=100, window=60.0))
 ```
 
+A request the key function cannot name — no client address in the scope, behind
+a socket or an unusual server — lands in one shared bucket rather than skipping
+the limiter. A limiter that lets a request past because it could not identify it
+is not a limiter; use `exempt=` to allow one deliberately.
+
+`CORSMiddleware` refuses `allow_origins=["*"]` together with
+`allow_credentials=True` at construction: honouring it means reflecting whatever
+origin asked, alongside `Access-Control-Allow-Credentials: true`, which lets any
+site read authenticated responses from yours. Name the origins that may send
+credentials.
+
+`SessionMiddleware` defaults to `secure=True` (matching `CSRFMiddleware`) and
+requires a secret of at least 32 bytes. Pass `secure=False` for local plaintext
+development.
+
+
 The default key is the client address, so each caller gets its own bucket; a
 request over the limit gets a `429 Too Many Requests` (an RFC 9457 problem body)
 with a whole-second `Retry-After`. Pass `key=` to bucket by API key or

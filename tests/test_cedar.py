@@ -69,3 +69,73 @@ async def test_cedar_adapter_is_final_authorization_after_coarse_route_pruning()
     assert allowed[0]["status"] == 200
     assert denied[0]["status"] == 403
     assert engine.calls[0]["context"] == {"method": "GET"}
+
+
+# --- policy identity, delegated from the engine -------------------------------
+#
+# A cached permission manifest is tagged by the policy set behind the authorizer.
+# That tag used to be found by reaching through `authorizer._engine` from
+# `_auth/permissions.py` -- a private name owned by `_auth/cedar.py` and read
+# from another module, where a rename would not raise but would silently drop
+# every ETag to a per-instance token. Delegating keeps the name in the file that
+# owns it, and hands out only the value.
+
+
+class _Identified:
+    """An engine that offers its policy text, the way `CedarPolicies` does."""
+
+    def __init__(self, source: str) -> None:
+        self.source = source
+
+    def is_authorized(self, **request: object) -> bool:
+        return False
+
+
+class _Fingerprinted:
+    """An engine that offers a digest instead of its text."""
+
+    fingerprint = b"a-digest"
+
+    def is_authorized(self, **request: object) -> bool:
+        return False
+
+
+def test_the_authorizer_offers_the_engines_policy_identity() -> None:
+    authorizer = CedarAuthorizer(engine=_Identified("permit(principal, action, resource);"))
+
+    assert authorizer.source == "permit(principal, action, resource);"
+
+
+def test_every_probed_name_is_delegated_not_just_source() -> None:
+    """Partial delegation would reintroduce the miss in a subtler form.
+
+    An engine that offers `fingerprint` but not `source` has to be found through
+    the authorizer too, or it silently degrades to a per-instance token while the
+    engine next to it works fine.
+    """
+    assert CedarAuthorizer(engine=_Fingerprinted()).fingerprint == b"a-digest"
+
+
+def test_an_engine_offering_nothing_leaves_the_names_absent() -> None:
+    """Absence has to stay absence, not become a `None` that is present.
+
+    The fingerprint probes with `getattr(..., None)` and falls through to a
+    per-instance token. A property that always resolved and returned `None`
+    would promise "there is a source, and it is nothing" -- a different claim,
+    and one that would read as an engine having no policies at all.
+    """
+    authorizer = CedarAuthorizer(engine=Engine())
+
+    for name in ("fingerprint", "source", "policies"):
+        with pytest.raises(AttributeError):
+            getattr(authorizer, name)
+        assert getattr(authorizer, name, None) is None
+
+
+def test_the_delegation_adds_no_dict_to_the_authorizer() -> None:
+    """`CedarAuthorizer` is `__slots__`; properties must not have changed that."""
+    authorizer = CedarAuthorizer(engine=_Identified("permit(principal, action, resource);"))
+
+    assert not hasattr(authorizer, "__dict__")
+    with pytest.raises(AttributeError):
+        authorizer.source = "something else"  # type: ignore[misc]

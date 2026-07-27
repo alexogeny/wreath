@@ -12,7 +12,7 @@ of the data and the number of round trips.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -132,8 +132,13 @@ def qualified(spec: ModelSpec) -> str:
     return f"{quote(spec.schema)}.{quote(spec.table)}"
 
 
-class _Builder:
-    """Accumulates SQL text and bind values for one statement."""
+class SqlBuilder:
+    """Accumulates SQL text and bind values for one statement.
+
+    Public because :mod:`wreath._series` renders its own statements against
+    the same predicate machinery. Placeholder numbering is positional, so a
+    caller must emit text and binds in the order they appear in the SQL.
+    """
 
     __slots__ = ("oids", "parts", "values")
 
@@ -390,7 +395,7 @@ def compile_count(registry: Any, select: Select) -> tuple[str, tuple[Any, ...], 
     """
     spec = registry.spec_for(select.model)
     counting = select._replace(orderings=(), limit_=None, offset_=None, includes=())
-    builder = _Builder()
+    builder = SqlBuilder()
     clauses: list[str] = []
     filter_aliases = _plan_filter_joins(registry, spec, counting, clauses)
     builder.text(f"SELECT COUNT(*) FROM {qualified(spec)} AS {quote('t0')}")
@@ -398,7 +403,7 @@ def compile_count(registry: Any, select: Select) -> tuple[str, tuple[Any, ...], 
         builder.text(clause)
     if counting.predicates:
         builder.text(" WHERE ")
-        _render_predicate(_conjoin(counting.predicates), builder, "t0", filter_aliases)
+        render_predicate(conjoin(counting.predicates), builder, "t0", filter_aliases)
     return builder.sql(), tuple(builder.values), tuple(builder.oids)
 
 
@@ -408,7 +413,7 @@ def _build_plan(registry: Any, select: Select, spec: ModelSpec) -> _CachedPlan:
     columns = _with_primary_key(spec, requested)
     joined, selectin = _resolve_loads(registry, spec, select)
 
-    builder = _Builder()
+    builder = SqlBuilder()
     selected: list[ColumnSpec] = list(columns)
     parts = [f"{quote('t0')}.{quote(item.database_name)}" for item in columns]
     clauses: list[str] = []
@@ -425,7 +430,7 @@ def _build_plan(registry: Any, select: Select, spec: ModelSpec) -> _CachedPlan:
 
     if select.predicates:
         builder.text(" WHERE ")
-        _render_predicate(_conjoin(select.predicates), builder, "t0", filter_aliases)
+        render_predicate(conjoin(select.predicates), builder, "t0", filter_aliases)
     if select.orderings:
         builder.text(" ORDER BY ")
         builder.text(
@@ -489,18 +494,33 @@ def _filter_paths(
 def _plan_filter_joins(
     registry: Any, spec: ModelSpec, select: Select, clauses: list[str]
 ) -> dict[tuple[Any, ...], str]:
-    """Emit an INNER JOIN per relationship path a predicate filters through.
+    """Emit an INNER JOIN per relationship path this query's predicates reach."""
+    return plan_filter_joins(registry, spec, select.predicates, clauses)
+
+
+def plan_filter_joins(
+    registry: Any,
+    spec: ModelSpec,
+    expressions: Iterable[Expression],
+    clauses: list[str],
+) -> dict[tuple[Any, ...], str]:
+    """Emit an INNER JOIN per relationship path ``expressions`` reach through.
 
     These joins constrain rows and select nothing: filtering is not loading, so
     a filtered relation stays unloaded unless the query also `.include()`s it.
     INNER rather than LEFT because a parent with no matching child cannot
     satisfy a predicate on the child's column, and INNER lets PostgreSQL reorder
     the join.
+
+    Takes expressions rather than a ``Select`` because a calculated view groups
+    by a column as well as filtering by one, and a ``GROUP BY`` on a related
+    column needs the same join a predicate on it would get. Aliases are returned
+    keyed by relationship path, which is what :func:`render_predicate` reads.
     """
     paths: list[tuple[Any, ...]] = []
     seen: set[tuple[Any, ...]] = set()
-    for predicate in select.predicates:
-        _filter_paths(predicate, paths, seen)
+    for expression in expressions:
+        _filter_paths(expression, paths, seen)
     if not paths:
         return {}
 
@@ -673,7 +693,7 @@ def _resolve_loads(
     return joined, selectin
 
 
-def _conjoin(predicates: tuple[Predicate, ...]) -> Predicate:
+def conjoin(predicates: tuple[Predicate, ...]) -> Predicate:
     if len(predicates) == 1:
         return predicates[0]
     return BooleanExpr(AND, predicates)
@@ -685,9 +705,9 @@ def _direction(item: OrderExpr) -> str:
     return item.direction
 
 
-def _render_predicate(
+def render_predicate(
     node: Expression,
-    builder: _Builder,
+    builder: SqlBuilder,
     alias: str,
     joins: dict[tuple[Any, ...], str],
 ) -> None:
@@ -725,7 +745,7 @@ def _render_predicate(
         for index, operand in enumerate(node.operands):
             if index:
                 builder.text(f" {node.operator} ")
-            _render_predicate(operand, builder, alias, joins)
+            render_predicate(operand, builder, alias, joins)
         builder.text(")")
         return
     if isinstance(node, UnaryExpr):
@@ -733,7 +753,7 @@ def _render_predicate(
             raise ORMError(f"invalid SQL operator {node.operator!r}")
         if node.operator == "NOT":
             builder.text("NOT (")
-            _render_predicate(node.operand, builder, alias, joins)
+            render_predicate(node.operand, builder, alias, joins)
             builder.text(")")
             return
         _render_operand(node.operand, builder, alias, joins)
@@ -744,7 +764,7 @@ def _render_predicate(
 
 def _render_operand(
     node: Expression,
-    builder: _Builder,
+    builder: SqlBuilder,
     alias: str,
     joins: dict[tuple[Any, ...], str],
 ) -> None:
@@ -781,7 +801,7 @@ def _collect_binds_pure(select: Select) -> tuple[tuple[Any, ...], tuple[int, ...
     values: list[Any] = []
     oids: list[int] = []
     if select.predicates:
-        _walk_values(_conjoin(select.predicates), values, oids)
+        _walk_values(conjoin(select.predicates), values, oids)
     if select.limit_ is not None:
         values.append(select.limit_)
         oids.append(_INT8_OID)
@@ -973,11 +993,15 @@ __all__ = [
     "JoinedStep",
     "LoadPlan",
     "SelectinStep",
+    "SqlBuilder",
     "check_predicate_columns",
     "compile_count",
     "compile_rebind",
     "compile_select",
+    "conjoin",
+    "plan_filter_joins",
     "qualified",
     "quote",
+    "render_predicate",
     "shape_of",
 ]

@@ -88,6 +88,47 @@ class CedarAuthorizer:
         self._entities = entities
         self._context = context
 
+    # --- policy identity, delegated from the engine -------------------------
+    #
+    # A cached permission manifest is tagged by the policy set behind the
+    # authorizer, and the tag is found by probing `fingerprint`, `source`, then
+    # `policies` (`_auth/permissions.py::_policy_fingerprint`). Those live on
+    # the engine, and the tag used to be found by reaching through
+    # `authorizer._engine` from that module — a private name owned by this file
+    # and read from another one, where a rename would not raise but would
+    # quietly drop every ETag to a per-instance token and stop cross-worker
+    # revalidation with no error at all.
+    #
+    # Delegating keeps the private name in the file that owns it, so a rename
+    # moves the readers with it, and hands out only the *value*. Deliberately
+    # not a public `engine` accessor: the five mappers above are the work this
+    # class exists to do, and a caller holding the engine could call
+    # `is_authorized` straight past all of them.
+    #
+    # Absence stays absent. An engine offering none of these lets `AttributeError`
+    # out of the property, which `getattr(..., None)` reports as missing, so the
+    # probe falls through to a per-instance token exactly as it does for a bare
+    # engine. A property that always resolved and usually returned `None` would
+    # promise something else — "there is a source, and it is nothing" rather
+    # than "there is no source to offer". Each body is a single attribute
+    # access, so there is no room for an unrelated `AttributeError` to be
+    # swallowed here.
+
+    @property
+    def fingerprint(self) -> object:
+        engine: Any = self._engine
+        return engine.fingerprint
+
+    @property
+    def source(self) -> object:
+        engine: Any = self._engine
+        return engine.source
+
+    @property
+    def policies(self) -> object:
+        engine: Any = self._engine
+        return engine.policies
+
     async def authorize(
         self, request: Request, requirement: PolicyRequirement
     ) -> AuthorizationDecision:

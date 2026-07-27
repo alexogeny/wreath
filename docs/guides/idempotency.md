@@ -39,9 +39,21 @@ Idempotency-Key: 4b5f...-once-per-checkout
   users cannot collide on the same key value.
 - An **unauthenticated** request is left unguarded — see below.
 - A **concurrent** duplicate (the first is still in flight) gets `409 Conflict`
+  with a `Retry-After`, so a client that retries immediately is told when to
   rather than racing to run twice.
 - A `5xx` is **not** stored — a transient failure stays retryable, so the client's
   retry actually re-runs instead of replaying the error.
+
+A stored response is a *replay*, so two things never make it into the store:
+a `Set-Cookie` header (the response's own per-request state — a rotated
+session id re-issued to every retry would be worse than no idempotency), and
+any status whose cause is expected to change on a retry — `401`, `403`, `408`,
+`409`, `423`, `425`, `429`. A rate limit lifting or a role changing must not be
+answered from a day-old ledger. Every other `4xx` is deterministic enough that
+replaying it is the point.
+
+The middleware runs at the **action** stage, not at ingress: the key is scoped
+by the authenticated principal, and ingress is upstream of authentication.
 
 ## Idempotency requires an authenticated principal
 

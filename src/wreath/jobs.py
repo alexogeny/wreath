@@ -37,6 +37,15 @@ JobHandler = Callable[..., Awaitable[None]]
 # messaging share one definition; kept as a module-local alias for readability.
 _validate_identifier = validate_identifier
 
+#: Reconnect backoff for the NOTIFY doorbell, matching `messaging.MessageBus`.
+#: 50ms first, because the ordinary loss (a failover, an idle timeout, a blip)
+#: leaves a database that hands back a connection immediately and every moment
+#: without a doorbell is polling latency on every job. Capped at the default
+#: `poll_interval`: that is the behaviour an outage degrades to, so retrying
+#: slower than the damage buys nothing.
+DOORBELL_BACKOFF_BASE = 0.05
+DOORBELL_BACKOFF_CAP = 5.0
+
 
 class JobVanished(RuntimeError):
     """A deduplicated :meth:`JobRunner.launch` found no row to hand back.
@@ -52,10 +61,21 @@ class JobVanished(RuntimeError):
 
 
 def _channel(schema: str, queue: str) -> str:
-    # A bounded LISTEN/NOTIFY channel shared by producers (pg_notify) and the
-    # runner's listen connection. Both derive it identically so the doorbell
-    # lines up; identifier-safe and <=63 bytes by construction of its inputs.
-    return f"wj_{schema}_{queue}"[:63]
+    """The LISTEN/NOTIFY channel shared by producers and the runner.
+
+    Refused rather than truncated when it is too long: PostgreSQL truncates a
+    channel name silently, so two queues whose names agree in their first 63
+    bytes would share one doorbell and wake each other's workers -- which
+    presents as latency, not as an error.
+    """
+    channel = f"wj_{schema}_{queue}"
+    if len(channel.encode("utf-8")) > 63:
+        raise ValueError(
+            f"the doorbell channel for schema {schema!r} and queue {queue!r} is "
+            f"{len(channel.encode('utf-8'))} bytes; PostgreSQL truncates a channel "
+            "name at 63, which would collide with another queue. Shorten one of them."
+        )
+    return channel
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +204,19 @@ class JobRunner:
         self._listen_conn: Any = None
         self._inflight: set[asyncio.Future[Any]] = set()
         self._worker_id = f"{self._name}"
+        #: Failures *after* a job was claimed -- recording the outcome, not
+        #: running the handler. Non-zero means jobs are being re-run on lease
+        #: expiry rather than completing, which used to end a worker silently.
+        self.run_errors = 0
+        #: Doorbell connections lost, plus every failed attempt to open one
+        #: (including the attempt made on the startup path). Correctness never
+        #: depended on the doorbell, which is exactly why losing it is invisible
+        #: without a number: the runner keeps working at `poll_interval`.
+        self.doorbell_reconnects = 0
+        #: Passes whose shift could not be enqueued. A pass that is never driven
+        #: does nothing at all, and the ledger cannot tell that apart from a
+        #: pass with no work to do.
+        self.pass_drive_errors = 0
 
     @property
     def name(self) -> str:
@@ -314,21 +347,40 @@ class JobRunner:
         return task
 
     async def _enqueue_next_shift(self, task: str, walk: Any) -> None:
+        """Queue the next shift of ``walk``. Raises if it cannot.
+
+        Deliberately *not* suppressed. Called from inside ``run_shift`` this is
+        the handler's own failure, so letting it propagate hands the problem to
+        the retry machinery that already exists — the shift is re-run from
+        wherever the ledger says it got to, and the pass carries on. Swallowing
+        it instead stalled the pass until the next cron tick, and a
+        non-recurring pass has no next tick: it simply stopped, at whatever
+        percentage it had reached, with the ledger still reading ``walking``.
+        """
         # A fresh dedup key per shift, bucketed by the minute so a pass that
         # cannot make progress re-enqueues at most once a minute instead of
         # spinning, and self-heals as soon as it can advance again.
         key = f"pass:{walk.name}:{walk.tenant}:{int(time.time() // 60)}"
-        with contextlib.suppress(Exception):
-            await self.enqueue(task, key=key, tenant=walk.tenant)
+        await self.enqueue(task, key=key, tenant=walk.tenant)
 
     async def _start_passes(self) -> None:
-        """Give every driven pass its first shift, once the database is up."""
+        """Give every driven pass its first shift, once the database is up.
+
+        One pass that cannot be started must not take the others with it, so the
+        isolation here is per pass rather than around the loop — but it is
+        counted, because a pass that is never driven does nothing at all and the
+        ledger cannot tell that apart from a pass with no work to do.
+        """
         for task, walk in self._passes:
-            with contextlib.suppress(Exception):
+            try:
                 status = await walk.status(self._db)
                 if status is not None and status.phase == "done" and not walk.recurring:
                     continue
                 await self._enqueue_next_shift(task, walk)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - one pass must not strand the rest
+                self.pass_drive_errors += 1
 
     # -- enqueue -------------------------------------------------------------
 
@@ -428,7 +480,19 @@ class JobRunner:
                 f"launch({task!r}, key={key!r}) was deduplicated but the surviving "
                 "job row was gone when it was read; there is no task to watch"
             )
-        return TaskHandle(task_id=str(existing), state="running")
+        task_id = str(existing)
+        # Seed only if this worker has nothing, because progress fan-out is
+        # at-most-once with no replay: a worker that started after the original
+        # `launch`, or that missed the publish, has no entry for a task that is
+        # genuinely running, and would hand back a handle that 404s on status
+        # and streams forever. Seeding *unconditionally* would be the opposite
+        # bug -- the original may be at 70% on this very worker, and every
+        # watching client would see the import start over.
+        if self._progress is not None and self._progress.get(task_id) is None:
+            self._progress.report(
+                task_id, 0, "already in flight on another worker", state="running",
+            )
+        return TaskHandle(task_id=task_id, state="running")
 
     async def _existing_job_id(self, key: str | None, *, tx: Any = None) -> Any:
         sql = f"SELECT id FROM {self._table} WHERE queue=$1 AND dedup_key=$2"
@@ -481,11 +545,15 @@ class JobRunner:
         self._supervisor = supervisor
         # A dedicated held connection for the NOTIFY doorbell (never leased back
         # while listening — design 01 §5). Correctness does not depend on it, so
-        # a failure to establish it degrades to pure polling.
-        with contextlib.suppress(Exception):
-            self._listen_conn = await self._db.acquire(self._workload)
-            await self._listen_conn.listen(self._channel)
-            supervisor.spawn(f"jobs:{self._name}:doorbell", self._doorbell())
+        # a failure to establish it degrades to pure polling — but *permanently*
+        # losing it is a different thing from riding out a blip. Connect once
+        # here so a runner starting against a healthy database is listening by
+        # the time `start` returns, and spawn the loop regardless: it owns every
+        # subsequent connection including this one having failed. Spawning it
+        # only on a successful connect — as this did — meant a database that was
+        # down at boot left the process with no doorbell for its entire life.
+        await self._open_doorbell()
+        supervisor.spawn(f"jobs:{self._name}:doorbell", self._doorbell())
         for index in range(self._concurrency):
             supervisor.spawn(f"jobs:{self._name}:worker:{index}", self._worker())
         supervisor.spawn(f"jobs:{self._name}:sweeper", self._sweeper())
@@ -502,20 +570,106 @@ class JobRunner:
             pending = tuple(self._inflight)
             with contextlib.suppress(Exception):
                 await asyncio.wait(pending, timeout=max(0.0, deadline - loop.time()))
-        if self._listen_conn is not None:
-            with contextlib.suppress(Exception):
-                await self._db.release(self._workload, self._listen_conn)
-            self._listen_conn = None
+        await self._release_listen()
 
     # -- loops ---------------------------------------------------------------
 
-    async def _doorbell(self) -> None:
-        # Turn each NOTIFY on our queue channel into a wake for parked workers.
-        if self._listen_conn is None:
+    async def _open_doorbell(self) -> bool:
+        """Take a connection and ``LISTEN`` on the queue channel.
+
+        Reports failure rather than raising, because a database that will not
+        give us a connection is precisely the condition the reconnect loop
+        exists to ride out — and because this also runs on the startup path,
+        where it must not stop a runner from claiming its own work by polling.
+        Cancellation is not a failure and propagates.
+        """
+        connection: Any = None
+        try:
+            connection = await self._db.acquire(self._workload)
+            await connection.listen(self._channel)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - the caller backs off and tries again
+            # Counted here rather than in the loop so the attempt made on the
+            # startup path lands too: a runner that came up against a database
+            # that was down has no doorbell, which is the same outage.
+            self.doorbell_reconnects += 1
+            if connection is not None:
+                with contextlib.suppress(Exception):
+                    await self._db.release(self._workload, connection)
+            return False
+        self._listen_conn = connection
+        return True
+
+    async def _release_listen(self) -> None:
+        """Give the held connection back, exactly once.
+
+        Both :meth:`drain` and the doorbell loop's own teardown call this, and a
+        clean shutdown runs them in that order, so the swap-to-``None`` is what
+        keeps the second caller from releasing a connection twice.
+        """
+        connection, self._listen_conn = self._listen_conn, None
+        if connection is None:
             return
         with contextlib.suppress(Exception):
-            async for _notification in self._listen_conn.notifications():
-                self._wake.set()
+            await self._db.release(self._workload, connection)
+
+    async def _doorbell(self) -> None:
+        """Hold a LISTEN connection for the process's lifetime, and get it back.
+
+        One connection is held for as long as the process runs, so every reason
+        a long-lived Postgres connection ends — a failover, an idle timeout, a
+        ``pg_terminate_backend``, a network blip — happens to this one
+        eventually. The driver's ``notifications()`` iterator *ends* when the
+        connection closes rather than raising, so the unsupervised loop this
+        replaces returned having caught nothing: every later NOTIFY was lost and
+        workers fell back to ``poll_interval`` for the life of the process. That
+        is survivable, which is what makes it worth supervising — nothing breaks,
+        so nothing tells you. The supervisor owns tasks; it does not resurrect
+        them, so the retry has to live here.
+        """
+        stopping = self._supervisor.stopping
+        loop = asyncio.get_running_loop()
+        attempt = 0
+        while not stopping.is_set():
+            if self._listen_conn is None and not await self._open_doorbell():
+                attempt += 1  # `_open_doorbell` counted it
+                await _sleep_or_stop(stopping, _doorbell_delay(attempt))
+                continue
+            opened = loop.time()
+            try:
+                await self._pump()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a broken stream is a lost connection
+                pass
+            finally:
+                await self._release_listen()
+            if stopping.is_set():
+                # Shutdown closed it; that is not an outage and not a reason to
+                # open another one on the way out.
+                break
+            self.doorbell_reconnects += 1
+            # A connection that is accepted and then dies immediately is a flap,
+            # not a recovery, so only one that outlived the backoff cap resets
+            # the count — otherwise a database in that state gets retried at the
+            # base delay forever, which is the storm the cap exists to stop.
+            attempt = 1 if loop.time() - opened >= DOORBELL_BACKOFF_CAP else attempt + 1
+            await _sleep_or_stop(stopping, _doorbell_delay(attempt))
+
+    async def _pump(self) -> None:
+        """Wake parked workers until the connection's stream ends.
+
+        Returning is the ordinary end of a dropped connection. Unlike the bus's
+        pump there is no user code on this path — a notification only sets an
+        event — so there is nothing here that could raise on someone else's
+        behalf, and no second counter to keep it apart from an outage.
+        """
+        connection = self._listen_conn
+        if connection is None:
+            return
+        async for _notification in connection.notifications():
+            self._wake.set()
 
     async def _worker(self) -> None:
         stopping = self._supervisor.stopping
@@ -531,7 +685,19 @@ class JobRunner:
             for job in claimed:
                 if stopping.is_set():
                     break
-                await self._run(job)
+                try:
+                    await self._run(job)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - see below
+                    # `_claim` was already guarded; the *run* was not, so a
+                    # transient database error while recording an outcome
+                    # (`_complete`/`_fail` both issue an UPDATE) propagated out
+                    # of this loop and ended the worker for the life of the
+                    # process. The job stays leased and the sweeper reclaims it,
+                    # which is the same path a crashed worker takes.
+                    self.run_errors += 1
+                    await self._park()
 
     async def _run(self, job: _Claimed) -> None:
         handler = self._tasks.get(job.task)
@@ -650,14 +816,28 @@ class JobRunner:
         stopping = self._supervisor.stopping
         while not stopping.is_set():
             with contextlib.suppress(Exception):
-                # Reclaim expired leases: bump the fence so the previous owner's
-                # completion UPDATE (WHERE fence=old) can no longer land.
-                await self._exec(
-                    f"UPDATE {self._table} SET state='ready', owner=NULL, "
-                    "lease_expiry=NULL, fence=fence+1, updated_at=now() "
-                    "WHERE state='leased' AND lease_expiry < now()"
-                )
+                await self._reclaim_expired()
             await _sleep_or_stop(stopping, self._lease)
+
+    async def _reclaim_expired(self) -> None:
+        """Return expired leases to the queue, counting the attempt.
+
+        The fence is bumped so the previous owner's completion UPDATE (WHERE
+        fence=old) can no longer land. ``attempts`` is bumped for the same
+        reason a handler exception bumps it: the job *was* attempted. Reclaiming
+        without counting meant the one failure mode that never reaches
+        :meth:`_fail` -- a handler that kills its worker, or a process that dies
+        mid-run -- was redelivered forever and could never dead-letter, so a
+        poison job outlived every other kind.
+        """
+        await self._exec(
+            f"UPDATE {self._table} SET "
+            "attempts = attempts + 1, "
+            "state = CASE WHEN attempts + 1 >= max_attempts THEN 'dead' ELSE 'ready' END, "
+            "last_error = COALESCE(last_error, 'lease expired before completion'), "
+            "owner=NULL, lease_expiry=NULL, fence=fence+1, updated_at=now() "
+            "WHERE state='leased' AND lease_expiry < now()"
+        )
 
     async def _scheduler(self) -> None:
         stopping = self._supervisor.stopping
@@ -708,6 +888,15 @@ def _pass_task_name(name: str, tenant: str) -> str:
     """A task name for a pass, since a pass name is prose and a task name is not."""
     slug = re.sub(r"[^A-Za-z0-9_]", "_", f"{name}_{tenant}" if tenant else name)
     return _validate_identifier(f"pass_{slug}"[:63], "pass task name")
+
+
+def _doorbell_delay(attempt: int) -> float:
+    """Seconds before reconnect ``attempt`` (1-based). Jittered so a fleet that
+    lost the same database does not come back at it in lockstep."""
+    return compute_backoff(
+        attempt, kind="exp", base=DOORBELL_BACKOFF_BASE,
+        cap=DOORBELL_BACKOFF_CAP, jitter=0.2,
+    )
 
 
 async def _sleep_or_stop(stopping: asyncio.Event, seconds: float) -> None:

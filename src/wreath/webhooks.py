@@ -49,6 +49,15 @@ class WebhookEnvelope:
     def __post_init__(self) -> None:
         if not self.id or not self.type or not self.version:
             raise ValueError("webhook id, type, and version are required")
+        # The signature base joins these with newlines, so a newline inside one
+        # of them lets a single MAC cover more than one (timestamp, id, type,
+        # body) split -- the fields stop being unambiguously recoverable from
+        # what was signed. Refused here rather than escaped, because no real
+        # event id or type contains a control character.
+        for name, value in (("id", self.id), ("type", self.type),
+                            ("version", self.version)):
+            if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+                raise ValueError(f"webhook {name} contains a control character")
         if self.timestamp.tzinfo is None:
             raise ValueError("webhook timestamp must include a timezone")
         if len(self.relay_path) > 32 or any(
@@ -185,6 +194,13 @@ class HMACWebhookVerifier:
         event_id_text = event_id.decode("utf-8")
         event_type_text = event_type.decode("utf-8")
         version_text = version.decode("utf-8")
+        # Checked before the MAC is computed, for the reason in
+        # `WebhookEnvelope.__post_init__`: a framing character in a signed field
+        # makes the split ambiguous, so it must not reach `_signature_base`.
+        for name, value in (("id", event_id_text), ("type", event_type_text),
+                            ("version", version_text)):
+            if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+                raise ValueError(f"webhook {name} contains a control character")
         try:
             key_id = key_id_data.decode("utf-8")
         except UnicodeDecodeError as error:

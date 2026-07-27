@@ -270,6 +270,34 @@ carrying the level's object count. Per-field latency attribution is the
 observability GraphQL users most often want and hardest to retrofit; here it
 needs no exporter wiring.
 
+## Sensitive columns
+
+A column whose name looks like a secret — `password`, `*_hash`, `token`,
+`secret`, `salt`, `api_key`, and the rest of the list `wreath.crud` uses — is
+**left out of the schema**. Both surfaces are generated from one `ModelSpec`, so
+it would be strange for the REST one to hide a password hash and the GraphQL one
+to answer `{ user { passwordHash } }`. Name a column in `expose` to put it back:
+
+```python
+GraphQL(registry, models=[User], expose=("User.api_key",))   # or just "api_key"
+```
+
+A hidden column is absent from the SDL as well as from execution, so it is not
+discoverable either.
+
+## Transport
+
+`POST /graphql` requires `content-type: application/json` (or
+`application/graphql+json`) and answers `415` otherwise. That is what keeps a
+cross-origin `<form>` from reaching a mutation: a `text/plain` POST is a *simple
+request*, so a browser sends it — with the caller's cookies — without the
+preflight a CORS policy could refuse.
+
+**The endpoint is exactly as public as the route you mount it on**, and field
+policies are evaluated only when you pass an `authorizer=`. Mount it behind
+`@authenticated()` (or an `include_router(..., permissions=...)`) unless the
+schema is genuinely public.
+
 ## Introspection
 
 Off by default — a schema dump is reconnaissance. Turn it on deliberately:

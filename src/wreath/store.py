@@ -161,11 +161,24 @@ class Keyed:
         return schema
 
 
+#: PostgreSQL truncates an identifier at NAMEDATALEN-1 bytes, silently.
+MAX_IDENTIFIER_BYTES: Final = 63
+
+
 def _interval(seconds: float | str) -> str:
     # A float is rendered as a literal (the store owns the lifetime); a string is
     # a placeholder, for when the caller supplies it per write.
-    bound = seconds if isinstance(seconds, str) else repr(float(seconds))
-    return f"make_interval(secs => {bound}::float8)"
+    if isinstance(seconds, str):
+        return f"make_interval(secs => {seconds}::float8)"
+    value = float(seconds)
+    # The literal goes into statement text, so a non-finite or negative lifetime
+    # would be discovered by PostgreSQL at prepare time (or, for a negative one,
+    # not at all -- it would just make every row born expired).
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError("a store lifetime must be a finite number of seconds")
+    if value <= 0:
+        raise ValueError("a store lifetime must be positive")
+    return f"make_interval(secs => {value!r}::float8)"
 
 
 @dataclass(slots=True)
@@ -305,7 +318,23 @@ class PostgresStore:
         """Register ``sql`` under ``name`` for lazy preparation."""
         if name in self._defined:
             raise ValueError(f"{name!r} is already defined on this store")
+        # Checked here, at description time, rather than left to the first
+        # request: PostgreSQL *truncates* an over-long statement name instead of
+        # refusing it, so two stores whose names agree in their first 63 bytes
+        # would quietly share one prepared statement -- exactly the collision
+        # `prefix` exists to prevent, and invisible until the wrong SQL runs.
+        statement_name = self._statement_name(name)
+        if len(statement_name.encode("utf-8")) > MAX_IDENTIFIER_BYTES:
+            raise ValueError(
+                f"prepared-statement name {statement_name!r} is "
+                f"{len(statement_name.encode('utf-8'))} bytes; PostgreSQL truncates "
+                f"at {MAX_IDENTIFIER_BYTES}, which would collide with another "
+                "store. Shorten the table name or the prefix."
+            )
         self._defined[name] = _Defined(sql, workload)
+
+    def _statement_name(self, name: str) -> str:
+        return f"{self._declaration.prefix}_{name}_{self.table}"
 
     def sql(self, name: str) -> str:
         """The text registered under ``name``. Useful when explaining a plan."""
@@ -319,7 +348,7 @@ class PostgresStore:
         entry = self._entry(name)
         if entry.statement is None:
             entry.statement = self._database.statement(
-                f"{self._declaration.prefix}_{name}_{self.table}",
+                self._statement_name(name),
                 entry.sql,
                 workload=entry.workload,
             )

@@ -20,6 +20,7 @@ from .. import _nplusone
 from .._flight_markers import COV_PYTHON as _COV_PYTHON
 from .._flight_markers import PH_ORM_HYDRATE as _PH_ORM_HYDRATE
 from .._flight_markers import phase_marker as _phase_marker
+from .._locks import _KEYED
 from .._nplusone import query_ledger as _query_ledger
 from .._orm_events import has_subscribers as _has_write_subscribers
 from .._orm_events import publish_write as _publish_write
@@ -93,19 +94,30 @@ class RawQuery:
         self._sql = sql
         self._args = args
 
+    # Every entry point checks the tenant binding. Compiled queries route
+    # through `Session.fetch`/`count`, which check it once; raw SQL is the one
+    # path that reaches the connection directly, and it is also the path whose
+    # statements are *unqualified by construction* -- so an unbound tenant
+    # session running raw SQL resolves against whatever `search_path` the
+    # pooled connection last held, which is another tenant's.
+
     async def execute(self) -> str:
+        self._session._check_tenant_bound()
         connection = await self._session._acquire()
         return await connection.execute(self._sql, *self._args)
 
     async def fetch(self) -> list[Any]:
+        self._session._check_tenant_bound()
         connection = await self._session._acquire()
         return await connection.fetch(self._sql, *self._args)
 
     async def fetchrow(self) -> Any:
+        self._session._check_tenant_bound()
         connection = await self._session._acquire()
         return await connection.fetchrow(self._sql, *self._args)
 
     async def fetchval(self) -> Any:
+        self._session._check_tenant_bound()
         connection = await self._session._acquire()
         return await connection.fetchval(self._sql, *self._args)
 
@@ -117,6 +129,7 @@ class RawQuery:
         silently dropped, so a drifting query fails loudly.
         """
         session = self._session
+        session._check_tenant_bound()
         spec = session._registry.spec_for(model)
         connection = await session._acquire()
         rows = await connection.fetch(self._sql, *self._args)
@@ -602,6 +615,21 @@ class Session:
         connection = await self._acquire()
         total = await connection.fetchval(sql, *values)
         return int(total) if total is not None else 0
+
+    async def declared(self, sql: str, args: tuple[Any, ...]) -> list[Any]:
+        """Run one statement rendered from a declaration, and return its rows.
+
+        The seam :mod:`wreath.series` executes through. It exists rather than
+        going via :meth:`raw` because a calculated view is compiled from model
+        metadata the same way a ``Select`` is, so it owes the same two checks a
+        ``Select`` gets: that the session is open, and that a tenant session is
+        inside the transaction its ``search_path`` is bound by. Statement text
+        comes from the compiler, never from a caller.
+        """
+        self._check_usable()
+        self._check_tenant_bound()
+        connection = await self._acquire()
+        return await connection.fetch(sql, *args)
 
     def raw(self, sql: str, *args: Any) -> RawQuery:
         """Run SQL exactly as written on this session's connection."""
@@ -1149,11 +1177,10 @@ class Session:
             else "pg_advisory_xact_lock_shared"
         )
         connection = await self._acquire()
-        await connection.fetchval(
-            f"SELECT {function}(hashtext($1::text), hashtext($2::text))",
-            namespace,
-            key,
-        )
+        # The same 64-bit, server-side key `wreath._locks` derives, so a lock
+        # taken through a session and one taken through `database.lock(...)`
+        # name the same lock.
+        await connection.fetchval(f"SELECT {function}({_KEYED})", namespace, key)
 
     def __repr__(self) -> str:
         state = "closed" if self._closed else "open"

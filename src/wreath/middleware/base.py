@@ -191,11 +191,28 @@ class MiddlewareTape:
         return response
 
 
+_HOOK_ATTRIBUTES = ("before", "before_sync", "after")
+
+
 def _is_fused(middleware: Middleware) -> bool:
-    return isinstance(middleware, MiddlewareHooks) or any(
-        hasattr(middleware, attribute)
-        for attribute in ("before", "before_sync", "after")
-    )
+    if isinstance(middleware, MiddlewareHooks):
+        return True
+    hooks = any(hasattr(middleware, attribute) for attribute in _HOOK_ATTRIBUTES)
+    if not hooks:
+        return False
+    # A hook middleware and a legacy `(request, call_next)` middleware are told
+    # apart by which attributes they carry, so an object carrying both is
+    # ambiguous -- and the ambiguity used to resolve silently in favour of the
+    # hooks, which meant a legacy middleware that happened to define `after`
+    # never had its `__call__` invoked at all. Nothing in the response said so.
+    if callable(middleware) and not isinstance(middleware, type):
+        raise TypeError(
+            f"{type(middleware).__name__} defines both __call__ and "
+            f"{', '.join(a for a in _HOOK_ATTRIBUTES if hasattr(middleware, a))}; "
+            "a middleware is either the legacy (request, call_next) form or the "
+            "hook form, and which one this is cannot be guessed. Remove one."
+        )
+    return True
 
 
 def _fuse_sync_befores(instructions: list[_Instruction]) -> list[_Instruction]:

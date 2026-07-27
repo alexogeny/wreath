@@ -129,9 +129,33 @@ before it begins listening.
 `@cached` refuses to cache anything that would leak one caller's data to another:
 
 - only the methods you allow (`GET` by default),
-- only success responses (status < 400),
+- only success responses (`2xx`) — a `3xx` is excluded too, because a
+  redirect's `Location` is one of the most reliably per-caller things a
+  response carries,
 - **never** a response that sets a cookie,
 - **never** one marked `Cache-Control: no-store` or `private`.
+
+A cached `dict`/`list` is copied on the way in and on the way out, so the
+entry every later caller is served can never be rewritten by something
+mutating the object it was given.
+
+**The public key now refuses an identified caller.** A request that reached the
+handler with a `request.identity` set bypasses the cache entirely rather than
+being served — or stored — under a key that carries no principal. Pass a `key`
+that includes the principal to cache per caller.
+
+**A response carrying `Vary` is not cached.** `Vary` names request headers the
+answer depends on, and this cache's key cannot represent them — so one entry
+would be served to every variant. That includes anything from
+`negotiation.serialize()`, which sets `Vary: Accept`.
+
+**Bound the keyspace with `query_params`.** By default the whole query string is
+part of the key, so a caller varying a parameter the handler ignores (`?_=1`)
+fills the store and evicts everything real:
+
+```python
+@cached(ttl=30, query_params=("page", "size"))   # only these reach the key
+```
 
 The default key has no notion of *who* is asking, so it is a **shared/public**
 cache. If a response depends on the caller, either don't cache it, or pass a key

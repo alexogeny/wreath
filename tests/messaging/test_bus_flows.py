@@ -83,7 +83,8 @@ async def test_publish_durable_with_no_groups_is_a_noop() -> None:
 
 
 async def test_claim_hydrates_message_or_returns_none() -> None:
-    row = {"id": 7, "payload": json.dumps({"x": 1}), "tenant": "", "fence": 2}
+    # `attempts` rides the claim so a retry's backoff can grow with it.
+    row = {"id": 7, "payload": json.dumps({"x": 1}), "tenant": "", "fence": 2, "attempts": 0}
     conn = FakeConn(fetchrow=row)
     bus = _bus(conn)
 

@@ -136,6 +136,10 @@ app.crud(Invoice, open_session,
          object_authorizer=same_tenant)   # -> 403 when it returns falsey
 ```
 
+`object_authorizer` also runs over each row of `GET /`, so a model whose rows
+are protected individually is not readable in bulk. A page may therefore come
+back shorter than `size`.
+
 `object_authorizer` may be async and may return a bool or an
 `AuthorizationDecision`; it runs on retrieve, update, delete (the loaded row) and
 on create (the new instance, before it is committed).

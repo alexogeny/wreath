@@ -94,7 +94,30 @@ handle, so submitting the same work twice yields the same task to watch. In the
 narrow race where that row is purged between the conflict and the lookup there
 is genuinely nothing to watch, and `launch` raises `wreath.jobs.JobVanished`
 rather than returning a task id that would 404 on the status endpoint and stream
-forever on the SSE one. Re-launch — nothing is holding the key any more.
+forever on the SSE one. Re-launch — nothing is holding the key any more. When
+the surviving row *is* found and this worker has no progress entry for it — the
+original ran elsewhere, and progress fan-out is at-most-once with no replay —
+the task is seeded as `running` so the handle is watchable immediately, without
+overwriting a real percentage this worker already knows about.
+
+### When the runner's doorbell drops
+
+`NOTIFY` is a latency doorbell, never a correctness dependency: workers poll as
+well, so losing it costs latency rather than jobs. That is exactly why it is
+worth supervising — nothing breaks, so nothing tells you. The held `LISTEN`
+connection is reconnected with jittered backoff (50 ms up to 5 s, the default
+`poll_interval`), and a runner whose database is down at startup still starts,
+still claims work by polling, and picks the doorbell up when the database comes
+back.
+
+Two counters make the quiet states countable:
+
+- **`runner.doorbell_reconnects`** — connections lost, plus every failed attempt
+  to open one (including at startup). Climbing means jobs are being claimed at
+  poll latency rather than on notification.
+- **`runner.pass_drive_errors`** — chunked passes that could not be given their
+  first shift. A pass that is never driven does nothing at all, and its ledger
+  row looks the same as one with no work to do.
 
 ## Scheduled work
 

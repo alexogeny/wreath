@@ -55,13 +55,37 @@ class BusBridge:
     with them -- belongs to the caller, because it differs every time.
     """
 
-    __slots__ = ("_apply", "_bus", "_channel", "_inflight", "_origin")
+    __slots__ = (
+        "_apply",
+        "_bus",
+        "_channel",
+        "_inflight",
+        "_max_inflight",
+        "_origin",
+        "dropped_publishes",
+        "untagged_applied",
+    )
 
-    def __init__(self, bus: Any = None, *, channel: str, apply: Apply) -> None:
+    def __init__(
+        self,
+        bus: Any = None,
+        *,
+        channel: str,
+        apply: Apply,
+        max_inflight: int = 1024,
+    ) -> None:
         self._bus = bus
         self._channel = channel
         self._apply = apply
         self._inflight: set[asyncio.Future[Any]] = set()
+        self._max_inflight = max_inflight
+        #: Deferred publishes dropped because too many were already in flight.
+        self.dropped_publishes = 0
+        #: Inbound payloads that carried no origin tag -- i.e. published by
+        #: something that is not a bridge. Delivered anyway (see `_receive`);
+        #: non-zero on a healthy fleet means somebody else is writing to this
+        #: channel, which is worth knowing either way.
+        self.untagged_applied = 0
         # Identifies messages this worker published, so the copy NOTIFY hands
         # back to the sender is dropped. Random, not `id(self)`: the tag goes on
         # the wire to every other worker, and an address is wrong on both
@@ -129,6 +153,16 @@ class BusBridge:
             # caller has no loop to publish on and there is nothing useful to
             # do about it here.
             return
+        if len(self._inflight) >= self._max_inflight:
+            # Bounded. A caller whose real work is already durable publishes
+            # without waiting, so nothing here applies backpressure to it -- and
+            # against a bus that is slow or wedged, the set grew with every
+            # write until the process did. Dropping the newest update is the
+            # cheap failure: these payloads are commentary (a progress
+            # percentage, an invalidation with a TTL behind it), and the count
+            # says how much was lost.
+            self.dropped_publishes += 1
+            return
         future = asyncio.ensure_future(self._publish_quietly(payload))
         # Held until it finishes: a task nobody references can be collected
         # mid-flight, which loses the message silently.
@@ -155,10 +189,21 @@ class BusBridge:
         payload = message.payload
         if not isinstance(payload, dict):
             return
-        if payload.get("origin") == self._origin:
+        origin = payload.get("origin")
+        if origin == self._origin:
             return  # our own NOTIFY, already applied locally
-        # An untagged payload is treated as foreign: an unrecognised publisher
-        # is somebody else, and dropping it would lose a real update.
+        if not isinstance(origin, str) or not origin:
+            # Applied, and counted. Every bridge tags what it publishes, so an
+            # untagged payload came from something that is not a bridge -- which
+            # is either an ops script or somebody with NOTIFY rights on this
+            # database driving invalidations, room broadcasts, and progress
+            # writes. Dropping it would close that seam, and would also lose a
+            # real update from a publisher on an older wire format; the shipped
+            # decision is to deliver (see the test named for it). What was
+            # missing is that the situation was invisible, so it is now counted:
+            # a non-zero value on a healthy fleet means somebody else is writing
+            # to this channel.
+            self.untagged_applied += 1
         await self._apply(payload)
 
     def __repr__(self) -> str:

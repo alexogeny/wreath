@@ -23,6 +23,16 @@ class BadRequest(HTTPException):
     status = 400
 
 
+class ClientDisconnect(BadRequest):
+    """The peer went away before the request body finished arriving.
+
+    A 4xx because the request never completed; distinct from `BadRequest` so an
+    application can tell "malformed" from "never finished" in a handler or a
+    log, and so the response -- which usually has nowhere to go -- is not
+    counted as a server fault.
+    """
+
+
 class Unauthorized(HTTPException):
     status = 401
 

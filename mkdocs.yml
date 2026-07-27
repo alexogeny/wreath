@@ -98,6 +98,7 @@ nav:
           - ORM: guides/orm.md
           - JSONB and arrays: guides/jsonb-arrays.md
           - Pagination, filtering, and sorting: guides/pagination.md
+          - Calculated views: guides/calculated-views.md
           - Generating CRUD: guides/crud.md
           - Distributed locks: guides/distributed-locks.md
           - FastAPI and Alembic migration: guides/migrations.md
@@ -220,6 +221,7 @@ nav:
       - Supervised services: reference/services.md
       - User management: reference/users.md
       - Named queries: reference/queries.md
+      - Calculated views: reference/series.md
       - Pagination: reference/pagination.md
       - Health checks: reference/health.md
       - Rooms: reference/rooms.md

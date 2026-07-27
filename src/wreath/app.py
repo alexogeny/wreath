@@ -35,7 +35,7 @@ from .binding import (
     inspect_handler,
 )
 from .cache_control import CacheControl
-from .exceptions import Forbidden, HTTPException, Unauthorized
+from .exceptions import Forbidden, HTTPException, NotFound, Unauthorized
 from .middleware.base import Middleware, MiddlewareRoute, compile_middleware
 from .request import DEFAULT_LIMITS, Request, RequestLimits
 from .response import (
@@ -160,6 +160,13 @@ def _make_dependency_capturer(scope: Any, rule: tuple[Any, int]) -> Any:
         capture(field_class, 0, disposition_int, bytes(data), max_bytes)
 
     return _capture_dependency
+
+#: Environments in which `enable_docs()` publishes the docs page and the
+#: OpenAPI document. Anything not named here -- including the default,
+#: "production" -- gets neither route and no existence leak.
+NON_PRODUCTION_ENVIRONMENTS: tuple[str, ...] = (
+    "dev", "development", "local", "test", "testing",
+)
 
 ExceptionHandler = Callable[[Request, Exception], Awaitable[Any]]
 WebSocketHandler = Callable[[WebSocket], Awaitable[None]]
@@ -1108,7 +1115,12 @@ class Wreath:
                 if global_hooks:
                     request._set_route_outcome("static")
             else:
-                response = ProblemResponse(status=404, detail="Not Found")
+                # Through the exception path rather than straight to a
+                # ProblemResponse, so a registered 404 status handler (or a
+                # NotFound exception handler) covers a routing miss -- which is
+                # the case people register one for. With nothing registered this
+                # produces the same response it always did.
+                response = await self._handle_exception(request, NotFound("Not Found"))
                 await self._finish_http(
                     request, response, send, method, scope, native_response, active_global
                 )
@@ -1304,7 +1316,31 @@ class Wreath:
             attribution = ids.get(handler)
             if attribution is not None:
                 scope["_wreath_flight"] = attribution
-        websocket = WebSocket(scope, receive, send, path_params)
+        # A WebSocket route carries the same `@authenticated`/`@roles`/
+        # `@permissions`/`@authorize` metadata an HTTP route does, and it used to
+        # be ignored here -- the handler ran for anyone who could reach the path.
+        # Enforced before the handshake, so a refused caller never gets an
+        # accepted socket: an ASGI server turns a pre-accept close into its own
+        # rejection response.
+        identity: Identity | None = None
+        requirement = requirement_for(handler)
+        if (
+            requirement.authenticated
+            or requirement.role_checks
+            or requirement.permission_checks
+            or requirement.policies
+        ):
+            # Authentication backends read headers and cookies, which a
+            # WebSocket scope carries; `method` is synthesized on a copy because
+            # the handshake is a GET and a backend may look.
+            request = Request({**scope, "method": "GET"}, receive, path_params, self._limits)
+            try:
+                await self._authorize_request(request, requirement)
+            except HTTPException:
+                await send({"type": "websocket.close", "code": 1008})
+                return
+            identity = request.identity
+        websocket = WebSocket(scope, receive, send, path_params, identity=identity)
         try:
             await cast("WebSocketHandler", handler)(websocket)
         except WebSocketDisconnect:
@@ -1833,15 +1869,26 @@ class Wreath:
         spec_path: str = "/openapi.json",
         title: str = "Wreath",
         version: str = "0.1.0",
-    ) -> None:
+        environments: Iterable[str] | None = NON_PRODUCTION_ENVIRONMENTS,
+    ) -> bool:
         """Backwards-compatible alias for :meth:`enable_api_docs`.
 
-        Serves the self-contained docs page and OpenAPI document, ungated (all
-        environments, no auth). Prefer :meth:`enable_api_docs` for env/auth
+        Serves the self-contained docs page and OpenAPI document **outside
+        production**. The gate is the difference from what this used to do: the
+        alias registered both routes unconditionally, so the shorter, older,
+        more-copied spelling was the one that published the whole API surface
+        from a production deployment. Pass ``environments=None`` to register
+        everywhere, or use :meth:`enable_api_docs` for auth as well as env
         gating.
+
+        Returns whether the routes were registered.
         """
-        self.enable_api_docs(
-            path=docs_path, spec_path=spec_path, title=title, version=version
+        return self.enable_api_docs(
+            path=docs_path,
+            spec_path=spec_path,
+            title=title,
+            version=version,
+            environments=environments,
         )
 
     def on_startup(self, handler: LifespanHandler) -> LifespanHandler:

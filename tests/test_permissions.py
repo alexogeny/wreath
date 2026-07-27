@@ -636,6 +636,51 @@ def test_the_built_in_engine_is_fingerprinted_through_its_public_surface() -> No
     assert "_source" not in _policy_fingerprint.__code__.co_consts
 
 
+def test_the_built_in_authorizer_is_fingerprinted_without_digging_out_its_engine() -> None:
+    """The content path asks the authorizer, which delegates to its engine.
+
+    Reaching through `authorizer._engine` read a private name owned by
+    `_auth/cedar.py` from another module. A rename there would not have raised:
+    the `getattr` would have handed back the authorizer, every probe would have
+    missed, and the tag would have dropped to a per-instance token -- so
+    `If-None-Match` would stop matching across workers with no error anywhere.
+    """
+    from wreath._auth.permissions import _policy_fingerprint
+
+    authorizer = CedarAuthorizer(engine=CedarPolicies(POLICIES))
+
+    assert _policy_fingerprint(authorizer) == POLICIES.encode("utf-8")
+
+
+def test_the_fingerprint_still_knows_the_private_engine_name() -> None:
+    """The guard for the one reach that survives, in the fallback path.
+
+    An engine exposing nothing is tagged per *engine*, not per authorizer, so
+    two adapters over one policy set agree. That still needs `_engine`. The
+    consequence of a rename differs by path -- a redundant refetch here, a
+    silently stale manifest on the content path -- but it should fail loudly
+    either way rather than degrade.
+    """
+    assert "_engine" in CedarAuthorizer.__slots__
+
+
+def test_two_authorizers_over_one_engine_agree_on_the_tag() -> None:
+    """A second adapter over the same policies must not mint a second tag.
+
+    Otherwise every client behind it refetches a manifest that has not moved.
+    Checked on the opaque path deliberately: content-derived tags agree for the
+    trivial reason that the content is equal, so only the token path can show
+    that the identity is the engine's rather than the adapter's.
+    """
+    from wreath._auth.permissions import _policy_fingerprint
+
+    engine = _OpaqueEngine(4)
+
+    assert _policy_fingerprint(CedarAuthorizer(engine=engine)) == _policy_fingerprint(
+        CedarAuthorizer(engine=engine)
+    )
+
+
 def test_an_opaque_engines_tag_is_minted_once_not_per_read() -> None:
     """`_shared_fingerprint` is re-read on every stream keep-alive tick.
 

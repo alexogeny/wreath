@@ -67,6 +67,11 @@ PROGRESS_CHANNEL = "wreath_progress"
 
 _TERMINAL = ("done", "failed")
 
+#: How many consecutive polls a stream waits for a task that has never been
+#: reported before giving up. Covers the client-connects-first race without
+#: letting an id nobody ever launches hold a connection open.
+MISSING_TASK_POLLS = 5
+
 
 def _clamp(percent: float) -> float:
     return 0.0 if percent < 0 else 100.0 if percent > 100 else float(percent)
@@ -164,18 +169,32 @@ class ProgressRegistry:
         """Yield each new :class:`Progress` for ``task_id`` until it is terminal.
 
         Polls every ``interval`` seconds (thread-safe, no cross-task signalling);
-        stops after a ``done``/``failed`` state or once the entry is gone.
+        stops after a ``done``/``failed`` state, once the entry is gone, or once
+        a task that never appeared has been waited for long enough.
+
+        That last case is the one worth naming: a stream for an id that does not
+        exist used to poll forever, so any caller -- including an unauthenticated
+        one, since these helpers carry no auth of their own -- could hold a
+        connection open indefinitely by asking about a task that was never
+        launched. A short grace period still covers the real race, where a client
+        starts watching a moment before the task is registered.
         """
         last: Progress | None = None
+        missing = 0
         while True:
             current = self.get(task_id)
             if current is not None and current != last:
                 yield current
                 last = current
+                missing = 0
                 if current.terminal:
                     return
-            elif current is None and last is not None:
-                return           # expired or evicted mid-stream
+            elif current is None:
+                if last is not None:
+                    return       # expired or evicted mid-stream
+                missing += 1
+                if missing > MISSING_TASK_POLLS:
+                    return       # never existed; nothing to wait for
             await asyncio.sleep(interval)
 
 

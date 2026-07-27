@@ -11,7 +11,7 @@ from ._codecs import parse_cookies, parse_qs
 from ._headers import build_header_map, find_header
 from ._json import loads as _json_loads
 from ._multipart import parse as multipart_parse
-from .exceptions import PayloadTooLarge
+from .exceptions import ClientDisconnect, PayloadTooLarge
 from .state import State
 
 
@@ -418,7 +418,14 @@ class Request:
             message = await self._receive()
             message_type = message["type"]
             if message_type == "http.disconnect":
-                break
+                # Not an end-of-body. Returning what had arrived handed the
+                # handler a truncated payload that could still parse -- half a
+                # JSON document is rarely valid, but half a form or half an
+                # upload very often is, and the handler had no way to tell.
+                self._body = b""
+                raise ClientDisconnect(
+                    "the client disconnected before the request body was received"
+                )
             if message_type != "http.request":
                 continue
             body = message.get("body", b"")

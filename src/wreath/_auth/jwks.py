@@ -21,6 +21,13 @@ __all__ = ["JwksCache"]
 # Absolute cap on a JWKS document so a hostile endpoint cannot exhaust memory.
 _MAX_JWKS_BYTES = 512 * 1024
 
+#: Bounds on the cache lifetime a provider may ask for through `Cache-Control`.
+#: Unclamped, `max-age=31536000` pinned a rotated -- or withdrawn -- signing key
+#: for a year, and `max-age=0` turned every unknown kid into a fetch. The floor
+#: is also what makes the negative cache meaningful.
+_MIN_TTL = 60.0
+_MAX_TTL = 24 * 60 * 60.0
+
 
 class JwksCache:
     """Holds parsed JWKS keys and refreshes them on demand."""
@@ -94,7 +101,11 @@ class JwksCache:
         response = await self._client.get(self._jwks_path)
         if response.status != 200:
             # Leave the existing keys in place; a transient IdP error must not
-            # wipe a working cache.
+            # wipe a working cache. The attempt still counts as a refresh, so
+            # the negative cache holds: without this, once `min_refresh` had
+            # elapsed since the last *success*, every request carrying an
+            # unknown kid hit a provider that was already failing.
+            self._last_refresh = self._now()
             return
         body = response.body
         if len(body) > _MAX_JWKS_BYTES:
@@ -125,7 +136,10 @@ def _ttl_from_headers(response: Any, default: float) -> float:
         directive = directive.strip().lower()
         if directive.startswith(b"max-age="):
             try:
-                return float(int(directive[len(b"max-age=") :]))
+                seconds = float(int(directive[len(b"max-age=") :]))
             except ValueError:
                 return default
+            # The provider is advising, not instructing: this cache holds the
+            # keys that decide who is authenticated.
+            return min(max(seconds, _MIN_TTL), _MAX_TTL)
     return default

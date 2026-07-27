@@ -122,6 +122,15 @@ window between the conflict and the lookup — there is no task to watch, and
 `launch` raises `wreath.jobs.JobVanished` instead of returning an id that
 cannot be polled. Every `TaskHandle` you are given carries a real job id.
 
+That handle is watchable even when the original `launch` happened somewhere
+else. Progress crosses workers at-most-once and is never replayed, so a worker
+that started later — or that simply missed the publish — has no entry for a task
+that is genuinely running, and the handle it just handed you would `404` on
+status and hang on the stream. So a deduplicated `launch` seeds the task as
+`running` *when this worker has nothing for it*, and leaves it alone when it
+does: an import already at 70% here keeps its 70%, rather than appearing to
+start over because somebody submitted it twice.
+
 ### From GraphQL
 
 The same handle, and no new schema machinery — a mutation returning `ID` passes

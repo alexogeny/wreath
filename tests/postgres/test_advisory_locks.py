@@ -83,7 +83,8 @@ async def test_lock_acquires_and_unlocks_on_the_same_connection() -> None:
             assert pool.borrowed == 1
             connection = connector.connections[0]
             assert (
-                "SELECT pg_advisory_lock(hashtext($1::text), hashtext($2::text))",
+                "SELECT pg_advisory_lock("
+                "hashtextextended($2::text, hashtextextended($1::text, 0)))",
                 ("main", "job:rebalance"),
             ) in connection.calls
         # Released back to the pool, unlocked on the same backend.
@@ -91,7 +92,7 @@ async def test_lock_acquires_and_unlocks_on_the_same_connection() -> None:
         connection = connector.connections[0]
         assert connection is connector.connections[0]
         assert (
-            "SELECT pg_advisory_unlock(hashtext($1::text), hashtext($2::text))",
+            "SELECT pg_advisory_unlock(hashtextextended($2::text, hashtextextended($1::text, 0)))",
             ("main", "job:rebalance"),
         ) in connection.calls
     finally:
@@ -294,7 +295,10 @@ async def test_session_xact_lock_rides_the_pinned_connection() -> None:
     session._depth = 1  # simulate being inside `async with session.begin():`
     await session.lock("account:42")
     sql, args = database.connection.calls[-1]
-    assert sql == "SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))"
+    assert sql == (
+        "SELECT pg_advisory_xact_lock("
+        "hashtextextended($2::text, hashtextextended($1::text, 0)))"
+    )
     assert args == ("main", "account:42")
 
 

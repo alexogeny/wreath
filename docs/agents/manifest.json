@@ -379,6 +379,24 @@
       "policy": "The dependency direction is one-way: wreath.orm imports wreath.postgres, never the reverse. Attribute access never performs I/O; loading is explicit (no lazy N+1). Pure and native storage must match behavior, not representation; the native query cache-key (orm_shape) must produce bytes identical to _shape_of_pure or the plan cache splits."
     },
     {
+      "name": "series",
+      "guides": [
+        "docs/guides/calculated-views.md"
+      ],
+      "reference": [
+        "docs/reference/series.md"
+      ],
+      "sources": [
+        "src/wreath/series.py",
+        "src/wreath/_series/"
+      ],
+      "tests": [
+        "tests/series/",
+        "tests/postgres/test_series_integration.py"
+      ],
+      "policy": "Chart data as a declaration over one source model, with a bounded result. Bucketing is a timezone problem before it is an aggregation problem: the bucket is assigned and the spine generated on the local wall clock, then converted back, because generate_series stepping naive timestamps advances a calendar day while stepping timestamptz advances exactly 24 hours -- the DST bug, twice a year, in one bucket. Ranges are half-open and stated once, for the filter and the spine bounds alike. Fill is per measure: count and sum fill with 0, avg/min/max stay null, because an average of no rows is undefined and drawing it as zero reads as a collapse rather than an absence. A series is identified by a stable key from the grouping value, never by rank, so a filter change cannot repaint a legend. Multiple measures are multiple named series and are never merged -- two units on one pair of axes is a dual-axis chart, whose alignment is arbitrary. Top-N folds (it preserves the total) and the fold is applied before aggregation, so the remainder's average is a real average and not an average of averages; every other ceiling refuses rather than truncating. Not plan-cached, following compile_count: a declaration runs once per chart request, not once per row. Bucket vocabulary lives in wreath.temporal because sealing will need end_of() too."
+    },
+    {
       "name": "migrations",
       "guides": [
         "docs/guides/migrations.md"

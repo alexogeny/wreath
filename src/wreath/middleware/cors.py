@@ -43,6 +43,18 @@ class CORSMiddleware:
         max_age: int = 600,
     ) -> None:
         origins = tuple(allow_origins)
+        if "*" in origins and allow_credentials:
+            # Reflecting an arbitrary origin *with* credentials lets any site
+            # read authenticated responses from this one. Browsers refuse the
+            # literal `*` with credentials, so the only way to honour this
+            # configuration is to echo whichever origin asked -- which is the
+            # vulnerability, not a workaround for it. Named origins with
+            # credentials are fine and stay supported.
+            raise ValueError(
+                "allow_origins=['*'] cannot be combined with allow_credentials=True: "
+                "it reflects every origin with credentials. Name the origins that "
+                "may send credentials."
+            )
         self._allow_all_origins = "*" in origins
         self._allow_origins = frozenset(origins)
         self._allow_credentials = allow_credentials
@@ -84,7 +96,11 @@ class CORSMiddleware:
             return None  # not a CORS preflight; fall through to the route
         allowed = self._origin_header(origin)
         if allowed is None:
-            return Response(b"disallowed origin", status=403, media_type=b"text/plain")
+            refusal = Response(b"disallowed origin", status=403, media_type=b"text/plain")
+            # The refusal is origin-dependent too, so a shared cache must not
+            # replay it to an origin that would have been allowed.
+            refusal.headers.append((b"vary", b"origin"))
+            return refusal
         response = Response(b"", status=204, media_type=None)
         response.headers.append(allowed)
         response.headers.extend(self._preflight_headers)
@@ -103,9 +119,16 @@ class CORSMiddleware:
             return response
         allowed = self._origin_header(origin)
         headers = getattr(response, "headers", None)
+        if allowed is None:
+            # No ACAO for this origin -- but the *absence* is still a function of
+            # the Origin header, so the response has to say so or a shared cache
+            # will hand this bodyless-to-JavaScript answer to an allowed origin
+            # (and the reverse).
+            if headers is not None and find_response_header(headers, b"vary") is None:
+                headers.append((b"vary", b"origin"))
+            return response
         if (
-            allowed is not None
-            and headers is not None
+            headers is not None
             # Respect a response that already carries CORS headers — the
             # preflight short-circuit from `before`, or a handler's own.
             # `find_response_header` is the same scan in C, and it matches

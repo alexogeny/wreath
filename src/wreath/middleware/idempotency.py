@@ -44,6 +44,32 @@ from ..store import CLAIMED, Column, Keyed, MemoryStore, PostgresStore
 
 _UNCACHEABLE_BODY = ("StreamingResponse", "FileResponse", "SSEResponse", "PreparedResponse")
 
+#: Statuses whose *cause* is expected to change on a retry, so storing one would
+#: hand the client the same failure for the whole TTL. A rate limit lifts, a
+#: lock frees, an authorization decision follows a role change; none of them
+#: said "your write happened". 5xx is handled separately, and every other 4xx
+#: (a 422 on a malformed body, a 404 on a missing row) is deterministic enough
+#: that replaying the answer is the point of the feature.
+_RETRYABLE_STATUSES = frozenset({401, 403, 408, 409, 423, 425, 429, 449})
+
+#: Response headers that must never be replayed to a later request. A cookie is
+#: the response's own per-request state -- a rotated session id, a CSRF token --
+#: and handing a stored copy to every retry re-issues credentials the server has
+#: already moved on from.
+_UNREPLAYABLE_HEADERS = frozenset({b"set-cookie", b"set-cookie2"})
+
+
+def _replayable_headers(
+    headers: Iterable[tuple[bytes, bytes]],
+) -> tuple[tuple[bytes, bytes], ...]:
+    """The headers worth storing: dropped rather than filtered on the way out,
+    so the store never holds a credential it does not need."""
+    return tuple(
+        (name, value)
+        for name, value in headers
+        if name.lower() not in _UNREPLAYABLE_HEADERS
+    )
+
 #: A stored response: status, headers, body.
 type Replay = tuple[int, tuple[tuple[bytes, bytes], ...], bytes]
 
@@ -247,7 +273,7 @@ class IdempotencyMiddleware:
     """Replay the stored response for a repeated ``Idempotency-Key``."""
 
     global_scope = True
-    __slots__ = ("_header", "_methods", "_store")
+    __slots__ = ("_header", "_max_body_bytes", "_methods", "_store")
 
     def __init__(
         self,
@@ -257,6 +283,7 @@ class IdempotencyMiddleware:
         methods: Iterable[str] = ("POST", "PUT", "PATCH", "DELETE"),
         header: str = "idempotency-key",
         store: IdempotencyStore | None = None,
+        max_body_bytes: int = 256 * 1024,
     ) -> None:
         self._store: IdempotencyStore = (
             store
@@ -265,6 +292,12 @@ class IdempotencyMiddleware:
         )
         self._methods = frozenset(m.upper() for m in methods)
         self._header = header.lower()
+        # A replay holds a whole response body for the TTL, in memory or in a
+        # table, and nothing bounded it -- so an endpoint that returns something
+        # large was an amplifier any authenticated caller could aim. Past the
+        # cap the key is released and the request stays retryable, which is the
+        # same outcome as an un-snapshottable body.
+        self._max_body_bytes = max_body_bytes
 
     def _key(self, request: Request) -> str | None:
         """The store key for this request, or ``None`` to leave it unguarded.
@@ -294,16 +327,31 @@ class IdempotencyMiddleware:
         # and the stored key is a bounded width whatever the path length.
         return dedup_key(f"{request.method} {request.path} {identity.id}", value)
 
-    async def before(self, request: Request):
+    async def action(self, request: Request):
+        """Run after the pipeline has identified the caller, before the handler.
+
+        Deliberately the ``action`` stage and not ``before``: a global ``before``
+        hook runs at *ingress*, which is upstream of authentication, so
+        ``request.identity`` is always None there -- and :meth:`_key` returns
+        None for an anonymous request, so mounting this as an ingress hook made
+        it silently guard nothing at all. ``RateLimitMiddleware`` refuses
+        ``principal_key`` at construction for exactly this reason; this
+        middleware has no such choice to refuse, so it moves to the stage where
+        the principal exists. The ``after`` half still runs for every response,
+        as it must.
+        """
         key = self._key(request)
         if key is None:
             return None
         state, entry = await self._store.reserve(key)
         if state == "in_flight":
-            return ProblemResponse(
+            conflict = ProblemResponse(
                 status=409,
                 detail="a request with this Idempotency-Key is still in progress",
             )
+            # A bare 409 invites an immediate retry into the same conflict.
+            conflict.headers.append((b"retry-after", b"1"))
+            return conflict
         if state == "done" and entry is not None:
             status, headers, body = entry
             replay = Response(body, status=status, headers=list(headers))
@@ -316,12 +364,17 @@ class IdempotencyMiddleware:
         key = getattr(request.state, "idempotency_key", None) if request._state else None
         if key is None:
             return response
-        if response.status >= 500 or type(response).__name__ in _UNCACHEABLE_BODY:
+        if (
+            response.status >= 500
+            or response.status in _RETRYABLE_STATUSES
+            or type(response).__name__ in _UNCACHEABLE_BODY
+            or len(getattr(response, "body", b"")) > self._max_body_bytes
+        ):
             # A transient failure (or an un-snapshottable body) stays retryable.
             await self._store.release(key)
             return response
         await self._store.store(
-            key, (response.status, tuple(response.headers), response.body)
+            key, (response.status, _replayable_headers(response.headers), response.body)
         )
         return response
 

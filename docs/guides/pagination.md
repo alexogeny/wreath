@@ -31,6 +31,12 @@ async def list_orders(
 your table wants. `allow_sort` is a hard allow-list — `?sort=secret_column` is
 rejected, never handed to the SQL.
 
+`page` is bounded above by `MAX_PAGE` (10 000) as well as below by 1.
+`LIMIT/OFFSET` makes the database walk and discard every row before the offset,
+so an unbounded page number is a full scan a caller can ask for at will; past
+that depth, filter on a keyset instead.
+
+
 ## Bind the query parameters
 
 `page_params` is a `Depends`-able that binds `?page=&size=&sort=` into a `PageParams`:

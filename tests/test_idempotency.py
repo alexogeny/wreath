@@ -43,11 +43,11 @@ async def test_first_call_passes_through_then_replays() -> None:
     mw = IdempotencyMiddleware()
 
     first = _request()
-    assert await mw.before(first) is None            # not seen -> proceed
+    assert await mw.action(first) is None            # not seen -> proceed
     await mw.after(first, Response(b"created", status=201))
 
     second = _request()                              # same key
-    replay = await mw.before(second)
+    replay = await mw.action(second)
     assert replay is not None
     assert replay.status == 201 and replay.body == b"created"
     assert (b"idempotency-replayed", b"true") in replay.headers
@@ -56,25 +56,25 @@ async def test_first_call_passes_through_then_replays() -> None:
 async def test_concurrent_duplicate_gets_409() -> None:
     mw = IdempotencyMiddleware()
     first = _request()
-    assert await mw.before(first) is None            # reserves the key (in-flight)
+    assert await mw.action(first) is None            # reserves the key (in-flight)
     # A second identical request arrives before the first's `after` runs.
-    conflict = await mw.before(_request())
+    conflict = await mw.action(_request())
     assert conflict is not None and conflict.status == 409
 
 
 async def test_5xx_is_not_cached_and_stays_retryable() -> None:
     mw = IdempotencyMiddleware()
     first = _request()
-    await mw.before(first)
+    await mw.action(first)
     await mw.after(first, Response(b"boom", status=500))
     # The key was released, so a retry proceeds instead of replaying the 500.
-    assert await mw.before(_request()) is None
+    assert await mw.action(_request()) is None
 
 
 async def test_safe_method_and_missing_key_are_ignored() -> None:
     mw = IdempotencyMiddleware()
-    assert await mw.before(_request(method="GET")) is None
-    assert await mw.before(_request(key=None)) is None
+    assert await mw.action(_request(method="GET")) is None
+    assert await mw.action(_request(key=None)) is None
     # Neither reserved a key, so `after` is a passthrough.
     resp = Response(b"x")
     assert await mw.after(_request(key=None), resp) is resp
@@ -83,12 +83,12 @@ async def test_safe_method_and_missing_key_are_ignored() -> None:
 async def test_key_is_scoped_by_principal() -> None:
     mw = IdempotencyMiddleware()
     alice = _request(principal="alice")
-    await mw.before(alice)
+    await mw.action(alice)
     await mw.after(alice, Response(b"alice-order", status=201))
 
     bob = _request(principal="bob")                  # same key value, different user
     # Bob must NOT get alice's stored response.
-    assert await mw.before(bob) is None
+    assert await mw.action(bob) is None
 
 
 async def test_anonymous_requests_are_not_guarded_and_never_replay_each_other() -> None:
@@ -103,23 +103,23 @@ async def test_anonymous_requests_are_not_guarded_and_never_replay_each_other() 
     mw = IdempotencyMiddleware()
 
     first = _request(path="/signup", principal=None)
-    assert await mw.before(first) is None
+    assert await mw.action(first) is None
     await mw.after(first, Response(b'{"token":"alice-secret"}', status=201))
 
     second = _request(path="/signup", principal=None)   # same key, other caller
-    assert await mw.before(second) is None              # reaches the handler...
+    assert await mw.action(second) is None              # reaches the handler...
     # ... and nothing of the first caller's response came back.
     assert not hasattr(second.state, "idempotency_key")
 
     # Not even a concurrent duplicate is claimed, so no anonymous caller can
     # take a key that locks another out with a 409.
     third = _request(path="/signup", principal=None)
-    assert await mw.before(third) is None
+    assert await mw.action(third) is None
 
     # And `after` stays a passthrough: nothing anonymous is ever stored.
     response = Response(b'{"token":"bob-secret"}', status=201)
     assert await mw.after(second, response) is response
-    assert await mw.before(_request(path="/signup", principal=None)) is None
+    assert await mw.action(_request(path="/signup", principal=None)) is None
 
 
 # --- sharing the store across workers ----------------------------------------
@@ -139,10 +139,10 @@ async def test_a_shared_store_replays_across_workers() -> None:
     worker_b = IdempotencyMiddleware(store=store)
 
     first = _request()
-    assert await worker_a.before(first) is None
+    assert await worker_a.action(first) is None
     await worker_a.after(first, Response(b"created", status=201))
 
-    replay = await worker_b.before(_request())
+    replay = await worker_b.action(_request())
     assert replay is not None and replay.body == b"created"
 
 

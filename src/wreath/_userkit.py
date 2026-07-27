@@ -54,6 +54,12 @@ _SCRYPT_P = 1
 _SCRYPT_DKLEN = 32
 _SCRYPT_MAXMEM = 64 * 1024 * 1024
 
+#: Longest password accepted, in UTF-8 bytes. scrypt hashes the whole input, so
+#: an unbounded one is a CPU amplifier any anonymous caller can pull -- and no
+#: human password is near this. Refused on hash, and rejected without spending
+#: the CPU on verify.
+MAX_PASSWORD_BYTES = 1024
+
 
 def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
@@ -69,6 +75,8 @@ def hash_password(
     """Hash ``password`` with a fresh salt; returns ``scrypt$n$r$p$salt$hash``."""
     if not password:
         raise ValueError("password must not be empty")
+    if len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise ValueError(f"password must not exceed {MAX_PASSWORD_BYTES} bytes")
     salt = os.urandom(16)
     dk = hashlib.scrypt(
         password.encode("utf-8"), salt=salt, n=n, r=r, p=p,
@@ -79,6 +87,10 @@ def hash_password(
 
 def verify_password(password: str, encoded: str) -> bool:
     """Constant-time verify ``password`` against a stored ``encoded`` hash."""
+    if len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        # Refused before scrypt: a password this long cannot be the one that was
+        # stored, so hashing it is work an attacker chose for us.
+        return False
     try:
         scheme, n, r, p, salt_b64, hash_b64 = encoded.split("$")
         if scheme != "scrypt":
@@ -306,6 +318,23 @@ _VERIFY = "verify"
 _RESET = "reset"
 
 
+async def _hash_password_off_loop(password: str) -> str:
+    """`hash_password` in a worker thread.
+
+    scrypt at N=2^14 is tens of milliseconds of CPU and ~16 MB of memory. Called
+    inline from an async flow it stalls the whole worker -- every other request
+    on that process waits for one login -- and the flows below are the only
+    callers that are already async. `SmtpEmailSender` in this module already
+    treats its blocking work this way.
+    """
+    return await asyncio.to_thread(hash_password, password)
+
+
+async def _verify_password_off_loop(password: str, encoded: str) -> bool:
+    """`verify_password` in a worker thread. See :func:`_hash_password_off_loop`."""
+    return await asyncio.to_thread(verify_password, password, encoded)
+
+
 async def register(
     store: UserStore,
     mailer: EmailSender,
@@ -318,12 +347,17 @@ async def register(
     now: float | None = None,
 ) -> None:
     """Create an unverified user (if new) and email a verification link. Uniform, no leak."""
+    # Hashed *before* the existence check, so both paths pay the same dominant
+    # cost. Returning early on a duplicate spent no CPU at all, which made the
+    # uniform response a formality: the latency answered the question anyway.
+    # (The remaining signal is the mail send; queue it to remove that too.)
+    hashed = await _hash_password_off_loop(password)
     existing = await store.get_by_email(email)
     if existing is not None:
         # Do not reveal existence; optionally the app could email a "you already
         # have an account" notice here. We stay silent + uniform.
         return None
-    user = await store.create(email, hash_password(password))
+    user = await store.create(email, hashed)
     # Verify tokens are idempotent + expiry-limited; no fingerprint binding (that
     # single-use mechanism is reserved for password resets).
     token = sign_token(secret, _VERIFY, user.id, ttl=ttl, now=now)
@@ -336,9 +370,11 @@ async def authenticate(store: UserStore, email: str, password: str) -> UserRecor
     user = await store.get_by_email(email)
     if user is None:
         # Spend comparable work to blunt timing-based enumeration.
-        verify_password(password, "scrypt$16384$8$1$AAAA$AAAA")
+        await _verify_password_off_loop(password, "scrypt$16384$8$1$AAAA$AAAA")
         return None
-    if not verify_password(password, user.hashed_password) or not user.is_active:
+    if not await _verify_password_off_loop(password, user.hashed_password):
+        return None
+    if not user.is_active:
         return None
     return user
 
@@ -371,6 +407,9 @@ async def start_password_reset(
     """Email a reset link if the account exists. Uniform response regardless."""
     user = await store.get_by_email(email)
     if user is None:
+        # Mint and discard, so the work is the same shape either way. The mail
+        # send remains the honest asymmetry; queue it to remove that too.
+        sign_token(secret, _RESET, "", ttl=ttl, bound="", now=now)
         return None
     token = sign_token(secret, _RESET, user.id, ttl=ttl,
                        bound=fingerprint(user.hashed_password), now=now)
@@ -397,7 +436,14 @@ async def reset_password(
     if verify_token(secret, _RESET, token, now=now,
                     bound=fingerprint(user.hashed_password)) != user.id:
         return False
-    await store.update(replace(user, hashed_password=hash_password(new_password)))
+    try:
+        hashed = await _hash_password_off_loop(new_password)
+    except ValueError:
+        # An empty or over-long new password is a caller error, not a server
+        # fault: it used to raise out of `hash_password` and become a 500 on an
+        # input a form can submit.
+        return False
+    await store.update(replace(user, hashed_password=hashed))
     return True
 
 
