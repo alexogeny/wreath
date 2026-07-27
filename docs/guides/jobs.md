@@ -88,6 +88,8 @@ async def reindex(ctx, doc_id: str) -> None:
 
 When a task raises, it is retried with backoff; once `retries` is exhausted it is **dead-lettered** (moved to a terminal state you can inspect) rather than lost or retried forever.
 
+One failure skips the retries: a job whose stored arguments no longer **bind** to its handler's signature is dead-lettered on the first attempt. That is version skew — the row was written by a release where the task took different arguments — and the fourth attempt binds no better than the first. The `last_error` names the task, how many arguments the row carried, and which parameter is missing, so it reads as a deploy-ordering problem rather than as a handler bug. Arguments are bound *before* the handler is called, so this never reaches your code.
+
 ## Transactional enqueue
 
 Enqueue from a handler on the *same transaction* as the business row, so the job commits atomically with the work that spawned it. Pass a `key` for idempotency:

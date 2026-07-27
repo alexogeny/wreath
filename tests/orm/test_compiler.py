@@ -298,12 +298,26 @@ def test_a_cache_hit_still_extracts_this_query_s_values(registry: Registry) -> N
 
 
 def test_cache_hit_executes_compiled_bind_program(monkeypatch, registry: Registry) -> None:
+    """A cache hit reads this query's values without re-walking its tree.
+
+    Patched on whichever traversal the *current* build actually uses: the
+    native path calls `_collect_value_nodes`, which only exists when the C
+    extension bound it, and the pure path calls `_walk_values`. Naming only the
+    native one made this an `AttributeError` under `WREATH_PURE=1` rather than
+    a check -- so the mode the pure twin exists to protect was the one mode
+    this assertion never ran in.
+    """
     compile_select(registry, User.select(User.id).where(User.name == "A").limit(5))
 
-    def fail_collect(_select):
+    def fail_collect(*_args, **_kwargs):
         raise AssertionError("cache hit traversed the expression tree")
 
-    monkeypatch.setattr(compiler_module, "_collect_value_nodes", fail_collect)
+    walker = (
+        "_collect_value_nodes"
+        if hasattr(compiler_module, "_collect_value_nodes")
+        else "_walk_values"
+    )
+    monkeypatch.setattr(compiler_module, walker, fail_collect)
     hit = compile_select(registry, User.select(User.id).where(User.name == "B").limit(9))
 
     assert hit.bind_values == ("B", 9)

@@ -140,7 +140,12 @@ class TestProgressStreamTermination:
 
         async with asyncio.timeout(2):
             await drain()
-        assert events == []
+        # The point of this test is that the stream *ends* rather than polling
+        # forever; the timeout above is what proves it. It now ends with one
+        # closing event naming the reason, so a client can tell "no such task"
+        # apart from a dropped connection (design 22 item 11).
+        assert [item.state for item in events] == ["unknown"]
+        assert events[-1].ends_stream
 
     async def test_a_live_task_still_streams_to_its_terminal_state(self):
         from wreath.progress import ProgressRegistry

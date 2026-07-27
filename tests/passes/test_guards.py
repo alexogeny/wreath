@@ -125,7 +125,13 @@ async def test_pending_facts_asks_only_about_the_columns_it_was_given() -> None:
     await _ledger.pending_facts(
         executor, schema="wreath", facts=("column:app.treks.grade",)
     )
-    assert "guards = ANY($1)" in executor.queries[0]
+    # One placeholder per fact, not `= ANY($1)` with a bound array: the driver
+    # infers a parameter's type from its Python value and has no case for
+    # `list`, so the array form fails against a real server and a fake cannot
+    # tell. The property being pinned is that the read is proportional to the
+    # migration -- one placeholder, because one fact was asked about.
+    assert "guards IN ($1)" in executor.queries[0]
+    assert "ANY(" not in executor.queries[0]
     assert "verified_at IS NULL" in executor.queries[0]
 
 

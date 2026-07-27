@@ -16,6 +16,7 @@ import uuid
 from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Awaitable, Iterator, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Literal, NamedTuple, overload
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -94,8 +95,18 @@ _VARCHAR = 1043
 _DATE = 1082
 _TIMESTAMP = 1114
 _TIMESTAMPTZ = 1184
+_NUMERIC = 1700
 _UUID = 2950
 _JSONB = 3802
+
+# `numeric` is base-10000 digit groups plus a sign and a display scale, which is
+# what lets it hold values no float can. `float()` was the wrong landing type,
+# not merely a lossy one: it collapses distinct values onto one.
+_NUMERIC_POS = 0x0000
+_NUMERIC_NEG = 0x4000
+_NUMERIC_NAN = 0xC000
+_NUMERIC_PINF = 0xD000
+_NUMERIC_NINF = 0xF000
 
 # PostgreSQL stores date/timestamp binary values relative to 2000-01-01, and
 # reserves the int64/int32 extremes for the infinity values datetime cannot
@@ -252,11 +263,24 @@ def _infer_oid(value: object) -> int:
         return _BYTEA
     if isinstance(value, uuid.UUID):
         return _UUID
+    if isinstance(value, Decimal):
+        return _NUMERIC
     # datetime is a date subclass, so it must be tested first.
     if isinstance(value, datetime.datetime):
         return _TIMESTAMP if value.tzinfo is None else _TIMESTAMPTZ
     if isinstance(value, datetime.date):
         return _DATE
+    if isinstance(value, (list, tuple, set, frozenset)):
+        raise TypeError(
+            f"unsupported PostgreSQL value type: {type(value).__name__}. "
+            "Inference binds one scalar per placeholder and a sequence has no "
+            "inferable element type -- [1, 2] is equally int4[], int8[] or "
+            "numeric[], and [] names no element type at all. Write the predicate "
+            "as IN ($1, $2, ...) with one placeholder per value rather than "
+            "= ANY($1); that is what Wreath's own readers do, and it is bounded "
+            "by however many values you actually have. An array *column* is a "
+            "different path: its OID comes from the declaration, not from here."
+        )
     raise TypeError(f"unsupported PostgreSQL value type: {type(value).__name__}")
 
 
@@ -280,6 +304,117 @@ def _as_json(value: object) -> str:
     if not isinstance(value, str):
         raise TypeError("json codec requires str")
     return value
+
+
+def _as_decimal(value: object) -> Decimal:
+    """Accept the exact numeric types only.
+
+    ``float`` is refused rather than converted: a column is declared ``numeric``
+    precisely because binary floating point cannot hold its values, so accepting
+    a float here would reintroduce the collapse the type exists to prevent.
+    """
+    if isinstance(value, Decimal):
+        return value
+    if type(value) is int:
+        return Decimal(value)
+    raise TypeError(
+        "numeric codec requires Decimal or int, not "
+        f"{type(value).__name__}; a float cannot hold a numeric exactly"
+    )
+
+
+def _encode_numeric(value: object) -> bytes:
+    """Pack a ``Decimal`` into PostgreSQL's base-10000 numeric wire form.
+
+    Layout: ``ndigits``, ``weight``, ``sign``, ``dscale``, then ``ndigits``
+    base-10000 groups, most significant first. The value is
+    ``sum(digit[i] * 10000 ** (weight - i))`` and ``dscale`` is how many decimal
+    places to display -- carried separately, which is why ``Decimal("1.10")``
+    survives as ``1.10`` rather than ``1.1``.
+    """
+    number = _as_decimal(value)
+    sign, digit_tuple, exponent = number.as_tuple()
+    if not isinstance(exponent, int):  # 'n'/'N' (NaN) or 'F' (infinity)
+        if exponent == "F":
+            marker = _NUMERIC_NINF if sign else _NUMERIC_PINF
+        else:
+            marker = _NUMERIC_NAN
+        return struct.pack("!hhHH", 0, 0, marker, 0)
+
+    unscaled = int("".join(map(str, digit_tuple))) if digit_tuple else 0
+    if exponent > 0:
+        # A positive exponent is a whole-number magnitude; multiply it out so
+        # the group split below always works against a plain integer.
+        unscaled *= 10**exponent
+        exponent = 0
+    dscale = -exponent
+
+    # Pad the fractional part out to a whole number of base-10000 groups so the
+    # split lands on a group boundary.
+    padding = (-dscale) % 4
+    unscaled *= 10**padding
+    fraction_groups = (dscale + padding) // 4
+
+    groups: list[int] = []
+    while unscaled:
+        unscaled, remainder = divmod(unscaled, 10000)
+        groups.append(remainder)
+    groups.reverse()
+
+    weight = len(groups) - 1 - fraction_groups
+    # PostgreSQL sends no leading or trailing zero groups; dscale still records
+    # the display scale, so stripping them cannot lose the value's precision.
+    while groups and groups[0] == 0:
+        groups.pop(0)
+        weight -= 1
+    while groups and groups[-1] == 0:
+        groups.pop()
+    if not groups:
+        # PostgreSQL has no signed zero -- `SELECT '-0'::numeric` is `0` -- so a
+        # negative zero is sent positive rather than as a sign the server would
+        # never itself produce.
+        weight = 0
+        sign = 0
+
+    header = struct.pack(
+        "!hhHH", len(groups), weight, _NUMERIC_NEG if sign else _NUMERIC_POS, dscale
+    )
+    return header + struct.pack(f"!{len(groups)}h", *groups)
+
+
+def _decode_numeric(data: bytes) -> Decimal:
+    """Unpack PostgreSQL's binary numeric into an exact ``Decimal``."""
+    if len(data) < 8:
+        raise ProtocolError("invalid binary numeric header")
+    ndigits, weight, sign, dscale = struct.unpack_from("!hhHH", data, 0)
+    if sign == _NUMERIC_NAN:
+        return Decimal("NaN")
+    if sign == _NUMERIC_PINF:
+        return Decimal("Infinity")
+    if sign == _NUMERIC_NINF:
+        return Decimal("-Infinity")
+    if sign not in {_NUMERIC_POS, _NUMERIC_NEG}:
+        raise ProtocolError(f"invalid numeric sign 0x{sign:04X}")
+    if ndigits < 0 or len(data) != 8 + ndigits * 2:
+        raise ProtocolError("invalid binary numeric length")
+
+    unscaled = 0
+    for group in struct.unpack_from(f"!{ndigits}h", data, 8) if ndigits else ():
+        if not 0 <= group < 10000:
+            raise ProtocolError("invalid numeric digit group")
+        unscaled = unscaled * 10000 + group
+    exponent = 4 * (weight - ndigits + 1)
+
+    # Move the exponent onto the advertised display scale. Growing is always
+    # safe; shrinking only ever drops PostgreSQL's zero group padding, and the
+    # `% 10` guard means a significant digit is never discarded.
+    while exponent > -dscale:
+        unscaled *= 10
+        exponent -= 1
+    while exponent < -dscale and unscaled % 10 == 0:
+        unscaled //= 10
+        exponent += 1
+    return Decimal(f"{'-' if sign == _NUMERIC_NEG else ''}{unscaled}E{exponent}")
 
 
 def _encode_text(value: object, oid: int) -> bytes | None:
@@ -315,6 +450,8 @@ def _encode_text(value: object, oid: int) -> bytes | None:
         return _as_timestamp(value, aware=False).isoformat(sep=" ").encode("ascii")
     if oid == _TIMESTAMPTZ:
         return _as_timestamp(value, aware=True).isoformat(sep=" ").encode("ascii")
+    if oid == _NUMERIC:
+        return str(_as_decimal(value)).encode("ascii")
     if oid in {_JSON, _JSONB}:
         return _as_json(value).encode("utf-8")
     return str(value).encode("utf-8")
@@ -374,6 +511,8 @@ def _encode_binary(value: object, oid: int) -> bytes | None:
         return struct.pack(
             "!q", delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
         )
+    if oid == _NUMERIC:
+        return _encode_numeric(value)
     if oid == _JSON:
         return _as_json(value).encode("utf-8")
     if oid == _JSONB:
@@ -401,6 +540,8 @@ def _decode_value(oid: int, format_code: int, data: bytes | None) -> object:
             return datetime.date.fromisoformat(data.decode("ascii"))
         if oid in {_TIMESTAMP, _TIMESTAMPTZ}:
             return datetime.datetime.fromisoformat(data.decode("ascii"))
+        if oid == _NUMERIC:
+            return Decimal(data.decode("ascii"))
         if oid in {_JSON, _JSONB}:
             return data.decode("utf-8")
         return data
@@ -445,6 +586,8 @@ def _decode_value(oid: int, format_code: int, data: bytes | None) -> object:
             raise ProtocolError("timestamp infinity is not representable")
         epoch = _PG_EPOCH_UTC if oid == _TIMESTAMPTZ else _PG_EPOCH_NAIVE
         return epoch + datetime.timedelta(microseconds=micros)
+    if oid == _NUMERIC:
+        return _decode_numeric(data)
     if oid == _JSON:
         return data.decode("utf-8")
     if oid == _JSONB:

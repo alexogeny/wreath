@@ -10,6 +10,7 @@ and every temporal type, and that the retry still covers what it always did.
 from __future__ import annotations
 
 import datetime
+import traceback
 
 import pytest
 
@@ -101,3 +102,60 @@ def test_non_finite_floats_are_still_rejected() -> None:
 def test_non_str_keys_are_still_rejected() -> None:
     with pytest.raises(TypeError):
         dumps({1: "a"})
+
+
+# --- the retry must not report one error as two (design 22 item 16) -------------
+
+
+def test_an_unserializable_object_is_reported_once_not_twice() -> None:
+    """The retry re-raises, so the same message appeared under a chained
+    traceback -- reading as a second, different problem on the commonest JSON
+    failure there is."""
+
+    class Nope:
+        pass
+
+    with pytest.raises(TypeError) as caught:
+        dumps(Nope())
+    printed = "".join(traceback.format_exception(caught.value))
+    assert "During handling of the above exception" not in printed
+    assert printed.count("not JSON serializable") == 1
+
+
+def test_a_nested_unserializable_object_is_also_reported_once() -> None:
+    class Nope:
+        pass
+
+    with pytest.raises(TypeError) as caught:
+        dumps({"a": [1, 2, Nope()]})
+    printed = "".join(traceback.format_exception(caught.value))
+    assert "During handling of the above exception" not in printed
+    assert printed.count("not JSON serializable") == 1
+
+
+def test_a_hook_raising_its_own_type_error_is_not_masked() -> None:
+    """A __jsonable__ that fails says something the encoder's error did not, so
+    it must reach the caller rather than being replaced by 'not serializable'."""
+
+    class BadHook:
+        def __jsonable__(self):
+            raise TypeError("hook exploded for its own reasons")
+
+    with pytest.raises(TypeError, match="hook exploded for its own reasons"):
+        dumps(BadHook())
+
+
+def test_an_instance_getattr_is_never_consulted() -> None:
+    """`jsonable` looks the hook up on the *type*, so an instance __getattr__
+    cannot be triggered by encoding -- the mechanism design 22 item 16
+    hypothesised."""
+    consulted = []
+
+    class Grumpy:
+        def __getattr__(self, name):
+            consulted.append(name)
+            raise TypeError("unrelated")
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        dumps(Grumpy())
+    assert consulted == []

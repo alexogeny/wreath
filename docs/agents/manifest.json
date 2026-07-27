@@ -416,12 +416,13 @@
       ],
       "sources": [
         "src/wreath/migrations.py",
-        "src/wreath/_migrations_cli.py"
+        "src/wreath/_migrations_cli.py",
+        "src/wreath/_migrations/"
       ],
       "tests": [
         "tests/migrations/"
       ],
-      "policy": "Readiness resolution is metal-only. The inverse `down` is derived from the same artifact as the forward migration and refuses to strand live ORM code unless --force. The DDL runner is still unshipped; see docs/reference/roadmap.md.",
+      "policy": "Readiness resolution is metal-only. The inverse `down` is derived from the same artifact as the forward migration and refuses to strand live ORM code unless --force. The DDL runner is still unshipped; see docs/reference/roadmap.md. A deferred migration declares its conversion beside the model rather than in a migration file, because artifacts are generated from the catalog and there is nothing to decorate. `Recode` (same type, new values) is guarded by a predicate scan that refuses ordered comparison, patterns, `GROUP BY`, `ORDER BY` and joins on a converting column; `Retype` (new type, two columns) is guarded by the gate instead, because an unconverted row reads NULL rather than reading wrong. Refusal is the default: a false refusal costs an argument, a false permission costs a silent incident. A scan that examined nothing refuses rather than reporting clean.",
       "decisions": [
         "docs/decisions/0001-keep-fixed-and-named-migration-representations-separate.md"
       ]

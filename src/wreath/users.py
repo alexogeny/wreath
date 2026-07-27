@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from time import monotonic
 from typing import Annotated, Any
 
 from . import _userkit
@@ -35,6 +36,7 @@ from ._userkit import (  # re-export the stdlib-only surface
     verify_password,
 )
 from .binding import Body, Path
+from .cache import BoundedCache
 from .response import JSONResponse
 from .router import Router
 
@@ -85,6 +87,91 @@ class ResetInput:
     password: str
 
 
+class LoginLimiter:
+    """Counts failed sign-ins per identifier and refuses past a budget.
+
+    Deliberately here rather than in :mod:`wreath._userkit`: that module is
+    stdlib-only on purpose, and a limiter wants a bounded store. The primitive
+    it guards -- ``_userkit.authenticate`` -- stays unthrottled, so an
+    application calling it directly owns this decision itself.
+
+    Keyed per identifier, so failing against one account cannot lock another
+    out. A success clears the count, so a legitimate user who mistypes twice and
+    then succeeds starts clean.
+    """
+
+    __slots__ = ("_attempts", "_clock", "_max", "_window")
+
+    def __init__(
+        self,
+        *,
+        max_attempts: int = 10,
+        window: float = 300.0,
+        max_tracked: int = 4096,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        if window <= 0:
+            raise ValueError("window must be positive")
+        self._max = max_attempts
+        self._window = window
+        self._clock = clock
+        self._attempts: BoundedCache = BoundedCache(
+            max_entries=max_tracked, ttl=window, clock=clock
+        )
+
+    def allow(self, identifier: str) -> bool:
+        """Whether another attempt may be made for ``identifier`` right now."""
+        entry = self._attempts.get(identifier)
+        if entry is None:
+            return True
+        count, first = entry
+        if self._clock() - first >= self._window:
+            self._attempts.delete(identifier)
+            return True
+        return count < self._max
+
+    def record_failure(self, identifier: str) -> None:
+        entry = self._attempts.get(identifier)
+        now = self._clock()
+        if entry is None or now - entry[1] >= self._window:
+            self._attempts.set(identifier, (1, now))
+            return
+        self._attempts.set(identifier, (entry[0] + 1, entry[1]))
+
+    def record_success(self, identifier: str) -> None:
+        self._attempts.delete(identifier)
+
+
+async def reset_password_endpoint(
+    store: UserStore,
+    sessions: Any = None,
+    *,
+    secret: str,
+    token: str,
+    new_password: str,
+) -> bool:
+    """Reset a password and end that user's other sessions.
+
+    The second half is the point. A user resets a password *because* somebody
+    else is in the account, and changing the credential only stops the next
+    sign-in -- whoever is already holding a session keeps it. `sessions` is any
+    session store; one that cannot enumerate (no ``delete_for``) is used for
+    nothing and does not fail the reset.
+    """
+    subject = _userkit._token_subject(token)
+    ok = await _userkit.reset_password(
+        store, secret=secret, token=token, new_password=new_password
+    )
+    if not ok or sessions is None or subject is None:
+        return ok
+    delete_for = getattr(sessions, "delete_for", None)
+    if delete_for is not None:
+        await delete_for(subject)
+    return ok
+
+
 def _profile(user: UserRecord) -> dict[str, Any]:
     return {"id": user.id, "email": user.email, "is_verified": user.is_verified}
 
@@ -109,18 +196,30 @@ def user_router(
     verify_ttl: int = 24 * 3600,
     reset_ttl: int = 3600,
     link_builder: Callable[[str, str], str] | None = None,
+    sessions: Any = None,
+    max_login_attempts: int = 10,
+    login_window: float = 300.0,
 ) -> Router:
     """Build a mountable :class:`Router` with the full user lifecycle.
 
     ``secret`` signs the action tokens (use a stable app secret). ``link_builder``
     maps ``(purpose, token) -> URL`` for the emailed links; the default points at
     this router's own verify route and a ``reset-password?token=`` query.
+
+    ``sessions`` is the server-side session store, if there is one. Passing it
+    is what lets a password reset end the sessions somebody else is already
+    holding; without it the reset changes the credential and nothing more.
+
+    ``max_login_attempts``/``login_window`` throttle failed sign-ins per
+    identifier -- in this router only. ``wreath._userkit.authenticate`` stays
+    unguarded for direct callers.
     """
     if not secret:
         raise ValueError("user_router requires a non-empty secret")
     mailer = email_sender if email_sender is not None else LogEmailSender()
     links = link_builder if link_builder is not None else _default_link(base_url, prefix)
     router = Router(prefix=prefix, tags=("users",))
+    limiter = LoginLimiter(max_attempts=max_login_attempts, window=login_window)
 
     def _session(request: Any) -> dict[str, Any] | None:
         return getattr(request.state, "session", None)
@@ -139,9 +238,21 @@ def user_router(
         session = _session(request)
         if session is None:
             return JSONResponse({"error": "session_middleware_required"}, status=500)
+        identifier = data.email.strip().lower()
+        if not limiter.allow(identifier):
+            # Deliberately the same shape as a wrong password plus a
+            # Retry-After: saying "too many attempts for *this* account" would
+            # confirm the account exists.
+            refused = JSONResponse({"error": "invalid_credentials"}, status=429)
+            refused.headers.append(
+                (b"retry-after", str(int(login_window)).encode("ascii"))
+            )
+            return refused
         user = await _userkit.authenticate(store, data.email, data.password)
         if user is None:
+            limiter.record_failure(identifier)
             return JSONResponse({"error": "invalid_credentials"}, status=401)
+        limiter.record_success(identifier)
         session[session_key] = {"sub": user.id, "type": "User", "roles": []}
         return JSONResponse(_profile(user), status=200)
 
@@ -175,8 +286,9 @@ def user_router(
 
     @router.post("/reset-password")
     async def reset(request: Any, data: Annotated[ResetInput, Body()]):  # noqa: ANN202
-        ok = await _userkit.reset_password(
-            store, secret=secret, token=data.token, new_password=data.password,
+        ok = await reset_password_endpoint(
+            store, sessions, secret=secret, token=data.token,
+            new_password=data.password,
         )
         return JSONResponse({"status": "password_reset" if ok else "invalid_token"},
                            status=200 if ok else 400)

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
+from tempfile import TemporaryFile
 from typing import Any, cast
 
 from ._auth.models import Identity
@@ -47,6 +48,17 @@ class RequestLimits:
     #: and per-part limits. Defaults to `max_body_bytes`; lower it to bound the
     #: parse-time amplification (body plus materialized parts) more tightly.
     max_form_memory_bytes: int = 16 * 1024 * 1024
+    #: Bytes one multipart part may hold in memory before its payload is spooled
+    #: to a temporary file. Past this the part's bytes never become a Python
+    #: object: `UploadedFile` reads them back from disk on demand.
+    #:
+    #: This bounds what a parsed form *retains*, which is what made an upload
+    #: cost memory for as long as the handler ran. It does **not** bound the
+    #: body buffer itself -- `body()` still materialises the whole request
+    #: before parsing, so a concurrent upload still costs its own size once.
+    #: Making that incremental means an incremental parser, which is a native
+    #: module with a byte-for-byte pure twin; see report 23 G-44.
+    spool_max_bytes: int = 1024 * 1024
     #: Bytes the `Cookie` header may carry. Browsers stay far under this; a
     #: request past it is either broken or probing, and parsing it builds a dict
     #: proportional to whatever arrived -- on any route that reads a session, a
@@ -68,6 +80,7 @@ class RequestLimits:
         for name in (
             "max_body_bytes",
             "max_cookie_bytes",
+            "spool_max_bytes",
             "max_parts",
             "max_part_header_bytes",
             "max_part_bytes",
@@ -82,21 +95,81 @@ DEFAULT_LIMITS = RequestLimits()
 
 
 class UploadedFile:
-    """One file field from a multipart form."""
+    """One file field from a multipart form.
 
-    __slots__ = ("data", "field_name", "filename", "headers")
+    Small payloads stay in memory and are reachable as :attr:`data`, exactly as
+    before. A payload past :attr:`RequestLimits.spool_max_bytes` is written to a
+    temporary file instead and never becomes a Python `bytes` -- read it with
+    :meth:`chunks` (streaming) or :meth:`read` (materialising, which undoes the
+    point of spooling for anything large).
+
+    The spool is closed by :meth:`FormData.close`, or when the object is
+    collected; a handler that hands the file somewhere else should copy it
+    first.
+    """
+
+    __slots__ = ("_size", "_spool", "data", "field_name", "filename", "headers")
 
     def __init__(
         self,
         field_name: str,
         filename: str,
         headers: list[tuple[bytes, bytes]],
-        data: bytes,
+        data: bytes | None = None,
+        spool: Any = None,
+        size: int | None = None,
     ) -> None:
         self.field_name = field_name
         self.filename = filename
         self.headers = headers
-        self.data = data
+        self.data = data if data is not None else b""
+        self._spool = spool
+        self._size = size if size is not None else len(self.data)
+
+    @property
+    def spooled(self) -> bool:
+        """Whether this payload lives in a temporary file rather than in memory."""
+        return self._spool is not None
+
+    @property
+    def size(self) -> int:
+        """Payload length in bytes, whether it is spooled or not."""
+        return self._size
+
+    def chunks(self, size: int = 64 * 1024) -> Iterator[bytes]:
+        """Yield the payload in pieces, without materialising it.
+
+        The streaming read. For an in-memory payload this yields it in one
+        piece, so a caller does not have to know which kind it holds.
+        """
+        if self._spool is None:
+            if self.data:
+                yield self.data
+            return
+        if self._spool.closed:
+            raise ValueError("this upload's spool has been closed")
+        self._spool.seek(0)
+        while True:
+            chunk = self._spool.read(size)
+            if not chunk:
+                return
+            yield chunk
+
+    def read(self) -> bytes:
+        """The whole payload as bytes.
+
+        Materialises a spooled file, which is exactly what spooling avoided --
+        fine for a small one, and a way to reintroduce the problem for a large
+        one. Prefer :meth:`chunks`.
+        """
+        if self._spool is None:
+            return self.data
+        return b"".join(self.chunks())
+
+    def close(self) -> None:
+        """Release the spool, if there is one. Idempotent."""
+        if self._spool is not None and not self._spool.closed:
+            self._spool.close()
 
     @property
     def content_type(self) -> str:
@@ -108,6 +181,11 @@ class FormData:
     """Parsed form fields plus uploaded files (first value wins per name)."""
 
     __slots__ = ("_all", "fields", "files")
+
+    def close(self) -> None:
+        """Release every spooled upload this form holds."""
+        for uploaded in self.files.values():
+            uploaded.close()
 
     def __init__(
         self,
@@ -177,6 +255,23 @@ def _multipart_boundary(content_type: bytes) -> bytes | None:
                 value = value[1:-1]
             return value if _valid_boundary(value) else None
     return None
+
+def _uploaded(part: Any, spool_max_bytes: int) -> UploadedFile:
+    """Build an `UploadedFile`, spooling the payload when it is large.
+
+    The threshold is on the *part*, not the request: one 4 MiB attachment is
+    what fills a heap, and ten 40 KiB ones are not.
+    """
+    if len(part.data) <= spool_max_bytes:
+        return UploadedFile(part.name, part.filename, part.headers, part.data)
+    spool = TemporaryFile()
+    spool.write(part.data)
+    spool.flush()
+    return UploadedFile(
+        part.name, part.filename, part.headers,
+        data=None, spool=spool, size=len(part.data),
+    )
+
 
 Receive = Callable[[], Awaitable[dict[str, Any]]]
 _MISSING = object()
@@ -569,18 +664,20 @@ class Request:
             ):
                 if part.name is None:
                     continue
-                # Bound the aggregate payload retained across all parts, checked
-                # before this part is kept so the crossing part is refused rather
-                # than materialised into the result.
-                retained += len(part.data)
+                # Bound the aggregate payload retained *in memory* across all
+                # parts, checked before this part is kept so the crossing part is
+                # refused rather than materialised into the result. A part large
+                # enough to spool does not count: it is not in memory, which is
+                # the whole point of spooling it.
+                if part.filename is None or len(part.data) <= limits.spool_max_bytes:
+                    retained += len(part.data)
                 if retained > limits.max_form_memory_bytes:
                     raise PayloadTooLarge(
                         f"form parts exceed {limits.max_form_memory_bytes} bytes in memory"
                     )
                 if part.filename is not None:
                     files.setdefault(
-                        part.name,
-                        UploadedFile(part.name, part.filename, part.headers, part.data),
+                        part.name, _uploaded(part, limits.spool_max_bytes)
                     )
                 else:
                     decoded = part.data.decode("utf-8", "replace")

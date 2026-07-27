@@ -83,6 +83,11 @@ class PostgresSessionStore:
             read_workload="read",
         )
         self._store.define(
+            "delete_for",
+            f"DELETE FROM {self._store.table} "
+            "WHERE data -> 'principal' ->> 'sub' = $1",
+        )
+        self._store.define(
             "save",
             self._store.upsert(
                 values={"sid": "$1", "data": "$2::jsonb", "expires": self._store.window("$3")},
@@ -115,6 +120,23 @@ class PostgresSessionStore:
 
     async def delete(self, sid: str) -> None:
         await self._store.delete(sid)
+
+    async def delete_for(self, subject: str) -> int:
+        """Drop every session whose principal is ``subject``.
+
+        One statement over the payload, because the alternative -- read every
+        row, decode each one, delete the matches -- is the whole table across
+        the network to end a handful of sessions. The predicate reads the same
+        `principal.sub` the session backend writes.
+        """
+        status = await self._store.statement("delete_for").execute(subject)
+        if not isinstance(status, str) or not status.startswith("DELETE"):
+            return 0
+        _, _, count = status.partition(" ")
+        try:
+            return int(count.strip())
+        except ValueError:
+            return 0
 
     def purge_pass(self, *, chunk: int = 1000, **options: Any) -> Any:
         """A recurring pass that deletes expired sessions, chunk by chunk.

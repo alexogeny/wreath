@@ -369,6 +369,242 @@ or execute migration code. A checksum or structural failure exits with status 2.
 The JSON form is stable machine-readable metadata for review automation; it does
 not expand every operation into Python objects.
 
+## User story: rewrite ten million rows without blocking the deploy
+
+> *As an engineer, I need `Trek.status` to stop holding numeric codes and start
+> holding names. There are ten million treks. I do not want to hold a deploy for
+> an hour, and I do not want to do it by hand in a psql session at 2am.*
+
+A **deferred migration** converts the values while the application keeps
+serving. [`wreath.passes`](chunked-passes.md) already does the walking — durably,
+resumably, one transaction per chunk, paced so it does not starve requests. What
+a deferred migration adds is the part a backfill library cannot: deciding
+whether running it is *safe*.
+
+!!! warning "The precondition, before anything else"
+
+    **A pass converts the past. The application writes the future in the shape
+    the pass is converting to.** Everything below rests on that. Deploy the code
+    that writes the new shape *first*, then start the conversion.
+
+### Where the declaration lives
+
+Beside the model, not in a migration file:
+
+```python
+from wreath.migrations import Recode
+
+class Trek(Model, table="treks"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    status: Mapped[str] = column(Text)
+
+restyle_status = Recode(
+    Trek.status,
+    mapping={"1": "planned", "2": "walking", "3": "done"},
+    chunk=10_000,
+)
+```
+
+Wreath generates migration artifacts from the catalog rather than from authored
+migration files, so there is no `@migration` decorator to hang this on — and a
+declaration beside the model is the better home anyway, because the scan below
+has to read it as a value.
+
+Drive it like any other pass:
+
+```python
+jobs.drive(restyle_status.build())
+```
+
+### The window is the dangerous part, and the scan is why
+
+While the pass runs, some rows hold `"1"` and some hold `"planned"`. A
+comparison against the wrong one **does not raise** — it returns `False`. A
+filter quietly drops rows. A join quietly matches nothing. A chart quietly reads
+low. Nobody finds out until someone reconciles a number by hand.
+
+So every read of a converting column is classified before the migration starts:
+
+| Written | Verdict |
+| --- | --- |
+| `status == "planned"` | **rewritable** — widens to `status IN ('planned', '1')` |
+| `status != "planned"` | **rewritable** — widens to `NOT IN`, which is the one people get wrong by hand |
+| `status.in_([...])` | **rewritable** — every value in both encodings |
+| `status >= "planned"` | **refused** — `1 < 2` but `'planned' > 'done'`; no correct transitional form exists |
+| `status.like("plan%")` | **refused** — a pattern matches an encoding |
+| `ORDER BY status` | **refused** — a half-converted sort is unstable between requests as the pass advances |
+| `GROUP BY status` | **refused** — one group splits into two, so counts halve and a category appears to fork |
+| a join on `status` | **refused** — rows vanish from an inner join, and no `where`-clause scan would catch it |
+| `status == Param("s")` | **undecidable** — the value arrives with the request and could be in either encoding |
+
+The last three are why this is not just a filter problem. Grouping and joining
+are not filters, and they are worse.
+
+`wreath migrations check` runs the scan and exits nonzero on anything unproven:
+
+```bash
+wreath migrations check app:app --database main
+```
+
+### Ordered comparison, and the mapping that happens to preserve order
+
+An order-preserving mapping *looks* like it should license `>=`. It is still
+refused, and the reason is totality rather than order: "preserves order over the
+values in the mapping" is not "preserves order over the values in the table",
+and a row holding an unmapped value is much of why a re-encode gets run. If you
+know your mapping is total, waive the read and say so — a written sentence is
+worth more than a permission inferred from an unproven premise.
+
+### Waiving a read
+
+Waivers attach to the read, never to the migration, because a blanket waiver is
+indistinguishable from not having the feature. There is no `strict=False`.
+
+```python
+from wreath.migrations import transitional_read, waive_transitional
+
+@transitional_read(
+    Trek.status,
+    reason="the admin console filters on status for display only; a row read "
+           "under the old code shows a stale label for the length of the "
+           "backfill and nothing downstream branches on it",
+)
+def recent_by_status(session): ...
+
+# A declared query is an immutable value with nowhere to hang an attribute,
+# so it is waived by its declared name instead.
+waive_transitional(
+    Trek.status,
+    site="TrekQueries.by_status",
+    reason="operational dashboard; both encodings render the same label",
+)
+```
+
+Waivers are counted in `wreath migrations check` output, so "we waived
+everything" is visible in review rather than discovered afterwards.
+
+### A scan that looked at nothing is not a pass
+
+If no declared query, model check or calculated view names the column, the scan
+says so and **refuses** rather than reporting clean. An inline predicate inside a
+handler is invisible to it until source-level analysis lands, and a tool that
+reported success after examining nothing would be worse than no tool.
+
+### Changing a column's *type* is a different shape
+
+`Recode` re-encodes values in one column. Changing the type is `Retype`, and it
+cannot happen in place — `ALTER COLUMN … TYPE` rewrites the table under
+`ACCESS EXCLUSIVE`, which is the hour-long block being avoided. So it is the
+four-step form, with two columns alive throughout:
+
+```python
+grade_to_text = Retype(
+    Trek.grade,                    # the column a later migration will drop
+    into="grade_next",             # added nullable by this migration's DDL
+    using="CASE grade WHEN 1 THEN 'gentle' WHEN 2 THEN 'rolling' END",
+)
+```
+
+There is nothing to scan here, and that is not an omission: both columns are
+separately typed and correct throughout, so an unconverted row reads `NULL`
+rather than reading *wrong*. Nullable-then-not is a shape the ORM already
+models, and it is loud where a bad comparison is silent.
+
+The gate proves the nulls gone using the constraint the swap migration is about
+to add:
+
+```sql
+ALTER TABLE treks ADD CONSTRAINT grade_next_present
+    CHECK (grade_next IS NOT NULL) NOT VALID;      -- brief lock, no scan
+ALTER TABLE treks VALIDATE CONSTRAINT grade_next_present;  -- does not block reads or writes
+```
+
+Because the thing proven and the thing later enforced are the same predicate, a
+walk that was subtly wrong cannot verify its own bug. When it passes, the pass
+publishes a fact — and a later migration that drops `grade` is
+[refused until that fact exists](#apply-one-authoritative-artifact).
+
+### A downgrade will not silently strand your re-encoded data
+
+A `Recode` changes values and leaves the schema alone. That is what makes it
+safe to run against a live application — and what makes reverting the migration
+around it dangerous in a way nothing else here catches. The reverse DDL applies
+cleanly, the catalog fingerprint returns to the artifact's source exactly as it
+should, every check `wreath migrations down` performs passes, and the column is
+full of values the restored definition was never written for.
+
+So the ledger records the column a re-encode rewrote, and a downgrade that would
+revert that column's definition is refused:
+
+```
+refusing to downgrade schema 'app': it reverts the definition of 1 column(s)
+whose values a deferred migration has already re-encoded, and reverting DDL
+does not restore data:
+  - app.treks.status, re-encoded by 'recode_app_treks_status', which has
+    finished, so every row is in the new encoding
+```
+
+**A finished re-encode is the worse case, not the safe one.** While one is still
+running the column holds a mixture, so some originals survive; once it completes
+none do. The refusal therefore does not clear when the pass finishes, and unlike
+the code-stranding guard above there is **no `--force`** — the schema check that
+would normally catch a bad downgrade is precisely the one a re-encode slips past,
+so a flag to skip this would be a flag to skip the only thing looking.
+
+To undo one, convert the values back with a `Recode` declaring the inverse
+mapping, let it finish, and downgrade after.
+
+### The record the refusal reads, and why it cannot be tidied away
+
+The refusal needs to know that a column's values were changed. That fact lives
+in two places, and the second is the one that matters.
+
+The pass ledger row carries it, but a ledger row is working state — a pass
+rewrites it on every claim, and a "tidy up finished passes" job is a perfectly
+reasonable thing to write. If the refusal read only that row, such a job would
+silently re-enable the downgrade. Worse, it would be invisible: a column that
+was *never* re-encoded is also the absence of a row, so there is nothing to tell
+the two apart.
+
+So the fact is also written to `"wreath".pass_rewrites`, which is append-only.
+The database refuses `DELETE`, `UPDATE` and `TRUNCATE` on it:
+
+```
+ERROR:  wreath: app.pass_rewrites is append-only; a row here records that a
+column's values were overwritten in place, and a downgrade reads it to refuse
+restoring the old schema over the new data. Removing it does not make the
+downgrade safe, only silent.
+```
+
+A downgrade reads both. If the ledger row is gone but the record survives, it
+still refuses and says so — it cannot report the pass's phase, because that
+lived on the row that was deleted:
+
+```
+  - app.treks.status, re-encoded by 'recode_app_treks_status', whose ledger row
+    is gone -- only the append-only pass_rewrites record remains, so the pass's
+    phase cannot be read. The values were still changed
+```
+
+**What this does not protect against.** Anyone who can run DDL on the schema can
+`DROP TRIGGER`, `DROP TABLE`, or set `session_replication_role = replica` to
+disable triggers wholesale; restoring a backup taken before the re-encode has
+the same effect. The guard is aimed at routine tidying — a purge job, a cleanup
+script, a well-meaning `DELETE` — not at a determined operator. Deliberate DDL
+against the guard is a decision someone made; that is the difference.
+
+The table holds one row per re-encoded column per schema and is never updated,
+so it stays small: a deployment that re-encodes a column a month accumulates a
+few hundred bytes a year.
+
+!!! note "What is not built yet"
+
+    Stages 1 and 2 have shipped: the two declarations, the pass each derives,
+    the operator lattice, and per-read waivers. Rolling a completed re-encode
+    back is a forward `Recode` with the inverse mapping, written by hand —
+    deriving it automatically is not built. Tenant-fleet deferred migrations are
+    not built either.
+
 ## Migrate without a flag day
 
 Use four deployment phases:

@@ -52,6 +52,7 @@ class Registry:
     """Compiled models for one database."""
 
     __slots__ = (
+        "identity_map_warn_at",
         "statement_timeout",
         "_by_name",
         "_by_table",
@@ -82,12 +83,16 @@ class Registry:
         query_cache_bytes: int = 8 * 1024 * 1024,
         schema_mode: SchemaMode | None = None,
         statement_timeout: float | None = None,
+        identity_map_warn_at: int | None = None,
     ) -> None:
         #: Default seconds a statement may run, applied by every `Session` this
         #: registry opens. None leaves it to the server's own setting, which in
         #: a default PostgreSQL is "forever" -- one pathological query then holds
         #: a pooled connection until somebody notices.
         self.statement_timeout = statement_timeout
+        #: Default `identity_map_warn_at` for sessions this registry opens. Off
+        #: unless set; see `wreath.orm.session.Session`.
+        self.identity_map_warn_at = identity_map_warn_at
         if statement_timeout is not None and statement_timeout <= 0:
             raise RegistryError("statement_timeout must be positive")
         if validate_schema not in _VALIDATE_MODES:

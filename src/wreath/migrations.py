@@ -7,6 +7,14 @@ import struct
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from ._migrations.deferred import DeferredDeclarationError, Recode, Retype
+from ._migrations.scan import (
+    ScanReport,
+    TransitionalHazard,
+    transitional_read,
+    waive_transitional,
+)
+
 _SINGLE_CATALOG_SQL = """
 WITH migration_objects AS (
     SELECT
@@ -477,6 +485,134 @@ class MigrationBlockedByPass(RuntimeError):
             f"{listing}\n"
             f"{remedy}"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class RecodedColumnHazard:
+    """One column this downgrade touches whose values a re-encode has changed."""
+
+    schema: str
+    table: str
+    column: str
+    action: str
+    pass_name: str
+    tenant: str
+    phase: str
+    finished: bool
+    #: ``False`` when only the append-only record survives. See
+    #: :class:`wreath._passes.ledger.RewrittenColumn`.
+    ledger_row_present: bool = True
+
+    def describe(self) -> str:
+        where = f"{self.schema}.{self.table}.{self.column}"
+        who = self.pass_name if not self.tenant else f"{self.pass_name}[{self.tenant}]"
+        if not self.ledger_row_present:
+            return (
+                f"{where}, re-encoded by {who!r}, whose ledger row is gone -- only the "
+                "append-only pass_rewrites record remains, so the pass's phase cannot "
+                "be read. The values were still changed"
+            )
+        state = (
+            "which has finished, so every row is in the new encoding"
+            if self.finished
+            else f"which is still running (phase {self.phase}), so the rows are a mixture"
+        )
+        return f"{where}, re-encoded by {who!r}, {state}"
+
+
+class DowngradeWouldStrandRecodedData(RuntimeError):
+    """A downgrade was refused because a re-encode has changed the values under it.
+
+    The counterpart to :class:`DowngradeWouldStrandCode`, one layer down: that
+    one refuses when the *code* would be stranded by the reverse DDL, this one
+    when the *data* already has been.
+
+    The reason it has to exist is that nothing else notices. A re-encode changes
+    values in place and touches no schema, so the reverse DDL applies cleanly and
+    the catalog fingerprint returns to the artifact's source exactly as it
+    should -- every check :func:`revert_single_artifact` already performs passes
+    while the column holds values the reverted schema was never written for. It
+    reports success. That is the whole defect.
+    """
+
+    def __init__(self, schema: str, hazards: tuple[RecodedColumnHazard, ...]) -> None:
+        self.schema = schema
+        self.hazards = hazards
+        listing = "\n".join(f"  - {hazard.describe()}" for hazard in hazards)
+        super().__init__(
+            f"refusing to downgrade schema {schema!r}: it reverts the definition of "
+            f"{len(hazards)} column(s) whose values a deferred migration has already "
+            "re-encoded, and reverting DDL does not restore data:\n"
+            f"{listing}\n"
+            "The reverse DDL would apply cleanly and the catalog fingerprint would "
+            "verify, because a re-encode changes values and not schema -- so nothing "
+            "downstream of this refusal would notice.\n"
+            "Convert the values back first, with a Recode declaring the inverse "
+            "mapping, and downgrade once it has finished. There is deliberately no "
+            "flag to skip this: the schema check that would normally catch a bad "
+            "downgrade is exactly the one a re-encode slips past."
+        )
+
+
+class TransitionalContractUnproven(RuntimeError):
+    """A deferred migration whose reads could not be proven safe for the window.
+
+    The mirror of :class:`MigrationBlockedByPass`, one step earlier: that one
+    refuses a migration for narrowing a column a pass has not finished, this one
+    refuses to *start* the pass while a read of that column would silently mean
+    something else while it runs.
+
+    Refusal is the default and the asymmetry is the argument -- a false refusal
+    costs an argument with the tool, a false permission costs a data incident
+    that surfaces a week later.
+    """
+
+    def __init__(self, report: Any) -> None:
+        self.report = report
+        blocking = report.blocking
+        listing = "\n".join(f"  - {item.describe()}" for item in blocking)
+        if report.scanned_nothing:
+            super().__init__(
+                f"refusing to start the deferred migration for {report.column}: "
+                "nothing was scanned. No declared query, model check or calculated "
+                "view names this column, so the scan proved nothing rather than "
+                "proving it safe -- an inline predicate in a handler is invisible "
+                "until the source analyser lands. Waive the reads you know about "
+                "with waive_transitional(...) once you have checked them."
+            )
+            return
+        super().__init__(
+            f"refusing to start the deferred migration for {report.column}: "
+            f"{len(blocking)} read(s) cannot be proven safe while the values are "
+            f"half converted, and a wrong comparison does not raise -- it returns "
+            f"False and quietly drops rows:\n"
+            f"{listing}\n"
+            "Rewrite each read to accept both encodings, or waive it with a "
+            "written reason: waive_transitional(column, site=..., reason=...). "
+            "The waiver count appears in `wreath migrations check`."
+        )
+
+
+def scan_transitional_reads(
+    declaration: Any,
+    *,
+    registry: Any = None,
+    queries: Any = (),
+    views: Any = (),
+    strict: bool = True,
+) -> Any:
+    """Classify every read of the column *declaration* converts.
+
+    Returns the report. With *strict*, raises
+    :class:`TransitionalContractUnproven` when anything is unproven -- including
+    when nothing was scanned at all, because a scan that reports "clean" after
+    looking at nothing is the empty-denominator bug doc 19 found in
+    ``coverage_overall()``, and it must not come back here.
+    """
+    report = declaration.scan(registry=registry, queries=queries, views=views)
+    if strict and (report.blocking or report.scanned_nothing):
+        raise TransitionalContractUnproven(report)
+    return report
 
 
 @dataclass(frozen=True, slots=True)
@@ -1088,6 +1224,75 @@ def _column_fact(schema: str, table: str, column: str) -> str:
     return f"column:{schema}.{table}.{column}"
 
 
+def _touched_columns(named_plan: bytes) -> tuple[tuple[str, str, str, str], ...]:
+    """``(schema, table, column, action)`` for every column operation in a plan.
+
+    Wider than :func:`_narrowed_columns` on purpose. That one asks "would this
+    lose rows a pass has not converted yet", which only drops and retypes can
+    do. This one asks "does this change the definition a re-encode's values were
+    written under", and *adding* a constraint or a default is as capable of
+    contradicting them as removing one.
+    """
+    return tuple(
+        (
+            operation["schema"],
+            operation["table"],
+            operation["name"],
+            operation["action"],
+        )
+        for operation in unpack_named_plan(named_plan)
+        if operation["kind"] == "column"
+    )
+
+
+async def _recoded_column_hazards(
+    connection: Any, reverse_plan: bytes, *, ledger_schema: str = "wreath"
+) -> tuple[RecodedColumnHazard, ...]:
+    """Columns this reverse plan touches whose values a re-encode has changed.
+
+    Read with **no** filter on whether the pass finished, which is the one thing
+    that distinguishes this from :func:`_pending_pass_hazards`. That function
+    refuses while a pass is unfinished and relents once it publishes, because a
+    published pass has converted every row and the narrowing is then safe. Here
+    publication is not a release: a finished re-encode is the case where *no*
+    original value survives, so it is the more dangerous state rather than the
+    settled one.
+    """
+    from ._passes import ledger as _pass_ledger
+
+    candidates = _touched_columns(reverse_plan)
+    if not candidates:
+        return ()
+    table = _pass_ledger.table_name(ledger_schema)
+    exists = await connection.fetchval("SELECT to_regclass($1) IS NOT NULL", table)
+    if not exists:
+        return ()
+    facts = {
+        _column_fact(schema, tbl, column): (schema, tbl, column, action)
+        for schema, tbl, column, action in candidates
+    }
+    rewritten = await _pass_ledger.rewritten_columns(
+        connection, schema=ledger_schema, facts=tuple(facts)
+    )
+    hazards: list[RecodedColumnHazard] = []
+    for entry in rewritten:
+        schema, tbl, column, action = facts[entry.fact]
+        hazards.append(
+            RecodedColumnHazard(
+                schema=schema,
+                table=tbl,
+                column=column,
+                action=action,
+                pass_name=entry.name,
+                tenant=entry.tenant,
+                phase=entry.phase,
+                finished=entry.finished,
+                ledger_row_present=entry.ledger_row_present,
+            )
+        )
+    return tuple(hazards)
+
+
 def _downgrade_hazards(
     registry: Any, reverse_plan: bytes
 ) -> tuple[DowngradeHazard, ...]:
@@ -1184,6 +1389,13 @@ async def revert_single_artifact(
                 f"{actual_fingerprint.hex()} does not match artifact target "
                 f"{artifact.target_fingerprint.hex()} for schema {schema!r}"
             )
+        # Inside the advisory lock, and deliberately not gated on `force`. The
+        # catalog checks either side of this one cannot see the hazard at all --
+        # a re-encode leaves the schema untouched, so they verify perfectly
+        # while the values contradict the schema being restored.
+        recoded = await _recoded_column_hazards(connection, reverse_plan)
+        if recoded:
+            raise DowngradeWouldStrandRecodedData(schema, recoded)
         await connection.execute(ddl_block)
         resulting = await _decode_catalog_snapshot(
             connection, _SINGLE_CATALOG_SQL, (schema,)
@@ -1299,10 +1511,18 @@ __all__ = [
     "HISTORY_BLOCKED",
     "HISTORY_UNKNOWN",
     "HISTORY_VERIFIED",
+    "DeferredDeclarationError",
     "DowngradeHazard",
     "DowngradeWouldStrandCode",
+    "DowngradeWouldStrandRecodedData",
     "MigrationBlockedByPass",
     "PendingPassHazard",
+    "RecodedColumnHazard",
+    "Recode",
+    "Retype",
+    "ScanReport",
+    "TransitionalHazard",
+    "TransitionalContractUnproven",
     "FleetResolution",
     "MigrationConfig",
     "MigrationDetection",
@@ -1324,4 +1544,7 @@ __all__ = [
     "pack_tenant_directory",
     "resolve_fleet",
     "revert_single_artifact",
+    "scan_transitional_reads",
+    "transitional_read",
+    "waive_transitional",
 ]

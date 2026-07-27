@@ -72,8 +72,21 @@ wreath_pg_decode_hex_bytea(const unsigned char *data, Py_ssize_t length)
 #define PG_DATE 1082
 #define PG_TIMESTAMP 1114
 #define PG_TIMESTAMPTZ 1184
+#define PG_NUMERIC 1700
 #define PG_UUID 2950
 #define PG_JSONB 3802
+
+/* `numeric` is base-10000 digit groups plus a sign and a display scale, which
+   is what lets it hold values no float can. Both twins land it on `Decimal`;
+   `float` was the wrong type, not merely a lossy one, because it collapses
+   distinct values onto one. The heavy lifting is delegated to Python's decimal
+   module rather than reimplemented here: a second arbitrary-precision decimal
+   implementation in C would be a parity liability for no measured gain. */
+#define PG_NUMERIC_POS 0x0000
+#define PG_NUMERIC_NEG 0x4000
+#define PG_NUMERIC_NAN 0xC000
+#define PG_NUMERIC_PINF 0xD000
+#define PG_NUMERIC_NINF 0xF000
 
 /* One-dimensional array OIDs, and the map back to their element OID. An array
    reuses its element's scalar codec value-by-value, so no per-type array code
@@ -91,6 +104,7 @@ wreath_pg_decode_hex_bytea(const unsigned char *data, Py_ssize_t length)
 #define PG_DATE_ARRAY 1182
 #define PG_TIMESTAMP_ARRAY 1115
 #define PG_TIMESTAMPTZ_ARRAY 1185
+#define PG_NUMERIC_ARRAY 1231
 #define PG_UUID_ARRAY 2951
 #define PG_JSONB_ARRAY 3807
 
@@ -114,6 +128,7 @@ array_element_oid(uint32_t oid)
     case PG_DATE_ARRAY: return PG_DATE;
     case PG_TIMESTAMP_ARRAY: return PG_TIMESTAMP;
     case PG_TIMESTAMPTZ_ARRAY: return PG_TIMESTAMPTZ;
+    case PG_NUMERIC_ARRAY: return PG_NUMERIC;
     case PG_UUID_ARRAY: return PG_UUID;
     case PG_JSONB_ARRAY: return PG_JSONB;
     default: return 0;
@@ -144,6 +159,8 @@ static PyObject *decode_binary_array(const unsigned char *raw, Py_ssize_t length
 #define PG_DATE_NEG_INFINITY INT32_MIN
 
 static PyObject *uuid_type = NULL;
+static PyObject *decimal_type = NULL;
+static PyObject *str_as_tuple = NULL;
 static PyObject *utc_timezone = NULL;
 static PyObject *date_fromisoformat = NULL;
 static PyObject *datetime_fromisoformat = NULL;
@@ -418,6 +435,268 @@ isoformat_ascii(PyObject *value, int with_separator)
     return result;
 }
 
+/* Coerce to `Decimal`, refusing `float`. A column is declared `numeric` exactly
+   because binary floating point cannot hold its values, so accepting a float
+   would reintroduce the collapse the type exists to prevent. Returns a new
+   reference, or NULL with an exception set. */
+static PyObject *
+as_decimal(PyObject *value)
+{
+    if (decimal_type != NULL && PyObject_TypeCheck(value, (PyTypeObject *)decimal_type)) {
+        return Py_NewRef(value);
+    }
+    if (PyLong_CheckExact(value)) {
+        return PyObject_CallOneArg(decimal_type, value);
+    }
+    PyErr_Format(PyExc_TypeError,
+                 "numeric codec requires Decimal or int, not %s; "
+                 "a float cannot hold a numeric exactly",
+                 Py_TYPE(value)->tp_name);
+    return NULL;
+}
+
+/* Pack a Decimal into PostgreSQL's base-10000 numeric wire form:
+   ndigits, weight, sign, dscale, then ndigits groups most significant first.
+   The value is sum(digit[i] * 10000 ** (weight - i)); dscale rides alongside as
+   the display scale, which is why Decimal("1.10") survives as 1.10, not 1.1.
+
+   The digit arithmetic runs through Python ints rather than a C bignum: numeric
+   is arbitrary precision, so a C implementation would mean a second bignum in
+   the tree and a standing parity risk, for a type that is not on any hot path. */
+static PyObject *
+encode_numeric(PyObject *value)
+{
+    PyObject *number = NULL, *parts = NULL, *digits = NULL, *exponent = NULL;
+    PyObject *unscaled = NULL, *ten = NULL, *scratch = NULL, *result = NULL;
+    PyObject *groups = NULL;
+    long sign_flag = 0, dscale = 0, exp_value = 0, padding = 0;
+    Py_ssize_t ndigits, fraction_groups, count, i;
+    unsigned char header[8];
+    char *out;
+
+    number = as_decimal(value);
+    if (number == NULL) return NULL;
+    parts = PyObject_CallMethodNoArgs(number, str_as_tuple);
+    if (parts == NULL || !PyTuple_Check(parts) || PyTuple_GET_SIZE(parts) != 3) {
+        if (parts != NULL) PyErr_SetString(PyExc_TypeError, "invalid Decimal tuple");
+        goto done;
+    }
+    sign_flag = PyLong_AsLong(PyTuple_GET_ITEM(parts, 0));
+    if (sign_flag == -1 && PyErr_Occurred()) goto done;
+    digits = Py_NewRef(PyTuple_GET_ITEM(parts, 1));
+    exponent = Py_NewRef(PyTuple_GET_ITEM(parts, 2));
+
+    /* A non-integer exponent is Decimal's marker for NaN ('n'/'N') or
+       infinity ('F'); PostgreSQL 14+ carries both as reserved sign words. */
+    if (!PyLong_Check(exponent)) {
+        unsigned int marker = PG_NUMERIC_NAN;
+        if (PyUnicode_Check(exponent) && PyUnicode_CompareWithASCIIString(exponent, "F") == 0) {
+            marker = sign_flag ? PG_NUMERIC_NINF : PG_NUMERIC_PINF;
+        }
+        memset(header, 0, sizeof header);
+        header[4] = (unsigned char)(marker >> 8);
+        header[5] = (unsigned char)marker;
+        result = PyBytes_FromStringAndSize((const char *)header, 8);
+        goto done;
+    }
+    exp_value = PyLong_AsLong(exponent);
+    if (exp_value == -1 && PyErr_Occurred()) goto done;
+
+    /* unscaled = the coefficient digits as one integer. */
+    count = PyTuple_Check(digits) ? PyTuple_GET_SIZE(digits) : 0;
+    unscaled = PyLong_FromLong(0);
+    ten = PyLong_FromLong(10);
+    if (unscaled == NULL || ten == NULL) goto done;
+    for (i = 0; i < count; i++) {
+        PyObject *scaled = PyNumber_Multiply(unscaled, ten);
+        if (scaled == NULL) goto done;
+        Py_SETREF(unscaled, PyNumber_Add(scaled, PyTuple_GET_ITEM(digits, i)));
+        Py_DECREF(scaled);
+        if (unscaled == NULL) goto done;
+    }
+
+    if (exp_value > 0) {
+        /* A positive exponent is whole-number magnitude. Multiply it out so the
+           group split below always works against a plain integer -- which is
+           also what PostgreSQL itself stores: '1E+100'::numeric has scale 0. */
+        scratch = PyLong_FromLong(exp_value);
+        if (scratch == NULL) goto done;
+        Py_SETREF(scratch, PyNumber_Power(ten, scratch, Py_None));
+        if (scratch == NULL) goto done;
+        Py_SETREF(unscaled, PyNumber_Multiply(unscaled, scratch));
+        Py_CLEAR(scratch);
+        if (unscaled == NULL) goto done;
+        exp_value = 0;
+    }
+    dscale = -exp_value;
+
+    /* Pad the fraction out to a whole number of base-10000 groups so the split
+       lands on a group boundary. */
+    padding = ((-dscale) % 4 + 4) % 4;
+    if (padding) {
+        scratch = PyLong_FromLong(padding);
+        if (scratch == NULL) goto done;
+        Py_SETREF(scratch, PyNumber_Power(ten, scratch, Py_None));
+        if (scratch == NULL) goto done;
+        Py_SETREF(unscaled, PyNumber_Multiply(unscaled, scratch));
+        Py_CLEAR(scratch);
+        if (unscaled == NULL) goto done;
+    }
+    fraction_groups = (Py_ssize_t)((dscale + padding) / 4);
+
+    groups = PyList_New(0);
+    if (groups == NULL) goto done;
+    {
+        PyObject *base = PyLong_FromLong(10000);
+        if (base == NULL) goto done;
+        while (PyObject_IsTrue(unscaled)) {
+            PyObject *pair = PyNumber_Divmod(unscaled, base);
+            if (pair == NULL) { Py_DECREF(base); goto done; }
+            if (PyList_Append(groups, PyTuple_GET_ITEM(pair, 1)) < 0) {
+                Py_DECREF(pair); Py_DECREF(base); goto done;
+            }
+            Py_SETREF(unscaled, Py_NewRef(PyTuple_GET_ITEM(pair, 0)));
+            Py_DECREF(pair);
+        }
+        Py_DECREF(base);
+    }
+    if (PyList_Reverse(groups) < 0) goto done;
+
+    ndigits = PyList_GET_SIZE(groups);
+    {
+        long weight = (long)(ndigits - 1 - fraction_groups);
+        Py_ssize_t lead = 0, tail;
+        /* PostgreSQL sends no leading or trailing zero groups; dscale still
+           records the display scale, so stripping cannot lose precision. */
+        while (lead < PyList_GET_SIZE(groups) &&
+               PyLong_AsLong(PyList_GET_ITEM(groups, lead)) == 0) {
+            lead++; weight--;
+        }
+        if (lead && PyList_SetSlice(groups, 0, lead, NULL) < 0) goto done;
+        tail = PyList_GET_SIZE(groups);
+        while (tail > 0 && PyLong_AsLong(PyList_GET_ITEM(groups, tail - 1)) == 0) tail--;
+        if (tail < PyList_GET_SIZE(groups) &&
+            PyList_SetSlice(groups, tail, PyList_GET_SIZE(groups), NULL) < 0) goto done;
+        ndigits = PyList_GET_SIZE(groups);
+        if (ndigits == 0) {
+            /* PostgreSQL has no signed zero -- '-0'::numeric is 0 -- so a
+               negative zero goes on the wire positive rather than as a sign the
+               server would never produce. */
+            weight = 0;
+            sign_flag = 0;
+        }
+        result = PyBytes_FromStringAndSize(NULL, 8 + ndigits * 2);
+        if (result == NULL) goto done;
+        out = PyBytes_AS_STRING(result);
+        out[0] = (char)((ndigits >> 8) & 0xFF); out[1] = (char)(ndigits & 0xFF);
+        out[2] = (char)((weight >> 8) & 0xFF);  out[3] = (char)(weight & 0xFF);
+        {
+            unsigned int sign_word = sign_flag ? PG_NUMERIC_NEG : PG_NUMERIC_POS;
+            out[4] = (char)(sign_word >> 8); out[5] = (char)sign_word;
+        }
+        out[6] = (char)((dscale >> 8) & 0xFF); out[7] = (char)(dscale & 0xFF);
+        for (i = 0; i < ndigits; i++) {
+            long group = PyLong_AsLong(PyList_GET_ITEM(groups, i));
+            if (group == -1 && PyErr_Occurred()) { Py_CLEAR(result); goto done; }
+            out[8 + i * 2] = (char)((group >> 8) & 0xFF);
+            out[9 + i * 2] = (char)(group & 0xFF);
+        }
+    }
+
+done:
+    Py_XDECREF(number); Py_XDECREF(parts); Py_XDECREF(digits); Py_XDECREF(exponent);
+    Py_XDECREF(unscaled); Py_XDECREF(ten); Py_XDECREF(scratch); Py_XDECREF(groups);
+    return result;
+}
+
+/* Unpack binary numeric into an exact Decimal, built from a digit string so the
+   decimal context can never round it. */
+static PyObject *
+decode_numeric(const unsigned char *raw, Py_ssize_t length)
+{
+    int ndigits, weight;
+    unsigned int sign, dscale;
+    PyObject *unscaled = NULL, *base = NULL, *text = NULL, *result = NULL;
+    long exponent;
+    int i;
+
+    if (length < 8) {
+        PyErr_SetString(PyExc_ValueError, "invalid binary numeric header");
+        return NULL;
+    }
+    ndigits = (int)(int16_t)((raw[0] << 8) | raw[1]);
+    weight = (int)(int16_t)((raw[2] << 8) | raw[3]);
+    sign = (unsigned int)((raw[4] << 8) | raw[5]);
+    dscale = (unsigned int)((raw[6] << 8) | raw[7]);
+
+    if (sign == PG_NUMERIC_NAN) return PyObject_CallFunction(decimal_type, "s", "NaN");
+    if (sign == PG_NUMERIC_PINF) return PyObject_CallFunction(decimal_type, "s", "Infinity");
+    if (sign == PG_NUMERIC_NINF) return PyObject_CallFunction(decimal_type, "s", "-Infinity");
+    if (sign != PG_NUMERIC_POS && sign != PG_NUMERIC_NEG) {
+        PyErr_Format(PyExc_ValueError, "invalid numeric sign 0x%04X", sign);
+        return NULL;
+    }
+    if (ndigits < 0 || length != 8 + (Py_ssize_t)ndigits * 2) {
+        PyErr_SetString(PyExc_ValueError, "invalid binary numeric length");
+        return NULL;
+    }
+
+    unscaled = PyLong_FromLong(0);
+    base = PyLong_FromLong(10000);
+    if (unscaled == NULL || base == NULL) goto done;
+    for (i = 0; i < ndigits; i++) {
+        int group = (int)(int16_t)((raw[8 + i * 2] << 8) | raw[9 + i * 2]);
+        PyObject *scaled, *addend;
+        if (group < 0 || group >= 10000) {
+            PyErr_SetString(PyExc_ValueError, "invalid numeric digit group");
+            goto done;
+        }
+        scaled = PyNumber_Multiply(unscaled, base);
+        if (scaled == NULL) goto done;
+        addend = PyLong_FromLong(group);
+        if (addend == NULL) { Py_DECREF(scaled); goto done; }
+        Py_SETREF(unscaled, PyNumber_Add(scaled, addend));
+        Py_DECREF(scaled);
+        Py_DECREF(addend);
+        if (unscaled == NULL) goto done;
+    }
+    exponent = 4L * (weight - ndigits + 1);
+
+    /* Move onto the advertised display scale. Growing is always safe; shrinking
+       only ever drops PostgreSQL's zero group padding, and the remainder guard
+       means a significant digit is never discarded. */
+    {
+        PyObject *ten = PyLong_FromLong(10);
+        if (ten == NULL) goto done;
+        while (exponent > -(long)dscale) {
+            Py_SETREF(unscaled, PyNumber_Multiply(unscaled, ten));
+            if (unscaled == NULL) { Py_DECREF(ten); goto done; }
+            exponent--;
+        }
+        while (exponent < -(long)dscale) {
+            PyObject *pair = PyNumber_Divmod(unscaled, ten);
+            int divisible;
+            if (pair == NULL) { Py_DECREF(ten); goto done; }
+            divisible = !PyObject_IsTrue(PyTuple_GET_ITEM(pair, 1));
+            if (!divisible) { Py_DECREF(pair); break; }
+            Py_SETREF(unscaled, Py_NewRef(PyTuple_GET_ITEM(pair, 0)));
+            Py_DECREF(pair);
+            exponent++;
+        }
+        Py_DECREF(ten);
+    }
+
+    text = PyUnicode_FromFormat(
+        "%s%SE%ld", sign == PG_NUMERIC_NEG ? "-" : "", unscaled, exponent
+    );
+    if (text == NULL) goto done;
+    result = PyObject_CallOneArg(decimal_type, text);
+
+done:
+    Py_XDECREF(unscaled); Py_XDECREF(base); Py_XDECREF(text);
+    return result;
+}
+
 PyObject *
 wreath_pg_encode_text_value(PyObject *value, uint32_t oid)
 {
@@ -490,6 +769,14 @@ wreath_pg_encode_text_value(PyObject *value, uint32_t oid)
     case PG_TIMESTAMPTZ:
         if (check_timestamp(value, oid == PG_TIMESTAMPTZ) < 0) return NULL;
         return isoformat_ascii(value, 1);
+    case PG_NUMERIC: {
+        PyObject *number = as_decimal(value);
+        PyObject *encoded;
+        if (number == NULL) return NULL;
+        encoded = ascii_string(number);
+        Py_DECREF(number);
+        return encoded;
+    }
     case PG_JSON:
     case PG_JSONB:
         return json_utf8(value);
@@ -630,6 +917,8 @@ wreath_pg_encode_binary_value(PyObject *value, uint32_t oid)
         }
         return PyBytes_FromStringAndSize((const char *)out, 8);
     }
+    case PG_NUMERIC:
+        return encode_numeric(value);
     case PG_JSON:
         return json_utf8(value);
     case PG_JSONB: {
@@ -945,6 +1234,14 @@ wreath_pg_decode_value(uint32_t oid, int format, PyObject *data)
             Py_DECREF(text);
             return result;
         }
+        case PG_NUMERIC: {
+            PyObject *text = PyUnicode_DecodeASCII((const char *)raw, length, "strict");
+            PyObject *decoded;
+            if (text == NULL) return NULL;
+            decoded = PyObject_CallOneArg(decimal_type, text);
+            Py_DECREF(text);
+            return decoded;
+        }
         case PG_JSON:
         case PG_JSONB:
             return PyUnicode_DecodeUTF8((const char *)raw, length, "strict");
@@ -1033,6 +1330,9 @@ wreath_pg_decode_value(uint32_t oid, int format, PyObject *data)
         }
         value = read_unsigned(raw, 8);
         return timestamp_from_micros((int64_t)value, oid == PG_TIMESTAMPTZ);
+    }
+    if (oid == PG_NUMERIC) {
+        return decode_numeric(raw, length);
     }
     if (oid == PG_JSON) {
         return PyUnicode_DecodeUTF8((const char *)raw, length, "strict");
@@ -1189,6 +1489,16 @@ wreath_pg_codec_init(PyObject *module)
     Py_DECREF(uuid_module);
     if (uuid_type == NULL) return -1;
 
+    {
+        PyObject *decimal_module = PyImport_ImportModule("decimal");
+        if (decimal_module == NULL) return -1;
+        decimal_type = PyObject_GetAttrString(decimal_module, "Decimal");
+        Py_DECREF(decimal_module);
+        if (decimal_type == NULL) return -1;
+        str_as_tuple = PyUnicode_InternFromString("as_tuple");
+        if (str_as_tuple == NULL) return -1;
+    }
+
     datetime_module = PyImport_ImportModule("datetime");
     if (datetime_module == NULL) return -1;
     date_type = PyObject_GetAttrString(datetime_module, "date");
@@ -1222,6 +1532,8 @@ void
 wreath_pg_codec_fini(void)
 {
     Py_CLEAR(uuid_type);
+    Py_CLEAR(decimal_type);
+    Py_CLEAR(str_as_tuple);
     Py_CLEAR(utc_timezone);
     Py_CLEAR(date_fromisoformat);
     Py_CLEAR(datetime_fromisoformat);

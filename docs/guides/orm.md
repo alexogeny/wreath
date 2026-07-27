@@ -21,6 +21,34 @@ class Widget(Model, table="widgets"):
 
 Every column names its PostgreSQL type explicitly — nothing is inferred from
 the annotation — and columns are `NOT NULL` unless you pass `nullable=True`.
+
+### Money and anything else that must be exact
+
+Use `Numeric` for a value where rounding is wrong rather than merely imprecise,
+and hand it a `Decimal`:
+
+```python
+from decimal import Decimal
+from wreath.orm.types import Numeric
+
+class Invoice(Model, table="invoices"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    total: Mapped[Decimal] = column(Numeric)
+
+invoice.total = Decimal("19.99")   # exact
+invoice.total = 19.99              # TypeError
+```
+
+A `float` is **refused, not converted**. That looks unhelpful until you see what
+the alternative costs: `Decimal("1.0000000000000000001")` and
+`...0002` are the same `float`, so a column that accepted floats would quietly
+merge two different values — and a row keyed on it would go missing. If you want
+rounding, say so at the call site with `Decimal(str(value))`.
+
+`Numeric` reads back as an exact `Decimal` with its scale intact, so a column
+declared `numeric(10,2)` returns `Decimal("1.10")` rather than `Decimal("1.1")`.
+Aggregates over it — `sum`, `avg` — come back as `Decimal` too. `NaN` and the
+infinities PostgreSQL 14 added round-trip unchanged.
 Wire the models onto the application with `app.postgres("main", dsn=...)`
 followed by `app.orm(database="main", models=[Widget])`, and ask for a
 request-scoped session in a handler with

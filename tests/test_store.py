@@ -8,6 +8,8 @@ claim that is one statement whose returned row *is* the claim.
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -357,3 +359,59 @@ def test_the_memory_half_is_bounded_because_a_worker_is_not() -> None:
     assert len(store) <= 8
     store.clear()
     assert len(store) == 0
+
+
+class _SlowDatabase(_FakeDatabase):
+    """`statement()` slow enough for two callers to overlap in it.
+
+    Not artificial: the real one builds a `Statement`, touches `_configs`, and
+    registers in a dict, and the GIL is released across all of that.
+    """
+
+    def statement(self, name: str, sql: str, *, workload: str) -> _FakeStatement:
+        time.sleep(0.02)
+        return super().statement(name, sql, workload=workload)
+
+
+def test_two_threads_reaching_a_statement_first_do_not_both_prepare_it() -> None:
+    """The lazy prepare is not atomic, and a duplicate is not benign.
+
+    `Database.statement` raises on a name it already holds, so without the lock
+    the losing thread gets `duplicate PostgreSQL statement` on an ordinary first
+    call. This needs no free-threaded interpreter -- the window spans a call, so
+    the GIL is released inside it. A single event loop cannot hit it, because
+    there is no `await` between the check and the assignment.
+    """
+    database = _SlowDatabase()
+    store = PostgresStore(database, _declaration(ttl=3600.0))
+
+    barrier = threading.Barrier(2)
+    returned: list[Any] = []
+    failed: list[BaseException] = []
+
+    def first_use() -> None:
+        barrier.wait()
+        try:
+            returned.append(store.statement("purge"))
+        except BaseException as exc:  # noqa: BLE001
+            failed.append(exc)
+
+    threads = [threading.Thread(target=first_use) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failed == []
+    assert len(database.statements) == 1
+    # And both callers hold the same statement, not one each.
+    assert returned[0] is returned[1]
+
+
+def test_the_settled_path_does_not_take_the_lock() -> None:
+    """Double-checked: after first use the lock is never acquired again."""
+    store = PostgresStore(_FakeDatabase(), _declaration(ttl=3600.0))
+    first = store.statement("purge")
+
+    store._prepare_lock = None  # any acquire from here would raise
+    assert store.statement("purge") is first

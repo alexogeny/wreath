@@ -178,6 +178,56 @@ string and the stream is a plain endpoint.
 The registry is **bounded** (`max_tasks`, `ttl`) — no external store, no
 unbounded growth.
 
+### Every stream ends by saying why
+
+A stream that simply stops is indistinguishable from a connection that dropped,
+so each one closes with a final event naming the reason:
+
+| `state` | what happened |
+| --- | --- |
+| `done` / `failed` | the task finished; this is the event you were waiting for |
+| `expired` | the registry no longer holds the task. It aged out past `ttl` or was evicted past `max_tasks` — the work may well still be running, but nothing here can tell you. See [below](#what-expired-does-and-does-not-tell-you) |
+| `unknown` | the id never appeared. Either it was never launched, or you asked the wrong worker |
+| `detached` | `max_duration` ran out while the task was still going. Reconnect and pick up where the registry is |
+
+`Progress.terminal` stays a fact about the *task* — only `done` and `failed`.
+`Progress.ends_stream` is the broader question a client actually asks: is
+anything else coming? The last three are `ends_stream` without being `terminal`,
+because the registry losing track of a task is not the same as the task
+stopping. Each carries the last percent seen, so a bar can show "stalled at 40%"
+rather than snapping back to zero on the way out.
+
+That matters most for exactly the case the `ttl` is sized for: an import that
+outlives its registry entry used to end by appearing to still be running, with
+`state: running` as the last thing the client ever saw.
+
+### What `expired` does and does not tell you
+
+`expired` covers two situations the registry cannot tell apart: the task is
+still running and this worker can no longer see it, or it finished somewhere
+else and the entry aged out. Both are "the registry forgot", and the registry is
+the only thing being asked.
+
+It is worth being precise about the one guarantee it *does* carry: **the task
+was not terminal as far as this worker ever saw.** A `done` or `failed` report
+ends the stream on its own event, before `expired` can fire — so `expired` never
+means "it finished and you missed the news on this worker". It means the last
+thing this worker knew was in progress.
+
+Distinguishing the two would mean reading the job row, and neither
+`status_response` nor the stream does that, deliberately. `status_response` is
+synchronous — a handler that needs to await something does it before calling —
+and making it a coroutine to answer a diagnostic question would change a public
+signature for every caller. In the stream it would put a database round trip on
+a polling path, at precisely the moment the registry is under pressure and
+entries are aging out.
+
+The division is the same one the rest of this page draws: **progress is
+commentary, the job row is the record.** A client that needs an authoritative
+answer to "did this finish?" should ask the jobs surface, where the answer is
+durable, rather than the registry, where it is bounded by `ttl` and `max_tasks`
+by design.
+
 Without a bus it is in-process, which is right for tasks running in the web
 process and for tests. With a bus it is fleet-wide, and delivery is
 at-most-once as ephemeral fan-out is: a worker that misses an update gets the

@@ -28,6 +28,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -218,17 +219,26 @@ def _is_init_function(name: str) -> bool:
     return bool(INIT_TOKENS & set(name.lower().split("_")))
 
 
-def _waivers(raw_lines: list[str], code_lines: list[str]) -> dict[int, set[str]]:
+def _waivers(
+    raw_lines: list[str], code_lines: list[str], pattern: re.Pattern[str]
+) -> dict[int, set[str]]:
     """Map line number -> waived rule codes.
 
     A waiver covers its own line (for trailing comments) and the next line that
     actually contains code. Anything else would force the reason to be a
     one-liner: these waivers have to explain why a match is bounded, and that
     rarely fits beside the statement.
+
+    Every native lint spells its waiver the same way and differs only in the
+    rule-code prefix, so ``pattern`` is the whole difference between them --
+    which is why the five identical copies this replaces could collapse into
+    one. It is required rather than defaulted to this module's :data:`WAIVER`:
+    a caller that forgot it would match no waiver at all, and a lint that
+    silently waives nothing reports findings someone already justified.
     """
     found: dict[int, set[str]] = {}
     for number, line in enumerate(raw_lines, 1):
-        match = WAIVER.search(line)
+        match = pattern.search(line)
         if not match:
             continue
         code = match.group("code")
@@ -331,7 +341,7 @@ def _loop_depth_map(code_lines: list[str]) -> list[int]:
 def scan_text(path: str, text: str) -> list[Finding]:
     raw_lines = text.split("\n")
     code_lines = strip_c(text)
-    waived = _waivers(raw_lines, code_lines)
+    waived = _waivers(raw_lines, code_lines, WAIVER)
     depth = _loop_depth_map(code_lines)
     findings: list[Finding] = []
 
@@ -433,6 +443,81 @@ def iter_sources(paths: list[Path]) -> list[Path]:
 def repo_root() -> Path:
     # Installed editable from the repo: src/wreath/_devtools/native_lint.py
     return Path(__file__).resolve().parents[3]
+
+
+def run_lint(
+    argv: list[str] | None,
+    *,
+    prog: str,
+    description: str,
+    rules: dict[str, Rule],
+    scan: Callable[[str, str], list[Finding]],
+    default_roots: tuple[str, ...],
+) -> int:
+    """The command body every native lint but this module's own shares.
+
+    The four lints that delegate here differ only in the four values above --
+    everything else, down to the wording of the summary line, was already
+    identical across four copies.
+
+    An unreadable source **names the file on stderr and returns 1**. That is a
+    deliberate choice rather than the analyser shape used in ``_port``: these are
+    gates, ``wreath-check`` trusts the exit code, and a lint that skipped a file
+    and still printed "0 finding(s)" would report a clean bill of health over
+    files it never opened. Ending the run loudly is the honest failure. Three of
+    the five already did this; ``native-error-lint`` and ``native-gil-lint``
+    raised ``FileNotFoundError`` out of ``main`` instead, which ended the run
+    anyway but without naming the file.
+    """
+    parser = argparse.ArgumentParser(prog=prog, description=description)
+    parser.add_argument(
+        "paths", nargs="*", type=Path, help="files or directories (default: src/wreath/_native)"
+    )
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument("--list-rules", action="store_true")
+    args = parser.parse_args(argv)
+
+    if args.list_rules:
+        for rule in rules.values():
+            print(f"{rule.code}  {rule.summary}\n    {rule.hint}\n")
+        return 0
+
+    roots = args.paths or [repo_root() / root for root in default_roots]
+    sources = iter_sources([Path(root) for root in roots])
+    if not sources:
+        print(f"{prog}: no C sources found in {roots}", file=sys.stderr)
+        return 1
+
+    root = repo_root()
+    findings: list[Finding] = []
+    for source in sources:
+        try:
+            text = source.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            print(f"{prog}: cannot read {source}: {exc}", file=sys.stderr)
+            return 1
+        try:
+            display = str(source.relative_to(root))
+        except ValueError:
+            display = str(source)
+        findings.extend(scan(display, text))
+
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "scanned": len(sources),
+                    "count": len(findings),
+                    "findings": [finding.__dict__ for finding in findings],
+                },
+                indent=2,
+            )
+        )
+    else:
+        for finding in findings:
+            print(finding.render())
+        print(f"\n{prog}: {len(findings)} finding(s) across {len(sources)} file(s).")
+    return 1 if findings else 0
 
 
 def main(argv: list[str] | None = None) -> int:

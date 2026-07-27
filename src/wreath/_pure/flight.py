@@ -103,6 +103,16 @@ def decode_recording(data: bytes) -> Recording:
             if cell[0] != SCHEMA_VERSION:
                 raise SchemaError("event cell has an unsupported schema version")
         events = cells
+    if offset != len(data):
+        # Refuse rather than return the first container and drop the rest. Two
+        # recordings concatenated, or a file appended to after a short write,
+        # both land here -- and decoding the first while silently discarding
+        # what follows is the failure `read_recording` avoids by reporting a
+        # torn tail as `clean=False` instead of hiding it.
+        raise SchemaError(
+            f"recording has {len(data) - offset} trailing byte(s) after its last "
+            f"chunk; a container holds exactly one recording"
+        )
     return Recording(image=image, events=events)
 
 

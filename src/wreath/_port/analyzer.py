@@ -51,6 +51,11 @@ _QUERY_RULE = {
     "last": "orm.query.first",
     "get_or_create": "orm.query.get_or_create",
     "update_or_create": "orm.query.get_or_create",
+    # `order_by` heads a chain often enough to deserve its own verdict. Without
+    # one it fell through to the generic `orm.query`, which is *unsupported* —
+    # so the one shape wreath handles best (an explicitly ordered read) was
+    # reported as the shape it cannot do at all.
+    "order_by": "orm.query.order",
 }
 
 
@@ -87,6 +92,37 @@ _QUERY_EXACT_RULE = {
     "all": "orm.query.all",
     "count": "orm.query.count",
     "exists": "orm.query.exists",
+    "order_by": "orm.query.order_exact",
+    "select_related": "orm.query.eager_exact",
+    "prefetch_related": "orm.query.eager_exact",
+}
+
+
+def _eager_names_are_literal(call: ast.Call | None) -> bool:
+    """Whether ``select_related(...)`` names relations this analyzer can resolve.
+
+    ``select_related("llama")`` is ``.include(Model.llama.selectin())`` — a
+    rename. ``select_all()`` is not: it means "every relation", and wreath has
+    no such switch, so the set has to be written out by someone who knows which
+    ones the caller actually reads. A ``a__b`` trail is a nested include and a
+    non-literal is a runtime name; neither is resolved here.
+    """
+    if call is None or not call.args or call.keywords:
+        return False
+    return all(
+        isinstance(argument, ast.Constant)
+        and isinstance(argument.value, str)
+        and "__" not in argument.value
+        for argument in call.args
+    )
+
+# Tail verbs that only a specific head makes mechanical. `first` is the case:
+# `orm.query.first` is held back because "first without an order is not
+# deterministic" — an objection that does not apply when the head *is* the
+# order. Keyed by head so `filter(a=1).first()` keeps the old verdict.
+_TAIL_NEEDS_HEAD: dict[str, frozenset[str]] = {
+    "first": frozenset({"order_by"}),
+    "last": frozenset(),                  # reversing the declared order is a decision
 }
 
 
@@ -96,9 +132,13 @@ def _lookup_is_mechanical(keyword: str) -> bool:
     A bare column name is an equality test. A name with ``__`` is a column plus
     a lookup *only* when the trailing segment is one wreath has an operator for;
     otherwise it is a relation traversal (``owner__name``) or a container lookup
-    (``tags__jsonb_has_any``), and both are joins or operators someone has to
-    choose. Reading the suffix is what separates them, and getting it wrong in
-    the permissive direction would silently drop a join.
+    (``tags__jsonb_has_any``). The container lookup needs an operator someone
+    chooses. The relation does *not* need a join chosen — ``Model.owner.name``
+    is a ``RelatedColumnExpr`` and the compiler emits the INNER JOIN itself — it
+    needs the relation *resolved*, and ``owner``'s target model is usually
+    declared in another module. Reading the suffix is what separates them, and
+    getting it wrong in the permissive direction would emit an attribute chain
+    against a column that is not a relation at all.
     """
     column, separator, suffix = keyword.rpartition("__")
     if not separator:
@@ -144,20 +184,32 @@ def query_rule(
     exact = _QUERY_EXACT_RULE.get(verb or "")
     if exact is None:
         return base
-    if not _call_is_mechanical(call):
+    if verb == "order_by":
+        # The head's own arguments are column names, not filters.
+        if not _tail_step_is_mechanical("order_by", call):
+            return base
+    elif verb in ("select_related", "prefetch_related"):
+        if not _eager_names_are_literal(call):
+            return base
+    elif not _call_is_mechanical(call):
         return base
-    if not all(_tail_step_is_mechanical(step, node) for step, node in tail):
+    if not all(_tail_step_is_mechanical(step, node, verb or "") for step, node in tail):
         return base
     return exact
 
 
-def _tail_step_is_mechanical(verb: str, call: ast.Call | None) -> bool:
+def _tail_step_is_mechanical(verb: str, call: ast.Call | None, head: str = "") -> bool:
     """Whether a verb chained after the head carries across with its arguments.
 
     Checked rather than assumed: ``.all(name__icontains=x)`` is a filter wearing
     a terminal's name, and treating the verb alone as safe would let the lookup
     the head check exists to catch through the back door.
+
+    ``head`` is what lets ``first`` be mechanical after ``order_by`` and nowhere
+    else — the verb alone does not decide it.
     """
+    if verb in _TAIL_NEEDS_HEAD:
+        return head in _TAIL_NEEDS_HEAD[verb]
     kind = _MECHANICAL_TAIL.get(verb)
     if kind is None:
         return False
@@ -454,12 +506,34 @@ class _Imports:
         return ""
 
 
+def _boto3_service(node: ast.Call) -> str | None:
+    """The AWS service named by ``boto3.client("s3")`` / ``.resource("s3")``.
+
+    ``None`` when the name is not a literal — a service chosen at runtime is not
+    one this analyzer can route, and guessing would put an S3 verdict on a call
+    that talks to something else.
+    """
+    argument = node.args[0] if node.args else None
+    if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+        return argument.value.lower()
+    return None
+
+
 def _base_kind(imports: _Imports, cls: ast.ClassDef) -> str | None:
     """Which framework model kind (if any) this class subclasses."""
     for base in cls.bases:
         origin = imports.origin(base)
         if origin == "pydantic.BaseModel":
             return "pydantic"
+        # A BaseHTTPMiddleware subclass is the middleware itself — the construct
+        # a porter rewrites. `mw.custom` used to fire only where one was *wired
+        # up* (`add_middleware(...)`), so a class defined in its own module and
+        # imported elsewhere went unreported entirely.
+        if origin in (
+            "starlette.middleware.base.BaseHTTPMiddleware",
+            "fastapi.middleware.base.BaseHTTPMiddleware",
+        ):
+            return "middleware"
         # pydantic-settings (v2) and the legacy pydantic v1 BaseSettings both appear
         # in real apps — recognize either.
         if origin in ("pydantic_settings.BaseSettings", "pydantic.BaseSettings"):
@@ -593,7 +667,9 @@ class _Analyzer(ast.NodeVisitor):
                 rule_id, reason = self._graphql_type_shape(node, origin.split(".")[-1])
                 self._emit(rule_id, node.lineno, reason)
         kind = _base_kind(self.imports, node)
-        if kind == "pydantic":
+        if kind == "middleware":
+            self._emit("mw.custom", node.lineno)
+        elif kind == "pydantic":
             self._emit("pydantic.model", node.lineno)
             self._scan_pydantic_body(node)
         elif kind == "settings":
@@ -744,13 +820,16 @@ class _Analyzer(ast.NodeVisitor):
                     self._emit("route.websocket", dec.lineno)
                 elif attr == "exception_handler":
                     self._emit("exc.handler", dec.lineno)
-                elif attr in ("task",) and "celery" in origin.lower():
-                    self._emit("bg.celery", dec.lineno)
             if tail in ("field_validator", "model_validator", "validator", "root_validator"):
                 self._emit("pydantic.validator", getattr(dec, "lineno", node.lineno))
             elif tail == "asynccontextmanager":
                 self._scan_lifespan(node)
-            elif tail == "shared_task":
+            elif tail == "shared_task" or (tail == "task" and "celery" in origin.lower()):
+                # Both spellings, deliberately: `@celery_app.task(bind=True)` is a
+                # Call and `@celery_app.task` is a bare Attribute. Checking only the
+                # Call form missed every undecorated-argument task -- and the
+                # emitter (`emit.py`) has always matched on `tail`, so the report
+                # under-counted exactly the sites whose ported source carried a TODO.
                 self._emit("bg.celery", getattr(dec, "lineno", node.lineno))
             elif tail == "field" and origin.startswith("strawberry."):
                 self._emit("graphql.resolver", getattr(dec, "lineno", node.lineno))
@@ -849,6 +928,11 @@ class _Analyzer(ast.NodeVisitor):
                 self._emit("ws.json_method", node.lineno)
             elif attr == "create_task" and self.imports.origin(func.value) == "asyncio":
                 self._once_emit("asyncio_loop", "bg.asyncio_loop", node.lineno)
+        if tail == "Process" and origin.startswith("multiprocessing"):
+            # One finding per spawn, the way `bg.celery` bills the decorator
+            # rather than every call. `.start()`/`.join()`/`.is_alive()` around it
+            # are the same worker, and billing them would report one port as four.
+            self._emit("bg.multiprocessing", node.lineno)
         if tail == "FastAPI":
             self._emit("route.app", node.lineno)
         elif tail == "APIRouter":
@@ -887,7 +971,20 @@ class _Analyzer(ast.NodeVisitor):
         elif origin.startswith("alembic.op."):
             self._scan_migration_op(node, tail)
         elif origin.startswith("boto3") or origin.startswith("aioboto3"):
-            self._once_emit("boto3", "ext.boto3", node.lineno)
+            # `boto3.client("s3")` names its service in the first argument, and
+            # that argument is what decides the verdict: S3 has a wreath target
+            # now, every other service still has none. A module that talks to
+            # both bills both, so the once-key carries the service.
+            service = _boto3_service(node)
+            if service == "s3":
+                self._once_emit("boto3-s3", "ext.boto3_s3", node.lineno)
+            else:
+                self._once_emit("boto3", "ext.boto3", node.lineno)
+        elif origin in ("hmac.new", "hmac.compare_digest"):
+            # A digest compared against a header is a signature check. One
+            # finding per module: `hmac.new(...)` and the `compare_digest` that
+            # reads it are two halves of one verify, not two ports.
+            self._once_emit("hmac", "webhook.hmac", node.lineno)
         elif "dlock" in origin:
             self._once_emit("dlock", "lock.dlock", node.lineno)
         elif tail in ("decode", "get_unverified_header") and "jwt" in origin.lower():

@@ -65,14 +65,27 @@ def dumps(obj: Any) -> bytes:
         _install_temporal()
     try:
         return _dumps(obj)
-    except TypeError:
+    except TypeError as first:
         # Either a temporal value the encoders do not know, or something
         # genuinely unserializable. `jsonable` rewrites the first and leaves the
         # second alone, so the retry re-raises the encoder's own error for
         # anything it could not help with -- the message stays accurate.
         from .temporal import jsonable
 
-        return _dumps(jsonable(obj))
+        try:
+            return _dumps(jsonable(obj))
+        except TypeError as second:
+            if str(second) == str(first):
+                # The walk changed nothing the encoder cared about, so the two
+                # errors are one error reported twice. Raising the retry would
+                # print the same message under "another exception occurred",
+                # which reads as a second, different problem -- on what is the
+                # commonest JSON failure there is, a handler returning an object
+                # nobody taught the encoder about. A __jsonable__ hook that
+                # raises its own TypeError says something the first error did
+                # not, so that one still propagates with the original as context.
+                raise first from None
+            raise
 
 
 __all__ = ["dumps", "loads"]

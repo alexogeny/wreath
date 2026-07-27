@@ -90,6 +90,32 @@ answer draws a table whose remaining rows look unauthorized, which is a UI that
 is confidently wrong. A refusal is only a UI that is absent, and the client can
 page. Unbounded cardinality refuses.
 
+### If your authorizer is remote, the round trips are bounded too
+
+`max_ids` bounds how much work a request asks for. `max_concurrency` bounds how
+much of it is in flight at once:
+
+```python
+app.include_router(permissions_router(app, max_concurrency=16))
+```
+
+With the built-in Cedar engine this changes nothing you can observe — it runs
+in-process and never yields, so the evaluations happen in the same order either
+way. It matters when the authorizer is **remote**, which the `CedarEngine`
+protocol invites: there each evaluation is a round trip, and asking for them one
+at a time makes a full batch `max_ids × len(actions)` round trips end to end.
+Eight at a time, it is that number divided by eight.
+
+It is a ceiling rather than "as many as possible" on purpose. Firing the whole
+product at once would fix this endpoint's own denial of service by pointing one
+at your authorization service instead, and a burst of six hundred is a burst of
+six hundred whoever receives it.
+
+One requirement comes with this: **an authorizer must tolerate concurrent calls
+carrying a single request.** The built-in one does — it reads the request and
+never writes to it. If yours cannot, `max_concurrency=1` returns evaluation to
+strictly sequential and nothing else changes.
+
 ## User story: the client that stops asking
 
 > *We call the permissions endpoint on every page transition. It is fast, but

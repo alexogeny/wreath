@@ -45,6 +45,7 @@ _native_claims = getattr(_core, "jose_validate_claims", None) if _core is not No
 
 __all__ = [
     "EcPublicKey",
+    "RevocationCheck",
     "InvalidToken",
     "JwtError",
     "JwtVerifier",
@@ -465,6 +466,9 @@ def default_identity(claims: Mapping[str, Any]) -> Identity:
 
 IdentityMapper = Callable[[Mapping[str, Any]], Identity]
 KeyResolver = Callable[[Mapping[str, Any]], "JwtKey | None"]
+#: ``revoked(claims) -> bool`` -- whether this token has been cancelled since it
+#: was issued. See :func:`verify_jwt`.
+RevocationCheck = Callable[[Mapping[str, Any]], bool]
 
 
 def _reason_valid(
@@ -533,6 +537,7 @@ class JwtVerifier:
         "_key",
         "_leeway",
         "_required",
+        "_revoked",
     )
 
     def __init__(
@@ -545,6 +550,7 @@ class JwtVerifier:
         leeway: int = 60,
         required: Iterable[str] = ("exp",),
         identity: IdentityMapper = default_identity,
+        revoked: RevocationCheck | None = None,
     ) -> None:
         self._algorithms = _freeze_algorithms(algorithms)
         self._key = _coerce_key(key)
@@ -562,6 +568,7 @@ class JwtVerifier:
         self._leeway = int(leeway)
         self._required = tuple(required)
         self._identity = identity
+        self._revoked = revoked
 
     def __call__(self, token: str) -> Identity | None:
         return verify_jwt(
@@ -573,6 +580,7 @@ class JwtVerifier:
             leeway=self._leeway,
             required=self._required,
             identity=self._identity,
+            revoked=self._revoked,
         )
 
 
@@ -587,11 +595,23 @@ def verify_jwt(
     required: tuple[str, ...],
     identity: IdentityMapper,
     now: int | None = None,
+    revoked: RevocationCheck | None = None,
 ) -> Identity | None:
     """Verify a compact JWS and return an Identity, or None on any failure.
 
     Returns None (never raises) for every authentication failure so the bearer
     backend can issue a challenge without leaking which check failed.
+
+    ``revoked(claims)`` is the seam for cancelling a token before it expires.
+    Nothing ships behind it -- no ``jti`` cache, no store -- because a real one
+    is a lookup on the busiest path in the framework and that is the
+    application's call to make. Without it a stolen token stays valid until
+    ``exp``, which is why short lifetimes remain the primary answer.
+
+    It runs **after** the signature and the registered claims, so a hook only
+    ever sees claims that were genuinely issued; and a hook that *raises*
+    denies, because a revocation store that is unreachable must not be a
+    revocation store that says yes.
     """
     import time
 
@@ -628,6 +648,13 @@ def verify_jwt(
     )
     if reason != 0:
         return None
+
+    if revoked is not None:
+        try:
+            if revoked(claims):
+                return None
+        except Exception:  # noqa: BLE001 - see the docstring: unreachable != allowed
+            return None
 
     try:
         return identity(claims)

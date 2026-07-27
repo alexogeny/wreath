@@ -165,3 +165,134 @@ async def test_invalid_registered_statement_fails_startup_and_closes_connection(
 
     assert connector.connections[-1].closed
     assert not db.started
+
+
+def test_the_duplicate_statement_guard_holds_across_threads(monkeypatch: Any) -> None:
+    """Two threads registering one name: exactly one wins, the other is refused.
+
+    `Database.statement` was check-then-act -- `name in self._statements` and the
+    assignment were separate steps -- so both callers could pass the check before
+    either assigned. Both then succeeded, the second overwrote the first, and the
+    loser was left holding a `Statement` that `_for_workload` never yields and no
+    pool ever prepares. A guard written to *refuse* two subsystems claiming one
+    name silently became a lost write.
+
+    The interleave is forced rather than raced for. Contention alone did not
+    reproduce it here in 3,200 thread-trials, because on a GIL build the window
+    is a handful of bytecodes; a free-threaded interpreter removes exactly that
+    accident. Parking a thread inside the window is what a second core does for
+    free, so this asserts the invariant rather than the odds.
+    """
+    import threading
+
+    import wreath.postgres as pg
+
+    real_init = pg.Statement.__init__
+    parked = threading.Event()
+    release = threading.Event()
+
+    def parking_init(self: Any, database: Any, name: str, sql: str, workload: Any) -> None:
+        real_init(self, database, name, sql, workload)
+        if not parked.is_set():
+            parked.set()
+            release.wait(5.0)
+
+    monkeypatch.setattr(pg.Statement, "__init__", parking_init)
+
+    db = Database("main", "postgresql://primary/app")
+    won: list[Any] = []
+    refused: list[Exception] = []
+
+    def register(sql: str) -> None:
+        try:
+            won.append(db.statement("dup", sql))
+        except ValueError as exc:
+            refused.append(exc)
+
+    first = threading.Thread(target=register, args=("SELECT 1",))
+    first.start()
+    assert parked.wait(5.0), "the first caller never reached the window"
+
+    second = threading.Thread(target=register, args=("SELECT 2",))
+    second.start()
+    # The second caller blocks on the lock the first holds while parked, so this
+    # join is *expected* to time out -- it only gives it time to reach the window.
+    # Both threads are joined for real after the release; joining only `first`
+    # asserted on `refused` before the second caller had appended to it, which is
+    # rare serially and routine under `pytest -n 6`.
+    second.join(0.5)
+    release.set()
+    first.join(5.0)
+    second.join(5.0)
+    assert not first.is_alive() and not second.is_alive(), "a caller never returned"
+
+    assert len(won) == 1, "the duplicate guard let both callers through"
+    assert len(refused) == 1
+    assert "duplicate PostgreSQL statement" in str(refused[0])
+    # And the survivor is the one the pools will actually prepare.
+    assert db._statements["dup"] is won[0]
+    assert db._for_workload("read") == (won[0],)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_reports_the_pool_as_it_stands() -> None:
+    connector = Connector()
+    db = Database(
+        "main",
+        "postgresql://primary/app",
+        pools={"read": PoolConfig(min_size=1, max_size=2)},
+        connector=connector,
+    )
+    await db.start()
+    try:
+        pool = db.pool("read")
+        idle = pool.snapshot()
+        assert (idle.borrowed, idle.waiters, idle.max_size) == (0, 0, 2)
+        assert idle.available >= 1
+
+        held = await db.acquire("read")
+        busy = pool.snapshot()
+        assert busy.borrowed == 1
+        assert busy.available == idle.available - 1
+        await db.release("read", held)
+    finally:
+        await db.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_queue_high_water_survives_the_queue_draining() -> None:
+    """The point of a watermark: a sampler polling `waiters` would miss this.
+
+    Two callers queue behind a single connection and are served the instant it
+    comes back, so by the time anything could observe the pool the queue is
+    already empty -- `waiters` reads 0 and the pressure that mattered has left
+    no trace. `queue_high_water` is what a pacer needs and what a status page
+    should show.
+    """
+    connector = Connector()
+    db = Database(
+        "main",
+        "postgresql://primary/app",
+        pools={"read": PoolConfig(min_size=1, max_size=1)},
+        connector=connector,
+    )
+    await db.start()
+    try:
+        pool = db.pool("read")
+        held = await db.acquire("read")
+        assert pool.snapshot().queue_high_water == 0
+
+        queued = [asyncio.create_task(db.acquire("read")) for _ in range(2)]
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert pool.snapshot().waiters == 2, "both callers should be queued"
+
+        await db.release("read", held)
+        for task in asyncio.as_completed(queued):
+            await db.release("read", await task)
+
+        drained = pool.snapshot()
+        assert drained.waiters == 0, "the queue drained"
+        assert drained.queue_high_water == 2, "but the watermark remembers"
+    finally:
+        await db.stop()

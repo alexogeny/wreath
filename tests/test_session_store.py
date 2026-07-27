@@ -288,3 +288,83 @@ async def test_expiry_is_pushed_to_the_database_clock() -> None:
     # database's: one clock, whatever the workers' clocks say.
     assert "clock_timestamp() + make_interval(secs => $3::float8)" in save.sql
     assert save.calls == [("sid", '{"user":"ada"}', 60.0)]
+
+
+async def test_after_degrades_when_before_did_not_publish_a_baseline() -> None:
+    """An `after` whose `before` never finished must not raise.
+
+    Every field `before` publishes is read through `state.get` for this reason.
+    `_session_loaded` used to be read by attribute while its two neighbours were
+    not, so a half-initialised session turned an error response into an
+    unrelated `AttributeError` 500 -- a different bug than the one being served.
+
+    The dispatch fix landed alongside this means a `before` that raises no
+    longer runs its own `after` at all, so this is defence in depth rather than
+    a live path. It is pinned because the asymmetry is what made it reachable,
+    and asymmetries come back.
+    """
+    store = MemoryStore()
+    middleware = SessionMiddleware(secret="s" * 32, store=store)
+
+    class Response:
+        def __init__(self) -> None:
+            self.cookies: list[tuple] = []
+
+        def set_cookie(self, *args: Any, **kwargs: Any) -> None:
+            self.cookies.append((args, kwargs))
+
+        def delete_cookie(self, *args: Any, **kwargs: Any) -> None:
+            self.cookies.append((args, kwargs))
+
+    class Req:
+        def __init__(self) -> None:
+            from wreath.state import State
+
+            self.state = State()
+
+    # `before` got as far as publishing the session and stopped.
+    request = Req()
+    request.state.session = {"user": "ada"}
+
+    response = Response()
+    assert await middleware._after_stored(request, response) is response
+    assert response.cookies == [], "no cookie from a baseline that does not exist"
+    assert store.saves == 0, "nothing written from half-initialised state"
+
+    # And the cookie-only path, which had the same asymmetry.
+    plain = SessionMiddleware(secret="s" * 32)
+    request2 = Req()
+    request2.state.session = {"user": "ada"}
+    response2 = Response()
+    assert await plain.after(request2, response2) is response2
+    assert response2.cookies == []
+
+
+async def test_a_session_that_cannot_be_serialized_publishes_no_state() -> None:
+    """`before` serializes before it publishes, so there is no window.
+
+    `_json_dumps` is the one call in `_before_stored` that can raise. It used to
+    run third, after `state.session` was already set -- which is what made
+    "session published, baseline missing" reachable rather than theoretical.
+    """
+    store = MemoryStore()
+    store.rows["sid"] = {"bad": object()}  # not JSON-serializable
+    middleware = SessionMiddleware(secret="s" * 32, store=store)
+
+    class Req:
+        def __init__(self) -> None:
+            from wreath.state import State
+
+            self.state = State()
+            self.cookies: dict[str, str] = {}
+
+    request = Req()
+    request.cookies = {"wreath_session": middleware._sign(b"sid", 2_000_000_000)}
+
+    with pytest.raises(TypeError):
+        await middleware._before_stored(request)
+
+    assert request.state.get("session") is None, (
+        "a failed serialization must leave no session behind"
+    )
+    assert request.state.get("_session_loaded") is None

@@ -99,7 +99,11 @@ class LedgerConnection:
 
     async def fetch(self, sql: str, *args: object) -> Any:
         self.executed.append((sql, *args))
-        self.asked_for.append(args[0] if args else None)
+        # Every fact is its own placeholder now, so record the whole tuple:
+        # `= ANY($1)` with one bound array does not survive the real driver,
+        # which infers a parameter's type from its Python value and has no
+        # case for `list`.
+        self.asked_for.append(list(args))
         return list(self.rows)
 
     async def fetchrow(self, *args: object) -> Any:
@@ -151,7 +155,7 @@ async def test_a_pass_still_converting_the_column_is_a_hazard() -> None:
     assert hazards[0].action == "drop"
     # The scan asks only about the columns this migration touches, so a large
     # ledger costs nothing to a migration that narrows one column.
-    assert connection.asked_for == [[GRADE_FACT]]
+    assert connection.asked_for == [[GRADE_FACT]]  # one fact -> one placeholder
 
 
 @pytest.mark.asyncio

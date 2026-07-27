@@ -47,6 +47,7 @@ from pathlib import Path
 from types import CodeType
 from typing import Any
 
+from .measure import scope as _scope
 from .native_lint import repo_root
 from .sample_app import SCENARIOS
 
@@ -218,24 +219,6 @@ def _load_app(target: str) -> Any:
             f"wreath-request-trace: {module_name} has no attribute {attribute!r}"
         ) from None
 
-
-def _scope(method: str, path: str, headers: dict[str, str]) -> dict[str, Any]:
-    raw_path, _, query = path.partition("?")
-    return {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
-        "http_version": "1.1",
-        "method": method.upper(),
-        "scheme": "http",
-        "path": raw_path,
-        "raw_path": raw_path.encode(),
-        "query_string": query.encode(),
-        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
-        "server": ("127.0.0.1", 8000),
-        "client": ("127.0.0.1", 5555),
-        "root_path": "",
-        "extensions": {},
-    }
 
 
 async def _drive(app: Any, method: str, path: str, headers: dict[str, str]) -> tuple[Trace, int]:

@@ -100,6 +100,14 @@ exactly 24 hours — so the day a clock changes comes out an hour wrong and ever
 boundary after it is wrong too. It is a bug that appears twice a year, in one
 bucket, and is almost never traced back to the chart.
 
+Python's half of this and PostgreSQL's are checked against each other rather
+than assumed to match: `Bucket.floor` and `date_trunc` are run over 9,828
+comparisons — every bucket unit, nine zones, densely across both transitions of
+each — and agree on all of them, including how each resolves the hour a
+fall-back repeats. That check matters because a bucket boundary computed in
+Python has to be an instant `generate_series` will emit. When those drift, a
+settled row files itself under a bucket no read will ever ask for.
+
 The **range** is a runtime argument, because it changes per request. The
 **`stored_in`** zone is part of the declaration, and is the default when a caller
 does not name one. Today every run buckets fresh, so any zone costs the same; the
@@ -413,8 +421,42 @@ away: `sealed_through` says exactly how far the settled data goes.
 
 `on_late="reopen"` is available and replaces the settled value outright instead
 of recording a delta. It is never the default, because it is only sound while
-the source rows are still there to recompute from — a rule that works until
-retention lands and then quietly stops is worse than one that never worked.
+the source rows are still there to recompute from.
+
+Once you declare `retain()`, that soundness becomes checkable, and a declaration
+that can never satisfy it is refused where you wrote it:
+
+```python
+(
+    Series(Trek, at=Trek.started_at, bucket=Day, stored_in=zone("Pacific/Auckland"))
+        .measure(started=count())
+        .seal(after="2h", on_late="reopen")
+        .retain(raw="1 day")            # SeriesError
+)
+```
+
+A day bucket sealing two hours after it closes is not fully recomputable until
+**26** hours after it closes, because the oldest row in it is a whole day older
+than its end. One day of raw is not enough, and neither is three hours — even
+though three hours comfortably exceeds the two-hour seal. The requirement is the
+lateness allowance **plus the bucket**, and the refusal names both numbers.
+
+Ways out, in the order you should consider them: leave `on_late="correct"`, the
+default, which records a delta beside a value it never destroys; keep the source
+rows indefinitely with `retain(raw=None, ...)`; or lengthen raw's window past the
+figure the refusal names.
+
+**What that check cannot cover.** It refuses a declaration under which reopen
+could never work. It cannot refuse a `reconcile()` that runs a month after a
+bucket sealed, by which point the rows may have aged out under a window that was
+ample at sealing time. And the hazard is not unique to `reopen`: `reconcile()`
+recomputes from source rows in *both* modes, so `correct` running past the window
+records a delta computed from rows that are no longer all there. The reason only
+`reopen` is refused is what happens next — a correction leaves the settled value
+standing and shows up in `result.state.corrections`, so it is observable and
+recoverable, where a reopen overwrites the value and clears the correction that
+would have shown anything was wrong. **Run `reconcile()` on a schedule shorter
+than raw's retention window.**
 
 ### What cannot be sealed yet
 
@@ -427,16 +469,133 @@ the range that happened to materialise it.
 **A comparison.** The previous period is a second range and settling it is a
 separate question; declare the seal on the view you read directly.
 
+## Long ranges: the same view at more than one grain
+
+A year of daily buckets is 365 rows to draw and rather more to aggregate. Once
+a bucket is sealed you can keep a coarser copy of it too:
+
+```python
+activity = (
+    Series(Trek, at=Trek.started_at, bucket=Day, stored_in=zone("Pacific/Auckland"))
+        .measure(started=count(), distance=sum_(Trek.distance_km))
+        .seal(after="2 hours")
+        .retain(raw="3 days", day="1 year", month=None)
+)
+```
+
+Read that as: keep the source rows answering for three days, keep daily buckets
+a year, keep monthly buckets indefinitely. `None` means forever.
+
+**A tier is this view at a coarser grain, and that is all it is.** There is no
+second table and no second kind of identity — a settled bucket is filed under a
+key derived from the declaration's content, and the grain is part of that
+content, so asking for the same declaration at `Month` names the monthly tier.
+The daily tier of a daily view is *literally* the rows sealing already writes.
+
+Reading is transparent. A range spanning several tiers comes back as one dense
+run of buckets and one series per measure, exactly as an untiered read does:
+
+```python
+result = await activity.run(session, range=Range(start, end), zone=request.zone)
+for segment in result.segments:
+    print(segment.grain)      # "month", then "day", then "raw"
+```
+
+`segments` is reporting, not something to handle. It says which grain answered
+where, so a chart drawn from two grains can say so.
+
+### What retention does and does not mean
+
+`retain()` **deletes nothing**, and this release adds no way to. It is a promise
+about how long a grain stays warm, and the read path keeps that promise: a range
+older than raw's window is answered from the coarsest tier that still covers it,
+*even though raw happens to still be there*. That is deliberate — it means the
+query keeps returning the same answer on the day a later release starts
+enforcing the window, rather than quietly changing shape when rows it was
+relying on disappear.
+
+### Two refusals worth knowing about
+
+**Not every measure survives being rolled up.** A count and a sum add. A minimum
+and a maximum take the extreme of the extremes. An **average does not**: a daily
+mean built by averaging twenty-four hourly means weights a quiet 3am hour exactly
+as heavily as a busy noon, and produces a number that looks entirely reasonable.
+So an average against a bounded raw window with a coarser tier above it is
+refused where you wrote it:
+
+```python
+.measure(mean=avg(Trek.distance_km)).seal(after="2h").retain(raw="3 days", month=None)
+# SeriesError: measure 'mean' is an average and cannot be rolled up ...
+```
+
+Two ways out. Keep the source rows for the whole window the chart asks about
+(`retain(raw=None, ...)`), so every coarse bucket is always recomputed from
+them. Or take the coarse tier off the ladder. Storing the average decomposed as
+a sum and a count would make it additive, and that is not implemented.
+
+**A materialised grain is timezone-specific**, and this is the part that
+surprises people. Daily buckets cut in `Pacific/Auckland` cannot answer a
+question about London days: the boundaries do not line up, and no amount of
+re-aggregation recovers them. A tier can serve a reading zone only when the
+offset between the two is a whole number of that grain — so hourly rows serve
+any whole-hour zone but not `Asia/Kolkata` (+5:30), `Asia/Kathmandu` (+5:45) or
+`Pacific/Chatham` (+12:45), and daily rows serve only the zone they were cut in.
+A read in an incompatible zone falls back to raw, or refuses. It never quietly
+returns the wrong day's numbers.
+
+**The practical advice: if your readers span timezones, materialise at `hour`
+grain or finer and let day bucketing happen at read time.** You lose some
+compression and keep correctness. A single-zone business materialises daily and
+keeps both.
+
+Declaring `retain()` also constrains your seal: a bounded raw window and
+`seal(on_late="reopen")` are refused together unless raw outlives the lateness
+allowance **plus one bucket** — see [the write that arrives
+late](#the-write-that-arrives-late).
+
+### When a range outruns the grain you asked for
+
+If part of a range is only covered by a tier coarser than the bucket you asked
+for, the read refuses and names what is available:
+
+```
+SeriesError: this range reaches past every tier that stores day buckets; the
+coarsest grain still covering it is 'month'. ... pass allow_coarsening=True ...
+```
+
+Returning monthly numbers labelled as days is a lie that survives review, so it
+is not the default. `allow_coarsening=True` accepts it, and `segments` reports
+where it was taken up.
+
+### Building the coarser grains
+
+`rollup()` materialises every tier above `raw` over the sealed part of a range:
+
+```python
+written = await activity.rollup(session, range=Range(start, end))
+```
+
+It is an ordinary method, so scheduling stays in `wreath.jobs` where it already
+lives — `jobs.schedule` with a dedup key makes a re-run a no-op, and the insert
+refuses to overwrite anyway.
+
+Two things it does in order. It **reconciles first**, so a late write that
+landed behind the watermark is folded in before anything coarser is built from
+it — carving a stale number into a coarser grain puts it somewhere harder to
+notice and no longer traceable to the row that caused it. Then it computes each
+coarse grain **from the source rows**, not from the finer tier, which is both
+correct by construction and immune to the average-of-averages trap.
+
 ## What is not built yet
 
-The declaration surface names three more methods that a later stage fills in:
-`.retain()`, `.archive()` and `.drop()`. They exist today and they **refuse by
-name** rather than quietly doing nothing, because a declaration that read as
-though retention were configured while nothing enforced it would be worse than
-one that failed. Nothing in this module deletes anything — sealing decides a
-bucket is final, not that anything goes away — and `.drop()` will stay opt-in
-when it arrives, because a declaration written to make a chart fast must not be
-able to remove a business record as a side effect.
+The declaration surface names two more methods that a later stage fills in:
+`.archive()` and `.drop()`. They exist today and they **refuse by name** rather
+than quietly doing nothing, because a declaration that read as though archival
+were configured while nothing enforced it would be worse than one that failed.
+Nothing in this module deletes anything — sealing decides a bucket is final and
+retention decides which grain answers, neither makes anything go away — and
+`.drop()` will stay opt-in when it arrives, because a declaration written to
+make a chart fast must not be able to remove a business record as a side effect.
 
 Reference: [`wreath.series`](../reference/series.md), and
 [`wreath.temporal`](../reference/temporal.md) for the bucket vocabulary.

@@ -185,16 +185,30 @@ class SessionMiddleware:
                     # is a revoked session, even with a valid signed cookie --
                     # that is the whole point of storing server-side.
                     sid, session = decoded, stored
+        # Serialize before publishing anything. `_json_dumps` is the one call
+        # here that can raise, and doing it first means the four assignments
+        # below are plain stores with no failure point between them -- so
+        # `after` can never observe a half-initialised session. It used to sit
+        # third, which made "session is set but its baseline is not" reachable
+        # rather than merely theoretical.
+        baseline = _json_dumps(session)
         state = request.state
         state.session = session
         state._session_sid = sid
-        state._session_loaded = _json_dumps(session)
+        state._session_loaded = baseline
         state._session_rotate = False
 
     async def _after_stored(self, request: Request, response: Any) -> Any:
         state = request.state
-        session = getattr(state, "session", None)
-        if session is None:
+        session = state.get("session")
+        loaded = state.get("_session_loaded")
+        if session is None or loaded is None:
+            # Read through `.get` uniformly: every field `before` publishes is
+            # optional here, because an `after` whose `before` did not complete
+            # must degrade rather than raise. Reading one of the four by
+            # attribute made that case an unrelated `AttributeError` 500 instead
+            # of a session that is simply not written. `_session_loaded` is
+            # always bytes when present, so None is unambiguously "absent".
             return response
         sid = state.get("_session_sid")
         rotate = bool(state.get("_session_rotate"))
@@ -207,7 +221,7 @@ class SessionMiddleware:
                 response.delete_cookie(self._cookie)
             return response
 
-        changed = _json_dumps(session) != state._session_loaded
+        changed = _json_dumps(session) != loaded
         if not changed and sid is not None and not rotate:
             # Unchanged but live. Saving again would rewrite the row for nothing,
             # but leaving it alone made expiry *absolute*: a session in constant
@@ -261,11 +275,15 @@ class SessionMiddleware:
         if self._store is not None:
             return await self._after_stored(request, response)
         state = request.state
-        session = getattr(state, "session", None)
-        if session is None or not hasattr(response, "set_cookie"):
+        session = state.get("session")
+        loaded = state.get("_session_loaded")
+        # Same rule as `_after_stored`: no baseline means `before` did not
+        # finish, and a cookie signed against a baseline that does not exist
+        # would be a guess about what the caller arrived with.
+        if session is None or loaded is None or not hasattr(response, "set_cookie"):
             return response
         serialized = _json_dumps(session)
-        if serialized == state._session_loaded:
+        if serialized == loaded:
             return response
         if not session:
             response.delete_cookie(self._cookie)

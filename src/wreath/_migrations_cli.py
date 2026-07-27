@@ -82,13 +82,54 @@ async def _detect(
             await database.release(workload, connection)
     finally:
         await database.stop()
-    return {
+    payload = {
         "current": detection.current,
         "pending_passes": passes,
         "operation_count": detection.diff.operation_count,
         "desired_fingerprint": detection.desired_fingerprint.hex(),
         "actual_fingerprint": detection.actual_fingerprint.hex(),
     }
+    if with_passes:
+        payload["transitional"] = _transitional_findings(registry)
+    return payload
+
+
+def _transitional_findings(registry: Any) -> list[dict[str, Any]]:
+    """The forward scan: reads that would mean something else mid-conversion.
+
+    Doc 16 called this an extension of the existing hazard scan. It is not --
+    ``_downgrade_hazards`` runs only from a revert, and ``check`` today is drift
+    detection. This is new machinery, and it needs no connection, so it runs
+    beside the drift check rather than inside it.
+    """
+    from ._migrations.scan import scan_application
+
+    return [
+        {
+            "column": report.column,
+            "shape": report.shape,
+            "examined": report.examined,
+            "scanned_nothing": report.scanned_nothing,
+            "summary": report.describe(),
+            "unsafe": [
+                {
+                    "site": item.site,
+                    "operation": item.operation,
+                    "verdict": item.verdict,
+                    "detail": item.detail,
+                }
+                for item in report.blocking
+            ],
+            "waived": [
+                {"site": item.site, "operation": item.operation, "reason": item.waiver}
+                for item in report.waived
+            ],
+            "rewritable": [
+                {"site": item.site, "rewrite": item.rewrite} for item in report.rewrites
+            ],
+        }
+        for report in scan_application(registry)
+    ]
 
 
 
@@ -401,6 +442,21 @@ def execute(
         title = "schema is current" if payload["current"] else "schema drift detected"
         if checking and not payload["current"]:
             exit_code = 1
+        if checking:
+            # A read that cannot be proven safe fails `check` on its own, even
+            # when the schema is current: the schema being right is not the same
+            # as it being safe to start converting values underneath it.
+            unproven = [
+                item
+                for item in payload.get("transitional", ())
+                if item["unsafe"] or item["scanned_nothing"]
+            ]
+            if unproven:
+                exit_code = 1
+                title = (
+                    f"{len(unproven)} deferred migration(s) have reads that are not "
+                    f"proven safe for the conversion window"
+                )
     elif namespace.migration_action == "generate":
         application = load_application(namespace.target, factory=namespace.factory)
         payload = asyncio.run(_generate(namespace, application))

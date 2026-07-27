@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import importlib
 import os
+import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
@@ -111,13 +112,31 @@ class FromDatabase:
             raise ValueError(f"unknown PostgreSQL workload: {self.workload}")
 
 
+@dataclass(frozen=True, slots=True)
+class PoolSnapshot:
+    """What the pool looks like right now, for a status page or a pacer.
+
+    `queue_high_water` is the only field that is not instantaneous: it is the
+    deepest the wait queue has ever been, because the interesting question --
+    "did anything ever wait?" -- has no answer a sampler can be relied on to
+    catch. A pass that paces against pool pressure needs to know the queue was
+    ten deep for fifty milliseconds, and polling `waiters` will usually miss it.
+    """
+
+    borrowed: int
+    available: int
+    waiters: int
+    max_size: int
+    queue_high_water: int
+
+
 class Pool:
     """A bounded, exclusive-lease pool for one database workload."""
 
     __slots__ = (
         "_available", "_borrowed", "_condition", "_config", "_connections",
-        "_connector", "_dsn", "_read_only", "_started", "_statements",
-        "_stopping", "_waiters",
+        "_connector", "_dsn", "_high_water", "_read_only", "_started",
+        "_statements", "_stopping", "_waiters",
     )
 
     def __init__(
@@ -139,12 +158,23 @@ class Pool:
         self._connections: set[Any] = set()
         self._borrowed: set[Any] = set()
         self._waiters = 0
+        self._high_water = 0
         self._started = False
         self._stopping = False
 
     @property
     def borrowed(self) -> int:
         return len(self._borrowed)
+
+    def snapshot(self) -> PoolSnapshot:
+        """Mirrors `HTTPClient.snapshot()`, so both pools read the same way."""
+        return PoolSnapshot(
+            borrowed=len(self._borrowed),
+            available=len(self._available),
+            waiters=self._waiters,
+            max_size=self._config.max_size,
+            queue_high_water=self._high_water,
+        )
 
     @property
     def started(self) -> bool:
@@ -203,6 +233,10 @@ class Pool:
                         if self._waiters >= self._config.max_queue:
                             raise InterfaceError("PostgreSQL pool queue is full")
                         self._waiters += 1
+                        # Recorded on the way in: a sampler polling `waiters`
+                        # will usually miss a queue that formed and drained
+                        # between two polls, and that queue is the whole signal.
+                        self._high_water = max(self._high_water, self._waiters)
                         counted = True
                     remaining = deadline - loop.time()
                     if remaining <= 0:
@@ -392,7 +426,8 @@ class Database:
 
     __slots__ = (
         "_configs", "_connector", "_dsn", "_flight_dep_id", "_name", "_pools",
-        "_statements", "_workload_dsns", "shutdown_timeout", "started",
+        "_register_lock", "_statements", "_workload_dsns", "shutdown_timeout",
+        "started",
     )
 
     def __init__(
@@ -417,6 +452,9 @@ class Database:
         self._connector = connector
         self._pools: dict[Workload, Pool] = {}
         self._statements: dict[str, Statement] = {}
+        # Guards the duplicate check in `statement`, which is check-then-act and
+        # therefore not a guard at all across threads -- see the comment there.
+        self._register_lock = threading.Lock()
         # Metadata-image ID for phase attribution; stamped by the app when the
         # flight recorder joins live objects to the image (0 = unattributed).
         self._flight_dep_id = 0
@@ -428,15 +466,32 @@ class Database:
         return self._name
 
     def statement(self, name: str, sql: str, *, workload: Workload = "read") -> Statement:
+        """Register one prepared statement, refusing a name already claimed.
+
+        The duplicate check and the assignment run under a lock because
+        separately they are not a check at all: two threads registering the same
+        name both passed ``name in self._statements`` before either assigned, so
+        *both* succeeded and the loser was left holding a `Statement` that no
+        pool ever prepares -- `_for_workload` only ever sees the survivor. A
+        guard that exists to catch two subsystems claiming one name silently
+        became a lost write instead of the refusal it was written to be.
+
+        The window spans a `Statement` construction, so it does not need a
+        free-threaded interpreter to be real; free-threading merely removes the
+        GIL that makes it rare. Registration happens at startup and on a store's
+        first use, never per request, so a plain lock costs nothing worth
+        measuring. `store.py`'s `_prepare_lock` guards the tier above this one.
+        """
         workload = _workload(workload)
         if not name or not sql.strip():
             raise ValueError("statement name and SQL are required")
-        if name in self._statements:
-            raise ValueError(f"duplicate PostgreSQL statement: {name}")
-        if workload not in self._configs:
-            self._configs[workload] = PoolConfig()
-        statement = Statement(self, name, sql, workload)
-        self._statements[name] = statement
+        with self._register_lock:
+            if name in self._statements:
+                raise ValueError(f"duplicate PostgreSQL statement: {name}")
+            if workload not in self._configs:
+                self._configs[workload] = PoolConfig()
+            statement = Statement(self, name, sql, workload)
+            self._statements[name] = statement
         return statement
 
     def _for_workload(self, workload: Workload) -> tuple[Statement, ...]:
@@ -445,7 +500,22 @@ class Database:
     async def start(self) -> None:
         if self.started:
             return
-        for workload, config in self._configs.items():
+        # Snapshot under the registration lock rather than iterating the live
+        # dict. `statement()` inserts a workload the first time one is named, and
+        # it holds `_register_lock` while doing so -- but this loop awaits a
+        # connection per workload, so it stays open for milliseconds and a
+        # concurrent registration raises `dictionary changed size during
+        # iteration`. Measured: 400 of 400 trials when the two align.
+        #
+        # Snapshotting rather than holding the lock across the loop is
+        # deliberate: `_register_lock` is a `threading.Lock`, so holding it
+        # across an `await` would block every other thread for the whole of
+        # connection setup. A workload registered after the snapshot is not
+        # started here, which is the pre-existing behaviour -- `pool()` raises
+        # for it, as it already did.
+        with self._register_lock:
+            configs = tuple(self._configs.items())
+        for workload, config in configs:
             connector = self._connector or connect
             if connector is _DEFAULT_CONNECTOR:
                 connector = partial(
@@ -596,6 +666,7 @@ def _pool_config(value: PoolConfig | Mapping[str, Any]) -> PoolConfig:
 __all__ = [
     "AdvisoryLock", "AdvisoryTryLock", "Connection", "Database", "FromDatabase",
     "InterfaceError", "OperationalError", "PipelineFullError", "Pool", "PoolConfig",
-    "PostgresError", "ProtocolError", "Record", "SingletonRunner", "Statement",
+    "PoolSnapshot", "PostgresError", "ProtocolError", "Record", "SingletonRunner",
+    "Statement",
     "Workload", "connect",
 ]

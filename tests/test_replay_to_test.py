@@ -198,3 +198,44 @@ async def test_the_generated_test_says_where_it_came_from() -> None:
 async def test_a_module_only_target_imports_the_module() -> None:
     source = await generate_test(_app(), _recording(GET), target="herd.app")
     assert "import herd.app" in source
+
+
+# --- a connection that carried more than one request (design 22 item 18) -----
+
+
+def test_a_pipelined_recording_is_refused_rather_than_half_tested():
+    """Two requests on one keep-alive connection must not silently become one.
+
+    `recorded_request` joins every DATA segment and parses one request, so the
+    second request's bytes were dropped past `content-length` without a word --
+    generating a regression test that covers half of what was recorded. Refused
+    for the same reason a chunked body is.
+    """
+    with pytest.raises(ReplayError) as caught:
+        recorded_request(_recording(GET + POST))
+
+    message = str(caught.value)
+    assert "more than one request" in message
+    assert "wreath replay transport" in message
+
+
+def test_the_dropped_bytes_are_counted_in_the_refusal():
+    with pytest.raises(ReplayError) as caught:
+        recorded_request(_recording(POST + GET))
+
+    assert f"{len(GET)} bytes past" in str(caught.value)
+
+
+def test_pipelining_is_caught_when_split_across_reads():
+    """A real capture splits mid-request; the join must not hide the second one."""
+    joined = GET + POST
+    with pytest.raises(ReplayError):
+        recorded_request(_recording(joined[:20], joined[20:]))
+
+
+def test_a_single_request_with_a_trailing_newline_is_still_accepted():
+    """Not everything past the body is another request."""
+    request = recorded_request(_recording(POST + b"\r\n"))
+
+    assert request.method == "POST"
+    assert request.body == b'{"name": "Bea"}\n'

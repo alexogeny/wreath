@@ -94,18 +94,29 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     # is a mechanical rewrite — every keyword maps to a wreath predicate with the
     # value carried across untouched. `filter(name__icontains=x)` is not: the
     # value has to be wrapped in wildcards. `filter(ranch__slug=x)` is not
-    # either, because `slug` is a column on another table and the join is a
-    # decision. Same verb, three verdicts, and the argument list is what tells
-    # them apart — so the analyzer reads it rather than guessing from the name.
+    # either — but *not* because the join is a decision, which it is not:
+    # `Model.ranch.slug` is a `RelatedColumnExpr` and `plan_filter_joins` emits
+    # the INNER JOIN itself, choosing INNER because a parent with no matching
+    # child cannot satisfy a predicate on the child's column. The real blocker
+    # is resolution: turning `ranch__slug` into `Model.ranch.slug` means knowing
+    # `ranch` is a relation and `slug` a column on its target, and a model is
+    # usually declared in a different module from the query. `analyze` has a
+    # tree-wide index and could; `emit_module` is per-module and takes raw source
+    # text, so it could not — and `query_rule` is shared precisely so the report
+    # and the emitted TODO cannot disagree. Promoting this needs the emitter to
+    # gain a tree-wide index first. Same verb, three verdicts, and the argument
+    # list is what tells them apart — so the analyzer reads it rather than
+    # guessing from the name.
     "orm.query": ("orm_query", "queries", UNSUPPORTED, "ormar .objects. query -> session.fetch(Model.select().where(...)); rewrite by hand (design 07 §6)"),
-    "orm.query.filter": ("orm_query", "queries", NEEDS_REVIEW, "filter(**kw) -> Model.select().where(Model.col == value); run it with session.fetch() for a list. This one needs a decision: a `__icontains`/`__startswith` lookup rewrites the *value* (wrap it in wildcards for .ilike()), a `__isnull` has no negated form, a relation lookup (`owner__name`) is a join, and a jsonb lookup needs the container operator by hand"),
+    "orm.query.filter": ("orm_query", "queries", NEEDS_REVIEW, "filter(**kw) -> Model.select().where(Model.col == value); run it with session.fetch() for a list. This one needs a decision: a `__icontains`/`__startswith` lookup rewrites the *value* (wrap it in wildcards for .ilike()), a `__isnull` has no negated form, a relation lookup (`owner__name`) is `Model.owner.name` — wreath plans that INNER JOIN itself, but resolving `owner` to its target model is cross-module and this tool works one module at a time — and a jsonb lookup needs the container operator by hand"),
     "orm.query.filter_exact": ("orm_query", "queries", TRANSLATED, "filter(**kw) -> Model.select().where(Model.col == value, ...) — every keyword here maps to a wreath predicate with the value unchanged (`__gte` -> >=, `__in` -> .in_()). Run it with session.fetch() for a list, session.count() for a count"),
     "orm.query.get_or_none": ("orm_query", "queries", NEEDS_REVIEW, "get_or_none(**kw) -> await session.fetch_one(Model.select().where(...)) — same contract, None on no match. This call's lookups do not map straight across; see the filter note"),
     "orm.query.get_or_none_exact": ("orm_query", "queries", TRANSLATED, "get_or_none(**kw) -> await session.fetch_one(Model.select().where(...)) — the contract matches exactly: None on no match, and both raise when more than one row matches"),
     "orm.query.get": ("orm_query", "queries", NEEDS_REVIEW, "get(pk) -> await session.get(Model, pk); get(**kw) -> session.fetch_one(...). Left for review even when the arguments are simple, because the *miss* changes: ormar raises NoMatch, wreath returns None, so the caller's error branch has to move"),
     "orm.query.create": ("orm_query", "queries", NEEDS_REVIEW, "create(**values) -> instance = Model(**values); session.add(instance); await session.flush(). The rewrite is mechanical but the transaction boundary is not: ormar writes immediately, wreath writes when the session flushes, so where the flush goes is yours to choose"),
     "orm.query.all": ("orm_query", "queries", TRANSLATED, "all() -> await session.fetch(Model.select())"),
-    "orm.query.eager": ("orm_query", "queries", NEEDS_REVIEW, "select_related/select_all/prefetch_related -> Model.select().include(Model.rel.selectin()). Wreath never lazy-loads, so a relationship you forget to include raises instead of silently N+1-ing; NPlusOneGuard catches the ones that slip through a handler"),
+    "orm.query.eager": ("orm_query", "queries", NEEDS_REVIEW, "select_related/select_all/prefetch_related -> Model.select().include(Model.rel.selectin()). Wreath never lazy-loads, so a relationship you forget to include raises instead of silently N+1-ing; NPlusOneGuard catches the ones that slip through a handler. This call does not name its relations as plain literals — `select_all()` means *every* relation and wreath has no such switch, so write out the ones this caller actually reads"),
+    "orm.query.eager_exact": ("orm_query", "queries", TRANSLATED, "select_related('rel')/prefetch_related('rel') -> Model.select().include(Model.rel.selectin()), one include per name, run with session.fetch(). Wreath never lazy-loads, so the include is mandatory rather than an optimisation — a relationship you forget raises instead of silently N+1-ing, and NPlusOneGuard catches the ones that slip through a handler"),
     "orm.query.values": ("orm_query", "queries", NEEDS_REVIEW, "values([...]) -> narrow the projection with Model.select(Model.a, Model.b); rows come back as models, not dicts"),
     "orm.query.bulk": ("orm_query", "queries", NEEDS_REVIEW, "bulk_create/bulk_update -> session.add() each instance and flush once; the flush batches by model"),
     "orm.query.count": ("orm_query", "queries", TRANSLATED, "count() -> await session.count(Model.select().where(...))"),
@@ -113,6 +124,8 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     "orm.query.delete": ("orm_query", "queries", NEEDS_REVIEW, "delete() -> session.delete(instance) + flush for a loaded row; a bulk delete has no query form — issue it through postgres"),
     "orm.query.first": ("orm_query", "queries", NEEDS_REVIEW, "first() -> await session.fetch_one(Model.select().order_by(...).limit(1)); add the order_by, since 'first' without one is not deterministic"),
     "orm.query.get_or_create": ("orm_query", "queries", UNSUPPORTED, "get_or_create/update_or_create is a read-then-write race in one call — no wreath equivalent by design; write the upsert explicitly (ON CONFLICT) or guard it with a unique index"),
+    "orm.query.order": ("orm_query", "queries", NEEDS_REVIEW, "order_by(...) -> Model.select().order_by(Model.col) / .desc(); this chain's columns are not literal strings, so the column each name resolves to is a lookup only you can do"),
+    "orm.query.order_exact": ("orm_query", "queries", TRANSLATED, "order_by('col')/order_by('-col') -> Model.select().order_by(Model.col) / Model.col.desc(), run with session.fetch(). A trailing first() becomes session.fetch_one(...limit(1)) — the usual objection to first() is that an unordered 'first' is not deterministic, and this chain states the order, so there is nothing left to decide"),
     # -- middleware / lifespan / infra (not floor-checked) --------------------
     "mw.cors": ("middleware", "other", TRANSLATED, "add_middleware(CORSMiddleware, ...) -> add_middleware(CORSMiddleware(...)) (instance form)"),
     "mw.trustedhost": ("middleware", "other", TRANSLATED, "TrustedHostMiddleware -> wreath security middleware (instance form)"),
@@ -129,6 +142,7 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     # auto-translatable (the task/loop body is bespoke) — needs-review with a real target.
     "bg.celery": ("background", "other", NEEDS_REVIEW, "Celery task -> wreath jobs: app.jobs()/@jobs.task + jobs.schedule(cron=) (built); port the task body by hand"),
     "bg.asyncio_loop": ("background", "other", NEEDS_REVIEW, "asyncio background loop -> a supervised wreath service or app.jobs() (built)"),
+    "bg.multiprocessing": ("background", "other", NEEDS_REVIEW, "multiprocessing.Process worker -> jobs.launch() + ProgressRegistry (both built): the job runner owns the worker, and progress reports replace the shared state file a client polls -- jobs.launch() returns a TaskHandle whose task_id *is* the job id, so the status endpoint and the SSE stream need no second identifier. Port the worker body by hand"),
     # `wreath.graphql` shipped after this catalog was first written; leaving the
     # old "no equivalent" verdict in place told porters to keep a dependency
     # they can now delete, which is the specific way a porting tool goes stale.
@@ -144,7 +158,14 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     "graphql.type": ("graphql", "other", NEEDS_REVIEW, "@strawberry.type/@strawberry.input -> wreath.graphql derives the type from the ORM model, so the class is usually deleted; `strawberry.auto` fields have no counterpart to write. Expose the model via GraphQL(models=[...]) — exposure is opt-in"),
     "graphql.type_mirror": ("graphql", "other", TRANSLATED, "@strawberry.type whose `strawberry.auto` fields are exactly the columns of the ORM model of the same name -> delete the class and name the model in GraphQL(models=[...]); the derived type is field-for-field the same, with the same names on the wire"),
     "graphql.resolver": ("graphql", "other", NEEDS_REVIEW, "@strawberry.field computed field -> @api.field(\"Type\", \"name\", returns=...); the resolver sees the whole level (batched), not one object"),
+    # boto3 is not one verdict. Object storage became a framework feature when
+    # `wreath.objects` shipped (design 09), so an S3 client now has a real target
+    # and reporting it as "keep the external library" tells a porter to keep a
+    # dependency they can delete. Every other AWS service still has none, so the
+    # service name is what splits them — read it rather than judging the import.
     "ext.boto3": ("external", "other", UNSUPPORTED, "boto3/AWS SDK is not a framework feature; keep the external library"),
+    "ext.boto3_s3": ("external", "other", NEEDS_REVIEW, "boto3 S3 client/resource -> wreath.objects ObjectStore: S3ObjectStore(bucket=, region=) with ObjectPath for keys, put/get/stat/delete and zip_stream (built, design 09). Signing is SigV4 either way; what changes is that the store is declared once on the app and drained by lifespan rather than constructed at import. A presigned-URL flow has a recipe"),
+    "webhook.hmac": ("webhook", "other", NEEDS_REVIEW, "hand-rolled HMAC webhook signature verify -> wreath.webhooks HMACWebhookVerifier.verify(), which checks the digest with compare_digest *and* the timestamp against a replay window, and refuses an envelope whose relay path it has already seen. The hand-rolled form here compares the digest only, so a captured request replays forever — port the secret and the header names, not the comparison (built)"),
     "ext.aiometer": ("external", "other", NEEDS_REVIEW, "aiometer/tenacity outbound throttle+retry -> app.http_client(rate=, retries=) (built)"),
     "ext.s3path": ("external", "other", NEEDS_REVIEW, "s3path.S3Path -> wreath.objects ObjectStore/ObjectPath (built, design 09)"),
     "ext.gql": ("external", "other", UNSUPPORTED, "gql GraphQL client has no wreath equivalent; keep the external library"),
@@ -173,7 +194,11 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     "mig.index_manual": ("migration_op", "other", UNSUPPORTED, "an expression, partial, covering or non-btree index is emitted as a MANUAL operation that cannot be applied (and therefore cannot be downgraded) — keep it in Alembic; wreath's detection covers btree indexes only today"),
     "mig.unmodelled_type": ("migration_op", "other", NEEDS_REVIEW, "this DDL names a column type wreath's ORM has no PgType for (Numeric/Decimal, Time, Interval, Enum, INET, TSVECTOR, ...), so the generator cannot derive the column; pick a modelled type or keep the table in Alembic"),
     "mig.raw_sql": ("migration_op", "other", UNSUPPORTED, "op.execute(<raw SQL>) is a MANUAL op — the generator cannot derive it from a model; keep it in Alembic (design 07 Alembic posture)"),
-    "mig.data": ("migration_op", "other", NEEDS_REVIEW, "op.get_bind() means this revision rewrites *rows*, not just schema — the migration that blocks a deploy for an hour on a large table. Wreath has no online/deferred backfill yet (designed, not shipped): keep it in Alembic and run it deliberately, out of the startup path"),
+    # Deferred data migrations shipped (design 24), so "keep it in Alembic" stopped
+    # being true. The verdict stays needs-review because the *body* is bespoke —
+    # a Recode wants the old->new mapping written out, which is the thing the
+    # `op.execute(UPDATE ...)` in this revision encodes and a differ cannot read.
+    "mig.data": ("migration_op", "other", NEEDS_REVIEW, "op.get_bind() means this revision rewrites *rows*, not just schema — the migration that blocks a deploy for an hour on a large table. Wreath now ships deferred data migrations: declare a `Recode(Model.col, mapping={...})` beside the model (same column, new values) or a `Retype` (new column, backfill, verify, swap) and drive it with jobs.drive(). Startup applies the DDL and serves immediately while a chunked pass converts rows, and `wreath migrations check` refuses a later migration that narrows the column before the pass has published. The mapping is yours to write — that is what makes this needs-review rather than automatic"),
     # -- caching --------------------------------------------------------------
     "cache.store": ("cache", "other", TRANSLATED, "cachetools TTLCache(maxsize=, ttl=)/LRUCache(maxsize=) -> wreath.cache.BoundedCache(max_entries=, ttl=) — the same bounded LRU with the same eviction, under the framework's own budget. (A read-mostly reference table is better served by SnapshotCache + refresh_on, but that is a change of shape, not a rename.)"),
     "cache.decorator": ("cache", "other", NEEDS_REVIEW, "@cachetools.cached -> @wreath.response_cache.cached(ttl=, invalidate_on=[Model]). A TTL is a guess; naming the models makes it exact — the ORM announces its committed writes and the cache clears. Add cache.invalidate_across_workers(bus) to make that fleet-wide, and cache.refresh_on() for a SnapshotCache (built)"),

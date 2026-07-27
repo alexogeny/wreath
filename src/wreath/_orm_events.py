@@ -174,13 +174,23 @@ def _unsubscribe(callback: Callable[[frozenset[str]], None]) -> None:
 
 
 def register_bridge(callback: Callable[[frozenset[str]], None]) -> None:
-    """Call ``callback(model_names)`` for **locally** originated writes only."""
-    if callback not in _bridges:
-        _bridges.append(callback)
+    """Call ``callback(model_names)`` for **locally** originated writes only.
+
+    Under the same lock as :func:`subscribe_writes`: both are check-then-act on
+    a module-level list, and free-threading is a supported execution mode rather
+    than an assumption. Two threads registering the same bridge would otherwise
+    both pass the membership test, and two unregistering it would leave one
+    calling ``remove`` on a list that no longer holds it.
+    """
+    with _lock:
+        if callback not in _bridges:
+            _bridges.append(callback)
 
 
 def unregister_bridge(callback: Callable[[frozenset[str]], None]) -> None:
-    _bridges.remove(callback) if callback in _bridges else None
+    with _lock:
+        if callback in _bridges:
+            _bridges.remove(callback)
 
 
 def publish_write(model_names: frozenset[str], *, remote: bool = False) -> None:

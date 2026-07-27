@@ -70,15 +70,41 @@ def holes_table_name(schema: str) -> str:
     return f'"{schema}".pass_holes'
 
 
-def schema_sql(schema: str) -> str:
-    """DDL for the ledger and its dead-letter table. Never auto-applied.
+def rewrites_table_name(schema: str) -> str:
+    return f'"{schema}".pass_rewrites'
 
-    A table that appears because a process started is a schema change with no
-    history and no review, which is the same stance ``JobRunner.schema_sql`` and
-    every :mod:`wreath.store` declaration take.
+
+def _placeholders(values: tuple[str, ...]) -> str:
+    """``$1, $2, ...`` for an ``IN`` list, one placeholder per value.
+
+    Not ``= ANY($1)``, which is the obvious spelling and does not work: the
+    driver infers a parameter's type from the Python value, and it has no case
+    for ``list`` -- passing one raises ``unsupported PostgreSQL value type``.
+    Both readers here were written that way and neither had ever run against a
+    real server, because their tests use fakes and fakes do not infer types.
+
+    The list is bounded by the columns one migration touches, so an ``IN`` list
+    is the right size of hammer; a reader proportional to the *ledger* would
+    need the array, and would need a codec first.
+    """
+    return ", ".join(f"${index}" for index in range(1, len(values) + 1))
+
+
+def schema_sql(schema: str) -> str:
+    """DDL for the ledger, its dead-letter table, and the rewrite record.
+
+    Never auto-applied. A table that appears because a process started is a
+    schema change with no history and no review, which is the same stance
+    ``JobRunner.schema_sql`` and every :mod:`wreath.store` declaration take.
+
+    Every statement here is separated by ``;\\n`` and contains no ``;\\n`` of
+    its own, because every caller splits on exactly that -- the trigger function
+    below is written on one line for no other reason.
     """
     table = table_name(schema)
     holes = holes_table_name(schema)
+    rewrites = rewrites_table_name(schema)
+    guard = f'"{schema}".pass_rewrites_is_append_only'
     return (
         f'CREATE SCHEMA IF NOT EXISTS "{schema}";\n'
         f"CREATE TABLE IF NOT EXISTS {table} (\n"
@@ -104,6 +130,7 @@ def schema_sql(schema: str) -> str:
         "  driven_at timestamptz,\n"
         "  last_drive_error text,\n"
         "  guards text,\n"
+        "  rewrites text,\n"
         "  verified_at timestamptz,\n"
         "  verified_fact text,\n"
         "  last_error text,\n"
@@ -120,6 +147,35 @@ def schema_sql(schema: str) -> str:
         "  failed_at timestamptz NOT NULL DEFAULT clock_timestamp(),\n"
         "  PRIMARY KEY (name, tenant, cursor_to)\n"
         ");\n"
+        # The rewrite record. Separate from the ledger row on purpose: the
+        # ledger is working state that a pass rewrites on every claim, and a
+        # future "tidy up finished passes" job would be entirely reasonable to
+        # write against it. This table is not working state. It answers one
+        # question -- "were this column's values ever overwritten in place?" --
+        # whose answer can never become false, because the originals are gone
+        # and no later event puts them back. So it is append-only, and the
+        # guard below is what makes that a rule rather than a convention.
+        f"CREATE TABLE IF NOT EXISTS {rewrites} (\n"
+        "  fact text NOT NULL,\n"
+        "  pass_name text NOT NULL,\n"
+        "  tenant text NOT NULL DEFAULT '',\n"
+        "  recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),\n"
+        "  PRIMARY KEY (fact, pass_name, tenant)\n"
+        ");\n"
+        f"CREATE OR REPLACE FUNCTION {guard}() RETURNS trigger AS "
+        "$$ BEGIN RAISE EXCEPTION 'wreath: %.pass_rewrites is append-only; "
+        "a row here records that a column''s values were overwritten in place, "
+        "and a downgrade reads it to refuse restoring the old schema over the "
+        "new data. Removing it does not make the downgrade safe, only silent.', "
+        f"TG_TABLE_SCHEMA; END $$ LANGUAGE plpgsql;\n"
+        f"DROP TRIGGER IF EXISTS pass_rewrites_no_change ON {rewrites};\n"
+        f"CREATE TRIGGER pass_rewrites_no_change BEFORE DELETE OR UPDATE ON {rewrites} "
+        f"FOR EACH ROW EXECUTE FUNCTION {guard}();\n"
+        # TRUNCATE does not fire row-level triggers, so it needs its own. Without
+        # this the whole guard is one `TRUNCATE` away from doing nothing.
+        f"DROP TRIGGER IF EXISTS pass_rewrites_no_truncate ON {rewrites};\n"
+        f"CREATE TRIGGER pass_rewrites_no_truncate BEFORE TRUNCATE ON {rewrites} "
+        f"FOR EACH STATEMENT EXECUTE FUNCTION {guard}();\n"
     )
 
 
@@ -127,7 +183,7 @@ _COLUMNS = (
     "name, tenant, phase, cursor, ceiling, keyspace_from, pending, units_done, "
     "rows_done, denominator, denominator_kind, chunk_limit, paced_reason, "
     "window_started, window_rows, window_units, started_at, last_advance, "
-    "cycle_started, driven_at, last_drive_error, guards, verified_at, "
+    "cycle_started, driven_at, last_drive_error, guards, rewrites, verified_at, "
     "verified_fact, last_error"
 )
 
@@ -176,6 +232,17 @@ class LedgerRow:
     #: only at publication. Last in the field order, and defaulted, so every
     #: existing construction of this row keeps working.
     guards: str | None = None
+    #: The column whose *values* this pass overwrote in place, if any.
+    #:
+    #: Deliberately not ``guards``, and the difference is the whole point.
+    #: ``guards`` is a claim a gate will discharge -- it is answered by
+    #: ``verified_at`` and stops mattering once publication clears it.
+    #: ``rewrites`` is a fact about the data that publication does **not**
+    #: clear: once a re-encode has run, the old values are gone from the table
+    #: and no later event puts them back. A downgrade therefore has to read it
+    #: with no ``verified_at`` filter, because a *finished* re-encode is the
+    #: dangerous case rather than the safe one.
+    rewrites: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,11 +323,12 @@ def row_from_record(record: Any) -> LedgerRow:
         driven_at=field("driven_at", 19),
         last_drive_error=field("last_drive_error", 20),
         guards=field("guards", 21),
-        verified_at=field("verified_at", 22),
-        verified_fact=field("verified_fact", 23),
-        last_error=field("last_error", 24),
-        now=field("now", 25),
-        holes_open=int(field("holes_open", 26) or 0),
+        rewrites=field("rewrites", 22),
+        verified_at=field("verified_at", 23),
+        verified_fact=field("verified_fact", 24),
+        last_error=field("last_error", 25),
+        now=field("now", 26),
+        holes_open=int(field("holes_open", 27) or 0),
     )
 
 
@@ -281,7 +349,7 @@ def hole_from_record(record: Any) -> Hole:
 class Ledger:
     """The statements one pass issues against its own ledger row."""
 
-    __slots__ = ("_holes", "_name", "_schema", "_table", "_tenant")
+    __slots__ = ("_holes", "_name", "_rewrites", "_schema", "_table", "_tenant")
 
     def __init__(self, *, schema: str, name: str, tenant: str = "") -> None:
         self._schema = schema
@@ -289,6 +357,7 @@ class Ledger:
         self._tenant = tenant
         self._table = table_name(schema)
         self._holes = holes_table_name(schema)
+        self._rewrites = rewrites_table_name(schema)
 
     @property
     def table(self) -> str:
@@ -302,7 +371,12 @@ class Ledger:
         return schema_sql(self._schema)
 
     async def seed(
-        self, executor: Any, *, chunk_limit: int, guards: str | None = None
+        self,
+        executor: Any,
+        *,
+        chunk_limit: int,
+        guards: str | None = None,
+        rewrites: str | None = None,
     ) -> None:
         """Create this pass's row if it is not already there. Idempotent.
 
@@ -311,16 +385,42 @@ class Ledger:
         "nothing guards this column" from "something guards it and has not
         finished". ``DO UPDATE`` keeps it current when a redeploy changes the
         declaration, without disturbing a walk already in progress.
+
+        *rewrites* is the column whose values this pass overwrites in place.
+        It is recorded for the opposite reason: not so a migration can wait for
+        it, but so a *downgrade* can refuse forever after. ``COALESCE`` on the
+        update rather than a plain overwrite, because a redeploy that drops the
+        declaration must not erase the record that the values were already
+        changed -- forgetting is the failure mode here, not staleness.
+
+        It is also written to the append-only ``pass_rewrites`` table, and that
+        copy is the one a downgrade actually depends on. The ledger row is
+        working state and a plausible future purge job would delete it; the
+        record is not, and deleting it is refused by the database. Written
+        *before* the ledger row so a crash between the two leaves the safe
+        residue -- a record with no pass reads as "these values were changed",
+        which is true, where the reverse would read as "they were not".
         """
+        if rewrites is not None:
+            await executor.execute(
+                f"INSERT INTO {self._rewrites} (fact, pass_name, tenant) "
+                "VALUES ($1, $2, $3) ON CONFLICT (fact, pass_name, tenant) DO NOTHING",
+                rewrites,
+                self._name,
+                self._tenant,
+            )
         await executor.execute(
             f"INSERT INTO {self._table} "
-            "(name, tenant, phase, chunk_limit, started_at, guards) "
-            "VALUES ($1, $2, 'walking', $3, clock_timestamp(), $4) "
-            "ON CONFLICT (name, tenant) DO UPDATE SET guards = EXCLUDED.guards",
+            "(name, tenant, phase, chunk_limit, started_at, guards, rewrites) "
+            "VALUES ($1, $2, 'walking', $3, clock_timestamp(), $4, $5) "
+            "ON CONFLICT (name, tenant) DO UPDATE SET guards = EXCLUDED.guards, "
+            "rewrites = COALESCE(EXCLUDED.rewrites, "
+            f"{self._table}.rewrites)",
             self._name,
             self._tenant,
             int(chunk_limit),
             guards,
+            rewrites,
         )
 
     async def read(self, executor: Any) -> LedgerRow | None:
@@ -800,11 +900,97 @@ async def pending_facts(
         f"SELECT name, tenant, guards, phase, "
         f"(SELECT count(*) FROM {holes} h WHERE h.name = p.name "
         f"AND h.tenant = p.tenant) AS holes_open "
-        f"FROM {table} p WHERE verified_at IS NULL AND guards = ANY($1) "
+        f"FROM {table} p WHERE verified_at IS NULL AND guards IN ({_placeholders(facts)}) "
         "ORDER BY name, tenant",
-        list(facts),
+        *facts,
     )
     return [_pending_from_record(record) for record in records or ()]
+
+
+@dataclass(frozen=True, slots=True)
+class RewrittenColumn:
+    """A column whose values a pass has overwritten, or is overwriting."""
+
+    name: str
+    tenant: str
+    fact: str
+    phase: str
+    finished: bool
+    #: ``False`` when the append-only record survives but the ledger row that
+    #: should sit beside it is gone. The refusal is the same either way -- the
+    #: values were changed and that cannot become false -- but an operator
+    #: seeing this needs to know their ledger has been tidied, because the next
+    #: thing they will do is go looking for a pass that is not there.
+    ledger_row_present: bool = True
+
+
+async def rewritten_columns(
+    executor: Any, *, schema: str, facts: tuple[str, ...] = ()
+) -> list[RewrittenColumn]:
+    """Passes that have re-encoded any of *facts*, finished or not.
+
+    The reader a downgrade needs, and the one place in this module that asks a
+    question **without** filtering on ``verified_at``. Every other reader here
+    is asking "is this settled yet?", where finishing is the good answer. This
+    one is asking "have the values on disk already been changed?", where
+    finishing is the *worse* answer: a half-converted column at least still
+    holds some originals, while a completed re-encode holds none at all.
+
+    Reads the **union** of the ledger and the append-only ``pass_rewrites``
+    record, and that union is the whole protection. A naive "no row, no hazard"
+    cannot tell a column that was never re-encoded from one whose ledger row was
+    deleted, because both are the absence of a row -- and getting that wrong in
+    the safe direction refuses every downgrade forever, while getting it wrong
+    in the unsafe direction is the silent data loss this exists to prevent. The
+    record breaks the tie: it is written when the pass is seeded, it is never
+    updated, and the database refuses to delete it.
+
+    Restricted to *facts* for the same reason as :func:`pending_facts` -- the
+    read stays proportional to the migration rather than to the ledger -- and an
+    empty tuple honestly means "nothing to check".
+    """
+    if not facts:
+        return []
+    table = table_name(schema)
+    rewrites = rewrites_table_name(schema)
+    marks = _placeholders(facts)
+    records = await executor.fetch(
+        "SELECT r.pass_name AS name, r.tenant, r.fact, "
+        "COALESCE(p.phase, '') AS phase, (p.name IS NOT NULL) AS ledger_row_present "
+        f"FROM {rewrites} r "
+        f"LEFT JOIN {table} p ON p.name = r.pass_name AND p.tenant = r.tenant "
+        f"WHERE r.fact IN ({marks}) "
+        "UNION "
+        # The ledger's own column as well, so a pass seeded before this table
+        # existed is still found. Those rows have no record behind them and a
+        # purge would take them, which is exactly the gap being closed -- but
+        # refusing on a fact only the ledger knows is strictly better than not
+        # refusing at all.
+        "SELECT p.name, p.tenant, p.rewrites AS fact, p.phase, true "
+        f"FROM {table} p WHERE p.rewrites IN ({marks}) "
+        "ORDER BY name, tenant",
+        *facts,
+    )
+    # `UNION` already collapses the case where both sources agree. This keeps
+    # the richer reading if a driver ever hands back both spellings anyway:
+    # a row the ledger still has beats one it does not, because the phase is
+    # only knowable from the ledger.
+    found: dict[tuple[str, str, str], RewrittenColumn] = {}
+    for record in records or ():
+        field = _reader(record)
+        phase = str(field("phase", 3, "") or "")
+        entry = RewrittenColumn(
+            name=field("name", 0),
+            tenant=field("tenant", 1, ""),
+            fact=field("fact", 2, ""),
+            phase=phase,
+            finished=phase == "done",
+            ledger_row_present=bool(field("ledger_row_present", 4, True)),
+        )
+        key = (entry.name, entry.tenant, entry.fact)
+        if key not in found or entry.ledger_row_present:
+            found[key] = entry
+    return [found[key] for key in sorted(found)]
 
 
 async def read_all(executor: Any, *, schema: str, name: str | None = None) -> list[LedgerRow]:

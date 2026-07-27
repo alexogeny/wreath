@@ -349,3 +349,31 @@ async def test_the_clock_the_states_are_judged_against_comes_from_the_database(
 
     assert row.now == world.now
     assert any("clock_timestamp() AS now" in sql for sql in world.sql_of("SELECT"))
+
+
+def test_the_estimated_denominator_never_casts_its_parameter_to_regclass() -> None:
+    """A shape guard for a defect only a live server could surface.
+
+    `WHERE oid = $1::regclass` makes PostgreSQL infer the *parameter* as
+    `regclass` (OID 2205), and no binary encoder here can write one. The first
+    execution survived it, every later one raised -- so a pass measured once and
+    then failed forever, and a recurring pass re-measures every cycle.
+
+    A fake driver does not infer parameter types, so this cannot be caught by
+    behaviour here; the live check is
+    `tests/postgres/test_passes_integration.py::test_the_denominator_can_be_measured_more_than_once`.
+    What this pins is the spelling, in the suite that actually runs on every
+    change, because the DSN-gated one had never run at all before today.
+    """
+    import inspect
+
+    # Code only -- the comment above the statement names the broken spelling in
+    # order to explain it, and a guard that its own explanation trips is a guard
+    # nobody keeps.
+    code = "\n".join(
+        line
+        for line in inspect.getsource(_progress.Estimated.measure).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    assert "to_regclass($1)" in code
+    assert "::regclass" not in code

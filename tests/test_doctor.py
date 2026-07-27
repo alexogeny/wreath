@@ -292,7 +292,11 @@ async def test_a_fetch_tells_the_ledger_which_model_it_hydrated(
     database.connection.script("users", [user_row(1)])
     await Session(registry, "read").fetch(User.select())
 
-    assert ledger.counts == {"User": 1}
+    # Keyed by module *and* qualname: two models of the same name in different
+    # modules must not share a tally. What a reader is *shown* is shortened
+    # back to `User` unless the ledger has counted a second one -- see
+    # `test_two_models_of_the_same_name_are_counted_separately`.
+    assert ledger.counts == {f"{User.__module__}.{User.__qualname__}": 1}
 
 
 @pytest.mark.asyncio
@@ -442,3 +446,51 @@ async def test_the_doctor_survives_a_server_with_no_model_table() -> None:
     client = StubInspector([_herd_trace(50)], tables={"routes": ROUTES})
     (finding,) = await diagnose_n_plus_one(client, threshold=10)
     assert finding.worst.model == "model:5"
+
+
+def _same_named_key(module: str) -> str:
+    """The ledger key a top-level `Invoice` in `module` would produce."""
+    return f"{module}.Invoice"
+
+
+def test_two_models_of_the_same_name_are_counted_separately() -> None:
+    """`billing.Invoice` and `reporting.Invoice` are two models, not one.
+
+    `__qualname__` is `"Invoice"` for both, so keying on it alone made one
+    query to each look like two queries to one -- tripping the guard on two
+    innocent reads, in exactly the trees where it is most likely to happen
+    (design 19 found 73 of 405 names defined in more than one file).
+    """
+    tripped: list[Finding] = []
+    ledger = QueryLedger(limit=2, route="GET /invoices", on_exceeded=tripped.append)
+
+    ledger.record(_same_named_key("billing"))
+    ledger.record(_same_named_key("reporting"))
+
+    assert ledger.counts == {"billing.Invoice": 1, "reporting.Invoice": 1}
+    assert tripped == []
+    assert ledger.finding() is None
+
+
+def test_an_ambiguous_name_is_reported_with_its_module() -> None:
+    """When two share a bare name, the finding must say which one looped."""
+    ledger = QueryLedger(limit=2, route="GET /invoices")
+    for _ in range(2):
+        ledger.record(_same_named_key("billing"))
+    ledger.record(_same_named_key("reporting"))
+
+    finding = ledger.finding()
+    assert finding is not None
+    assert finding.worst.model == "billing.Invoice"
+
+
+def test_an_unambiguous_name_keeps_its_short_form() -> None:
+    """The module prefix is noise until it is the answer."""
+    ledger = QueryLedger(limit=2, route="GET /treks")
+    for _ in range(3):
+        ledger.record("myapp.models.Trek")
+
+    finding = ledger.finding()
+    assert finding is not None
+    assert finding.worst.model == "Trek"
+    assert "myapp" not in finding.describe()

@@ -826,6 +826,8 @@ class _Emitter(ast.NodeVisitor):
         elif (isinstance(func, ast.Attribute) and func.attr == "create_task"
               and self.imports.origin(func.value) == "asyncio"):
             self._annotate(node.lineno, "bg.asyncio_loop")
+        elif tail == "Process" and origin.startswith("multiprocessing"):
+            self._annotate(node.lineno, "bg.multiprocessing")
         elif tail == "GraphQL":
             self._annotate(node.lineno, "graphql.mount")
         elif origin.startswith(("boto3", "aioboto3")):

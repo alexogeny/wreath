@@ -36,6 +36,7 @@ rows are claimed at all. Each caller keeps those.
 from __future__ import annotations
 
 import re
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from time import monotonic
@@ -267,7 +268,7 @@ class PostgresStore:
             accepted its claim; a store that only reads may pass ``"read"``.
     """
 
-    __slots__ = ("_database", "_declaration", "_defined")
+    __slots__ = ("_database", "_declaration", "_defined", "_prepare_lock")
 
     def __init__(
         self, database: Any, declaration: Keyed, *, read_workload: str = "write"
@@ -275,6 +276,9 @@ class PostgresStore:
         self._database = database
         self._declaration = declaration
         self._defined: dict[str, _Defined] = {}
+        # Guards the lazy prepare in `statement`, which is not safe for two
+        # threads to enter at once -- see the comment there.
+        self._prepare_lock = threading.Lock()
         table, key, stamp = declaration.table, declaration.key, declaration.stamp
         # The SQL is built here; the prepared statements are not. A store is
         # constructed while the application is being described, which is before
@@ -413,14 +417,31 @@ class PostgresStore:
         return self._entry(name).workload
 
     def statement(self, name: str) -> Any:
-        """The prepared statement for ``name``, preparing it on first use."""
+        """The prepared statement for ``name``, preparing it on first use.
+
+        Locked, because the first use is not atomic: the window spans a call
+        into ``Database.statement``, and two threads arriving together both see
+        ``None`` and both register. That is not a benign duplicate --
+        ``Database.statement`` *raises* on a name it already holds, so the loser
+        gets `duplicate PostgreSQL statement` on an ordinary first call.
+
+        This does not need a free-threaded interpreter to happen: the GIL is
+        released across that call, so plain threads reproduce it. A single event
+        loop cannot, because there is no ``await`` between the check and the
+        assignment -- which is why it has not been seen.
+
+        Double-checked so the settled path stays one attribute read: after the
+        first use of each statement the lock is never taken again.
+        """
         entry = self._entry(name)
         if entry.statement is None:
-            entry.statement = self._database.statement(
-                self._statement_name(name),
-                entry.sql,
-                workload=entry.workload,
-            )
+            with self._prepare_lock:
+                if entry.statement is None:
+                    entry.statement = self._database.statement(
+                        self._statement_name(name),
+                        entry.sql,
+                        workload=entry.workload,
+                    )
         return entry.statement
 
     def _entry(self, name: str) -> _Defined:

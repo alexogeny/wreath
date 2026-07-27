@@ -40,8 +40,9 @@ push, and treating it as one would be the one way to make this unsafe.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from secrets import token_bytes
 from typing import Any
 from weakref import WeakKeyDictionary
@@ -88,6 +89,14 @@ TYPE_LEVEL_ID = "\x00type-level"
 #: :func:`permissions_router` for why going over it refuses rather than
 #: truncates.
 DEFAULT_MAX_IDS = 200
+
+#: How many policy evaluations one request may have in flight. Only a *remote*
+#: authorizer can be concurrent at all -- the built-in engine is in-process and
+#: never yields -- so this is a ceiling on outbound calls, not on work. Small on
+#: purpose: it exists to stop one caller's batch becoming a burst of `max_ids x
+#: actions` against somebody else's authorization service. Set it to 1 for an
+#: authorizer that cannot take concurrent calls carrying one request.
+DEFAULT_MAX_CONCURRENCY = 8
 
 
 def declared_actions(app: Any) -> dict[str, tuple[str, ...]]:
@@ -245,15 +254,54 @@ def _principal_key(identity: Any) -> str:
     return f"{identity.type}::{identity.id}"
 
 
-async def _allowed_actions(
-    request: Request, authorizer: Any, actions: tuple[str, ...], resource: Any
-) -> list[str]:
-    allowed = []
-    for action in actions:
-        decision = await authorizer.authorize(request, _Requirement(action, resource))
-        if getattr(decision, "allowed", False):
-            allowed.append(action)
-    return allowed
+async def _decide(
+    request: Request,
+    authorizer: Any,
+    asks: Sequence[tuple[Any, str]],
+    *,
+    limit: int,
+) -> list[bool]:
+    """Answer every ``(resource, action)`` ask, in ask order, ``limit`` at a time.
+
+    Every ask is one ``authorizer.authorize``. With the built-in engine that is
+    in-process and the loop never yields, so this is the same work either way --
+    the case it exists for is the *remote* authorizer the ``CedarEngine``
+    protocol invites, where each ask is a round trip. Evaluated one at a time, a
+    batch of two hundred ids over three actions is six hundred round trips end
+    to end; ``limit`` at a time it is six hundred divided by ``limit``. That is
+    a complexity argument, not a measurement -- no benchmark run here can see a
+    network that is not in it.
+
+    Bounded rather than gathered whole, because gathering whole would trade this
+    endpoint's own denial of service for one aimed at somebody else's
+    authorization service: ``max_ids`` already caps the work at ids x actions,
+    and firing all of it at once makes one request a burst of exactly that size.
+
+    ``limit <= 1`` restores strictly sequential evaluation. It is the escape
+    hatch for an authorizer that cannot take concurrent calls carrying one
+    request -- see :func:`permissions_router`, which states that requirement.
+    """
+    if not asks:
+        return []
+    if limit <= 1 or len(asks) == 1:
+        verdicts = []
+        for resource, action in asks:
+            decision = await authorizer.authorize(
+                request, _Requirement(action, resource)
+            )
+            verdicts.append(bool(getattr(decision, "allowed", False)))
+        return verdicts
+
+    gate = asyncio.Semaphore(limit)
+
+    async def one(resource: Any, action: str) -> bool:
+        async with gate:
+            decision = await authorizer.authorize(
+                request, _Requirement(action, resource)
+            )
+            return bool(getattr(decision, "allowed", False))
+
+    return list(await asyncio.gather(*(one(r, a) for r, a in asks)))
 
 
 def permission_document(
@@ -308,6 +356,7 @@ def permissions_router(
     roles_model: Any = None,
     document: LiveDocument | None = None,
     max_ids: int = DEFAULT_MAX_IDS,
+    max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
 ) -> Router:
     """Routes that answer what the caller may do, from the app's own policies.
 
@@ -333,6 +382,20 @@ def permissions_router(
     denial of service one authenticated caller can post. Over the ceiling it
     **refuses**, naming the limit, rather than truncating: a truncated answer
     draws a UI that is confidently wrong, and an absent answer is only absent.
+
+    ``max_concurrency`` bounds how many of those evaluations are in flight at
+    once. It matters only for a **remote** authorizer, which the ``CedarEngine``
+    protocol invites: the built-in engine is in-process and the loop never
+    yields, so concurrency there is the same work in the same order. Evaluating
+    a full batch one ask at a time is ``max_ids x len(actions)`` round trips end
+    to end; this makes it that over ``max_concurrency``. It is deliberately not
+    unbounded -- gathering the whole product would turn one caller's batch into
+    a burst of that size against a service that is not yours to overload.
+
+    **An authorizer must therefore tolerate concurrent calls carrying one
+    request.** The built-in one does; it reads the request and never writes to
+    it. If yours cannot, pass ``max_concurrency=1`` and evaluation returns to
+    strictly sequential.
 
     ``bus`` and ``roles_model`` configure the stream; see
     :func:`permission_document`, which builds the document when you do not pass
@@ -384,14 +447,28 @@ def permissions_router(
             response.headers.append((b"etag", tag.encode("ascii")))
             return _private(response)
 
+        # The resource is the *type*, not a row: this answers "could this
+        # principal ever" so a nav item can be drawn. Row-level questions go to
+        # the batch endpoint, which is why both exist.
+        #
+        # Flattened across resource types before evaluating, so `max_concurrency`
+        # bounds the whole manifest rather than each type in turn -- a type with
+        # one action would otherwise pace the type with ten.
+        asks = [
+            (_entity(resource_type, TYPE_LEVEL_ID), action)
+            for resource_type, actions in vocabulary.items()
+            for action in actions
+        ]
+        verdicts = await _decide(request, authorizer, asks, limit=max_concurrency)
         allowed: dict[str, list[str]] = {}
+        at = 0
         for resource_type, actions in vocabulary.items():
-            # The resource is the *type*, not a row: this answers "could this
-            # principal ever" so a nav item can be drawn. Row-level questions
-            # go to the batch endpoint, which is why both exist.
-            granted = await _allowed_actions(
-                request, authorizer, actions, _entity(resource_type, TYPE_LEVEL_ID)
-            )
+            granted = [
+                action
+                for offset, action in enumerate(actions)
+                if verdicts[at + offset]
+            ]
+            at += len(actions)
             if granted:
                 allowed[resource_type] = granted
         body = JSONResponse({
@@ -500,11 +577,24 @@ def permissions_router(
             texts = _distinct_identifiers(identifiers)
         except ValueError as error:
             return _bad(str(error))
+        # Flattened across ids as well as actions: ids is the axis that grows
+        # (up to `max_ids`), so bounding per id would leave the request as
+        # `len(ids)` sequential rounds however small the concurrency limit.
+        chosen = tuple(actions)
+        asks = [
+            (_entity(resource_type, text), action)
+            for text in texts
+            for action in chosen
+        ]
+        verdicts = await _decide(request, authorizer, asks, limit=max_concurrency)
         permissions = {}
-        for text in texts:
-            permissions[text] = await _allowed_actions(
-                request, authorizer, tuple(actions), _entity(resource_type, text)
-            )
+        for index, text in enumerate(texts):
+            base = index * len(chosen)
+            permissions[text] = [
+                action
+                for offset, action in enumerate(chosen)
+                if verdicts[base + offset]
+            ]
         return _private(
             JSONResponse({"type": resource_type, "permissions": permissions})
         )

@@ -9,13 +9,16 @@ recovered -- never crash or over-read the reader.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import struct
 
 import pytest
 
 import wreath
-from wreath.postgres import Connection
+from wreath._replay_adapters import DatabaseDouble
+from wreath.messaging import MessageBus
+from wreath.postgres import Connection, PostgresError
 from wreath.replay import (
     CanonicalRequest,
     FaultSchedule,
@@ -96,11 +99,16 @@ def _db_http_app() -> wreath.Wreath:
 @pytest.mark.parametrize("name", ADAPTER_NAMES)
 async def test_adapter_corpus_entry_is_deterministic(name: str) -> None:
     schedule = FaultSchedule.from_bytes(CORPUS[name].to_bytes())
-    # DB adapter faults route to a DB handler; HTTP ones have no in-app target
-    # here, so we only assert the schedule reconstructs its doubles cleanly.
+    # Every entry must reconstruct at least one double from its serialized form:
+    # a schedule that round-trips to nothing is a corpus entry that tests nothing.
     adapters = ReplayAdapters.from_faults(schedule.adapter_faults)
+    assert adapters.databases or adapters.clients or adapters.object_stores
     if "main" in adapters.databases:
         double = adapters.databases["main"]
+        # Only the query/acquire/release seams are reachable from an HTTP
+        # handler; listen and transaction faults are driven by their own
+        # subsystems below, so here we assert the reconstruction and that the
+        # handler path stays deterministic in their presence.
         a = await replay_endpoint_plan(_db_http_app(), CanonicalRequest("GET", "/db"),
                                        adapters=adapters)
         # A pooled/query fault is an owned 500; a release-only fault may still 200.
@@ -108,8 +116,6 @@ async def test_adapter_corpus_entry_is_deterministic(name: str) -> None:
         # An acquire fault never leases; otherwise the connection is returned.
         if double.acquired and double.acquire_fault is None:
             assert double.acquired == double.released
-    else:
-        assert adapters.clients  # HTTP fault reconstructed a faulty client
 
 
 # --- recording-reader fault taxonomy -----------------------------------------
@@ -171,3 +177,294 @@ def test_fault_schedule_reader_rejects_a_truncated_length_prefix() -> None:
     blob = _MAGIC_FAULTS + b"\x01" + _chunk(b"FALT", body)
     with pytest.raises((ReplayError, struct.error)):
         FaultSchedule.from_bytes(blob)
+
+
+# --- doorbell seam: LISTEN and the notification stream ------------------------
+#
+# The bus's doorbell is the failure this session actually shipped a fix for: a
+# held LISTEN connection whose `notifications()` iterator *returns* on close
+# rather than raising, so the unsupervised loop ended with nothing to catch and
+# ephemeral fan-out stopped for the life of the process. A corpus entry that
+# only models the raising case would re-bless that bug, which is why
+# NOTIFY_STREAM_END and NOTIFY_STREAM_ERROR are separate regions.
+
+
+class _Supervisor:
+    """Spawns real tasks and stops them the way `Supervisor` does."""
+
+    def __init__(self) -> None:
+        self.stopping = asyncio.Event()
+        self.tasks: list[asyncio.Task] = []
+
+    def spawn(self, name: str, coro):
+        task = asyncio.ensure_future(coro)
+        self.tasks.append(task)
+        return task
+
+    async def stop(self, bus) -> None:
+        self.stopping.set()
+        await bus.drain(asyncio.get_running_loop().time() + 1.0)
+        for task in self.tasks:
+            task.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+
+
+async def _until(predicate, *, within: float = 2.0) -> bool:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + within
+    while loop.time() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return predicate()
+
+
+def _bus_on(double: DatabaseDouble) -> MessageBus:
+    bus = MessageBus(double, name="corpus", poll_interval=60.0)
+
+    async def _handler(message) -> None:
+        return None
+
+    bus.subscribe("things")(_handler)
+    return bus
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name", ["adapter-notify_stream_end", "adapter-notify_stream_error"]
+)
+async def test_a_lost_doorbell_stream_is_reopened(name: str) -> None:
+    """Both ways a stream can stop must lead to the same owned outcome: reopen.
+
+    `STREAM_END` is the one that matters -- it raises nothing at all, so a
+    supervisor written around `except` sees a clean return and stops.
+    """
+    schedule = FaultSchedule.from_bytes(CORPUS[name].to_bytes())
+    double = ReplayAdapters.from_faults(schedule.adapter_faults).databases["main"]
+    bus = _bus_on(double)
+    supervisor = _Supervisor()
+    try:
+        await bus.start(supervisor)
+        # The owned recovery: the stream ends, the loop notices, and it takes a
+        # *new* connection and re-subscribes. Trusting the fix would assert the
+        # counter; proving it asserts the second stream.
+        assert await _until(lambda: double.streams >= 2), (
+            f"doorbell did not reopen after {name}: streams={double.streams}"
+        )
+        assert len(double.listened) >= 2, (
+            "reopened without re-LISTENing: a connection with no subscriptions "
+            "delivers nothing, which is the outage continuing quietly"
+        )
+        assert bus.doorbell_reconnects >= 1
+    finally:
+        await supervisor.stop(bus)
+
+
+@pytest.mark.asyncio
+async def test_a_doorbell_that_cannot_re_listen_keeps_trying() -> None:
+    """The compound region: the stream ends *and* the reopen is refused.
+
+    A database that went away and came back refusing is not a terminal state,
+    and treating a failed reopen as one is how a transient outage becomes a
+    permanent one.
+    """
+    schedule = FaultSchedule.from_bytes(
+        CORPUS["adapter-doorbell-drop-then-refused-reopen"].to_bytes()
+    )
+    double = ReplayAdapters.from_faults(schedule.adapter_faults).databases["main"]
+    bus = _bus_on(double)
+    supervisor = _Supervisor()
+    try:
+        await bus.start(supervisor)
+        # Three acquisitions: the original, the refused reopen, and at least one
+        # attempt after it -- the loop did not give up on a failure.
+        assert await _until(lambda: double.acquired >= 3), (
+            f"gave up after a refused reopen: acquired={double.acquired}"
+        )
+        assert bus.doorbell_reconnects >= 2
+    finally:
+        await supervisor.stop(bus)
+
+
+@pytest.mark.asyncio
+async def test_a_doorbell_refused_at_startup_still_gets_a_loop() -> None:
+    """A database down at boot must not leave the process with no doorbell.
+
+    This is the half of the bug that had no symptom at all: `start()` swallowed
+    the failure and never spawned the loop, so the bus never listened again even
+    once the database came back.
+    """
+    schedule = FaultSchedule.from_bytes(CORPUS["adapter-listen_refused"].to_bytes())
+    double = ReplayAdapters.from_faults(schedule.adapter_faults).databases["main"]
+    bus = _bus_on(double)
+    supervisor = _Supervisor()
+    try:
+        await bus.start(supervisor)  # must not raise: a dead database is not a boot failure
+        assert bus.doorbell_reconnects >= 1, "a refused startup LISTEN went uncounted"
+        assert double.streams == 0, "listened despite LISTEN being refused"
+        # The loop exists, retries, and gets there once the database allows it.
+        # Asserting only "it retried" would pass for a loop that never succeeds.
+        assert await _until(lambda: double.streams >= 1), (
+            f"never recovered from a refused startup LISTEN: "
+            f"acquired={double.acquired} streams={double.streams}"
+        )
+    finally:
+        await supervisor.stop(bus)
+
+
+# --- transaction seam ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_three_transaction_faults_land_at_three_distinct_moments() -> None:
+    """`BEGIN`, the body, and `COMMIT` fail differently and must stay distinct.
+
+    A caller's recovery turns on which one it was: no work ran, work ran and
+    rolled back, or work ran and its durability is unknown. Collapsing them is
+    how "did my write happen?" becomes unanswerable.
+    """
+    moments: dict[str, str] = {}
+    for name, fault in (
+        ("adapter-begin_error", "begin"),
+        ("adapter-statement_timeout", "body"),
+        ("adapter-commit_error", "commit"),
+    ):
+        schedule = FaultSchedule.from_bytes(CORPUS[name].to_bytes())
+        double = ReplayAdapters.from_faults(schedule.adapter_faults).databases["main"]
+        connection = await double.acquire("write")
+        txn = connection.transaction()
+        try:
+            async with txn as tx:
+                moments[fault] = "opened"
+                await tx.execute("UPDATE t SET x = 1")
+                moments[fault] = "body-ran"
+        except Exception:
+            moments[fault] = moments.get(fault, "never-opened")
+        else:  # pragma: no cover - a faulted scope must not complete
+            moments[fault] = "completed"
+    assert moments["begin"] == "never-opened", "BEGIN failed but the body ran"
+    assert moments["body"] == "opened", "the body was skipped, not interrupted"
+    assert moments["commit"] == "body-ran", "COMMIT failed before the body ran"
+
+
+@pytest.mark.asyncio
+async def test_a_rolled_back_scope_is_not_recorded_as_committed() -> None:
+    schedule = FaultSchedule.from_bytes(CORPUS["adapter-statement_timeout"].to_bytes())
+    double = ReplayAdapters.from_faults(schedule.adapter_faults).databases["main"]
+    connection = await double.acquire("write")
+    txn = connection.transaction()
+    with pytest.raises(PostgresError):
+        async with txn as tx:
+            await tx.execute("UPDATE t SET x = 1")
+    assert txn.rolled_back and not txn.committed
+
+
+# --- claim seam: the statement succeeds and returns nothing --------------------
+
+
+@pytest.mark.asyncio
+async def test_a_lost_claim_returns_nothing_rather_than_raising() -> None:
+    """`INSERT ... ON CONFLICT ... RETURNING` degrading to no row is not an error.
+
+    Modelling it as one would prove the wrong thing: the whole hazard is that a
+    caller sees a *successful* statement with an empty result and carries on.
+    """
+    schedule = FaultSchedule.from_bytes(CORPUS["adapter-claim_lost"].to_bytes())
+    double = ReplayAdapters.from_faults(schedule.adapter_faults).databases["main"]
+    connection = await double.acquire("write")
+    assert await connection.fetchval("INSERT ... RETURNING id") is None
+    assert await connection.fetch("SELECT 1") == []  # later queries are unaffected
+
+
+# --- object store seam --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_object_store_raises_an_owned_error() -> None:
+    from wreath.objects import ObjectError
+
+    schedule = FaultSchedule.from_bytes(CORPUS["adapter-object_unreachable"].to_bytes())
+    store = ReplayAdapters.from_faults(schedule.adapter_faults).object_stores["objects"]
+    with pytest.raises(ObjectError):
+        await store.write("k", b"payload")
+
+
+@pytest.mark.asyncio
+async def test_a_torn_write_leaves_a_partial_object_behind() -> None:
+    """The failure mode worth naming: the write raised *and* the key exists.
+
+    A caller that retries is fine; one that treats `exists()` as "the upload
+    finished" reads half an object and never learns.
+    """
+    from wreath.objects import ObjectError
+
+    schedule = FaultSchedule.from_bytes(
+        CORPUS["adapter-object-torn-write-then-read"].to_bytes()
+    )
+    store = ReplayAdapters.from_faults(schedule.adapter_faults).object_stores["objects"]
+    payload = b"0123456789"
+    with pytest.raises(ObjectError):
+        await store.write("k", payload)
+    assert await store.exists("k"), "a torn write should leave the partial object"
+    assert await store.read("k") != payload
+
+
+@pytest.mark.asyncio
+async def test_a_short_read_returns_fewer_bytes_than_stat_promised() -> None:
+    """No exception, fewer bytes. A caller trusting `stat` is silently truncated."""
+    schedule = FaultSchedule.from_bytes(CORPUS["adapter-object_read_short"].to_bytes())
+    store = ReplayAdapters.from_faults(schedule.adapter_faults).object_stores["objects"]
+    await store._inner.write("k", b"0123456789")
+    data = await store.read("k")
+    assert len(data) < 10
+
+
+# --- the pass driver: a shift always gives its connection back ----------------
+#
+# NOT design 20 §6.4. That claim -- a chunk hitting its own `statement_timeout`
+# surfaces as a chunk failure rather than a stuck lease -- needs the walk to
+# reach a chunk transaction, and a `DatabaseDouble` cannot get it there: the
+# driver seeds and then *reads* its ledger row, and `row_from_record` wants a
+# full record. Scripting one through the double's positional `results` would
+# bake the ledger's column list into this file, and that list changed twice in
+# one day. §6.4 stays DSN-gated until the ledger grows a "script me a pass in
+# state X" seam; see the report.
+#
+# What the transaction seam *can* prove without a server is the property that
+# holds regardless of which fault fires, and it is the one that turns a bad
+# chunk into an incident: the connection comes back.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name",
+    ["adapter-begin_error", "adapter-statement_timeout", "adapter-commit_error"],
+)
+async def test_a_failed_shift_still_returns_its_connection(name: str) -> None:
+    from wreath._passes.driver import run_shift
+    from wreath.passes import ChunkedPass, DutyCycle, Key, Purge, Rows, Sealed, Table
+
+    schedule = FaultSchedule.from_bytes(CORPUS[name].to_bytes())
+    double = ReplayAdapters.from_faults(schedule.adapter_faults).databases["main"]
+    walk = ChunkedPass(
+        "corpus_purge",
+        over=Table("things"),
+        units=Rows(
+            key=(
+                Key("expires", "timestamptz", indexed=True),
+                Key("id", "bigint", unique=True),
+            ),
+            limit=10,
+        ),
+        frontier=Sealed(),
+        work=Purge(),
+        pace=DutyCycle(1.0),
+    )
+    result = await run_shift(walk, double, budget=0.05)
+    # `run_shift`'s `finally` is the whole assertion: whatever went wrong, the
+    # connection is not still leased by a transaction that will never commit.
+    assert double.acquired == double.released == 1, (
+        "a failed shift kept its connection -- that is a stuck lease"
+    )
+    # And it *reports* rather than hanging or raising past the caller.
+    assert result.stopped is not None

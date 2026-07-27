@@ -415,9 +415,35 @@ def check(argv: list[str] | None = None) -> int:
     print("\n" + "=" * 66)
     if failed:
         print(f"wreath-check: {len(failed)} of {len(checks)} failed: {', '.join(failed)}")
+        _warn_unverified()
         return 1
     print(f"wreath-check: all {len(checks)} checks passed.")
+    _warn_unverified()
     return 0
+
+
+#: Printed last, because the pytest banner that says the same thing scrolls past
+#: eight more gates before anyone reads the verdict. `tests/conftest.py` owns the
+#: count; this only has to say the gates were not all green in the way they look.
+def _warn_unverified() -> None:
+    """Say, last of all, that the database suites did not run.
+
+    Checked here rather than reported up from pytest: the env var is the whole
+    condition, and this process can read it. No state to pass, nothing to parse,
+    and it cannot disagree with what the test run actually did.
+    """
+    if os.environ.get("WREATH_TEST_POSTGRES_DSN"):
+        return
+    runtime = next(
+        (name for name in ("docker", "podman", "nerdctl") if shutil.which(name)), None
+    )
+    print(
+        "\nNOTE: the database-backed tests did not run -- "
+        "WREATH_TEST_POSTGRES_DSN is unset."
+    )
+    if runtime is None:
+        print("      No container runtime found, so they cannot run on this machine.")
+    print("      See the pytest section above for the count and the command.")
 
 
 if __name__ == "__main__":  # pragma: no cover

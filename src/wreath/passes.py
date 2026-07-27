@@ -643,8 +643,8 @@ class ChunkedPass:
 
     __slots__ = (
         "_alias", "_chunk_retries", "_frontier", "_gate", "_ledger", "_model",
-        "_name", "_on_chunk_failure", "_pace", "_progress", "_schema", "_shift",
-        "_table", "_tenant", "_units", "_work", "_workload",
+        "_name", "_on_chunk_failure", "_pace", "_progress", "_rewrites",
+        "_schema", "_shift", "_table", "_tenant", "_units", "_work", "_workload",
     )
 
     def __init__(
@@ -664,6 +664,7 @@ class ChunkedPass:
         tenant: str = "",
         schema: str = "wreath",
         workload: str = "write",
+        rewrites: str | None = None,
     ) -> None:
         if not name or len(name) > 200:
             raise PassDeclarationError("a pass name must be 1..200 characters")
@@ -708,6 +709,7 @@ class ChunkedPass:
         self._frontier = frontier
         self._work = work
         self._gate = gate
+        self._rewrites = rewrites
         self._pace = pace if pace is not None else DutyCycle()
         self._progress = progress if progress is not None else Estimated()
         self._on_chunk_failure = on_chunk_failure
@@ -811,6 +813,15 @@ class ChunkedPass:
         Seeded into the ledger so a migration can ask what is still in flight.
         """
         return None if self._gate is None else self._gate.publishes
+
+    @property
+    def rewrites(self) -> str | None:
+        """The column whose values this pass overwrites in place, if any.
+
+        Seeded into the ledger so a *downgrade* can refuse forever after. A pass
+        that only reads, or that fills a column it added, leaves this ``None``.
+        """
+        return self._rewrites
 
     @property
     def pace(self) -> DutyCycle:
@@ -940,7 +951,10 @@ class ChunkedPass:
             # that arrives during a deploy, say -- so the row has to exist for
             # the queue to be appended to.
             await self._ledger.seed(
-                connection, chunk_limit=self._units.limit, guards=self.guards
+                connection,
+                chunk_limit=self._units.limit,
+                guards=self.guards,
+                rewrites=self._rewrites,
             )
             return await self._ledger.requeue(
                 connection, cursor_from=lower, cursor_to=upper

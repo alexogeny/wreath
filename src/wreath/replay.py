@@ -39,6 +39,7 @@ from ._replay_adapters import (
     AdapterFault,
     DatabaseDouble,
     FaultyHttpClient,
+    ObjectStoreDouble,
     ReplayAdapters,
 )
 from ._replay_plan import (
@@ -73,6 +74,7 @@ __all__ = [
     "AdapterFault",
     "DatabaseDouble",
     "FaultyHttpClient",
+    "ObjectStoreDouble",
     "ReplayAdapters",
     "ReplayError",
     "generate_test",
@@ -711,6 +713,9 @@ class AdapterSeam(IntEnum):
     DB_QUERY = 1  # the Nth query on a leased connection (coordinate = index)
     DB_RELEASE = 2  # returning the connection to the pool (coordinate unused)
     HTTP_REQUEST = 3  # the Nth outbound request (coordinate = index)
+    DB_LISTEN = 4  # LISTEN, or the notification stream, on a held connection
+    DB_TRANSACTION = 5  # the Nth transaction scope on a leased connection
+    OBJECT_STORE = 6  # the Nth operation on a named object store (coordinate = index)
 
 
 @dataclass(frozen=True, slots=True)
@@ -849,6 +854,58 @@ def fault_corpus() -> dict[str, FaultSchedule]:
     fuzz gates -- so the fault-injection library and the ASan/UBSan gate are the
     same corpus. Transport entries are keyed to segment indices (apply them to a
     recording split into a few segments); adapter entries carry adapter faults.
+
+    **The regions, and why each is one.** An entry earns its place by naming a
+    failure the owned code has to answer differently from its neighbours. A
+    schedule whose outcome is "something reasonable happens" is not a region and
+    does not belong; a cross product nobody can reason about is worse than a
+    short list that maps to named incidents.
+
+    ``transport-*`` / ``schedule-*``
+        The inbound byte stream and the virtual clock: short reads, truncation,
+        peer reset, half-close, retransmission, and the driver's own timeout.
+
+    ``adapter-pool_*`` / ``adapter-server_error`` / ``adapter-connection_drop``
+    ``adapter-lost_commit`` / ``adapter-release_error``
+        The PostgreSQL pool: acquire, the Nth statement, and the release that
+        has to happen anyway. ``lost_commit`` is the ambiguous one -- the write
+        may or may not be durable, which is the only pool fault where retrying
+        is not obviously safe.
+
+    ``adapter-connect_error`` / ``adapter-read_timeout``
+        The outbound HTTP client, beneath its own timeout and phase handling.
+
+    ``adapter-listen_refused`` / ``adapter-notify_stream_end``
+    ``adapter-notify_stream_error``
+        The LISTEN/NOTIFY doorbell. ``STREAM_END`` and ``STREAM_ERROR`` are
+        deliberately separate regions: ``Connection.notifications()`` *returns*
+        when the connection closes rather than raising, so a supervisor written
+        around ``except`` sees nothing at all. Modelling only the raising case
+        would have re-blessed the bug where ephemeral fan-out stopped for the
+        life of a process with no signal.
+
+    ``adapter-begin_error`` / ``adapter-statement_timeout``
+    ``adapter-commit_error``
+        The transaction scope, at its three distinct moments: no work ran, work
+        ran and rolled back, work ran and its durability is unknown. A caller's
+        recovery turns on which, so collapsing them makes "did my write happen?"
+        unanswerable.
+
+    ``adapter-claim_lost``
+        An ``INSERT ... ON CONFLICT ... RETURNING`` claim that succeeds and
+        returns *no row*. Not an error, which is the entire hazard: the caller
+        sees a successful statement with an empty result and carries on.
+
+    ``adapter-object_*``
+        Object storage: unreachable, a write torn part-way (the key exists and
+        the bytes are wrong), and a read shorter than ``stat`` promised -- the
+        last without raising, so a caller trusting the length is truncated
+        silently.
+
+    ``adapter-*-then-*``
+        Compounds, where two faults *together* are the failure and either alone
+        is handled: a doorbell that drops and then cannot re-``LISTEN``, a lost
+        claim followed by an unknown commit, a torn write followed by a read.
     """
     from ._replay_adapters import AdapterFault
 
@@ -868,10 +925,27 @@ def fault_corpus() -> dict[str, FaultSchedule]:
             FaultDescriptor(int(FaultKind.RESET), 1),
         )
     )
-    # Adapter seam: one schedule per modeled boundary failure.
+    # Adapter seam: one schedule per modeled boundary failure. The `adapter-`
+    # prefix is load-bearing -- the corpus test derives its parametrisation from
+    # it, and the sanitizer gate re-runs the same names.
     db_acquire = {AdapterFault.POOL_TIMEOUT, AdapterFault.POOL_EXHAUSTED}
     db_release = {AdapterFault.RELEASE_ERROR}
     http = {AdapterFault.CONNECT_ERROR, AdapterFault.READ_TIMEOUT}
+    listen = {
+        AdapterFault.LISTEN_REFUSED,
+        AdapterFault.NOTIFY_STREAM_END,
+        AdapterFault.NOTIFY_STREAM_ERROR,
+    }
+    transaction = {
+        AdapterFault.BEGIN_ERROR,
+        AdapterFault.COMMIT_ERROR,
+        AdapterFault.STATEMENT_TIMEOUT,
+    }
+    objects = {
+        AdapterFault.OBJECT_UNREACHABLE,
+        AdapterFault.OBJECT_WRITE_TORN,
+        AdapterFault.OBJECT_READ_SHORT,
+    }
     for fault in AdapterFault:
         if fault in db_acquire:
             seam, target, coord = AdapterSeam.DB_ACQUIRE, "main", 0
@@ -879,11 +953,57 @@ def fault_corpus() -> dict[str, FaultSchedule]:
             seam, target, coord = AdapterSeam.DB_RELEASE, "main", 0
         elif fault in http:
             seam, target, coord = AdapterSeam.HTTP_REQUEST, "api", 0
+        elif fault in listen:
+            seam, target, coord = AdapterSeam.DB_LISTEN, "main", 0
+        elif fault in transaction:
+            seam, target, coord = AdapterSeam.DB_TRANSACTION, "main", 0
+        elif fault in objects:
+            seam, target, coord = AdapterSeam.OBJECT_STORE, "objects", 0
         else:
             seam, target, coord = AdapterSeam.DB_QUERY, "main", 0
         corpus[f"adapter-{fault.value}"] = FaultSchedule(
             adapter_faults=(AdapterFaultDescriptor(int(seam), target, fault.value, coord),)
         )
+    # Compound schedules: the regions where two faults *together* are the real
+    # failure, and either alone is handled. One entry per compound, because a
+    # cross product nobody can reason about is worse than a short list that maps
+    # to named incidents.
+    #
+    # A doorbell that ends its stream and then cannot re-LISTEN: the shape of a
+    # database that went away and came back refusing. A supervisor must keep
+    # retrying rather than treating the failed reopen as terminal.
+    corpus["adapter-doorbell-drop-then-refused-reopen"] = FaultSchedule(
+        adapter_faults=(
+            AdapterFaultDescriptor(
+                int(AdapterSeam.DB_LISTEN), "main", AdapterFault.NOTIFY_STREAM_END.value, 0
+            ),
+            AdapterFaultDescriptor(
+                int(AdapterSeam.DB_LISTEN), "main", AdapterFault.LISTEN_REFUSED.value, 1
+            ),
+        )
+    )
+    # A claim that comes back empty and a commit whose outcome is unknown: the
+    # two halves of "did my write happen?", which is the question every
+    # idempotency and job-dedup path exists to answer.
+    corpus["adapter-claim-lost-then-commit-unknown"] = FaultSchedule(
+        adapter_faults=(
+            AdapterFaultDescriptor(
+                int(AdapterSeam.DB_QUERY), "main", AdapterFault.CLAIM_LOST.value, 0
+            ),
+            AdapterFaultDescriptor(
+                int(AdapterSeam.DB_TRANSACTION), "main", AdapterFault.COMMIT_ERROR.value, 0
+            ),
+        )
+    )
+    # A torn write followed by a read: the archive/upload failure where the
+    # object exists, `exists()` says yes, and the bytes are wrong.
+    corpus["adapter-object-torn-write-then-read"] = FaultSchedule(
+        adapter_faults=(
+            AdapterFaultDescriptor(
+                int(AdapterSeam.OBJECT_STORE), "objects", AdapterFault.OBJECT_WRITE_TORN.value, 0
+            ),
+        )
+    )
     return corpus
 
 
@@ -960,6 +1080,20 @@ def recorded_request(recording: TransportRecording) -> CanonicalRequest:
         raise ReplayError(
             f"the recorded request is incomplete: {len(rest)} body bytes of "
             f"{declared} declared"
+        )
+    if rest[declared:].strip():
+        # A keep-alive connection carrying a second request concatenates into
+        # this buffer, and taking `rest[:declared]` would drop it without a
+        # word -- generating a regression test that silently covers only the
+        # first of two requests. Refused for the same reason a chunked body is:
+        # a generated test that quietly tests less than the recording holds is
+        # worse than no test at all.
+        raise ReplayError(
+            f"the recording holds {len(rest) - declared} bytes past the first "
+            "request's body, so the connection carried more than one request; "
+            "this generator emits a test for a single request. Re-record one "
+            "request, or replay the whole connection with `wreath replay "
+            "transport`"
         )
 
     path, _, query = target.partition("?")

@@ -56,6 +56,35 @@ _CLOCK_TYPES = frozenset(
     {"timestamptz", "timestamp", "timestamp with time zone", "timestamp without time zone"}
 )
 
+#: SQL type names a cursor does not yet survive.
+#:
+#: The original reason was that nothing could read a decimal back, so a cursor
+#: returned through ``float()``: ``1.0000000000000000001`` and ``...002`` both
+#: decoded to ``1.0``, two adjacent boundaries became one, and ``>`` skipped
+#: every row between them. **That reason expired when the numeric codec landed**
+#: -- ``orm.types.BY_OID`` carries one now -- and the ordering property was
+#: swept over the real ledger path (``Decimal`` -> ``str`` -> jsonb ->
+#: ``Decimal``): 403 values, 81,001 ordered pairs, zero value failures and zero
+#: ordering failures, against 229 value failures and 5 collapsed pairs for the
+#: float path it replaces.
+#:
+#: It stays refused for a different reason, found while measuring that one.
+#: :func:`wreath._passes.progress.position` places a key value on a line for
+#: ``progress=Keyspace()`` and handles ``int`` and ``float`` but not ``Decimal``,
+#: while ``_EXAMPLE`` already maps ``numeric`` to ``0.0``. So a numeric key would
+#: pass ``Keyspace.refuse`` at declaration and then silently measure nothing at
+#: runtime -- a check with nothing to check, which is worse than the refusal.
+#:
+#: Lifting this needs three coordinated changes, not one: empty this set, route
+#: ``numeric`` to ``Decimal`` in :func:`_decode_one`, and teach ``position`` about
+#: ``Decimal`` *including the non-finites*. PostgreSQL orders ``NaN`` above every
+#: other numeric and ``Decimal("NaN") > x`` **raises** rather than returning
+#: ``False``, so ``float(Decimal("NaN"))`` would hand the percentage arithmetic a
+#: ``nan`` instead of an error. The walk itself is unaffected -- it never orders
+#: in Python, and a NaN cursor correctly leaves zero rows remaining -- but the
+#: progress path is, and that is the piece to design rather than bolt on.
+_INEXACT_TYPES = frozenset({"numeric", "decimal"})
+
 
 class PassDeclarationError(ValueError):
     """A pass that cannot be made correct, refused where it was declared.
@@ -185,6 +214,17 @@ def refuse_unsound_key(keys: tuple[Key, ...], *, table: str) -> None:
             "re-reads them forever. Append the primary key as a tiebreaker -- "
             f"key=({names}, <primary key>) -- which stays one index scan."
         )
+    for item in keys:
+        if item.type.lower() in _INEXACT_TYPES:
+            raise PassDeclarationError(
+                f"key ({names}) on {table} includes {item.name!r}, which is "
+                f"{item.type}. A cursor round-trips through the ledger's jsonb, "
+                "and there is no decimal codec to read it back with, so the value "
+                "returns as a float: two boundaries a decimal place apart become "
+                "the same number and the walk skips every row between them. Walk "
+                "on an exact column instead -- the primary key is the usual "
+                f"answer -- and put {item.name!r} in the chunk's work, not its key."
+            )
 
 
 def refuse_unmonotone_key(keys: tuple[Key, ...], *, table: str, reason: str | None) -> None:
@@ -286,6 +326,20 @@ def decode_cursor(keys: tuple[Key, ...], encoded: Any) -> tuple[Any, ...] | None
 
     The placeholders carry no ``::cast``, so the value handed to the driver has
     to be the right Python type; the key's declared SQL type is what says which.
+
+    **A timestamp comes back on a fixed offset, not the zone it went in on.**
+    ``isoformat`` writes ``+13:00``, not ``Pacific/Auckland``, so the instant is
+    exact and the ordering is exact but the ``tzinfo`` object is not the original.
+    Nothing here depends on it: PostgreSQL compares absolute instants, the
+    compare-and-swap compares the encoded JSON rather than the decoded value, and
+    :meth:`Buckets.advance` re-anchors on its own declared zone before doing any
+    calendar arithmetic. Do not start depending on ``tzinfo`` identity, and do not
+    "fix" this by dropping the offset -- that would lose the instant.
+
+    One consequence worth knowing: inside an ambiguous local hour the decoded
+    value compares *unequal* to the original under ``==`` while naming the same
+    instant, because PEP 495 ignores ``fold`` in interzone comparison. Compare
+    instants (``astimezone(utc)``), not datetimes, if you ever need to.
     """
     if encoded is None:
         return None
@@ -308,7 +362,10 @@ def _decode_one(key: Key, value: Any) -> Any:
         return uuid.UUID(value)
     if name in ("int2", "int4", "int8", "smallint", "integer", "bigint"):
         return int(value)
-    if name in ("float4", "float8", "real", "double precision", "numeric"):
+    # `numeric` is deliberately absent: it is refused as a key type (see
+    # `_INEXACT_TYPES`), and leaving it here would quietly do the lossy thing for
+    # anything that reached this function by another route.
+    if name in ("float4", "float8", "real", "double precision"):
         return float(value)
     if name == "bytea" and isinstance(value, str):
         return bytes.fromhex(value)

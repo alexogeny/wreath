@@ -136,6 +136,14 @@ frontier=Ceiling.at_launch(monotone="UUIDv7, assigned by the application")
 **A key the work itself writes is refused.** Walking by `expires` while updating
 `expires` moves rows past the cursor, so they are processed twice or never.
 
+**A `numeric` key is refused.** The cursor round-trips through the ledger's
+`jsonb`, and there is no decimal codec to read it back with — so the value would
+return as a float, and `1.0000000000000000001` and `1.0000000000000000002` both
+become `1.0`. Two boundaries a decimal place apart collapse into one and the walk
+skips every row between them, which is the non-unique-boundary failure wearing a
+different hat. Walk on an exact column instead, usually the primary key, and put
+the decimal in the chunk's work rather than its key.
+
 **The time chain is checked.** `statement_timeout < within < shift < lease <
 command_timeout`. A chunk budget that does not fit inside a shift, or a shift
 that does not fit inside the runner's lease, is refused by
@@ -172,6 +180,36 @@ one that refuses to be declared.
 the cursor, found by asking the table. Everything above about unique, indexed,
 single-direction keys is about that — the boundary is a row that exists, so it
 has to identify exactly one.
+
+### How big should a chunk be?
+
+Measured, not guessed — PostgreSQL 17 on loopback, ten million rows, an
+`UPDATE`-per-chunk rewrite, unpaced, median of two full walks. The A/A noise
+floor at this size is 0.087s, so everything below is resolved:
+
+| `limit` | wall time | rows/s | per chunk |
+| --- | --- | --- | --- |
+| 1,000 | 52.98s | 188,745 | 5.3ms |
+| 10,000 | 27.64s | 361,856 | 27.6ms |
+| 100,000 | 26.82s | 372,794 | 268ms |
+
+Fitting a fixed cost per chunk plus a marginal cost per row gives **2.8ms per
+chunk** and **2.5µs per row**. That decomposition is the whole story: the
+marginal cost is what the work costs, and it matches a single `UPDATE` over the
+whole table almost exactly (24.8s modelled against 24.4s measured). Everything a
+pass adds is the per-chunk fixed cost, and the only way to pay less of it is to
+have fewer chunks.
+
+So the curve is **flat above ten thousand, not above one thousand** — going from
+1,000 to 10,000 nearly doubles throughput, and going on to 100,000 buys 3%.
+
+**The default is still 1,000, deliberately.** A chunk is a lock footprint as
+well as a unit of throughput: at `limit=100000` one chunk holds a hundred
+thousand row locks for a quarter of a second, and a pass exists to *not* do that
+to a live table. If you own the table and nothing else contends for it, raising
+the limit is the single biggest thing you can do, and now there is a number
+behind it. If the table is hot, the default is the conservative choice and the
+cost of that choice is about 2× throughput.
 
 `Buckets(on=..., step=Day, zone=...)` is the other shape, and it asks the table
 nothing at all. The next range after "the day starting the 24th" is "the day
@@ -262,6 +300,12 @@ way, so the kind travels with the number everywhere it goes:
 `Estimated()` is the default because a full count in front of a long pass delays
 the work you actually asked for in order to make a progress bar prettier. Reach
 for `Exact()` when the number matters more than the minutes.
+
+Two cases report **no denominator** rather than a wrong one, and a pass with no
+denominator still walks — it just declines to quote a percentage. A table
+`ANALYZE` has never seen answers `-1`, which is not a count; and a table that is
+not there answers nothing at all, rather than raising and taking the shift down
+with it.
 
 ### There is no ETA unless there can be one
 

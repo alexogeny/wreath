@@ -38,6 +38,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+# Re-exported under this module's historic names: the supervision moved to
+# `_doorbell`, the names callers and tests already reach for did not.
+from ._doorbell import BACKOFF_BASE as DOORBELL_BACKOFF_BASE  # noqa: F401
+from ._doorbell import BACKOFF_CAP as DOORBELL_BACKOFF_CAP  # noqa: F401
+from ._doorbell import Doorbell
+from ._doorbell import delay as _doorbell_delay  # noqa: F401
+from ._doorbell import sleep_or_stop as _sleep_or_stop
 from ._jobcore import (
     check_notify_payload,
     compute_backoff,
@@ -57,18 +64,11 @@ _REJECT = "reject"
 #: read on the publish path is not.
 DEFAULT_GROUP_REFRESH = 30.0
 
-#: Reconnect backoff for the doorbell's held ``LISTEN`` connection. The first
-#: retry is nearly immediate because the ordinary loss -- a failover, an idle
-#: timeout, a ``pg_terminate_backend``, a network blip -- leaves a database that
-#: hands back a working connection at once, and every millisecond without a
-#: doorbell is ephemeral fan-out dropped on the floor. The cap keeps a database
-#: that is genuinely *down* at a handful of attempts a minute per bus rather
-#: than a reconnect storm against something already struggling, and it is the
-#: default poll interval because that is how long durable consumers take to
-#: notice work without a doorbell -- retrying slower than the fallback would be
-#: retrying slower than the damage.
-DOORBELL_BACKOFF_BASE = 0.05
-DOORBELL_BACKOFF_CAP = 5.0
+#: Reconnect backoff for the doorbell's held ``LISTEN`` connection, re-exported
+#: from :mod:`wreath._doorbell` where the supervision itself lives. The cap is
+#: the default poll interval on purpose: that is how long durable consumers take
+#: to notice work without a doorbell, so retrying slower than the fallback would
+#: be retrying slower than the damage.
 
 
 class NoSubscriberGroup(RuntimeError):
@@ -152,7 +152,13 @@ class MessageBus:
         self._table = f'"{schema}".messages'
         self._groups_table = f'"{schema}".message_groups'
         self._supervisor: Any = None
-        self._listen_conn: Any = None
+        # Channels and the dispatch maps below are filled in by `start`, once
+        # subscriptions are known.
+        self._doorbell = Doorbell(
+            database=database, workload=workload, pump=self._pump,
+        )
+        self._wire_to_channel: dict[str, str] = {}
+        self._ephemeral_subs: dict[str, list[_Subscription]] = {}
         # One waiter per consumer; see wreath.jobs for why a single shared
         # Event loses wakes when several consumers park on it.
         self._waiters: list[asyncio.Event] = []
@@ -168,16 +174,6 @@ class MessageBus:
         #: Failed reads of / writes to the group registry. Non-zero almost
         #: always means `schema_sql()` was never applied.
         self.group_registry_errors = 0
-        #: Times the doorbell's held LISTEN connection was lost, plus every
-        #: attempt to (re)open one that failed -- including the attempt made at
-        #: startup, since a bus that came up against a dead database has no
-        #: doorbell either. A database that stays down keeps this climbing
-        #: rather than reading as a single blip.
-        #: Non-zero means ephemeral fan-out was down for at least a moment and
-        #: those messages are gone (at-most-once has nowhere to replay from);
-        #: climbing means it still is, and durable consumers are running on the
-        #: poll interval. This used to be entirely invisible.
-        self.doorbell_reconnects = 0
         #: Exceptions raised by *ephemeral* subscriber callbacks. Fire-and-forget
         #: delivery has nowhere else to put them -- a durable handler's failure
         #: lands in the row's `last_error` and its retry state -- and counting
@@ -192,6 +188,30 @@ class MessageBus:
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def _listen_conn(self) -> Any:
+        """The doorbell's held connection. Delegated rather than stored, so
+        there is one owner of the connection's lifetime and not two."""
+        return self._doorbell.connection
+
+    @property
+    def doorbell_reconnects(self) -> int:
+        """Times the doorbell's held LISTEN connection was lost, plus every
+        attempt to (re)open one that failed -- including the attempt made at
+        startup, since a bus that came up against a dead database has no
+        doorbell either. A database that stays down keeps this climbing rather
+        than reading as a single blip.
+
+        Non-zero means ephemeral fan-out was down for at least a moment and
+        those messages are gone (at-most-once has nowhere to replay from);
+        climbing means it still is, and durable consumers are running on the
+        poll interval. This used to be entirely invisible.
+
+        Kept deliberately apart from :attr:`handler_errors`: a bug in a
+        subscriber must never read as a flapping database.
+        """
+        return self._doorbell.reconnects
 
     def stats(self) -> dict[str, int]:
         """Every counter this bus keeps, by name.
@@ -608,16 +628,26 @@ class MessageBus:
             {self._channel_wire(s.channel) for s in self._subs}
         )
         if listen_channels:
+            self._doorbell.channels = listen_channels
+            # Map wire channel -> user channel for ephemeral dispatch, once,
+            # rather than on every reconnect.
+            self._wire_to_channel = {
+                self._channel_wire(c): c for c in ephemeral_channels
+            }
+            self._ephemeral_subs = {}
+            for sub in self._subs:
+                if not sub.durable:
+                    self._ephemeral_subs.setdefault(sub.channel, []).append(sub)
             # Connect once here so a bus starting against a healthy database is
             # listening by the time `start` returns, and spawn the loop
             # regardless: it owns every subsequent connection *including this
             # one having failed*. Spawning it only on a successful connect --
             # as this did -- meant a database that was down at boot left the
             # process with no doorbell for its entire lifetime.
-            await self._open_doorbell(listen_channels)
+            await self._doorbell.open()
             supervisor.spawn(
                 f"messaging:{self._name}:doorbell",
-                self._doorbell(ephemeral_channels, listen_channels),
+                self._doorbell.run(supervisor.stopping),
             )
         for sub in durable_subs:
             for index in range(sub.concurrency):
@@ -636,119 +666,29 @@ class MessageBus:
         while self._inflight and loop.time() < deadline:
             with contextlib.suppress(Exception):
                 await asyncio.wait(tuple(self._inflight), timeout=max(0.0, deadline - loop.time()))
-        await self._release_listen()
+        await self._doorbell.release()
 
     # -- loops ---------------------------------------------------------------
 
-    async def _open_doorbell(self, listen_channels: list[str]) -> bool:
-        """Take a connection and ``LISTEN`` on every wire channel.
-
-        Reports failure rather than raising, because a database that will not
-        give us a connection is precisely the condition the reconnect loop
-        exists to ride out -- and because this also runs on the startup path,
-        where it must not stop a bus from consuming its own durable work.
-        Cancellation is not a failure and propagates.
-        """
-        connection: Any = None
-        try:
-            connection = await self._db.acquire(self._workload)
-            for wire in listen_channels:
-                await connection.listen(wire)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - the caller backs off and tries again
-            # Counted here rather than in the loop so the attempt made on the
-            # startup path lands too: a bus that came up against a database
-            # that was down has no doorbell, which is the same outage.
-            self.doorbell_reconnects += 1
-            if connection is not None:
-                with contextlib.suppress(Exception):
-                    await self._db.release(self._workload, connection)
-            return False
-        self._listen_conn = connection
-        return True
-
-    async def _release_listen(self) -> None:
-        """Give the held connection back, exactly once.
-
-        Both :meth:`drain` and the doorbell loop's own teardown call this, and a
-        clean shutdown runs them in that order, so the swap-to-``None`` is what
-        keeps the second caller from releasing a connection twice.
-        """
-        connection, self._listen_conn = self._listen_conn, None
-        if connection is None:
-            return
-        with contextlib.suppress(Exception):
-            await self._db.release(self._workload, connection)
-
-    async def _doorbell(self, ephemeral_channels: list[str],
-                        listen_channels: list[str]) -> None:
-        """Hold a LISTEN connection for the process's lifetime, and get it back.
-
-        One connection is held for as long as the process runs, so every reason
-        a long-lived Postgres connection ends -- a failover, an idle timeout, a
-        ``pg_terminate_backend``, a network blip -- happens to this one
-        eventually. The driver's ``notifications()`` iterator *ends* when the
-        connection closes rather than raising, so the unsupervised loop this
-        replaces returned with nothing to notice: ephemeral fan-out stopped for
-        the lifetime of the process, durable consumers silently degraded to
-        ``poll_interval``, and the system kept working, slower and lossier,
-        with no signal at all. The supervisor owns tasks; it does not resurrect
-        them, so the retry has to live here.
-        """
-        stopping = self._supervisor.stopping
-        # Map wire channel -> user channel for ephemeral dispatch.
-        wire_to_channel = {self._channel_wire(c): c for c in ephemeral_channels}
-        ephemeral_subs: dict[str, list[_Subscription]] = {}
-        for sub in self._subs:
-            if not sub.durable:
-                ephemeral_subs.setdefault(sub.channel, []).append(sub)
-        loop = asyncio.get_running_loop()
-        attempt = 0
-        while not stopping.is_set():
-            if self._listen_conn is None and not await self._open_doorbell(listen_channels):
-                attempt += 1  # `_open_doorbell` counted it
-                await _sleep_or_stop(stopping, _doorbell_delay(attempt))
-                continue
-            opened = loop.time()
-            try:
-                await self._pump(wire_to_channel, ephemeral_subs)
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001 - a broken stream is a lost connection
-                pass
-            finally:
-                await self._release_listen()
-            if stopping.is_set():
-                # Shutdown closed it; that is not an outage and not a reason to
-                # open another one on the way out.
-                break
-            self.doorbell_reconnects += 1
-            # A connection that is accepted and then dies immediately is a flap,
-            # not a recovery, so only one that outlived the backoff cap resets
-            # the count -- otherwise a database in that state gets retried at
-            # the base delay forever, which is the storm the cap exists to stop.
-            attempt = 1 if loop.time() - opened >= DOORBELL_BACKOFF_CAP else attempt + 1
-            await _sleep_or_stop(stopping, _doorbell_delay(attempt))
-
-    async def _pump(
-        self,
-        wire_to_channel: dict[str, str],
-        ephemeral_subs: dict[str, list[_Subscription]],
-    ) -> None:
+    async def _pump(self, connection: Any) -> None:
         """Dispatch notifications until the connection's stream ends.
 
-        Returning is the ordinary end of a dropped connection. Dispatch errors
-        are counted and stepped over instead: ending this loop over one would
-        reopen the connection because of a bug in user code, and would make the
-        two indistinguishable in the counter that exists to tell them apart.
+        Returning is the ordinary end of a dropped connection, and
+        :class:`~wreath._doorbell.Doorbell` reopens on it.
+
+        **This pump runs user code, so it catches for itself.** Dispatch errors
+        are counted and stepped over: letting one out would end the loop, which
+        the holder reads as a lost connection -- so a bug in a subscriber would
+        reopen the database connection *and* land in `doorbell_reconnects`,
+        making the two indistinguishable in the counter that exists to tell them
+        apart. `JobRunner._pump` has no user code on its path and so has nothing
+        to catch here; that difference is deliberate.
         """
-        connection = self._listen_conn
         if connection is None:
             return
         async for note in connection.notifications():
             try:
-                self._dispatch(note, wire_to_channel, ephemeral_subs)
+                self._dispatch(note, self._wire_to_channel, self._ephemeral_subs)
             except Exception:  # noqa: BLE001 - user code, not the connection
                 self.handler_errors += 1
 
@@ -954,16 +894,3 @@ class MessageBus:
                 await wake.wait()
 
 
-def _doorbell_delay(attempt: int) -> float:
-    """Seconds before reconnect ``attempt`` (1-based). Jittered so a fleet that
-    lost the same database does not come back at it in lockstep."""
-    return compute_backoff(
-        attempt, kind="exp", base=DOORBELL_BACKOFF_BASE,
-        cap=DOORBELL_BACKOFF_CAP, jitter=0.2,
-    )
-
-
-async def _sleep_or_stop(stopping: asyncio.Event, seconds: float) -> None:
-    with contextlib.suppress(asyncio.TimeoutError):
-        async with asyncio.timeout(seconds):
-            await stopping.wait()

@@ -84,6 +84,10 @@ from ._series.settle import (
     view_key,
     watermark,
 )
+from ._series.tiers import Ladder, Segment, Tier
+from ._series.tiers import build as _build_ladder
+from ._series.tiers import plan as _plan_tiers
+from ._series.tiers import width as _grain_width
 from .orm.compiler import check_predicate_columns, compile_rebind
 from .orm.errors import DeclarationError
 from .orm.expressions import ColumnExpr, Predicate, RelatedColumnExpr
@@ -102,7 +106,7 @@ from .orm.types import (
 # `compile_rebind` looks for. Public in `wreath.queries` precisely because two
 # modules now share that contract.
 from .queries import Placeholder
-from .temporal import Bucket, Instant, parse_duration, wall_clock
+from .temporal import Bucket, Instant, from_wall_clock, parse_duration, wall_clock
 from .temporal import now as _now
 from .temporal import zone as _zone_of
 
@@ -118,6 +122,7 @@ __all__ = [
     "SeriesError",
     "SeriesEvent",
     "SeriesResult",
+    "Tier",
     "avg",
     "count",
     "max_",
@@ -381,6 +386,12 @@ class SeriesResult:
     #: Where the watermark fell and what is known behind it. ``None`` for a view
     #: that declares no seal, so a caller who never seals never has to check.
     state: Any = None
+    #: Which tier answered for which part of the range, oldest first. Empty for
+    #: a view with no ladder. Always reported rather than only when it is
+    #: surprising: a chart drawn from two grains should be able to say so, and a
+    #: caller who passed ``allow_coarsening=True`` needs to know where it was
+    #: taken up.
+    segments: tuple[Any, ...] = ()
 
     def __len__(self) -> int:
         return len(self.buckets)
@@ -412,6 +423,10 @@ class SeriesResult:
                 "settled": list(self.state.settled),
                 "corrections": list(self.state.corrections),
             },
+            "segments": [
+                {"start": item.start, "end": item.end, "grain": item.grain}
+                for item in self.segments
+            ],
         }
 
     def __jsonable__(self) -> dict[str, Any]:
@@ -589,7 +604,15 @@ class _Builder:
                 raise SeriesError(f"measure {name!r} is declared twice")
         if not measures:
             raise SeriesError("measure() needs at least one named measure")
-        return self._with(measures=self._d.measures + tuple(measures.items()))
+        built = self._with(measures=self._d.measures + tuple(measures.items()))
+        # A measure added *after* the ladder has to face the same additivity
+        # check the ladder applied to the ones already there -- otherwise
+        # `.retain(...).measure(mean=avg(...))` walks straight past it, and
+        # builder methods commute everywhere else in this surface.
+        ladder = getattr(built, "_tiers", None)
+        if ladder is not None:
+            _refuse_unrollable(ladder, built.measures, built._bucket)
+        return built
 
     def fill(self, **values: Any) -> Any:
         """Override what an empty bucket reads as, per measure.
@@ -764,7 +787,10 @@ class Series(_Builder):
     segment joining Monday to Wednesday.
     """
 
-    __slots__ = ("_at", "_bucket", "_compare", "_events", "_seal", "_stored_in", "_top")
+    __slots__ = (
+        "_at", "_bucket", "_compare", "_events", "_seal", "_stored_in",
+        "_tiers", "_top",
+    )
 
     def __init__(
         self,
@@ -778,6 +804,7 @@ class Series(_Builder):
         _compare: Bucket | None = None,
         _events: _Events | None = None,
         _seal: Seal | None = None,
+        _tiers: Ladder | None = None,
     ) -> None:
         self._d = _state if _state is not None else _Declaration(model=model)
         self._at = _temporal(at)
@@ -791,6 +818,7 @@ class Series(_Builder):
         self._compare = _compare
         self._events = _events
         self._seal = _seal
+        self._tiers = _tiers
 
     def _with(self, **changes: Any) -> Series:
         return Series(
@@ -803,6 +831,7 @@ class Series(_Builder):
             _compare=self._compare,
             _events=self._events,
             _seal=self._seal,
+            _tiers=self._tiers,
         )
 
     @property
@@ -852,6 +881,13 @@ class Series(_Builder):
         average of the tail's rows rather than an average of averages.
         """
         checked = self._grouped_by(column)
+        if self._tiers is not None:
+            raise SeriesError(
+                "by() cannot be combined with retain(), for the reason it cannot "
+                "be combined with seal(): a materialised bucket is stored under a "
+                "range-independent key, and the top-N fold is ranked over "
+                "whichever range was asked for. Group an unmaterialised view"
+            )
         if isinstance(top, bool) or not isinstance(top, int) or top < 1:
             raise SeriesError(f"by(top=) must be a positive integer, got {top!r}")
         if top > MAX_TOP:
@@ -870,6 +906,7 @@ class Series(_Builder):
             _compare=self._compare,
             _events=self._events,
             _seal=self._seal,
+            _tiers=self._tiers,
         )
 
     def compare(self, *, previous: Bucket) -> Series:
@@ -910,6 +947,7 @@ class Series(_Builder):
             _compare=previous,
             _events=self._events,
             _seal=self._seal,
+            _tiers=self._tiers,
         )
 
     def events(
@@ -1030,7 +1068,12 @@ class Series(_Builder):
                 "is a second range and settling it is a separate question. "
                 "Declare the seal on the view you read directly"
             )
-        seconds = _lateness(after)
+        declared = Seal(after=_lateness(after), on_late=on_late)
+        # A seal declared *after* the ladder faces the same check retain()
+        # applies when the ladder comes second -- builder methods commute
+        # everywhere else in this surface, and a refusal that depends on the
+        # order two clauses were written in is not a refusal anyone can trust.
+        _refuse_unreopenable(declared, self._tiers, self._bucket)
         return Series(
             self._d.model,
             at=self._at,
@@ -1040,7 +1083,8 @@ class Series(_Builder):
             _top=self._top,
             _compare=self._compare,
             _events=self._events,
-            _seal=Seal(after=seconds, on_late=on_late),
+            _seal=declared,
+            _tiers=self._tiers,
         )
 
     @property
@@ -1048,14 +1092,91 @@ class Series(_Builder):
         """The declared lateness allowance in seconds, or ``None`` if open."""
         return None if self._seal is None else self._seal.after
 
-    def _identity(self, zone_name: str, values: dict[str, Any]) -> tuple[str, str]:
-        """``(view, params)`` -- what a settled row is filed under."""
+    def retain(self, **windows: Any) -> Series:
+        """How long each grain stays warm, finest to coarsest.
+
+        ::
+
+            .seal(after="2h").retain(raw="3 days", day="1 year", month=None)
+
+        Read as: keep the source rows answering for three days, keep daily
+        buckets a year, keep monthly buckets forever. ``None`` means
+        indefinitely.
+
+        **Nothing here deletes anything, and this stage adds no way to.**
+        ``retain`` is a promise about what stays warm, not an instruction to
+        expire. What it changes today is which tier a read prefers: a range
+        older than raw's window is answered from the coarsest tier that still
+        covers it, *even though raw happens to still be present*. Keeping that
+        promise now is what stops a query changing shape on the day a later
+        stage begins enforcing the window.
+
+        A tier coarser than ``raw`` requires :meth:`seal`, because a tier stores
+        a value on the understanding that it is final and only the seal says
+        when a value is final. A measure that cannot be recombined from parts --
+        an average -- is refused against a bounded raw window, because a coarse
+        bucket built from averages is an average of averages.
+        """
+        if self._tiers is not None:
+            raise SeriesError(
+                "retain() is already declared; one ladder per view, because a "
+                "second one would give the same grain two retention windows"
+            )
+        if self._d.group is not None:
+            raise SeriesError(
+                "retain() cannot be combined with by(), for the reason seal() "
+                "cannot: a materialised bucket is stored per range-independent "
+                "key, and the top-N fold is ranked over whichever range was "
+                "asked for. Retain an ungrouped view"
+            )
+        ladder = _build_ladder(windows, refuse=SeriesError)
+        if ladder.materialised and self._seal is None:
+            raise SeriesError(
+                "retain() with a grain above 'raw' needs seal(): a tier stores a "
+                "bucket on the understanding that it will not change again, and "
+                "seal() is what says when that is true. Add "
+                ".seal(after='...') before .retain(...), or declare retain(raw=...) "
+                "alone to state the source window without materialising anything"
+            )
+        _refuse_unrollable(ladder, self._d.measures, self._bucket)
+        _refuse_unreopenable(self._seal, ladder, self._bucket)
+        return Series(
+            self._d.model,
+            at=self._at,
+            bucket=self._bucket,
+            stored_in=self._stored_in,
+            _state=self._d,
+            _top=self._top,
+            _compare=self._compare,
+            _events=self._events,
+            _seal=self._seal,
+            _tiers=ladder,
+        )
+
+    @property
+    def tiers(self) -> tuple[Tier, ...]:
+        """The declared retention ladder, finest first. Empty when undeclared."""
+        return () if self._tiers is None else self._tiers.tiers
+
+    def _identity(
+        self, zone_name: str, values: dict[str, Any], *, grain: Bucket | None = None
+    ) -> tuple[str, str]:
+        """``(view, params)`` -- what a settled row is filed under.
+
+        ``grain`` is how a tier gets its own key without a second table or a
+        second kind of identity: :func:`view_key` already folds the bucket into
+        the digest, so asking for the same declaration at ``Month`` yields the
+        monthly tier's key. The daily tier of a view bucketed by day is
+        therefore *literally* the rows sealing already writes -- which is the
+        concrete form of §7.3's claim that rollup and settlement are one
+        mechanism seen from two ends.
+        """
         rendered = " ".join(repr(item) for item in self._d.predicates)
         return (
             view_key(
                 model=self._d.model,
                 at_column=self._at.column.python_name,
-                bucket=self._bucket,
+                bucket=self._bucket if grain is None else grain,
                 zone_name=zone_name,
                 measures=self._d.measures,
                 predicate_sql=rendered,
@@ -1071,6 +1192,7 @@ class Series(_Builder):
         range: Range,
         zone: Any = None,
         now: Any = None,
+        allow_coarsening: bool = False,
         **values: Any,
     ) -> SeriesResult:
         """Run this declaration for one range and one reader's zone.
@@ -1085,6 +1207,12 @@ class Series(_Builder):
         Passing one reads the range as of that instant, which is what makes a
         sealing test deterministic and a "what did this look like on Friday"
         question answerable.
+
+        ``allow_coarsening`` accepts a coarser grain for the part of a range no
+        tier stores at the grain asked for. Off by default: returning monthly
+        numbers labelled as days is a lie that survives review, so the honest
+        default is to refuse and name the coarsest grain available.
+        :attr:`SeriesResult.segments` always reports the grain actually used.
         """
         if not self._d.measures:
             raise SeriesError("this view declares no measures; there is nothing to plot")
@@ -1094,7 +1222,11 @@ class Series(_Builder):
         if self._compare is not None:
             _refuse_overlap(range, self._compare, zone_name)
         predicates = self._bind(values)
-        if self._seal is not None:
+        if self._tiers is not None:
+            result = await self._run_tiered(
+                session, predicates, range, zone_name, values, now, allow_coarsening
+            )
+        elif self._seal is not None:
             result = await self._run_sealed(
                 session, predicates, range, zone_name, values, now
             )
@@ -1154,15 +1286,46 @@ class Series(_Builder):
         and it shrinks to nothing as the watermark advances past a range that
         has already been read.
         """
-        assert self._seal is not None
         instant = _instant(now) if now is not None else _now()
+        start, end = _instant(range.start), _instant(range.end)
+        merged, state = await self._settled_span(
+            session, predicates, start, end, zone_name, values, instant
+        )
+        buckets = sorted(merged)
+        found = {(None, False): merged}
+        return SeriesResult(
+            range=range,
+            zone=zone_name,
+            bucket=self._bucket.name,
+            buckets=tuple(buckets),
+            series=self._series_of(buckets, found),
+            state=state,
+        )
+
+    async def _settled_span(
+        self,
+        session: Any,
+        predicates: tuple[Predicate, ...],
+        start: Any,
+        end: Any,
+        zone_name: str,
+        values: dict[str, Any],
+        instant: Any,
+    ) -> tuple[dict[Any, dict[str, Any]], Any]:
+        """One span at this view's own grain: settled behind the watermark, open ahead.
+
+        Split out from :meth:`_run_sealed` because a tiered read needs exactly
+        this for the part of a range that raw still answers for, and having two
+        copies of "what is sealed here" is how the watermark starts meaning two
+        things.
+        """
+        assert self._seal is not None
         edge = watermark(
             instant,
             bucket=self._bucket,
             zone_name=zone_name,
             after=self._seal.after,
         )
-        start, end = _instant(range.start), _instant(range.end)
         sealed_end = min(end, edge)
         view, params = self._identity(zone_name, values)
 
@@ -1205,21 +1368,211 @@ class Series(_Builder):
                 session, predicates, max(start, sealed_end), end, zone_name
             )
 
-        merged = {**settled, **open_part}
-        buckets = sorted(merged)
-        found = {(None, False): merged}
-        return SeriesResult(
-            range=range,
-            zone=zone_name,
-            bucket=self._bucket.name,
-            buckets=tuple(buckets),
-            series=self._series_of(buckets, found),
-            state=SealState(
+        return (
+            {**settled, **open_part},
+            SealState(
                 sealed_through=edge if sealed_end > start else None,
                 settled=tuple(sorted(settled)),
                 corrections=tuple(sorted(corrected)),
             ),
         )
+
+    async def _run_tiered(
+        self,
+        session: Any,
+        predicates: tuple[Predicate, ...],
+        range: Range,
+        zone_name: str,
+        values: dict[str, Any],
+        now: Any,
+        allow_coarsening: bool,
+    ) -> SeriesResult:
+        """Stitch one or more tiers onto a single spine, and say which answered.
+
+        §7.4's promise is that the caller never knows there were tiers -- so the
+        pieces are merged into one bucket run and one set of series, exactly as
+        an untiered read produces. What the caller *can* see, in
+        :attr:`SeriesResult.segments`, is which grain answered where: that is
+        reporting, not something they have to handle.
+        """
+        assert self._tiers is not None
+        instant = _instant(now) if now is not None else _now()
+        start, end = _instant(range.start), _instant(range.end)
+        stored_zone = (
+            _zone_name(self._stored_in) if self._stored_in is not None else zone_name
+        )
+        segments = _plan_tiers(
+            ladder=self._tiers,
+            requested=self._bucket,
+            start=start,
+            end=end,
+            now=instant,
+            stored_zone=stored_zone,
+            read_zone=zone_name,
+            allow_coarsening=allow_coarsening,
+            refuse=SeriesError,
+        )
+
+        merged: dict[Any, dict[str, Any]] = {}
+        settled: list[Any] = []
+        corrections: list[Any] = []
+        edge: Any = None
+        for segment in segments:
+            if segment.tier.is_raw:
+                part, state = await self._settled_span(
+                    session,
+                    predicates,
+                    segment.start,
+                    segment.end,
+                    zone_name,
+                    values,
+                    instant,
+                )
+                if state.sealed_through is not None:
+                    edge = state.sealed_through if edge is None else max(edge, state.sealed_through)
+                settled.extend(state.settled)
+                corrections.extend(state.corrections)
+            else:
+                part, found = await self._tier_span(session, segment, zone_name, values)
+                settled.extend(part)
+                corrections.extend(found)
+            merged.update(part)
+
+        buckets = sorted(merged)
+        return SeriesResult(
+            range=range,
+            zone=zone_name,
+            bucket=self._bucket.name,
+            buckets=tuple(buckets),
+            series=self._series_of(buckets, {(None, False): merged}),
+            state=SealState(
+                sealed_through=edge,
+                settled=tuple(sorted(settled)),
+                corrections=tuple(sorted(corrections)),
+            ),
+            segments=segments,
+        )
+
+    async def _tier_span(
+        self,
+        session: Any,
+        segment: Segment,
+        zone_name: str,
+        values: dict[str, Any],
+    ) -> tuple[dict[Any, dict[str, Any]], list[Any]]:
+        """Read one materialised tier's stored rows for one piece of the range.
+
+        One statement, and no contact with the source table at all. A tier is
+        the same ``series_buckets`` rows sealing writes, filed under the key
+        that grain hashes to -- so this is :func:`select_settled` again, asking
+        a different question of the same table.
+        """
+        view, params = self._identity(zone_name, values, grain=segment.tier.grain)
+        stored = await session.declared(
+            select_settled(), (view, params, segment.start, segment.end)
+        )
+        part: dict[Any, dict[str, Any]] = {}
+        corrections: list[Any] = []
+        for row in stored:
+            bucket, measures, delta = row[0], row[1], row[2]
+            part[bucket] = fold(_as_mapping(measures), _as_mapping(delta))
+            if delta:
+                corrections.append(bucket)
+        return part, corrections
+
+    async def rollup(
+        self,
+        session: Any,
+        *,
+        range: Range,
+        zone: Any = None,
+        now: Any = None,
+        **values: Any,
+    ) -> dict[str, tuple[Any, ...]]:
+        """Materialise every coarser tier over the sealed part of ``range``.
+
+        The durable-job body §7.3 describes, written as an ordinary method so
+        the scheduling stays in :mod:`wreath.jobs` where it already
+        lives — ``jobs.schedule`` with a dedup key of declaration, tier and
+        bucket makes a re-run a no-op, and the insert refuses to overwrite
+        anyway, so at-least-once delivery costs nothing here.
+
+        Two steps, in this order:
+
+        1. :meth:`reconcile` the range first, so a late write that landed behind
+           the watermark is folded in before anything coarser is built from it.
+           Running rollup without this would carve a stale number into a coarser
+           grain, where it is harder to notice and no longer traceable to the
+           row that caused it.
+        2. Compute each coarser grain **from the source rows**, not from the
+           finer tier. Nothing is ever removed at this stage, so raw is always
+           there, and recomputing from it is both correct and immune to the
+           average-of-averages trap. Building a tier from a tier becomes
+           necessary only when retention starts genuinely removing rows.
+
+        Returns the buckets written per tier, so a job can log what it did
+        rather than reporting that it ran.
+        """
+        if self._tiers is None:
+            raise SeriesError(
+                "rollup() needs retain(): with no ladder there is no coarser "
+                "grain to materialise"
+            )
+        assert self._seal is not None  # retain() refuses coarser tiers without it
+        zone_name = _zone_name(zone if zone is not None else self._stored_in)
+        instant = _instant(now) if now is not None else _now()
+        await self.reconcile(session, range=range, zone=zone, now=now, **values)
+
+        predicates = self._bind(values)
+        start = _instant(range.start)
+        written: dict[str, tuple[Any, ...]] = {}
+        for tier in self._tiers.materialised:
+            grain = tier.grain
+            assert grain is not None
+            edge = watermark(
+                instant, bucket=grain, zone_name=zone_name, after=self._seal.after
+            )
+            end = min(_instant(range.end), edge)
+            if end <= start:
+                written[tier.name] = ()
+                continue
+            written[tier.name] = await self._materialise(
+                session, predicates, grain, start, end, zone_name, values
+            )
+        return written
+
+    async def _materialise(
+        self,
+        session: Any,
+        predicates: tuple[Predicate, ...],
+        grain: Bucket,
+        start: Any,
+        end: Any,
+        zone_name: str,
+        values: dict[str, Any],
+    ) -> tuple[Any, ...]:
+        """Compute one coarser grain from the source rows and store what is new."""
+        coarser = Series(
+            self._d.model,
+            at=self._at,
+            bucket=grain,
+            stored_in=self._stored_in,
+            _state=self._d,
+            _top=self._top,
+        )
+        fresh = await coarser._compute(session, predicates, start, end, zone_name)
+        view, params = self._identity(zone_name, values, grain=grain)
+        stored = await session.declared(select_settled(), (view, params, start, end))
+        already = {row[0] for row in stored}
+        added: list[Any] = []
+        for bucket, measures in sorted(fresh.items()):
+            if bucket in already:
+                continue
+            await session.declared(
+                insert_settled(), (view, params, bucket, dict(measures))
+            )
+            added.append(bucket)
+        return tuple(added)
 
     async def reconcile(
         self,
@@ -1416,6 +1769,129 @@ def _walk_related(node: Any, out: list[RelatedColumnExpr]) -> None:
             _walk_related(child, out)
 
 
+def _refuse_unrollable(
+    ladder: Ladder, measures: tuple[tuple[str, Measure], ...], bucket: Bucket
+) -> None:
+    """Refuse a measure that cannot be rebuilt from parts against a bounded raw window.
+
+    §7.5's correctness trap, and the design calls it "the big one": **rollup is
+    lossy, and average-of-averages is wrong.** A daily average built by averaging
+    twenty-four hourly averages weights a quiet 3am hour exactly as heavily as a
+    busy noon, and the number it produces is confidently, quietly incorrect.
+
+    Two things make this refusal the right shape rather than an inconvenience.
+
+    The check is the *same predicate* that decides whether a bucket can absorb a
+    late correction (§7.2). Additivity over disjoint sets is one property with
+    two consequences: a measure that rolls up can take a delta, and a measure
+    that cannot roll up cannot take one either. That is why it reads
+    :attr:`Measure.rollup_safe` -- one fact about the function -- rather than a
+    second list that could disagree with the first.
+
+    And it is deliberately conditional on ``raw`` being *bounded*. A coarse tier
+    is computed from the source rows today, so an average over one is correct
+    right now; what makes it unsound is the retention window promising those
+    rows will stop being there. §7.5 gives exactly two ways out and this enforces
+    both: pin raw retention across the whole query window (``raw=None``), or
+    take the coarse tier off the ladder.
+
+    The third way out, which is not built: store ``avg`` decomposed as a sum and
+    a count and divide at read time, so it becomes additive after all. That is
+    §7.5's own prescription, it is invisible to the caller, and it is a change to
+    what a settled row holds rather than a check -- so it is named in the
+    refusal instead of being half-implemented here.
+    """
+    coarser = [
+        tier
+        for tier in ladder.materialised
+        if tier.grain is not None and _grain_width(tier.grain) > _grain_width(bucket)
+    ]
+    if not coarser or not ladder.raw_bounded:
+        return
+    for name, measure in measures:
+        if measure.rollup_safe:
+            continue
+        tier = coarser[0].name
+        raise SeriesError(
+            f"measure {name!r} is an {measure.kind} and cannot be rolled up, but "
+            f"this ladder keeps raw for a bounded time and materialises "
+            f"{tier!r} above it. Combining {measure.kind}s from coarser parts "
+            "means averaging averages, which weights a quiet bucket the same as "
+            "a busy one and produces a number that looks reasonable and is "
+            "wrong. Either keep the source rows for the whole window the chart "
+            f"asks about (retain(raw=None, ...)), or drop the {tier!r} tier. "
+            f"Storing {name!r} decomposed as a sum and a count would make it "
+            "additive, and that is not implemented"
+        )
+
+
+def _refuse_unreopenable(
+    seal: Seal | None, ladder: Ladder | None, bucket: Bucket
+) -> None:
+    """Refuse ``on_late="reopen"`` when raw cannot outlive the seal window.
+
+    §7.2's rule. Reopening a sealed bucket means **recomputing it from the
+    source rows and overwriting the stored value**. If those rows are gone, the
+    recomputation produces a smaller number and writes it over one that was
+    correct -- silently, and destructively, since reopening also clears the
+    correction that would have shown something was wrong.
+
+    The arithmetic is one bucket wider than the design's phrasing, and the extra
+    width is load-bearing. A bucket ``[start, end)`` seals at ``end + after``,
+    but recomputing it needs *every* row in it, and the oldest sits at ``start``
+    -- a whole bucket earlier. So raw has to promise::
+
+        keep >= after + width(bucket)
+
+    Keeping raw for exactly the seal window is not enough: at the instant the
+    bucket sealed, its first row would already be past the edge.
+
+    **Equality is accepted, not refused.** :meth:`~wreath.\
+_series.tiers.Tier.covers` tests ``instant >= now - keep``, so a row sitting
+    exactly on the retention edge is still covered. Refusing at equality would
+    contradict the coverage predicate one module over, and two rules disagreeing
+    about the same boundary is worse than either rule being slightly loose.
+
+    **Two durations, two precisions, and why that is sound here.** ``after``
+    comes from :func:`_lateness`, which is exact -- it cannot even express
+    months or years. ``keep`` comes from ``retain()``, which reads ``"1 year"``
+    as a mean length on purpose. Comparing them is comparing an exact number
+    against an approximate one, and the approximation would matter if anything
+    else read ``keep`` differently. Nothing does: ``Tier.covers`` uses the same
+    seconds at runtime, so this check and the behaviour it predicts cannot
+    disagree, whatever the calendar does.
+
+    **What this cannot catch, stated rather than implied.** It is a necessary
+    condition, not a sufficient one. It refuses a declaration under which reopen
+    could *never* be sound. It cannot refuse a :func:`reconcile` that runs a
+    month after a bucket sealed, by which time the rows may have aged out under
+    a window that was ample at sealing time. That hazard belongs to *when* the
+    operation runs rather than to what was declared, so the guide carries it and
+    no declaration-time check can.
+    """
+    if seal is None or seal.on_late != "reopen":
+        return
+    if ladder is None or not ladder.raw_bounded:
+        return
+    keep = ladder.raw.keep
+    assert keep is not None  # raw_bounded
+    needed = seal.after + _grain_width(bucket)
+    if keep >= needed:
+        return
+    raise SeriesError(
+        f"seal(on_late='reopen') needs the source rows to outlive the seal "
+        f"window, but this ladder keeps raw for {keep:g}s and a {bucket.name} "
+        f"bucket is not fully recomputable until {needed:g}s after it closes "
+        f"({seal.after:g}s of lateness allowance plus the {bucket.name} itself). "
+        "Reopening recomputes a sealed bucket from rows that would already be "
+        "eligible to have gone, so it would overwrite a correct value with a "
+        "smaller one and clear the correction that showed it had moved. Keep "
+        f"raw for at least {needed:g}s, or retain(raw=None, ...) to keep the "
+        "source rows indefinitely, or leave on_late='correct' -- the default "
+        "records the difference beside the settled value instead of replacing it"
+    )
+
+
 def _refuse_overlap(range: Range, previous: Bucket, zone_name: str) -> None:
     """Refuse a comparison period that would reach into the primary one.
 
@@ -1445,7 +1921,7 @@ def _refuse_overlap(range: Range, previous: Bucket, zone_name: str) -> None:
         # month before a 30-day one is that month's last day, not its first.
         day = min(local.day, monthrange(year, month)[1])
         shifted = local.replace(year=year, month=month, day=day)
-    if shifted.replace(tzinfo=tzinfo) > _instant(range.start):
+    if from_wall_clock(shifted, tzinfo) > _instant(range.start):
         raise SeriesError(
             f"compare(previous={previous.name}) overlaps the range it compares "
             f"against: one {previous.name} is shorter than {range.start} to "
@@ -1501,8 +1977,14 @@ def _instant(value: Any) -> Any:
     return Instant.of(value)
 
 
-#: ``2h``, ``30m``, ``90s``, ``250ms`` -- the same compact spelling
+#: ``2h``, ``30m``, ``90s``, ``250ms``, ``7d`` -- the same compact spelling
 #: ``ChunkedPass(within=...)`` takes, so one codebase has one duration syntax.
+#:
+#: That was aspirational until 2026-07-27: this accepted ``d`` and
+#: :mod:`wreath._passes.duration` did not, so ``seal(after="3d")`` parsed while
+#: ``Rows(within="3d")`` refused. The scales are the same set now, and
+#: ``tests/series/test_duration_syntax.py`` asserts it rather than trusting this
+#: comment -- a claim two modules apart is one edit from being false again.
 _COMPACT_DURATION = _re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*(ms|s|m|h|d)?\s*$")
 _COMPACT_SCALE = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
 

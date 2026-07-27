@@ -28,7 +28,7 @@ import pytest
 
 from wreath._series.settle import schema_sql, watermark
 from wreath.postgres import Database
-from wreath.temporal import Day, Hour, Instant, Month, Week, zone
+from wreath.temporal import Day, Hour, Instant, Month, Week, from_wall_clock, zone
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("WREATH_TEST_POSTGRES_DSN"),
@@ -38,10 +38,29 @@ pytestmark = pytest.mark.skipif(
 AUCKLAND = "Pacific/Auckland"
 
 
+def local(day: str, hour: int = 0) -> datetime.datetime:
+    """A wall-clock time in Auckland, as an instant.
+
+    The offset is read from the zone rather than written into the literal.
+    Auckland is +13 in March and +12 in June, so a hardcoded offset makes a
+    test that quietly measures the day either side of the one it names -- which
+    is exactly what three of these tests did before they were first run.
+    """
+    naive = datetime.datetime.fromisoformat(f"{day}T00:00:00").replace(hour=hour)
+    return from_wall_clock(naive, zone(AUCKLAND))
+
+
 @pytest.fixture
 async def database():
     dsn = os.environ["WREATH_TEST_POSTGRES_DSN"]
-    db = Database("main", dsn, pools={"read": {"min_size": 1, "max_size": 2}})
+    db = Database(
+        "main",
+        dsn,
+        pools={
+            "read": {"min_size": 1, "max_size": 2},
+            "write": {"min_size": 1, "max_size": 2},
+        },
+    )
     await db.start()
     try:
         yield db
@@ -147,8 +166,8 @@ async def _spine(database, start: str, end: str, unit: str) -> list:
             f"date_trunc('{unit}', ($2::timestamptz AT TIME ZONE $3) "
             f"- interval '1 microsecond'), "
             f"interval '1 {unit}') AT TIME ZONE $3 AS b",
-            datetime.datetime.fromisoformat(f"{start}T00:00:00+13:00"),
-            datetime.datetime.fromisoformat(f"{end}T00:00:00+12:00"),
+            local(start),
+            local(end),
             AUCKLAND,
         )
         return [row[0] for row in rows]
@@ -168,7 +187,10 @@ class TestTheComparisonShift:
         Subtracting a fixed number of days walks backwards through the calendar;
         `interval '1 month'` on a naive local timestamp does not.
         """
-        moment = datetime.datetime(2026, 3, 31, 12, tzinfo=datetime.UTC)
+        # Noon *in Auckland* on 31 March. Written as a UTC literal this was
+        # 2026-03-31T12:00Z, which is 1 April locally -- so the test shifted
+        # April back to March and read a pass as a failure.
+        moment = local("2026-03-31", hour=12)
         shifted = await fetchval(
             database,
             "SELECT (($1::timestamptz AT TIME ZONE $2) - interval '1 month') "
@@ -176,8 +198,8 @@ class TestTheComparisonShift:
             moment,
             AUCKLAND,
         )
-        local = shifted.astimezone(zone(AUCKLAND))
-        assert (local.month, local.day) == (2, 28), "clamped to February's last day"
+        there = shifted.astimezone(zone(AUCKLAND))
+        assert (there.month, there.day) == (2, 28), "clamped to February's last day"
 
     async def test_the_shift_preserves_the_wall_clock_across_a_transition(
         self, database
@@ -246,8 +268,8 @@ async def _shifted_spine(database, start: str, end: str, unit: str) -> list:
             f"date_trunc('{unit}', ((($2::timestamptz AT TIME ZONE $3) "
             f"- interval '1 microsecond') - interval '1 month')), "
             f"interval '1 {unit}') AT TIME ZONE $3 AS b",
-            datetime.datetime.fromisoformat(f"{start}T00:00:00+13:00"),
-            datetime.datetime.fromisoformat(f"{end}T00:00:00+13:00"),
+            local(start),
+            local(end),
             AUCKLAND,
         )
         return [row[0] for row in rows]
@@ -336,10 +358,113 @@ class TestSealedBucketBoundaries:
         assert Day.end_of(Instant.of(start), AUCKLAND) == theirs
 
     async def test_the_settled_tables_apply_cleanly(self, database):
-        """The DDL a migration would carry, against a real server."""
-        connection = await database.acquire("write")
-        try:
-            await connection.execute(schema_sql(schema="wreath_series_test"))
-            await connection.execute(schema_sql(schema="wreath_series_test"))
-        finally:
-            await database.release("write", connection)
+        """The DDL a migration would carry, against a real server -- twice.
+
+        Applied statement by statement because `execute` prepares, and a
+        prepared statement cannot carry several commands. That is the same
+        splitting `tests/postgres/test_passes_integration.py` does; every
+        caller of a `schema_sql()` currently has to know it.
+        """
+        for _ in range(2):
+            connection = await database.acquire("write")
+            try:
+                for part in schema_sql(schema="wreath_series_test").split(";\n"):
+                    if part.strip():
+                        await connection.execute(part.strip())
+            finally:
+                await database.release("write", connection)
+
+
+class TestRollupAgreesWithTheDatabase:
+    """Stage 8: a coarser tier has to hold the number a coarse query would.
+
+    The fake suite proves which statements run and which tier answers where.
+    What it cannot prove is that a month materialised from source rows equals
+    ``date_trunc('month', ...)`` over the same rows -- and if those ever
+    disagree, the rollup is a confidently wrong chart rather than a slow one.
+    """
+
+    async def test_a_month_bucket_start_agrees_with_date_trunc(self, database):
+        """The coarse grain files under the boundary the spine will generate.
+
+        Same failure mode as the sealing check one grain up: a monthly row
+        stored at an instant ``generate_series`` never emits is a value that
+        silently vanishes from every read.
+        """
+        for moment in (
+            datetime.datetime(2026, 4, 5, 1, 30, tzinfo=datetime.UTC),
+            datetime.datetime(2026, 9, 27, 1, 30, tzinfo=datetime.UTC),
+        ):
+            theirs = await fetchval(
+                database,
+                "SELECT date_trunc('month', $1::timestamptz AT TIME ZONE $2) "
+                "AT TIME ZONE $2",
+                moment,
+                AUCKLAND,
+            )
+            assert Month.floor(Instant.of(moment), AUCKLAND) == theirs
+
+    async def test_a_month_of_days_sums_to_the_month_bucket(self, database):
+        """Additivity, against the server rather than against the rule.
+
+        ``count`` and ``sum`` are declared rollup-safe. This is that claim
+        measured: aggregating a month directly equals aggregating its days and
+        adding them, across a month containing a DST transition.
+        """
+        rows = await _fetch(
+            database,
+            """
+            WITH samples AS (
+              SELECT generate_series(
+                timestamptz '2026-09-01 00:00+12',
+                timestamptz '2026-09-30 00:00+12',
+                interval '7 hours'
+              ) AS at
+            ),
+            by_day AS (
+              SELECT date_trunc('day', at AT TIME ZONE $1) AS bucket, count(*) AS n
+              FROM samples GROUP BY 1
+            ),
+            by_month AS (
+              SELECT date_trunc('month', at AT TIME ZONE $1) AS bucket, count(*) AS n
+              FROM samples GROUP BY 1
+            )
+            SELECT (SELECT sum(n) FROM by_day), (SELECT sum(n) FROM by_month)
+            """,
+            AUCKLAND,
+        )
+        summed_days, direct_month = rows[0]
+        assert summed_days == direct_month
+
+    async def test_an_average_of_averages_really_is_wrong(self, database):
+        """The refusal exists for a reason; this is the reason, measured.
+
+        If these ever came out equal the additivity check would be needless
+        ceremony. They do not: a quiet bucket and a busy one weigh the same once
+        you average their averages, and the error is small enough to look
+        plausible on a chart.
+        """
+        rows = await _fetch(
+            database,
+            """
+            WITH samples(bucket, value) AS (
+              VALUES ('a', 1.0), ('a', 1.0), ('a', 1.0), ('a', 1.0), ('b', 100.0)
+            ),
+            per_bucket AS (
+              SELECT bucket, avg(value) AS mean FROM samples GROUP BY bucket
+            )
+            SELECT (SELECT avg(value) FROM samples)::float8,
+                   (SELECT avg(mean) FROM per_bucket)::float8
+            """,
+        )
+        honest, average_of_averages = rows[0]
+        assert honest != average_of_averages
+        assert abs(honest - average_of_averages) > 20
+
+
+async def _fetch(database, sql: str, *args):
+    connection = await database.acquire("read")
+    try:
+        return await connection.fetch(sql, *args)
+    finally:
+        await database.release("read", connection)

@@ -146,6 +146,91 @@ class TestWhatCannotBeSealed:
             Aggregate(Trek).measure(n=count()).seal(after="2h")
 
 
+# -- reopen, and the rows it recomputes from ----------------------------------
+
+
+class TestReopenNeedsTheRowsItRecomputesFrom:
+    """§7.2: ``on_late="reopen"`` against a raw window that cannot outlive the seal.
+
+    Reopening *overwrites* the settled value with a recomputation, and clears
+    the correction that would have shown something moved. Doing that from rows
+    that have aged out replaces a correct number with a smaller one and leaves
+    no trace. Stage 7 could not check this — retention did not exist — so the
+    rule sat in the docstring until ``retain()`` landed.
+    """
+
+    def reopening(self, *, bucket=Day, after="2h", **windows):
+        declared = Series(
+            Trek, at=Trek.started_at, bucket=bucket, stored_in=tz("UTC")
+        ).measure(n=count())
+        return declared.seal(after=after, on_late="reopen").retain(**windows)
+
+    def test_a_raw_window_shorter_than_the_seal_is_refused(self):
+        with pytest.raises(SeriesError, match="outlive the seal window"):
+            self.reopening(raw="1 day")
+
+    def test_the_refusal_names_both_windows_and_the_way_out(self):
+        with pytest.raises(SeriesError) as caught:
+            self.reopening(raw="1 day")
+        message = str(caught.value)
+        assert "86400s" in message and "93600s" in message
+        assert "retain(raw=None" in message
+        assert "on_late='correct'" in message
+
+    def test_keeping_raw_forever_is_always_sound(self):
+        assert self.reopening(raw=None).sealed_after == 7200
+
+    def test_a_comfortable_window_is_accepted(self):
+        assert self.reopening(raw="30 days").sealed_after == 7200
+
+    def test_the_default_on_late_is_not_refused(self):
+        """``correct`` records a delta beside an immutable settled value.
+
+        Recomputing from vanished rows would still produce a wrong delta — but
+        the settled number survives it, the envelope reports which buckets carry
+        a correction, and dropping a bad correction recovers. Destroying the
+        value outright does not, which is the whole reason only ``reopen`` is
+        refused here.
+        """
+        declared = Series(
+            Trek, at=Trek.started_at, bucket=Day, stored_in=tz("UTC")
+        ).measure(n=count())
+        assert declared.seal(after="2h").retain(raw="1 day").sealed_after == 7200
+
+    def test_the_check_does_not_depend_on_clause_order(self):
+        declared = Series(
+            Trek, at=Trek.started_at, bucket=Day, stored_in=tz("UTC")
+        ).measure(n=count())
+        with pytest.raises(SeriesError, match="outlive the seal window"):
+            declared.retain(raw="1 day").seal(after="2h", on_late="reopen")
+
+    def test_the_bucket_width_is_part_of_the_requirement(self):
+        """Raw outlasting the *seal* is not enough — it must outlast the bucket too.
+
+        The design phrases the rule as "raw retention shorter than the seal
+        window", which understates it by one bucket. A day bucket sealing two
+        hours after it closes is not fully recomputable until 26 hours after it
+        closes, because its oldest row is a day older than its end. Three hours
+        of raw comfortably exceeds the two-hour seal and is still wrong.
+        """
+        with pytest.raises(SeriesError, match="outlive the seal window"):
+            self.reopening(bucket=Day, after="2h", raw="3 hours")
+        # The same numbers against an hour bucket need only 3h, and are fine.
+        assert self.reopening(bucket=Hour, after="2h", raw="3 hours").sealed_after == 7200
+
+    def test_equality_is_accepted_because_coverage_is_inclusive(self):
+        """``Tier.covers`` tests ``instant >= now - keep``.
+
+        A row sitting exactly on the retention edge is still covered, so
+        refusing at equality would put this check and the coverage predicate one
+        module over into disagreement about the same boundary.
+        """
+        exact = 7200.0 + 86400.0
+        assert self.reopening(raw=exact).sealed_after == 7200
+        with pytest.raises(SeriesError, match="outlive the seal window"):
+            self.reopening(raw=exact - 1)
+
+
 # -- identity -----------------------------------------------------------------
 
 

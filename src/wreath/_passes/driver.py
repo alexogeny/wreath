@@ -335,7 +335,10 @@ async def _shift(
     ledger = walk.ledger
     keys = walk.units.keys
     await ledger.seed(
-        connection, chunk_limit=walk.units.limit, guards=walk.guards
+        connection,
+        chunk_limit=walk.units.limit,
+        guards=walk.guards,
+        rewrites=walk.rewrites,
     )
     await ledger.set_pacing(
         connection, chunk_limit=walk.units.limit, reason=walk.pace.reason

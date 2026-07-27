@@ -13,34 +13,29 @@ with ``native-boundary-lint: allow NB001 -- reason``.
 
 from __future__ import annotations
 
-import argparse
-import json
 import re
-import sys
-from dataclasses import dataclass
-from pathlib import Path
 
 from .native_lint import (
     Finding,
+    Rule,
     _enclosing_function,
     _is_init_function,
     _loop_depth_map,
+    _waivers,
     iter_sources,
     repo_root,
+    run_lint,
     strip_c,
 )
+
+#: ``iter_sources`` and ``repo_root`` are re-exported, not merely used -- see the
+#: note in :mod:`~wreath._devtools.native_error_lint`.
+__all__ = ["DEFAULT_ROOTS", "WAIVER", "Rule", "iter_sources", "main", "repo_root", "scan_text"]
 
 DEFAULT_ROOTS = ("src/wreath/_native",)
 WAIVER = re.compile(
     r"native-boundary-lint:\s*allow\s+(?P<code>NB\d{3})\s*--\s*(?P<reason>\S.*)"
 )
-
-
-@dataclass(frozen=True)
-class Rule:
-    code: str
-    summary: str
-    hint: str
 
 
 RULES: dict[str, Rule] = {
@@ -103,26 +98,11 @@ WEIGHTED_APIS: tuple[tuple[re.Pattern[str], int], ...] = (
 BOUNDARY_SCORE_LIMIT = 20
 
 
-def _waivers(raw_lines: list[str], code_lines: list[str]) -> dict[int, set[str]]:
-    found: dict[int, set[str]] = {}
-    for number, line in enumerate(raw_lines, 1):
-        match = WAIVER.search(line)
-        if not match:
-            continue
-        code = match.group("code")
-        found.setdefault(number, set()).add(code)
-        for index in range(number, len(code_lines)):
-            if code_lines[index].strip():
-                found.setdefault(index + 1, set()).add(code)
-                break
-    return found
-
-
 def scan_text(path: str, text: str) -> list[Finding]:
     raw_lines = text.split("\n")
     code_lines = strip_c(text)
     loop_depth = _loop_depth_map(code_lines)
-    waived = _waivers(raw_lines, code_lines)
+    waived = _waivers(raw_lines, code_lines, WAIVER)
     findings: list[Finding] = []
     by_function: dict[str, list[int]] = {}
     loop_object_lines: dict[str, list[int]] = {}
@@ -203,61 +183,14 @@ def scan_text(path: str, text: str) -> list[Finding]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
+    return run_lint(
+        argv,
         prog="wreath-native-boundary-lint",
         description="Find excessive Python object and boundary traffic in Wreath's C.",
+        rules=RULES,
+        scan=scan_text,
+        default_roots=DEFAULT_ROOTS,
     )
-    parser.add_argument(
-        "paths", nargs="*", type=Path, help="files or directories (default: src/wreath/_native)"
-    )
-    parser.add_argument("--format", choices=("text", "json"), default="text")
-    parser.add_argument("--list-rules", action="store_true")
-    args = parser.parse_args(argv)
-
-    if args.list_rules:
-        for rule in RULES.values():
-            print(f"{rule.code}  {rule.summary}\n    {rule.hint}\n")
-        return 0
-
-    roots = args.paths or [repo_root() / root for root in DEFAULT_ROOTS]
-    sources = iter_sources([Path(root) for root in roots])
-    if not sources:
-        print(f"wreath-native-boundary-lint: no C sources found in {roots}", file=sys.stderr)
-        return 1
-
-    root = repo_root()
-    findings: list[Finding] = []
-    for source in sources:
-        try:
-            text = source.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            print(f"wreath-native-boundary-lint: cannot read {source}: {exc}", file=sys.stderr)
-            return 1
-        try:
-            display = str(source.relative_to(root))
-        except ValueError:
-            display = str(source)
-        findings.extend(scan_text(display, text))
-
-    if args.format == "json":
-        print(
-            json.dumps(
-                {
-                    "scanned": len(sources),
-                    "count": len(findings),
-                    "findings": [finding.__dict__ for finding in findings],
-                },
-                indent=2,
-            )
-        )
-    else:
-        for finding in findings:
-            print(finding.render())
-        print(
-            f"\nwreath-native-boundary-lint: {len(findings)} finding(s) across "
-            f"{len(sources)} file(s)."
-        )
-    return 1 if findings else 0
 
 
 if __name__ == "__main__":

@@ -46,3 +46,16 @@ A directory reached without its trailing slash (`/assets/sub`) answers `308` to
 `/assets/sub/` rather than serving the index from the wrong base — otherwise
 every relative link in that page resolves one level up.
 
+
+### Ranges
+
+`Range` is honoured: `206` with `Content-Range` for a single byte range, `416`
+for one entirely past the end, and `Accept-Ranges: bytes` on every response so
+clients know to try. A multi-range request, an unknown unit, or anything
+malformed is *ignored* and the whole file is sent, per RFC 9110 §14.2.
+`If-Range` is checked first — a stale validator falls back to the whole file
+rather than splicing new bytes into an old copy.
+
+Lookups run on the handler's own bounded thread pool rather than the loop's
+default executor, so a burst of static requests cannot starve unrelated work.
+

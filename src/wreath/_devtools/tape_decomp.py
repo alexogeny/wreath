@@ -51,11 +51,15 @@ import json
 import platform
 import statistics
 import sys
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .decomp import _frame_chain
+from .measure import run as _run
+from .measure import scope as _scope
+from .measure import status_of as _status
+from .measure import time_app as _time
 from .sample_app import MIDDLEWARE_FACTORIES, build_realistic_app
 
 DEFAULT_ROUNDS = 11
@@ -82,46 +86,8 @@ class Arm:
         return ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
 
 
-def _scope(method: str, path: str, headers: dict[str, str]) -> dict[str, Any]:
-    raw_path, _, query = path.partition("?")
-    return {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
-        "http_version": "1.1",
-        "method": method.upper(),
-        "scheme": "http",
-        "path": raw_path,
-        "raw_path": raw_path.encode(),
-        "query_string": query.encode(),
-        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
-        "server": ("127.0.0.1", 8000),
-        "client": ("127.0.0.1", 5555),
-        "root_path": "",
-        "extensions": {},
-    }
 
 
-async def _receive() -> dict[str, Any]:
-    return {"type": "http.request", "body": b"", "more_body": False}
-
-
-async def _run(app: Any, template: dict[str, Any], count: int) -> None:
-    sent: list[Any] = []
-
-    async def send(message: dict[str, Any]) -> None:
-        sent.append(message)
-
-    for _ in range(count):
-        # A fresh dict per request: a real server never hands the same scope
-        # twice, and ProxyHeaders mutates it.
-        await app(dict(template), _receive, send)
-        sent.clear()
-
-
-async def _time(app: Any, template: dict[str, Any], iterations: int) -> float:
-    start = time.perf_counter()
-    await _run(app, template, iterations)
-    return (time.perf_counter() - start) / iterations * 1e6
 
 
 def _configure(app: Any, middleware: list[Any]) -> Any:
@@ -130,19 +96,6 @@ def _configure(app: Any, middleware: list[Any]) -> Any:
     app._compile_routes()
     return app
 
-
-def _frame_chain(depth: int) -> Any:
-    """`depth` real Python calls that do nothing foldable."""
-    def leaf(value: int) -> int:
-        return value + 1
-
-    current = leaf
-    for _ in range(depth):
-        def step(value: int, _previous: Any = current) -> int:
-            return _previous(value)
-
-        current = step
-    return current
 
 
 class _FrameMiddleware:
@@ -255,22 +208,6 @@ def _build_arms(factory: Any, names: list[str], make: Any, mode: str) -> list[Ar
         arms.append(Arm(label, middleware, app=_configure(factory(), middleware)))
     return arms
 
-
-async def _status(app: Any, template: dict[str, Any]) -> int:
-    sent: list[dict[str, Any]] = []
-
-    async def send(message: dict[str, Any]) -> None:
-        sent.append(message)
-
-    await app(dict(template), _receive, send)
-    return next(
-        (
-            message.get("status", 0)
-            for message in sent
-            if message.get("type") in ("http.response.start", "wreath.response")
-        ),
-        0,
-    )
 
 
 async def _verify(arms: list[Arm], template: dict[str, Any], when: str) -> None:

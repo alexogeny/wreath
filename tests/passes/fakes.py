@@ -23,6 +23,11 @@ import datetime
 import re
 from typing import Any
 
+# Measured against PostgreSQL 17.10 and pinned by
+# `tests/postgres/test_double_fidelity.py`. Imported plainly rather than
+# relatively: `tests/` is on `sys.path` but is not a package.
+from _pgfidelity import PreparedStatements, check_statement, record
+
 _ROW_COMPARISON = re.compile(r"^\(([\w, ]+)\)\s*(>=|<=|>|<)\s*\(([\s$\d,]+)\)$")
 #: The ORM's compiler qualifies and quotes -- ``"replays"."tries" = $4`` -- while
 #: the keyset emits bare column names. Both are real shapes the driver sends, so
@@ -158,6 +163,10 @@ class World:
         #: Called with (sql, args) before each statement runs, so a test can
         #: make one of them fail exactly where it wants to.
         self.before: Any = None
+        #: Which SQL texts have been run already. A cast on a placeholder only
+        #: bites on the *second* execution, so without this the fake cannot see
+        #: the shape that broke the default denominator.
+        self.prepared = PreparedStatements()
 
     def snapshot(self) -> Any:
         return (
@@ -179,6 +188,17 @@ class World:
         return next(iter(self.ledger.values()))
 
 
+def _as_record(row: Any) -> Any:
+    """Hand back what the driver hands back, not the dict we built it from.
+
+    A dict is friendlier than a ``Record`` and that is the problem: it makes
+    ``row.values()`` work in a test and raise in production, which is how a
+    live ``EXPLAIN`` test came to be written against an API that does not
+    exist.
+    """
+    return record(row) if isinstance(row, dict) else row
+
+
 class FakeConnection:
     def __init__(self, world: World) -> None:
         self.world = world
@@ -191,17 +211,16 @@ class FakeConnection:
 
     async def fetchrow(self, sql: str, *args: Any) -> Any:
         result = _run(self.world, sql, args)
-        return result[0] if isinstance(result, list) and result else None
+        return _as_record(result[0]) if isinstance(result, list) and result else None
 
     async def fetch(self, sql: str, *args: Any) -> Any:
         result = _run(self.world, sql, args)
-        return result if isinstance(result, list) else []
+        return [_as_record(row) for row in result] if isinstance(result, list) else []
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
         row = await self.fetchrow(sql, *args)
-        if row is None:
-            return None
-        return next(iter(row.values()))
+        # `row[0]`, not `next(iter(row.values()))` -- a Record is not a mapping.
+        return None if row is None else row[0]
 
 
 class FakeTransaction:
@@ -227,11 +246,11 @@ class FakeTransaction:
 
     async def fetchrow(self, sql: str, *args: Any) -> Any:
         result = _run(self.world, sql, args)
-        return result[0] if isinstance(result, list) and result else None
+        return _as_record(result[0]) if isinstance(result, list) and result else None
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
         row = await self.fetchrow(sql, *args)
-        return None if row is None else next(iter(row.values()))
+        return None if row is None else row[0]
 
 
 class FakeDatabase:
@@ -259,6 +278,11 @@ _HOLES = '"wreath".pass_holes'
 
 def _run(world: World, sql: str, args: tuple[Any, ...]) -> Any:
     world.statements.append((sql, args))
+    # Refuse what a real connection refuses, *before* interpreting anything.
+    # Three defects reached working-looking code because this check was absent:
+    # a placeholder cast that survives one call and raises on the next, a list
+    # bound to `= ANY($1)`, and a multi-statement string handed to `execute`.
+    check_statement(sql, args, world.prepared)
     if world.before is not None:
         world.before(sql, args)
     text = " ".join(sql.split())

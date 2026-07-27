@@ -299,3 +299,68 @@ def test_flight_route_ids_stamp_dependency_ids() -> None:
     client_ids = {n.name: n.entry_id for n in image.clients}
     assert app._databases["main"]._flight_dep_id == db_ids["main"] != 0
     assert app._http_clients["api"]._flight_dep_id == client_ids["api"] != 0
+
+
+def test_the_lazy_metadata_join_is_idempotent_under_concurrent_builders() -> None:
+    """Design 22 item 14, checked as far as this interpreter allows.
+
+    The hypothesis was a torn dict from two concurrent armed requests racing
+    `_build_flight_route_ids`. Two corrections came out of checking it:
+
+    * `_build_flight_route_ids` is a plain sync function with **zero** await
+      points, so two coroutines on one event loop cannot interleave inside it.
+      The stated scenario is not a race at all; only genuine OS threads
+      sharing one `Wreath` can reach it concurrently.
+    * Every write it makes is idempotent -- the same value derived from the
+      same immutable image -- so the worst outcome of a real thread overlap
+      is duplicated work, plus a window in which a reader sees a partially
+      populated `_flight_model_ids` and misses one ORM_HYDRATE attribution.
+      That degrades telemetry transiently; it does not corrupt anything.
+
+    This runs the builder from several threads and asserts the stamps agree.
+    Under the GIL that is a logic check, not a free-threading proof: no
+    free-threaded interpreter is available here (`Py_GIL_DISABLED` is false),
+    so the free-threaded mode `AGENTS.md` requires remains untested for this
+    path and is recorded as such rather than assumed.
+    """
+    import threading
+
+    from wreath import Wreath
+    from wreath._flight_metadata import build_metadata_image
+
+    app = Wreath()
+    app.postgres("main", dsn="postgres://stub/db")
+    app.http_client("api", base_url="http://api.internal.test")
+
+    @app.get("/x")
+    async def handler(request) -> str:
+        return "ok"
+
+    app._compile_routes()
+
+    results: list[dict] = []
+    errors: list[BaseException] = []
+    start = threading.Barrier(4)
+
+    def build() -> None:
+        try:
+            start.wait()
+            app._flight_route_ids = None  # force every thread down the build path
+            results.append(app._build_flight_route_ids())
+        except BaseException as exc:  # noqa: BLE001 - recorded, asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=build) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert len(results) == 4
+    # Same mapping every time, whichever thread produced it.
+    assert all(mapping == results[0] for mapping in results)
+    # And the dependency stamps settled on the image's IDs, not a torn value.
+    image = build_metadata_image(app)
+    db_ids = {n.name: n.entry_id for n in image.databases}
+    assert app._databases["main"]._flight_dep_id == db_ids["main"] != 0

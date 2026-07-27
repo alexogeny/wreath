@@ -54,7 +54,8 @@ verb:
 | `.objects.get_or_none(**kw)` | `await session.fetch_one(...)` | same contract, `None` on no match |
 | `.objects.get(pk)` | `await session.get(Model, pk)` | **ormar raises `NoMatch`, wreath returns `None`** — port the miss branch |
 | `.objects.create(**values)` | `session.add(Model(**values))` + `flush()` | |
-| `.objects.select_related(...)` | `.include(Model.rel.selectin())` | wreath never lazy-loads: a forgotten include *raises* rather than N+1-ing |
+| `.objects.select_related('rel')` | `.include(Model.rel.selectin())` | wreath never lazy-loads: a forgotten include *raises* rather than N+1-ing. `select_all()` names no relations, and wreath has no such switch |
+| `.objects.order_by('-col')` | `.order_by(Model.col.desc())` | a trailing `.first()` becomes `fetch_one(...limit(1))` — the objection to `first()` is an *unordered* first, which this is not |
 | `.objects.count()` / `.exists()` | `await session.count(...)` | |
 | `.objects.get_or_create(...)` | — | a read-then-write race in one call; write the upsert explicitly |
 
@@ -62,9 +63,12 @@ verb:
 `translated`: every keyword maps to a wreath predicate with the value carried
 across untouched, so the target is fully determined. `filter(name__icontains=x)`
 is not — the value has to be wrapped in wildcards, and choosing that is a
-decision. Neither is `filter(ranch__slug=x)`, because `slug` lives on another
-table and the join is yours to write. Same verb, different verdicts; sort the
-JSON report by `rule_id` to get each list.
+decision. Neither is `filter(ranch__slug=x)` — though the join is *not* yours to
+write: `Model.ranch.slug` is a related column and wreath plans the `INNER JOIN`
+for you. What the tool cannot do is resolve `ranch` to its target model when that
+model is declared in another file, so it hands you the rewrite rather than
+performing it. Same verb, different verdicts; sort the JSON report by `rule_id`
+to get each list.
 
 A `translated` query still gets a `# TODO` comment rather than a rewrite. The
 tag says the target is determined, not that the emitter performs it: Phase 1
@@ -110,10 +114,34 @@ codebase actually imports:
   reports separately: months are not a fixed number of seconds, and temporal
   will not pretend otherwise.
 
+- **A `boto3` S3 client** → `wreath.objects`. The verdict now reads the *service
+  name*: `boto3.client("s3")` has a target (`S3ObjectStore`, `ObjectPath`,
+  `zip_stream`), and `boto3.client("dynamodb")` still has none. One import, two
+  answers — reporting them alike told you to keep a dependency you can delete,
+  or to look for a replacement that does not exist.
+- **A hand-rolled HMAC webhook verify** → `wreath.webhooks`'
+  `HMACWebhookVerifier`. Worth more than a rename: the hand-rolled form compares
+  the digest and stops there, so a captured request replays forever. The shipped
+  verifier also checks the timestamp against a replay window and refuses an
+  envelope whose relay path it has already seen.
+- **An Alembic revision that calls `op.get_bind()`** → a deferred data
+  migration. This one said "wreath has no online/deferred backfill yet
+  (designed, not shipped): keep it in Alembic" until the day it shipped. A
+  `Recode(Model.col, mapping={...})` beside the model converts rows in chunks
+  while the application serves, and `wreath migrations check` refuses a later
+  migration that narrows the column before the pass has published. The mapping
+  is still yours to write, which is why it is `needs-review` rather than
+  automatic.
+
 This is a catalog that gets re-audited when a subsystem lands. `arrow` was
 `needs-review` with the note "a native temporal layer is designed but NOT
 shipped — do not wait for it", which was true when it was written and became
 misleading the day `wreath.temporal` merged.
+
+A `BaseHTTPMiddleware` subclass is the other shape that had gone missing, for a
+different reason: the rule fired where middleware was *wired up*
+(`add_middleware(...)`) and never where it was *written*, so a middleware living
+in its own module — the ordinary layout — produced no finding at all.
 
 ## Alembic revisions, sorted by risk
 

@@ -151,9 +151,30 @@ def test_map_preserves_insertion_order() -> None:
     assert _same(first) != _same(second)
 
 
-def test_non_string_keys_are_allowed_where_pure_allows_them() -> None:
+def test_scalar_keys_are_allowed_by_both() -> None:
+    """Non-str keys are fine as long as they are scalars the format can carry."""
     _same({1: "a", 2: "b"})
-    _same({(1, 2): "tuple-key-encodes-as-array"})
+    _same({b"bin": "a", 1.5: "b", None: "c", True: "d"})
+
+
+def test_container_keys_are_refused_by_both_in_the_same_words() -> None:
+    """Replaces an earlier test that blessed a tuple key as an array key.
+
+    That was deliberate once -- `_native/msgpack.c` documented non-str keys as
+    intentional -- but a round-trip sweep showed an array key is unreconstructable
+    by any decoder targeting a mapping, while `json.dumps` refuses the same value.
+    The two serializers now agree, so the failure a handler sees does not depend
+    on which content type was negotiated.
+
+    The messages must match, not merely both raise: parity here is what stops one
+    twin drifting into accepting a key the other rejects.
+    """
+    with pytest.raises(TypeError) as pure_error:
+        pure_packb({(1, 2): "x"})
+    with pytest.raises(TypeError) as native_error:
+        native_packb({(1, 2): "x"})
+    assert str(pure_error.value) == str(native_error.value)
+    assert "not tuple" in str(pure_error.value)
 
 
 def test_nested_document() -> None:
@@ -182,12 +203,19 @@ def test_unsupported_types_are_refused_by_both(value: object) -> None:
 
 
 def test_deep_nesting_is_refused_rather_than_crashing() -> None:
-    """The native encoder recurses; it must bound that itself."""
+    """Both encoders recurse; each must bound that itself.
+
+    The pure side was previously unpinned here -- it behaved the same way, but
+    nothing said so, which is how a reference implementation drifts from the twin
+    that is tested against it.
+    """
     document: object = 0
     for _ in range(2000):
         document = [document]
     with pytest.raises((ValueError, RecursionError)):
         native_packb(document)
+    with pytest.raises((ValueError, RecursionError)):
+        pure_packb(document)
 
 
 def test_self_referential_container_is_refused() -> None:
@@ -195,3 +223,5 @@ def test_self_referential_container_is_refused() -> None:
     cycle.append(cycle)
     with pytest.raises((ValueError, RecursionError)):
         native_packb(cycle)
+    with pytest.raises((ValueError, RecursionError)):
+        pure_packb(cycle)

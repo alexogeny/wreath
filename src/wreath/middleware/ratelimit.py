@@ -424,7 +424,12 @@ class TieredRateLimitMiddleware:
     :class:`RateLimitMiddleware` keyed on the address, and use both.
 
     Each tier keeps its own buckets, so a promotion arrives with a full
-    allowance rather than whatever was left of the old plan's.
+    allowance rather than whatever was left of the old plan's. That is the
+    intended behaviour -- an upgrade should take effect at once -- and it has a
+    consequence worth naming: **moving between tiers hands the caller a fresh
+    allowance every time**, so where roles are self-service, toggling one twice
+    is a way to bypass the limit on demand. Keep tier membership
+    server-controlled, or key the limit on something the caller cannot change.
     """
 
     global_scope = False

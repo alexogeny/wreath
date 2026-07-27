@@ -17,6 +17,7 @@ import datetime
 
 import pytest
 
+from wreath.orm.model import PERSISTENT
 from wreath.orm.registry import Registry
 from wreath.orm.session import Session, _count_write_sql_builds
 
@@ -193,3 +194,81 @@ async def test_plan_cache_outlives_the_session(registry: Registry) -> None:
         await _flush(second)
 
     assert builds[0] == 0
+
+
+def _loaded_user(session: Session, identifier: int) -> User:
+    """A clean, persistent user in the session's identity map.
+
+    The shape a big read leaves behind: loaded from the database, so it is
+    `PERSISTENT` with no pending changes, and findable by identity.
+    """
+    instance = _user(identifier)
+    instance._orm_state = PERSISTENT
+    instance._orm_clear_dirty()
+    spec = session._registry.spec_for(User)
+    session._identity[(spec, (identifier,))] = instance
+    return instance
+
+
+def _count_change_checks(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Count `_orm_has_changes` calls, the per-object cost of finding the dirty."""
+    calls = [0]
+    original = User._orm_has_changes
+
+    def counting(self: User) -> bool:
+        calls[0] += 1
+        return original(self)
+
+    monkeypatch.setattr(User, "_orm_has_changes", counting)
+    return calls
+
+
+@pytest.mark.parametrize("size", [16, 64, 256])
+async def test_one_flush_scans_the_identity_map_at_most_twice(
+    registry: Registry, monkeypatch: pytest.MonkeyPatch, size: int
+) -> None:
+    """Finding the one changed row must not cost three passes over the map.
+
+    A request that loaded `size` rows and changed one used to pay `3 * size`
+    change checks per flush -- `_has_pending`, `_collect_written`, and the
+    update ordering each walked the whole identity map. The ceiling here is two:
+    one short-circuiting existence check, and one scan that builds the list.
+    """
+    session = Session(registry, "write")
+    for index in range(size):
+        _loaded_user(session, index)
+    # The last one, so the existence check cannot short-circuit early and this
+    # measures the worst case rather than a lucky ordering.
+    session._identity[(registry.spec_for(User), (size - 1,))].name = "changed"
+
+    calls = _count_change_checks(monkeypatch)
+    await _flush(session)
+
+    assert calls[0] <= 2 * size
+
+
+async def test_a_clean_session_still_flushes_nothing(
+    registry: Registry, database: FakeDatabase
+) -> None:
+    """The short-circuiting existence check must not lose the early return."""
+    session = Session(registry, "write")
+    for index in range(8):
+        _loaded_user(session, index)
+
+    await _flush(session)
+
+    assert not [sql for sql in database.connection.statements if "UPDATE" in sql]
+
+
+async def test_a_write_is_still_found_when_it_is_the_last_object(
+    registry: Registry, database: FakeDatabase
+) -> None:
+    """Short-circuiting on the *first* dirty object must not miss a later one."""
+    session = Session(registry, "write")
+    for index in range(8):
+        _loaded_user(session, index)
+    session._identity[(registry.spec_for(User), (7,))].name = "changed"
+
+    await _flush(session)
+
+    assert sum("UPDATE" in sql for sql in database.connection.statements) == 1

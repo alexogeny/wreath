@@ -1000,8 +1000,27 @@ class Wreath:
                 try:
                     candidate = before(request) if is_sync else await before(request)
                 except Exception as error:
-                    candidate = await self._handle_exception(request, error)
+                    # `index`, not `index + 1`: this hook's `before` did not
+                    # complete, so pairing it with its own `after` would run
+                    # cleanup against preconditions that were never
+                    # established. The hooks *below* it did complete, and they
+                    # still unwind. A `before` that acquires something and then
+                    # raises owns that in its own `try`/`finally` -- dispatch
+                    # cannot know how far through it got.
+                    await self._finish_http(
+                        request,
+                        _coerce_response(await self._handle_exception(request, error)),
+                        send,
+                        method,
+                        scope,
+                        native_response,
+                        index,
+                    )
+                    return
                 if candidate is not None:
+                    # Returning a response is a *completed* `before`, so this
+                    # hook keeps its `after` -- hence `index + 1` here and
+                    # `index` above.
                     active_global = index + 1
                     await self._finish_http(
                         request,

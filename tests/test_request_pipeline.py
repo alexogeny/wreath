@@ -350,3 +350,84 @@ async def test_miss_stage_can_rate_limit_without_authentication() -> None:
 
     assert response.status == 429
     assert auth_calls == 0
+
+
+async def _hook_order(kind: str) -> tuple[list[str], int]:
+    """Drive three global hooks where the middle one short-circuits or raises."""
+    events: list[str] = []
+
+    async def outer_before(request: Any) -> None:
+        events.append("outer-before")
+
+    async def outer_after(request: Any, response: Any) -> Any:
+        events.append("outer-after")
+        return response
+
+    async def culprit_before(request: Any) -> Any:
+        events.append("culprit-before")
+        if kind == "raise":
+            raise RuntimeError("before blew up")
+        return TextResponse("short-circuit")
+
+    async def culprit_after(request: Any, response: Any) -> Any:
+        events.append("culprit-after")
+        return response
+
+    async def inner_before(request: Any) -> None:
+        events.append("inner-before")
+
+    async def inner_after(request: Any, response: Any) -> Any:
+        events.append("inner-after")
+        return response
+
+    app = Wreath()
+    app.add_global_middleware(
+        MiddlewareHooks(before=outer_before, after=outer_after), priority=0
+    )
+    app.add_global_middleware(
+        MiddlewareHooks(before=culprit_before, after=culprit_after), priority=1
+    )
+    app.add_global_middleware(
+        MiddlewareHooks(before=inner_before, after=inner_after), priority=2
+    )
+
+    @app.get("/")
+    async def endpoint(request: Any) -> str:
+        events.append("handler")
+        return "ok"
+
+    async with TestClient(app) as client:
+        response = await client.get("/")
+    return events, response.status
+
+
+@pytest.mark.asyncio
+async def test_a_before_that_raises_does_not_run_its_own_after() -> None:
+    """A hook whose `before` never completed must not have its `after` paired.
+
+    Design 22 item 12. `after` is cleanup for preconditions `before`
+    establishes; running it against a `before` that raised part-way is
+    guessing how far it got. `SessionMiddleware` is the near-miss --
+    `_after_stored` reads `state._session_loaded` by attribute while reading
+    its siblings with `.get()`, so it is one inserted `await` away from
+    turning an error response into an unrelated `AttributeError` 500.
+    """
+    events, status = await _hook_order("raise")
+
+    assert "culprit-after" not in events
+    # Hooks below it *did* complete, so they still unwind.
+    assert events == ["outer-before", "culprit-before", "outer-after"]
+    assert status == 500
+
+
+@pytest.mark.asyncio
+async def test_a_before_that_returns_a_response_still_runs_its_own_after() -> None:
+    """The other half of the pair: returning a response is a completed `before`.
+
+    Pinned so a future reading of the rule above cannot collapse both cases
+    into `index` and silently drop a short-circuiting hook's `after`.
+    """
+    events, status = await _hook_order("short-circuit")
+
+    assert events == ["outer-before", "culprit-before", "culprit-after", "outer-after"]
+    assert status == 200

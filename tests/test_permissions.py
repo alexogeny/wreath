@@ -1001,3 +1001,163 @@ def test_action_names_become_readable_flags(action: str, expected: str) -> None:
     from wreath.typegen.targets.typescript import permission_flag
 
     assert permission_flag(action) == expected
+
+
+# --- how many policy evaluations run at once ----------------------------------
+#
+# Every answer here is one `authorizer.authorize` per (resource, action). With
+# the built-in engine that is in-process and the order never matters. With a
+# *remote* authorizer -- which the `CedarEngine` protocol invites -- each one is
+# a round trip, and evaluating them one at a time makes a batch of two hundred
+# ids over three actions six hundred round trips end to end.
+
+
+class _CountingAuthorizer:
+    """A real authorizer with a round trip in front of it, and a tally."""
+
+    def __init__(self, inner: Any, delay: float = 0.0) -> None:
+        self._inner = inner
+        self._delay = delay
+        self.calls = 0
+        self.in_flight = 0
+        self.peak = 0
+
+    async def authorize(self, request: Any, requirement: Any) -> Any:
+        self.calls += 1
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            if self._delay:
+                await asyncio.sleep(self._delay)
+            return await self._inner.authorize(request, requirement)
+        finally:
+            self.in_flight -= 1
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def _counting_app(*, delay: float = 0.0, **router: Any) -> tuple[Wreath, Any]:
+    app = _app(mount=False)
+    counter = _CountingAuthorizer(app._authorizer, delay=delay)
+    app.configure_auth(_Backend(), counter)
+    app.include_router(permissions_router(app, **router))
+    return app, counter
+
+
+@pytest.mark.asyncio
+async def test_the_manifest_evaluates_its_actions_concurrently() -> None:
+    app, counter = _counting_app(delay=0.01)
+    async with TestClient(app) as client:
+        response = await client.acting_as("root", roles=["admin"]).get(
+            "/permissions/manifest"
+        )
+
+    assert response.status == 200
+    # Llama has three actions and Trek one; every one is still asked.
+    assert counter.calls == 4
+    # The finding: this was 1, so four round trips ran end to end.
+    assert counter.peak > 1
+
+
+@pytest.mark.asyncio
+async def test_the_batch_bounds_concurrency_across_ids_not_just_actions() -> None:
+    # ids is the axis that grows, so bounding per id would leave len(ids)
+    # sequential rounds however small the limit.
+    app, counter = _counting_app(delay=0.01, max_concurrency=8)
+    async with TestClient(app) as client:
+        response = await client.acting_as("root", roles=["admin"]).post(
+            "/permissions", json={"type": "Llama", "ids": [str(n) for n in range(10)]}
+        )
+
+    assert response.status == 200
+    assert counter.calls == 30                  # 10 ids x 3 actions
+    assert counter.peak == 8                    # the declared ceiling, reached
+    assert counter.peak <= 8                    # and never exceeded
+
+
+@pytest.mark.asyncio
+async def test_concurrency_never_exceeds_the_declared_ceiling() -> None:
+    # The bound is the point: unbounded would make one batch a burst of
+    # `max_ids x actions` against an authorization service that is not ours.
+    app, counter = _counting_app(delay=0.005, max_concurrency=3)
+    async with TestClient(app) as client:
+        await client.acting_as("root", roles=["admin"]).post(
+            "/permissions", json={"type": "Llama", "ids": [str(n) for n in range(12)]}
+        )
+
+    assert counter.calls == 36
+    assert counter.peak == 3
+
+
+@pytest.mark.asyncio
+async def test_max_concurrency_one_restores_sequential_evaluation() -> None:
+    # The escape hatch for an authorizer that cannot take concurrent calls
+    # carrying one request.
+    app, counter = _counting_app(delay=0.005, max_concurrency=1)
+    async with TestClient(app) as client:
+        await client.acting_as("root", roles=["admin"]).post(
+            "/permissions", json={"type": "Llama", "ids": ["1", "2", "3"]}
+        )
+
+    assert counter.calls == 9
+    assert counter.peak == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_evaluation_keeps_every_answer_with_its_own_id() -> None:
+    # Gathering is only safe if results come back attached to the right ask.
+    # `bo` is a rider: the policies grant Trek::read to everyone and nothing on
+    # Llama, so every id must answer identically -- and an off-by-one in the
+    # reassembly would show as one id disagreeing with the rest.
+    app, _ = _counting_app(delay=0.001, max_concurrency=4)
+    async with TestClient(app) as client:
+        editor = client.acting_as("ada", roles=["editor"])
+        body = (await editor.post(
+            "/permissions",
+            json={"type": "Llama", "ids": [str(n) for n in range(9)],
+                  "actions": ["Llama::read", "Llama::delete", "Llama::edit"]},
+        )).json()
+
+    assert sorted(body["permissions"]) == sorted(str(n) for n in range(9))
+    for identifier, granted in body["permissions"].items():
+        assert granted == ["Llama::read", "Llama::edit"], identifier
+
+
+@pytest.mark.asyncio
+async def test_the_manifest_keeps_each_action_under_its_own_resource_type() -> None:
+    app, _ = _counting_app(max_concurrency=4)
+    async with TestClient(app) as client:
+        body = (await client.acting_as("ada", roles=["editor"]).get(
+            "/permissions/manifest"
+        )).json()
+
+    # Flattened for evaluation, reassembled per type: a shifted slice would put
+    # a Llama action under Trek. Order is the vocabulary's, which is sorted.
+    assert body["allowed"]["Llama"] == ["Llama::edit", "Llama::read"]
+    assert body["allowed"]["Trek"] == ["Trek::read"]
+
+
+# --- one cache-control header, and it is the handler's ------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_composed_cache_middleware_leaves_one_cache_control() -> None:
+    # Two `cache-control` headers leaves a proxy reading the first, which would
+    # be whatever the middleware set -- `public` on a per-principal answer.
+    from wreath.cache_control import CacheControl
+    from wreath.middleware import CacheControlMiddleware
+
+    app = _app(mount=False)
+    app.add_middleware(CacheControlMiddleware(CacheControl(public=True, max_age=60)))
+    app.include_router(permissions_router(app))
+
+    async with TestClient(app) as client:
+        admin = client.acting_as("root", roles=["admin"])
+        for path in ("/permissions", "/permissions/manifest"):
+            response = await admin.get(path)
+            headers = [
+                value for key, value in response.headers
+                if key.lower() == b"cache-control"
+            ]
+            assert headers == [b"private, no-store"], path

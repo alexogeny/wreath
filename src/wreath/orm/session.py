@@ -311,8 +311,28 @@ class TenantContext:
         return tuple(statements)
 
 
+#: A suggested threshold for `identity_map_warn_at`, for a caller who wants one
+#: without picking a number. Not the default: the check costs a boundary
+#: crossing on every fetch, and `docs/agents/request-boundary-baseline.json`
+#: is not the place to spend one on a diagnostic that fires for almost nobody.
+#: Turn it on while chasing memory, or set it on the registry for a service that
+#: has been bitten.
+SUGGESTED_IDENTITY_MAP_WARN_AT = 50_000
+
+
 class Session:
-    """One unit of work over one leased connection."""
+    """One unit of work over one leased connection.
+
+    **The identity map holds every object this session hydrated**, for as long
+    as the session is open. That is what makes the map an identity map -- two
+    reads of one row give one object, and a pending change is not lost to a
+    refetch -- and it means a fetch of a million rows pins a million objects
+    until `close()`. There is deliberately no ceiling: evicting an entry would
+    detach an object the caller may still be holding, which changes what the ORM
+    means rather than bounding it. Past `identity_map_warn_at` the session emits
+    one `ResourceWarning`, so the situation is visible before it is a memory
+    incident. Page large reads, or open a session per page.
+    """
 
     __slots__ = (
         "_broken",
@@ -323,6 +343,8 @@ class Session:
         "_written",
         "_depth",
         "_identity",
+        "_identity_warn_at",
+        "_identity_warned",
         "_new_items",
         "_new_ordinals",
         "_new_stale",
@@ -340,6 +362,7 @@ class Session:
         *,
         tenant: TenantContext | None = None,
         statement_timeout: float | None = None,
+        identity_map_warn_at: int | None = None,
     ) -> None:
         isolated = getattr(getattr(registry, "schema_mode", None), "kind", None) == "isolated"
         if isolated and tenant is None:
@@ -378,6 +401,12 @@ class Session:
         self._written: frozenset[str] = frozenset()
         self._closed = False
         self._broken = False
+        # Read from the registry only when the caller did not say, and only
+        # inside `_note_identity_size` -- a `getattr` here is a boundary
+        # crossing on every session, i.e. on every request, for a diagnostic
+        # that is off.
+        self._identity_warn_at = identity_map_warn_at
+        self._identity_warned = False
 
     @property
     def registry(self) -> Any:
@@ -447,6 +476,40 @@ class Session:
         except BaseException:
             self._broken = True
 
+    def check_identity_map(self) -> None:
+        """Warn, once, if this session is holding an unusual number of objects.
+
+        **Nothing calls this for you.** Every automatic placement costs a
+        boundary crossing on a path the whole application pays for -- per fetch,
+        or per session close -- and `wreath-request-trace` prices each at +1 on
+        the realistic scenario. That is a poor trade for a diagnostic that fires
+        for almost nobody, so the check is a thing you *call* while chasing a
+        memory problem:
+
+            rows = await session.fetch(Big.select())
+            session.check_identity_map()
+
+        Set `identity_map_warn_at` on the session or the registry to pick the
+        threshold; without one this does nothing.
+        """
+        threshold = self._identity_warn_at
+        if threshold is None:
+            threshold = getattr(self._registry, "identity_map_warn_at", None)
+        if threshold is None or self._identity_warned:
+            return
+        if len(self._identity) <= threshold:
+            return
+        self._identity_warned = True
+        import warnings
+
+        warnings.warn(
+            f"this session's identity map holds {len(self._identity)} objects and "
+            "keeps every one of them until the session closes; page the read or "
+            "open a session per page",
+            ResourceWarning,
+            stacklevel=3,
+        )
+
     def _check_usable(self) -> None:
         if self._closed:
             raise SessionClosedError("this ORM session is closed")
@@ -514,10 +577,19 @@ class Session:
         The N+1 seam. The ledger may raise -- that is the point, and it happens
         before the statement runs, so the traceback lands on the loop rather
         than on the row that finally overflowed it.
+
+        Keyed by module *and* qualname, because the ledger counts per key and
+        `__qualname__` alone is not unique across a tree: `billing.Invoice` and
+        `reporting.Invoice` are both `"Invoice"`, so one query to each would
+        count as two queries to one model and trip a guard on two innocent
+        reads. Building the key costs an f-string per query, which only a
+        request under a guard pays -- the caller gates this on
+        `_nplusone.WATCHING`, and a guard is a development and staging tool.
         """
         ledger = _query_ledger.get(None)
         if ledger is not None and spec is not None:
-            ledger.record(spec.model_type.__qualname__)
+            model = spec.model_type
+            ledger.record(f"{model.__module__}.{model.__qualname__}")
 
     async def _fetch_recorded(
         self, model_ids: dict[Any, int], connection: Any, compiled: CompiledQuery
@@ -963,8 +1035,14 @@ class Session:
         if written:
             _publish_write(written)
 
-    def _collect_written(self) -> frozenset[str]:
-        """Model names in the pending set, for write subscribers."""
+    def _collect_written(self, dirty: list[Any]) -> frozenset[str]:
+        """Model names in the pending set, for write subscribers.
+
+        Takes the dirty list rather than recomputing it: the caller has already
+        scanned the identity map for this flush, and scanning twice for one
+        flush is how a request that loaded five thousand rows paid to find the
+        one it changed.
+        """
         # The bare class name, which is the name `invalidate_on` and
         # `publish_write` callers use. Two models sharing one class name in
         # different modules therefore invalidate each other -- accepted, because
@@ -972,13 +1050,24 @@ class Session:
         # have to) rather than stale data, and qualifying the name would break
         # every caller that names a model as a string.
         names = {type(item).__name__ for item in self._new}
-        names.update(type(item).__name__ for item in self._dirty_objects())
+        names.update(type(item).__name__ for item in dirty)
         names.update(type(item).__name__ for item in self._deleted)
         return frozenset(names)
 
     def _has_pending(self) -> bool:
-        # The ordinal map answers this without compacting the pending list.
-        return bool(self._new_ordinals or self._deleted or self._dirty_objects())
+        # The ordinal map answers this without compacting the pending list, and
+        # the dirty check short-circuits on the first changed object rather than
+        # building the whole list -- this only has to answer *whether* anything
+        # is pending. `_flush_inner` does the one scan that needs the list, and
+        # it does it after `begin()`, so a write arriving while the transaction
+        # opens is still picked up.
+        return bool(self._new_ordinals or self._deleted or self._any_dirty())
+
+    def _any_dirty(self) -> bool:
+        return any(
+            item._orm_has_changes() and item._orm_state == PERSISTENT
+            for item in self._identity.values()
+        )
 
     def _dirty_objects(self) -> list[Any]:
         return [
@@ -1003,8 +1092,11 @@ class Session:
         # `@cached` handler decorated during startup, a broadcast attached by a
         # later hook -- would otherwise miss the names of a transaction that was
         # already open when it arrived, and see the write only from the next one.
+        # One scan of the identity map per flush, shared by the name collection
+        # and the update ordering below.
+        dirty = self._dirty_objects()
         written = (
-            self._collect_written()
+            self._collect_written(dirty)
             if (_has_write_subscribers() or self._depth)
             else frozenset()
         )
@@ -1014,7 +1106,7 @@ class Session:
         ):
             await self._insert(instance)
         updates = sorted(
-            self._dirty_objects(),
+            dirty,
             key=lambda item: (self._order(type(item)), _sort_key(item)),
         )
         for instance in updates:

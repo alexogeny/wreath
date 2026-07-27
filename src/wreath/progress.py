@@ -69,6 +69,13 @@ PROGRESS_CHANNEL = "wreath_progress"
 
 _TERMINAL = ("done", "failed")
 
+#: States only :meth:`ProgressRegistry.stream` synthesises, to say *why* a stream
+#: ended. A registry never stores one: they describe the stream, not the task.
+#: Without them every non-terminal close -- entry expired, id never seen, budget
+#: spent -- looked identical to each other and to a dropped connection, so a long
+#: import ended by appearing to still be running.
+_STREAM_ENDED = ("expired", "unknown", "detached")
+
 #: Longest message a report may carry. Applies to what arrives over the bus,
 #: where the length is another worker's decision, and to local reports, where it
 #: keeps one runaway f-string from filling the registry.
@@ -89,6 +96,16 @@ def _as_text(data: Any) -> str:
     return encoded.decode("utf-8") if isinstance(encoded, bytes) else encoded
 
 
+def _ended(last: Progress | None, state: str, message: str) -> Progress:
+    """The closing event of a stream that ended without the task finishing.
+
+    Carries the last percent seen rather than zero, so a client can render
+    "stalled at 40%" instead of a bar that jumps back to the start on the way
+    out. ``error`` stays ``None``: nothing failed, the stream just stopped.
+    """
+    return Progress(last.percent if last is not None else 0.0, message, state, None)
+
+
 @dataclass(frozen=True, slots=True)
 class Progress:
     """A snapshot of a task's progress."""
@@ -100,7 +117,19 @@ class Progress:
 
     @property
     def terminal(self) -> bool:
+        """The *task* finished: ``done`` or ``failed``."""
         return self.state in _TERMINAL
+
+    @property
+    def ends_stream(self) -> bool:
+        """Nothing further will arrive on the stream that yielded this.
+
+        Broader than :attr:`terminal`, which is about the task. A stream also
+        ends when the registry forgets an entry, when an id never appears, or
+        when a watch budget runs out -- and a client needs to tell those apart
+        from the connection simply dropping.
+        """
+        return self.state in _TERMINAL or self.state in _STREAM_ENDED
 
     def as_dict(self) -> dict[str, Any]:
         return {"percent": self.percent, "message": self.message,
@@ -191,6 +220,15 @@ class ProgressRegistry:
         connection open indefinitely by asking about a task that was never
         launched. A short grace period still covers the real race, where a client
         starts watching a moment before the task is registered.
+
+        **Every stream ends with an event saying why**, so a close is never
+        ambiguous with a dropped connection: ``done``/``failed`` when the task
+        finished, ``expired`` when the registry forgot the entry mid-stream,
+        ``unknown`` when the id never appeared, ``detached`` when
+        ``max_duration`` ran out while the task was still going. The last three
+        are :attr:`Progress.ends_stream` but not :attr:`Progress.terminal` in the
+        ``expired``/``unknown`` sense the task never reached -- the registry
+        stopped being able to answer, which is not the same as the work stopping.
         """
         last: Progress | None = None
         missing = 0
@@ -202,7 +240,9 @@ class ProgressRegistry:
             if deadline is not None and asyncio.get_running_loop().time() >= deadline:
                 # A task that never finishes must not mean a connection that
                 # never closes. The client reconnects and picks up where the
-                # registry is, which is what an SSE client does anyway.
+                # registry is, which is what an SSE client does anyway -- and the
+                # `detached` event is what tells it to.
+                yield _ended(last, "detached", "watch budget spent; reconnect to resume")
                 return
             current = self.get(task_id)
             if current is not None and current != last:
@@ -213,10 +253,12 @@ class ProgressRegistry:
                     return
             elif current is None:
                 if last is not None:
-                    return       # expired or evicted mid-stream
+                    yield _ended(last, "expired", "the registry no longer holds this task")
+                    return
                 missing += 1
                 if missing > MISSING_TASK_POLLS:
-                    return       # never existed; nothing to wait for
+                    yield _ended(last, "unknown", "no such task")
+                    return
             await asyncio.sleep(interval)
 
 

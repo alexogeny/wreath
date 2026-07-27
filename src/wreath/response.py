@@ -10,7 +10,7 @@ import threading
 from collections.abc import AsyncIterable, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Any, cast
+from typing import Any, Final, cast
 from urllib.parse import quote, urlsplit
 
 from ._json import dumps as _json_dumps
@@ -552,6 +552,68 @@ class SSEResponse(StreamingResponse):
             yield _encode_sse(event)
 
 
+class _Unsatisfiable:
+    """A `Range` that names nothing inside the representation."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "UNSATISFIABLE"
+
+
+#: A range past the end of the representation. Distinct from ``None`` -- which
+#: means "ignore the header and send everything" -- because the two have
+#: opposite answers: 416 versus 200 (RFC 9110 §14.2, §15.5.17).
+UNSATISFIABLE: Final = _Unsatisfiable()
+
+
+def parse_range(header: str | None, size: int) -> tuple[int, int] | _Unsatisfiable | None:
+    """Resolve a ``Range`` header against a representation of ``size`` bytes.
+
+    Returns an inclusive ``(first, last)``, :data:`UNSATISFIABLE`, or ``None``
+    for a header to ignore.
+
+    That last case is most of the grammar. RFC 9110 §14.2 says a recipient
+    *may* ignore a `Range` it does not understand, and must serve the whole
+    representation when it does -- so a multi-range request, a unit that is not
+    ``bytes``, and anything malformed all fall through to a normal 200 rather
+    than an error. Only a syntactically valid range that lies entirely past the
+    end is a 416; getting that distinction backwards either breaks resumable
+    downloads or answers 416 to clients asking politely.
+    """
+    if not header:
+        return None
+    unit, separator, spec = header.partition("=")
+    if not separator or unit.strip().lower() != "bytes":
+        return None
+    spec = spec.strip()
+    if "," in spec:
+        return None                     # multi-range: not implemented, so ignored
+    first_text, separator, last_text = spec.partition("-")
+    if not separator:
+        return None
+    try:
+        if not first_text:
+            # A suffix range: the last N bytes.
+            length = int(last_text)
+            if length <= 0:
+                return UNSATISFIABLE
+            if size == 0:
+                return UNSATISFIABLE
+            return (max(0, size - length), size - 1)
+        first = int(first_text)
+        last = int(last_text) if last_text else size - 1
+    except ValueError:
+        return None
+    if first < 0 or last < 0:
+        return None
+    if first >= size:
+        return UNSATISFIABLE
+    if last < first:
+        return None
+    return (first, min(last, size - 1))
+
+
 _FILE_CHUNK = 256 * 1024
 #: Chunks a file reader may buffer ahead of the ASGI send. Bounds read-ahead
 #: memory to _FILE_READAHEAD * _FILE_CHUNK regardless of file size.
@@ -561,9 +623,14 @@ _EOF = object()
 
 
 async def _send_from_descriptor(
-    fd: int, size: int, status: int, headers: list[tuple[bytes, bytes]], send: Send
+    fd: int,
+    size: int,
+    status: int,
+    headers: list[tuple[bytes, bytes]],
+    send: Send,
+    offset: int = 0,
 ) -> None:
-    """Stream an already-open file descriptor with one executor submission.
+    """Stream ``size`` bytes from ``fd``, starting at ``offset``.
 
     A single reader worker owns the descriptor (reads and closes it) and hands
     chunks to the event loop through a bounded queue; the queue's bound applies
@@ -577,6 +644,8 @@ async def _send_from_descriptor(
         os.close(fd)
         await send({"type": "http.response.body", "body": b""})
         return
+    if offset:
+        os.lseek(fd, offset, os.SEEK_SET)
 
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_FILE_READAHEAD)
@@ -593,6 +662,14 @@ async def _send_from_descriptor(
                 # Block the reader until the sender makes room; this is the
                 # backpressure that keeps read-ahead bounded, and it releases
                 # promptly once the sender drains the queue on teardown.
+                #
+                # It does mean this thread is held for the life of a slow
+                # response -- a slow client parks it. That is the deliberate
+                # side of the trade: the alternative is one executor submission
+                # per 256 KiB chunk, which
+                # `tests/test_framework_features.py::test_file_response_uses_
+                # bounded_executor_submissions` exists to forbid. Bounded
+                # read-ahead with one worker means the worker waits.
                 asyncio.run_coroutine_threadsafe(queue.put(chunk), loop).result()
                 if stop.is_set():
                     return
@@ -681,7 +758,10 @@ class FileResponse:
     a 404 checks existence first (as ``wreath.staticfiles`` does).
     """
 
-    __slots__ = ("_fd", "_stat", "background", "headers", "media_type", "path", "status")
+    __slots__ = (
+        "_fd", "_stat", "background", "headers", "media_type", "path", "range",
+        "status",
+    )
 
     def __init__(
         self,
@@ -691,9 +771,11 @@ class FileResponse:
         media_type: bytes | None = None,
         filename: str | None = None,
         background: Background | None = None,
+        range: tuple[int, int] | None = None,
     ) -> None:
         self.path = os.fspath(path)
-        self.status = status
+        self.range = range
+        self.status = 206 if range is not None else status
         self.headers = list(headers) if headers is not None else []
         if media_type is None:
             guessed, _ = mimetypes.guess_type(self.path)
@@ -715,13 +797,15 @@ class FileResponse:
         *,
         status: int = 200,
         headers: Iterable[tuple[bytes, bytes]] | None = None,
+        range: tuple[int, int] | None = None,
     ) -> FileResponse:
         """Build a response over an already-open descriptor (owned and closed by
         the response). The file checked by the opener is the file served — there
         is no reopen-by-name window. ``name`` is used only to guess the type."""
         self = cls.__new__(cls)
         self.path = name
-        self.status = status
+        self.range = range
+        self.status = 206 if range is not None else status
         self.headers = list(headers) if headers is not None else []
         guessed, _ = mimetypes.guess_type(name)
         self.media_type = (guessed or "application/octet-stream").encode("ascii")
@@ -737,19 +821,32 @@ class FileResponse:
         ]
         self.headers.append((b"cache-control", policy.to_header()))
 
+    def _window(self, size: int) -> tuple[int, int]:
+        """The (offset, length) to send: the whole file, or the asked-for slice."""
+        if self.range is None:
+            return 0, size
+        first, last = self.range
+        return first, max(0, min(last, size - 1) - first + 1)
+
     async def __call__(self, send: Send) -> None:
         if self._fd is not None:
             # Already opened beneath a trusted root (see wreath.staticfiles);
             # serve the descriptor we hold rather than reopening a pathname.
             size = self._stat.st_size if self._stat is not None else 0
             fd, self._fd = self._fd, None
-            if await _send_native_descriptor(fd, size, self.status, self.headers, send):
-                return
-            await _send_from_descriptor(fd, size, self.status, self.headers, send)
+            await self._stream(fd, size, send)
             return
         # Open once (open + fstat in a single worker), then stream through the
         # same single-submission reader. A missing file raises here.
         fd, size = await asyncio.to_thread(_open_fd, self.path)
-        if await _send_native_descriptor(fd, size, self.status, self.headers, send):
+        await self._stream(fd, size, send)
+
+    async def _stream(self, fd: int, size: int, send: Send) -> None:
+        offset, length = self._window(size)
+        # The native path sends a whole file from a descriptor and has nowhere
+        # to put an offset, so a partial response takes the portable reader.
+        if self.range is None and await _send_native_descriptor(
+            fd, size, self.status, self.headers, send
+        ):
             return
-        await _send_from_descriptor(fd, size, self.status, self.headers, send)
+        await _send_from_descriptor(fd, length, self.status, self.headers, send, offset)

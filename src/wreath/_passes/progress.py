@@ -96,8 +96,16 @@ class Estimated(Denominator):
     counts_rows = True
 
     async def measure(self, executor: Any, *, table: str, keys: tuple[Key, ...]) -> int | None:
+        # `to_regclass($1)` rather than `$1::regclass`: the cast makes PostgreSQL
+        # infer the *parameter* as `regclass` (OID 2205), which no binary encoder
+        # here can write. The first execution survives it and every later one
+        # raises, because only the prepared statement carries the inferred type --
+        # so a pass measured once and then failed forever, which is the worst
+        # possible shape for a default. `to_regclass` takes `text`, and returns
+        # NULL rather than raising for a table that is not there. The three other
+        # regclass lookups in this codebase already spell it this way.
         estimate = await executor.fetchval(
-            "SELECT reltuples::bigint FROM pg_class WHERE oid = $1::regclass", table
+            "SELECT reltuples::bigint FROM pg_class WHERE oid = to_regclass($1)", table
         )
         # A table that has never been analysed reports -1, which is not a
         # denominator. Reporting no percentage beats reporting a negative one.

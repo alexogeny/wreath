@@ -37,12 +37,16 @@ async def list_llamas():
 
 # boto3 is `ext.boto3`: "not a framework feature; keep the external library" —
 # an `unsupported` verdict that does not depend on any ORM fixture.
+# The service name matters: `boto3.client("s3")` stopped being unsupported when
+# `wreath.objects` shipped an S3 store, so this fixture names a service that
+# genuinely has no wreath target. If DynamoDB ever gains one, the assertion in
+# `test_unsupported_constructs_exit_one` says so rather than passing vacuously.
 _UNSUPPORTED_APP = """\
 import boto3
 from fastapi import FastAPI
 
 app = FastAPI()
-s3 = boto3.client("s3")
+table = boto3.client("dynamodb")
 
 
 @app.get("/llamas")

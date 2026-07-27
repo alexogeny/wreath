@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 import uuid
 from collections.abc import Callable
+from decimal import Decimal
 from typing import Any
 
 from .._json import dumps as _json_dumps
@@ -163,6 +164,25 @@ def _check_aware_datetime(value: Any) -> datetime.datetime:
     return value
 
 
+def _check_numeric(value: Any) -> Decimal:
+    """Accept the exact numeric types only.
+
+    ``float`` is refused rather than converted. A column is declared ``numeric``
+    precisely because binary floating point cannot hold its values -- accepting
+    a float would put the collapse back in, one layer up from the codec that
+    just removed it. ``Decimal(str(x))`` at the call site is the explicit way to
+    say what rounding you wanted.
+    """
+    if isinstance(value, Decimal):
+        return value
+    if value.__class__ is int:
+        return Decimal(value)
+    raise TypeError(
+        f"expected Decimal or int, got {type(value).__name__}; "
+        "a float cannot hold a numeric exactly -- use Decimal(str(value))"
+    )
+
+
 def _check_json(value: Any) -> Any:
     # Serializing here rejects unencodable values on assignment instead of at
     # flush time, when the failure is far from the offending line.
@@ -187,6 +207,7 @@ Uuid = PgType("uuid", 2950, "uuid", _check_uuid)
 Date = PgType("date", 1082, "date", _check_date)
 Timestamp = PgType("timestamp", 1114, "timestamp without time zone", _check_naive_datetime)
 TimestampTz = PgType("timestamptz", 1184, "timestamp with time zone", _check_aware_datetime)
+Numeric = PgType("numeric", 1700, "numeric", _check_numeric)
 Json = PgType(
     "json", 114, "json", _check_json, to_wire=_json_to_wire, from_wire=_json_loads
 )
@@ -211,6 +232,7 @@ _ARRAY_OID: dict[int, int] = {
     1082: 1182,  # date[]
     1114: 1115,  # timestamp[]
     1184: 1185,  # timestamptz[]
+    1700: 1231,  # numeric[]
     2950: 2951,  # uuid[]
     3802: 3807,  # jsonb[]
 }
@@ -277,7 +299,7 @@ BY_OID: dict[int, PgType] = {
     item.oid: item
     for item in (
         Bool, Int16, Int32, Int64, Float32, Float64, Text, Varchar,
-        Bytea, Uuid, Date, Timestamp, TimestampTz, Json, Jsonb,
+        Bytea, Uuid, Date, Timestamp, TimestampTz, Numeric, Json, Jsonb,
     )
 }
 
@@ -287,7 +309,7 @@ BY_OID: dict[int, PgType] = {
 # column of that array type.
 for _element in (
     Bool, Int16, Int32, Int64, Float32, Float64, Text, Varchar,
-    Bytea, Uuid, Date, Timestamp, TimestampTz, Json, Jsonb,
+    Bytea, Uuid, Date, Timestamp, TimestampTz, Numeric, Json, Jsonb,
 ):
     _canonical_array = Array(_element)
     BY_OID[_canonical_array.oid] = _canonical_array
@@ -314,6 +336,7 @@ __all__ = [
     "Int64",
     "Json",
     "Jsonb",
+    "Numeric",
     "PgType",
     "Text",
     "TextArray",

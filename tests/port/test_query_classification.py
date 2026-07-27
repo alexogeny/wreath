@@ -16,9 +16,15 @@ separately.
 Within a verb, the *arguments* decide the verdict. ``filter(id=x)`` carries
 across untouched. ``filter(name__icontains=x)`` does not — the value has to be
 wrapped in wildcards, and choosing that is not translating it.
-``filter(ranch__slug=x)`` does not either, because ``slug`` lives on another
-table and the join is a decision. Same verb, three verdicts, and the argument
-list is what tells them apart.
+``filter(ranch__slug=x)`` does not either — though **not** because the join is a
+decision. It is not one: ``Model.ranch.slug`` is a ``RelatedColumnExpr`` and
+``plan_filter_joins`` emits the INNER JOIN automatically, INNER rather than LEFT
+because a parent with no matching child cannot satisfy a predicate on the
+child's column. What blocks it is *resolution* — knowing ``ranch`` is a relation
+and ``slug`` a column on its target, when the model is declared in another
+module. ``analyze`` has a tree-wide index; ``emit_module`` is per-module, and
+``query_rule`` is shared so the report and the emitted TODO cannot disagree.
+Same verb, three verdicts, and the argument list is what tells them apart.
 
 The invariant underneath does not move: **the emitter never rewrites a query
 body.** A translated verdict says the target is fully determined, not that
@@ -55,9 +61,12 @@ def _query_rules(tmp_path, source: str) -> list[str]:
         ("Llama.objects.get(id=7)", "orm.query.get"),
         ("Llama.objects.create(name='Bea')", "orm.query.create"),
         ("Llama.objects.all()", "orm.query.all"),
-        ("Llama.objects.select_related('treks')", "orm.query.eager"),
+        # Argument-shaped, the same way `filter` is above: a named relation is
+        # one `.include(...)`, while `select_all()` means *every* relation and
+        # wreath has no such switch.
+        ("Llama.objects.select_related('treks')", "orm.query.eager_exact"),
         ("Llama.objects.select_all()", "orm.query.eager"),
-        ("Llama.objects.prefetch_related('treks')", "orm.query.eager"),
+        ("Llama.objects.prefetch_related('treks')", "orm.query.eager_exact"),
         ("Llama.objects.values(['name'])", "orm.query.values"),
         ("Llama.objects.bulk_create([])", "orm.query.bulk"),
         ("Llama.objects.bulk_update([])", "orm.query.bulk"),
@@ -195,7 +204,7 @@ def test_a_mechanical_query_is_translated(tmp_path, call) -> None:
         ("Llama.objects.filter(name__icontains='b')", "rewrites the value"),
         ("Llama.objects.filter(name__startswith='b')", "rewrites the value"),
         ("Llama.objects.filter(retired__isnull=True)", "no negated form"),
-        ("Llama.objects.filter(ranch__slug='x')", "relation traversal is a join"),
+        ("Llama.objects.filter(ranch__slug='x')", "relation target is cross-module"),
         ("Llama.objects.filter(tags__jsonb_has_any=['a'])", "container operator"),
         ("Llama.objects.filter(Q(a=1))", "positional Q object"),
         ("Llama.objects.filter(**criteria)", "keys are a runtime value"),
@@ -229,3 +238,62 @@ def test_every_query_verb_stays_in_the_queries_category(tmp_path) -> None:
     )
     findings = [f for f in _analyze(tmp_path, source) if f.rule_id.startswith("orm.query")]
     assert {f.category for f in findings} == {"queries"}
+
+
+# --- an explicitly ordered read -------------------------------------------------
+
+
+def test_an_ordered_read_is_translated(tmp_path) -> None:
+    """`order_by('-x').first()` is the one shape the generic verdict got wrong.
+
+    Without a rule for ``order_by`` as a head verb the whole chain fell through
+    to ``orm.query``, which is *unsupported* — so the read wreath expresses most
+    directly was reported as the one it cannot do. The usual objection to
+    ``first()`` is that an unordered "first" is not deterministic; this chain
+    states the order, so the objection does not apply to it.
+    """
+    source = "x = await Trek.objects.order_by('-started_at').first()\n"
+    (finding,) = [f for f in _analyze(tmp_path, source) if f.construct == "orm_query"]
+    assert finding.rule_id == "orm.query.order_exact"
+    assert finding.tag == port.TRANSLATED
+    assert "fetch_one" in finding.message
+
+
+def test_an_unordered_first_is_still_not_translated(tmp_path) -> None:
+    """The promotion above must not leak to a chain with no order to carry."""
+    (finding,) = [
+        f
+        for f in _analyze(tmp_path, "x = await Trek.objects.filter(a=1).first()\n")
+        if f.construct == "orm_query"
+    ]
+    assert finding.tag != port.TRANSLATED
+
+
+def test_an_ordered_read_by_a_runtime_column_is_not_translated(tmp_path) -> None:
+    """A column named at runtime is a lookup this analyzer cannot do."""
+    (finding,) = [
+        f
+        for f in _analyze(tmp_path, "x = Trek.objects.order_by(column).all()\n")
+        if f.construct == "orm_query"
+    ]
+    assert finding.rule_id == "orm.query.order"
+    assert finding.tag != port.TRANSLATED
+
+
+@pytest.mark.parametrize(
+    ("call", "expected"),
+    [
+        ("Llama.objects.select_related('treks')", "orm.query.eager_exact"),
+        ("Llama.objects.select_related('treks', 'ranch')", "orm.query.eager_exact"),
+        ("Llama.objects.select_all()", "orm.query.eager"),          # every relation
+        ("Llama.objects.select_related('ranch__owner')", "orm.query.eager"),  # nested
+        ("Llama.objects.select_related(name)", "orm.query.eager"),  # runtime name
+    ],
+)
+def test_an_eager_load_is_split_by_what_it_names(tmp_path, call, expected) -> None:
+    """A named relation is one `.include(...)`; "all of them" is not a rename.
+
+    Wreath has no `select_all()`, so that call needs someone to write out the
+    relations the caller actually reads — which is a decision, not a rewrite.
+    """
+    assert _query_rules(tmp_path, f"x = {call}\n") == [expected]

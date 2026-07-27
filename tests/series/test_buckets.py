@@ -138,12 +138,19 @@ class TestEndOf:
 
 
 class TestAmbiguousAndMissingLocalTimes:
-    def test_an_ambiguous_local_hour_resolves_to_the_first_of_its_two_instants(self):
-        """London repeats 01:00-02:00 on 2026-10-25; floor takes the earlier."""
-        # 00:30 UTC on that date is 01:30 BST, the *first* pass through 01:30.
+    def test_an_ambiguous_local_hour_resolves_to_the_later_of_its_two_instants(self):
+        """London repeats 01:00-02:00 on 2026-10-25; floor takes the later.
+
+        Not a preference -- it is what `timestamp AT TIME ZONE zone` does, so
+        `floor` and `date_trunc` name the same instant. Measured against a live
+        server in `tests/postgres/test_series_integration.py`; the pure check
+        here is the fast mirror of it.
+        """
+        # 00:30 UTC on that date is 01:30 BST, the *first* pass through 01:30 --
+        # but its bucket start is the *second* 01:00, an hour later.
         floored = Hour.floor(at(2026, 10, 25, 0, 30), LONDON)
-        assert floored.utcoffset() == datetime.timedelta(hours=1), "the pre-transition offset"
-        assert floored.astimezone(UTC) == Instant.of(at(2026, 10, 25, 0))
+        assert floored.utcoffset() == datetime.timedelta(0), "the post-transition offset"
+        assert floored.astimezone(UTC) == Instant.of(at(2026, 10, 25, 1))
 
     def test_an_ambiguous_result_must_be_converted_before_it_is_compared(self):
         """PEP 495: a datetime inside a fold compares unequal across zones.
@@ -155,7 +162,7 @@ class TestAmbiguousAndMissingLocalTimes:
         written the naive way passes all year and then does not.
         """
         ambiguous = Hour.floor(at(2026, 10, 25, 0, 30), LONDON)
-        same_instant = Instant.of(at(2026, 10, 25, 0))
+        same_instant = Instant.of(at(2026, 10, 25, 1))
         assert ambiguous != same_instant
         assert ambiguous.astimezone(UTC) == same_instant
 

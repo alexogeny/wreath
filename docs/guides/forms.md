@@ -33,6 +33,20 @@ The `AvatarForm` fields are read from the multipart body and validated by the
 same tape that checks a JSON body; the uploaded `image` arrives beside them as an
 `UploadedFile`. One handler, one form, both halves typed.
 
+### Large uploads
+
+A part past `RequestLimits.spool_max_bytes` (1 MiB) is written to a temporary
+file instead of becoming a `bytes`. Read it with `upload.chunks()` to stream, or
+`upload.read()` to materialise; `upload.spooled` and `upload.size` say which
+kind you have, and `form.close()` releases the spools.
+
+This bounds what a parsed form *retains*. It does not bound the body buffer:
+`body()` still materialises the whole request before parsing, so a concurrent
+upload still costs its own size once. Making that incremental means an
+incremental multipart parser — a native module with a byte-for-byte pure twin —
+which is why `max_body_bytes` is still the ceiling on upload size.
+
+
 ## Bind an entire model from a form
 
 Annotate the parameter with your model and `Form()`:

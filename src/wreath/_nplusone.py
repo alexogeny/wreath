@@ -145,7 +145,13 @@ class QueryLedger:
         self._tripped: set[str] = set()
 
     def record(self, model: str) -> None:
-        """Count one query that hydrated ``model``."""
+        """Count one query that hydrated ``model``.
+
+        ``model`` is a key, not a label: the ORM passes ``module.QualName``,
+        because two models of the same name in different modules would
+        otherwise share a tally and trip this on two innocent reads. What a
+        reader is shown comes from :meth:`_display`.
+        """
         count = self.counts.get(model, 0) + 1
         self.counts[model] = count
         if count < self.limit or model in self._tripped or self.on_exceeded is None:
@@ -154,17 +160,31 @@ class QueryLedger:
         self.on_exceeded(
             Finding(
                 route=self.route,
-                repetitions=(Repetition(model=model, count=count),),
+                repetitions=(Repetition(model=self._display(model), count=count),),
                 queries=sum(self.counts.values()),
             )
         )
+
+    def _display(self, key: str) -> str:
+        """The shortest name that still says which model this is.
+
+        The module prefix is noise until it is the answer, so it appears only
+        when this ledger has counted another model with the same bare name --
+        which is exactly when a reader would otherwise be told to go and look
+        at a `Trek` without being told *which* `Trek`.
+        """
+        bare = key.rpartition(".")[2] or key
+        for other in self.counts:
+            if other != key and (other.rpartition(".")[2] or other) == bare:
+                return key
+        return bare
 
     def finding(self) -> Finding | None:
         """Everything at or past the limit when the request ended, or None."""
         repetitions = tuple(
             sorted(
                 (
-                    Repetition(model=model, count=count)
+                    Repetition(model=self._display(model), count=count)
                     for model, count in self.counts.items()
                     if count >= self.limit
                 ),

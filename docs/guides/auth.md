@@ -35,6 +35,16 @@ async def me(request) -> dict:
 `WWW-Authenticate: Bearer` challenge. Past that gate, `request.identity` is
 guaranteed to be there. Deciding *what* that identity may do is the next step.
 
+### Cancelling a token early
+
+`JwtVerifier(revoked=...)` — or `verify_jwt(revoked=...)` — takes
+`revoked(claims) -> bool`, checked after the signature and the registered
+claims. Nothing ships behind it: a real revocation list is a lookup on the
+busiest path in the framework, and that is the application's call. A hook that
+raises **denies**, because a revocation store that is unreachable must not be
+one that says yes. Short token lifetimes remain the primary answer.
+
+
 ## Establishing identity
 
 Configure a backend that turns a credential into an `Identity`, or into nothing

@@ -23,6 +23,19 @@ Passwords are hashed with stdlib `scrypt` and compared in constant time, and
 account exists — so the endpoints can't be turned into a user-enumeration oracle.
 The full route list and the pieces you plug in are below.
 
+### Reset, sessions, and guessing
+
+Pass the session store to `user_router(sessions=...)` and a successful password
+reset ends that user's other sessions. Without it the reset changes the
+credential and nothing more — whoever is already signed in stays signed in,
+which is the case that motivates most resets.
+
+Failed sign-ins are throttled per identifier: `max_login_attempts` (10) within
+`login_window` (300s), answering `429` in the same shape as a wrong password so
+the response does not confirm the account exists. The throttle lives in this
+router; `wreath._userkit.authenticate` stays unguarded for direct callers.
+
+
 ## Mount the flows
 
 ```python

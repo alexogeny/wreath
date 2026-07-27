@@ -88,6 +88,12 @@ Deliberately narrow: request line, headers, and a `Content-Length` body. A
 chunked body or a truncated tail is **refused by name** rather than guessed at,
 because a generated test that asserts a mis-decoded body is worse than no test.
 
+A recording of a keep-alive connection that carried **more than one request** is
+refused for the same reason. The extra bytes would otherwise be dropped past
+`content-length` without a word, and you would get a test covering the first of
+two requests while looking like it covered the recording. Re-record a single
+request, or replay the whole connection with `wreath replay transport`.
+
 ::: wreath.replay.recorded_request
 
 ::: wreath.replay.generate_test
@@ -95,10 +101,18 @@ because a generated test that asserts a mis-decoded body is worse than no test.
 ## Fault injection
 
 A [`FaultSchedule`](#wreath.replay.FaultSchedule) carries transport faults (keyed
-to recorded segment indices) and adapter faults (keyed to the named DB/HTTP
-boundary and operation index), and round-trips through a checksummed `WFS1`
-container. [`fault_corpus`](#wreath.replay.fault_corpus) returns a curated
-schedule per taxonomy region — the artifact the sanitizer/fuzz gate re-runs.
+to recorded segment indices) and adapter faults (keyed to the named boundary and
+operation index), and round-trips through a checksummed `WFS1` container.
+[`fault_corpus`](#wreath.replay.fault_corpus) returns a curated schedule per
+taxonomy region — the artifact the sanitizer/fuzz gate re-runs.
+
+The boundaries a fault can reach are the pool, the outbound HTTP client, the
+LISTEN/NOTIFY doorbell, the transaction scope, a `RETURNING` claim, and object
+storage. Two of those regions exist because of failures that shipped: a
+notification stream *ends* rather than raising when its connection closes, and a
+`RETURNING` claim can come back with no row — both are quiet successes, and code
+written to catch exceptions sees neither. `fault_corpus`'s own docstring lists
+every region and says what makes it one.
 
 ::: wreath.replay.FaultSchedule
 
@@ -124,14 +138,22 @@ schedule per taxonomy region — the artifact the sanitizer/fuzz gate re-runs.
 
 ## Boundary adapters
 
-Request-scoped doubles that let an `INVOKE` plan replay reach the PostgreSQL and
-outbound-HTTP boundaries deterministically — or under an injected fault, so the
-framework's owned error mapping and resource release run for real.
+Request-scoped doubles that let an `INVOKE` plan replay reach the PostgreSQL,
+outbound-HTTP, and object-storage boundaries deterministically — or under an
+injected fault, so the framework's owned error mapping and resource release run
+for real.
+
+A `DatabaseDouble` also serves the subsystems that hold a connection rather than
+borrowing one per request: pass it to a `MessageBus` and its `listen`,
+`notifications` and `transaction` seams are faultable, so a supervised reconnect
+can be *proved* rather than trusted.
 
 ::: wreath.replay.ReplayAdapters
 
 ::: wreath.replay.DatabaseDouble
 
 ::: wreath.replay.FaultyHttpClient
+
+::: wreath.replay.ObjectStoreDouble
 
 ::: wreath.replay.AdapterFault

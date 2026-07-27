@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from _pgfidelity import check_statement
 
 from wreath._jobcore import PayloadTooLarge
 from wreath.messaging import MessageBus
@@ -15,6 +16,7 @@ class FakeConnection:
         self.calls: list[tuple[str, tuple]] = []
 
     async def execute(self, sql, *args):
+        check_statement(sql, args)
         self.calls.append((sql, args))
         return "OK"
 

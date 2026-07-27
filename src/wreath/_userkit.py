@@ -396,7 +396,13 @@ async def register(
 
 
 async def authenticate(store: UserStore, email: str, password: str) -> UserRecord | None:
-    """Return the user iff credentials are valid AND the account is active. Uniform failure."""
+    """Return the user iff credentials are valid AND the account is active.
+
+    Uniform failure, and **unthrottled**: nothing here counts attempts, so a
+    caller invoking this directly owns rate limiting. `wreath.users.user_router`
+    wraps it with `LoginLimiter`; this module stays stdlib-only and storeless on
+    purpose, which is why the guard lives there rather than here.
+    """
     user = await store.get_by_email(email)
     if user is None:
         # Spend comparable work to blunt timing-based enumeration.

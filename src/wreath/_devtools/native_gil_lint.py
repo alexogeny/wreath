@@ -2,24 +2,25 @@
 
 from __future__ import annotations
 
-import argparse
-import json
 import re
-import sys
-from dataclasses import dataclass
-from pathlib import Path
 
-from .native_lint import Finding, _enclosing_function, iter_sources, repo_root, strip_c
+from .native_lint import (
+    Finding,
+    Rule,
+    _enclosing_function,
+    _waivers,
+    iter_sources,
+    repo_root,
+    run_lint,
+    strip_c,
+)
+
+#: ``iter_sources`` and ``repo_root`` are re-exported, not merely used -- see the
+#: note in :mod:`~wreath._devtools.native_error_lint`.
+__all__ = ["DEFAULT_ROOTS", "WAIVER", "Rule", "iter_sources", "main", "repo_root", "scan_text"]
 
 DEFAULT_ROOTS = ("src/wreath/_native",)
 WAIVER = re.compile(r"native-gil-lint:\s*allow\s+(?P<code>NG\d{3})\s*--\s*(?P<reason>\S.*)")
-
-
-@dataclass(frozen=True)
-class Rule:
-    code: str
-    summary: str
-    hint: str
 
 
 RULES: dict[str, Rule] = {
@@ -84,21 +85,6 @@ PTHREAD_CREATE = re.compile(
 )
 
 
-def _waivers(raw_lines: list[str], code_lines: list[str]) -> dict[int, set[str]]:
-    found: dict[int, set[str]] = {}
-    for number, line in enumerate(raw_lines, 1):
-        match = WAIVER.search(line)
-        if not match:
-            continue
-        code = match.group("code")
-        found.setdefault(number, set()).add(code)
-        for index in range(number, len(code_lines)):
-            if code_lines[index].strip():
-                found.setdefault(index + 1, set()).add(code)
-                break
-    return found
-
-
 def _uses_variable(line: str, variable: str) -> bool:
     escaped = re.escape(variable)
     return bool(
@@ -110,7 +96,7 @@ def _uses_variable(line: str, variable: str) -> bool:
 def scan_text(path: str, text: str) -> list[Finding]:
     raw_lines = text.split("\n")
     code_lines = strip_c(text)
-    waived = _waivers(raw_lines, code_lines)
+    waived = _waivers(raw_lines, code_lines, WAIVER)
     findings: list[Finding] = []
     callbacks = {
         match.group("callback")
@@ -185,49 +171,14 @@ def scan_text(path: str, text: str) -> list[Finding]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
+    return run_lint(
+        argv,
         prog="wreath-native-gil-lint",
         description="Find unsafe GIL release, blocking I/O, and native-thread callback patterns.",
+        rules=RULES,
+        scan=scan_text,
+        default_roots=DEFAULT_ROOTS,
     )
-    parser.add_argument("paths", nargs="*", type=Path)
-    parser.add_argument("--format", choices=("text", "json"), default="text")
-    parser.add_argument("--list-rules", action="store_true")
-    args = parser.parse_args(argv)
-    if args.list_rules:
-        for rule in RULES.values():
-            print(f"{rule.code}  {rule.summary}\n    {rule.hint}\n")
-        return 0
-
-    roots = args.paths or [repo_root() / root for root in DEFAULT_ROOTS]
-    sources = iter_sources([Path(root) for root in roots])
-    if not sources:
-        print(f"wreath-native-gil-lint: no C sources found in {roots}", file=sys.stderr)
-        return 1
-    root = repo_root()
-    findings: list[Finding] = []
-    for source in sources:
-        text = source.read_text(encoding="utf-8", errors="replace")
-        try:
-            display = str(source.relative_to(root))
-        except ValueError:
-            display = str(source)
-        findings.extend(scan_text(display, text))
-
-    payload = {
-        "scanned": len(sources),
-        "count": len(findings),
-        "findings": [finding.__dict__ for finding in findings],
-    }
-    if args.format == "json":
-        print(json.dumps(payload, indent=2))
-    else:
-        for finding in findings:
-            print(finding.render())
-        print(
-            f"\nwreath-native-gil-lint: {len(findings)} finding(s) "
-            f"across {len(sources)} file(s)."
-        )
-    return 1 if findings else 0
 
 
 if __name__ == "__main__":

@@ -13,8 +13,12 @@
  *     encoder is lossy and the pure side never did it.
  *   - str uses str8 (0xD9) for lengths 32..255 rather than str16.
  *   - bool is tested before int, since Python's bool is an int subclass.
- *   - dict keys go through the same value encoder, so non-str keys are allowed
- *     exactly where the pure encoder allows them.
+ *   - dict keys go through the same value encoder, but only after mp_key_ok
+ *     accepts them: scalar keys (str, int, float, bool, bytes, None) are
+ *     allowed, container keys are refused. A container key encodes to an array
+ *     no decoder targeting a mapping can rebuild, and json.dumps refuses the
+ *     same value, so allowing it made the two serializers disagree about what
+ *     is representable at all.
  */
 #include "wreathcore.h"
 
@@ -260,6 +264,20 @@ mp_encode_header(MpWriter *w, Py_ssize_t n, unsigned char fix, unsigned char tag
 
 static int mp_encode_value(MpWriter *w, PyObject *obj, int depth);
 
+/* A map key has to survive the round trip through a decoder, and a decoder
+ * targeting a mapping cannot rebuild a key that is itself a container: an array
+ * key decodes to a list, which is unhashable, so the map cannot be reassembled.
+ * Only tuple can actually reach this position -- list and dict are unhashable
+ * and so can never be dict keys -- but the test is an allowlist of the scalars
+ * the format can represent, which stays correct if a hashable container type is
+ * ever added to the encoder. Mirrors _key_ok in the pure twin. */
+static int
+mp_key_ok(PyObject *key)
+{
+    return key == Py_None || PyBool_Check(key) || PyLong_Check(key)
+           || PyFloat_Check(key) || PyUnicode_Check(key) || PyBytes_Check(key);
+}
+
 static int
 mp_encode_value(MpWriter *w, PyObject *obj, int depth)
 {
@@ -334,6 +352,13 @@ mp_encode_value(MpWriter *w, PyObject *obj, int depth)
          * would mutate the dict, because every encoder branch above operates on
          * exact built-in types. */
         while (PyDict_Next(obj, &pos, &key, &value)) {
+            if (!mp_key_ok(key)) {
+                PyErr_Format(PyExc_TypeError,
+                             "keys must be str, int, float, bool, bytes or None, "
+                             "not %s",
+                             Py_TYPE(key)->tp_name);
+                return -1;
+            }
             if (mp_encode_value(w, key, depth + 1) < 0 ||
                 mp_encode_value(w, value, depth + 1) < 0) {
                 return -1;

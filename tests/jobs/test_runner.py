@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from _pgfidelity import check_statement
 
 from wreath._jobcore import dedup_key
 from wreath.jobs import JobRunner, JobVanished
@@ -16,20 +17,24 @@ class FakeConnection:
         self.fetchval_script: list | None = None
 
     async def execute(self, sql, *args):
+        check_statement(sql, args)
         self.calls.append((sql, args))
         return "OK"
 
     async def fetchval(self, sql, *args):
+        check_statement(sql, args)
         self.calls.append((sql, args))
         if self.fetchval_script:
             return self.fetchval_script.pop(0)
         return self._fetchval_result
 
     async def fetch(self, sql, *args):
+        check_statement(sql, args)
         self.calls.append((sql, args))
         return []
 
     async def fetchrow(self, sql, *args):
+        check_statement(sql, args)
         self.calls.append((sql, args))
         return None
 
@@ -296,3 +301,76 @@ def test_schedule_registration_and_validation():
     runner.schedule("rollup", cron="0 3 * * *")
     with pytest.raises(ValueError):
         runner.schedule("rollup", cron="0 3 * * *", misfire="fire")
+
+
+# --- a job enqueued by an older release (design 22 item 10) ------------------
+
+
+def _stale_job(**kw):
+    from wreath.jobs import _Claimed
+
+    defaults = dict(
+        id=7, task="send_receipt", args=["o-1", "plain"], tenant=None,
+        attempts=0, max_attempts=3, fence=1, key=None,
+    )
+    return _Claimed(**{**defaults, **kw})
+
+
+async def test_args_that_no_longer_bind_dead_letter_instead_of_escaping():
+    """A signature change between releases must not kill the worker silently.
+
+    Binding used to happen inside the call that builds the coroutine, which sat
+    *outside* `_run`'s try -- so the TypeError escaped `_run` entirely: no
+    `_fail`, no `last_error`, no backoff. The job stayed leased until the
+    sweeper reclaimed it and eventually recorded "lease expired before
+    completion", which points at a hung handler rather than a stale enqueue.
+    """
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send_receipt")
+    async def send_receipt(ctx, order_id, template, locale):   # three, not two
+        pass
+
+    await runner._run(_stale_job())
+
+    statements = [sql for sql, _ in db.connection.calls]
+    assert statements, "the job was never marked failed, retried, or dead-lettered"
+    assert "state='dead'" in statements[0]
+    assert runner.dead_lettered == 1
+
+
+async def test_a_stale_enqueue_names_the_arity_and_does_not_retry():
+    db = FakeDatabase()
+    runner = _runner(db, )
+
+    @runner.task("send_receipt")
+    async def send_receipt(ctx, order_id, template, locale):
+        pass
+
+    await runner._run(_stale_job())
+
+    _, args = db.connection.calls[0]
+    message = args[-1]
+    assert "send_receipt" in message
+    assert "2 argument(s)" in message
+    assert "locale" in message
+    assert "retrying cannot fix it" in message
+    # Attempt 1 of 3, yet dead: a binding failure will not bind on the fourth try.
+    assert args[2] == 1
+
+
+async def test_a_handler_that_raises_still_retries_normally():
+    """The permanent path must not swallow ordinary failures."""
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("send_receipt")
+    async def send_receipt(ctx, order_id, template):
+        raise RuntimeError("smtp down")
+
+    await runner._run(_stale_job())
+
+    statements = [sql for sql, _ in db.connection.calls]
+    assert "state='ready'" in statements[0], "a transient failure must retry"
+    assert runner.dead_lettered == 0

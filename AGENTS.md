@@ -97,13 +97,34 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
 - `tests/`: correctness and ASGI behavior tests. **Parallelism now pays on the
   default marks, and it did not used to.** The suite was ~3.5s, where an xdist
   worker's re-import of the native extensions cost more than it saved; it has
-  since passed 4,400 tests and 30s, and the trade inverted. Measured on 12 cores,
-  best of two runs: serial 30.7s, `-n 2` 16.8s, `-n 4` 9.8s, **`-n 6` 8.1s**,
-  `-n 8` 8.1s, `-n 12` 9.5s. The curve flattens at six and turns back up once
-  workers outnumber the cores they share with the extensions each one loads, so
-  prefer `-n 6` over `-n auto` on a wide machine. `uv run wreath-check` applies
-  `min(6, cpu_count)` for you; a bare `uv run pytest` stays serial, because that
-  is the one you attach a debugger to. Re-measure before changing the cap.
+  since passed 4,400 tests and 30s, and the trade inverted. Roughly: serial ~31s,
+  **`-n 6` ~8s**, and the curve turns back up once workers outnumber the cores
+  they share with the extensions each one loads — so prefer `-n 6` over
+  `-n auto` on a wide machine. `uv run wreath-check` applies `min(6, cpu_count)`
+  for you; a bare `uv run pytest` stays serial, because that is the one you
+  attach a debugger to. **The full measured curve lives in one place —
+  `_devtools/tasks.py::_pytest_command`'s docstring — and that is the copy to
+  read and to update.** These two numbers were stale here for a while precisely
+  because they were written down twice; re-measure there before changing the cap.
+- **Some tests need a real PostgreSQL, and skipping them used to be silent.**
+  Suites gated on `WREATH_TEST_POSTGRES_DSN` cover what a fake cannot model —
+  parameter type inference, query plans, lock and timeout behaviour, DST
+  boundaries. They went a long time without running once, and when they finally
+  did they found a defect in a *default* code path that worked on its first call
+  and raised on every call after. `tests/conftest.py` now prints a banner naming
+  the count whenever they skip; it never fails the run, because a warning that
+  breaks the build gets suppressed. To run them:
+
+  ```bash
+  docker run -d --name wreath-test-pg -e POSTGRES_PASSWORD=wreath \
+    -e POSTGRES_USER=wreath -e POSTGRES_DB=wreath_test -p 55432:5432 \
+    postgres:17-alpine -c max_connections=200 -c fsync=off -c synchronous_commit=off
+  export WREATH_TEST_POSTGRES_DSN="postgresql://wreath:wreath@127.0.0.1:55432/wreath_test"
+  ```
+
+  `podman` and `nerdctl` work too. Some database suites are also marked
+  `network` and so are excluded by the default marker expression entirely —
+  `-m ''` includes them.
 - `benchmarks/`: equivalent competitor applications and benchmark tooling
 - `docs/`: user documentation, API reference, cookbooks, agent guidance, design notes, and conformance reports
 

@@ -4,6 +4,11 @@ Enough of the spec to serialize JSON-shaped data — nil, bool, int, float, str,
 bin, array, map — for content negotiation. Deserialization is not needed for
 response encoding and is intentionally absent. Pinned to the spec's byte layout
 by known-answer vectors in ``tests/test_negotiation.py``.
+
+Map keys must be scalars. Encoding a container key produces bytes no decoder
+targeting a mapping can rebuild, and :func:`json.dumps` refuses the same value,
+so allowing it would mean the same handler return value was a ``TypeError`` on
+one content type and silently unreadable on the other.
 """
 
 from __future__ import annotations
@@ -126,6 +131,23 @@ def _pack_seq(seq: Any, out: bytearray) -> None:
         _pack(item, out)
 
 
+def _key_ok(key: Any) -> bool:
+    """Whether *key* can survive the round trip through a decoder.
+
+    A decoder targeting a mapping cannot rebuild a key that is itself a
+    container: an array key decodes to a list, which is unhashable, so the map
+    cannot be reassembled. In practice only ``tuple`` reaches this position --
+    list and dict are unhashable and so can never be dict keys -- but this is
+    written as an allowlist of the scalars the format can represent, which stays
+    correct if a hashable container type is ever added to the encoder.
+
+    ``bytes`` is here and absent from :func:`json.dumps`'s list because msgpack
+    has a genuine scalar encoding for it (``bin``) and it round-trips; the point
+    of the refusal is representability, not matching JSON's set exactly.
+    """
+    return key is None or isinstance(key, (bool, int, float, str, bytes))
+
+
 def _pack_map(mapping: dict, out: bytearray) -> None:
     n = len(mapping)
     if n <= 0xF:
@@ -139,5 +161,10 @@ def _pack_map(mapping: dict, out: bytearray) -> None:
     else:
         raise ValueError("map too long for MessagePack")
     for key, value in mapping.items():
+        if not _key_ok(key):
+            raise TypeError(
+                "keys must be str, int, float, bool, bytes or None, "
+                f"not {type(key).__name__}"
+            )
         _pack(key, out)
         _pack(value, out)

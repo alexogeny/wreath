@@ -31,6 +31,24 @@ Every negotiated response carries `Vary: Accept`, so a shared cache keys on the
 chosen format instead of serving one client's MessagePack to another expecting
 JSON. q-values are parsed per RFC 9110 §12.5.1.
 
+### The same value is representable, or neither format takes it
+
+Both encoders accept the same things, so a handler cannot succeed on one
+negotiated format and fail on the other. That matters most for dictionary keys:
+MessagePack is happy to write an array as a map key, but no decoder can read one
+back — a list is unhashable, so the map cannot be rebuilt on the far side. Both
+encoders refuse it, in the same words `json.dumps` uses:
+
+```python
+serialize(request, {(1, 2): "point"})
+# TypeError: keys must be str, int, float, bool, bytes or None, not tuple
+```
+
+Keys may be `str`, `int`, `float`, `bool`, `bytes` or `None`. (`bytes` is absent
+from JSON's list because JSON has no way to write it; MessagePack does, and it
+round-trips, so it is allowed there.) Values are unrestricted — nested lists and
+dicts are fine, it is only the *key* position that has to stay scalar.
+
 ## Registering your own formats
 
 `serialize` takes a `serializers` list — a `Serializer` is just a media type and
