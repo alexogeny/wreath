@@ -37,6 +37,7 @@ from ._doorbell import Doorbell
 from ._doorbell import delay as _doorbell_delay  # noqa: F401
 from ._doorbell import sleep_or_stop as _sleep_or_stop
 from ._jobcore import CronSchedule, compute_backoff, dedup_key, validate_identifier
+from .postgres import PostgresError
 
 JobHandler = Callable[..., Awaitable[None]]
 
@@ -465,7 +466,7 @@ class JobRunner:
         driven for five minutes reads as ``blocked`` whether or not the reason
         was written.
         """
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(PostgresError, TimeoutError, OSError):
             connection = await self._db.acquire(walk.workload)
             try:
                 await walk.ledger.mark_driven(
@@ -661,9 +662,11 @@ class JobRunner:
         # bounded in-flight handlers to settle, then release the listen conn.
         loop = asyncio.get_running_loop()
         while self._inflight and loop.time() < deadline:
+            # No catch: `asyncio.wait` does not raise for a task that failed,
+            # and the only documented raise -- an empty set -- is impossible
+            # under the `while self._inflight` above. Guarding beats catching.
             pending = tuple(self._inflight)
-            with contextlib.suppress(Exception):
-                await asyncio.wait(pending, timeout=max(0.0, deadline - loop.time()))
+            await asyncio.wait(pending, timeout=max(0.0, deadline - loop.time()))
         # Claimed and never started: hand them back rather than making the next
         # worker wait out the lease.
         await self._release_unstarted()
@@ -767,7 +770,10 @@ class JobRunner:
         """
         pending, self._claimed_not_started = self._claimed_not_started, []
         for job in pending:
-            with contextlib.suppress(Exception):
+            # Narrowed: the lease expires and another worker takes the job, so a
+            # database failure here costs latency and nothing else. A bug in the
+            # statement is not that, and must not be lost on the shutdown path.
+            with contextlib.suppress(PostgresError, TimeoutError, OSError):
                 await self._exec(
                     f"UPDATE {self._table} SET state='ready', owner=NULL, "
                     "lease_expiry=NULL, updated_at=now() "

@@ -197,7 +197,10 @@ def _db_app() -> wreath.Wreath:
     async def guarded(request: wreath.Request, db: Connection) -> dict:
         try:
             await db.fetch("SELECT 1")
-        except Exception:
+        except Exception:  # noqa: BLE001 -- fixture app, models a user's guarded handler
+            # This handler exists to be faulted: the test asserts a guarded handler
+            # can absorb an injected adapter failure and still answer. Narrowing it
+            # would couple the fixture to the injector's error type.
             return {"handled": True}
         return {"handled": False}
 

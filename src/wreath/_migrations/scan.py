@@ -702,7 +702,11 @@ def collect_populations(modules: Any) -> tuple[tuple[Any, ...], tuple[Any, ...]]
         from ..series import Aggregate, Series
 
         view_types: tuple[type, ...] = (Series, Aggregate)
-    except Exception:  # pragma: no cover - series is optional to this reader
+    except ImportError:  # pragma: no cover - deferred so a cycle degrades rather than fails
+        # Only an import failure means "there are no views to look for". A
+        # NameError or TypeError from `series`'s module body is a bug, and
+        # swallowing it would make every view invisible to the scan while
+        # `scanned_nothing` stayed silent about why.
         view_types = ()
 
     seen: set[int] = set()

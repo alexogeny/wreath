@@ -473,8 +473,23 @@ class Session:
             # task carried on as though it had not been cancelled.
             self._broken = True
             raise
-        except BaseException:
+        except Exception:  # noqa: BLE001 -- every failure means the same thing here
+            # A rollback that did not complete leaves transaction state unproven
+            # whatever went wrong, so the type carries no information the caller
+            # could act on -- and `_close_connection`'s `finally` already turns
+            # `_broken` into the only safe outcome, discarding the connection.
+            # Swallowing is deliberate and matches cleanup-while-unwinding
+            # elsewhere: this runs on the way out of a failure, so raising here
+            # would replace the error the caller actually needs with a rollback
+            # detail. Not counted -- `_broken` is the signal.
             self._broken = True
+        except BaseException:
+            # KeyboardInterrupt and SystemExit leave the transaction just as
+            # unproven, so the connection is still broken -- but they are no more
+            # ours to absorb than a cancellation, and a swallowed SystemExit
+            # hands a dirty connection back to a pool that outlives it.
+            self._broken = True
+            raise
 
     def check_identity_map(self) -> None:
         """Warn, once, if this session is holding an unusual number of objects.
@@ -680,7 +695,12 @@ class Session:
                 spec,
                 tuple(item.index for item in compiled.load_plan.columns),
             )
-        except Exception:
+        except (TypeError, ValueError, IndexError, RuntimeError, MappingError):
+            # The native compiler's whole documented failure set: a shape it
+            # cannot lay out falls back to the Record path, which is what this
+            # cache line records. Anything outside it -- a MemoryError, a bug in
+            # the caller -- would otherwise pin every future fetch to the slower
+            # path with no signal, which is a performance cliff nothing reports.
             cached.hydrate_plan = False
             return None
         cached.hydrate_plan = plan

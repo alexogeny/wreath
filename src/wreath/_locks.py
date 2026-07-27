@@ -288,8 +288,8 @@ class SingletonRunner:
     """
 
     __slots__ = (
-        "_database", "_jitter", "_key", "_namespace", "_poll", "_stopped",
-        "_task", "_work", "_workload",
+        "_database", "_jitter", "_key", "_lead_errors", "_namespace", "_poll",
+        "_stopped", "_task", "_work", "_workload",
     )
 
     def __init__(
@@ -314,7 +314,19 @@ class SingletonRunner:
         self._poll = poll_interval
         self._jitter = jitter if jitter is not None else _default_jitter
         self._stopped = False
+        self._lead_errors = 0
         self._task: asyncio.Task[None] = asyncio.ensure_future(self._run())
+
+    @property
+    def lead_errors(self) -> int:
+        """How many leadership attempts ended in a failure rather than a return.
+
+        A ``work()`` that fails every time is otherwise invisible: leadership is
+        acquired, dropped, and re-contended on a timer, so the fleet looks busy
+        while nothing is being done. This is the only signal that distinguishes
+        "nobody has needed to lead yet" from "leading has never once worked".
+        """
+        return self._lead_errors
 
     async def _run(self) -> None:
         while not self._stopped:
@@ -338,17 +350,38 @@ class SingletonRunner:
             except asyncio.CancelledError:
                 # Closing the connection is the surest release of the advisory
                 # lock during cancellation, when a clean unlock round-trip may
-                # itself be interrupted.
+                # itself be interrupted. The reference is kept so `finally` still
+                # hands the slot back -- a closed connection is discarded by the
+                # pool on release, but only if release is actually called.
                 await _drop(connection)
-                connection = None
                 held = False
                 raise
-            except BaseException:
+            except Exception:  # noqa: BLE001 -- breadth is the decision; see below
                 # Connection died or work() failed: drop the connection so the
                 # lock is released server-side and a follower can be promoted.
+                #
+                # Broad on purpose. `work()` is caller-supplied and may raise
+                # anything, and the query above can fail in any driver-specific
+                # way -- but every one of those has the same answer, so naming a
+                # set would be a longer way of writing `Exception`. Counted,
+                # because a `work()` that fails every time would otherwise flap
+                # leadership forever with no signal: acquire, fail, drop, sleep,
+                # repeat, while the fleet looks healthy.
+                #
+                # Deliberately *not* `BaseException`. `CancelledError` is handled
+                # above and re-raised; `KeyboardInterrupt` and `SystemExit` must
+                # end the process rather than be retried on a timer.
+                self._lead_errors += 1
                 await _drop(connection)
-                connection = None
                 held = False
+                # Keep the reference so `finally` still calls `_release`. Setting
+                # it to `None` here leaked the pool slot: `Pool.release` is what
+                # removes a connection from `_borrowed`, so a dropped-but-never-
+                # released connection pinned the slot forever, and the *next*
+                # round blocked in `acquire()` until the pool was stopped. One
+                # `work()` failure therefore ended leadership for the process --
+                # invisibly, because a runner parked in `acquire()` looks exactly
+                # like one that is simply not the leader.
             finally:
                 if counted:
                     _exit_held(self._database, self._workload)
@@ -384,26 +417,49 @@ async def _release(
 
     If the unlock cannot be confirmed the connection's lock state is unknown, so
     it is closed rather than leased out still-locked -- the pool discards a closed
-    connection on release.
+    connection on release. That is why the catch below is broad: the round trip
+    can fail in any driver-specific way, and every one of them means the same
+    thing here, which is that confirmation did not happen.
     """
     broken = False
-    if unlock:
-        try:
+    try:
+        if unlock:
             await connection.fetchval(
                 f"SELECT {_UNLOCK[mode]}({_KEYED})", namespace, key
             )
-        except BaseException:
-            broken = True
-    if broken and not getattr(connection, "closed", False):
-        await connection.close()
-    await database.release(workload, connection)
+    except Exception:  # noqa: BLE001 -- one answer for every failure; see docstring
+        broken = True
+    except BaseException:
+        # Cancellation or interpreter exit leaves the lock state just as unknown,
+        # so the connection still must not be leased out -- but the exception has
+        # to reach the caller rather than being spent on cleanup.
+        broken = True
+        raise
+    finally:
+        # In a `finally` so the release happens on the raising path too. Leaking a
+        # pool slot during cancellation is how a shutdown becomes a hang, and the
+        # unlock is exactly where cancellation is most likely to land.
+        if broken:
+            await _drop(connection)
+        await database.release(workload, connection)
 
 
 async def _drop(connection: Any) -> None:
+    """Best-effort close, so PostgreSQL releases the advisory lock server-side.
+
+    Only ever called on a connection already being discarded, so a close that
+    fails changes nothing a caller could act on -- the pool drops a closed *or* a
+    broken connection on release either way. That is what makes the breadth
+    harmless here rather than a swallowed signal.
+
+    `CancelledError`, `KeyboardInterrupt` and `SystemExit` still propagate: the
+    lock is released by the backend dying regardless, so there is nothing to be
+    gained by spending a cancellation on a courtesy close.
+    """
     if connection is not None and not getattr(connection, "closed", False):
         try:
             await connection.close()
-        except BaseException:
+        except Exception:  # noqa: BLE001 -- best-effort cleanup; see docstring
             pass
 
 

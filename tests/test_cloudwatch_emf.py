@@ -14,7 +14,7 @@ _SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "wreath"
 def _mod(name: str):
     try:
         return importlib.import_module(f"wreath.{name}")
-    except Exception:
+    except ImportError:
         pkg = sys.modules.get("wreath")
         if not isinstance(pkg, types.ModuleType) or not getattr(pkg, "__path__", None):
             pkg = types.ModuleType("wreath")

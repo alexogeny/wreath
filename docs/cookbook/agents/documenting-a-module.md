@@ -25,7 +25,8 @@ Work through all of these; the strict docs build (below) fails if the nav and th
 pages disagree.
 
 1. **A reference page** — `docs/reference/<module>.md`. A short, hand-written
-   intro (what it is, when to reach for it) followed by mkdocstrings:
+   intro (what it is, when to reach for it) followed by a `:::` directive, which
+   expands the module's own docstrings and signatures at build time:
 
    ```markdown
    # `wreath.<module>`
@@ -35,7 +36,7 @@ pages disagree.
    ::: wreath.<module>
    ```
 
-   Add it to the `API reference` section of `nav:` in `mkdocs.yml`.
+   Add it to the `API reference` section of the `nav` in `wreath_docs.py`.
 
 2. **A guide** — `docs/guides/<topic>.md`, one per major extension. Open with the
    reasoning, then a real example, then a "Reference:" line linking the reference
@@ -54,13 +55,13 @@ pages disagree.
 
 ## Cross-cutting rules
 
-- **Every Markdown page must be in the nav** (`strict: true`), except paths
-  covered by `not_in_nav` / `exclude_docs` in `mkdocs.yml` — currently the
-  generated `release_notes/<version>.md`, and the hidden `plans/` and
-  `decisions/` trees. Do not add a page and forget its nav entry.
+- **Every Markdown page must be in the nav** (`strict=True`), except paths
+  covered by `exclude` in `wreath_docs.py` — currently the generated
+  `release_notes/<version>.md`, and the hidden `plans/`, `decisions/`, and
+  `agents/` trees. Do not add a page and forget its nav entry.
 - **Reference is generated, guides are written.** Never hand-transcribe
-  signatures into a guide; link to the reference and let mkdocstrings keep it
-  accurate.
+  signatures into a guide; link to the reference and let the `:::` directive keep
+  it accurate.
 - **Reserved and in-progress surfaces** are listed on
   `docs/reference/roadmap.md` — check the page, not a remembered list. When
   you finish one, remove its row there and make sure its reference page and

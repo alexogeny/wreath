@@ -71,7 +71,14 @@ def build_metadata_image(app: Any) -> MetadataImage:
         spec = None
         try:
             spec = inspect_handler(definition.endpoint, definition.path)
-        except Exception:  # noqa: BLE001 - introspection must never break the build
+        except TypeError:
+            # `inspect_handler` already returns None for anything it cannot
+            # inspect; the only thing it *raises* is TypeError, for a handler
+            # it judges invalid (`*args`/`**kwargs`, a bare `Session`). Such a
+            # route cannot serve either, so the app is already broken -- the
+            # image just declines to describe it rather than failing the build
+            # a second time. Anything else escaping is a bug in the inspector
+            # and is no longer swallowed here.
             spec = None
 
         dep_names = sorted(
@@ -118,7 +125,11 @@ def build_metadata_image(app: Any) -> MetadataImage:
         ws_auth_name = None
         try:
             ws_auth_name = _auth_policy_name(requirement_for(ws_handler))
-        except Exception:  # noqa: BLE001 - introspection must never break the build
+        except AttributeError:
+            # `requirement_for` is a `getattr` with a default and cannot fail on
+            # an ordinary object; only a handler with a hostile `__getattr__`
+            # reaches here. Narrowed from a blanket catch so a genuine bug in
+            # `_auth_policy_name` surfaces instead of quietly unnaming a policy.
             ws_auth_name = None
         if ws_auth_name is not None:
             auth_policies.intern(ws_auth_name)
@@ -343,7 +354,12 @@ def _model_names(registry: Any) -> list[str]:
             continue
         try:
             items = container.values() if hasattr(container, "values") else container
-        except Exception:  # noqa: BLE001
+        except (AttributeError, TypeError):
+            # `hasattr` already guards absence, so this only covers a `values`
+            # that exists and misbehaves -- a test double, or a container whose
+            # attribute is not callable. Narrowed from a blanket catch: a
+            # registry raising anything else is a real fault, not a shape to
+            # tolerate.
             continue
         for item in items:
             model = getattr(item, "model_type", None) or getattr(item, "model", None)

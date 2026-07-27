@@ -250,3 +250,67 @@ def test_pem_and_jwk_agree(rsa_keypair):
     from_pem = key_from_pem(pem)
     from_jwk = key_from_jwk(jwk)
     assert (from_pem.n, from_pem.e) == (from_jwk.n, from_jwk.e)
+
+
+# --- JWKS document robustness ------------------------------------------------
+
+
+def _jwks_cache(document: dict):
+    """A `JwksCache` wired to a client that serves `document` once."""
+    import json as _json
+
+    from wreath._auth.jwks import JwksCache
+
+    class _Response:
+        def __init__(self, body):
+            self.status = 200
+            self.body = body
+
+        def header(self, name, default=None):
+            return default
+
+    class _Client:
+        def __init__(self, body):
+            self._body = body
+
+        async def get(self, path):
+            return _Response(self._body)
+
+    return JwksCache(
+        http_client=_Client(_json.dumps(document).encode()), jwks_path="/jwks"
+    )
+
+
+async def test_a_non_object_in_keys_does_not_discard_the_rest():
+    """One junk entry must not cost every key after it.
+
+    `jwk.get("use")` ran before the try, so a string in `keys` raised
+    `AttributeError` out of the whole refresh -- the blanket catch below it
+    started one line too late. Every valid key later in the document was lost,
+    and the failure looked like a provider that had stopped serving keys.
+    """
+    cache = _jwks_cache(
+        {"keys": ["junk", 42, {"kty": "oct", "k": "AAAA", "kid": "good"}]}
+    )
+    await cache.prefetch()
+
+    assert await cache.resolve("good") is not None, "a valid key was discarded"
+    assert cache.malformed_keys == 2
+
+
+async def test_a_malformed_jwk_is_counted_not_silent():
+    """A provider serving junk shows up as a number, not as keys that vanish."""
+    cache = _jwks_cache(
+        {
+            "keys": [
+                {"kty": "RSA", "n": "###", "e": "AQAB"},  # bad base64url
+                {"kty": "EC", "crv": "P-521"},  # unsupported curve
+                {"kty": "oct"},  # missing "k"
+                {"kty": "oct", "k": "AAAA", "kid": "good"},
+            ]
+        }
+    )
+    await cache.prefetch()
+
+    assert await cache.resolve("good") is not None
+    assert cache.malformed_keys == 3

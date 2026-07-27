@@ -9,9 +9,10 @@ manifest lost three subsystems' test lists to a bad patch that wrote
 public modules that had since been made private, and twenty subsystems shipped
 without a manifest entry at all. Each of those costs an agent a wasted plan.
 
-The docs site is already protected -- `mkdocs build --strict` fails on a missing
-nav entry or a broken autodoc target -- which is exactly why `mkdocs.yml` was
-the one map still accurate. This is that gate for the maps mkdocs does not read.
+The docs site is already protected -- `wreath docs check` fails on a page
+missing from the nav, a dead internal link, or a broken anchor -- which is
+exactly why `wreath_docs.py` is the one map that stays accurate. This is that
+gate for the maps the site build does not read.
 
 Findings:
 
@@ -52,7 +53,7 @@ from .native_lint import repo_root
 #: Prose maps whose inline-code repo paths must resolve.
 PROSE_MAPS: tuple[str, ...] = ("AGENTS.md", "README.md", "repo-map.md")
 
-#: The compact index agents read in place of the mkdocs nav.
+#: The compact index agents read in place of the site nav.
 LLMS_TXT = "docs/llms.txt"
 
 MANIFEST = "docs/agents/manifest.json"
@@ -307,6 +308,102 @@ def check_sanitizer_sources(root: Path) -> list[Finding]:
     return findings
 
 
+def _module_name(source: str) -> str | None:
+    """``src/wreath/session_store.py`` -> ``session_store``; nested paths -> None.
+
+    Only a top-level module or package has a conventional test path worth
+    guessing at. ``src/wreath/_auth/cedar.py`` does not -- its tests live wherever
+    the subsystem that owns ``_auth`` put them.
+    """
+    if not source.startswith("src/wreath/"):
+        return None
+    trimmed = source.removeprefix("src/wreath/").rstrip("/")
+    if "/" in trimmed:
+        return None
+    return trimmed.removesuffix(".py") or None
+
+
+def _conventional_tests(root: Path, module: str) -> list[str]:
+    """The test paths named after ``module`` that actually exist.
+
+    Deliberately only the two exact spellings the repository already uses --
+    ``tests/test_<module>.py`` and ``tests/<module>/``. A prefix match would sweep
+    up ``tests/test_native_lint_readability.py`` under ``native_lint``, and a
+    guessed-wrong entry in the manifest is worse than a missing one: an agent
+    reads it and runs the wrong suite.
+    """
+    found = []
+    for candidate in (f"tests/test_{module}.py", f"tests/{module}/"):
+        if (root / candidate.rstrip("/")).exists():
+            found.append(candidate)
+    return found
+
+
+def _listed(values: list[str]) -> set[str]:
+    """Path comparison that does not care about a trailing slash."""
+    return {value.rstrip("/") for value in values}
+
+
+def repair(root: Path, adopt: list[tuple[str, str]]) -> tuple[list[str], list[str]]:
+    """Apply the mechanically-derivable manifest repairs.
+
+    Two of them, and no more. Both have exactly one right answer, which is what
+    separates them from the findings a person has to resolve -- ``MAP002`` cannot
+    know where a moved file went, and ``MAP003`` cannot know which subsystem a new
+    module belongs to. Guessing at either would produce a manifest that lints
+    clean and lies, which is the failure this whole tool exists to prevent.
+
+    * **adopt** -- ``name=src/wreath/x.py`` puts a source under the subsystem you
+      name (you supply the judgment) and brings its conventional tests with it
+      (the tool supplies the bookkeeping).
+    * **conventional tests** -- for every source already listed, attach
+      ``tests/test_<module>.py`` / ``tests/<module>/`` when it exists on disk and
+      is not listed yet. This is the half that silently rots: the module gets
+      mapped when it lands, and the test file added a week later does not.
+
+    Returns ``(changes, refusals)``.
+    """
+    path = root / MANIFEST
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [], [f"{MANIFEST} cannot be read as JSON: {exc}"]
+
+    subsystems = {s.get("name"): s for s in manifest.get("subsystems", [])}
+    changes: list[str] = []
+    refusals: list[str] = []
+
+    for name, source in adopt:
+        subsystem = subsystems.get(name)
+        if subsystem is None:
+            known = ", ".join(sorted(n for n in subsystems if n))
+            refusals.append(f"no subsystem named {name!r}; known: {known}")
+            continue
+        if not (root / source.rstrip("/")).exists():
+            refusals.append(f"{name}: no such path {source!r} — adopting it would "
+                            "add a MAP002 finding, not remove one")
+            continue
+        if source.rstrip("/") in _listed(subsystem.setdefault("sources", [])):
+            continue
+        subsystem["sources"].append(source)
+        changes.append(f"{name}.sources += {source}")
+
+    for name, subsystem in subsystems.items():
+        tests = subsystem.setdefault("tests", [])
+        for source in subsystem.get("sources", []):
+            module = _module_name(source)
+            if module is None:
+                continue
+            for candidate in _conventional_tests(root, module):
+                if candidate.rstrip("/") not in _listed(tests):
+                    tests.append(candidate)
+                    changes.append(f"{name}.tests += {candidate}")
+
+    if changes:
+        path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return changes, refusals
+
+
 def scan(root: Path) -> list[Finding]:
     findings = check_manifest(root)
     for relative in PROSE_MAPS:
@@ -322,9 +419,41 @@ def main(argv: list[str] | None = None) -> int:
         description="Check that the agent-facing maps still describe this repository.",
     )
     parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument(
+        "--fix", action="store_true",
+        help="apply the mechanical manifest repairs: attach each source's "
+             "conventional test paths (tests/test_<module>.py, tests/<module>/) "
+             "when they exist on disk and are not listed yet",
+    )
+    parser.add_argument(
+        "--adopt", action="append", metavar="SUBSYSTEM=PATH", default=[],
+        help="add PATH to that subsystem's `sources`, with its conventional "
+             "tests (repeatable, e.g. --adopt middleware=src/wreath/session_store.py). "
+             "Implies --fix.",
+    )
     args = parser.parse_args(argv)
 
     root = repo_root()
+
+    adopt: list[tuple[str, str]] = []
+    for spec in args.adopt:
+        name, separator, source = spec.partition("=")
+        if not separator or not name or not source:
+            parser.error(f"--adopt expects SUBSYSTEM=PATH, got {spec!r}")
+        adopt.append((name, source))
+
+    if args.fix or adopt:
+        changes, refusals = repair(root, adopt)
+        for change in changes:
+            print(f"fixed  {change}")
+        for refusal in refusals:
+            print(f"REFUSED  {refusal}")
+        if not changes and not refusals:
+            print("nothing to fix: every source's conventional tests are already listed.")
+        print()
+        if refusals:
+            return 1
+
     findings = scan(root)
 
     if args.format == "json":

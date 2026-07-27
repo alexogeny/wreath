@@ -1,8 +1,13 @@
 name: docs
 
-# Build the MkDocs site and deploy it to GitHub Pages through the `github-pages`
-# environment. mkdocstrings reads docstrings statically from src/, so the native
-# C extension does not need to be built here — the docs group is enough.
+# Build the documentation site with wreath's own static-site generator and
+# deploy it to GitHub Pages through the `github-pages` environment.
+#
+# There is no docs dependency group and no third-party toolchain: `wreath docs`
+# is part of the framework, so the only thing to install is wreath itself. The
+# project *is* installed here (unlike the old mkdocstrings build, which read
+# docstrings statically) because the `:::` reference directive imports the
+# modules it documents.
 
 on:
   push:
@@ -10,7 +15,7 @@ on:
     paths:
       - docs/**
       - src/**
-      - mkdocs.yml
+      - wreath_docs.py
       - pyproject.toml
       - uv.lock
       - .github/workflows/docs.yml
@@ -36,11 +41,12 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - name: Install docs dependencies
-        # Only the docs group; skip building/installing the C-extension project.
-        run: uv sync --frozen --only-group docs --no-install-project
+      - name: Install wreath
+        run: uv sync --frozen
       - name: Build site (strict)
-        run: uv run --no-sync mkdocs build --strict
+        # `check` fails on an orphan page, a dead internal link, or a broken
+        # anchor -- the same gate contributors run locally.
+        run: uv run --no-sync wreath docs check
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

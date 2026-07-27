@@ -17,7 +17,7 @@ import inspect
 import re
 from typing import Any
 
-__all__ = ["expand", "has_directives"]
+__all__ = ["TargetNotFound", "expand", "has_directives"]
 
 _DIRECTIVE = re.compile(r"^:::\s+([\w.]+)\s*$")
 _SECTION = re.compile(
@@ -28,8 +28,23 @@ def has_directives(source: str) -> bool:
     return any(_DIRECTIVE.match(line) for line in source.splitlines())
 
 
-def expand(source: str) -> str:
-    """Replace each ``::: dotted.path`` line with generated reference markdown."""
+def expand(source: str, page: str = "", sink: list[str] | None = None) -> str:
+    """Replace each ``::: dotted.path`` line with generated reference markdown.
+
+    A directive naming something that cannot be imported or introspected renders
+    an inline note, so a local non-strict preview still builds and shows what is
+    wrong on the page itself. It *also* reports to ``sink`` when one is given, so
+    a strict build fails rather than shipping a reference page whose body is an
+    apology. `AGENTS.md` promises "a missing nav entry or broken autodoc target
+    fails it"; before ``sink`` existed, only the first half was true.
+
+    The catch is exactly `TargetNotFound`, which `_import` raises and nothing
+    else does. A directive naming a target that is not there is the caller's
+    typo; an `AttributeError` out of a *renderer* is a bug in this module, and
+    turning that into an inline note on one page is how a renderer stays broken
+    for a release. Both are `AttributeError` at the source, which is why
+    `_import` converts one of them.
+    """
     out: list[str] = []
     for line in source.splitlines():
         match = _DIRECTIVE.match(line)
@@ -39,8 +54,11 @@ def expand(source: str) -> str:
         path = match.group(1)
         try:
             out.append(_pin_anchor(_render_object(path), path))
-        except Exception as error:            # a bad path must not abort the build
+        except TargetNotFound as error:
             out.append(f"> **API reference unavailable for `{path}`:** {error}")
+            if sink is not None:
+                where = f"{page}: " if page else ""
+                sink.append(f"{where}::: {path} could not be rendered: {error}")
     return "\n".join(out)
 
 
@@ -60,13 +78,30 @@ def _pin_anchor(markdown: str, path: str) -> str:
     return "\n".join(lines)
 
 
+class TargetNotFound(Exception):
+    """A ``:::`` directive named something that could not be resolved.
+
+    Distinct from the `AttributeError` `getattr` would raise, so `expand` can
+    catch a caller's typo without also catching a renderer's bug -- the two are
+    the same exception type and only this boundary knows which is which.
+    """
+
+
 def _import(path: str) -> Any:
     try:
         return importlib.import_module(path)
     except ModuleNotFoundError:
         module_path, _, attr = path.rpartition(".")
-        module = importlib.import_module(module_path)
-        return getattr(module, attr)
+        if not module_path:
+            raise TargetNotFound(f"{path!r} is not a module") from None
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError as error:
+            raise TargetNotFound(f"cannot import {module_path!r}: {error}") from None
+        try:
+            return getattr(module, attr)
+        except AttributeError:
+            raise TargetNotFound(f"{module_path!r} has no attribute {attr!r}") from None
 
 
 def _render_object(path: str) -> str:

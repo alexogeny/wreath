@@ -27,6 +27,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, TypeIs
 
+from . import _fenced
+
 __all__ = ["extract", "restore"]
 
 _OPEN = "```chart"
@@ -40,32 +42,11 @@ def extract(
     Every data file a chart successfully reads is added to ``sources`` (if given),
     so the caller can publish the raw JSON alongside the rendered chart.
     """
-    lines = text.splitlines()
-    out: list[str] = []
-    tokens: dict[str, str] = {}
-    i = 0
-    while i < len(lines):
-        if lines[i].strip() == _OPEN:
-            i += 1
-            config: list[str] = []
-            while i < len(lines) and lines[i].strip() != "```":
-                config.append(lines[i])
-                i += 1
-            i += 1                                  # consume the closing fence
-            token = f"\x00CHART{len(tokens)}\x00"
-            tokens[token] = _render(_parse(config), base_dir, sources)
-            out.append(token)
-        else:
-            out.append(lines[i])
-            i += 1
-    return "\n".join(out), tokens
+    return _fenced.extract(
+        text, _OPEN, lambda body: _render(_parse(body), base_dir, sources), "CHART")
 
 
-def restore(html: str, tokens: dict[str, str]) -> str:
-    """Swap chart tokens (as rendered by the markdown pass) for their SVG."""
-    for token, svg in tokens.items():
-        html = html.replace(f"<p>{token}</p>", svg).replace(token, svg)
-    return html
+restore = _fenced.restore
 
 
 def _parse(config: list[str]) -> dict[str, str]:
@@ -218,15 +199,19 @@ def _pairs(node: Any, config: dict[str, str]) -> list[tuple[str, float]]:
     return list(aggregated.items())
 
 
-# The wreath arms each get a distinct, theme-aware fill so they never blend into
-# the competitor bars; everything else is a muted slate with a diagonal hatch, so
-# it reads as "the field" at a glance regardless of colour-blindness or theme.
+# The wreath arms are one hue at three strengths, not three unrelated colours.
+# They differ by *how much of the stack is native*, which is an ordered quantity,
+# so a sequential ramp says something true that a categorical palette did not —
+# the old set (brand purple, brand cyan, a fixed amber, a fixed violet) also went
+# off-palette in four of the five themes because two of its four values were
+# hard-coded hexes. Everything else is a muted slate with a diagonal hatch, so it
+# reads as "the field" at a glance regardless of colour-blindness or theme.
 _WREATH_FILL = {
     "metal": "var(--primary)",
-    "native": "var(--accent)",
-    "pure": "#f59e0b",
-    "asgi": "#8b5cf6",
-    "uvicorn": "#8b5cf6",
+    "native": "color-mix(in oklab, var(--primary) 68%, var(--bg))",
+    "pure": "color-mix(in oklab, var(--primary) 38%, var(--bg))",
+    "asgi": "color-mix(in oklab, var(--primary) 38%, var(--bg))",
+    "uvicorn": "color-mix(in oklab, var(--primary) 38%, var(--bg))",
 }
 _OTHER_FILL = "#9aa4b2"
 
@@ -257,36 +242,46 @@ def _bar_fill(label: str, uid: str) -> str:
 
 
 def _svg_bar(pairs: list[tuple[str, float]], title: str, unit: str) -> str:
+    """One horizontal bar chart, as inline SVG that recolours with the theme.
+
+    The type belongs to the page, not to the chart: labels take the body face,
+    values take the mono face with tabular figures, and the caption takes the
+    same mono micro-label every other structural heading in the theme uses. A
+    chart that ships its own typography is the tell that it came from a library.
+    """
     # Derived from the chart's own content, so the id is stable across builds
     # (a counter would renumber every chart when one is inserted above it).
     uid = sha256(
         f"{title}\x00{unit}\x00{pairs}".encode()).hexdigest()[:8]
-    width, label_w, value_w, row_h = 720, 172, 82, 32
+    width, label_w, value_w, row_h = 720, 168, 84, 30
     bar_area = width - label_w - value_w - 12
-    top = 36 if title else 8
-    height = top + len(pairs) * row_h + 8
+    top = 12
+    height = top + len(pairs) * row_h + 6
     top_value = max((v for _, v in pairs), default=1.0) or 1.0
     parts = [
-        f'<figure class="chart"><svg viewBox="0 0 {width} {height}" '
-        f'role="img" width="100%" style="max-width:{width}px">', _hatch_defs(uid)]
-    if title:
-        parts.append(
-            f'<text x="0" y="21" font-weight="700" font-size="15" '
-            f'fill="currentColor">{_esc(title)}</text>')
+        '<figure class="chart">',
+        f'<figcaption class="chart-title">{_esc(title)}</figcaption>' if title else "",
+        f'<svg viewBox="0 0 {width} {height}" role="img" width="100%" '
+        f'style="max-width:{width}px">', _hatch_defs(uid),
+        # The baseline every bar starts from. Without it the bars float and the
+        # eye has nothing to judge the left edge against.
+        f'<line x1="{label_w - .5}" y1="{top - 2}" x2="{label_w - .5}" '
+        f'y2="{height - 4}" stroke="currentColor" opacity=".18"/>']
     for index, (label, value) in enumerate(pairs):
         cy = top + index * row_h
         mid = cy + row_h / 2
         bar_w = max(2.0, value / top_value * bar_area)
         is_wreath = "wreath" in label.lower()
-        weight = "700" if is_wreath else "400"
+        weight = "600" if is_wreath else "400"
         parts.append(
-            f'<text x="{label_w - 8}" y="{mid + 4:.0f}" text-anchor="end" font-weight="{weight}" '
-            f'fill="currentColor" font-size="13">{_esc(label)}</text>'
-            f'<rect x="{label_w}" y="{cy + 4}" width="{bar_w:.1f}" height="{row_h - 10}" '
-            f'rx="3" fill="{_bar_fill(label, uid)}"/>'
-            f'<text x="{label_w + bar_w + 6:.1f}" y="{mid + 4:.0f}" fill="currentColor" '
-            f'font-size="12" font-weight="{weight}" '
-            f'opacity="0.9">{_fmt(value)}{_esc(unit)}</text>')
+            f'<text class="chart-label" x="{label_w - 10}" y="{mid + 4:.0f}" '
+            f'text-anchor="end" font-weight="{weight}" fill="currentColor">'
+            f"{_esc(label)}</text>"
+            f'<rect x="{label_w}" y="{cy + 4}" width="{bar_w:.1f}" height="{row_h - 11}" '
+            f'rx="2" fill="{_bar_fill(label, uid)}"/>'
+            f'<text class="chart-value" x="{label_w + bar_w + 8:.1f}" y="{mid + 4:.0f}" '
+            f'fill="currentColor" font-weight="{weight}">'
+            f"{_fmt(value)}{_esc(unit)}</text>")
     parts.append("</svg></figure>")
     return "".join(parts)
 

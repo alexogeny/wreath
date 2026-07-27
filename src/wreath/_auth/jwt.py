@@ -653,7 +653,12 @@ def verify_jwt(
         try:
             if revoked(claims):
                 return None
-        except Exception:  # noqa: BLE001 - see the docstring: unreachable != allowed
+        except Exception:  # noqa: BLE001 - user callback; resolves to DENY
+            # `revoked` is application code (a cache lookup, a database read)
+            # and may raise anything. It resolves fail-closed: an unreachable
+            # revocation list is not a licence to accept the token. Narrowing
+            # this is not possible -- the set of failures is the caller's, not
+            # ours -- which is what makes it the exceptional minority.
             return None
 
     try:

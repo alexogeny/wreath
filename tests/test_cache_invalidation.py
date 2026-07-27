@@ -671,6 +671,50 @@ async def test_a_failing_loader_keeps_the_previous_generation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_failing_loader_is_countable_not_silent() -> None:
+    """The other half of the test above: staying up must not mean staying quiet.
+
+    A snapshot cache degrades upwards -- every read still succeeds against the
+    last good generation, so a permanently broken loader moves no other signal.
+    Without a count there is nothing anywhere that says the data is stale.
+    """
+    def explode() -> dict:
+        raise RuntimeError("the database is down")
+
+    cache: SnapshotCache = SnapshotCache()
+    await cache.refresh(lambda: {1: "Bea"})
+    watch = refresh_on(cache, [User], load=explode)
+    assert watch.refresh_errors == 0
+    assert watch.last_error is None
+
+    publish_write(frozenset({"User"}))
+    await asyncio.sleep(0)
+    publish_write(frozenset({"User"}))
+    await asyncio.sleep(0)
+
+    assert watch.refresh_errors == 2
+    assert isinstance(watch.last_error, RuntimeError)
+    assert str(watch.last_error) == "the database is down"
+    # And the reason the count is the only signal: the reads never stopped.
+    assert cache.get(1) == "Bea"
+
+
+@pytest.mark.asyncio
+async def test_a_successful_reload_counts_nothing() -> None:
+    """Guard against 'fixed it by counting everything'."""
+    cache: SnapshotCache = SnapshotCache()
+    await cache.refresh(lambda: {1: "Bea"})
+    watch = refresh_on(cache, [User], load=lambda: {1: "renamed"})
+
+    publish_write(frozenset({"User"}))
+    await asyncio.sleep(0)
+
+    assert cache.get(1) == "renamed"
+    assert watch.refresh_errors == 0
+    assert watch.last_error is None
+
+
+@pytest.mark.asyncio
 async def test_refresh_on_returns_a_handle_that_can_be_stopped() -> None:
     cache: SnapshotCache = SnapshotCache()
     await cache.refresh(lambda: {1: "Bea"})

@@ -702,6 +702,14 @@ class S3ObjectStore:
         self._host = host or f"{bucket}.s3.{region}.amazonaws.com"
         self._part_size = max(part_size, _MIN_PART)
         self._window = max(window, 1 << 16)
+        #: Multipart uploads this store began, failed to complete, and then failed
+        #: to abort. Each one is parts already stored in S3 that no longer belong to
+        #: any object and that nothing will collect -- they accrue storage charges
+        #: until a lifecycle rule reaps them. The abort is best-effort by necessity
+        #: (it runs while a more interesting exception is propagating) but a
+        #: best-effort cleanup with no counter is one nobody can discover has been
+        #: failing, so the count is the signal.
+        self.orphaned_uploads = 0
 
     def __repr__(self) -> str:  # never leak credentials
         return f"S3ObjectStore(bucket={self._bucket!r}, region={self._region!r})"
@@ -866,10 +874,20 @@ class S3ObjectStore:
         return await self._send("POST", path, params=[("uploadId", upload_id)], body=xml)
 
     async def _abort(self, path: str, upload_id: str) -> None:
+        """Best-effort abort of a multipart upload whose completion failed.
+
+        The caller is already unwinding, so raising here would replace the
+        interesting exception with a less interesting one. Transport failures are
+        therefore counted rather than raised. A programming error is *not* --
+        `AttributeError` or `TypeError` out of here is a bug in this file, and
+        swallowing it would hide it behind an S3 outage that never happened.
+        """
+        from .http_client import ClientError
+
         try:
             await self._send("DELETE", path, params=[("uploadId", upload_id)])
-        except Exception:
-            pass
+        except (ClientError, OSError):
+            self.orphaned_uploads += 1
 
     async def stat(self, key: str) -> ObjectStat:
         key = normalize_key(key)

@@ -81,4 +81,25 @@ channel. Two properties keep it safe to leave on: the refresh is single-flight,
 so a burst of writes is one reload; and a failing loader leaves the previous
 generation in place, so a database blip cannot empty a cache readers depend on.
 
-`refresh_on` returns a callable that stops watching.
+### Check that the reloads are working
+
+Surviving a failing loader is the right behaviour, and it has an uncomfortable
+consequence: this cache degrades *upwards*. Every read keeps succeeding against
+the last good generation, so errors, latency and hit rate all stay flat while
+the data quietly ages. Nothing else in the system will tell you.
+
+`refresh_on` returns a `RefreshWatch` for exactly that. Call it to stop
+watching, and read the two attributes to find out whether it is still working:
+
+```python
+watch = refresh_on(countries, [Country], load=load_countries)
+
+if watch.refresh_errors:
+    # Serving data older than the last write we were told about.
+    logger.warning("country reload failing: %r", watch.last_error)
+
+watch()          # stop watching
+```
+
+Export `refresh_errors` next to your other counters; a non-zero value that stays
+non-zero is a cache serving stale reference data indefinitely.

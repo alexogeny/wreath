@@ -42,10 +42,6 @@ dev = [
   "setuptools>=77",
   "ty",
 ]
-docs = [
-  "mkdocs-material>=9.6",
-  "mkdocstrings[python]>=0.30",
-]
 benchmark = [
   "alembic>=1.16",
   # Bench-only competitor for bench_cedar: the official Rust Cedar engine via
@@ -93,6 +89,10 @@ wreath-complexity-probe = "wreath._devtools.complexity_probe:main"
 wreath-sanitize = "wreath._devtools.sanitize:main"
 # Checks that the agent-facing maps still describe the repository.
 wreath-map-lint = "wreath._devtools.map_lint:main"
+# Checks (--update regenerates) the pinned `wreath port` emitter output.
+wreath-port-golden = "wreath._devtools.port_golden:main"
+# Reports function bodies sharing a structure. A report, not a gate.
+wreath-dup-scan = "wreath._devtools.dup_scan:main"
 wreath-request-trace = "wreath._devtools.request_trace:main"
 wreath-tape-decomp = "wreath._devtools.tape_decomp:main"
 wreath-decomp = "wreath._devtools.decomp:main"
@@ -149,7 +149,15 @@ line-length = 100
 extend-exclude = [".sanitizers", "nghttp2", "tests/port/corpus"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "ASYNC"]
+# BLE enforces AGENTS.md's "a broad `except` is the exception, not the rule":
+# guard the precondition, else catch the specific type, else catch broadly with a
+# counter and a waiver carrying a written reason. It is on repo-wide rather than
+# scoped to `src` -- `tests` and `benchmarks` cost eleven sites between them, and
+# a test that swallows around the code under test is a test that cannot fail.
+# Enabled after the fact: 49 `# noqa: BLE001` waivers were already written here
+# against a rule that had never run, which is its own kind of check with nothing
+# to check.
+select = ["E", "F", "I", "UP", "B", "ASYNC", "BLE"]
 
 [tool.ruff.lint.flake8-bugbear]
 # Depends() in parameter defaults is the dependency-injection marker.

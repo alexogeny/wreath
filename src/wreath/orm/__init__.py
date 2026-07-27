@@ -63,7 +63,21 @@ from .registry import Registry
 from .relations import relationship
 from .schema import CENTRAL_SCHEMA, TENANT_SCHEMA, SchemaMode, SchemaRef
 from .session import FromORM, RawQuery, Session, TenantContext
-from .table import Index, Unique, index, unique
+from .table import (
+    AllOf,
+    Eq,
+    Index,
+    InValues,
+    IsNull,
+    Unique,
+    all_of,
+    eq,
+    index,
+    is_not_null,
+    is_null,
+    one_of,
+    unique,
+)
 
 __all__ = [
     "CENTRAL_SCHEMA",
@@ -104,11 +118,20 @@ __all__ = [
     "UnloadedRelationshipError",
     "and_",
     "column",
+    "AllOf",
+    "Eq",
+    "InValues",
+    "IsNull",
+    "all_of",
+    "eq",
     "index",
     "narrow",
     "not_",
     "or_",
     "rule",
     "relationship",
+    "is_not_null",
+    "is_null",
+    "one_of",
     "unique",
 ]

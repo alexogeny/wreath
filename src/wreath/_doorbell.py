@@ -135,8 +135,7 @@ class Doorbell:
         except Exception:  # noqa: BLE001 - the caller backs off and tries again
             self.reconnects += 1
             if connection is not None:
-                with contextlib.suppress(Exception):
-                    await self._db.release(self._workload, connection)
+                await self._give_back(connection)
             return False
         self._conn = connection
         return True
@@ -151,6 +150,18 @@ class Doorbell:
         connection, self._conn = self._conn, None
         if connection is None:
             return
+        await self._give_back(connection)
+
+    async def _give_back(self, connection: Any) -> None:
+        """Return a connection on a path that is already failing or finishing.
+
+        The one suppression in this module, and it earns it: both callers are
+        past the point of being able to act on a failure. `open` is unwinding a
+        connection it could not use, and `release` runs on shutdown. Raising
+        here would replace the real failure with the cleanup's, and there is
+        nothing a caller could do with either -- the pool reclaims a connection
+        that is never returned.
+        """
         with contextlib.suppress(Exception):
             await self._db.release(self._workload, connection)
 

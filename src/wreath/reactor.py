@@ -204,7 +204,15 @@ class WreathTask(asyncio.Future):
         except (KeyboardInterrupt, SystemExit) as e:
             asyncio.Future.set_exception(self, e)
             raise
-        except BaseException as e:
+        except BaseException as e:  # noqa: BLE001 -- stored on the future, not lost
+            # `Task.__step`, reimplemented. The exception is *recorded* on the
+            # future for whoever awaits this task -- it is not discarded, and the
+            # three cases that need different handling are caught above:
+            # `CancelledError` cancels the future, `KeyboardInterrupt` and
+            # `SystemExit` are stored *and* re-raised so they still reach the
+            # loop. Narrowing this to `Exception` would drop any other
+            # `BaseException` on the floor instead of delivering it to the
+            # awaiter. This mirrors CPython's own tasks.py; keep it that way.
             asyncio.Future.set_exception(self, e)
         else:
             blocking = getattr(result, "_asyncio_future_blocking", None)
@@ -241,7 +249,11 @@ class WreathTask(asyncio.Future):
     def __wakeup(self, future):
         try:
             future.result()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 -- forwarded into __step
+            # Also from CPython's tasks.py. The exception is handed straight to
+            # `__step`, which decides what it means for the task -- this frame
+            # only chooses which of the two `__step` calls to make. Nothing is
+            # absorbed, and `CancelledError` in particular must arrive here.
             self.__step(exc)
         else:
             self.__step()

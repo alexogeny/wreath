@@ -45,7 +45,8 @@ own named module so the whole stays easy to hold in your head.
   PostgreSQL driver are accelerated in C, engaged automatically when built. A
   pure-Python reference is always present and always in agreement — reach for it
   anywhere with `WREATH_PURE=1`. See how it measures up on the
-  [Performance](perf/index.md) page — with the methodology, not just the bars.
+  [Performance](perf/index.md) page — with the methodology, not just the bars —
+  and what makes it quick under [the hood](internals/index.md).
 - **One obvious home per idea.** A small top level — `Wreath`, `Router`,
   `Request`, `Response`, `JSONResponse`, `Depends` — and a cohesive module for
   everything else, from `wreath.middleware` to `wreath.orm`.

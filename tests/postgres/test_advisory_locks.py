@@ -397,3 +397,96 @@ async def test_singleton_follower_never_runs_work_while_lock_unavailable() -> No
         await runner.stop()
     finally:
         await database.stop()
+
+
+# -- what a broad catch used to hide ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_failing_work_is_counted_rather_than_silently_retried() -> None:
+    database, _ = await _write_db()
+    attempts = 0
+
+    async def work() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("work is broken")
+
+    runner = database.run_singleton("leader", work, poll_interval=0.01)
+    try:
+        for _ in range(200):
+            if attempts >= 2:
+                break
+            await asyncio.sleep(0.005)
+        # Re-contending is correct -- a follower must be able to take over. But a
+        # `work()` that never succeeds looks exactly like one that has never been
+        # needed, so the count is the only thing that tells them apart.
+        assert attempts >= 2
+        assert runner.lead_errors >= 2
+    finally:
+        await runner.stop()
+        await database.stop()
+
+
+class _HardStop(BaseException):
+    """Stands in for `KeyboardInterrupt`/`SystemExit`.
+
+    Those two cannot be used literally here: asyncio's `Task.__step` re-raises
+    them into the event loop as well as storing them on the future, which aborts
+    the pytest session rather than failing a test. `_HardStop` exercises the
+    property that actually matters -- a `BaseException` outside `Exception` is no
+    longer caught, so it ends the runner instead of being retried on a timer.
+    """
+
+
+@pytest.mark.asyncio
+async def test_a_hard_stop_in_work_ends_the_runner_rather_than_retrying() -> None:
+    database, _ = await _write_db()
+    attempts = 0
+
+    async def work() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise _HardStop
+
+    runner = database.run_singleton("leader", work, poll_interval=0.01)
+    try:
+        for _ in range(200):
+            if runner._task.done():
+                break
+            await asyncio.sleep(0.005)
+        assert runner._task.done(), "the runner kept contending after a hard stop"
+        with pytest.raises(_HardStop):
+            runner._task.result()
+        # `except BaseException` used to swallow this and go round again on the
+        # poll timer, so a Ctrl-C landing inside `work()` left the process
+        # contending for leadership forever.
+        assert attempts == 1
+    finally:
+        runner._stopped = True
+        await database.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_unlock_reaches_the_caller_and_still_frees_the_slot() -> None:
+    class CancelledUnlock(FakeConnection):
+        async def fetchval(self, sql: str, *args: object) -> object:
+            self.calls.append((sql, args))
+            if "pg_advisory_unlock" in sql:
+                raise asyncio.CancelledError
+            return None
+
+    database, connector = await _write_db(CancelledUnlock)
+    pool = database.pool("write")
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            async with database.lock("k"):
+                pass
+        # The cancellation reaches the caller -- `except BaseException` used to
+        # swallow it, so a cancelled task carried on as though nothing happened --
+        # and the slot is still returned, because leaking one on the way out is
+        # how a shutdown turns into a hang.
+        assert pool.borrowed == 0
+        assert connector.connections[0].closed is True
+    finally:
+        await database.stop()

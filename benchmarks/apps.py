@@ -272,7 +272,9 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
         body = await request.body()
         try:
             _webhook_verifier.verify(body=body, headers=dict(request.scope["headers"]))
-        except Exception:
+        except ValueError:
+            # Every rejection this verifier makes is a ValueError; a KeyError from
+            # the scope would be a bug in the benchmark app, not a bad signature.
             return TextResponse("invalid", status=401)
         return TextResponse("ok")
 
@@ -359,7 +361,11 @@ elif FRAMEWORK == "starlette":
             while True:
                 message = await websocket.receive_text()
                 await websocket.send_text(message)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- competitor app, mirrors idiomatic Starlette
+            # A disconnect is the normal end of an echo loop. Narrowing would mean
+            # importing Starlette's WebSocketDisconnect here, which would stop this
+            # being the code a Starlette user would actually write -- and being that
+            # is the whole point of a comparison app.
             pass
 
     import asyncio as _bg_asyncio

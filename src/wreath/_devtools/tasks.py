@@ -3,19 +3,20 @@
 `uv sync` reconciles the venv to exactly the groups it was given and **removes
 everything else**. That is the right default for a reproducible install and the
 wrong one for switching between jobs: `uv sync --group benchmark` silently
-uninstalls mkdocs, then `uv run --group docs mkdocs` uninstalls sanic, and each
-tool works only until the next one runs. Every command here has been on the
-losing side of that at least once.
+uninstalls the dev toolchain, the next `uv sync --group dev` uninstalls sanic,
+and each tool works only until the next one runs. Every command here has been on
+the losing side of that at least once.
 
 So each task ensures its own group with `uv sync --inexact`, which adds without
 removing, and then runs the tool:
 
-    uv run wreath-docs                 # build the docs, strictly
-    uv run wreath-docs --serve         # ... and watch them
+    uv run wreath-docs                 # build the docs, strictly (no group needed)
+    uv run wreath-docs --serve         # ... and preview, rebuilding on change
     uv run wreath-bench --framework wreath starlette
     uv run wreath-check                # ruff, ty, pytest, native lints, baseline
 
-`--inexact` is the whole point: `wreath-docs` must not cost you `wreath-bench`.
+`--inexact` is the whole point: `wreath-bench` must not cost you `wreath-check`.
+`wreath-docs` needs no group at all -- wreath's own generator builds the site.
 
 Nothing here pins or resolves anything itself -- `uv.lock` remains the only
 source of versions. These just make sure the group is present before use.
@@ -60,21 +61,25 @@ def _run(command: list[str], *, cwd: Path | None = None) -> int:
 
 
 def docs(argv: list[str] | None = None) -> int:
-    """Build the documentation, strictly. `--serve` watches instead."""
+    """Build the documentation, strictly. `--serve` previews and watches instead.
+
+    There is no docs dependency group to install any more: wreath's own
+    generator builds the site, so the toolchain is the framework.
+    """
     parser = argparse.ArgumentParser(
         prog="wreath-docs", description="Build (or serve) the documentation."
     )
     parser.add_argument(
-        "--serve", action="store_true", help="serve with live reload instead of building"
+        "--serve", action="store_true", help="preview and rebuild on change"
     )
-    parser.add_argument("rest", nargs=argparse.REMAINDER, help="passed to mkdocs")
+    parser.add_argument("rest", nargs=argparse.REMAINDER, help="passed to `wreath docs`")
     args = parser.parse_args(argv)
 
-    ensure_groups("docs")
     if args.serve:
-        return _run([sys.executable, "-m", "mkdocs", "serve", *args.rest])
-    # --strict, always: a warning that is not an error is a warning nobody reads.
-    return _run([sys.executable, "-m", "mkdocs", "build", "--strict", *args.rest])
+        return _run([sys.executable, "-m", "wreath", "docs", "serve", *args.rest])
+    # `check` is the strict build: a warning that is not an error is a warning
+    # nobody reads, so an orphan page or a dead link fails here.
+    return _run([sys.executable, "-m", "wreath", "docs", "check", *args.rest])
 
 
 #: PostgreSQL image and container used by the DB battery. Matches the durability
@@ -395,15 +400,14 @@ def check(argv: list[str] | None = None) -> int:
         prog="wreath-check", description="Run lint, types, tests, native lints, baseline."
     )
     parser.add_argument(
-        "--docs", action="store_true", help="also build the docs (installs the docs group)"
+        "--docs", action="store_true", help="also build the docs, strictly"
     )
     args = parser.parse_args(argv)
 
     ensure_groups("dev")
     checks = list(_CHECKS)
     if args.docs:
-        ensure_groups("docs")
-        checks.append(("docs", [sys.executable, "-m", "mkdocs", "build", "--strict"]))
+        checks.append(("docs", [sys.executable, "-m", "wreath", "docs", "check"]))
 
     failed: list[str] = []
     for name, command in checks:

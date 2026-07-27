@@ -22,7 +22,7 @@ class Widget(Model, table="widgets"):
 Every column names its PostgreSQL type explicitly — nothing is inferred from
 the annotation — and columns are `NOT NULL` unless you pass `nullable=True`.
 
-### Money and anything else that must be exact
+## Money and anything else that must be exact
 
 Use `Numeric` for a value where rounding is wrong rather than merely imprecise,
 and hand it a `Decimal`:
@@ -235,8 +235,53 @@ class Membership(Model, table="memberships"):
 A composite primary key needs no separate declaration — mark each part
 `primary_key=True`. The [migration engine](migrations.md) reads all of these,
 names the underlying constraints and indexes deterministically, and can both
-apply and downgrade them; expression, partial, covering, and non-btree indexes
-are not modelled yet.
+apply and downgrade them; expression, covering, and non-btree indexes are not
+modelled yet.
+
+### Partial indexes
+
+`where=` makes an index partial — it covers only the rows the predicate matches,
+which is how a queue keeps its claim index small and how a nullable column gets a
+unique constraint that ignores the nulls:
+
+```python
+from wreath.orm import Mapped, Model, column, index
+from wreath.orm.table import eq, is_not_null, one_of, all_of
+from wreath.orm.types import Int64, Text
+
+class Job(Model, table="jobs"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    queue: Mapped[str] = column(Text)
+    state: Mapped[str] = column(Text)
+    dedup_key: Mapped[str] = column(Text, nullable=True)
+
+    _claim = index("queue", where=eq("state", "ready"))
+    _dedup = index("queue", "dedup_key", unique=True, where=is_not_null("dedup_key"))
+```
+
+Predicates name their column by string, for the same reason `index()` and
+`unique()` do: a model cannot refer to its own attributes from inside its own
+class body, so the query language (`Job.state == "ready"`) is not available here.
+
+The vocabulary is `eq`, `is_null`, `is_not_null`, `one_of`, and `all_of` to join
+them with `AND`. It is deliberately small. PostgreSQL does not store a predicate
+as you wrote it — it parses it and deparses it back to a canonical form, so
+`status = 'ready'` becomes `(status = 'ready'::text)` and `IN ('a','b')` becomes
+`= ANY (ARRAY['a'::text, 'b'::text])`. Wreath emits that canonical form directly,
+and only supports the shapes it can reproduce exactly. Anything else is refused
+when the registry compiles, naming what it was:
+
+| Refused | Why |
+| --- | --- |
+| `one_of("state", ["only"])` | PostgreSQL rewrites a one-element `IN` to `=`, so the catalog would never match the declaration. Use `eq()`. |
+| `one_of` on a non-text column | each `ARRAY` element gets a cast that depends on the column's width. |
+| a column that is not `text`, an integer, or `bool` | `varchar` casts the column, `double precision` casts the literal, `timestamptz` rewrites its format. |
+| a literal of the wrong Python type | `eq("tries", "3")` is a mistake worth catching at startup. |
+
+The reason for that strictness is worth knowing, because it is not fussiness: if
+the declared text and the catalog text disagree by one character, `detect` reports
+drift on an index it created moments ago, on every run, forever — and nothing is
+actually wrong, so nothing ever resolves it.
 
 ## Queries, relationships, and sessions
 

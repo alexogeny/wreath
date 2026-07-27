@@ -28,6 +28,8 @@ from typing import Any
 # relatively: `tests/` is on `sys.path` but is not a package.
 from _pgfidelity import PreparedStatements, check_statement, record
 
+from wreath.postgres import PostgresError
+
 _ROW_COMPARISON = re.compile(r"^\(([\w, ]+)\)\s*(>=|<=|>|<)\s*\(([\s$\d,]+)\)$")
 #: The ORM's compiler qualifies and quotes -- ``"replays"."tries" = $4`` -- while
 #: the keyset emits bare column names. Both are real shapes the driver sends, so
@@ -44,7 +46,31 @@ _LITERAL_COMPARE = re.compile(
 
 
 class SqlUnsupported(AssertionError):
-    """The fake refuses to guess at a statement it was not built to answer."""
+    """The fake refuses to guess at a statement it was not built to answer.
+
+    Deliberately *not* a `PostgresError`: this is the harness saying it cannot
+    model something, which a caller must never mistake for the database saying
+    no. Modelled database rejections get their own types below.
+    """
+
+
+class DuplicateObject(PostgresError):
+    """``42710``, what PostgreSQL raises for an object that is already there.
+
+    Was `SqlUnsupported`, which conflated "the fake does not understand this"
+    with "the database rejected this" -- so a caller narrowing its catch to
+    driver errors, which is correct, stopped seeing the ordinary re-verify case.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, sqlstate="42710")
+
+
+class UndefinedObject(PostgresError):
+    """``42704``, for an object the statement names and the database does not have."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, sqlstate="42704")
 
 
 # --- predicate evaluation ----------------------------------------------------
@@ -555,14 +581,23 @@ _ADD_CONSTRAINT = re.compile(
 _VALIDATE = re.compile(r"^ALTER TABLE (?P<table>\S+) VALIDATE CONSTRAINT (?P<name>\w+)$")
 
 
-class CheckViolation(Exception):
-    """What PostgreSQL raises when ``VALIDATE CONSTRAINT`` finds an offending row."""
+class CheckViolation(PostgresError):
+    """What PostgreSQL raises when ``VALIDATE CONSTRAINT`` finds an offending row.
 
-    sqlstate = "23514"
+    Inherits `PostgresError` because the real one does. It carried a `sqlstate`
+    but not the base class, so a caller narrowing its catch to driver errors --
+    which is the correct narrowing -- would not have caught it. A double whose
+    exception hierarchy differs from the driver's tests a different program.
+
+    `sqlstate` is passed through `super().__init__` rather than declared as a
+    class attribute: `PostgresError.__init__` assigns `self.sqlstate` on every
+    instance, so a class-level default is silently shadowed by `None`.
+    """
 
     def __init__(self, name: str, row: Any) -> None:
         super().__init__(
-            f'check constraint "{name}" is violated by some row: {row!r}'
+            f'check constraint "{name}" is violated by some row: {row!r}',
+            sqlstate="23514",
         )
 
 
@@ -577,7 +612,7 @@ def _alter(world: World, text: str) -> str:
     if match is not None:
         name = match.group("name")
         if name in world.constraints:
-            raise SqlUnsupported(f'constraint "{name}" already exists')
+            raise DuplicateObject(f'constraint "{name}" already exists')
         world.constraints[name] = match.group("check")
         return "ALTER TABLE"
     match = _VALIDATE.match(text)
@@ -586,7 +621,7 @@ def _alter(world: World, text: str) -> str:
     name = match.group("name")
     check = world.constraints.get(name)
     if check is None:
-        raise SqlUnsupported(f'constraint "{name}" does not exist')
+        raise UndefinedObject(f'constraint "{name}" does not exist')
     for row in world.rows:
         if not evaluate(check, row, ()):
             raise CheckViolation(name, row)

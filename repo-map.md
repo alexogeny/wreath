@@ -13,7 +13,7 @@ A quick routing guide for Wreath contributors and coding agents. Start with `AGE
 | `tools/` | Native checks and sanitizer build helpers. |
 | `setup.py` | Optional C-extension build definitions and feature detection. |
 | `pyproject.toml` | Package metadata, dependency groups, test markers, lint/type configuration, and CLI entry points. |
-| `mkdocs.yml` | Documentation site structure and configuration. |
+| `wreath_docs.py` | Documentation site structure and theme, built by `wreath docs`. |
 | `README.md` | Public project overview and quick start. |
 | `AGENTS.md` | Repository-wide engineering, testing, documentation, and benchmark rules. |
 | `CLAUDE.md` | Pointer file so a coding agent loads those rules without being told to. |

@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from typing import Any
 
-from .jwt import JwtKey, key_from_jwk
+from .jwt import JwtError, JwtKey, key_from_jwk
 
 __all__ = ["JwksCache"]
 
@@ -35,6 +36,7 @@ class JwksCache:
     __slots__ = (
         "duplicate_kids",
         "fetch_errors",
+        "malformed_keys",
         "_client",
         "_expires_at",
         "_jwks_path",
@@ -65,6 +67,10 @@ class JwksCache:
         self.fetch_errors = 0
         #: JWKs skipped for reusing a `kid` already seen in the same document.
         self.duplicate_kids = 0
+        #: JWKs skipped for not being an object, or for failing to parse. A
+        #: provider that starts serving junk shows up here rather than as keys
+        #: that quietly stopped resolving.
+        self.malformed_keys = 0
 
     def _now(self) -> float:
         return asyncio.get_running_loop().time()
@@ -129,12 +135,25 @@ class JwksCache:
             return
         keys: dict[str, JwtKey] = {}
         for index, jwk in enumerate(document.get("keys", ())):
+            if not isinstance(jwk, Mapping):
+                # `keys` is meant to hold objects. A string or number in there
+                # used to reach `.get` and raise out of the whole refresh --
+                # one junk entry discarded every valid key after it, because the
+                # guard below started one line too late.
+                self.malformed_keys += 1
+                continue
             use = jwk.get("use")
             if use not in (None, "sig"):
                 continue  # encryption keys are not signing keys
             try:
                 key = key_from_jwk(jwk)
-            except Exception:  # noqa: BLE001 - skip a single malformed JWK
+            except (JwtError, KeyError, ValueError, TypeError):
+                # The measured set for a Mapping input: JwtError (and its
+                # UnsupportedAlgorithm subclass) for a rejected key, KeyError
+                # for a missing member, ValueError for bad base64url, TypeError
+                # for a non-string member. A malformed JWK is skipped; anything
+                # else is a bug in the parser and must not be swallowed here.
+                self.malformed_keys += 1
                 continue
             kid = jwk.get("kid")
             name = kid if isinstance(kid, str) else f"__nokid_{index}"

@@ -85,11 +85,17 @@ def negotiate_version(
     """Resolve the requested version from ``Accept-Version``, else ``default``.
 
     Returns ``default`` when the header is absent or names an unsupported version.
+
+    Reads through :meth:`Request.header`, which is the accessor. ``Request.headers``
+    is the raw ``list[tuple[bytes, bytes]]`` and has no ``.get`` -- this used to
+    call ``request.headers.get(...)`` inside a blanket ``except Exception``, so
+    every real request raised ``AttributeError``, was swallowed, and got
+    ``default`` back. Negotiation never happened; only a dict-shaped test double
+    ever exercised the path. Guarding for the accessor rather than catching is
+    what makes that visible instead of silent.
     """
     allowed = {str(item) for item in supported}
-    header = ""
-    try:
-        header = (request.headers.get("accept-version", "") or "").strip()
-    except Exception:  # a malformed/missing header object just means "no preference"
-        header = ""
+    read = getattr(request, "header", None)
+    raw = read("accept-version", "") if callable(read) else ""
+    header = raw.strip() if isinstance(raw, str) else ""
     return header if header in allowed else str(default)

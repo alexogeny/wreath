@@ -19,6 +19,37 @@ Run them individually while you work:
 | `uv run wreath-map-lint` | The maps you arrived by — that `docs/agents/manifest.json`, `AGENTS.md`, `repo-map.md`, and `docs/llms.txt` still describe this repository. |
 | `uv run wreath-native-lint` | C complexity patterns; its siblings `wreath-native-error-lint`, `wreath-native-gil-lint`, and `wreath-native-memory-lint` cover error-handling, GIL, and memory. `0` means clean. |
 | `uv run wreath-request-trace --check` | The Python↔native boundary — that you didn't add crossings. |
+| `uv run wreath-port-golden` | That `tests/port/golden/` still matches the emitter. `--update` rewrites what drifted. |
+
+## The two reports that are not gates
+
+Neither of these fails a run, and neither is in `wreath-check`. Read them when
+the question comes up.
+
+| Command | What it answers |
+|---|---|
+| `uv run wreath-dup-scan` | Which function bodies share a *structure* — the same body under different names, locals, and literals, which is how copy-paste survives here. Ranked by the lines a collapse would remove. Many of its findings are legitimate near-twins, which is exactly why it is not a gate: as one, it would train everyone to ignore it. |
+| `uv run wreath port <app> --by-rule` | What a codebase needs in bulk, rather than one finding per line in file order. `--rule ID --context 3` then shows that rule's sites with their source. |
+
+## Fixing the map instead of hand-editing it
+
+`uv run wreath-map-lint --fix` applies the repairs that have exactly one right
+answer: for every source already listed, it attaches `tests/test_<module>.py` and
+`tests/<module>/` when they exist on disk and are not listed yet. That is the
+half of the manifest that rots quietly — the module gets mapped when it lands,
+and the test file added a week later does not.
+
+```bash
+uv run wreath-map-lint --fix
+uv run wreath-map-lint --adopt middleware=src/wreath/session_store.py
+```
+
+`--adopt` is for the judgment the tool does not have: you name the subsystem a
+new module belongs to, and it does the bookkeeping (the source, plus that
+module's conventional tests). `MAP002` and `MAP003` are deliberately *not*
+repaired — nothing can derive where a moved file went or which subsystem a new
+module belongs to, and a manifest that lints clean while lying is the exact
+failure this gate exists to prevent.
 
 ## The gate you can pass without running
 

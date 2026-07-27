@@ -3,8 +3,19 @@ name: publish
 # Cut a versioned release when a commit on main bumps the version in
 # pyproject.toml.
 #
-#   1. detect  - Is the pyproject version valid semver, different from the
-#                previous commit's, and greater? Emits `bumped` + `version`.
+#   1. detect  - Is the pyproject version valid semver, greater than the version
+#                at the commit this push STARTED from, and does it have release
+#                notes? Emits `bumped` + `version`.
+#
+#                The baseline is `github.event.before`, not `HEAD~1`. A push
+#                carrying several commits that bumps the version in any but the
+#                last leaves HEAD~1 already holding the new version, so the diff
+#                is empty and no release is cut -- with a green tick, because
+#                "no bump" is a success.
+#
+#                When no release is cut, the reason is written to the run
+#                summary. A skipped `release` job otherwise looks identical to
+#                a broken one.
 #   2. release - (environment: publish) Guard against a duplicate tag, require a
 #                docs/release_notes/<version>.md file, then cut the
 #                `release/vX.Y.Z` branch from the release commit, push the
@@ -43,18 +54,23 @@ jobs:
       bumped: ${{ steps.check.outputs.bumped }}
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
-          fetch-depth: 2 # HEAD and its parent, to diff the version
+          # Full history, not `2`. The baseline is the commit this push STARTED
+          # from (`github.event.before`), which can be many commits back, and a
+          # shallow clone cannot read pyproject.toml out of it.
+          fetch-depth: 0
       - id: check
         env:
-          FORCED: ${{ github.event.inputs.force }}
+          FORCED: ${{ inputs.force }}
+          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          extract() { grep -m1 -E '^version[[:space:]]*=' "$1" \
+          # Reads stdin, so the same helper works on a file and on `git show`.
+          extract() { grep -m1 -E '^version[[:space:]]*=' \
             | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/'; }
 
-          version="$(extract pyproject.toml)"
+          version="$(extract < pyproject.toml)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
           if ! printf '%s' "$version" \
@@ -63,23 +79,50 @@ jobs:
             exit 1
           fi
 
-          prev=""
-          if git cat-file -e 'HEAD~1:pyproject.toml' 2>/dev/null; then
-            prev="$(git show HEAD~1:pyproject.toml \
-              | grep -m1 -E '^version[[:space:]]*=' \
-              | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/' || true)"
+          # The baseline must be where the push started, NOT HEAD~1. A push of
+          # several commits that bumps the version in any but the last leaves
+          # HEAD~1 already carrying the new version, so the diff comes out empty
+          # and the release never happens -- silently, because "no bump" is a
+          # success.
+          #
+          # `before` is all-zeros when the branch is newly created, and absent
+          # entirely on workflow_dispatch. Both fall back to HEAD~1, which is
+          # deliberately the conservative reading: treating "no previous state"
+          # as a bump would cut a release the first time main is ever pushed.
+          zero="0000000000000000000000000000000000000000"
+          base=""
+          if [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "$zero" ] \
+            && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            base="$BEFORE"
+          elif git cat-file -e 'HEAD~1^{commit}' 2>/dev/null; then
+            base="HEAD~1"   # workflow_dispatch carries no `before`
           fi
+          prev=""
+          if [ -n "$base" ]; then
+            prev="$(git show "$base:pyproject.toml" 2>/dev/null | extract || true)"
+          fi
+
+          note() { printf '%s\n' "$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
 
           if [ "${FORCED:-false}" = "true" ]; then
             echo "bumped=true" >> "$GITHUB_OUTPUT"
-            echo "forced release of $version"
+            note "Forced release of **$version** (no version diff required)."
             exit 0
           fi
+
           if [ "$version" = "$prev" ]; then
             echo "bumped=false" >> "$GITHUB_OUTPUT"
-            echo "no version change ($version); nothing to release"
+            # Say so loudly. A skipped `release` under a green tick is
+            # indistinguishable from a broken one without reading the log, and
+            # that ambiguity has already cost one round of investigation.
+            note "### No release cut"
+            note ""
+            note "\`pyproject.toml\` is still at **$version**, unchanged since \`${base:-<none>}\`,"
+            note "so \`release\` and \`pypi\` were skipped. **This is the designed outcome, not a"
+            note "failure.** Bump the version (and add its release notes) to cut a release."
             exit 0
           fi
+
           if [ -n "$prev" ]; then
             greater="$(printf '%s\n%s\n' "$prev" "$version" | sort -V | tail -n1)"
             if [ "$greater" != "$version" ]; then
@@ -87,8 +130,19 @@ jobs:
               exit 1
             fi
           fi
+
+          # Checked here as well as in `release`, because `release` sits behind
+          # the `publish` environment: leaving this as the only check means a
+          # missing notes file is reported only after whatever approval that
+          # gate requires, which is the slowest possible moment to learn it.
+          notes="docs/release_notes/$version.md"
+          if [ ! -f "$notes" ]; then
+            echo "::error::missing $notes -- run the release-notes skill before bumping the version"
+            exit 1
+          fi
+
           echo "bumped=true" >> "$GITHUB_OUTPUT"
-          echo "version bump: ${prev:-<none>} -> $version"
+          note "Version bump: **${prev:-<none>} -> $version**. Cutting a release."
 
   release:
     needs: detect
@@ -101,7 +155,7 @@ jobs:
       VERSION: ${{ needs.detect.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history so the tag and branch are complete
 
@@ -146,13 +200,16 @@ jobs:
 
   pypi:
     needs: [detect, release]
+    # Explicit, though a skipped `release` would skip this anyway: without it,
+    # adding any future `if:` to `release` silently changes what publishes.
+    if: needs.detect.outputs.bumped == 'true'
     runs-on: ubuntu-latest
     environment: publish
     permissions:
       id-token: write # PyPI Trusted Publishing (OIDC); no stored token needed
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - name: Build sdist

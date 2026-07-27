@@ -16,7 +16,7 @@ from .conftest import FakeTransport, _settle
 _flight = pytest.importorskip("wreath._native._flight")
 try:
     from wreath._native._server import Http2Protocol
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover -- the native h2 build is optional
     Http2Protocol = None
 
 pytestmark = pytest.mark.skipif(Http2Protocol is None, reason="native h2 not built")

@@ -999,7 +999,7 @@ class Wreath:
                     continue
                 try:
                     candidate = before(request) if is_sync else await before(request)
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 -- see _handle_exception
                     # `index`, not `index + 1`: this hook's `before` did not
                     # complete, so pairing it with its own `after` would run
                     # cleanup against preconditions that were never
@@ -1238,7 +1238,7 @@ class Wreath:
                     flight_phase(
                         _PH_AUTH, 0, _COV_PYTHON, _monotonic_ns() - auth_start
                     )
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 -- see _handle_exception
                 response = await self._handle_exception(request, error)
                 await self._finish_http(
                     request, response, send, method, scope, native_response, active_global
@@ -1280,7 +1280,7 @@ class Wreath:
                 flight_phase(
                     _PH_SERIALIZE, 0, _COV_PYTHON, _monotonic_ns() - serialize_start
                 )
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 -- see _handle_exception
             response = await self._handle_exception(request, error)
 
         # Forensic response-side capture: the response now exists (handler result,
@@ -1313,7 +1313,7 @@ class Wreath:
             if after is not None:
                 try:
                     response = _coerce_response(await after(request, response))
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 -- see _handle_exception
                     response = await self._handle_exception(request, error)
 
         extensions = None if native_response else scope.get("extensions")
@@ -1404,6 +1404,24 @@ class Wreath:
     async def _handle_exception(
         self, request: Request, error: Exception
     ) -> Response | StreamingResponse | FileResponse | PreparedResponse:
+        """Turn an exception into a response. The dispatch error boundary.
+
+        Every ``except Exception`` in dispatch funnels here, and each is waived
+        against BLE001 pointing at this docstring. The breadth is the contract,
+        not an oversight: the code being guarded is *the caller's* -- middleware
+        hooks, the route handler, the auth backend, exception handlers themselves
+        -- so there is no set of types to name, and an ASGI application that
+        raises must still produce a response rather than drop the connection.
+
+        Nothing is swallowed. The error becomes a registered handler's response,
+        a problem+json for ``HTTPException``/``ValidationError``, or a 500 -- and
+        in ``debug`` the type and message go in the body. It is visible to the
+        client on every path.
+
+        `BaseException` is deliberately not caught anywhere in dispatch, so
+        `CancelledError` still unwinds a request that is being torn down and
+        `KeyboardInterrupt`/`SystemExit` still end the process.
+        """
         # Guarded: most applications register no exception handlers at all, and
         # the walk was paying one dict lookup per class in the MRO to find that
         # out on every error response.
@@ -1771,7 +1789,7 @@ class Wreath:
         for hook in self._stage_hooks.get(stage, ()):
             try:
                 candidate = await hook(request)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 -- see _handle_exception
                 return await self._handle_exception(request, error)
             if candidate is not None:
                 return _coerce_response(candidate)

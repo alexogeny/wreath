@@ -238,6 +238,11 @@ def cached(
             try:
                 result = await handler(request, *args, **kwargs)
             except BaseException as error:
+                # Deliberately `BaseException`, and deliberately re-raised:
+                # nothing is swallowed here. Waiters are parked on this future,
+                # so whatever ends the handler has to reach them -- including
+                # `CancelledError`, which is the one that would otherwise leave
+                # them awaiting a future that never resolves.
                 future.set_exception(error)
                 # Consumed here so a future nobody awaits does not log
                 # "exception was never retrieved"; every waiter still sees it.

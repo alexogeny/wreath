@@ -184,6 +184,11 @@ class MessageBus:
         #: running the handler. Non-zero means messages are being redelivered on
         #: lease expiry rather than completing.
         self.delivery_errors = 0
+        #: Failed reclaims of expired leases. Counted for the same reason
+        #: `wreath.jobs.JobRunner.sweep_errors` is: a sweeper that keeps failing
+        #: leaves messages in `leased` forever with nothing to read, and the
+        #: degradation is invisible unless it is countable.
+        self.sweep_errors = 0
 
     @property
     def name(self) -> str:
@@ -226,6 +231,7 @@ class MessageBus:
             "doorbell_reconnects": self.doorbell_reconnects,
             "handler_errors": self.handler_errors,
             "delivery_errors": self.delivery_errors,
+            "sweep_errors": self.sweep_errors,
         }
 
     def known_groups(self, channel: str) -> frozenset[str]:
@@ -664,8 +670,10 @@ class MessageBus:
         await self._deregister_groups()
         loop = asyncio.get_running_loop()
         while self._inflight and loop.time() < deadline:
-            with contextlib.suppress(Exception):
-                await asyncio.wait(tuple(self._inflight), timeout=max(0.0, deadline - loop.time()))
+            # No catch, as in `wreath.jobs.JobRunner.drain`: `asyncio.wait` does
+            # not raise for a task that failed, and its one documented raise --
+            # an empty set -- cannot happen under the `while` above.
+            await asyncio.wait(tuple(self._inflight), timeout=max(0.0, deadline - loop.time()))
         await self._doorbell.release()
 
     # -- loops ---------------------------------------------------------------
@@ -742,7 +750,10 @@ class MessageBus:
             wake.clear()
             try:
                 claimed = await self._claim(sub)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 - a transient claim failure parks and retries
+                # Broad because a claim is a database round trip and every way
+                # it can fail has the same answer: park, then try again. Ending
+                # the consumer instead would take the group down until a deploy.
                 await self._park(wake)
                 continue
             if claimed is None:
@@ -770,7 +781,11 @@ class MessageBus:
             await future
         except asyncio.CancelledError:
             raise
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:  # noqa: BLE001 - handler failures drive retry/dead-letter
+            # The subscriber's own code. Any exception is a failed delivery and
+            # feeds the retry/dead-letter machinery, which is where a durable
+            # handler's failure is supposed to land -- narrowing here would let
+            # an unexpected type kill the consumer instead of the message.
             errored = repr(error)
             message._disposition = _RETRY
         finally:
@@ -845,10 +860,18 @@ class MessageBus:
         )
 
     async def _sweeper(self, sub: _Subscription) -> None:
+        # Deliberately the same shape as `wreath.jobs.JobRunner._sweeper`: the
+        # two loops do the same job one subsystem apart, and this one used to
+        # swallow silently while that one counted. A reclaim that keeps failing
+        # leaves messages `leased` forever with nothing to read.
         stopping = self._supervisor.stopping
         while not stopping.is_set():
-            with contextlib.suppress(Exception):
+            try:
                 await self._reclaim_expired(sub)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a transient error must not end the loop
+                self.sweep_errors += 1
             await _sleep_or_stop(stopping, self._lease)
 
     async def _reclaim_expired(self, sub: _Subscription) -> None:

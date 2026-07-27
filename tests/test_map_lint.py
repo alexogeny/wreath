@@ -242,3 +242,106 @@ def test_sanitizer_building_an_unknown_extension_is_caught(fake_repo: Path) -> N
     findings = [f for f in map_lint.scan(fake_repo) if f.code == "MAP008"]
     assert len(findings) == 1
     assert "does not define" in findings[0].message
+
+
+# -- `--fix` / `--adopt`: the mechanical repairs -------------------------------
+#
+# `manifest_patch.py`-shaped one-off scripts kept being written to do exactly
+# this by hand, because the lint could report the drift and never repair any of
+# it. What is repaired here is only what has one right answer; the tests below
+# pin that boundary as hard as they pin the repairs.
+
+
+def test_fix_attaches_a_conventional_test_that_was_not_listed(fake_repo: Path) -> None:
+    """The half that rots: the module is mapped, the later test file is not."""
+    manifest = _clean_manifest()
+    manifest["subsystems"][0]["tests"] = []
+    _write_manifest(fake_repo, manifest)
+
+    changes, refusals = map_lint.repair(fake_repo, [])
+
+    assert refusals == []
+    assert changes == ["widgets.tests += tests/test_widgets.py"]
+    written = json.loads((fake_repo / map_lint.MANIFEST).read_text())
+    assert written["subsystems"][0]["tests"] == ["tests/test_widgets.py"]
+
+
+def test_fix_is_idempotent(fake_repo: Path) -> None:
+    before = (fake_repo / map_lint.MANIFEST).read_text()
+
+    changes, refusals = map_lint.repair(fake_repo, [])
+
+    assert (changes, refusals) == ([], [])
+    # Byte-identical: a no-op fix must not reformat the file, or every run of it
+    # shows up as a diff and the tool becomes something you avoid.
+    assert (fake_repo / map_lint.MANIFEST).read_text() == before
+
+
+def test_fix_does_not_invent_a_test_that_is_not_on_disk(fake_repo: Path) -> None:
+    """A guessed-wrong test path is worse than a missing one: it gets believed."""
+    (fake_repo / "src" / "wreath" / "gadgets.py").write_text("")
+    manifest = _clean_manifest()
+    manifest["subsystems"][0]["sources"].append("src/wreath/gadgets.py")
+    _write_manifest(fake_repo, manifest)
+
+    changes, _ = map_lint.repair(fake_repo, [])
+
+    assert changes == []
+
+
+def test_fix_does_not_sweep_up_a_prefix_match(fake_repo: Path) -> None:
+    """`tests/test_widgets_extra.py` is not `widgets`' conventional test path."""
+    (fake_repo / "tests" / "test_widgets_extra.py").write_text("")
+
+    changes, _ = map_lint.repair(fake_repo, [])
+
+    assert changes == []
+
+
+def test_adopt_adds_the_source_and_brings_its_tests(fake_repo: Path) -> None:
+    (fake_repo / "src" / "wreath" / "gadgets.py").write_text("")
+    (fake_repo / "tests" / "test_gadgets.py").write_text("")
+    assert "MAP003" in _codes(map_lint.scan(fake_repo))
+
+    changes, refusals = map_lint.repair(fake_repo, [("widgets", "src/wreath/gadgets.py")])
+
+    assert refusals == []
+    assert changes == [
+        "widgets.sources += src/wreath/gadgets.py",
+        "widgets.tests += tests/test_gadgets.py",
+    ]
+    assert map_lint.scan(fake_repo) == []
+
+
+def test_adopt_refuses_an_unknown_subsystem(fake_repo: Path) -> None:
+    before = (fake_repo / map_lint.MANIFEST).read_text()
+
+    changes, refusals = map_lint.repair(fake_repo, [("ghosts", "src/wreath/widgets.py")])
+
+    assert changes == []
+    assert len(refusals) == 1 and "no subsystem named 'ghosts'" in refusals[0]
+    assert (fake_repo / map_lint.MANIFEST).read_text() == before
+
+
+def test_adopt_refuses_a_path_that_does_not_exist(fake_repo: Path) -> None:
+    """Adopting a missing path would add a MAP002 finding, not remove one."""
+    changes, refusals = map_lint.repair(fake_repo, [("widgets", "src/wreath/gone.py")])
+
+    assert changes == []
+    assert len(refusals) == 1 and "no such path" in refusals[0]
+
+
+def test_repair_never_resolves_a_finding_that_needs_judgment(fake_repo: Path) -> None:
+    """MAP002 and MAP003 are left alone: neither has a derivable answer.
+
+    A repair that guessed at these would produce a manifest that lints clean and
+    lies, which is the exact failure the lint exists to prevent.
+    """
+    (fake_repo / "src" / "wreath" / "gadgets.py").write_text("")   # MAP003
+    manifest = _clean_manifest()
+    manifest["subsystems"][0]["reference"] = ["docs/reference/moved.md"]  # MAP002
+    _write_manifest(fake_repo, manifest)
+
+    map_lint.repair(fake_repo, [])
+
+    assert _codes(map_lint.scan(fake_repo)) == {"MAP002", "MAP003"}

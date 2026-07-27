@@ -846,7 +846,12 @@ class HTTPClient:
         assert create
         try:
             connection = await self._connect()
-        except BaseException:
+        except BaseException:  # noqa: BLE001 -- re-raised; the counter must balance
+            # `_open` was incremented before the connect attempt, so *any* exit
+            # that is not a live connection has to give the slot back -- a
+            # cancelled connect leaks a permit exactly as a refused one does,
+            # and `except Exception` would miss it. The pool would then wedge at
+            # its ceiling with no connections to show for it. Nothing swallowed.
             async with self._condition:
                 self._open -= 1
                 self._condition.notify(1)

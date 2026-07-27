@@ -437,7 +437,13 @@ class Projector:
             return
         try:
             hook(trace)
-        except Exception:  # noqa: BLE001 -- a failing exporter must not stall drain
+        except Exception:  # noqa: BLE001 - user exporter; counted in loss.export_error
+            # `hook` is an application-supplied exporter and may raise anything.
+            # This is a *publish* site: the trace it describes has already
+            # happened, so a failing exporter must not stall the drain that
+            # feeds every other consumer. Counted rather than logged, so a
+            # permanently broken exporter is a rising number rather than
+            # silence -- the `MessageBus` shape.
             self._loss.export_error += 1
 
     # --- snapshots ---------------------------------------------------------

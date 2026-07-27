@@ -16,16 +16,26 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 
-from . import apidoc, charts, markdown, theme
-from .config import Nav, Page, Section, Site
+from . import apidoc, charts, figures, hero, markdown, scripts, theme
+from .config import Page, Section, Site
 
 _TAG = re.compile(r"<[^>]+>")
 _WS = re.compile(r"\s+")
 
 _CSS_PATH = "assets/docs.css"
+_JS_PATH = "assets/docs.js"
 _INTERNAL_MD = re.compile(r'href="([^"#:]+)\.md(#[^"]*)?"')
 _ANCHOR = re.compile(r'href="#([^"]+)"')
 _FM_DESC = re.compile(r"^description:\s*(.+?)\s*$", re.MULTILINE)
+#: Where one indexable section of a page starts. Only h2/h3 — an h4 is a label
+#: inside a section, not a destination somebody searches for.
+_SECTION_SPLIT = re.compile(r'<h([23]) id="([^"]+)"')
+#: How much prose to keep per section. It is both the ranking signal and the
+#: result snippet, so it wants the topic sentence and nothing after it.
+_SECTION_CHARS = 280
+#: The heading a section opens with, and the `#` permalink every heading carries.
+_OWN_HEADING = re.compile(r"^<h[1-6][^>]*>.*?</h[1-6]>", re.DOTALL)
+_PERMALINK = re.compile(r'<a class="anchor".*?</a>', re.DOTALL)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,43 +59,91 @@ def _relative(from_output: str, to_output: str) -> str:
     return posixpath.relpath(to_output, start=posixpath.dirname(from_output)) or "."
 
 
-def _render_nav(nav: Nav, current: str) -> str:
-    parts: list[str] = []
-    _render_nav_items(nav.items, current, parts)
-    return "".join(parts)
+def _first_page(item: Page | Section) -> Page | None:
+    """The page a nav entry lands on when it is clicked as a whole."""
+    if isinstance(item, Page):
+        return item
+    for child in item.items:
+        found = _first_page(child)
+        if found is not None:
+            return found
+    return None
 
 
-def _section_has(item: Page | Section, current: str) -> bool:
+def _holds(item: Page | Section, current: str) -> bool:
     """Does this nav subtree contain the page currently being rendered?"""
     if isinstance(item, Page):
         return _output_path(item.source) == current
-    return any(_section_has(child, current) for child in item.items)
+    return any(_holds(child, current) for child in item.items)
 
 
-def _render_nav_items(items, current: str, parts: list[str]) -> None:
+def _render_items(
+    items: tuple[Page | Section, ...], current: str, depth: int,
+) -> tuple[str, bool]:
+    """One nav level as HTML, plus whether it holds the current page.
+
+    The `on-path` flag is what draws the thread: every level between the root of
+    the sidebar and the page you are on lights its rail, so "you are here"
+    carries its ancestry instead of being an isolated highlight.
+    """
+    parts: list[str] = []
+    on_path = False
     for item in items:
         if isinstance(item, Page):
             target = _output_path(item.source)
-            href = _relative(current, target)
-            active = ' class="active"' if target == current else ""
-            parts.append(f'<a href="{_esc(href)}"{active}>{_esc(item.title)}</a>')
-        elif isinstance(item, Section):
-            # A collapsible group; auto-open the branch holding the current page.
-            open_attr = " open" if _section_has(item, current) else ""
-            parts.append(f'<details class="section"{open_attr}>'
-                         f'<summary>{_esc(item.title)}</summary>')
-            _render_nav_items(item.items, current, parts)
-            parts.append("</details>")
+            active = target == current
+            on_path = on_path or active
+            css = "nav-page active" if active else "nav-page"
+            aria = ' aria-current="page"' if active else ""
+            parts.append(f'<a class="{css}" href="{_esc(_relative(current, target))}"{aria}>'
+                         f"{_esc(item.title)}</a>")
+        else:
+            inner, inner_path = _render_items(item.items, current, depth + 1)
+            on_path = on_path or inner_path
+            parts.append(
+                f'<details class="sec sec-{depth}{" on-path" if inner_path else ""}"'
+                f'{" open" if inner_path else ""}>'
+                f"<summary>{_esc(item.title)}</summary>{inner}</details>")
+    # The root level draws no rail, so marking it would be a class that styles
+    # nothing and reads, wrongly, as "the thread starts here".
+    css = f"lvl lvl-{depth}{' on-path' if on_path and depth else ''}"
+    return f'<div class="{css}">{"".join(parts)}</div>', on_path
+
+
+def _nav_context(site: Site, current: str) -> tuple[str, str]:
+    """The header tabs and the sidebar tree for one page.
+
+    With tabs on, the top level of the nav moves into the header and the sidebar
+    shows only the section you are inside. A 129-page tree in one scroller is a
+    list; split at the top level it is a structure you can hold in your head.
+    """
+    if not site.use_tabs():
+        side, _ = _render_items(site.nav.items, current, 0)
+        return "", side
+
+    tabs: list[str] = []
+    side = ""
+    for item in site.nav.items:
+        landing = _first_page(item)
+        if landing is None:
+            continue
+        active = _holds(item, current)
+        href = _relative(current, _output_path(landing.source))
+        tabs.append(f'<a href="{_esc(href)}"{" class=\"active\"" if active else ""}'
+                    f'{" aria-current=\"true\"" if active else ""}>{_esc(item.title)}</a>')
+        if active and isinstance(item, Section):
+            side, _ = _render_items(item.items, current, 0)
+    return "".join(tabs), side
 
 
 def _render_toc(entries) -> str:
-    shown = [e for e in entries if 2 <= e.level <= 3]
+    shown = [entry for entry in entries if 2 <= entry.level <= 3]
     if not shown:
         return ""
     rows = "".join(
-        f'<a href="#{_esc(e.slug)}" style="padding-left:{(e.level - 2) * 0.8}rem">'
-        f"{_esc(e.text)}</a>" for e in shown)
-    return f"<strong>On this page</strong>{rows}"
+        f'<a href="#{_esc(entry.slug)}"{" class=\"sub\"" if entry.level == 3 else ""}>'
+        f"{_esc(entry.text)}</a>" for entry in shown)
+    return f'<div class="toc-rail">{rows}</div>'
 
 
 @dataclass(slots=True)
@@ -131,12 +189,21 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
         description = _frontmatter_description(text) or site.description
         # ```chart -> SVG; note any data files read so we can publish them.
         text, chart_tokens = charts.extract(text, source_dir, chart_sources)
+        text, figure_tokens = figures.extract(text)
+        text, hero_tokens = hero.extract(text)
         if apidoc.has_directives(text):
-            text = apidoc.expand(text)
+            # Strict builds fail on a directive that could not be rendered; a
+            # non-strict preview keeps the inline note and carries on.
+            text = apidoc.expand(
+                text, page.source, errors if site.strict else warnings
+            )
         rendered = markdown.render(text)
-        html = charts.restore(rendered.html, chart_tokens)
+        html = hero.restore(
+            figures.restore(charts.restore(rendered.html, chart_tokens), figure_tokens),
+            hero_tokens)
         rendered_pages.append(_RenderedPage(
-            page, _output_path(page.source), rendered.title or page.title,
+            page, _output_path(page.source),
+            rendered.title or hero.title_of(hero_tokens) or page.title,
             html, rendered.toc, frozenset(e.slug for e in rendered.toc), description))
 
     slugs_by_page = {rp.out_rel: rp.slugs for rp in rendered_pages}
@@ -148,37 +215,44 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
 
     # Phase 3 — write each page with prev/next from nav order.
     output_dir.mkdir(parents=True, exist_ok=True)
-    _write_css(output_dir / _CSS_PATH, site)
-    index: list[dict] = []
+    _write_asset(output_dir / _CSS_PATH, theme.stylesheet(site.palette, site.feel))
+    _write_asset(output_dir / _JS_PATH, scripts.runtime())
+    index_pages: list[dict] = []
+    index_sections: list[dict] = []
     for pos, rp in enumerate(rendered_pages):
         prev = rendered_pages[pos - 1] if pos > 0 else None
         nxt = rendered_pages[pos + 1] if pos + 1 < len(rendered_pages) else None
+        tabs_html, nav_html = _nav_context(site, rp.out_rel)
+        content = _rewrite_md_links(rp.html)
         html = theme.page(
             site_name=site.name,
             page_title=rp.title,
-            content=_rewrite_md_links(rp.html),
-            nav_html=_render_nav(site.nav, rp.out_rel),
+            content=content,
+            nav_html=nav_html,
+            tabs_html=tabs_html,
             toc_html=_render_toc(rp.toc),
             css_href=_relative(rp.out_rel, _CSS_PATH),
+            js_href=_relative(rp.out_rel, _JS_PATH),
             palette=site.palette,
             feel=site.feel,
             search_root="../" * rp.out_rel.count("/"),
             description=rp.description,
-            footer=_footer(rp.out_rel, prev, nxt),
+            footer=_footer(rp.out_rel, prev, nxt, site),
             home_href=_relative(rp.out_rel, "index.html"),
+            canonical=f"{site.base_url.rstrip('/')}/{rp.out_rel}" if site.base_url else "",
         )
         out_file = output_dir / rp.out_rel
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text(html, encoding="utf-8")
-        index.append({
-            "u": rp.out_rel, "t": rp.title,
-            "h": [{"t": e.text, "s": e.slug} for e in rp.toc if e.level <= 3],
-            "b": _WS.sub(" ", _TAG.sub(" ", rp.html)).strip()[:1500],
-        })
+        page_id = len(index_pages)
+        index_pages.append({"u": rp.out_rel, "t": rp.title})
+        for anchor, heading, body in _sections(content, rp.toc, rp.title):
+            index_sections.append({"p": page_id, "a": anchor, "h": heading, "x": body})
 
     # Phase 4 — site-level artifacts.
     (output_dir / "assets" / "search-index.json").write_text(
-        json.dumps(index, separators=(",", ":")), encoding="utf-8")
+        json.dumps({"p": index_pages, "s": index_sections}, separators=(",", ":")),
+        encoding="utf-8")
     _write_llms_txt(output_dir, site, rendered_pages)
     _write_robots(output_dir, site)
     _write_404(output_dir, site)
@@ -187,6 +261,41 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
         _write_sitemap(output_dir, site, rendered_pages)
 
     return BuildReport(len(rendered_pages), str(output_dir), tuple(errors), tuple(warnings))
+
+
+def _sections(html: str, toc, title: str) -> list[tuple[str, str, str]]:
+    """Split a rendered page into ``(anchor, heading, text)`` search records.
+
+    One record per h2/h3 rather than one blob per page. It costs a little more
+    JSON and buys three things a page-level index cannot: a result that lands on
+    the *section* you wanted, a heading match that can outrank a body match, and
+    a snippet drawn from near the term instead of from the top of the page.
+    """
+    headings = {entry.slug: entry.text for entry in toc}
+    out: list[tuple[str, str, str]] = []
+    cursor = 0
+    anchor, heading = "", title
+    for match in _SECTION_SPLIT.finditer(html):
+        body = _plain(html[cursor:match.start()])
+        if body or not out:
+            out.append((anchor, heading, body))
+        anchor = match.group(2)
+        heading = headings.get(anchor, anchor)
+        cursor = match.start()
+    out.append((anchor, heading, _plain(html[cursor:])))
+    return out
+
+
+def _plain(html: str) -> str:
+    """Section HTML as the prose a reader would see.
+
+    The section's own heading comes off the front and the permalink glyphs come
+    out throughout: the record already carries the heading in its own field, so
+    leaving it in the body double-counted it when scoring and put "Routing # "
+    at the head of every snippet.
+    """
+    html = _OWN_HEADING.sub("", html.lstrip())
+    return _WS.sub(" ", _TAG.sub(" ", _PERMALINK.sub("", html))).strip()[:_SECTION_CHARS]
 
 
 def _write_robots(output_dir: Path, site: Site) -> None:
@@ -199,21 +308,34 @@ def _write_robots(output_dir: Path, site: Site) -> None:
 def _write_404(output_dir: Path, site: Site) -> None:
     body = markdown.render(
         "# Page not found\n\nThe page you were looking for doesn't exist. "
-        "Head back to the [home page](index.html).\n")
+        "Head back to the [home page](index.html) or press "
+        "`Ctrl K` to search the docs.\n")
+    tabs_html, nav_html = _nav_context(site, "404.html")
     html = theme.page(
         site_name=site.name, page_title="Page not found",
-        content=_rewrite_md_links(body.html), nav_html=_render_nav(site.nav, "404.html"),
-        toc_html="", css_href=_relative("404.html", _CSS_PATH), palette=site.palette,
+        content=_rewrite_md_links(body.html), nav_html=nav_html, tabs_html=tabs_html,
+        toc_html="", css_href=_relative("404.html", _CSS_PATH),
+        js_href=_relative("404.html", _JS_PATH), palette=site.palette,
         feel=site.feel, search_root="", description="", footer="")
     (output_dir / "404.html").write_text(html, encoding="utf-8")
 
 
-def _footer(current: str, prev: _RenderedPage | None, nxt: _RenderedPage | None) -> str:
+def _footer(
+    current: str, prev: _RenderedPage | None, nxt: _RenderedPage | None, site: Site,
+) -> str:
+    """Prev/next through nav order, and the page's own source when it has one."""
     left = (f'<a class="nav-prev" href="{_esc(_relative(current, prev.out_rel))}">'
-            f"← {_esc(prev.title)}</a>" if prev else "<span></span>")
+            f'<span class="dir">&larr; Previous</span>'
+            f'<span class="title">{_esc(prev.title)}</span></a>' if prev else "<span></span>")
     right = (f'<a class="nav-next" href="{_esc(_relative(current, nxt.out_rel))}">'
-             f"{_esc(nxt.title)} →</a>" if nxt else "<span></span>")
-    return f'<nav class="page-nav">{left}{right}</nav>'
+             f'<span class="dir">Next &rarr;</span>'
+             f'<span class="title">{_esc(nxt.title)}</span></a>' if nxt else "<span></span>")
+    meta = ""
+    if site.source_url:
+        source = current[:-5] + ".md"
+        meta = (f'<div class="page-meta"><a href="'
+                f'{_esc(site.source_url.rstrip("/"))}/{_esc(source)}">Edit this page</a></div>')
+    return f'<nav class="page-nav">{left}{right}</nav>{meta}'
 
 
 def _frontmatter_description(text: str) -> str:
@@ -273,9 +395,9 @@ def _check_page(
             sink.append(f"{current}: broken anchor #{name}")
 
 
-def _write_css(path: Path, site: Site) -> None:
+def _write_asset(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(theme.stylesheet(site.palette, site.feel), encoding="utf-8")
+    path.write_text(text, encoding="utf-8")
 
 
 def _copy_chart_sources(sources: set[Path], source_root: Path, output_dir: Path) -> None:

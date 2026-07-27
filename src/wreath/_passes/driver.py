@@ -40,7 +40,6 @@ step.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import datetime
 import uuid
 from dataclasses import dataclass
@@ -532,22 +531,26 @@ async def _attempt(
     predicate = walk.units.reproduce(
         table=walk.table, cursor_from=cursor_from, cursor_to=cursor_to
     )
-    with contextlib.suppress(Exception):
-        await ledger.record_hole(
-            connection,
-            cursor_from=None if cursor_from is None else keyset.encode_cursor(keys, cursor_from),
-            cursor_to=keyset.encode_cursor(keys, cursor_to),
-            attempts=attempts,
-            error=last_error,
-            predicate=predicate,
-        )
+    # These three ledger writes are not best-effort bookkeeping: `gate_barred`
+    # is `holes_open > 0`, so the hole *is* the fact the terminal gate reads.
+    # Suppressing a failure here left no hole, an unbarred gate, and a `skip`
+    # that had bought exactly the irreversible step §11.2 says it never can.
+    # Letting it propagate is safe -- the cursor has not moved, and every write
+    # below is idempotent, so the runner's retry re-runs them cleanly.
+    await ledger.record_hole(
+        connection,
+        cursor_from=None if cursor_from is None else keyset.encode_cursor(keys, cursor_from),
+        cursor_to=keyset.encode_cursor(keys, cursor_to),
+        attempts=attempts,
+        error=last_error,
+        predicate=predicate,
+    )
     if pending is not None:
         # A requeued unit that still fails goes back to being a hole and stops
         # being pending, or the shift would take it again immediately forever.
-        with contextlib.suppress(Exception):
-            await ledger.drop_pending(
-                connection, cursor_from=pending.get("from"), cursor_to=pending.get("to")
-            )
+        await ledger.drop_pending(
+            connection, cursor_from=pending.get("from"), cursor_to=pending.get("to")
+        )
         return _Outcome(failed=True, error=last_error)
 
     if walk.on_chunk_failure == "skip":
@@ -562,8 +565,7 @@ async def _attempt(
             return _Outcome(lost=True)
         return _Outcome(failed=True, error=last_error)
 
-    with contextlib.suppress(Exception):
-        await ledger.block(connection, error=last_error)
+    await ledger.block(connection, error=last_error)
     return _Outcome(blocked=True, error=last_error)
 
 

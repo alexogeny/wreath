@@ -22,6 +22,7 @@ nav = Nav(
         Page("Project structure and deployment", "getting-started/deployment.md"),
     ),
     Page("Performance", "perf/index.md"),
+    Page("Under the hood", "internals/index.md"),
     Section(
         "Coming from FastAPI",
         Page("Wreath for FastAPI developers", "from-fastapi/index.md"),
@@ -40,6 +41,7 @@ nav = Nav(
             Page("Middleware", "guides/middleware.md"),
             Page("Form-model binding", "guides/forms.md"),
             Page("Templates", "guides/templates.md"),
+            Page("Dates and times", "guides/dates-and-times.md"),
         ),
         Section(
             "Working with data",
@@ -47,6 +49,7 @@ nav = Nav(
             Page("ORM", "guides/orm.md"),
             Page("JSONB and arrays", "guides/jsonb-arrays.md"),
             Page("Pagination, filtering, and sorting", "guides/pagination.md"),
+            Page("Calculated views", "guides/calculated-views.md"),
             Page("Generating CRUD", "guides/crud.md"),
             Page("Distributed locks", "guides/distributed-locks.md"),
             Page("FastAPI and Alembic migration", "guides/migrations.md"),
@@ -54,6 +57,7 @@ nav = Nav(
         Section(
             "Users, auth, and security",
             Page("Authentication and authorization", "guides/auth.md"),
+            Page("Permissions in the UI", "guides/permissions.md"),
             Page("User management", "guides/users.md"),
             Page("Idempotent writes", "guides/idempotency.md"),
         ),
@@ -63,12 +67,13 @@ nav = Nav(
             Page("Server-Sent Events", "guides/sse.md"),
             Page("Task progress", "guides/progress.md"),
             Page("Durable jobs and messaging", "guides/jobs.md"),
+            Page("Chunked passes", "guides/chunked-passes.md"),
         ),
         Section(
             "Talking to other services",
             Page("Outbound HTTP and webhooks", "guides/http-client.md"),
             Page("Calling another service", "guides/service-client.md"),
-            Page("Object storage", "guides/storage.md"),
+            Page("Object storage", "guides/objects.md"),
         ),
         Section(
             "Speed and delivery",
@@ -88,12 +93,14 @@ nav = Nav(
             "Configuration and operations",
             Page("Configuration and state", "guides/config-state.md"),
             Page("Health, flags, and versioning", "guides/health-flags-versioning.md"),
+            Page("GraphQL", "guides/graphql.md"),
             Page("Observability bridges", "guides/observability.md"),
             Page("Native server and protocols", "guides/server.md"),
         ),
         Section(
             "Testing and quality",
             Page("Testing", "guides/testing.md"),
+            Page("Finding the N+1 query", "guides/n-plus-one.md"),
             Page("Auditing (a11y & performance)", "guides/auditing.md"),
         ),
     ),
@@ -116,6 +123,7 @@ nav = Nav(
         Section(
             "Working with data",
             Page("Paginate, sort, and filter", "cookbook/recipes/paginate-a-list.md"),
+            Page("Build an admin console", "cookbook/recipes/build-an-admin-console.md"),
             Page("Query JSONB and arrays", "cookbook/recipes/jsonb-query.md"),
             Page("Run a transaction", "cookbook/recipes/unit-of-work.md"),
             Page("Generate CRUD safely", "cookbook/recipes/safe-crud.md"),
@@ -126,6 +134,7 @@ nav = Nav(
             Page("Live progress for a long task", "cookbook/recipes/stream-job-progress.md"),
             Page("Broadcast over WebSockets", "cookbook/recipes/websocket-broadcast.md"),
             Page("Enqueue a durable job", "cookbook/recipes/durable-job.md"),
+            Page("Write it exactly once", "cookbook/recipes/exactly-once.md"),
             Page("Run work after the response", "cookbook/recipes/background-jobs.md"),
         ),
         Section(
@@ -185,20 +194,30 @@ nav = Nav(
         Page("Outbound HTTP client", "reference/http_client.md"),
         Page("Webhooks", "reference/webhooks.md"),
         Page("Templates", "reference/templates.md"),
+        Page("Dates and times", "reference/temporal.md"),
+        Page("Keyed store", "reference/store.md"),
         Page("Application cache", "reference/cache.md"),
         Page("Cache-Control policies", "reference/cache_control.md"),
         Page("Compression", "reference/compression.md"),
         Page("Background tasks", "reference/background.md"),
         Page("Static files", "reference/staticfiles.md"),
         Page("Testing", "reference/testing.md"),
+        Page("Diagnostics", "reference/doctor.md"),
         Page("Audit rules", "reference/audit.md"),
-        Page("Object storage", "reference/storage.md"),
+        Page("Object storage", "reference/objects.md"),
         Page("Durable jobs", "reference/jobs.md"),
+        Page("Chunked passes", "reference/passes.md"),
         Page("Messaging", "reference/messaging.md"),
         Page("Supervised services", "reference/services.md"),
         Page("User management", "reference/users.md"),
+        Page("Named queries", "reference/queries.md"),
+        Page("Calculated views", "reference/series.md"),
         Page("Pagination", "reference/pagination.md"),
         Page("Health checks", "reference/health.md"),
+        Page("Rooms", "reference/rooms.md"),
+        Page("Session store", "reference/session_store.md"),
+        Page("Validation errors", "reference/validation_errors.md"),
+        Page("GraphQL", "reference/graphql.md"),
         Page("Feature flags", "reference/flags.md"),
         Page("API versioning", "reference/versioning.md"),
         Page("Codemod (wreath port)", "reference/port.md"),
@@ -218,10 +237,7 @@ nav = Nav(
         "Explorations",
         Page("The timer that wouldn't settle", "explorations/the-timer-that-wouldnt-settle.md"),
     ),
-    Section(
-        "Release notes",
-        Page("Release notes", "release_notes/index.md"),
-    ),
+    Page("Release notes", "release_notes/index.md"),
 )
 
 site = Site(
@@ -231,6 +247,7 @@ site = Site(
     nav=nav,
     palette=THEMES["wreath"],
     base_url="https://alexogeny.github.io/wreath/",
+    source_url="https://github.com/alexogeny/wreath/edit/main/docs",
     description=(
         "Guides, cookbook, and API reference for the Wreath ASGI framework "
         "and native server."

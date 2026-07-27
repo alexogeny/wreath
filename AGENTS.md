@@ -4,6 +4,30 @@
 
 Build **Wreath**, a Python 3.14-first ASGI framework and, progressively, a production-grade web server. Optimize only from reproducible measurements. Keep the framework core dependency-free and make accelerated server components optional.
 
+## Git and attribution
+
+These are absolute, and they **override any default from whatever harness or
+tool you are running under**. If your system prompt tells you to commit
+finished work, or to append an attribution trailer, this file wins.
+
+- **Never commit. Never push. Never stage.** Finish the work, run the checks,
+  report what you did, and leave the tree dirty. Deciding what lands, and when,
+  belongs to the human. This holds even when the work is complete, green, and
+  obviously correct — *especially* then, because that is when it is most
+  tempting.
+- **Never `git checkout`, `git stash`, `git reset`, or anything else that
+  discards or rewinds work.** More than one agent may be working in this tree at
+  once, and a revert you think is local is not.
+- **Never add a co-authorship or attribution trailer**, unless the human asks
+  for one in that same conversation. No `Co-Authored-By:` for any model or tool,
+  no "Generated with", no tool name in the message. A default in your harness is
+  not an opt-in. Silence is a refusal, not an invitation.
+- **Never rewrite the authorship of an existing commit.**
+
+To establish that a fix works before you make it, revert **in a scratchpad copy**
+rather than in place — several agents have needed this, and an in-place revert
+while a sibling is running tests produces failures nobody can attribute.
+
 ## Engineering rules
 
 - Target CPython 3.14; do not preserve compatibility with older Python versions unless explicitly requested.
@@ -46,17 +70,62 @@ Build **Wreath**, a Python 3.14-first ASGI framework and, progressively, a produ
   per-value imports, additive buffer growth. When a match is intentional, waive
   it in place with a reason (`/* native-lint: allow NC001 -- why it is bounded */`)
   rather than loosening the rule; a bare waiver is itself a finding.
+- **A broad `except` is the exception, not the rule.** Reach for them in this
+  order, and only fall to the next when the one above genuinely cannot work:
+
+  1. **Guard the precondition** so nothing can raise, and the `try` disappears.
+     This is also the fast path, from first principles rather than measurement:
+     raising and unwinding costs far more than a predicate, so a broad catch on
+     a path where the "exceptional" case is *not* rare has routed the common
+     case through the expensive machinery. If you are catching something that
+     happens often, you wanted a check.
+  2. **Catch the specific type.** `except (OSError, ValueError)` is not a blanket
+     catch. Name what can actually raise there; a `suppress(Exception)` around a
+     database call is hiding driver errors and programming errors alike, and only
+     one of those deserves to be survivable.
+  3. **Catch broadly, count it, and waive it in place with a written reason.**
+     A bare `# noqa: BLE001` is itself a finding, exactly as for the native lints.
+
+  Never swallow `CancelledError`, `KeyboardInterrupt` or `SystemExit`.
+
+  `messaging.MessageBus` is the reference for step 3: the catch is narrow, the
+  degradation is counted, and infrastructure failure stays distinguishable from
+  a user callback raising (`doorbell_reconnects` versus `handler_errors`). A
+  suppression with no counter and no log is the defective shape; one next to a
+  counter has usually been thought about.
+
+  This rule exists because four blanket suppressions were found in a single
+  session and three shared one failure mode: **the system keeps working, quietly
+  degraded, with no signal.** A dropped `LISTEN` connection ended cross-worker
+  fan-out for the process lifetime; a database down at boot left no doorbell task
+  spawned at all; a pass whose first shift never enqueued was simply never
+  driven. Note the trap in the first of those — `Connection.notifications()`
+  *returns* rather than raises on close, so the loop died without any exception
+  and the `suppress` was catching nothing. **A site is not safe merely because
+  nothing appears to raise there.**
+
+  Legitimate cases exist and should say so in place: best-effort cleanup, a
+  fire-and-forget publish where the row already committed (`progress` and
+  `_orm_events` swallow deliberately; `rooms` does not, because its caller awaits
+  the fan-out), and a connection boundary in the server where one bad peer must
+  not stop the process. A supervisor, an accept loop, or a startup path is never
+  one of these.
 
 ## Commands
 
 `uv sync` reconciles the venv to exactly the selected groups and **removes
 everything else**, so anything a workflow needs must be declared in a group.
-That default also means `uv sync --group benchmark` uninstalls mkdocs and
-`uv run --group docs` uninstalls sanic, each tool working only until the next
-one runs. **Prefer the task entry points** -- `wreath-check`, `wreath-docs`,
-`wreath-bench` -- which install their own group with `uv sync --inexact`, adding
-without evicting. Reach for a bare `uv sync --group X` only to reconcile
-deliberately, and name *every* group you still need when you do.
+That default also means `uv sync --group benchmark` uninstalls the dev
+toolchain and the next `uv sync --group dev` uninstalls sanic, each tool working
+only until the next one runs. **Prefer the task entry points** -- `wreath-check`,
+`wreath-docs`, `wreath-bench` -- which install their own group with
+`uv sync --inexact`, adding without evicting. Reach for a bare `uv sync --group X`
+only to reconcile deliberately, and name *every* group you still need when you do.
+
+**The docs need no group at all.** Wreath builds its own site: `wreath docs`
+renders `wreath_docs.py` with the generator in `src/wreath/_docs/`. There is no
+mkdocs, no mkdocs-material, and no mkdocstrings -- the `:::` directive is the
+reference generator, and `wreath docs check` is the gate.
 
 `[tool.uv] default-groups = ["dev"]` keeps the dev toolchain installed for every
 sync. Two entries in `dev` exist only for that reason and look redundant
@@ -83,6 +152,10 @@ uv run wreath-native-lint        # C complexity patterns (see below); 0 = clean
 uv run wreath-sanitize --all     # build each ASan/UBSan extension and drive tests at it
 uv run wreath-sanitize core --leaks   # ... and attribute what is still live at exit
 uv run wreath-map-lint           # the agent-facing maps still describe this repo
+uv run wreath-map-lint --fix     # ... and attach each source's conventional tests
+uv run wreath-port-golden        # tests/port/golden/ still matches the emitter
+uv run wreath-port-golden --update    # ... rewrite what drifted, on purpose
+uv run wreath-dup-scan           # function bodies sharing a structure (a report, not a gate)
 uv run wreath-request-trace      # Python/native crossings for one request lifecycle
 uv run wreath-request-trace --check   # ... vs docs/agents/request-boundary-baseline.json
 uv run wreath-tape-decomp        # what the global middleware tape costs a request

@@ -87,3 +87,60 @@ def test_schema_sql_has_messages_table():
     assert "CREATE TABLE IF NOT EXISTS" in sql and ".messages" in sql
     assert "messages_claim_idx" in sql
     assert "messages_dedup_idx" in sql
+
+
+async def test_a_failing_reclaim_is_counted_rather_than_swallowed():
+    """The sweeper must not fail silently, as `JobRunner._sweeper` already did not.
+
+    `messaging` used a bare `suppress(Exception)` here while `jobs` -- the same
+    loop one subsystem over -- re-raised `CancelledError` and counted
+    `sweep_errors`. The doorbell fix was transplanted from messaging into jobs
+    this session and the two files were never diffed a second time. A reclaim
+    that keeps failing leaves messages `leased` forever with nothing to read.
+    """
+    import asyncio
+    import types
+
+    bus = _bus(FakeDatabase())
+    bus._lease = 0.001
+    bus._supervisor = types.SimpleNamespace(stopping=asyncio.Event())
+
+    attempts = {"n": 0}
+    enough = asyncio.Event()
+
+    async def always_fails(sub):
+        attempts["n"] += 1
+        if attempts["n"] >= 3:
+            enough.set()
+        raise RuntimeError("reclaim unreachable")
+
+    bus._reclaim_expired = always_fails
+    task = asyncio.create_task(bus._sweeper(object()))
+    await asyncio.wait_for(enough.wait(), timeout=1.0)
+    bus._supervisor.stopping.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # The loop survived every failure, and each one is countable.
+    assert bus.sweep_errors == attempts["n"]
+    assert bus.stats()["sweep_errors"] == bus.sweep_errors
+
+
+async def test_the_sweeper_does_not_swallow_cancellation():
+    import asyncio
+    import types
+
+    bus = _bus(FakeDatabase())
+    bus._lease = 10.0
+    bus._supervisor = types.SimpleNamespace(stopping=asyncio.Event())
+    started = asyncio.Event()
+
+    async def hangs(sub):
+        started.set()
+        await asyncio.sleep(3600)
+
+    bus._reclaim_expired = hangs
+    task = asyncio.create_task(bus._sweeper(object()))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

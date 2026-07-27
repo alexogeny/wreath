@@ -69,21 +69,78 @@ def execute(namespace: Any) -> int:
         return 1
     print(f"wreath docs: built {report.pages} page(s) into {report.output}")
     if action == "serve":
-        return _serve(Path(report.output), getattr(namespace, "port", 8000))
+        return _serve(
+            site, root, Path(report.output), getattr(namespace, "port", 8000),
+            reload=not getattr(namespace, "no_reload", False),
+        )
     return 0
 
 
-def _serve(directory: Path, port: int) -> int:
-    """Preview the built site with the standard-library HTTP server."""
+def _sources(site: Site, root: Path, config: Path) -> list[Path]:
+    """Every file a rebuild would read: the markdown tree and the config itself."""
+    return [config, *sorted((root / site.source).rglob("*.md"))]
+
+
+def _stamp(paths: list[Path]) -> tuple:
+    """A cheap signature that changes when any watched file does."""
+    marks = []
+    for path in paths:
+        try:
+            marks.append((path.as_posix(), path.stat().st_mtime_ns))
+        except OSError:
+            continue                     # deleted between listing and stat
+    return tuple(marks)
+
+
+def _serve(site: Site, root: Path, directory: Path, port: int, *, reload: bool) -> int:
+    """Preview the built site, rebuilding when a source file changes.
+
+    Polling rather than inotify: a watcher would be a dependency, and a docs
+    tree is small enough that stat-ing it twice a second costs nothing. The
+    browser is not told to refresh — reloading the tab is one keystroke, and a
+    live-reload socket would mean shipping a server into every built page.
+    """
     import functools
     import http.server
     import socketserver
+    import threading
+    import time
 
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(directory))
-    with socketserver.TCPServer(("127.0.0.1", port), handler) as httpd:
+    handler = functools.partial(
+        http.server.SimpleHTTPRequestHandler, directory=str(directory))
+
+    class _Quiet(socketserver.TCPServer):
+        allow_reuse_address = True       # so a restart is not refused for 60s
+
+    with _Quiet(("127.0.0.1", port), handler) as httpd:
         print(f"wreath docs: serving {directory} at http://127.0.0.1:{port} (ctrl-c to stop)")
+        if not reload:
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                print("\nwreath docs: stopped")
+            return 0
+
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        config = Path(root / "wreath_docs.py")
+        watched = _sources(site, root, config)
+        print(f"wreath docs: watching {len(watched)} source file(s); "
+              "edit and reload the page")
+        stamp = _stamp(watched)
         try:
-            httpd.serve_forever()
+            while True:
+                time.sleep(0.4)
+                watched = _sources(site, root, config)
+                current = _stamp(watched)
+                if current == stamp:
+                    continue
+                stamp = current
+                fresh = build(site, root=root)
+                _report(fresh)
+                print(f"wreath docs: rebuilt {fresh.pages} page(s)")
         except KeyboardInterrupt:
             print("\nwreath docs: stopped")
+        finally:
+            httpd.shutdown()
     return 0

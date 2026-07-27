@@ -255,3 +255,66 @@ def test_app_objects_missing_creds_raises(monkeypatch):
     except ValueError:
         raised = True
     assert raised
+
+
+def test_a_failed_abort_is_counted_not_swallowed():
+    """A multipart upload that can neither complete nor abort leaves orphans.
+
+    `_abort` runs while a more interesting exception is propagating, so it must
+    not raise -- but it used to `pass`, which meant parts already stored in S3
+    stopped belonging to any object and nothing recorded that it had happened.
+    They accrue storage charges until a lifecycle rule reaps them, and the only
+    signal was the bill.
+    """
+    import pytest as _pytest
+
+    from wreath.http_client import ConnectError
+    from wreath.objects import ObjectError
+
+    def handler(method, target, body):
+        if method == "POST" and "uploads" in target:
+            return FakeResp(200, [], b"<x><UploadId>u1</UploadId></x>")
+        if method == "PUT":
+            return FakeResp(200, [(b"etag", b'"p"')])
+        if method == "POST":                    # complete -> fails
+            return FakeResp(500, [], b"nope")
+        if method == "DELETE":                  # abort -> transport is gone too
+            raise ConnectError("connection refused")
+        raise AssertionError(method)
+
+    store, _ = _store(handler, part_size=5 * 1024 * 1024)
+
+    async def chunks():
+        yield b"x" * (5 * 1024 * 1024)
+        yield b"y" * 16
+
+    assert store.orphaned_uploads == 0
+    with _pytest.raises(ObjectError):
+        asyncio.run(store.write_stream("k", chunks()))
+    assert store.orphaned_uploads == 1, "a failed abort must leave a countable trace"
+
+
+def test_a_bug_in_abort_is_not_hidden_behind_a_transport_failure():
+    """Only transport errors are absorbed; a programming error still surfaces."""
+    import pytest as _pytest
+
+    def handler(method, target, body):
+        if method == "POST" and "uploads" in target:
+            return FakeResp(200, [], b"<x><UploadId>u1</UploadId></x>")
+        if method == "PUT":
+            return FakeResp(200, [(b"etag", b'"p"')])
+        if method == "POST":
+            return FakeResp(500, [], b"nope")
+        if method == "DELETE":
+            raise TypeError("bug in _abort")
+        raise AssertionError(method)
+
+    store, _ = _store(handler, part_size=5 * 1024 * 1024)
+
+    async def chunks():
+        yield b"x" * (5 * 1024 * 1024)
+        yield b"y" * 16
+
+    with _pytest.raises(TypeError, match="bug in _abort"):
+        asyncio.run(store.write_stream("k", chunks()))
+    assert store.orphaned_uploads == 0

@@ -1454,7 +1454,7 @@ def _curl_has_http3() -> bool:
         return False
     try:
         out = subprocess.run([curl, "--version"], capture_output=True, text=True, timeout=5)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return False
     return "http3" in out.stdout.lower()
 

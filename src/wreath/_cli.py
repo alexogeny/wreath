@@ -330,7 +330,7 @@ def build_parser() -> argparse.ArgumentParser:
     migration_down.add_argument("--json", action="store_true")
 
     docs_parser = commands.add_parser(
-        "docs", help="build the native static-site generator (wreath's mkdocs replacement)"
+        "docs", help="build a documentation site from markdown (no third-party toolchain)"
     )
     docs_actions = docs_parser.add_subparsers(dest="docs_action", required=True)
     for _action, _help in (
@@ -345,6 +345,10 @@ def build_parser() -> argparse.ArgumentParser:
         )
         if _action == "serve":
             _sub.add_argument("--port", type=int, default=8000, help="preview port")
+            _sub.add_argument(
+                "--no-reload", action="store_true",
+                help="do not watch the source tree and rebuild on change",
+            )
 
     port_parser = commands.add_parser(
         "port", help="port an existing FastAPI app to Wreath (report or emit)"
@@ -356,6 +360,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     port_parser.add_argument("--json", action="store_true", dest="as_json",
                              help="emit the machine-readable report JSON")
+    port_parser.add_argument(
+        "--by-rule", action="store_true",
+        help="cluster the findings needing a decision by rule, heaviest first, "
+             "instead of listing them one per line in file order",
+    )
+    port_parser.add_argument(
+        "--rule", action="append", metavar="ID",
+        help="show only this rule's sites (repeatable, e.g. --rule orm.query.filter)",
+    )
+    port_parser.add_argument(
+        "--context", type=int, default=0, metavar="N",
+        help="show N source lines either side of each site (implies the site view)",
+    )
     port_emit = port_parser.add_mutually_exclusive_group()
     port_emit.add_argument("--in-place", action="store_true",
                            help="rewrite files in place "
@@ -822,7 +839,13 @@ def _spawn_metal_worker(
             reuse_port=True,
         )
         run_server(app, config, tls=tls, loop_factory=loop_factory)
-    except BaseException:  # child must report startup/runtime failure to its supervisor
+    except BaseException:  # noqa: BLE001 -- see below
+        # A forked worker is a process boundary: nothing above this frame can see
+        # an exception, so anything that escapes here becomes a silent exit 0 and
+        # the supervisor reads a healthy worker that is not serving. `BaseException`
+        # rather than `Exception` because that failure mode does not care which
+        # base class ended the child. It is not a swallow -- the traceback goes to
+        # stderr and the non-zero code is the report.
         import traceback
 
         traceback.print_exc()

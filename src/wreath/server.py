@@ -53,7 +53,12 @@ async def _resume_started_coroutine(coroutine: Any, awaited: Any) -> Any:
                 if getattr(awaited, "_asyncio_future_blocking", False):
                     awaited._asyncio_future_blocking = False
                 result = await awaited
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 -- forwarded, never swallowed
+            # This drives a coroutine the native HTTP layer already started, so
+            # it must behave like the event loop it stands in for: *every*
+            # exception goes back into the coroutine via `throw`, including
+            # `CancelledError`. Narrowing to `Exception` would silently strip
+            # cancellation from a request mid-flight.
             try:
                 awaited = coroutine.throw(error)
             except StopIteration as completed:
@@ -773,7 +778,12 @@ class Server:
                     projector=self._projector,
                     arm_registry=self._arm_registry,
                 )
-        except BaseException:
+        except BaseException:  # noqa: BLE001 -- re-raised; cleanup must be total
+            # Broad *and* re-raised. A half-bound server -- listener up, lifespan
+            # not, or an inspector serving against a recorder that never started
+            # -- is worse than a failed start, and a start cancelled partway
+            # leaves exactly that. `except Exception` would miss the cancellation
+            # and leak the sockets. Nothing is swallowed.
             await self._abort_startup()
             raise
 
@@ -838,7 +848,13 @@ class Server:
             self._asyncio_server.close()
             try:
                 await self._asyncio_server.wait_closed()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 -- must not mask the abort's cause
+                # This runs *while unwinding*: every caller re-raises the failure
+                # that brought us here. An exception escaping this cleanup would
+                # replace that cause with a shutdown detail, which is strictly
+                # less useful to whoever reads the traceback. Narrowing is the
+                # wrong trade here -- the broad catch is what preserves the
+                # original error, not what hides one.
                 pass
             self._asyncio_server = None
         if self._datagram_transport is not None:
@@ -1060,7 +1076,13 @@ class _LifespanManager:
         scope = {"type": "lifespan", "asgi": {"version": "3.0", "spec_version": "2.5"}}
         try:
             await self._app(scope, self._receive, self._send)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- routed to the awaiting future
+            # `_main` is a task nobody awaits directly, so an exception escaping
+            # here would surface as an unretrieved-task warning and `startup()`
+            # would hang forever on a future nothing ever resolves. The catch
+            # exists to *move* the failure to the caller, not to hide it: it is
+            # deliberately `Exception`, so a `CancelledError` still propagates
+            # and cancels the task rather than being reported as app failure.
             self._supported = False
             if not self._startup_event.done():
                 self._startup_event.set_exception(exc)
@@ -1072,7 +1094,11 @@ class _LifespanManager:
         await self._receive_queue.put({"type": "lifespan.startup"})
         try:
             await self._startup_event
-        except Exception:
+        except Exception:  # noqa: BLE001 -- conditionally re-raised just below
+            # Not a swallow: the whole body is a decision about whether to
+            # re-raise, and the failing case does. Broad because `_main` puts
+            # whatever the app raised onto this future, and any of it means the
+            # same thing here -- lifespan did not come up.
             # In "auto" mode an app that rejects lifespan may run without it,
             # but a genuine startup *failure* must abort. We can only
             # distinguish "unsupported" (app raised before consuming) via the
@@ -1089,13 +1115,21 @@ class _LifespanManager:
         await self._receive_queue.put({"type": "lifespan.shutdown"})
         try:
             await asyncio.wait_for(self._shutdown_event, timeout=10.0)
-        except Exception:  # noqa: BLE001 - shutdown must not raise
+        except (TimeoutError, RuntimeError):
+            # The only two outcomes this await has besides success: the app never
+            # answered (TimeoutError), or it answered `lifespan.shutdown.failed`,
+            # which `_receive` turns into exactly this RuntimeError. Shutdown
+            # continues either way -- but naming them means a *third* outcome
+            # would now surface instead of being quietly absorbed.
             pass
         if not self._task.done():
             self._task.cancel()
         try:
             await self._task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        except asyncio.CancelledError:
+            # We cancelled it on the line above; reaping our own cancellation is
+            # expected. `_main` already routes an app exception into
+            # `_startup_event`/`_shutdown_event`, so nothing else escapes here.
             pass
 
 

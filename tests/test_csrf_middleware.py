@@ -83,6 +83,43 @@ async def test_valid_unsafe_request_indexes_headers_once() -> None:
     assert unsafe._header_map is not None
 
 
+@pytest.mark.asyncio
+async def test_an_exempt_predicate_that_raises_refuses_and_is_counted() -> None:
+    """Failing closed is right; failing closed *silently* is not.
+
+    A broken predicate refuses every unsafe request forever, and a wall of 403s
+    reads exactly like a site under attack rather than one that is misconfigured.
+    The count is what tells those two apart.
+    """
+    def explode(request: Request) -> bool:
+        raise AttributeError("typo in the exempt predicate")
+
+    middleware = CSRFMiddleware("s" * 32, exempt=explode)
+    assert middleware.exempt_errors == 0
+
+    refused = await middleware.before(_request("POST"))
+    assert refused is not None
+    assert refused.status == 403
+    assert middleware.exempt_errors == 1
+
+    await middleware.before(_request("POST"))
+    assert middleware.exempt_errors == 2
+
+
+@pytest.mark.asyncio
+async def test_a_working_exempt_predicate_counts_nothing() -> None:
+    """Guard against 'fixed it by counting every refusal'."""
+    middleware = CSRFMiddleware("s" * 32, exempt=lambda request: True)
+    assert await middleware.before(_request("POST")) is None
+    assert middleware.exempt_errors == 0
+
+    # And a predicate that simply declines still refuses without counting: the
+    # request was rejected, the check was not broken.
+    strict = CSRFMiddleware("s" * 32, exempt=lambda request: False)
+    assert (await strict.before(_request("POST"))) is not None
+    assert strict.exempt_errors == 0
+
+
 def test_csrf_configuration_validation() -> None:
     with pytest.raises(ValueError):
         CSRFMiddleware("short")

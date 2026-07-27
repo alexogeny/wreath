@@ -645,7 +645,14 @@ def _same_value(current: Any, value: Any) -> bool:
         return True
     try:
         return bool(current == value)
-    except Exception:
+    except Exception:  # noqa: BLE001 -- a user's __eq__/__bool__ may raise anything
+        # Both operands are application values, so the failure set belongs to
+        # the caller and cannot be enumerated: a custom `__eq__` raises whatever
+        # it likes, and `__bool__` on the result does too (a numpy array raises
+        # ValueError, a Decimal NaN raises InvalidOperation). Not counted -- this
+        # runs per field per flush, and the answer is already the safe one:
+        # "not the same" marks the field dirty, so an unanswerable comparison
+        # costs a redundant write rather than a lost one.
         return False
 
 

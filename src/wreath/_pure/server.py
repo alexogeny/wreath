@@ -666,7 +666,12 @@ class HttpProtocol(asyncio.Protocol):
         except _Disconnect:
             self._abort()
             return
-        except Exception:
+        except Exception:  # noqa: BLE001 -- connection boundary; see below
+            # The ASGI application is arbitrary caller code, and one misbehaving
+            # WebSocket must not stop the server. Not a swallow: the error goes to
+            # the loop's exception handler *and* the peer is closed with 1011, so
+            # it is visible from both ends. `CancelledError` deliberately escapes
+            # -- a connection being torn down must stay torn down.
             self._log_app_error()
             if not self._ws_accepted:
                 if not self._ws_close_sent:
@@ -956,8 +961,15 @@ class HttpProtocol(asyncio.Protocol):
         except _Disconnect:
             self._abort()
             return
-        except Exception:
+        except Exception:  # noqa: BLE001 -- connection boundary; see below
             # Application error. Emit a minimal 500 only if nothing was sent.
+            #
+            # The ASGI application is arbitrary caller code, and one bad request
+            # must not stop the server. Not a swallow: the error reaches the
+            # loop's exception handler *and* the peer gets a 500 (or the response
+            # is aborted if one had already started), so it is visible from both
+            # ends. `CancelledError` deliberately escapes -- a request being
+            # unwound must stay unwound.
             if not self._response_started:
                 self._write_error(500)
                 self._finish_response(keep_alive=False)

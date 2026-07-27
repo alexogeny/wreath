@@ -13,6 +13,7 @@ from collections import OrderedDict
 from sys import getsizeof
 from typing import Any, Literal
 
+from ._index_predicate import render_predicate
 from .errors import DeclarationError, RegistryError
 from .expressions import ColumnExpr
 from .fields import Column
@@ -30,6 +31,7 @@ from .schema import (
     fingerprint_registry,
     fingerprint_registry_template,
 )
+from .table import Index
 
 ValidateSchema = Literal["off", "warn", "error"]
 _VALIDATE_MODES = frozenset({"off", "warn", "error"})
@@ -237,6 +239,22 @@ class Registry:
                         f"{model.__name__} {declaration!r} names unknown column "
                         f"{name!r}; declare it as a column first"
                     )
+        # A partial index's predicate is rendered here, once column types are
+        # known, into the exact text PostgreSQL's catalog will report back. Doing
+        # it at declaration time would be too early (no types) and at migration
+        # time too late (a bad predicate must fail startup, not a deploy).
+        by_db_name = {item.database_name: item for item in columns}
+        table_indexes = tuple(
+            declaration
+            if declaration.where is None
+            else Index(
+                declaration.columns,
+                declaration.unique,
+                declaration.where,
+                render_predicate(declaration.where, by_db_name, model.__name__),
+            )
+            for declaration in table_indexes
+        )
         declared_schema = model.__wreath_schema__
         schema_ref = (
             declared_schema

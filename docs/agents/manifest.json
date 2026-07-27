@@ -9,7 +9,7 @@
     "llm_map": "docs/llms.txt",
     "repository_rules": "AGENTS.md",
     "repository_map": "repo-map.md",
-    "site_config": "mkdocs.yml"
+    "site_config": "wreath_docs.py"
   },
   "commands": {
     "all_gates": "uv run wreath-check",
@@ -813,7 +813,9 @@
         "tests/test_request_trace.py",
         "tests/test_decomp.py",
         "tests/test_tape_decomp.py",
-        "tests/test_complexity_probe.py"
+        "tests/test_complexity_probe.py",
+        "tests/test_port_golden.py",
+        "tests/test_dup_scan.py"
       ],
       "policy": "The gates themselves. Measure before building a fix, and do not use cProfile to decide: ablate instead. The rules live in src/wreath/_devtools/measure.py."
     },
@@ -863,6 +865,23 @@
         "tests/test_queries.py"
       ],
       "policy": "Reads only: writes belong to Session, whose one-way direction is an ORM invariant, so a layer that also wrote would duplicate that or work around it. A declaration's shape is fixed at class-definition time and only values vary, so it must compile once through the registry's existing plan cache -- a bound declaration's shape key stays byte-identical to the hand-written query's, and no second cache is added here (tested, not asserted). `Param` subclasses `RelatedColumnExpr` only to win operator dispatch against a column on the left; it never enters a tree, and the `_Placeholder` that does is deliberately not a `ValueExpr`, so one reaching `shape_of` raises rather than compiling a query with a hole in it. Validated at declaration time: the model, that every predicate column belongs to it, and that no `Param` sits in `order_by`/`limit`/`offset` where no caller could supply it."
+    },
+    {
+      "name": "docs-ssg",
+      "guides": [
+        "docs/guides/docs-ssg.md",
+        "docs/internals/index.md"
+      ],
+      "reference": [],
+      "sources": [
+        "src/wreath/_docs/",
+        "src/wreath/_docs_cli.py",
+        "wreath_docs.py"
+      ],
+      "tests": [
+        "tests/test_docs_ssg.py"
+      ],
+      "policy": "Markdown to a self-contained HTML tree with no third-party dependency, no YAML, and no network at runtime -- `wreath docs` renders a `Site` declared in a `wreath_docs.py`. `markdown.render()` is the seam the native `_docs` extension replaces (full CommonMark via a versioned WDT1 tape); everything else -- page collection, output paths, relative links, nav/TOC assembly, strict orphan and dead-link checks, all file I/O -- stays in the Python facade. Every text and attribute span is escaped and every href is scheme-checked at the parser, because a docs generator's input is somebody else's markdown. Theme rules: the design tokens are declared once in `theme.critical_css` and inlined per page (16 KiB budget -- `wreath audit`'s contrast, non-text-contrast, and focus rules only read inline `<style>`, so an external-only theme silently skips all three), components live in the cached `assets/docs.css`, and no rule may invent a size or a space outside the scales. Every theme is contrast-tested in both modes (AA for text, 3:1 for control boundaries and syntax tokens) -- add a palette and the test covers it. `scripts.py` is enhancement only: search, instant navigation, copy buttons, and the scroll-spy may not carry content, and nav sections, content tabs, and the whole TOC must work with JavaScript off. Build-time blocks (`chart`, `figure`, `hero`) are read out of the markdown before it is parsed, all through `_fenced.extract`, which skips anything inside an enclosing fence -- a line-by-line scan rendered the guide's own examples for real and failed the build. `figures.py` is a closed registry of specific arguments, not a diagram language: draw the operation rather than the state, label every symbol, and name the resting state in the `prefers-reduced-motion` block, because every reveal keyframe ends hidden and the global rule would otherwise leave the figure blank. There is no mkdocs: `wreath docs check` is the gate, in CI and locally, and no dependency group is needed to build the site."
     }
   ],
   "invariants": "AGENTS.md",

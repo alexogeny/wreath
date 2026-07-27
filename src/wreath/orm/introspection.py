@@ -37,8 +37,8 @@ LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
 WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
   AND a.attnum > 0
   AND NOT a.attisdropped
-  AND n.nspname = $1
-  AND c.relname = $2
+  AND n.nspname = $1::text
+  AND c.relname = $2::text
 ORDER BY a.attnum
 """
 
@@ -56,8 +56,8 @@ JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_catalog.pg_class fc ON fc.oid = con.confrelid
 LEFT JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace
 WHERE con.contype IN ('p', 'u', 'f')
-  AND n.nspname = $1
-  AND c.relname = $2
+  AND n.nspname = $1::text
+  AND c.relname = $2::text
 ORDER BY con.contype, con.conname
 """
 
@@ -68,8 +68,8 @@ FROM pg_catalog.pg_index i
 JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 WHERE i.indisunique
-  AND n.nspname = $1
-  AND c.relname = $2
+  AND n.nspname = $1::text
+  AND c.relname = $2::text
 """
 
 
@@ -136,12 +136,18 @@ async def validate_registry(registry: Any) -> SchemaDiff:
 
 
 def _has_workload(database: Any, workload: str) -> bool:
+    from ..postgres import InterfaceError
+
     try:
         database.pool(workload)
     except KeyError:
         return False
-    except Exception:
-        # The pool exists but rejects inspection before startup.
+    except InterfaceError:
+        # `_configured_pool` raises this for a workload that is declared but not
+        # started -- which answers the question being asked. Those two are the
+        # only outcomes `Database.pool` produces, so anything else (a bad
+        # workload name, a `database` that is not one) is a caller bug and is
+        # left to propagate.
         return True
     return True
 

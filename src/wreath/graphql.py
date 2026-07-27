@@ -429,7 +429,11 @@ class GraphQL:
             return False
         try:
             return document.operation().operation == "mutation"
-        except Exception:  # noqa: BLE001 - an unnamed/absent operation is not a mutation
+        except (KeyError, ValueError):
+            # `Document.operation` raises `KeyError` for a name it does not hold
+            # and `ValueError` when the document has no unambiguous operation.
+            # Neither is a mutation, and a document that cannot name one will be
+            # refused by execution anyway -- this only picks the session.
             return False
 
     async def _session(

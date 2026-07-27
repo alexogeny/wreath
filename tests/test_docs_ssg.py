@@ -1,6 +1,7 @@
 """The native static-site generator: config, markdown subset, and the build."""
 from __future__ import annotations
 
+import dataclasses
 import re
 
 import pytest
@@ -80,7 +81,9 @@ def test_build_writes_pages_css_and_rewrites_links(tmp_path) -> None:
     assert 'href="guides/routing.html"' in index      # .md link rewritten
     assert (tmp_path / "site" / "assets" / "docs.css").is_file()
     assert '../assets/docs.css' in routing             # relative from a nested page
-    assert 'class="active"' in routing                 # active nav item
+    assert 'class="nav-page active"' in routing        # active nav item
+    assert (tmp_path / "site" / "assets" / "docs.js").is_file()
+    assert "../assets/docs.js" in routing
 
 
 def test_strict_build_flags_dead_links(tmp_path) -> None:
@@ -98,10 +101,36 @@ def test_orphan_page_is_warned(tmp_path) -> None:
     assert any("orphan" in warning for warning in report.warnings)
 
 
-def test_content_tabs_render_as_a_tab_group() -> None:
+def test_content_tabs_need_no_javascript() -> None:
+    """The old tab group hid every panel but the first and switched them in JS.
+
+    With scripts off that made the other tabs' content unreachable, and the
+    labels were `<button>`s with no tab semantics for a screen reader. A radio
+    group is keyboard-native and needs no runtime.
+    """
     out = render('=== "A"\n    one\n\n=== "B"\n    two\n')
-    assert "data-tabs" in out.html
+    assert out.html.count('type="radio"') == 2
     assert out.html.count("tab-label") >= 2 and out.html.count("tab-panel") == 2
+    assert "checked" in out.html                     # the first tab is selected
+    assert "<button" not in out.html
+
+
+def test_two_tab_groups_on_a_page_are_independent() -> None:
+    """Shared radio `name`s would make the second group steal the first's state."""
+    out = render('=== "A"\n    one\n\n=== "B"\n    two\n\ntext\n\n'
+                 '=== "C"\n    three\n\n=== "D"\n    four\n')
+    names = set(re.findall(r'name="([^"]+)"', out.html))
+    assert len(names) == 2, names
+
+
+def test_the_tab_stylesheet_can_select_every_rendered_tab() -> None:
+    """The CSS-only group needs one `nth-of-type` pair per tab position."""
+    from wreath._docs import THEMES
+    from wreath._docs.theme import _MAX_TABS, stylesheet
+
+    css = stylesheet(THEMES["wreath"])
+    for index in range(_MAX_TABS):
+        assert f".tabbed>input:nth-of-type({index + 1}):checked" in css
 
 
 def test_code_is_highlighted_and_still_escaped() -> None:
@@ -123,9 +152,15 @@ def test_search_index_is_written(tmp_path) -> None:
     site = _site(tmp_path)
     build(site, root=tmp_path)
     index = json.loads((tmp_path / "site" / "assets" / "search-index.json").read_text())
-    entry = next(e for e in index if e["u"] == "guides/routing.html")
-    assert entry["t"] == "Routing"
-    assert any(h["s"] == "basics" for h in entry["h"])
+    page_id = next(i for i, p in enumerate(index["p"]) if p["u"] == "guides/routing.html")
+    assert index["p"][page_id]["t"] == "Routing"
+    # One record per heading, not one blob per page: a hit can land on the
+    # section the reader asked for, and its own text is the result snippet.
+    section = next(s for s in index["s"] if s["p"] == page_id and s["a"] == "basics")
+    assert section["h"] == "Basics"
+    # The body is prose only: the heading lives in its own field, and the `#`
+    # permalink is chrome. Both used to lead every snippet ("Basics # text").
+    assert section["x"] == "text"
     routing = (tmp_path / "site" / "guides" / "routing.html").read_text()
     assert 'id="docs-search"' in routing and 'data-root="../"' in routing
 
@@ -138,8 +173,8 @@ def test_prev_next_and_frontmatter_description(tmp_path) -> None:
     index = (tmp_path / "site" / "index.html").read_text()
     routing = (tmp_path / "site" / "guides" / "routing.html").read_text()
     assert 'meta name="description" content="The landing page."' in index
-    assert "page-nav" in index and "Routing →" in index      # next
-    assert "nav-prev" in routing and "← Home" in routing      # prev
+    assert "page-nav" in index and "Routing" in index        # next
+    assert "nav-prev" in routing and "Home" in routing       # prev
 
 
 def test_llms_txt_and_sitemap(tmp_path) -> None:
@@ -208,8 +243,8 @@ def test_chart_from_json_renders_svg(tmp_path) -> None:
     build(_site_like(tmp_path), root=tmp_path)
     html = (tmp_path / "site" / "index.html").read_text()
     assert '<figure class="chart">' in html and "<svg" in html
-    # Two bars (rx="3"); non-wreath labels use the muted competitor hatch.
-    assert html.count('rx="3"') == 2 and "url(#wc-hatch-" in html
+    # Two bars; non-wreath labels use the muted competitor hatch.
+    assert html.count('<rect x="168"') == 2 and "url(#wc-hatch-" in html
     # a bad source degrades to a visible note, not a crash
     (src / "index.md").write_text("# X\n\n```chart\nsource: gone.json\n```\n")
     build(_site_like(tmp_path), root=tmp_path)
@@ -306,7 +341,7 @@ def test_exclude_suppresses_orphan_warnings(tmp_path) -> None:
     assert not any("orphan" in w for w in quiet.warnings)
 
 
-def test_nav_sections_collapse_and_auto_open(tmp_path) -> None:
+def _threaded_nav_site(tmp_path, **kwargs) -> Nav:
     docs = tmp_path / "docs"
     (docs / "guides").mkdir(parents=True)
     (docs / "index.md").write_text("# Home\n")
@@ -314,25 +349,92 @@ def test_nav_sections_collapse_and_auto_open(tmp_path) -> None:
     (docs / "guides" / "b.md").write_text("# B\n")
     nav = Nav(
         Page("Home", "index.md"),
-        Section("Guides", Page("A", "guides/a.md")),
+        Section("Guides", Section("Deep", Page("A", "guides/a.md"))),
         Section("Other", Page("B", "guides/b.md")),
     )
-    build(Site("S", "docs", "out", nav, strict=False), root=tmp_path)
+    build(Site("S", "docs", "out", nav, strict=False, **kwargs), root=tmp_path)
+    return nav
+
+
+def test_nav_sections_collapse_and_auto_open(tmp_path) -> None:
+    _threaded_nav_site(tmp_path, tabs="never")
     html = (tmp_path / "out" / "guides" / "a.html").read_text()
-    assert "<details class=\"section\"" in html          # collapsible groups
     # The branch holding the current page is open; the sibling section is not.
-    assert '<details class="section" open><summary>Guides</summary>' in html
-    assert '<details class="section" open><summary>Other</summary>' not in html
+    assert '<details class="sec sec-0 on-path" open><summary>Guides</summary>' in html
+    assert '<details class="sec sec-0" open><summary>Other</summary>' not in html
+
+
+def test_the_nav_thread_traces_only_the_branch_you_are_in(tmp_path) -> None:
+    """The signature: one continuous stroke from the section root to your page.
+
+    Every level between the sidebar root and the current page is marked, so a
+    reader sees the whole ancestry rather than an isolated highlight — and the
+    sibling branch stays on the hairline so the thread reads as a change of
+    state, not of structure.
+    """
+    _threaded_nav_site(tmp_path, tabs="never")
+    html = (tmp_path / "out" / "guides" / "a.html").read_text()
+    nav = html.split('<nav class="side"')[1].split("</nav>")[0]
+    assert nav.count("on-path") == 4          # two <details> and their two levels
+    assert '<a class="nav-page active"' in nav and 'aria-current="page"' in nav
+    other = nav.split("Other")[1]
+    assert "on-path" not in other
+
+
+def test_tabs_lift_the_top_level_into_the_header(tmp_path) -> None:
+    """A 129-page tree in one scroller is a list; split at the top it is a shape."""
+    _threaded_nav_site(tmp_path)              # tabs="auto", three top-level entries
+    html = (tmp_path / "out" / "guides" / "a.html").read_text()
+    tabs = html.split('<nav class="tabs"')[1].split("</nav>")[0]
+    assert tabs.count("<a ") == 3 and 'class="active"' in tabs
+    # ... and the sidebar then shows only the section you are inside.
+    nav = html.split('<nav class="side"')[1].split("</nav>")[0]
+    assert "Deep" in nav and "Other" not in nav
+    assert "has-tabs" in html                 # the sticky offset grows with the row
+
+
+def test_a_page_outside_any_section_drops_the_sidebar(tmp_path) -> None:
+    """With tabs on there is no tree to show, so the column should not be there."""
+    _threaded_nav_site(tmp_path)
+    html = (tmp_path / "out" / "index.html").read_text()
+    assert '<nav class="side"' not in html
+    assert 'class="layout no-side"' in html
+
+
+def test_the_reading_column_stays_put_without_a_sidebar() -> None:
+    """It shipped broken once: `main` flowed into the empty sidebar track.
+
+    On a section-less page that squeezed the prose to the sidebar's 16rem and
+    pushed the contents list into the middle of the page. The column has to sit
+    at the same x everywhere, most of all under instant navigation, where a
+    jumping column is the whole illusion gone.
+    """
+    from wreath._docs import THEMES
+    from wreath._docs.theme import stylesheet
+
+    css = stylesheet(THEMES["wreath"])
+    assert ".layout.no-side>main{grid-column:2;}" in css
+    # ... and released again once the grid collapses to a single track.
+    assert ".layout.no-side>main{grid-column:auto;}" in css
 
 
 def test_chart_colors_wreath_arms_distinctly() -> None:
     from wreath._docs import charts
 
     svg = charts._svg_bar(
-        [("Wreath (metal)", 3.0), ("Wreath (native)", 2.0), ("BlackSheep", 1.0)], "t", "")
-    # Each wreath arm gets its own fill; the competitor gets the hatch.
-    assert "var(--primary)" in svg and "var(--accent)" in svg
-    assert "url(#wc-hatch-" in svg
+        [("Wreath (metal)", 3.0), ("Wreath (native)", 2.0), ("Wreath (ASGI)", 1.5),
+         ("BlackSheep", 1.0)], "t", "")
+    # The arms differ by how much of the stack is native, which is an ordered
+    # quantity, so they are one hue at three strengths rather than three hues.
+    # Two of the four used to be hard-coded hexes and went off-palette in every
+    # theme but the default.
+    bars = re.findall(r"<rect x=\"168\"[^>]*fill=\"([^\"]+)\"", svg)
+    arms = [fill for fill in bars if "primary" in fill]
+    assert len(arms) == 3 and len(set(arms)) == 3, arms
+    # No bar carries a fixed hex: that is what took two of the four arms
+    # off-palette in every theme but the default.
+    assert not [fill for fill in bars if fill.startswith("#")], bars
+    assert "url(#wc-hatch-" in bars[-1]                    # the field is hatched
 
 
 def test_two_charts_on_a_page_do_not_share_a_pattern_id() -> None:
@@ -606,3 +708,307 @@ def test_every_theme_builds_a_whole_site(tmp_path) -> None:
         report = build(site, root=root)
         assert report.ok, f"{name}: {report.errors}"
         assert (root / "site" / "index.html").read_text().startswith("<!doctype html>")
+
+
+# --- a broken `:::` directive must not pass a strict build -------------------
+
+
+def _apidoc_site(tmp_path, directive: str):
+    src = tmp_path / "docs"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "index.md").write_text(f"# Home\n\n{directive}\n")
+    return Site(
+        name="Demo", source="docs", output="site",
+        nav=Nav(Page("Home", "index.md")), strict=True,
+    )
+
+
+def test_a_broken_autodoc_target_fails_a_strict_build(tmp_path) -> None:
+    """AGENTS.md promises a broken autodoc target fails the strict build.
+
+    It did not. `apidoc.expand` rendered an inline apology and returned, so the
+    page shipped with its reference body replaced by an error note and the strict
+    build reported success -- a gate that could not fail for the thing it names.
+    """
+    report = build(_apidoc_site(tmp_path, "::: wreath.nope.NotAThing"), root=tmp_path)
+
+    assert not report.ok, "a directive naming a missing target must fail --strict"
+    assert any("wreath.nope.NotAThing" in e for e in report.errors)
+    # The inline note still renders, so a reader of the page sees it too.
+    assert "API reference unavailable" in (tmp_path / "site" / "index.html").read_text()
+
+
+def test_a_broken_autodoc_target_is_only_a_warning_when_not_strict(tmp_path) -> None:
+    site = _apidoc_site(tmp_path, "::: wreath.nope.NotAThing")
+    report = build(Site(
+        name=site.name, source=site.source, output=site.output, nav=site.nav,
+        strict=False,
+    ), root=tmp_path)
+
+    assert report.ok, "a local preview still builds"
+    assert any("wreath.nope.NotAThing" in w for w in report.warnings)
+
+
+def test_a_renderer_bug_is_not_reported_as_a_missing_target(monkeypatch) -> None:
+    """A bug *inside* a renderer must propagate, not become an inline note.
+
+    Both a caller's typo and a renderer's bug surface as `AttributeError`, which
+    is why `_import` converts one of them into `TargetNotFound`. Without that,
+    one broken renderer would quietly annotate every page that used it.
+    """
+    from wreath._docs import apidoc
+
+    def exploding(path):
+        raise AttributeError("renderer bug")
+
+    monkeypatch.setattr(apidoc, "_render_object", exploding)
+    with pytest.raises(AttributeError, match="renderer bug"):
+        apidoc.expand("::: wreath.response.JSONResponse\n")
+
+
+def test_a_missing_target_names_what_was_missing() -> None:
+    from wreath._docs.apidoc import TargetNotFound, _import
+
+    with pytest.raises(TargetNotFound, match="has no attribute 'NotAThing'"):
+        _import("wreath.response.NotAThing")
+    with pytest.raises(TargetNotFound, match="cannot import"):
+        _import("wreath.not_a_module.Thing")
+
+
+# --- rendering fidelity and the runtime -------------------------------------
+
+
+def test_a_wrapped_list_item_still_renders_its_markup() -> None:
+    """A regression that was visible on wreath's own home page.
+
+    `_parse_list` ran `_inline()` per line and appended the *raw* continuation
+    text to the finished HTML, so any bullet long enough to wrap showed literal
+    backticks and `[text](link.md)` to the reader. Inline rendering now happens
+    once, after the whole item has been collected.
+    """
+    out = render(
+        "- A bullet long enough to wrap, with `WREATH_PURE=1` and a\n"
+        "  [link](guides/routing.md) on the second line.\n")
+    assert "<code>WREATH_PURE=1</code>" in out.html
+    assert 'href="guides/routing.md"' in out.html
+    assert "`" not in out.html and "](" not in out.html
+
+
+def test_a_code_fence_can_name_its_file_and_shade_lines() -> None:
+    out = render('```python title="app.py" hl_lines="2 4-5"\n'
+                 "one\ntwo\nthree\nfour\nfive\n```\n")
+    assert '<span class="code-title">app.py</span>' in out.html
+    assert '<span class="code-lang">python</span>' in out.html
+    assert out.html.count('<span class="hl">') == 3          # line 2, 4, 5
+    # A fence with neither keeps the plain block: a language chip over every one
+    # of a corpus's code blocks is noise, not information.
+    assert "code-head" not in render("```python\none\n```\n").html
+
+
+def test_line_shading_survives_a_multiline_token() -> None:
+    """The splitter has to close and reopen the span a docstring holds open."""
+    out = render('```python hl_lines="2"\nx = 1\ny = """a\nb"""\n```\n')
+    assert out.html.count('<span class="hl">') == 1
+    assert out.html.count("<span") == out.html.count("</span>")
+
+
+def test_an_admonition_can_be_collapsible() -> None:
+    assert "<details" in render('??? note "Later"\n    body\n').html
+    assert "<details" in render('???+ note "Open"\n    body\n').html
+    assert " open>" in render('???+ note "Open"\n    body\n').html
+    assert " open>" not in render('??? note "Later"\n    body\n').html
+    assert "<details" not in render('!!! note "Always"\n    body\n').html
+
+
+def test_the_runtime_is_an_external_enhancement(tmp_path) -> None:
+    """Content must not depend on it, and 147 pages must not each pay for it."""
+    from wreath._docs.scripts import BOOT, runtime
+
+    build(_site(tmp_path), root=tmp_path)
+    js = (tmp_path / "site" / "assets" / "docs.js").read_text()
+    assert js == runtime() and len(js) > 4000
+    html = (tmp_path / "site" / "index.html").read_text()
+    # Only the anti-flash boot is inlined; the rest is fetched once and cached.
+    assert BOOT in html and "addCopyButtons" not in html
+    assert 'src="assets/docs.js" defer' in html
+
+
+def test_the_theme_control_offers_all_three_states(tmp_path) -> None:
+    """A two-state toggle discards "follow the OS" and cannot get back to it."""
+    from wreath._docs import THEMES
+    from wreath._docs.theme import page, stylesheet
+
+    html = page(site_name="D", page_title="P", content="<p>x</p>", nav_html="",
+                toc_html="", css_href="a.css", palette=THEMES["wreath"])
+    assert 'data-mode="system"' in html
+    css = stylesheet(THEMES["wreath"])
+    for mode in ("system", "light", "dark"):
+        assert f".theme[data-mode={mode}]" in css
+
+
+def test_source_url_adds_an_edit_link(tmp_path) -> None:
+    plain = _site(tmp_path)
+    build(dataclasses.replace(plain, source_url="https://git.example/edit/main/docs"),
+          root=tmp_path)
+    routing = (tmp_path / "site" / "guides" / "routing.html").read_text()
+    assert 'href="https://git.example/edit/main/docs/guides/routing.md"' in routing
+    assert "Edit this page" in routing
+    # ... and no link at all when the site does not say where its source lives.
+    build(plain, root=tmp_path)
+    assert "Edit this page" not in (
+        tmp_path / "site" / "guides" / "routing.html").read_text()
+
+
+def test_a_palette_names_its_two_type_voices() -> None:
+    from wreath._docs import THEMES
+    from wreath._docs.config import Palette
+    from wreath._docs.theme import critical_css
+
+    css = critical_css(THEMES["wreath"])
+    assert "--font:" in css and "--font-display:" in css and "--font-mono:" in css
+    with pytest.raises(ValueError, match="Palette.display"):
+        Site("s", "d", "o", Nav(Page("A", "a.md")), palette=Palette(display="comic"))
+
+
+# --- the hero and the explanatory figures ------------------------------------
+
+
+def test_a_hero_becomes_the_pages_h1_and_title(tmp_path) -> None:
+    """A page that opens with a hero has no markdown heading to take a title from.
+
+    Falling back to the nav label would put a different name in the browser tab
+    than the one printed on the page.
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir(parents=True)
+    (docs / "index.md").write_text(
+        "```hero\n"
+        "eyebrow: The request path\n"
+        "title: Most of a request never reaches Python.\n"
+        "lede: Routing and authorization are native code.\n"
+        "action: See the benchmarks -> other.md\n"
+        "```\n\ntext\n")
+    (docs / "other.md").write_text("# Other\n")
+    build(Site("S", "docs", "out", Nav(Page("Home", "index.md"),
+                                       Page("Other", "other.md"))), root=tmp_path)
+    html = (tmp_path / "out" / "index.html").read_text()
+    assert html.count("<h1") == 1 and 'class="hero-title"' in html
+    assert "<title>Most of a request never reaches Python. · S</title>" in html
+    assert 'class="hero-eyebrow"' in html and 'class="hero-lede"' in html
+    # Hero links travel the same .md -> .html rewrite as any other link.
+    assert 'href="other.html"' in html
+
+
+def test_a_hero_link_to_a_missing_page_fails_the_build(tmp_path) -> None:
+    """A hero that quietly points at a deleted page is worse than no hero."""
+    docs = tmp_path / "docs"
+    docs.mkdir(parents=True)
+    (docs / "index.md").write_text(
+        "```hero\ntitle: Hello\naction: Gone -> nowhere.md\n```\n")
+    report = build(Site("S", "docs", "out", Nav(Page("Home", "index.md"))), root=tmp_path)
+    assert not report.ok
+    assert any("dead link" in error for error in report.errors)
+
+
+def test_every_figure_draws_and_stays_inside_its_viewbox() -> None:
+    """A label wider than the viewBox is silently clipped in the browser."""
+    from wreath._docs import figures
+
+    assert set(figures.FIGURES) == {"request-boundary", "route-bitset", "timing-wheel"}
+    for name, draw in figures.FIGURES.items():
+        svg = draw("uid")
+        assert svg.count("<g") == svg.count("</g>"), name
+        width = int(re.search(r'viewBox="0 0 (\d+)', svg).group(1))
+        for match in re.finditer(r"<text[^>]*x=\"(\d+)\"[^>]*>([^<]*)<", svg):
+            x, label = int(match.group(1)), match.group(2)
+            span = len(label) * 6.6                  # a generous mono advance
+            right = x + span / 2 if "middle" in match.group(0) else x + span
+            assert right <= width, f"{name}: {label!r} runs to {right:.0f} of {width}"
+
+
+def test_an_unknown_figure_says_so_rather_than_drawing_nothing() -> None:
+    from wreath._docs import figures
+
+    _, tokens = figures.extract("```figure\nname: not-a-figure\n```\n")
+    rendered = next(iter(tokens.values()))
+    assert "chart-error" in rendered and "not-a-figure" in rendered
+    assert "request-boundary" in rendered          # ... and lists what it does have
+
+
+def test_the_bitset_figure_agrees_with_the_matching_it_illustrates() -> None:
+    """The grid is the algorithm's state, so it has to be the algorithm's answer.
+
+    Each row claims how many segment tests its route survives; running the real
+    table against the same request must pick the one row that survives them all.
+    """
+    from wreath._docs.figures import _COLUMNS, _ROUTES
+    from wreath._pure.dtbitset import BitsetRouteTable
+
+    table = BitsetRouteTable()
+    for route, _ in _ROUTES:
+        table.add(route, "GET", route)
+    matched = table.match("GET", "/orders/42/items")
+    assert matched is not None
+    survivors = [route for route, alive in _ROUTES if alive == len(_COLUMNS) - 1]
+    assert survivors == [matched[0]], (survivors, matched)
+
+
+def test_a_figure_can_be_stopped_without_javascript(tmp_path) -> None:
+    """WCAG 2.2.2: a control that only exists once a runtime loads is not one."""
+    from wreath._docs import THEMES, figures
+    from wreath._docs.theme import stylesheet
+
+    _, tokens = figures.extract("```figure\nname: timing-wheel\n```\n")
+    rendered = next(iter(tokens.values()))
+    assert 'type="checkbox"' in rendered and "fig-pause" in rendered
+    css = stylesheet(THEMES["wreath"])
+    assert ".fig:has(.fig-pause:checked) .fig-body *{animation-play-state:paused" in css
+
+
+def test_figures_are_readable_with_motion_turned_off() -> None:
+    """The reveal keyframes end hidden, so the rest state has to be stated.
+
+    Without this every figure is blank for anyone who asked for no animation —
+    the global rule collapses the duration and each element lands on whichever
+    keyframe happened to be last.
+    """
+    from wreath._docs import THEMES
+    from wreath._docs.theme import stylesheet
+
+    css = stylesheet(THEMES["wreath"])
+    reduced = css.split("prefers-reduced-motion")[1]
+    for revealed in (".f-fold", ".f-cell-on", ".f-pip", ".f-mark"):
+        assert revealed in reduced, revealed
+
+
+def test_a_block_inside_a_longer_fence_is_an_example_not_a_block() -> None:
+    """How a guide documents the syntax, and how it used to break the build.
+
+    `docs/guides/docs-ssg.md` shows a ```hero block inside a four-backtick
+    fence. A line-by-line scan found it, rendered it for real, and the example's
+    illustrative link failed the dead-link check.
+    """
+    from wreath._docs import figures, hero
+
+    page = ("````markdown\n"
+            "```hero\n"
+            "title: An example\n"
+            "action: Nowhere -> nowhere.md\n"
+            "```\n"
+            "````\n\n"
+            "```hero\ntitle: The real one\n```\n")
+    text, tokens = hero.extract(page)
+    assert len(tokens) == 1
+    assert "The real one" in next(iter(tokens.values()))
+    assert "An example" in text and "nowhere.md" in text     # left as source
+
+    fenced = ("````markdown\n```figure\nname: timing-wheel\n```\n````\n")
+    _, none = figures.extract(fenced)
+    assert not none
+
+
+def test_a_tilde_fence_encloses_a_block_the_same_way() -> None:
+    from wreath._docs import hero
+
+    text, tokens = hero.extract("~~~~\n```hero\ntitle: Example\n```\n~~~~\n")
+    assert not tokens and "title: Example" in text

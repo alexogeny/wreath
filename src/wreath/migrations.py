@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import struct
 from dataclasses import dataclass
@@ -26,7 +27,7 @@ WITH migration_objects AS (
             AS signature
     FROM pg_catalog.pg_class c
     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = $1
+    WHERE n.nspname = $1::text
       AND c.relkind IN ('r', 'p')
 
     UNION ALL
@@ -46,7 +47,7 @@ WITH migration_objects AS (
     JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
     LEFT JOIN pg_catalog.pg_attrdef d
       ON d.adrelid = c.oid AND d.adnum = a.attnum
-    WHERE n.nspname = $1
+    WHERE n.nspname = $1::text
       AND c.relkind IN ('r', 'p')
       AND a.attnum > 0
       AND NOT a.attisdropped
@@ -102,7 +103,7 @@ WITH migration_objects AS (
     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
     LEFT JOIN pg_catalog.pg_class fc ON fc.oid = con.confrelid
     LEFT JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace
-    WHERE n.nspname = $1
+    WHERE n.nspname = $1::text
       AND con.contype IN ('p', 'u', 'f')
 
     UNION ALL
@@ -115,12 +116,27 @@ WITH migration_objects AS (
             columns.column_names,
             -- btree stays implicit so its object name is unchanged; a non-btree
             -- access method is appended so it round-trips against the ORM image.
-            CASE WHEN am.amname = 'btree' THEN '' ELSE ':' || am.amname END
+            CASE WHEN am.amname = 'btree' THEN '' ELSE ':' || am.amname END,
+            -- A partial index always spells its method and appends a digest of
+            -- the predicate, because two indexes over the same columns with
+            -- different WHERE clauses are two different indexes. Four parts
+            -- therefore means partial. Must match _predicate_digest().
+            CASE WHEN i.indpred IS NULL THEN '' ELSE
+                CASE WHEN am.amname = 'btree' THEN ':' || am.amname ELSE '' END
+                || ':'
+                || substr(md5(pg_get_expr(i.indpred, i.indrelid)), 1, 8)
+            END
         )::text,
         4::int4,
         concat(
             'index:', CASE WHEN i.indisunique THEN 'ui:' ELSE 'i:' END,
-            columns.column_names, ':', am.amname
+            columns.column_names, ':', am.amname,
+            -- The predicate rides in the signature after a 0x1f, the way a
+            -- foreign key's referential actions do, because it contains '::'
+            -- and the signature above is ':'-delimited.
+            CASE WHEN i.indpred IS NULL THEN '' ELSE
+                chr(31) || pg_get_expr(i.indpred, i.indrelid)
+            END
         )::text
     FROM pg_catalog.pg_index i
     JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
@@ -133,11 +149,12 @@ WITH migration_objects AS (
         JOIN pg_catalog.pg_attribute a
           ON a.attrelid = i.indrelid AND a.attnum = key.attnum
     ) columns
-    WHERE n.nspname = $1
+    WHERE n.nspname = $1::text
       AND am.amname IN ('btree', 'gin')
       AND i.indisvalid
       AND i.indisready
-      AND i.indpred IS NULL
+      -- indexprs stays excluded: an index *on* an expression is a different
+      -- feature from an index with a WHERE, and is still MANUAL.
       AND i.indexprs IS NULL
       AND NOT EXISTS (
           SELECT 1 FROM pg_catalog.pg_constraint con
@@ -663,6 +680,18 @@ def _resolve_managed_snapshot(
     return FleetResolution(*counts)
 
 
+def _predicate_digest(predicate: str) -> str:
+    """A short, stable tag distinguishing partial indexes on the same columns.
+
+    ``md5`` because PostgreSQL's catalog query must compute the identical value
+    and ``md5()`` is the one digest built into every server; it is a name, not a
+    security boundary.
+    """
+    return hashlib.md5(
+        predicate.encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:8]
+
+
 def _descriptor_record(
     schema: str,
     table: str,
@@ -766,15 +795,25 @@ def _registry_descriptor(registry: Any) -> bytes:
             )
         for table_index in spec.table_indexes:
             prefix = "ui" if table_index.unique else "i"
-            index_name = f"{prefix}:{','.join(table_index.columns)}"
-            records.append(
-                _descriptor_record(
-                    spec.schema,
-                    spec.table,
-                    index_name,
-                    4,
-                    f"index:{index_name}:btree",
+            columns = ",".join(table_index.columns)
+            predicate = getattr(table_index, "where_sql", None)
+            if predicate is None:
+                index_name = f"{prefix}:{columns}"
+                signature = f"index:{index_name}:btree"
+            else:
+                # A partial index's identity includes its predicate: two indexes
+                # over the same columns with different WHERE clauses are two
+                # indexes, and the derived object name is a hash of this string.
+                # The predicate itself cannot go in the name -- names are
+                # ':'-delimited and SQL predicates contain '::' -- so the name
+                # carries a digest and the signature carries the text, after a
+                # 0x1f, the way a foreign key carries its referential actions.
+                index_name = (
+                    f"{prefix}:{columns}:btree:{_predicate_digest(predicate)}"
                 )
+                signature = f"index:{prefix}:{columns}:btree\x1f{predicate}"
+            records.append(
+                _descriptor_record(spec.schema, spec.table, index_name, 4, signature)
             )
     return b"WMD1" + struct.pack("<II", 1, len(records)) + b"".join(records)
 

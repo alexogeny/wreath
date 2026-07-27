@@ -19,7 +19,6 @@ implementation is the shipped one; the facade still selects a native
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -79,12 +78,37 @@ def invalidate_across_workers(bus: Any, *, channel: str = WRITE_CHANNEL) -> Writ
     return WriteBroadcast(bus, channel=channel)
 
 
+class RefreshWatch:
+    """The handle :func:`refresh_on` returns. Call it to stop watching.
+
+    It also carries what an operator needs when reloads are failing. A snapshot
+    cache degrades *upwards*: a broken loader leaves every read succeeding
+    against the last good generation, so the usual signals -- errors, latency,
+    a falling hit rate -- all stay quiet while the data silently ages. These two
+    attributes are the only place that shows.
+    """
+
+    __slots__ = ("_stop", "last_error", "refresh_errors")
+
+    def __init__(self, stop: Callable[[], None]) -> None:
+        self._stop = stop
+        #: Reloads that raised. Non-zero means the cache is serving data older
+        #: than the last write it was told about.
+        self.refresh_errors = 0
+        #: The most recent reload failure, kept so the cause is diagnosable
+        #: without reproducing it. ``None`` until one happens.
+        self.last_error: BaseException | None = None
+
+    def __call__(self) -> None:
+        self._stop()
+
+
 def refresh_on(
     cache: Any,
     models: Iterable[Any],
     *,
     load: Callable[[], Any],
-) -> Callable[[], None]:
+) -> RefreshWatch:
     """Reload ``cache`` whenever one of ``models`` is written::
 
         countries: SnapshotCache[str, Country] = SnapshotCache()
@@ -104,7 +128,8 @@ def refresh_on(
     The reload is scheduled rather than awaited -- the write has already
     committed and must not wait on it.
 
-    Returns a callable that stops watching.
+    Returns a :class:`RefreshWatch`: call it to stop watching, and read
+    ``refresh_errors`` to find out whether the reloads are actually working.
     """
     watched = frozenset(getattr(model, "__name__", str(model)) for model in models)
     inflight: set[Any] = set()
@@ -123,16 +148,31 @@ def refresh_on(
     async def _reload() -> None:
         # A loader that raises must not surface as a failed write, and must not
         # disturb the generation readers are already on.
-        with contextlib.suppress(Exception):
+        try:
             await cache.refresh(load)
+        except Exception as error:  # noqa: BLE001
+            # `load` is application code and may raise anything, so this is the
+            # exceptional case a broad catch is for. What it must not be is
+            # silent: a permanently failing loader leaves readers on the last
+            # good generation *forever*, and because every read still succeeds,
+            # nothing else in the system degrades to signal it. The count is
+            # what makes that visible; the exception is what makes it
+            # diagnosable without reproducing it.
+            #
+            # `CancelledError` is a `BaseException` and still propagates, so a
+            # reload cancelled at shutdown is not recorded as a loader fault.
+            watch.refresh_errors += 1
+            watch.last_error = error
 
+    watch = RefreshWatch(lambda: unsubscribe_writes(_on_write))
     subscribe_writes(_on_write)
-    return lambda: unsubscribe_writes(_on_write)
+    return watch
 
 
 __all__ = [
     "BoundedCache",
     "CacheStats",
+    "RefreshWatch",
     "SnapshotCache",
     "WriteBroadcast",
     "invalidate_across_workers",

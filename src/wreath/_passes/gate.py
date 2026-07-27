@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..postgres import PostgresError
 from .keyset import PassDeclarationError
 
 #: Phases the gate owns. ``walking`` and ``done`` belong to the walk.
@@ -107,7 +108,10 @@ class NoRowsMatch:
             found = await executor.fetchrow(
                 f"SELECT 1 AS present FROM {walk.table} WHERE {where} LIMIT 1"
             )
-        except Exception as error:  # noqa: BLE001 - could-not-run, not an answer
+        except PostgresError as error:
+            # Narrow on purpose: the database failing to answer is transient, but
+            # a TypeError building this SQL is a bug and must not be reported as
+            # "could not run" -- that is a wrong answer wearing a retry.
             return Verification(False, f"verification could not run: {error!r}", transient=True)
         if found is None:
             return Verification(True, self.describe(walk))
@@ -147,7 +151,8 @@ class Reconcile:
         try:
             left = await executor.fetchval(self.source)
             right = await executor.fetchval(self.against)
-        except Exception as error:  # noqa: BLE001 - could-not-run, not an answer
+        except PostgresError as error:
+            # See NoRowsMatch.check: only a database failure is a could-not-run.
             return Verification(False, f"verification could not run: {error!r}", transient=True)
         if left == right:
             return Verification(True, f"{self.describe(walk)}: both {left!r}")
@@ -205,7 +210,7 @@ class Constraint:
                 f"ALTER TABLE {walk.table} ADD CONSTRAINT {self.name} "
                 f"CHECK ({self.check_}) NOT VALID"
             )
-        except Exception as error:  # noqa: BLE001
+        except PostgresError as error:
             # Already there from an earlier attempt is the ordinary case on a
             # re-verify, and re-validating it is exactly what should happen.
             if "already exists" not in str(error).lower():
@@ -216,7 +221,7 @@ class Constraint:
             await executor.execute(
                 f"ALTER TABLE {walk.table} VALIDATE CONSTRAINT {self.name}"
             )
-        except Exception as error:  # noqa: BLE001
+        except PostgresError as error:
             if _violation(error):
                 return Verification(False, f"{self.name} does not hold: {error}")
             return Verification(False, f"could not validate: {error!r}", transient=True)

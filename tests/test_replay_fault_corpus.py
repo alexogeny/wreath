@@ -338,7 +338,11 @@ async def test_the_three_transaction_faults_land_at_three_distinct_moments() -> 
                 moments[fault] = "opened"
                 await tx.execute("UPDATE t SET x = 1")
                 moments[fault] = "body-ran"
-        except Exception:
+        except Exception:  # noqa: BLE001 -- the injected fault is the subject
+            # This drives every adapter fault in the corpus and records *where* the
+            # scope stopped. Pinning the type would assert the injector's choice
+            # rather than the property under test, which is that a faulted scope
+            # never reaches `else`.
             moments[fault] = moments.get(fault, "never-opened")
         else:  # pragma: no cover - a faulted scope must not complete
             moments[fault] = "completed"

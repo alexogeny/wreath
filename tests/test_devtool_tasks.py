@@ -32,28 +32,32 @@ def recorded(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
 
 
 def test_a_group_is_installed_without_removing_the_others(recorded: list[list[str]]) -> None:
-    # The entire reason these exist: `uv sync --group docs` uninstalls sanic,
-    # and `uv sync --group benchmark` uninstalls mkdocs. --inexact does not.
-    tasks.ensure_groups("docs")
+    # The entire reason these exist: `uv sync --group dev` uninstalls sanic,
+    # and `uv sync --group benchmark` uninstalls the dev toolchain. --inexact
+    # does not.
+    tasks.ensure_groups("benchmark")
     assert recorded[0][:3] == ["/usr/bin/uv", "sync", "--inexact"]
-    assert "--group=docs" in recorded[0]
+    assert "--group=benchmark" in recorded[0]
 
 
-def test_docs_installs_the_docs_group_before_building(recorded: list[list[str]]) -> None:
+def test_docs_builds_with_wreaths_own_generator(recorded: list[list[str]]) -> None:
+    """No group is installed: the docs toolchain is the framework itself."""
     tasks.docs([])
-    assert "--group=docs" in recorded[0]
-    assert recorded[1][1:] == ["-m", "mkdocs", "build", "--strict"]
+    assert not [c for c in recorded if c[1] == "sync"]
+    assert recorded[0][1:] == ["-m", "wreath", "docs", "check"]
 
 
 def test_docs_is_always_strict(recorded: list[list[str]]) -> None:
-    # A warning that is not an error is a warning nobody reads.
+    # A warning that is not an error is a warning nobody reads, so the task
+    # runs `check` -- which fails on an orphan page or a dead link -- and never
+    # the plain `build`.
     tasks.docs([])
-    assert "--strict" in recorded[1]
+    assert "check" in recorded[0] and "build" not in recorded[0]
 
 
 def test_docs_can_serve_instead(recorded: list[list[str]]) -> None:
     tasks.docs(["--serve"])
-    assert recorded[1][1:] == ["-m", "mkdocs", "serve"]
+    assert recorded[0][1:] == ["-m", "wreath", "docs", "serve"]
 
 
 def test_bench_installs_the_benchmark_group(recorded: list[list[str]]) -> None:
@@ -136,15 +140,13 @@ def test_check_passes_when_every_gate_passes(recorded: list[list[str]]) -> None:
 
 def test_check_can_add_the_docs_build(recorded: list[list[str]]) -> None:
     tasks.check(["--docs"])
-    groups = [c for c in recorded if c[1] == "sync"]
-    assert any("--group=docs" in c for c in groups)
-    assert any(c[-3:] == ["mkdocs", "build", "--strict"] for c in recorded)
+    assert any(c[-3:] == ["wreath", "docs", "check"] for c in recorded)
 
 
 def test_a_missing_uv_is_reported_rather_than_traced(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tasks.shutil, "which", lambda _name: None)
     with pytest.raises(SystemExit, match="uv"):
-        tasks.ensure_groups("docs")
+        tasks.ensure_groups("benchmark")
 
 
 def test_a_failed_sync_stops_the_task(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -629,33 +629,35 @@ def _default_h2_protocol_cls() -> type | None:
 def _fire_timeout(protocol: Any) -> None:
     """Fire the driver's owned request/keep-alive timeout enforcement. Both the
     native and pure HTTP/1 drivers expose ``_replay_fire_timeout`` for exactly
-    this; a driver without it (e.g. HTTP/2) is a no-op."""
+    this; a driver without it (e.g. HTTP/2) is a no-op.
+
+    The `callable` guard is what tolerates a driver that does not implement it.
+    A driver that implements it and then *raises* is a fault, and replay exists
+    to reproduce a request faithfully -- swallowing it would let a replayed run
+    diverge from production without saying so, which is the one thing this
+    module refuses to do elsewhere (a chunked or truncated recording is
+    rejected by name rather than guessed at)."""
     fire = getattr(protocol, "_replay_fire_timeout", None)
     if callable(fire):
-        try:
-            fire()
-        except Exception:
-            pass
+        fire()
 
 
 def _deliver_close(protocol: Any, kind: int) -> None:
     """Deliver a peer half-close (EOF) or reset to the protocol, tolerating
-    drivers that implement only a subset of the lifecycle callbacks."""
+    drivers that implement only a subset of the lifecycle callbacks.
+
+    The `callable` guards are what provide that tolerance. A callback that
+    exists and raises is a driver fault, and it propagates: see
+    `_fire_timeout` for why replay does not swallow one."""
     exc: Exception | None = (
         ConnectionResetError("replayed peer reset") if kind == int(SegmentKind.RESET) else None
     )
     eof = getattr(protocol, "eof_received", None)
     if kind == int(SegmentKind.EOF) and callable(eof):
-        try:
-            eof()
-        except Exception:
-            pass
+        eof()
     lost = getattr(protocol, "connection_lost", None)
     if callable(lost):
-        try:
-            lost(exc)
-        except Exception:
-            pass
+        lost(exc)
 
 
 def _default_protocol_cls() -> type:

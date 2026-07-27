@@ -109,7 +109,14 @@ def test_pg_fusion_survives_abrupt_connection_loss() -> None:
             await asyncio.sleep(0)
             try:
                 await asyncio.wait_for(conn.fetchval("select 8"), 2.0)
-            except Exception:
+            except TimeoutError:
+                # Measured, not assumed: the query does not fail fast after the
+                # transport is aborted -- `wait_for` times out at 2.0s and that is
+                # what sets `failed`. Pinned to the type that actually occurs so a
+                # driver that starts erroring cleanly breaks this loudly and
+                # someone updates the assertion, rather than `except Exception`
+                # quietly accepting either. Note the docstring above claims "a
+                # clean error state instead of ... hanging"; today it hangs.
                 failed = True
             else:
                 failed = False

@@ -113,6 +113,7 @@ class CSRFMiddleware:
     __slots__ = (
         "_cookie_name",
         "_exempt",
+        "exempt_errors",
         "_header_name",
         "_header_name_bytes",
         "_max_age",
@@ -166,6 +167,11 @@ class CSRFMiddleware:
         self._same_site = normalized_same_site
         self._trusted_origins = tuple(_normalize_origin(value) for value in trusted_origins)
         self._exempt = exempt
+        #: Times the `exempt` predicate raised. Each one was refused, so this is
+        #: not a security hole -- it is how you find out the predicate itself is
+        #: broken, which otherwise looks exactly like traffic that deserved a
+        #: 403 and is indistinguishable from working correctly.
+        self.exempt_errors = 0
         self._allow_missing_origin = allow_missing_origin
         # The expected origin is built from the `Host` header, which is the
         # client's to set. That is safe only if something validates it, and the
@@ -231,7 +237,16 @@ class CSRFMiddleware:
         try:
             if self._exempt is not None and self._exempt(request):
                 return None
-        except Exception:
+        except Exception:  # noqa: BLE001
+            # `exempt` is application code standing on a security decision, so
+            # failing closed is the only defensible direction and the broad
+            # catch is deliberate: a predicate that raises must not become an
+            # exemption. What it must not also be is invisible -- a typo in the
+            # predicate refuses every unsafe request forever, and a wall of 403s
+            # reads exactly like a site under attack rather than one that is
+            # broken. Counting separates "this request was refused" from "the
+            # check cannot run", which have different fixes.
+            self.exempt_errors += 1
             return ProblemResponse(status=403, title="Forbidden", detail="CSRF validation failed")
 
         headers = request._index_headers()

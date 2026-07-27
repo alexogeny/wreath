@@ -159,7 +159,9 @@ def make_driver():
     for d in drivers:
         try:
             d.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 -- fixture teardown, best effort
+            # Teardown for a driver a test may have already torn down itself. A
+            # failure here must not mask the assertion that actually ran.
             pass
 
 

@@ -24,11 +24,14 @@ __all__ = ["Rendered", "TocEntry", "render", "slugify"]
 
 _SAFE_SCHEME = re.compile(r"^(?:https?:|mailto:|#|/|\.{0,2}/|[^:]*$)", re.IGNORECASE)
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+#: `key="value"` attributes trailing a fence's language, e.g.
+#: ```` ```python title="app.py" hl_lines="3 4" ````.
+_FENCE_ATTR = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
 #: Optional trailing `{#custom-id}` on a heading (attr_list style) — lets a page
 #: pin an explicit anchor, e.g. mkdocstrings' dotted `wreath.mod.Class` ids so
 #: cross-references written against them keep resolving.
 _HEADING_ID = re.compile(r"^(.*?)\s*\{#([\w.:-]+)\}$")
-_FENCE = re.compile(r"^(```+|~~~+)\s*([^\s`]*)")
+_FENCE = re.compile(r"^(```+|~~~+)\s*([^\s`]*)\s*(.*)$")
 _THEMATIC = re.compile(r"^ {0,3}([-*_])(?:\s*\1){2,}\s*$")
 _UL_ITEM = re.compile(r"^(\s*)[-*+]\s+(.*)$")
 _OL_ITEM = re.compile(r"^(\s*)(\d+)[.)]\s+(.*)$")
@@ -116,11 +119,14 @@ def _inline(text: str) -> str:
 
 
 class _Renderer:
-    def __init__(self) -> None:
+    def __init__(self, counter: list[int] | None = None) -> None:
         self.out: list[str] = []
         self.toc: list[TocEntry] = []
         self.title: str | None = None
         self._slugs: dict[str, int] = {}
+        #: Shared with nested renderers so a tab group inside an admonition
+        #: still gets radio ids no other group on the page uses.
+        self._counter = counter if counter is not None else [0]
 
     def _unique_slug(self, text: str) -> str:
         return self._claim_slug(slugify(text) or "section")
@@ -182,6 +188,7 @@ class _Renderer:
 
     def _code_block(self, lines: list[str], i: int, fence: re.Match[str]) -> int:
         marker, info = fence.group(1), fence.group(2)
+        attrs = dict(_FENCE_ATTR.findall(fence.group(3) or ""))
         body: list[str] = []
         i += 1
         while i < len(lines) and not lines[i].startswith(marker[0] * len(marker)):
@@ -191,7 +198,17 @@ class _Renderer:
         raw = "\n".join(body)
         lang_class = f' class="language-{_esc(info)}"' if info else ""
         code = highlight(raw, info) if info else _esc(raw)
-        self.out.append(f"<pre><code{lang_class}>{code}</code></pre>")
+        code = _mark_lines(code, _line_numbers(attrs.get("hl_lines", "")))
+        # The chrome strip earns its place only when the fence names the file it
+        # came from. A language chip over every block on a 129-page corpus is
+        # noise; a filename is the thing a reader needs to act on the snippet.
+        head = ""
+        if title := attrs.get("title", ""):
+            lang = f'<span class="code-lang">{_esc(info)}</span>' if info else ""
+            head = (f'<div class="code-head"><span class="code-title">{_esc(title)}</span>'
+                    f"{lang}</div>")
+        self.out.append(
+            f'<div class="code">{head}<pre><code{lang_class}>{code}</code></pre></div>')
         return i
 
     def _blockquote(self, lines: list[str], i: int) -> int:
@@ -199,7 +216,7 @@ class _Renderer:
         while i < len(lines) and lines[i].startswith(">"):
             inner.append(lines[i][1:].lstrip(" "))
             i += 1
-        nested = _Renderer().render("\n".join(inner))
+        nested = _Renderer(self._counter).render("\n".join(inner))
         self.out.append(f"<blockquote>\n{nested.html}\n</blockquote>")
         return i
 
@@ -212,7 +229,12 @@ class _Renderer:
         base = _indent(lines[i])
         ordered = bool(_OL_ITEM.match(lines[i]))
         tag = "ol" if ordered else "ul"
-        items: list[list[str]] = []       # each item: [text, *nested-html]
+        # Each item holds its *raw* markdown, a prefix of already-built HTML (the
+        # task checkbox), and any nested lists. Inline rendering is deferred to
+        # the end because an item's text can continue onto wrapped lines: running
+        # `_inline` per line appended raw markdown to finished HTML, so a wrapped
+        # bullet showed literal backticks and `[text](link.md)` to the reader.
+        items: list[tuple[list[str], str, list[str]]] = []
         while i < len(lines):
             line = lines[i]
             m_ul, m_ol = _UL_ITEM.match(line), _OL_ITEM.match(line)
@@ -224,7 +246,7 @@ class _Renderer:
                         continue
                     break
                 if line.startswith(" ") and items:      # continuation of the item text
-                    items[-1][0] += " " + line.strip()
+                    items[-1][0].append(line.strip())
                     i += 1
                     continue
                 break
@@ -234,7 +256,7 @@ class _Renderer:
             if indent > base:                            # a sub-list under the last item
                 nested, i = self._parse_list(lines, i)
                 if items:
-                    items[-1].append(nested)
+                    items[-1][2].append(nested)
                 continue
             if m_ol is not None:
                 content = m_ol.group(3)
@@ -244,25 +266,36 @@ class _Renderer:
             task = _TASK.match(content)
             if task is not None:
                 checked = " checked" if task.group(1).lower() == "x" else ""
-                items.append([f'<input type="checkbox" disabled{checked}> '
-                              + _inline(task.group(2))])
+                items.append(([task.group(2)],
+                              f'<input type="checkbox" disabled{checked}> ', []))
             else:
-                items.append([_inline(content)])
+                items.append(([content], "", []))
             i += 1
-        body = "".join(f"<li>{''.join(parts)}</li>" for parts in items)
+        body = "".join(
+            f"<li>{prefix}{_inline(' '.join(text))}{''.join(nested)}</li>"
+            for text, prefix, nested in items)
         return f"<{tag}>{body}</{tag}>", i
 
     def _admonition(self, lines: list[str], i: int) -> int:
         match = _ADMONITION.match(lines[i])
         assert match is not None
-        kind = match.group(2).lower()
+        marker, kind = match.group(1), match.group(2).lower()
         title = match.group(3) if match.group(3) is not None else kind.capitalize()
         i += 1
         body: list[str] = []
         while i < len(lines) and (lines[i].startswith(("    ", "\t")) or not lines[i].strip()):
             body.append(lines[i][4:] if lines[i].startswith("    ") else lines[i].lstrip("\t"))
             i += 1
-        inner = _Renderer().render("\n".join(body).strip()).html
+        inner = _Renderer(self._counter).render("\n".join(body).strip()).html
+        if marker.startswith("?"):
+            # `???` is collapsed, `???+` starts open — mkdocs' spelling, and a
+            # <details> so it works with no script and prints expanded.
+            open_attr = " open" if marker.endswith("+") else ""
+            self.out.append(
+                f'<details class="admonition {_esc(kind)}"{open_attr}>'
+                f'<summary class="admonition-title">{_inline(title)}</summary>\n'
+                f"{inner}\n</details>")
+            return i
         title_html = f'<p class="admonition-title">{_inline(title)}</p>' if title else ""
         self.out.append(
             f'<div class="admonition {_esc(kind)}">{title_html}\n{inner}\n</div>')
@@ -284,15 +317,25 @@ class _Renderer:
             while i < len(lines) and (lines[i].startswith("    ") or not lines[i].strip()):
                 body.append(lines[i][4:] if lines[i].startswith("    ") else "")
                 i += 1
-            tabs.append((title, _Renderer().render("\n".join(body).strip()).html))
+            tabs.append((title, _Renderer(self._counter).render("\n".join(body).strip()).html))
+        # A radio group, not buttons and script. The JS version hid every panel
+        # but the first with `display:none`, so with JavaScript off the other
+        # tabs' content was simply unreachable — and the labels were buttons
+        # with no tab semantics for a screen reader. Radios are keyboard-native
+        # (arrow keys move within the group, one tab stop for the whole set) and
+        # need no runtime at all.
+        self._counter[0] += 1
+        group = f"tabs-{self._counter[0]}"
+        inputs = "".join(
+            f'<input type="radio" name="{group}" id="{group}-{k}"'
+            f'{" checked" if k == 0 else ""}>' for k in range(len(tabs)))
         labels = "".join(
-            f'<button class="tab-label{" active" if k == 0 else ""}" type="button">'
-            f"{_inline(t)}</button>" for k, (t, _) in enumerate(tabs))
-        panels = "".join(
-            f'<div class="tab-panel{" active" if k == 0 else ""}">{h}</div>'
-            for k, (_, h) in enumerate(tabs))
+            f'<label class="tab-label" for="{group}-{k}">{_inline(t)}</label>'
+            for k, (t, _) in enumerate(tabs))
+        panels = "".join(f'<div class="tab-panel">{h}</div>' for _, h in tabs)
         self.out.append(
-            f'<div class="tabbed" data-tabs><div class="tab-labels">{labels}</div>{panels}</div>')
+            f'<div class="tabbed">{inputs}<div class="tab-labels">{labels}</div>'
+            f"{panels}</div>")
         return i
 
     def _table(self, lines: list[str], i: int) -> int:
@@ -329,6 +372,54 @@ class _Renderer:
             i += 1
         self.out.append(f"<p>{_inline(' '.join(buffer))}</p>")
         return i
+
+
+#: `highlight()` emits a flat, never-nested run of token spans, which is what
+#: makes splitting its output by line safe: at most one span is open at a time,
+#: so a line break only has to close it and reopen the same tag.
+_SPAN = re.compile(r"(<span[^>]*>|</span>)")
+
+
+def _line_numbers(spec: str) -> frozenset[int]:
+    """Parse an ``hl_lines`` spec — ``"2 5-7"`` — into a set of line numbers."""
+    out: set[int] = set()
+    for part in spec.split():
+        start, sep, end = part.partition("-")
+        try:
+            if sep:
+                out.update(range(int(start), int(end) + 1))
+            else:
+                out.add(int(start))
+        except ValueError:
+            continue                  # a malformed range highlights nothing
+    return frozenset(out)
+
+
+def _mark_lines(html: str, wanted: frozenset[int]) -> str:
+    """Wrap the 1-indexed lines in ``wanted`` so they can be shaded."""
+    if not wanted:
+        return html
+    lines: list[str] = [""]
+    open_tag = ""
+    for piece in _SPAN.split(html):
+        if not piece:
+            continue
+        if piece.startswith("</span"):
+            open_tag = ""
+            lines[-1] += piece
+        elif piece.startswith("<span"):
+            open_tag = piece
+            lines[-1] += piece
+        else:
+            head, *rest = piece.split("\n")
+            lines[-1] += head
+            for tail in rest:
+                if open_tag:
+                    lines[-1] += "</span>"
+                lines.append(open_tag + tail)
+    return "\n".join(
+        f'<span class="hl">{line}</span>' if number in wanted else line
+        for number, line in enumerate(lines, 1))
 
 
 def _is_block_start(line: str) -> bool:

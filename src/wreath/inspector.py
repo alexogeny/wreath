@@ -725,7 +725,12 @@ class _InspectorProtocol(asyncio.Protocol):
         except InspectorError as error:
             self._send(command, FLAG_ERROR, request_id, {"error": str(error)})
             return
-        except Exception as error:  # noqa: BLE001 - a handler bug must not kill the app
+        except Exception as error:  # noqa: BLE001 - command dispatch; reported, not swallowed
+            # `self._server.handle` dispatches to a command implementation. A
+            # bug in one must not take down the process it is inspecting, and
+            # the failure is *sent back to the caller* rather than dropped --
+            # the error reaches a human either way, which is what separates
+            # this from a silent catch.
             self._send(command, FLAG_ERROR, request_id, {"error": f"internal: {error}"})
             return
         self._send(command, flags, request_id, body)

@@ -97,7 +97,7 @@ In `docs/release_notes/index.md`, insert a newest-first link just below the
 - [v<version>](<version>.md) — <YYYY-MM-DD>
 ```
 
-Do not add the version page to `mkdocs.yml` nav — `not_in_nav` already exempts
+Do not add the version page to the `wreath_docs.py` nav — `exclude` already exempts
 `release_notes/[0-9]*.md`, and the index links each release.
 
 ## 5. Report

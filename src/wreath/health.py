@@ -207,7 +207,13 @@ async def _run_check(check: HealthCheck) -> tuple[bool, dict[str, Any]]:
             "duration_ms": elapsed(),
             "timeout_s": check.timeout,
         }
-    except Exception as exc:  # a failing probe is "unhealthy", never a 500
+    except Exception as exc:  # noqa: BLE001 - user probe; resolves to UNHEALTHY
+        # `check.probe` is application code and may raise anything. The failure
+        # resolves fail-safe -- unhealthy, never healthy -- and is reported with
+        # the error string in the body, so it is visible rather than swallowed.
+        # A probe that blows up must not become a 500 on the health endpoint
+        # itself, because an unreachable health endpoint is indistinguishable
+        # from a dead process.
         return False, {
             "status": "fail",
             "critical": check.critical,

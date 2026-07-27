@@ -12,16 +12,26 @@ once wreath builds).
 
 Regenerate after an intentional emitter change:
 
-```python
-import sys; sys.path.insert(0, "src/wreath")   # load _port standalone (no native build)
-import _port
-from pathlib import Path
-corpus = Path("tests/port/corpus/tumbleweed_api")
-golden = Path("tests/port/golden/tumbleweed_api")
-for rel in ["schemas.py", "models.py", "routers/bookings.py", "routers/llamas.py"]:
-    dest = golden / (rel + ".expected")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(_port.emit_module(corpus / rel), encoding="utf-8")
+```bash
+uv run wreath-port-golden            # what drifted, and nothing written
+uv run wreath-port-golden --update   # rewrite the drifted ones
 ```
 
-Add new `.expected` files as more corpus modules are worth pinning.
+To pin a new module, create the empty `.expected` beside its siblings and run
+`--update` — the pinned set is this tree, so the tool fills in the goldens that
+exist rather than deciding which corpus modules deserve one.
+
+```bash
+touch tests/port/golden/summit_ops/intake.py.expected
+uv run wreath-port-golden --update
+```
+
+**This used to be a copy-pasteable Python snippet here, and it had already
+drifted.** It named four `tumbleweed_api` modules in a hardcoded list; a fifth
+golden was added later under `summit_ops/`, and following the documented
+procedure regenerated four of five files and said nothing about the one it
+skipped. A glob cannot go stale that way. The tool also checks, on the same
+pass, that the emit is deterministic, that its output *compiles* rather than
+merely parses, and that no `.expected` has outlived its corpus source — an
+orphan keeps passing, because `test_golden_output.py` parametrizes over the
+goldens and simply stops generating a case for it.

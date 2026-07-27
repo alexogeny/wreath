@@ -40,6 +40,7 @@ from wreath.passes import (
     Table,
     published_facts,
 )
+from wreath.postgres import OperationalError
 
 from .fakes import FakeDatabase, World
 
@@ -254,7 +255,10 @@ async def test_a_verification_that_could_not_run_is_not_a_verdict(database, worl
     def refuse_the_check(sql, args):
         if sql.startswith("SELECT 1 AS present"):
             calls["n"] += 1
-            raise RuntimeError("connection reset by peer")
+            # A real dropped connection is an `OperationalError`, not a bare
+            # `RuntimeError`. The distinction is load-bearing now that the
+            # check narrows its catch: see the test below.
+            raise OperationalError("connection reset by peer")
 
     world.before = refuse_the_check
     result = await walk.run(database, sleep=_nap)
@@ -270,6 +274,27 @@ async def test_a_verification_that_could_not_run_is_not_a_verdict(database, worl
     again = await walk.run(database, sleep=_nap)
     assert again.complete is True
     assert (await walk.status(database)).phase == "done"
+
+
+async def test_a_bug_in_the_verification_is_not_reported_as_could_not_run(
+    database, world
+):
+    """A driver error is transient. A `TypeError` is a bug and must surface.
+
+    `Constraint`/`NoRowsMatch` used to catch `Exception`, so a mistake building
+    the SQL came back as "verification could not run" with `transient=True` --
+    a wrong answer wearing a retry, which the pass would then repeat forever
+    against a check that can never run.
+    """
+    walk = convert_pass()
+
+    def a_programming_error(sql, args):
+        if sql.startswith("SELECT 1 AS present"):
+            raise TypeError("someone built this predicate wrong")
+
+    world.before = a_programming_error
+    with pytest.raises(TypeError, match="built this predicate wrong"):
+        await walk.run(database, sleep=_nap)
 
 
 async def test_a_hole_bars_the_gate(database, world):

@@ -54,8 +54,11 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - name: Install docs dependencies
-        # Only the docs group; the C extension is not needed (static docstrings).
-        run: uv sync --frozen --only-group docs --no-install-project
+      - name: Install wreath
+        # No docs group exists: wreath's own generator builds the site. The
+        # project is installed because the `:::` reference directive imports
+        # the modules it documents.
+        run: uv sync --frozen
       - name: Build site (strict)
-        run: uv run --no-sync mkdocs build --strict
+        # Fails on an orphan page, a dead internal link, or a broken anchor.
+        run: uv run --no-sync wreath docs check

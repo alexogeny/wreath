@@ -493,11 +493,18 @@ append_identifier_list(WreathPgBuffer *buffer, const WreathSqlPart *part)
 static int
 index_form(
     const WreathSqlOperation *operation,
-    WreathSqlPart parts[3],
+    WreathSqlPart parts[4],
     int *unique,
     WreathSqlPart *method)
 {
-    if (split_value(operation->name, operation->name_length, ':', parts, 3) == 0) {
+    /* Four parts means partial: prefix:columns:method:predicate-digest. The
+       predicate text itself cannot live here (names are ':'-delimited and SQL
+       predicates contain '::'), so it travels in the signature; the digest only
+       has to make two predicates over the same columns two distinct objects. */
+    if (split_value(operation->name, operation->name_length, ':', parts, 4) == 0) {
+        *method = parts[2];
+    }
+    else if (split_value(operation->name, operation->name_length, ':', parts, 3) == 0) {
         *method = parts[2];
     }
     else if (split_value(operation->name, operation->name_length, ':', parts, 2) == 0) {
@@ -513,19 +520,38 @@ index_form(
 }
 
 
+/* The predicate a partial index carries, if any: the signature is the ':'-joined
+   form followed by 0x1f and the predicate exactly as pg_get_expr deparses it.
+   Returns 1 and fills *predicate when present, 0 when the index is total. */
+static int
+index_predicate(const WreathSqlOperation *operation, WreathSqlPart *predicate)
+{
+    for (Py_ssize_t index = 0; index < operation->after_length; index++) {
+        if (operation->after[index] == 0x1f) {
+            predicate->data = operation->after + index + 1;
+            predicate->length = operation->after_length - index - 1;
+            return predicate->length > 0;
+        }
+    }
+    return 0;
+}
+
+
 static int
 render_index(WreathPgBuffer *statement, const WreathSqlOperation *operation)
 {
-    WreathSqlPart parts[3];
+    WreathSqlPart parts[4];
     WreathSqlPart method;
+    WreathSqlPart predicate;
     int unique;
-    int is_btree, is_gin;
+    int is_btree, is_gin, partial;
     if (!index_form(operation, parts, &unique, &method)) return 1;
     is_btree = method.length == 5 && memcmp(method.data, "btree", 5) == 0;
     is_gin = method.length == 3 && memcmp(method.data, "gin", 3) == 0;
     /* Only the access methods wreath emits are honored; anything else falls
        back to a MANUAL statement rather than injecting the token verbatim. */
     if (!is_btree && !is_gin) return 1;
+    partial = index_predicate(operation, &predicate);
     if (append_literal(statement, unique ? "create unique index " : "create index ") < 0 ||
         append_derived_object_name(statement, operation) < 0 ||
         append_literal(statement, " on ") < 0 ||
@@ -533,7 +559,17 @@ render_index(WreathPgBuffer *statement, const WreathSqlOperation *operation)
     if (is_gin && append_literal(statement, " using gin") < 0) return -1;
     if (append_literal(statement, " (") < 0 ||
         append_identifier_list(statement, parts + 1) < 0 ||
-        append_literal(statement, ");") < 0) return -1;
+        append_literal(statement, ")") < 0) return -1;
+    /* The predicate is emitted verbatim because it was produced by wreath's own
+       renderer (orm/_index_predicate.py) or read straight back from
+       pg_get_expr -- in both cases it is already PostgreSQL's normal form, and
+       reformatting it here would be the drift this design exists to avoid. */
+    if (partial) {
+        if (append_literal(statement, " where ") < 0 ||
+            wreath_pg_buffer_append(statement, predicate.data, predicate.length) < 0)
+            return -1;
+    }
+    if (append_literal(statement, ";") < 0) return -1;
     return 0;
 }
 
@@ -541,7 +577,7 @@ render_index(WreathPgBuffer *statement, const WreathSqlOperation *operation)
 static int
 render_drop_index(WreathPgBuffer *statement, const WreathSqlOperation *operation)
 {
-    WreathSqlPart parts[3];
+    WreathSqlPart parts[4];
     WreathSqlPart method;
     int unique;
     if (!index_form(operation, parts, &unique, &method)) return 1;

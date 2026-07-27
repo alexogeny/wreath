@@ -362,3 +362,38 @@ async def test_a_requeued_unit_that_still_fails_stops_being_pending(database, wo
     status = await walk.status(database)
     assert status.pending == 0
     assert status.holes_open >= 1
+
+
+# --- the hole recording is itself load-bearing ---------------------------------
+
+
+async def test_a_hole_that_cannot_be_recorded_stops_the_walk(database, world):
+    """If the hole cannot be written, the pass must not carry on regardless.
+
+    `gate_barred` is `holes_open > 0`, so the hole *is* the fact the terminal
+    gate reads. Recording it under `suppress(Exception)` meant a failed insert
+    left no hole, an unbarred gate, and a `skip` that had bought exactly the
+    irreversible step design 20 §11.2 says it never can -- the suppression sat
+    directly on the fact a safety mechanism reads.
+
+    Propagating is safe because the cursor has not moved and every ledger write
+    here is idempotent (`record_hole` is `ON CONFLICT DO UPDATE`), so the
+    runner's retry re-runs them cleanly.
+    """
+    walk = purge_pass(on_chunk_failure="skip")
+
+    def poison_the_chunk_and_its_hole(sql, args):
+        if sql.startswith("DELETE FROM replays"):
+            raise RuntimeError("cursed chunk")
+        if "pass_holes" in sql and sql.lstrip().upper().startswith("INSERT"):
+            raise RuntimeError("hole table unreachable")
+
+    world.before = poison_the_chunk_and_its_hole
+
+    with pytest.raises(RuntimeError, match="hole table unreachable"):
+        await walk.run(database, sleep=_nap)
+
+    # And the gate is barred by the pass not having progressed, rather than by
+    # a hole nobody managed to write.
+    status = await walk.status(database)
+    assert status.cursor is None

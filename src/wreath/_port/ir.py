@@ -127,6 +127,29 @@ class Report:
             return None
         return self._count(TRANSLATED) / len(self.findings)
 
+    def rule_counts(self) -> list[tuple[str, str, str, int]]:
+        """``(rule_id, category, tag, count)`` for the non-translated findings.
+
+        The report lists findings one per line, in file order. That answers "what
+        does this file need" and hides "what does this *codebase* need" -- a rule
+        firing forty times across thirty files reads as forty unrelated problems.
+        Clustering by rule is how the ported-app population gets prioritised, and
+        it is the view that kept getting rewritten by hand against ``--json``.
+
+        Translated findings are excluded: they are the part that needs no
+        decision, so ranking them ranks work nobody has to do. Heaviest first,
+        then by rule id so equal counts are stable.
+        """
+        tally: dict[tuple[str, str, str], int] = {}
+        for f in self.findings:
+            if f.tag == TRANSLATED:
+                continue
+            tally[(f.rule_id, f.category, f.tag)] = tally.get((f.rule_id, f.category, f.tag), 0) + 1
+        return [
+            (rule, cat, tag, n)
+            for (rule, cat, tag), n in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+
     def categories(self) -> dict:
         cats: dict[str, dict] = {}
         for f in self.findings:

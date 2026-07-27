@@ -260,6 +260,12 @@ def fingerprint_model(
         digest.update(b"\x1e")
         digest.update(b"ui\x1f" if table_index.unique else b"i\x1f")
         digest.update(",".join(table_index.columns).encode("utf-8"))
+        # A changed predicate is a different index. Without this a partial
+        # index could have its WHERE edited and no fingerprint would move.
+        predicate = getattr(table_index, "where_sql", None)
+        if predicate is not None:
+            digest.update(b"\x1f")
+            digest.update(predicate.encode("utf-8"))
     return digest.digest()
 
 

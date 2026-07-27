@@ -106,7 +106,14 @@ from .orm.types import (
 # `compile_rebind` looks for. Public in `wreath.queries` precisely because two
 # modules now share that contract.
 from .queries import Placeholder
-from .temporal import Bucket, Instant, from_wall_clock, parse_duration, wall_clock
+from .temporal import (
+    Bucket,
+    Instant,
+    TemporalError,
+    from_wall_clock,
+    parse_duration,
+    wall_clock,
+)
 from .temporal import now as _now
 from .temporal import zone as _zone_of
 
@@ -2009,7 +2016,7 @@ def _lateness(value: Any) -> float:
         else:
             try:
                 seconds = parse_duration(value).total_seconds()
-            except Exception:
+            except TemporalError:
                 raise SeriesError(
                     f"seal(after={value!r}) is not a duration. Write it compactly "
                     f"('2h', '30m', '90s') or as ISO-8601 ('PT2H')"

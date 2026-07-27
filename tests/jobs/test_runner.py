@@ -242,6 +242,10 @@ async def test_a_pass_that_cannot_be_started_is_counted_not_swallowed():
         tenant = ""
         shift = 5.0
         recurring = True
+        # A real ChunkedPass has one, and `_record_drive_failure` reads it. The
+        # stub omitted it and `suppress(Exception)` swallowed the AttributeError,
+        # so this test passed because a programming error was being hidden.
+        workload = "write"
 
         async def status(self, db):
             return None
@@ -259,12 +263,23 @@ async def test_one_unstartable_pass_does_not_strand_the_others():
     db = FakeDatabase()
     runner = _runner(db)
 
+    class Ledger:
+        """Enough of a real ledger for `_record_drive_failure` to reach."""
+
+        def __init__(self):
+            self.marked = []
+
+        async def mark_driven(self, connection, *, error=None):
+            self.marked.append(error)
+
     class Walk:
         def __init__(self, name, ok):
             self.name = name
             self.tenant = ""
+            self.workload = "write"
             self.shift = 5.0
             self.recurring = True
+            self.ledger = Ledger()
             self._ok = ok
 
         async def status(self, db):

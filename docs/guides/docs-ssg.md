@@ -81,14 +81,20 @@ from wreath._docs import THEMES
 site = Site(..., palette=THEMES["sepia"], feel="papery")
 ```
 
-- **Themes** (colours, light + dark): `wreath` (deep purple/cyan), `slate`,
-  `sepia` (warm paper, serif), `nord`, `terminal`.
+- **Themes** (colours, light + dark): `wreath` (evergreen on a green-cast paper,
+  brass held back for state), `slate`, `sepia` (warm paper, serif), `nord`,
+  `terminal`.
 - **Feels** (surface treatment): `flat` (default), `elevated` (soft shadows),
   `papery` (faint grain + soft shadows), `hardcore` (square, heavy borders,
   uppercase headings), `orby` (big radii, pill controls, glow).
 
 Both are just CSS variables, so a bespoke palette is a `Palette(primary=…, …)`
-away — no theme build step.
+away — no theme build step. A palette also picks its two type voices: `font` is
+the reading face (`"system"`, `"serif"`, or `"mono"`) and `display` is the
+heading face. `dark_primary` and `dark_accent` cover the case a light-first
+palette always gets wrong — a brand colour tuned to read *on paper* is too dark
+to *fill* anything on a near-black ground, so chart bars and rules vanish in dark
+mode. Leave them empty and they are derived by lightening.
 
 ### What the theme guarantees
 
@@ -117,6 +123,96 @@ Motion honours `prefers-reduced-motion`, tables scroll inside their own
 container rather than scrolling the page, there is a skip link, both navigation
 landmarks are labelled, and there is a print stylesheet.
 
+!!! note "One audit warning is deliberate"
+
+    `wreath audit` flags the component stylesheet as a render-blocking `<link>`
+    on every page, and it stays that way on purpose. The tokens and the layout
+    frame *are* inlined; what is left in the external file is the components —
+    the sidebar, code blocks, callouts, tabs. Loading that asynchronously would
+    trade a blocked first paint for a flash of unstyled components on every
+    navigation, which is the worse of the two. The file is one small same-origin
+    request, cached across the whole site.
+
+### Three type voices
+
+The theme sets its chrome in three faces with one job each, and the split is the
+project's own rule — *the brand may be poetic, the API must stay literal* — made
+visible. A serif carries page titles and section heads; the body face carries the
+prose; and the **mono face carries structure**: nav section labels, the table-of-
+contents head, table headers, admonition titles, chart captions, keyboard hints,
+code. That last one is what makes the hierarchy readable without adding a single
+box or rule. None of the three is downloaded, so there is no font flash and no
+network request.
+
+### Finding your way in a large site
+
+Once the nav has three or more top-level entries, the top level moves into a row
+of **section tabs** in the header and the sidebar shows only the section you are
+in (`tabs="never"` keeps the whole tree in one scroller). Inside that tree the
+branch you are on is drawn as **one continuous thread** from the section root
+down to a dot on your current page, so "you are here" carries its whole ancestry
+rather than being an isolated highlight.
+
+## What the built site does at runtime
+
+The runtime is one cached `assets/docs.js`, no framework and no build step, and
+it is **enhancement only**. With scripts off you keep every page, every link,
+every nav section, every content tab, and the whole table of contents; you lose
+the four things below and nothing else.
+
+- **Search palette** — `Ctrl K` (`⌘K` on a Mac) or `/`. Results are scored per
+  *section*, not per page, so a hit lands on the heading you wanted; matches are
+  highlighted, results group under their page, and arrow keys move real focus
+  between them. The index is fetched once, on your first keystroke.
+- **Instant navigation** — links prefetch on hover and swap `<main>` in place,
+  with a View Transition where the browser has one. The point is not the
+  milliseconds; it is that a 147-page sidebar does not blink and lose its scroll
+  position on every click.
+- **Copy buttons** on every code block, and a table of contents that tracks the
+  section you are reading.
+- **A three-state theme control** — system, light, dark. A two-state toggle
+  silently throws away "follow the OS" the first time you press it, with no way
+  back.
+
+## Writing the content
+
+Beyond CommonMark basics, tables, and the `:::` reference directive:
+
+- **Admonitions** — `!!! note "Title"` for a static callout, `??? note` for one
+  that starts collapsed, `???+ note` for one that starts open. Only warnings and
+  errors get a background wash; a note and a warning that look equally loud are
+  two decorations, while a warning that looks louder is information.
+- **Content tabs** — `=== "Tab title"` with an indented body. They compile to a
+  CSS radio group, so they work with no JavaScript and are keyboard-navigable
+  natively.
+- **Code fences** carry attributes: ` ```python title="app.py" hl_lines="3 7-9" `.
+  A `title` adds a header strip naming the file; `hl_lines` shades those lines.
+
+## Opening a page with a hero
+
+A page that has an argument to make rather than an API to document can open with
+a `hero` block — a mono eyebrow, a display headline, a lede, and up to four
+actions:
+
+````markdown
+```hero
+eyebrow: The request path
+title: Most of a request never reaches Python.
+lede: Ingress, routing, and authorization are native code.
+action: See the benchmarks -> ../perf/index.md
+action: How we know -> #how-we-know
+```
+````
+
+The headline becomes the page's real `<h1>` and its `<title>`, so a hero page
+needs no separate `#` heading. Action targets go through the same `.md` →
+`.html` rewrite and the same dead-link check as any other link on the page — a
+hero pointing at a page you deleted fails the build.
+
+There are four fields and no way to add a fifth. A hero is the one place a docs
+page is allowed to be loud, and the way to stop that spreading is to give it a
+shape it cannot outgrow.
+
 ## Charts from your data
 
 Point a ```` ```chart ```` block at a JSON file — a benchmark's `latest.json`,
@@ -140,10 +236,48 @@ limit: 12
 The data stays outside the docs, so the chart is always current with the source
 file. A missing file or field degrades to a visible note rather than failing the
 build — unless you're in `check`, where you want to know. Bars whose label names a
-wreath arm (`Wreath (metal)`, `(native)`, `(pure)`, …) each get a distinct
-theme-aware colour, and everything else renders as a muted hatch — so your own
+wreath arm (`Wreath (metal)`, `(native)`, `(ASGI)`, …) are drawn as one hue at
+three strengths — they differ by how much of the stack is native, which is an
+ordered quantity — and everything else renders as a muted hatch, so your own
 series never blends into the field. Chart data files that live under your `source`
 tree are copied into the built site, so a "raw data" link to the JSON resolves.
+
+## Explaining a mechanism
+
+Some things are easier to watch than to read. A `figure` block draws one of a
+small set of hand-built diagrams as inline SVG, animated with CSS:
+
+````markdown
+```figure
+name: timing-wheel
+title: Cancelling a timer
+note: Both sides cancel the same timer; the squares count what it costs.
+```
+````
+
+This is deliberately **not** a diagram language. Each figure is a specific
+argument about wreath's own machinery, drawn on purpose — `request-boundary`,
+`route-bitset`, `timing-wheel` — and they live on
+[Under the hood](../internals/index.md). A general renderer would be a
+dependency and would draw worse. Naming a figure this build doesn't have
+produces a visible note rather than an empty box.
+
+If you are adding one, three rules make the difference between a diagram and a
+decoration:
+
+- **Draw the operation, not the state.** The first version of these showed two
+  structures sitting still, and nobody could tell what was being compared.
+  Showing the *same operation* run on both, with a counter for the steps it
+  takes, is what makes a comparison legible.
+- **Label the symbols.** A grid of lit and unlit cells means nothing until each
+  row is named.
+- **Say what the resting state is.** Every reveal keyframe ends hidden, so the
+  `prefers-reduced-motion` block has to name the elements that must stay
+  visible — otherwise the whole figure is blank for anyone who asked for no
+  animation.
+
+Motion can be stopped from the figure's own header, with a checkbox rather than
+a script, so the control exists whether or not any JavaScript loaded.
 
 ## Serving the built site from your app
 
@@ -151,6 +285,13 @@ The output is a plain directory, so mount it like any other static tree:
 
 ```python
 app.static("/docs", "site")
+```
+
+Set `source_url` on the `Site` and every page also gets an "Edit this page" link
+built from its own source path:
+
+```python
+site = Site(..., source_url="https://github.com/you/proj/edit/main/docs")
 ```
 
 ## API reference from your code

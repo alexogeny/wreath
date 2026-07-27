@@ -270,5 +270,11 @@ def _resolve_route(app: Any, canonical: CanonicalRequest) -> bool:
         return False
     try:
         return matcher(canonical.method, canonical.path, 0) is not None
-    except Exception:
+    except TypeError:
+        # `Wreath._route_match` adapts the arity across routing modes itself, so
+        # this only catches a foreign or mocked app whose matcher takes a
+        # different signature -- "tolerant of both routing modes" in the
+        # docstring above. Narrowed from a blanket catch: a matcher that raises
+        # for any other reason is a routing fault, and reporting "no route"
+        # would make a replayed request silently miss a handler it should hit.
         return False
