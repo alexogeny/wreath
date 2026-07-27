@@ -90,7 +90,7 @@ def percentile(values: list[float], q: float) -> float:
 
 def native_module_path() -> str:
     try:
-        import wreath._native._server as mod  # noqa: PLC0415
+        import wreath._native._server as mod
 
         return str(getattr(mod, "__file__", "unresolved"))
     except Exception as exc:  # noqa: BLE001
@@ -240,14 +240,14 @@ class CountingTransport(asyncio.Transport):
 
 
 def native_protocol_cls() -> Any:
-    import wreath._native._server as mod  # noqa: PLC0415
+    import wreath._native._server as mod
 
     return mod.HttpProtocol
 
 
 def _feed(protocol: Any, data: bytes) -> None:
     # Mirrors tests/_server_ingest.py: the production BufferedProtocol path.
-    from tests._server_ingest import feed  # noqa: PLC0415
+    from tests._server_ingest import feed
 
     feed(protocol, data)
 
@@ -298,7 +298,7 @@ def _incomplete_head(size: int) -> bytes:
 
 
 async def _slow_head_once(size: int) -> tuple[float, dict[str, Any]]:
-    from wreath.server import ServerConfig  # noqa: PLC0415
+    from wreath.server import ServerConfig
 
     payload = _incomplete_head(size)
     config = ServerConfig(
@@ -334,7 +334,7 @@ def scenario_http1_slow_head(warmups: int, trials: int) -> dict[str, Any]:
 
 
 async def _slow_chunk_line_once(size: int) -> tuple[float, dict[str, Any]]:
-    from wreath.server import ServerConfig  # noqa: PLC0415
+    from wreath.server import ServerConfig
 
     config = ServerConfig(
         lifespan="off",
@@ -381,7 +381,7 @@ def scenario_http1_slow_chunk_line(warmups: int, trials: int) -> dict[str, Any]:
 
 
 async def _receive_queue_once(count: int) -> tuple[float, dict[str, Any]]:
-    from wreath.server import ServerConfig  # noqa: PLC0415
+    from wreath.server import ServerConfig
 
     gate = asyncio.Event()
     done = asyncio.Event()
@@ -447,7 +447,7 @@ MASK = b"\x01\x02\x03\x04"
 
 
 def ws_frame(fin: bool, opcode: int, payload: bytes = b"") -> bytes:
-    from wreath._websocket import build_frame  # noqa: PLC0415
+    from wreath._websocket import build_frame
 
     return build_frame(opcode, payload, fin, MASK)
 
@@ -463,7 +463,7 @@ async def _ws_accept_app(scope: dict, receive: Any, send: Any) -> None:
 
 
 async def _ws_empty_fragments_once(count: int) -> tuple[float, dict[str, Any]]:
-    from wreath.server import ServerConfig  # noqa: PLC0415
+    from wreath.server import ServerConfig
 
     seen: dict[str, Any] = {"messages": 0}
 
@@ -477,7 +477,7 @@ async def _ws_empty_fragments_once(count: int) -> tuple[float, dict[str, Any]]:
                 return
             seen["messages"] += 1
 
-    import tracemalloc  # noqa: PLC0415
+    import tracemalloc
 
     protocol, _transport = make_server(app, ServerConfig(lifespan="off"))
     _feed(protocol, WS_UPGRADE)
@@ -529,7 +529,7 @@ def scenario_ws_empty_fragments(warmups: int, trials: int) -> dict[str, Any]:
 
 
 async def _ws_empty_messages_once(count: int) -> tuple[float, dict[str, Any]]:
-    from wreath.server import ServerConfig  # noqa: PLC0415
+    from wreath.server import ServerConfig
 
     gate = asyncio.Event()
 
@@ -586,7 +586,7 @@ def scenario_ws_empty_messages(warmups: int, trials: int) -> dict[str, Any]:
 
 
 def native_route_table() -> Any:
-    from wreath._native import _core  # noqa: PLC0415
+    from wreath._native import _core
 
     return _core.RouteTable
 
@@ -664,7 +664,7 @@ def scenario_trie_wide_fanout(warmups: int, trials: int) -> dict[str, Any]:
 
 
 def native_postgres() -> Any:
-    import wreath._native._postgres as mod  # noqa: PLC0415
+    import wreath._native._postgres as mod
 
     return mod
 
@@ -834,11 +834,11 @@ def _multipart_body(total: int, boundary: bytes) -> bytes:
 
 
 def _multipart_once(total: int) -> tuple[float, dict[str, Any]]:
-    from wreath._native import _core  # noqa: PLC0415
+    from wreath._native import _core
 
     boundary = b"BOUNDARY"
     body = _multipart_body(total, boundary)
-    from wreath._headers import find_header  # noqa: PLC0415
+    from wreath._headers import find_header
 
     baseline = peak_rss_bytes()
     started = perf_counter_ns()
@@ -906,7 +906,7 @@ def _json_docs(distinct_keys: int, docs: int) -> list[bytes]:
 
 
 def _json_key_churn_once(mode: str) -> tuple[float, dict[str, Any]]:
-    from wreath._native import _core  # noqa: PLC0415
+    from wreath._native import _core
 
     # "stable" repeats one key set (what the cache is meant to help); "churn"
     # cycles 1024 distinct keys (what the cache retains).
@@ -939,7 +939,7 @@ def scenario_json_key_churn(warmups: int, trials: int) -> dict[str, Any]:
 
 
 def _cookie_repeat_once(reads: int) -> tuple[float, dict[str, Any]]:
-    from wreath.request import Request  # noqa: PLC0415
+    from wreath.request import Request
 
     cookie = b"; ".join(f"name{i}=value{i}".encode() for i in range(12))
     scope = {

@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import wreath
-from wreath._replay_adapters import AdapterFault, DatabaseDouble
+from wreath._replay_adapters import AdapterFault, DatabaseDouble, scripted_row
 from wreath.postgres import Connection
 from wreath.replay import (
     AdapterSeam,
@@ -495,7 +495,7 @@ async def _run_store_claim(schedule: FaultSchedule) -> Observation:
     # one, "no row came back" would be the control as well as the fault, and
     # the assertion would be comparing silence with silence.
     double = _double(schedule)
-    double.results = ({"key": "k"},)
+    double.results = (scripted_row({"key": "k"}),)
     store = keyed_store(double)
     raised: list[str] = []
     held: list[str] = []

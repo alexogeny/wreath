@@ -390,7 +390,9 @@ def _compile_bind_program(select: Select) -> Callable[[Select], tuple[Any, ...]]
                 f"refusing to generate an extractor from {fragment!r}: only "
                 "declared attribute names may reach the generated body"
             )
-    exec(f"def extract(select):\n    return ({body})", {}, namespace)
+    exec(  # noqa: S102 - every fragment is guarded to isidentifier() directly above
+        f"def extract(select):\n    return ({body})", {}, namespace
+    )
     return namespace["extract"]
 
 

@@ -68,7 +68,7 @@ def compile_trials(branches: int, leaves: int, trials: int) -> list[float]:
 def implementation_name() -> str:
     """Report whether the decision router resolved to native or pure Python."""
     try:
-        import wreath._native._core as core  # noqa: PLC0415
+        import wreath._native._core as core
 
         if getattr(core, "DecisionRouteTable", None) is not None:
             return f"native ({core.__file__})"

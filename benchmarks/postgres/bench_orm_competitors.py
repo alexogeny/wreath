@@ -234,14 +234,14 @@ async def _wreath_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[Any]]]
 async def _tortoise_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[Any]]], Any]:
     from tortoise import Tortoise
 
-    from benchmarks.postgres._tortoise_models import Item  # noqa: PLC0415
+    from benchmarks.postgres._tortoise_models import Item
 
     await Tortoise.init(
         db_url=dsn.replace("postgresql://", "asyncpg://"),
         modules={"models": ["benchmarks.postgres._tortoise_models"]},
         _create_db=False,
     )
-    from benchmarks.postgres._tortoise_models import Author, Book  # noqa: PLC0415
+    from benchmarks.postgres._tortoise_models import Author, Book
 
     async def joined_to_one() -> Any:
         books = await Book.all().select_related("author").order_by("id").limit(CHILD_LIMIT)
@@ -270,7 +270,7 @@ async def _sqlalchemy_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[An
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     from sqlalchemy.orm import joinedload, selectinload
 
-    from benchmarks.postgres._sqlalchemy_models import Author, Book, Item  # noqa: PLC0415
+    from benchmarks.postgres._sqlalchemy_models import Author, Book, Item
 
     engine = create_async_engine(
         dsn.replace("postgresql://", "postgresql+asyncpg://"),
@@ -322,7 +322,7 @@ async def _sqlmodel_ops(dsn: str) -> tuple[dict[str, Callable[[], Awaitable[Any]
     from sqlmodel import select
     from sqlmodel.ext.asyncio.session import AsyncSession
 
-    from benchmarks.postgres._sqlmodel_models import Author, Book, Item  # noqa: PLC0415
+    from benchmarks.postgres._sqlmodel_models import Author, Book, Item
 
     engine = create_async_engine(
         dsn.replace("postgresql://", "postgresql+asyncpg://"),
@@ -384,7 +384,7 @@ def _peewee_ops(dsn: str) -> tuple[dict[str, Callable[[], Any]], Callable[[], No
         enabled = peewee.BooleanField()
         label = peewee.TextField()
 
-        class Meta:  # noqa: D106
+        class Meta:
             database = handle
             table_name = TABLE
 
@@ -392,7 +392,7 @@ def _peewee_ops(dsn: str) -> tuple[dict[str, Callable[[], Any]], Callable[[], No
         id = peewee.BigIntegerField(primary_key=True)
         name = peewee.TextField()
 
-        class Meta:  # noqa: D106
+        class Meta:
             database = handle
             table_name = AUTHORS
 
@@ -402,7 +402,7 @@ def _peewee_ops(dsn: str) -> tuple[dict[str, Callable[[], Any]], Callable[[], No
         title = peewee.TextField()
         year = peewee.IntegerField()
 
-        class Meta:  # noqa: D106
+        class Meta:
             database = handle
             table_name = BOOKS
 

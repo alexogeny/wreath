@@ -168,3 +168,38 @@ def sighting_json(
         payload["camera"] = camera_json(sighting.camera)
         payload["species"] = species_json(sighting.species)
     return payload
+
+
+def chart_json(result: Any) -> dict[str, Any]:
+    """A series envelope with its averages made serialisable.
+
+    **This conversion is forced, not a preference.** A `Series` measure declared
+    with `avg()` over an integer column comes back as a `decimal.Decimal` —
+    PostgreSQL's `avg(int)` is `numeric`, and the driver decodes it faithfully.
+    `wreath._json` cannot serialise a `Decimal` and `wreath.temporal.jsonable`
+    passes it through unchanged, so returning the envelope directly is a 500 on
+    any bucket that has data. Rounding here is the application's own answer to a
+    question the framework does not answer yet.
+
+    Rounded to one place because the value is a percentage confidence, and the
+    sixteen decimal places `numeric` carries are noise a chart cannot draw. A
+    money column would want the `Decimal` kept and the encoder taught, which is
+    the other half of why this belongs in an application's wire layer rather
+    than being pushed into the framework as a global rule.
+
+    The hazard this hides is worth naming: a bucket with no rows averages to
+    `None`, so a fixture too small to fill any bucket serialises cleanly and the
+    defect stays invisible. That is how it was found — a 2,000-row sample passed
+    and a 4,000-row sample did not.
+    """
+    payload = result.as_dict()
+    payload["series"] = [
+        {**item, "values": [_plain(value) for value in item["values"]]}
+        for item in payload["series"]
+    ]
+    return payload
+
+
+def _plain(value: Any) -> Any:
+    """`Decimal` to a rounded float; everything else untouched."""
+    return round(float(value), 1) if isinstance(value, Decimal) else value

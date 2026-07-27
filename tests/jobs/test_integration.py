@@ -107,3 +107,58 @@ async def test_fencing_blocks_stale_completion(runner):
     await runner._complete(job)
     still_there = await runner._claim(1)
     assert len(still_there) == 1  # re-claimable, not marked done by the stale worker
+
+
+async def test_the_sweeper_reclaims_only_its_own_queue(runner):
+    """Every queue in a schema shares one `jobs` table, partitioned by `queue`.
+
+    The sweep was not partitioned with it. A queue whose own workers are down
+    keeps its in-flight rows `leased` until it comes back -- unless some other
+    queue in the same schema sweeps them, bumping `attempts` on its own lease
+    interval until they exhaust `max_attempts` and dead-letter. Jobs destroyed
+    by the deploy of a service that does not own them, and neither queue's
+    counters record it.
+    """
+    other = JobRunner(
+        runner._db, name="other", schema=_SCHEMA, concurrency=1, lease=1.0
+    )
+
+    @runner.task("noop")
+    async def noop(ctx):
+        pass
+
+    @other.task("noop")
+    async def other_noop(ctx):
+        pass
+
+    await other.enqueue("noop")
+    claimed = await other._claim(1)
+    assert len(claimed) == 1
+
+    # Expire the other queue's lease, then sweep from *this* queue.
+    connection = await runner._db.acquire("write")
+    try:
+        await connection.execute(
+            f'UPDATE "{_SCHEMA}".jobs SET lease_expiry = now() - interval \'1 hour\''
+            " WHERE queue = $1",
+            "other",
+        )
+        await runner._reclaim_expired()
+        state, attempts = await connection.fetchrow(
+            f'SELECT state, attempts FROM "{_SCHEMA}".jobs WHERE queue = $1',
+            "other",
+        )
+        assert (state, attempts) == ("leased", 0), (
+            "the 'work' queue's sweeper touched the 'other' queue's row"
+        )
+
+        # And the owning queue still reclaims it, so the scoping did not
+        # simply disable the sweep.
+        await other._reclaim_expired()
+        state, attempts = await connection.fetchrow(
+            f'SELECT state, attempts FROM "{_SCHEMA}".jobs WHERE queue = $1',
+            "other",
+        )
+        assert (state, attempts) == ("ready", 1)
+    finally:
+        await runner._db.release("write", connection)

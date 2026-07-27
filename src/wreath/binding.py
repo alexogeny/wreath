@@ -871,6 +871,49 @@ def _compile_dep(
             parameters = list(inspect.signature(fn).parameters.values())
         except (TypeError, ValueError):
             parameters = []
+        # A dependency's own parameters are never bound from the request: only a
+        # handler signature is inspected, and `_construct` calls
+        # `fn(request, **kwargs)` with `kwargs` holding nested `Depends` values
+        # and nothing else. A source marker here therefore does nothing, and the
+        # two ways it fails are both silent-to-the-caller. On the *first*
+        # parameter -- a callable written without a leading `request` -- the
+        # request object is handed in as that value, and the first arithmetic on
+        # it is a 500. On a later parameter the Python default wins, so the
+        # handler is served stale defaults while `?page=2` is ignored, which is
+        # a wrong answer with a 200 on it. Refused here, at route-compile time,
+        # naming the two spellings that do work.
+        try:
+            dep_hints = typing.get_type_hints(fn, include_extras=True)
+        except (NameError, TypeError):
+            dep_hints = {}
+        for index, parameter in enumerate(parameters):
+            annotation = dep_hints.get(parameter.name, parameter.annotation)
+            if typing.get_origin(annotation) is not typing.Annotated:
+                continue
+            marker = next(
+                (
+                    item
+                    for item in typing.get_args(annotation)[1:]
+                    if isinstance(item, _SOURCE_MARKERS)
+                ),
+                None,
+            )
+            if marker is None:
+                continue
+            label = getattr(fn, "__qualname__", fn)
+            where = (
+                "its first parameter, which wreath fills with the request itself"
+                if index == 0
+                else "a parameter wreath never binds"
+            )
+            raise TypeError(
+                f"dependency {label!s} declares {type(marker).__name__}() on "
+                f"{parameter.name!r} -- {where}. A dependency is called as "
+                f"fn(request, **nested_depends); request values are not bound "
+                f"into it. Either take the request first and read it "
+                f"(request.query_params), or declare {parameter.name!r} on the "
+                f"handler instead and pass the value in."
+            )
         nested: list[tuple[str, Depends, Resolver]] = []
         for parameter in parameters[1:]:
             default = parameter.default
@@ -1321,6 +1364,21 @@ def inspect_handler(handler: Handler, path: str) -> BindingSpec | None:
                 f"Write the marker inside Annotated and leave the default an "
                 f"ordinary Python default: "
                 f"Annotated[{shown}, {marker}(...)] = <default>"
+            )
+        if any(isinstance(item, Depends) for item in metadata):
+            # The mirror of the marker-as-default refusal above, and the worse
+            # failure of the two. `Depends` is read from the default only, so
+            # inside `Annotated` it was invisible: the parameter fell through to
+            # the JSON body and a GET answered 400 "invalid JSON body". A 500
+            # says *we* broke; a 400 says *you* broke, and the caller has no way
+            # to tell it was a wiring bug on this side.
+            label = getattr(handler, "__qualname__", handler)
+            raise TypeError(
+                f"handler {label!s} parameter {parameter.name!r} puts Depends() "
+                f"inside Annotated; wreath reads Depends from the default only, "
+                f"so nothing would be injected and the parameter would be bound "
+                f"from the request body. Write it as the default instead: "
+                f"{parameter.name} = Depends(...)"
             )
         if base_annotation is Session:
             if orm_marker is None:

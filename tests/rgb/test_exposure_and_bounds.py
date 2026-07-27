@@ -164,7 +164,12 @@ class TestPageDepth:
     def test_page_params_bound_the_page_number(self):
         from wreath.pagination import MAX_PAGE, page_params
 
-        params = page_params(page=10**9, size=20, sort="")
+        class _Request:
+            # `page_params` is a `Depends`, so it takes the request and reads
+            # the query string -- a dependency's own parameters are never bound.
+            query_string = b"page=1000000000&size=20"
+
+        params = page_params(_Request())
         assert params.page <= MAX_PAGE
 
     def test_crud_bounds_the_page_number(self):

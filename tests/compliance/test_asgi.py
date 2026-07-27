@@ -46,7 +46,7 @@ def _app_with_root() -> Wreath:
     app = Wreath()
 
     @app.get("/")
-    async def root(request):  # noqa: ANN001, ANN202
+    async def root(request):
         return Response(b"ok")
 
     return app
@@ -69,11 +69,11 @@ def test_lifespan_startup_and_shutdown_complete() -> None:
     order: list[str] = []
 
     @app.on_startup
-    async def _startup(app) -> None:  # noqa: ANN001 - hook is called handler(app)
+    async def _startup(app) -> None:  # hook is called handler(app)
         order.append("startup")
 
     @app.on_shutdown
-    async def _shutdown(app) -> None:  # noqa: ANN001
+    async def _shutdown(app) -> None:
         order.append("shutdown")
 
     sent: list[dict] = []
@@ -97,7 +97,7 @@ def test_handler_exception_becomes_500_not_a_crash() -> None:
     app = Wreath()
 
     @app.get("/boom")
-    async def boom(request):  # noqa: ANN001, ANN202
+    async def boom(request):
         raise RuntimeError("kaboom")
 
     sent = _run(app, _http_scope("/boom"))

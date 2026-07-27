@@ -106,7 +106,7 @@ def bench_memory(make, k=10_000):
     tracemalloc.start()
     tracemalloc.reset_peak()
     s = make()
-    keep = [s.schedule(30.0) for _ in range(k)]  # noqa: F841
+    keep = [s.schedule(30.0) for _ in range(k)]
     _cur, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     del keep, s

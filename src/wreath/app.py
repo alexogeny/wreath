@@ -1556,7 +1556,7 @@ class Wreath:
         if global_hooks and request._get_route_outcome() in (None, "ingress"):
             request._set_route_outcome("route")
         requirement = self._handler_requirements.get(handler)
-        if requirement is not None and requirement.authenticated:
+        if requirement is not None and requirement.needs_backend:
             try:
                 if flight_phase is None:
                     stage_response = await self._authorize_request(request, requirement)
@@ -1707,7 +1707,7 @@ class Wreath:
         identity: Identity | None = None
         requirement = requirement_for(handler)
         if (
-            requirement.authenticated
+            requirement.needs_backend
             or requirement.role_checks
             or requirement.permission_checks
             or requirement.policies
@@ -2258,6 +2258,12 @@ class Wreath:
                     if stage_response is not None:
                         return stage_response
         if identity is None:
+            if not requirement.authenticated:
+                # `identify()` only: the backend was asked and answered nobody,
+                # which is a value rather than a failure. Every check below is
+                # reached only through a decorator that sets `authenticated`, so
+                # there is nothing left to enforce against an absent principal.
+                return None
             challenge = (
                 None if auth_backend is None else auth_backend.challenge(request)
             )

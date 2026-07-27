@@ -45,7 +45,10 @@ __all__ = [
     "ObjectStoreDouble",
     "ReplayAdapters",
     "SILENT_FAULTS",
+    "ScriptedRecord",
+    "driver_row_value",
     "installed_adapters",
+    "scripted_row",
 ]
 
 
@@ -173,11 +176,6 @@ def _object_error(fault: AdapterFault, key: str) -> Exception:
 # `tests/postgres/test_double_fidelity.py`, which runs the same assertions
 # against a real connection so the two cannot drift apart.
 
-#: What `_infer_oid` can encode. A `list` is absent, which is why `= ANY($1)`
-#: raises before PostgreSQL is ever reached.
-_BINDABLE = (bool, int, float, str, bytes, uuid.UUID, decimal.Decimal,
-             datetime.datetime, datetime.date)
-
 #: A cast on a placeholder declares the *parameter* type, and only bites on the
 #: second execution of the same SQL text — the first is coerced, the second
 #: binds by the inferred OID. These have no binary encoder at all, so no Python
@@ -201,11 +199,23 @@ _STRING_OR_DOLLAR = re.compile(r"'(?:[^']|'')*'|\$\$.*?\$\$", re.DOTALL)
 
 
 def refuse_unbindable(args: tuple[Any, ...]) -> None:
-    """Raise what the driver raises for a value it cannot encode."""
+    """Raise what the driver raises for a value it cannot encode.
+
+    Calls the driver's own inference rather than restating its type table. The
+    restated version had already drifted: it refused the same *values*, but with
+    a 39-character message where the driver's is 497 and names the fix --
+    `IN ($1, $2, ...)` rather than `= ANY($1)`. A refusal test written against
+    the double therefore passed while saying nothing about what a caller reads,
+    and the outcome-classifying contract test could not see the difference
+    because both raise `TypeError`.
+
+    Derivation, not duplication: when the driver learns to encode a type, this
+    stops refusing it without anyone editing this function.
+    """
+    from ._pure.postgres import _infer_oid
+
     for value in args:
-        if value is None or isinstance(value, _BINDABLE):
-            continue
-        raise TypeError(f"unsupported PostgreSQL value type: {type(value).__name__}")
+        _infer_oid(value)
 
 
 def refuse_multiple_commands(sql: str) -> None:
@@ -244,6 +254,103 @@ def refuse_what_postgres_refuses(
     refuse_multiple_commands(sql)
     refuse_unbindable(args)
     refuse_uninferable_cast(sql, args, seen)
+
+
+# --- what a real connection hands *back* -------------------------------------
+#
+# The refusals above model what the driver rejects on the way in. A double is
+# equally able to lie on the way out, and that lie is the one that shipped: a
+# fake scripted with `str` and `int` rows modelled a driver with catalog codecs,
+# and `validate_schema="error"` -- the framework default -- had never once
+# completed lifespan startup against a real PostgreSQL.
+
+#: Column surface of `wreath._native._postgres.Record`, and nothing else.
+#: Measured, not assumed: a `dict`-shaped fake let `row.values()` through and
+#: the live test then died on `AttributeError` in code nobody had run.
+_RECORD_ABSENT = ("keys", "items", "get", "values", "__iter__", "__contains__")
+
+
+class ScriptedRecord:
+    """A scripted row with exactly the surface a real `Record` has.
+
+    Deliberately *not* a mapping. `list(record)` works, because the sequence
+    protocol falls back to `__getitem__` until `IndexError` -- but
+    `dict(record)` raises, `record.values()` raises, and `"a" in record`
+    compares against the *values*, not the column names. Each of those is a way
+    a dict-shaped fake quietly diverges from the driver.
+    """
+
+    __slots__ = ("_columns", "_values")
+
+    def __init__(self, columns: tuple[str, ...], values: tuple[Any, ...]) -> None:
+        self._columns = tuple(columns)
+        self._values = tuple(values)
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, str):
+            try:
+                return self._values[self._columns.index(key)]
+            except ValueError:
+                raise KeyError(key) from None
+        if isinstance(key, int):
+            if not -len(self._values) <= key < len(self._values):
+                raise IndexError("Record index out of range")
+            return self._values[key]
+        raise TypeError(f"Record indices must be int or str, not {type(key).__name__}")
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __repr__(self) -> str:
+        pairs = zip(self._columns, self._values, strict=True)
+        return f"<ScriptedRecord {' '.join(f'{n}={v!r}' for n, v in pairs)}>"
+
+
+def scripted_row(mapping: dict[str, Any]) -> ScriptedRecord:
+    """A `ScriptedRecord` from the dict a fake naturally builds."""
+    return ScriptedRecord(tuple(mapping), tuple(mapping.values()))
+
+
+def refuse_mapping_rows(results: tuple[Any, ...]) -> None:
+    """Refuse a scripted result shaped like something the driver never returns.
+
+    `fetch` yields `Record`s, never `dict`s. A double scripted with a mapping
+    accepts `row.values()`, `dict(row)` and `"col" in row`, all of which raise
+    against the driver -- so the test passes here and the code fails in
+    production, which is the whole failure this rule exists to stop.
+    """
+    for result in results:
+        rows = result if isinstance(result, (list, tuple)) else (result,)
+        for row in rows:
+            if isinstance(row, dict):
+                raise TypeError(
+                    "scripted result rows must have the driver's Record surface, "
+                    f"not {type(row).__name__}: a mapping accepts row.values() and "
+                    "dict(row), which raise against a real connection. Wrap it with "
+                    "wreath._replay_adapters.scripted_row({...})."
+                )
+
+
+def driver_row_value(oid: int, value: object) -> object:
+    """What the driver would hand back for *value* arriving under *oid*.
+
+    Derived by running the driver's own text-format `_decode_value`, so the
+    answer is whatever the shipped codec table says it is. For an OID with no
+    codec -- `name`, `oid`, `"char"`, `int2vector`, the exact types a
+    `pg_catalog` read projects -- `_decode_value` falls through to `return data`
+    and this returns **raw bytes**, which is what made `str(row[2])` produce the
+    literal `"b'id'"` and report every column of every table as missing.
+
+    A fake that scripts the *decoded* value it wishes it had is modelling a
+    driver that does not exist. Add a codec and this starts returning the
+    decoded type on its own; there is no second table to update.
+    """
+    from ._pure.postgres import _decode_value
+
+    if value is None:
+        return None
+    wire = value if isinstance(value, bytes) else str(value).encode("utf-8")
+    return _decode_value(oid, 0, wire)
 
 
 class _ConnectionDouble:
@@ -543,7 +650,7 @@ class DatabaseDouble:
     """
 
     __slots__ = (
-        "name", "results", "query_faults", "acquire_fault", "release_fault",
+        "name", "_results", "query_faults", "acquire_fault", "release_fault",
         "acquired", "released", "_flight_dep_id",
         "listen_faults", "stream_fault", "transaction_faults",
         "notifications", "listened", "streams", "listens",
@@ -599,6 +706,22 @@ class DatabaseDouble:
         #: the coordinate a listen fault is keyed to.
         self.listens = 0
 
+    @property
+    def results(self) -> tuple[Any, ...]:
+        """Scripted results, checked for the driver's row shape on every set.
+
+        A property rather than a plain slot because assignment after
+        construction is a real usage -- a test scripts the control, then
+        rescripts the faulted double -- and a check that only fires in
+        `__init__` is a check with a hole somebody is already walking through.
+        """
+        return self._results
+
+    @results.setter
+    def results(self, value: tuple[Any, ...]) -> None:
+        refuse_mapping_rows(value)
+        self._results = value
+
     def statement(self, name: str, sql: str, *, workload: str = "read") -> Any:
         """Register a prepared statement, exactly as `Database` does.
 
@@ -612,6 +735,21 @@ class DatabaseDouble:
         The real `wreath.postgres.Statement` is used rather than a
         double of it: it is the code that acquires, calls, and releases, and
         replacing it would replace the behaviour under test with a copy of it.
+
+        **A statement registered here is never prepared, and that gap cannot be
+        closed in process.** Preparing is a server round trip: PostgreSQL is
+        what parses the SQL, resolves every relation, and infers each parameter
+        type. So SQL naming a table that does not exist registers cleanly here
+        and fails against a server, and no amount of local checking changes
+        that -- modelling it would mean shipping a PostgreSQL parser.
+
+        The gap is therefore recorded rather than hidden: every SQL text
+        registered on a double is kept in `unprepared`, so a test that depends
+        on preparation can assert it is empty and gate itself on
+        `WREATH_TEST_POSTGRES_DSN` instead of quietly passing.
+        `tests/postgres/test_double_fidelity.py` pins the divergence against a
+        real connection so it stays a known gap rather than becoming a
+        forgotten one.
         """
         from .postgres import Statement
         from .postgres import _workload as check_workload
@@ -639,6 +777,15 @@ class DatabaseDouble:
         )
         self._statements[name] = statement
         return statement
+
+    @property
+    def unprepared(self) -> tuple[str, ...]:
+        """Every SQL text registered here that no server has ever parsed.
+
+        Non-empty means the double accepted SQL on trust. See `statement`: this
+        is a recorded gap, not a bug to fix locally.
+        """
+        return tuple(s.sql for s in self._statements.values())
 
     async def acquire(self, workload: str = "read") -> _ConnectionDouble:
         self.acquired += 1

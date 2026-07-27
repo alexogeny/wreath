@@ -28,7 +28,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ._auth.requirements import AuthRequirement, SetRequirement, merge_requirements
-from ._routing import Handler
+from ._routing import Handler, check_placeholders
 from .binding import Depends
 from .middleware.base import Middleware
 
@@ -46,6 +46,7 @@ def _prefix(value: str) -> str:
 def _path(prefix: str, path: str) -> str:
     if not path.startswith("/"):
         raise ValueError("route paths must begin with '/'")
+    check_placeholders(path)
     if not prefix:
         return path
     if path == "/":

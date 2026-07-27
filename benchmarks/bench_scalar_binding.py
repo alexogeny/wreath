@@ -74,7 +74,7 @@ def _app_typed(query_count: int) -> Any:
         + (", " + params if params else "")
         + "):\n    return {'ok': item_id}\n"
     )
-    exec(source, {"Annotated": Annotated, "Query": Query}, namespace)
+    exec(source, {"Annotated": Annotated, "Query": Query}, namespace)  # noqa: S102 - source is built from names this function generates
     app.get("/items/{item_id}")(namespace["handler"])
     return app
 

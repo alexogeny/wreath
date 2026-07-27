@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1]))  # tests/ for sibling imports
 
-from postgres.test_connection import FakePostgres  # noqa: E402
+from postgres.test_connection import FakePostgres
 
 
 def _metal_loop_or_skip():

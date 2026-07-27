@@ -135,6 +135,15 @@ markers = [
   "fuzz: expensive deterministic or randomized fuzz coverage",
   "performance: repeatable performance-ordering checks",
   "network: tests using real sockets, TLS, or external clients",
+  # `database` is deliberately NOT in the default deselect list above. A test
+  # that needs only a PostgreSQL DSN used to carry `network`, so it was excluded
+  # by default alongside tests that need a live socket -- and therefore never ran
+  # even on a machine where a database *was* available. That is how the
+  # DSN-gated suites went a long time without running once, and when they finally
+  # did they found a defect in a default code path. These are gated by a skipif
+  # on WREATH_TEST_POSTGRES_DSN, so they skip cleanly without one and run
+  # whenever there is a database to run against.
+  "database: tests needing a PostgreSQL DSN, but no listening socket of ours",
   "thesis: intentionally red deterministic architecture checklist",
 ]
 
@@ -166,7 +175,20 @@ extend-exclude = [".sanitizers", "nghttp2", "tests/port/corpus"]
 # Enabled after the fact: 49 `# noqa: BLE001` waivers were already written here
 # against a rule that had never run, which is its own kind of check with nothing
 # to check.
-select = ["E", "F", "I", "UP", "B", "ASYNC", "BLE"]
+#
+# RUF100 closes that class permanently: it fails on a `noqa` waiving a rule this
+# ruleset does not enforce, so a waiver can no longer be written against nothing.
+# It is on repo-wide with no per-file exemption, because when it was first
+# measured the 31 genuinely dead waivers were *all* in `tests` and `benchmarks` --
+# the two trees an exemption would have covered.
+#
+# S102 and S310 are selected individually rather than by taking all of `S`. Both
+# are tiny here (7 `exec` sites, 4 URL-open sites) and both already carried
+# waiver prose explaining why the call is safe; enabling them turns that prose
+# from decoration into a requirement, and makes an unexplained `exec` fail the
+# gate. The rest of `S` is not selected: it has not been triaged, and a rule set
+# nobody has read is how a gate acquires a blanket ignore.
+select = ["E", "F", "I", "UP", "B", "ASYNC", "BLE", "RUF100", "S102", "S310"]
 
 [tool.ruff.lint.flake8-bugbear]
 # Depends() in parameter defaults is the dependency-injection marker.

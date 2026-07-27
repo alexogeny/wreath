@@ -36,7 +36,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
 
-from _routing_impls import IMPLS, build  # noqa: E402
+from _routing_impls import IMPLS, build
 
 #: Rendered in this order; native first, pure twins after.
 ORDER = ("c-dt", "c-trie", "c-bitset", "py-dt", "py-trie", "py-bitset")

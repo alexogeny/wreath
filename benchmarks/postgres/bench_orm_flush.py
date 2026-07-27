@@ -26,10 +26,10 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
 
-from orm.conftest import FakeDatabase, Membership, Post, User  # noqa: E402
+from orm.conftest import FakeDatabase, Membership, Post, User
 
-from wreath.orm.registry import Registry  # noqa: E402
-from wreath.orm.session import Session, _count_probes  # noqa: E402
+from wreath.orm.registry import Registry
+from wreath.orm.session import Session, _count_probes
 
 SIZES = (1000, 2000, 5000, 10000)
 

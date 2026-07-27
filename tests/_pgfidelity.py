@@ -31,13 +31,20 @@ from typing import Any
 # test exists to prevent -- the doubles in `src/` and the fakes in `tests/`
 # would be free to disagree, and nothing would notice.
 from wreath._replay_adapters import (
+    ScriptedRecord as FakeRecord,
+)
+from wreath._replay_adapters import (
+    driver_row_value,
+    refuse_uninferable_cast,
+)
+from wreath._replay_adapters import (
     refuse_multiple_commands as check_single_statement,
 )
 from wreath._replay_adapters import (
     refuse_unbindable as check_bindable,
 )
 from wreath._replay_adapters import (
-    refuse_uninferable_cast,
+    scripted_row as record,
 )
 from wreath.postgres import PostgresError as FakePostgresError
 
@@ -50,59 +57,9 @@ __all__ = [
     "check_bindable",
     "check_single_statement",
     "check_statement",
+    "driver_row_value",
     "record",
 ]
-
-# --- Record ------------------------------------------------------------------
-
-#: The real ``Record`` is deliberately narrow: subscript by position or name,
-#: a length, and nothing else. ``dir()`` on it is empty. Measured, because a
-#: fake returning ``dict`` let ``row.values()`` through and the live test then
-#: died on ``AttributeError`` in code nobody had run.
-_RECORD_ABSENT = ("keys", "items", "get", "values", "__iter__", "__contains__")
-
-
-class FakeRecord:
-    """A row with exactly the surface ``wreath._native._postgres.Record`` has.
-
-    Deliberately *not* a mapping. ``list(record)`` works, because the sequence
-    protocol falls back to ``__getitem__`` until ``IndexError`` -- but
-    ``dict(record)`` raises, ``record.values()`` raises, and ``"a" in record``
-    compares against the *values*, not the column names. Every one of those is
-    measured behaviour, and each is a way a dict-shaped fake quietly diverges.
-    """
-
-    __slots__ = ("_columns", "_values")
-
-    def __init__(self, columns: tuple[str, ...], values: tuple[Any, ...]) -> None:
-        self._columns = tuple(columns)
-        self._values = tuple(values)
-
-    def __getitem__(self, key: Any) -> Any:
-        if isinstance(key, str):
-            try:
-                return self._values[self._columns.index(key)]
-            except ValueError:
-                raise KeyError(key) from None
-        if isinstance(key, int):
-            if not -len(self._values) <= key < len(self._values):
-                raise IndexError("Record index out of range")
-            return self._values[key]
-        raise TypeError(f"Record indices must be int or str, not {type(key).__name__}")
-
-    def __len__(self) -> int:
-        return len(self._values)
-
-    def __repr__(self) -> str:
-        pairs = zip(self._columns, self._values, strict=True)
-        body = " ".join(f"{n}={v!r}" for n, v in pairs)
-        return f"<FakeRecord {body}>"
-
-
-def record(mapping: dict[str, Any]) -> FakeRecord:
-    """A ``FakeRecord`` from the dict a fake naturally builds."""
-    return FakeRecord(tuple(mapping), tuple(mapping.values()))
-
 
 # --- the rules, re-exported --------------------------------------------------
 #

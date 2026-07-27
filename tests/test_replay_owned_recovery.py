@@ -18,14 +18,14 @@ import asyncio
 from typing import Any
 
 import pytest
-from _replaydrive import (  # noqa: E402 -- `tests/` is on sys.path
+from _replaydrive import (  # `tests/` is on sys.path
     Supervisor,
     keyed_store,
     until,
 )
 
 import wreath
-from wreath._replay_adapters import AdapterFault, DatabaseDouble
+from wreath._replay_adapters import AdapterFault, DatabaseDouble, scripted_row
 from wreath.postgres import Connection, PostgresError
 from wreath.replay import (
     CanonicalRequest,
@@ -87,12 +87,12 @@ async def test_a_failed_connection_latches_and_answers_every_later_call() -> Non
     """
     double = _double("adapter-connection_failed")
     connection = await double.acquire("write")
-    with pytest.raises(Exception) as first:  # noqa: B017, PT011 -- identity is the assertion
+    with pytest.raises(Exception) as first:  # identity is the assertion
         await connection.fetch("SELECT 1")
-    with pytest.raises(Exception) as again:  # noqa: B017, PT011
+    with pytest.raises(Exception) as again:
         await connection.fetch("SELECT 2")
     assert again.value is first.value
-    with pytest.raises(Exception) as third:  # noqa: B017, PT011
+    with pytest.raises(Exception) as third:
         await connection.execute("ROLLBACK")
     assert third.value is first.value
     assert connection.failed
@@ -130,7 +130,7 @@ async def test_a_decode_failure_is_not_a_postgres_error() -> None:
     """
     double = _double("adapter-decode_error")
     connection = await double.acquire("read")
-    with pytest.raises(ValueError) as caught:  # noqa: PT011 -- the type is the point
+    with pytest.raises(ValueError) as caught:  # the type is the point
         await connection.fetch("SELECT tags FROM things")
     assert not isinstance(caught.value, PostgresError)
 
@@ -155,7 +155,7 @@ async def test_a_decode_failure_is_not_caught_by_the_drivers_own_guard() -> None
     async def drive_me(ctx: Any) -> None:  # pragma: no cover - never invoked
         return None
 
-    with pytest.raises(ValueError):  # noqa: PT011 -- the type is the point
+    with pytest.raises(ValueError):  # the type is the point
         await runner.enqueue("drive_me")
     # And the framework still gave the connection back on the way out.
     assert double.acquired == double.released == 1
@@ -236,11 +236,11 @@ async def test_a_lost_claim_leaves_the_caller_holding_nothing() -> None:
     "no row" would be the control as well as the fault and this would be
     comparing silence with silence.
     """
-    control = DatabaseDouble("main", results=({"key": "k"},))
+    control = DatabaseDouble("main", results=(scripted_row({"key": "k"}),))
     assert await keyed_store(control).claim("k") is True
 
     faulted = _double("adapter-claim_lost")
-    faulted.results = ({"key": "k"},)
+    faulted.results = (scripted_row({"key": "k"}),)
     assert await keyed_store(faulted).claim("k") is False
     assert faulted.acquired == faulted.released == 1
 
@@ -531,7 +531,7 @@ async def test_a_failed_launch_seeds_no_task_to_watch(name: str) -> None:
     async def import_herd(ctx: Any) -> None:  # pragma: no cover - never invoked
         return None
 
-    with pytest.raises(Exception):  # noqa: B017, PT011 -- the failure is owned upstream
+    with pytest.raises(Exception):  # noqa: B017 -- the failure is owned upstream
         await runner.launch("import_herd")
     assert registry.get("41") is None
     # Every lease taken was given back. Written as an inequality rather than

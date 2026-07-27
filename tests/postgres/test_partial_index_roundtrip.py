@@ -38,7 +38,7 @@ from wreath.orm.types import (
 )
 from wreath.postgres import connect
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.network]
+pytestmark = [pytest.mark.asyncio, pytest.mark.database]
 _DSN = os.environ.get("WREATH_TEST_POSTGRES_DSN")
 
 

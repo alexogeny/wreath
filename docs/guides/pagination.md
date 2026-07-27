@@ -37,7 +37,7 @@ a hard allow-list — `?sort=secret_column` is rejected, never handed to the SQL
 
 The three query parameters are bound **on the handler**, and the bounds come from
 `wreath.pagination`, so they cannot drift from what `paginate` enforces. See
-[below](#why-not-one-dependency) for why this is not one `Depends`.
+[below](#or-one-dependency) for the one-`Depends` form and how it differs.
 
 `page` is bounded above by `MAX_PAGE` (10 000) as well as below by 1.
 `LIMIT/OFFSET` makes the database walk and discard every row before the offset,
@@ -77,28 +77,42 @@ async def list_llamas(
 Out-of-range values never reach your code: `?page=0` and `?size=100000` are both
 a `422` from the binding layer, before a query is built.
 
-### Why not one dependency
+### Or one dependency
 
-`wreath.pagination` exports `page_params`, and its docstring calls it a
-`Depends`-able. **It does not work as one today**, in either spelling, so this
-guide binds the three parameters directly instead:
+The three parameters above are the explicit form, and it is worth knowing
+because it is what you reach for the moment the bounds differ per route.
+`wreath.pagination` also exports `page_params`, which does the same job in one
+parameter:
 
-```python no-check="shows the two spellings that do not work; both are defects the surrounding prose explains"
-params: Annotated[PageParams, Depends(page_params)]   # 400 "invalid JSON body"
-params: PageParams = Depends(page_params)             # 500
+```python
+from wreath.binding import Depends
+from wreath.pagination import PageParams, page_params, paginate
+
+@app.get("/llamas")
+async def list_llamas(
+    request,
+    session: Annotated[Session, FromORM("main", workload="read")],
+    params: PageParams = Depends(page_params),
+):
+    result = await paginate(
+        session, Llama.select(), params, allow_sort=("name", "created_at")
+    )
+    return result.as_dict()
 ```
 
-A dependency is always called as `fn(request)`, and its own scalar parameters are
-never bound from the query string — so `page_params` receives the request where
-it expects a page number. In the `Annotated` spelling the parameter is instead
-classified as a **request body**, which is why a `GET` answers `400 invalid JSON
-body`: the framework reports a caller error for what is actually a wiring bug,
-and the caller has no way to tell.
+The two differ in how they treat a value out of range, and the difference is
+deliberate. The bound form **refuses**: `?page=0` is a `422` from the binding
+layer before a query is built. `page_params` **clamps**: `?page=999999` becomes
+`MAX_PAGE`, and `?page=abc` becomes page 1. Neither is more correct in general —
+a hand-edited URL degrading to a page that exists is friendlier for a browsable
+list, and a strict `422` is better for an API whose clients you control.
 
-The direct form above is not a lesser version of the dependency — it is the same
-three bounds, applied by the binding layer rather than inside a function the
-binding layer never fills in. When `page_params` binds correctly this page will
-show it, and the bounds will not have to change.
+`page_params` takes the request and reads the query string itself, rather than
+declaring `page`, `size` and `sort` as its own parameters. That is not a
+stylistic choice: **a dependency's own parameters are never bound from the
+request.** Wreath calls a dependency as `fn(request, **nested_depends)`, so a
+`Query()` marker on one of its parameters binds nothing — and route compilation
+now refuses that declaration rather than letting it fail per request.
 
 ## Safe by construction
 

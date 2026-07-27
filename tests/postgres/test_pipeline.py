@@ -364,3 +364,62 @@ async def test_transaction_rolls_back_on_error(
         assert await conn.fetchval("select 42") == 42
     finally:
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_newest_queued_operations_leaves_the_pipeline_correct(
+    postgres: Any,
+    database: tuple[FakePostgres, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancel newest-first, which is what nested `async with` scopes produce.
+
+    A cancelled waiting operation is tombstoned rather than removed from the
+    queue: `deque.remove` scans from the left, so cancelling the newest of k
+    queued operations walked all k, and a disconnect or timeout cascade paid
+    O(k^2). Measured at k=4000, newest-first: 72.9-80.0 ms before against a
+    1.85 ms oldest-first control at the same k; 0.86 ms after, with the two
+    orders now indistinguishable.
+
+    The tombstone is only safe if two things hold, and both are asserted here
+    rather than assumed: a cancelled operation is never emitted, and the live
+    count stays exact -- a queue of pure tombstones that still reads as "work
+    is waiting" reschedules the flush forever.
+    """
+    server, dsn = database
+    server.query_gate = asyncio.Event()
+    conn = await postgres.connect(dsn)
+    monkeypatch.setattr(type(conn), "max_emitted_operations", 1)
+    try:
+        active = asyncio.create_task(conn.fetchval("select 1::int4"))
+        await server.flight_received.wait()
+        queued = [
+            asyncio.create_task(conn.fetchval(f"select {n}::int4"))
+            for n in range(10, 20)
+        ]
+        await asyncio.sleep(0)
+
+        # Innermost scope first: the arrangement `deque.remove` was worst at.
+        for task in reversed(queued):
+            task.cancel()
+        for task in queued:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        waiting = getattr(conn, "_waiting", None)
+        if waiting is not None and hasattr(conn, "_waiting_live"):
+            assert conn._waiting_live == 0, (
+                "every queued operation was cancelled, so nothing is live; a "
+                "non-zero count reschedules the flush against tombstones"
+            )
+            assert all(op.state == "cancelled" for op in waiting)
+
+        server.query_gate.set()
+        assert await active == 1
+        # The connection is still usable and the tombstones drained.
+        assert await conn.fetchval("select 42::int4") == 42
+        if waiting is not None:
+            assert not waiting, "tombstones must be drained, not accumulated"
+    finally:
+        server.query_gate.set()
+        await conn.close()

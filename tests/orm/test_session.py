@@ -319,7 +319,13 @@ async def test_raw_returns_driver_records_untouched(
 ) -> None:
     database.connection.script("custom", [["anything"]])
     rows = await session.raw("SELECT 1 AS custom").fetch()
-    assert rows == [["anything"]]
+    # Asserted through the `Record` surface rather than against a list: `raw`
+    # returns what the driver returned, and what the driver returns is not a
+    # list. Comparing to one passed only because the fake handed back the
+    # container it was scripted with.
+    assert len(rows) == 1
+    assert rows[0][0] == "anything"
+    assert not hasattr(rows[0], "append")
     assert database.connection.calls[0] == ("SELECT 1 AS custom", ())
 
 

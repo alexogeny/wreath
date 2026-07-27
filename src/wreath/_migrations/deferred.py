@@ -286,7 +286,7 @@ class Retype:
         refused on a recurring pass, so a pass that guards a column is
         necessarily a bounded one that finishes.
         """
-        from ..passes import Constraint, Gate  # noqa: PLC0415 - avoids a cycle at import
+        from ..passes import Constraint, Gate  # avoids a cycle at import
 
         model = _model_of(self.column)
         expression = self.using if isinstance(self.using, Sql) else Sql(str(self.using), ())

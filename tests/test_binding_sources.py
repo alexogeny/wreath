@@ -108,7 +108,7 @@ def test_query_marker_as_a_default_is_refused() -> None:
     app = Wreath()
 
     @app.get("/items")
-    async def items(request: Any, limit: int = Query(20)) -> Any:  # noqa: B008
+    async def items(request: Any, limit: int = Query(20)) -> Any:
         return limit
 
     with pytest.raises(TypeError, match="Annotated"):
@@ -119,7 +119,7 @@ def test_the_refusal_names_the_parameter_and_the_correct_form() -> None:
     app = Wreath()
 
     @app.get("/items")
-    async def items(request: Any, limit: int = Query(minimum=1)) -> Any:  # noqa: B008
+    async def items(request: Any, limit: int = Query(minimum=1)) -> Any:
         return limit
 
     with pytest.raises(TypeError) as caught:

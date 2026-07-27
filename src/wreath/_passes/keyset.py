@@ -111,7 +111,16 @@ class Key:
         type: its SQL type, used to decode a cursor read back out of the ledger.
         indexed: an index leads with this column. Only the first key column is
             asked, because that is the one the range scan descends.
-        unique: this column alone identifies a row.
+        unique: the key columns up to and including this one identify a row.
+            For a single-column key that is the column alone; for
+            `(stamp, id)` it is set on `id`, because the pair is what the
+            boundary carries. A table whose primary key is itself composite
+            sets it on the *last* of those columns -- `(retention_until,
+            source, message_id)` marks `message_id`, because `(source,
+            message_id)` is the key and the walk's boundary is the whole
+            tuple. Setting it on a column that does not complete a unique
+            constraint is the one declaration a pass cannot check and cannot
+            survive: the boundary silently skips the row's siblings.
         monotone: values are assigned in increasing order, so a row inserted
             after a fixed ceiling was captured cannot land beneath it.
         descending: the walk runs from high to low on this column.
@@ -212,7 +221,9 @@ def refuse_unsound_key(keys: tuple[Key, ...], *, table: str) -> None:
             f"key ({names}) on {table} is not unique, so a value landing on a "
             "chunk boundary either skips its siblings (silent data loss) or "
             "re-reads them forever. Append the primary key as a tiebreaker -- "
-            f"key=({names}, <primary key>) -- which stays one index scan."
+            f"key=({names}, <primary key>) -- which stays one index scan. A "
+            "composite primary key appends every one of its columns, and "
+            "`unique=True` goes on the last of them."
         )
     for item in keys:
         if item.type.lower() in _INEXACT_TYPES:

@@ -263,3 +263,72 @@ async def test_outbox_purge_pass_runs_against_a_real_database() -> None:
         await connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         await database.release("write", connection)
         await database.stop()
+
+
+async def test_inbox_purge_keeps_its_chunk_bounded_across_sources() -> None:
+    """One inbox serves every source, so `message_id` alone is not a row.
+
+    The pass once walked `(retention_until, message_id)` and declared
+    `message_id` unique. It is not -- the primary key is `(source,
+    message_id)` -- and two senders using the same event id put two rows on one
+    boundary.
+
+    Nothing is *skipped*: a chunk is the half-open range `(from, to]`, so ties
+    at the top are swept in by `<=` and ties at the bottom excluded by `>`.
+    What breaks is the bound. `cursor_to` is the key of the limit-th row, and
+    every row sharing that key joins the same chunk however many there are.
+    Measured against PostgreSQL, 60 rows sharing a retention stamp and a
+    message id with `chunk=5`: **one chunk of 60** before, twelve chunks of
+    five after. An unbounded DELETE in a single transaction is the exact thing
+    `ChunkedPass` exists to prevent, so the declaration was buying nothing and
+    costing the guarantee.
+
+    A shared stamp is ordinary rather than contrived -- one `UPDATE ... SET
+    retention_until` stamps every row it touches with the same transaction
+    timestamp.
+    """
+    if _DSN is None:
+        pytest.skip("set WREATH_TEST_POSTGRES_DSN for real PostgreSQL webhook tests")
+
+    from wreath.passes import schema_sql
+    from wreath.postgres import Database
+
+    schema = f"wreath_hooks_{uuid.uuid4().hex[:8]}"
+    inbox = PostgresWebhookInbox(f"webhook_inbox_{uuid.uuid4().hex}")
+    database = Database("main", _DSN, pools={"write": {"min_size": 1, "max_size": 2}})
+    await database.start()
+    connection = await database.acquire("write")
+    try:
+        await connection.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+        await _apply_schema(connection, schema_sql(schema))
+        await _apply_schema(connection, inbox.schema_sql())
+        # Sixty sources, one message id, one literal stamp: under the old key
+        # every row carried the identical boundary.
+        for index in range(60):
+            await connection.execute(
+                f"INSERT INTO {inbox.table} (source, message_id, payload_version,"
+                " payload_hash, state, lease_owner, lease_expires_at,"
+                " retention_until) VALUES ($1, 'evt-shared', 'v1',"
+                " '\\x00'::bytea, 'completed', 'w', now(),"
+                " timestamptz '2020-01-01 00:00:00+00')",
+                f"src-{index:03d}",
+            )
+
+        walk = inbox.purge_pass(chunk=5, schema=schema)
+        result = await walk.run(database, sleep=lambda _s: asyncio.sleep(0))
+
+        assert result.rows == 60
+        # The property, not the row count: twelve bounded chunks rather than
+        # one transaction holding every row.
+        assert result.chunks == 12, (
+            f"{result.rows} rows purged in {result.chunks} chunk(s) at chunk=5; "
+            "a non-unique boundary collapses the whole tie group into one"
+        )
+        assert await connection.fetchval(
+            f"SELECT count(*) FROM {inbox.table}"
+        ) == 0
+    finally:
+        await connection.execute(f"DROP TABLE IF EXISTS {inbox.table}")
+        await connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await database.release("write", connection)
+        await database.stop()

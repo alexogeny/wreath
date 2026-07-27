@@ -730,7 +730,7 @@ def scan_application(registry: Any = None, modules: Any = None) -> list[ScanRepo
     it can run in CI against an application that has never connected to
     anything.
     """
-    import sys  # noqa: PLC0415 - only this reader walks loaded modules
+    import sys  # only this reader walks loaded modules
 
     loaded = tuple(
         module

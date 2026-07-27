@@ -73,7 +73,7 @@ def run_runtime_audit(base_url: str, paths: Iterable[str] = ("/",)) -> Report:
     report = Report()
     for path in paths:
         url = base_url.rstrip("/") + "/" + path.lstrip("/")
-        request = urllib.request.Request(url, headers={"Accept-Encoding": "gzip"})
+        request = urllib.request.Request(url, headers={"Accept-Encoding": "gzip"})  # noqa: S310 (operator-supplied URL)
         try:
             with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310 (operator-supplied URL)
                 raw = response.read()

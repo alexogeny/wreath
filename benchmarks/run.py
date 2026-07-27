@@ -69,7 +69,7 @@ BACKGROUND_DRAIN_SECONDS = 15.0
 
 
 def _read_stats(host: str, port: int) -> dict[str, int]:
-    with urllib.request.urlopen(  # noqa: S310 - loopback cleartext, benchmark only
+    with urllib.request.urlopen(  # loopback cleartext, benchmark only
         f"http://{host}:{port}/background-stats", timeout=5
     ) as response:
         return json.loads(response.read().decode("utf-8"))

@@ -330,7 +330,7 @@ _DSN = os.environ.get("WREATH_TEST_POSTGRES_DSN")
 
 
 @pytest.mark.asyncio
-@pytest.mark.network
+@pytest.mark.database
 async def test_real_apply_of_a_schema_with_foreign_keys() -> None:
     """The whole point: ``apply`` runs the artifact it generated, unedited.
 

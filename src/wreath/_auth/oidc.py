@@ -120,7 +120,7 @@ class OidcProvider:
         self._cache = JwksCache(http_client=self._client, jwks_path=jwks_path)
         await self._cache.prefetch()
 
-    def bearer_verifier(self):  # noqa: ANN201 - returns an async Verifier
+    def bearer_verifier(self):  # returns an async Verifier
         """Return an async `Verifier` closing over this provider's JWKS cache."""
 
         async def verify(token: str) -> Identity | None:

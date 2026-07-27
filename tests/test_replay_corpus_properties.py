@@ -34,7 +34,7 @@ import asyncio
 import os
 
 import pytest
-from _replaydrive import (  # noqa: E402 -- `tests/` is on sys.path; see test_double_fidelity
+from _replaydrive import (  # `tests/` is on sys.path; see test_double_fidelity
     Driver,
     Observation,
     ReplayDriveTimeout,

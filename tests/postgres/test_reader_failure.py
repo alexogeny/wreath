@@ -158,7 +158,7 @@ async def test_a_decode_failure_in_the_reader_reaches_the_caller(
     try:
         monkeypatch.setattr(PureConnection, "_consume_message", explode)
 
-        with pytest.raises(Exception) as caught:  # noqa: PT011 -- asserted below
+        with pytest.raises(Exception) as caught:  # asserted below
             await asyncio.wait_for(connection.fetch("SELECT 1"), timeout=5.0)
 
         assert not isinstance(caught.value, TimeoutError), (

@@ -358,7 +358,7 @@ def user_router(
         return getattr(request.state, "session", None)
 
     @router.post("/register")
-    async def register(request: Any, data: Annotated[RegisterInput, Body()]):  # noqa: ANN202
+    async def register(request: Any, data: Annotated[RegisterInput, Body()]):
         await _userkit.register(
             store, mailer, secret=secret, email=data.email, password=data.password,
             link_builder=links, ttl=verify_ttl,
@@ -367,7 +367,7 @@ def user_router(
         return JSONResponse({"status": "registration_received"}, status=202)
 
     @router.post("/login")
-    async def login(request: Any, data: Annotated[LoginInput, Body()]):  # noqa: ANN202
+    async def login(request: Any, data: Annotated[LoginInput, Body()]):
         session = _session(request)
         if session is None:
             return JSONResponse({"error": "session_middleware_required"}, status=500)
@@ -390,26 +390,26 @@ def user_router(
         return JSONResponse(_profile(user), status=200)
 
     @router.post("/logout")
-    async def logout(request: Any):  # noqa: ANN202
+    async def logout(request: Any):
         session = _session(request)
         if session is not None:
             session.pop(session_key, None)
         return JSONResponse({"status": "logged_out"}, status=200)
 
     @router.post("/verify")
-    async def verify(request: Any, data: Annotated[TokenInput, Body()]):  # noqa: ANN202
+    async def verify(request: Any, data: Annotated[TokenInput, Body()]):
         ok = await _userkit.verify_email(store, secret=secret, token=data.token)
         return JSONResponse({"status": "verified" if ok else "invalid_token"},
                            status=200 if ok else 400)
 
     @router.get("/verify/{token}")
-    async def verify_link(request: Any, token: Annotated[str, Path()]):  # noqa: ANN202
+    async def verify_link(request: Any, token: Annotated[str, Path()]):
         ok = await _userkit.verify_email(store, secret=secret, token=token)
         return JSONResponse({"status": "verified" if ok else "invalid_token"},
                            status=200 if ok else 400)
 
     @router.post("/forgot-password")
-    async def forgot(request: Any, data: Annotated[ForgotInput, Body()]):  # noqa: ANN202
+    async def forgot(request: Any, data: Annotated[ForgotInput, Body()]):
         await _userkit.start_password_reset(
             store, mailer, secret=secret, email=data.email,
             link_builder=links, ttl=reset_ttl,
@@ -418,7 +418,7 @@ def user_router(
         return JSONResponse({"status": "reset_email_sent"}, status=200)
 
     @router.post("/reset-password")
-    async def reset(request: Any, data: Annotated[ResetInput, Body()]):  # noqa: ANN202
+    async def reset(request: Any, data: Annotated[ResetInput, Body()]):
         ok = await reset_password_endpoint(
             store, sessions, secret=secret, token=data.token,
             new_password=data.password,
@@ -427,7 +427,7 @@ def user_router(
                            status=200 if ok else 400)
 
     @router.get("/me")
-    async def me(request: Any):  # noqa: ANN202
+    async def me(request: Any):
         session = _session(request)
         principal = session.get(session_key) if session else None
         if not principal:

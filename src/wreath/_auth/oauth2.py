@@ -142,7 +142,7 @@ def register_oauth2_login(
     nonce_key = f"_oidc_nonce_{name}"
 
     @app.get(login_path)
-    async def login(request: Request) -> RedirectResponse | JSONResponse:  # noqa: ANN001
+    async def login(request: Request) -> RedirectResponse | JSONResponse:
         if provider.authorization_endpoint is None:
             return JSONResponse({"error": "provider_not_discovered"}, status=503)
         verifier, challenge = _pkce_pair()
@@ -173,7 +173,7 @@ def register_oauth2_login(
         return RedirectResponse(f"{provider.authorization_endpoint}?{params}", status=302)
 
     @app.get(callback_path)
-    async def callback(request: Request):  # noqa: ANN001, ANN201
+    async def callback(request: Request):
         query = parse_qs(request.query_string.decode("ascii", "replace"))
         code = query.get("code", [None])[0]
         state = query.get("state", [None])[0]
@@ -188,7 +188,7 @@ def register_oauth2_login(
         if provider.token_endpoint is None:
             return JSONResponse({"error": "provider_not_discovered"}, status=503)
         token_path = _same_origin_path(provider.issuer, provider.token_endpoint)
-        response = await provider._client.post(  # noqa: SLF001 - same package
+        response = await provider._client.post(  # same package
             token_path,
             headers=((b"content-type", b"application/x-www-form-urlencoded"),),
             body=urlencode(

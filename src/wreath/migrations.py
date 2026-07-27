@@ -180,7 +180,15 @@ HISTORY_BLOCKED = 3
 # generation@24, status@28. The leading id is carried for the caller's benefit
 # and is not read by the resolver.
 _FLEET_ROW = struct.Struct("<QQQIB3x")
-assert _FLEET_ROW.size == 32
+# A raise, not an `assert`: `python -O` strips asserts, and this one guards a
+# layout the native resolver reads by fixed offset. Stripped, a mislaid format
+# string would reach the resolver and be misparsed rather than refused here.
+if _FLEET_ROW.size != 32:
+    raise RuntimeError(
+        f"the packed fleet row is {_FLEET_ROW.size} bytes, but the native "
+        "resolver reads WREATH_MIGRATION_ROW_SIZE (32); the format string and "
+        "the offsets documented above it have diverged"
+    )
 
 
 @dataclass(frozen=True, slots=True)

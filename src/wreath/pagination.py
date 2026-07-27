@@ -11,7 +11,7 @@ from wreath.pagination import Page, PageParams, page_params, paginate
 from wreath.binding import Depends
 
 @app.get("/llamas")
-async def list_llamas(request, params: Annotated[PageParams, Depends(page_params)]):
+async def list_llamas(request, params: PageParams = Depends(page_params)):
     page = await paginate(session, Llama.select(), params,
                           allow_sort=("name", "created_at"))
     return page.as_dict()
@@ -23,9 +23,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from .binding import Query
+from ._codecs import parse_qs
 from .orm.query import Select
 
 if TYPE_CHECKING:
@@ -131,13 +131,67 @@ def parse_sort(raw: str) -> tuple[str, ...]:
     return tuple(token.strip() for token in raw.split(",") if token.strip())
 
 
-def page_params(
-    page: Annotated[int, Query(minimum=1, maximum=MAX_PAGE)] = 1,
-    size: Annotated[int, Query(minimum=1, maximum=MAX_SIZE)] = DEFAULT_SIZE,
-    sort: Annotated[str, Query()] = "",
-) -> PageParams:
-    """A `Depends`-able that binds `?page=&size=&sort=` into `PageParams`."""
-    return PageParams(page=min(page, MAX_PAGE), size=size, sort=parse_sort(sort))
+def _bounded(raw: str | None, default: int, ceiling: int) -> int:
+    """One query value as an int in `[1, ceiling]`, falling back to `default`.
+
+    Clamps rather than refusing. A caller asking for page 20,000 is not making a
+    protocol error worth a 422 -- it is asking for a page past the end, and the
+    honest answer is the last page wreath is willing to walk to. `MAX_PAGE`
+    exists because `LIMIT/OFFSET` makes the database discard every row before
+    the offset, which an anonymous caller could otherwise ask for repeatedly.
+    """
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(1, min(value, ceiling))
+
+
+def page_params(request: Any) -> PageParams:
+    """Bind `?page=&size=&sort=` into `PageParams`. Written as a `Depends`.
+
+    ```python
+    from wreath.binding import Depends
+    from wreath.pagination import PageParams, page_params, paginate
+
+    @app.get("/llamas")
+    async def list_llamas(request, params: PageParams = Depends(page_params)):
+        page = await paginate(session, Llama.select(), params,
+                              allow_sort=("name", "created_at"))
+        return page.as_dict()
+    ```
+
+    It takes the request and reads the query string itself, because a
+    dependency's own parameters are never bound from the request -- wreath calls
+    a dependency as `fn(request, **nested_depends)` and nothing else. This
+    signature used to be `page_params(page, size, sort)` carrying `Query()`
+    markers, which meant the request object arrived *as* the page number and the
+    first comparison against it was a 500. That shape is now refused at route
+    compilation rather than failing per request.
+
+    `page` and `size` are clamped into `[1, MAX_PAGE]` and `[1, MAX_SIZE]`;
+    anything unparseable falls back to the default rather than raising, so a
+    hand-edited URL degrades to the first page instead of a 422.
+
+    Args:
+        request: The request; only its query string is read.
+
+    Returns:
+        The normalized page, size, and sort tuple.
+    """
+    # `request.query_string`, not the scope: on the native server the scope is a
+    # lazily materialized dict, so reading it here would build the whole thing
+    # to reach one member. First value wins, matching the binding layer.
+    values: dict[str, str] = {}
+    for key, value in parse_qs(request.query_string):
+        values.setdefault(key, value)
+    return PageParams(
+        page=_bounded(values.get("page"), 1, MAX_PAGE),
+        size=_bounded(values.get("size"), DEFAULT_SIZE, MAX_SIZE),
+        sort=parse_sort(values.get("sort") or ""),
+    )
 
 
 def sortable_fields(model: type) -> tuple[str, ...]:

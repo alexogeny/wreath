@@ -226,7 +226,7 @@ def test_concurrent_producers_conserve_every_trace() -> None:
 class _OtlpHandler(BaseHTTPRequestHandler):
     posts: list[tuple[str, dict]] = []
 
-    def do_POST(self) -> None:  # noqa: N802 -- http.server API
+    def do_POST(self) -> None:  # http.server API
         length = int(self.headers.get("content-length", 0))
         body = self.rfile.read(length)
         type(self).posts.append((self.path, json.loads(body)))
@@ -264,5 +264,5 @@ def test_otlp_http_exporter_failure_propagates_for_pipeline_isolation() -> None:
     # An unroutable endpoint: export raises, which the pipeline (not this test)
     # is responsible for catching. Here we assert it does raise.
     exporter = OtlpHttpExporter("http://127.0.0.1:1", timeout=0.2)
-    with pytest.raises(Exception):  # noqa: B017,PT011 -- urllib error type varies
+    with pytest.raises(Exception):  # noqa: B017 -- urllib error type varies
         exporter.export_traces({"resourceSpans": [{"scopeSpans": []}]})

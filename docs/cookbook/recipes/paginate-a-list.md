@@ -29,9 +29,10 @@ async def list_orders(
 The bounds come from `wreath.pagination`, so the binding layer rejects
 `?page=0` and `?size=100000` with a `422` before a query is built, and they
 cannot drift from what `paginate` enforces. `wreath.pagination` also exports
-`page_params`, which is meant to collapse those three into one `Depends` —
-[it does not work today](../../guides/pagination.md#why-not-one-dependency), so
-this recipe binds them directly.
+`page_params`, which collapses those three into one `Depends` and **clamps**
+where the bound form **refuses** — `?page=999999` becomes the last page rather
+than a `422`. [Either is defensible](../../guides/pagination.md#or-one-dependency);
+this recipe binds them directly so the refusal is visible.
 
 `paginate` fetches one page plus the total and returns a
 `Page` with `items`, `total`, and the derived

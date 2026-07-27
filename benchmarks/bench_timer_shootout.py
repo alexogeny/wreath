@@ -669,7 +669,7 @@ def main():
         tracemalloc.start()
         tracemalloc.reset_peak()
         arm = make()
-        pinned = [arm.schedule(300.0) for _ in range(10_000)]  # noqa: F841
+        pinned = [arm.schedule(300.0) for _ in range(10_000)]
         _c, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
         memory[name] = peak / 10_000

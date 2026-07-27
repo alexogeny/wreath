@@ -31,6 +31,14 @@ while a sibling is running tests produces failures nobody can attribute.
 ## Engineering rules
 
 - Target CPython 3.14; do not preserve compatibility with older Python versions unless explicitly requested.
+- **`python -O` is supported, and no invariant may depend on `assert`.** `-O`
+  strips every `assert` statement, so an `assert` guarding a wire format, a
+  layout, or any other invariant silently disappears in the one interpreter mode
+  nothing here tests. Write a real `raise`. Eight struct-layout checks in
+  `_flight_schema.py` and `migrations.py` were `assert`s until this rule existed;
+  under `-O` a module with a 60-byte cell where the format requires 64 imported
+  without complaint. Keep `assert` for tests, where it is the idiom and `-O` is
+  never used.
 - Keep `src/wreath` free of mandatory third-party runtime dependencies.
 - Do not integrate Pydantic into Wreath runtime code or public APIs. It is permitted only as a benchmark or test dependency.
 - Do not add SQLAlchemy integration or compatibility layers; Wreath ships and owns its PostgreSQL driver and ORM stack.

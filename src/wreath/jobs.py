@@ -939,7 +939,7 @@ class JobRunner:
             await _sleep_or_stop(stopping, self._lease)
 
     async def _reclaim_expired(self) -> None:
-        """Return expired leases to the queue, counting the attempt.
+        """Return this queue's expired leases, counting the attempt.
 
         The fence is bumped so the previous owner's completion UPDATE (WHERE
         fence=old) can no longer land. `attempts` is bumped for the same
@@ -948,6 +948,13 @@ class JobRunner:
         `_fail` -- a handler that kills its worker, or a process that dies
         mid-run -- was redelivered forever and could never dead-letter, so a
         poison job outlived every other kind.
+
+        Scoped to `queue`, because every queue in a schema shares this table and
+        the sweep is otherwise fleet-wide. Unscoped, a queue whose own workers
+        are down had its in-flight jobs reclaimed by an *unrelated* queue's
+        sweeper, on that queue's lease interval, until they exhausted
+        `max_attempts` and dead-lettered. Jobs lost to a deploy of a service
+        that does not own them, and nothing in either queue's counters says so.
         """
         await self._exec(
             f"UPDATE {self._table} SET "
@@ -955,7 +962,8 @@ class JobRunner:
             "state = CASE WHEN attempts + 1 >= max_attempts THEN 'dead' ELSE 'ready' END, "
             "last_error = COALESCE(last_error, 'lease expired before completion'), "
             "owner=NULL, lease_expiry=NULL, fence=fence+1, updated_at=now() "
-            "WHERE state='leased' AND lease_expiry < now()"
+            "WHERE queue=$1 AND state='leased' AND lease_expiry < now()",
+            self._name,
         )
 
     async def _scheduler(self) -> None:

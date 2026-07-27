@@ -23,6 +23,37 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Final
 
+
+def _require_layout(actual: int, expected: int, what: str) -> None:
+    """Refuse to import a struct whose packed size is not the wire size.
+
+    These are wire-format invariants, not developer sanity checks: a struct that
+    packs to the wrong size produces cells a reader will silently misparse.
+
+    They are written as a raise rather than an `assert` deliberately. `python -O`
+    strips `assert`, so under optimization the eight layout checks in this module
+    would vanish and the module would import with a wrong layout and no
+    complaint -- and `-O` is the one interpreter mode nothing in this repository
+    tests. A check that disappears under a supported flag is a check with
+    nothing to check.
+
+    Args:
+        actual: The packed size the `struct.Struct` reports.
+        expected: The size the wire format requires.
+        what: The name of the structure, for the message.
+
+    Raises:
+        RuntimeError: If the sizes differ. Raised at import, so a mislaid format
+            string cannot reach a recorder.
+    """
+    if actual != expected:
+        raise RuntimeError(
+            f"{what} packs to {actual} bytes, but the wire format requires "
+            f"{expected}; the format string and the layout comment above it "
+            "have diverged"
+        )
+
+
 # --- versioning -------------------------------------------------------------
 
 #: Wire schema version. Readers reject an unknown major version rather than
@@ -187,7 +218,7 @@ def histogram_bucket(duration_us: int) -> int:
 #  59  u8   worker_id
 #  60  u32  reserved (zero)
 _COMPLETION = struct.Struct(BYTE_ORDER + "BBHIQQIIQQQBBBBI")
-assert _COMPLETION.size == CELL_SIZE, _COMPLETION.size
+_require_layout(_COMPLETION.size, CELL_SIZE, "the completion cell")
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,7 +326,7 @@ _TERMINALS = frozenset(int(t) for t in TerminalStatus)
 #  40  u64  span_id
 #  48  16 bytes reserved
 _CORRELATION = struct.Struct(BYTE_ORDER + "BBHIQQQQQ16x")
-assert _CORRELATION.size == CELL_SIZE, _CORRELATION.size
+_require_layout(_CORRELATION.size, CELL_SIZE, "the correlation cell")
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,7 +389,7 @@ class CorrelationCell:
 #   8  u32  start_offset_us  (from request start)
 #  12  u32  duration_us
 _PHASE_RECORD = struct.Struct(BYTE_ORDER + "HHBBHII")
-assert _PHASE_RECORD.size == PHASE_CELL_SIZE, _PHASE_RECORD.size
+_require_layout(_PHASE_RECORD.size, PHASE_CELL_SIZE, "the phase record")
 
 # 16-byte batch header:
 #   0  u8   schema_version
@@ -368,8 +399,12 @@ assert _PHASE_RECORD.size == PHASE_CELL_SIZE, _PHASE_RECORD.size
 #   4  u32  reserved (zero)
 #   8  u64  request_id
 _PHASE_BATCH_HEADER = struct.Struct(BYTE_ORDER + "BBBBIQ")
-assert _PHASE_BATCH_HEADER.size == PHASE_CELL_SIZE, _PHASE_BATCH_HEADER.size
-assert _PHASE_BATCH_HEADER.size + PHASE_RECORDS_PER_BATCH * _PHASE_RECORD.size == CELL_SIZE
+_require_layout(_PHASE_BATCH_HEADER.size, PHASE_CELL_SIZE, "the phase batch header")
+_require_layout(
+    _PHASE_BATCH_HEADER.size + PHASE_RECORDS_PER_BATCH * _PHASE_RECORD.size,
+    CELL_SIZE,
+    "the phase batch",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,7 +560,7 @@ CAPTURE_FIELD_ALIGN: Final = 4
 #  20  u32  reserved2 (zero)
 _CAPTURE_SLAB_HEADER = struct.Struct(BYTE_ORDER + "QIHBBBBHI")
 CAPTURE_SLAB_HEADER_SIZE: Final = _CAPTURE_SLAB_HEADER.size
-assert CAPTURE_SLAB_HEADER_SIZE == 24, CAPTURE_SLAB_HEADER_SIZE
+_require_layout(CAPTURE_SLAB_HEADER_SIZE, 24, "the capture slab header")
 
 # 12-byte capture-field header (little-endian), followed by `stored_length`
 # payload bytes padded up to CAPTURE_FIELD_ALIGN:
@@ -537,7 +572,7 @@ assert CAPTURE_SLAB_HEADER_SIZE == 24, CAPTURE_SLAB_HEADER_SIZE
 #   8  u32  original_length  (the field's true length before redaction/truncation)
 _CAPTURE_FIELD_HEADER = struct.Struct(BYTE_ORDER + "HHBBHI")
 CAPTURE_FIELD_HEADER_SIZE: Final = _CAPTURE_FIELD_HEADER.size
-assert CAPTURE_FIELD_HEADER_SIZE == 12, CAPTURE_FIELD_HEADER_SIZE
+_require_layout(CAPTURE_FIELD_HEADER_SIZE, 12, "the capture field header")
 
 
 def _pad4(n: int) -> int:

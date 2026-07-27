@@ -16,6 +16,7 @@
 - [Camera-trap walkthrough](example/walkthrough.md): the canonical example's schema toured in psql — local wall clocks, late data, partial indexes, and the free-text column chapter two recodes.
 - [Camera-trap read API](example/read-api.md): the canonical example's nine read routes -- nested routers, a local-date window bounded at bind time, declared queries, stable paging, and the species list the ORM invalidates.
 - [Camera-trap uploads and ingest](example/ingest.md): presigned upload where minting is authorised and the URL is not, a durable job that unpacks the card, and progress by poll or SSE. Also why the queue's tables are not in the migration artifact, and why the example generates no thumbnails.
+- [Camera-trap charts](example/analysis.md): the two calculated views a reserve manager asks for -- a `Series` bucketed in the reserve's own timezone with every day present and per-measure fill (count 0, average null), and an `Aggregate` ranking that refuses rather than folding a tail. Names the two framework defects the stage hit: sealing cannot store a bucket (a `dict` bound to a `jsonb` parameter) and `avg()` returns a `Decimal` the JSON encoder refuses.
 
 ## Coming from FastAPI, Pydantic, SQLModel, or Alembic
 

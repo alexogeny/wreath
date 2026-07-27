@@ -82,7 +82,7 @@ class OtlpHttpExporter:
 
     def _post(self, url: str, request: dict[str, Any]) -> None:
         body = json.dumps(request).encode("utf-8")
-        req = urllib.request.Request(url, data=body, headers=self._headers, method="POST")
+        req = urllib.request.Request(url, data=body, headers=self._headers, method="POST")  # noqa: S310 (configured OTLP endpoint)
         with urllib.request.urlopen(req, timeout=self._timeout) as response:  # noqa: S310
             # Drain and discard: the OTLP response body is not needed, but leaving
             # it unread can wedge keep-alive connections.

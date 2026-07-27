@@ -62,15 +62,15 @@ def _param_heavy_app(mode: str, routes: int, segmax: int, param: float) -> tuple
     backends. That makes it the wrong table to see the compiled forms diverge on
     -- so measure this one alongside it, not instead of it.
     """
-    import random  # noqa: PLC0415
+    import random
 
-    from wreath import Wreath  # noqa: PLC0415
+    from wreath import Wreath
 
     rng = random.Random(20260716)
     words = ["api", "users", "orders", "items", "teams", "files", "jobs", "keys"]
     app = Wreath(routing=mode)
 
-    async def handler(request):  # noqa: ANN001, ANN202
+    async def handler(request):
         return b"ok"
 
     specs, seen = [], set()
@@ -97,9 +97,9 @@ def _child(mode: str, matches: int, shape: str) -> dict[str, Any]:
     import gc
 
     if shape == "param-heavy":
-        app, ROUTE_SPECS = _param_heavy_app(mode, 512, 6, 0.5)  # noqa: N806
+        app, ROUTE_SPECS = _param_heavy_app(mode, 512, 6, 0.5)
     else:
-        from benchmarks.apps import ROUTE_SPECS, app  # noqa: PLC0415
+        from benchmarks.apps import ROUTE_SPECS, app
 
     gc.collect()
     rss_registered = _rss()

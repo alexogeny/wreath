@@ -624,7 +624,7 @@ _SETTLED_STATES = "state IN ('delivered','failed','cancelled','unknown')"
 def _retention_purge_pass(
     *,
     table: str,
-    key: str,
+    key: tuple[str, ...],
     chunk: int = 1000,
     where: str | None = None,
     within: Any = "5s",
@@ -634,20 +634,38 @@ def _retention_purge_pass(
 ) -> Any:
     """The chunked pass behind the inbox's and the outbox's retention purge.
 
-    Both walk `(retention_until, <primary key>)`: the retention stamp because
+    Both walk `(retention_until, *primary key)`: the retention stamp because
     that is the ordered domain the frontier lives in, and the key appended
     because two rows can share a stamp and a boundary that is not unique either
     skips its siblings or loops on them.
+
+    *key* is every column of the table's primary key, in order -- one for the
+    outbox (`delivery_id`), two for the inbox (`source`, `message_id`). Passing
+    only the last of a composite key is the failure this signature exists to
+    make unspellable: the inbox once walked `(retention_until, message_id)` and
+    declared `message_id` unique, which it is not -- one inbox serves every
+    source on the hub, so two senders using the same event id put two rows on
+    one boundary. Measured against PostgreSQL with six rows sharing a retention
+    stamp: at `chunk=1` the walk visited three of them and silently left the
+    other three in the table forever.
     """
     from .passes import ChunkedPass, DutyCycle, Key, Purge, Rows, Sealed, Table
 
+    if not key:
+        raise ValueError("a retention purge needs at least one primary-key column")
+    # `unique=True` on the last one: the walk's boundary is the whole tuple, and
+    # it is the whole tuple that identifies a row.
+    tiebreakers = tuple(
+        Key(name, "text", unique=(index == len(key) - 1))
+        for index, name in enumerate(key)
+    )
     return ChunkedPass(
         f"purge_{table}",
         over=Table(table),
         units=Rows(
             key=(
                 Key("retention_until", "timestamptz", indexed=True),
-                Key(key, "text", unique=True),
+                *tiebreakers,
             ),
             limit=chunk,
             within=within,
@@ -752,8 +770,15 @@ class PostgresWebhookInbox:
             "    retention_until timestamptz,\n"
             "    PRIMARY KEY (source, message_id)\n"
             ");\n"
-            f"CREATE INDEX IF NOT EXISTS {table}_retention_idx ON {table} "
-            "(retention_until) WHERE retention_until IS NOT NULL;"
+            # Leads with the retention stamp and carries the whole primary key,
+            # because that tuple is the purge pass's boundary -- a stamp-only
+            # index leaves the walk's tiebreaker columns off the scan. Deployed
+            # before this shape, `{table}_retention_idx` is redundant with it
+            # and can be dropped; `IF NOT EXISTS` will not replace it in place,
+            # which is why this one has its own name.
+            f"CREATE INDEX IF NOT EXISTS {table}_retention_walk_idx ON {table} "
+            "(retention_until, source, message_id) "
+            "WHERE retention_until IS NOT NULL;"
         )
 
     async def claim(
@@ -864,7 +889,7 @@ class PostgresWebhookInbox:
             An unstarted `wreath.passes.ChunkedPass`; drive it from the scheduler.
         """
         return _retention_purge_pass(
-            table=self.table, key="message_id", chunk=chunk, **options
+            table=self.table, key=("source", "message_id"), chunk=chunk, **options
         )
 
     async def purge(self, session: Any, *, limit: int = 1000) -> int:
@@ -1122,7 +1147,7 @@ class PostgresWebhookOutbox:
         """
         return _retention_purge_pass(
             table=self.table,
-            key="delivery_id",
+            key=("delivery_id",),
             chunk=chunk,
             where=_SETTLED_STATES,
             **options,

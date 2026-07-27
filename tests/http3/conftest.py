@@ -142,6 +142,6 @@ def h3_module():
         pytest.skip("wreath._native._http3 not built")
     spec = importlib.util.find_spec("wreath._native._http3")
     assert spec is not None
-    import wreath._native._http3 as mod  # noqa: PLC0415
+    import wreath._native._http3 as mod
 
     return mod

@@ -11,6 +11,8 @@ freshly computed one land on the same instant across a DST change — lives in
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from wreath._series.settle import (
@@ -471,7 +473,11 @@ class TestTheWriteThatArrivesLate:
             if "series_corrections" in sql and "INSERT" in sql
         ]
         assert written, "a late write must leave a record"
-        assert written[0][3] == {"n": 2}, "the delta, not the new total"
+        # Compared after decoding, because what goes on the wire is JSON *text*:
+        # the driver has no encoder for `dict` and refuses one outright. This
+        # assertion used to compare against a mapping, which passed only because
+        # the fake accepted a parameter PostgreSQL never would.
+        assert json.loads(written[0][3]) == {"n": 2}, "the delta, not the new total"
 
     async def test_the_settled_value_itself_is_never_rewritten(
         self, declared, session, database

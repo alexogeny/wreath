@@ -156,7 +156,7 @@ async def test_startup_abort_leaves_no_projector_thread(tmp_path) -> None:
         telemetry=TelemetryConfig(mode=Mode.PULSE, ring_records=64, active_requests=8),
         inspector=InspectorConfig(path=str(bad_path)),
     )
-    with pytest.raises(Exception):  # noqa: B017,PT011 -- InspectorError from the abort
+    with pytest.raises(Exception):  # noqa: B017 -- InspectorError from the abort
         await serve(_app(), config)
     # The started projector thread was joined during the abort -- none leaked.
     deadline = asyncio.get_running_loop().time() + 2.0

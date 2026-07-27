@@ -88,7 +88,7 @@ def _alembic_arm(root: Path) -> Callable[[], int]:
     assert previous is not None
 
     def resolve() -> int:
-        return len(script._upgrade_revs("head", previous))  # noqa: SLF001
+        return len(script._upgrade_revs("head", previous))
 
     return resolve
 

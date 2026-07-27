@@ -71,12 +71,12 @@ def peak_rss_bytes() -> int | None:
 
 def wreath_version() -> str:
     try:
-        from importlib.metadata import version  # noqa: PLC0415
+        from importlib.metadata import version
 
         return version("wreath")
     except Exception:  # noqa: BLE001 - metadata is best-effort
         try:
-            import wreath  # noqa: PLC0415
+            import wreath
 
             return str(getattr(wreath, "__version__", "unknown"))
         except Exception:  # noqa: BLE001
@@ -85,7 +85,7 @@ def wreath_version() -> str:
 
 def native_module_path() -> str:
     try:
-        import wreath._native._server as mod  # noqa: PLC0415
+        import wreath._native._server as mod
 
         return str(getattr(mod, "__file__", "unresolved"))
     except Exception as exc:  # noqa: BLE001
@@ -199,13 +199,13 @@ def h2_support() -> Any:
     # The independent reference codec used by the HTTP/2 tests; it is not
     # imported by production code and encodes frames without trusting the
     # implementation under test.
-    from tests.http2 import support  # noqa: PLC0415
+    from tests.http2 import support
 
     return support
 
 
 def make_h2(app: Any, config: Any) -> tuple[Any, CountingTransport]:
-    from wreath._native._server import Http2Protocol  # noqa: PLC0415
+    from wreath._native._server import Http2Protocol
 
     loop = asyncio.get_running_loop()
     transport = CountingTransport()
@@ -227,7 +227,7 @@ async def h2_preface(proto: Any, settings: dict[int, int]) -> None:
 
 
 async def _h2_blocked_send_once(total_bytes: int, chunk_size: int) -> dict[str, Any]:
-    from wreath.server import ServerConfig  # noqa: PLC0415
+    from wreath.server import ServerConfig
 
     support = h2_support()
     progress = {"chunks_reached": 0}
@@ -308,7 +308,7 @@ def scenario_h2_blocked_send(warmup: int, trials: int) -> dict[str, Any]:
 
 
 async def _h2_flush_once(size: int, increment: int) -> tuple[float, int]:
-    from wreath.server import ServerConfig  # noqa: PLC0415
+    from wreath.server import ServerConfig
 
     support = h2_support()
     parked = asyncio.Event()
@@ -428,7 +428,7 @@ def scenario_h2_flush_scaling(warmup: int, trials: int) -> dict[str, Any]:
 
 
 async def _h2_queue_once(count: int, chunk: int) -> dict[str, Any]:
-    from wreath.server import ServerConfig  # noqa: PLC0415
+    from wreath.server import ServerConfig
 
     support = h2_support()
     gate = asyncio.Event()
@@ -538,7 +538,7 @@ def scenario_h2_request_queue(warmup: int, trials: int) -> dict[str, Any]:
 
 def h3_available() -> bool:
     try:
-        from wreath.server import _http3_available  # noqa: PLC0415
+        from wreath.server import _http3_available
 
         return bool(_http3_available())
     except Exception:  # noqa: BLE001
@@ -546,7 +546,7 @@ def h3_available() -> bool:
 
 
 def curl_h3_available() -> bool:
-    import shutil  # noqa: PLC0415
+    import shutil
 
     curl = shutil.which("curl")
     if curl is None:
@@ -561,8 +561,8 @@ def curl_h3_available() -> bool:
 
 
 async def _h3_limit_once(limit: int, upload: int) -> dict[str, Any]:
-    from tests.http3.conftest import curl_http3, make_self_signed_cert  # noqa: PLC0415
-    from wreath.server import ServerConfig, TLSConfig, serve  # noqa: PLC0415
+    from tests.http3.conftest import curl_http3, make_self_signed_cert
+    from wreath.server import ServerConfig, TLSConfig, serve
 
     accepted = {"bytes": 0, "disconnected": False}
 
@@ -590,7 +590,7 @@ async def _h3_limit_once(limit: int, upload: int) -> dict[str, Any]:
     port = server.datagram_addresses[0][1]
     started = perf_counter_ns()
     try:
-        import tempfile  # noqa: PLC0415
+        import tempfile
 
         with tempfile.NamedTemporaryFile("wb", suffix=".bin", delete=False) as fh:
             fh.write(b"x" * upload)
@@ -668,7 +668,7 @@ def build_router_app(routes: int) -> Any:
     a path parameter (wildcard) per route, and access clauses inherited from two
     nested protected routers.
     """
-    from wreath import Router, Wreath  # noqa: PLC0415
+    from wreath import Router, Wreath
 
     leaves = 100
     branches = max(1, routes // leaves)

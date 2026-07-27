@@ -5,7 +5,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from .requirements import Mode, add_authenticated, add_permissions, add_policy, add_roles
+from .requirements import (
+    Mode,
+    add_authenticated,
+    add_identify,
+    add_permissions,
+    add_policy,
+    add_roles,
+)
 
 
 def authenticated() -> Callable[[Any], Any]:
@@ -27,6 +34,44 @@ def authenticated() -> Callable[[Any], Any]:
         A decorator that records the requirement on the endpoint.
     """
     return add_authenticated
+
+
+def identify() -> Callable[[Any], Any]:
+    """Publish `request.identity` without requiring one -- anonymous is a value.
+
+    Runs the authentication backend and sets `request.identity` to whatever it
+    yields, including `None`. The route stays **public**: no challenge, no 401,
+    and no access clause in the compiled route table, so an anonymous caller
+    reaches the handler exactly as it would on a route with no requirement at
+    all.
+
+    This is the answer to "who is this, if anyone?" -- the question every
+    sign-in-aware page asks on load, and the one `authenticated()` cannot ask
+    because it refuses the case it is asking about. Reach for it when a handler
+    *renders differently* for a known caller rather than *refusing* an unknown
+    one: a console deciding whether to show a sign-in form, a catalogue marking
+    the rows you already own, a landing page greeting you by name.
+
+    ```python
+    @app.get("/session")
+    @identify()
+    async def whoami(request: Request) -> dict:
+        identity = request.identity
+        if identity is None:
+            return {"signed_in": False}
+        return {"signed_in": True, "subject": identity.subject}
+    ```
+
+    The distinction from `authenticated()` is the whole point and is worth
+    stating plainly: `authenticated()` means *refuse without an identity*, and
+    this means *ask, and accept either answer*. Do not reach for this to make a
+    protected route lenient -- a route that needs an identity should say so, so
+    that the framework can refuse before the handler runs.
+
+    Returns:
+        A decorator that records the requirement on the endpoint.
+    """
+    return add_identify
 
 
 def authorize(

@@ -1638,7 +1638,7 @@ def execute_replay(namespace: argparse.Namespace) -> int:
             schedule = rp.FaultSchedule.from_bytes(_read_bytes(namespace.inject))
         protocol_cls = None
         if namespace.pure:
-            from ._pure.server import Http1Protocol as protocol_cls  # noqa: N813
+            from ._pure.server import Http1Protocol as protocol_cls
         result = asyncio.run(
             rp.replay_transport(app, recording, protocol_cls=protocol_cls, faults=schedule)
         )

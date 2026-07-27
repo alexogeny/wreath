@@ -22,23 +22,23 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from orm.conftest import FakeDatabase, Post, User  # noqa: E402
+from orm.conftest import FakeDatabase, Post, User
 
-from wreath._orm_events import (  # noqa: E402
+from wreath._orm_events import (
     WRITE_CHANNEL,
     has_subscribers,
     publish_write,
     subscribe_writes,
     unsubscribe_writes,
 )
-from wreath.cache import (  # noqa: E402
+from wreath.cache import (
     SnapshotCache,
     invalidate_across_workers,
     refresh_on,
 )
-from wreath.orm.registry import Registry  # noqa: E402
-from wreath.orm.session import Session  # noqa: E402
-from wreath.response_cache import cached  # noqa: E402
+from wreath.orm.registry import Registry
+from wreath.orm.session import Session
+from wreath.response_cache import cached
 
 
 @pytest.fixture

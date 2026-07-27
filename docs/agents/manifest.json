@@ -904,7 +904,8 @@
         "docs/example/quickstart.md",
         "docs/example/walkthrough.md",
         "docs/example/read-api.md",
-        "docs/example/ingest.md"
+        "docs/example/ingest.md",
+        "docs/example/analysis.md"
       ],
       "reference": [],
       "sources": [

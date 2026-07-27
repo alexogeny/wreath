@@ -23,13 +23,15 @@ from wreath.binding import Query
 from wreath.exceptions import NotFound, UnprocessableEntity
 from wreath.orm import FromORM, Session
 from wreath.pagination import MAX_PAGE, MAX_SIZE, PageParams, paginate, parse_sort
+from wreath.series import Range
 from wreath.temporal import from_wall_clock, zone
 
 from ..config import SETTINGS
 from ..models import Reserve, Sighting, Species, Station
 from ..policies import may_locate, visible_protections
 from ..queries import RecentDeployments, Reserves, SightingsByStation, Stations
-from ..wire import deployment_json, reserve_json, sighting_json, station_json
+from ..views import station_activity, station_species
+from ..wire import chart_json, deployment_json, reserve_json, sighting_json, station_json
 
 #: One read-workload session per request, leased only if a handler touches it.
 ReadSession = Annotated[Session, FromORM("main", workload="read")]
@@ -245,6 +247,69 @@ async def list_deployments(
     station = await _station(session, reserve, station_id)
     found = await RecentDeployments(session).for_station(station=station.id)
     return {"items": [deployment_json(item) for item in found]}
+
+
+@stations.get("/{station_id}/activity", summary="Sightings per local day at a station")
+@authenticated()
+async def station_activity_chart(
+    request: Request,
+    slug: str,
+    station_id: int,
+    session: ReadSession,
+    since: datetime.date,
+    days: Annotated[int, Query(minimum=1, maximum=SETTINGS.max_window_days)] = 30,
+) -> dict:
+    """The activity chart, bucketed in the reserve's own calendar.
+
+    ``zone=reserve.timezone`` is the whole point of this endpoint. The same
+    query answered in UTC would cut Nullarbor's days at 09:30 local and put a
+    dusk trigger in the wrong column — visibly wrong to anyone who lives there
+    and invisible to everyone else.
+
+    The response is the declaration's own envelope. Every bucket in the range is
+    present whether or not anything walked past, so a quiet Tuesday is a zero
+    rather than a line segment joining Monday to Wednesday, and the mean
+    confidence for that Tuesday is ``null`` rather than a fabricated number —
+    zero animals is a fact, the average confidence of nothing is not.
+    """
+    reserve = await _reserve(session, slug)
+    station = await _station(session, reserve, station_id)
+    start, end = _window(reserve, since, days)
+    result = await station_activity.run(
+        session,
+        range=Range(start, end),
+        zone=reserve.timezone,
+        station=station.id,
+    )
+    # `chart_json` rather than `result.as_dict()`: an `avg()` measure comes back
+    # as a `Decimal` the JSON encoder cannot serialise. See `wire.chart_json`,
+    # which explains why the conversion is forced and why it lives here.
+    return {"station_id": station.id, **chart_json(result)}
+
+
+@stations.get("/{station_id}/species-mix", summary="Which species a station saw")
+@authenticated()
+async def station_species_chart(
+    request: Request,
+    slug: str,
+    station_id: int,
+    session: ReadSession,
+) -> dict:
+    """The ranking behind the bar chart. No time axis, and no folded tail.
+
+    Species ids rather than names, deliberately: the vocabulary is its own
+    endpoint with its own cache, and repeating forty names inside every chart
+    response would be the same rows travelling twice. A client that has read
+    ``/species`` once holds the labels already.
+    """
+    reserve = await _reserve(session, slug)
+    station = await _station(session, reserve, station_id)
+    result = await station_species.run(session, station=station.id)
+    return {
+        "station_id": station.id,
+        "measures": list(result.measures),
+        "rows": [row.as_dict() for row in result.rows],
+    }
 
 
 reserves.include_router(stations)

@@ -153,7 +153,7 @@ async def test_the_generated_test_is_actually_runnable() -> None:
             _app(), _recording(GET), target="herd_generated_app:app"
         )
         namespace: dict = {}
-        exec(compile(source, "generated_test.py", "exec"), namespace)
+        exec(compile(source, "generated_test.py", "exec"), namespace)  # noqa: S102 - executing the generated test is what this asserts
         test = next(
             value for name, value in namespace.items() if name.startswith("test_")
         )
@@ -373,7 +373,7 @@ async def _run_generated(source: str, app_factory) -> None:
     sys.modules["herd_roundtrip_app"] = module
     try:
         namespace: dict = {}
-        exec(compile(source, "generated_test.py", "exec"), namespace)
+        exec(compile(source, "generated_test.py", "exec"), namespace)  # noqa: S102 - executing the generated test is what this asserts
         test = next(value for name, value in namespace.items() if name.startswith("test_"))
         await test()
     finally:

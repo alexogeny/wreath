@@ -34,7 +34,7 @@ class _StubRequest:
 
 
 def test_form_marked_model_becomes_form_model_spec() -> None:
-    async def handler(request, data: Annotated[Booking, Form()]):  # noqa: ANN001
+    async def handler(request, data: Annotated[Booking, Form()]):
         ...
 
     spec = inspect_handler(handler, "/book")
@@ -45,7 +45,7 @@ def test_form_marked_model_becomes_form_model_spec() -> None:
 
 
 def test_scalar_form_field_still_scalar() -> None:
-    async def handler(request, name: Annotated[str, Form()]):  # noqa: ANN001
+    async def handler(request, name: Annotated[str, Form()]):
         ...
 
     spec = inspect_handler(handler, "/x")
@@ -81,7 +81,7 @@ async def test_form_model_rejects_bad_scalar() -> None:
 
 
 def test_body_and_form_model_conflict() -> None:
-    async def handler(request, a: Annotated[Booking, Form()], b: Booking):  # noqa: ANN001
+    async def handler(request, a: Annotated[Booking, Form()], b: Booking):
         ...
 
     with pytest.raises(TypeError):

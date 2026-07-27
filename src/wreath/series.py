@@ -1370,7 +1370,7 @@ class Series(_Builder):
                         continue
                     settled[bucket] = measures
                     await session.declared(
-                        insert_settled(), (view, params, bucket, dict(measures))
+                        insert_settled(), (view, params, bucket, _as_jsonb(measures))
                     )
 
         open_part: dict[Any, dict[str, Any]] = {}
@@ -1580,7 +1580,7 @@ class Series(_Builder):
             if bucket in already:
                 continue
             await session.declared(
-                insert_settled(), (view, params, bucket, dict(measures))
+                insert_settled(), (view, params, bucket, _as_jsonb(measures))
             )
             added.append(bucket)
         return tuple(added)
@@ -1646,12 +1646,12 @@ class Series(_Builder):
             moved.append(bucket)
             if self._seal.on_late == "reopen":
                 await session.declared(
-                    replace_settled(), (view, params, bucket, dict(current[bucket]))
+                    replace_settled(), (view, params, bucket, _as_jsonb(current[bucket]))
                 )
                 await session.declared(clear_correction(), (view, params, bucket))
             else:
                 await session.declared(
-                    upsert_correction(), (view, params, bucket, delta)
+                    upsert_correction(), (view, params, bucket, _as_jsonb(delta))
                 )
         return tuple(sorted(moved))
 
@@ -2037,12 +2037,31 @@ def _lateness(value: Any) -> float:
     return seconds
 
 
+def _as_jsonb(value: Any) -> str:
+    """A mapping as the JSON text a `jsonb` placeholder can actually bind.
+
+    The driver infers a parameter's type from the Python value and has no
+    encoder for `dict` -- `_infer_oid` raises `unsupported PostgreSQL value
+    type: dict`. So binding a mapping directly cannot reach PostgreSQL at all,
+    and every settled bucket and correction written that way failed against a
+    real database while passing against a fake that accepted anything.
+    Confirmed against PostgreSQL 17: a `dict` is refused, the JSON text is
+    accepted.
+
+    The pair of `_as_mapping`, which reads the column back.
+    """
+    from ._json import dumps
+
+    return dumps(dict(value)).decode("utf-8")
+
+
 def _as_mapping(value: Any) -> dict[str, Any]:
     """A stored JSONB column as a dict, however the driver handed it back.
 
-    A real driver decodes `jsonb` to a dict; a fake, and some configurations,
-    hand back the text. Accepting both here keeps the storage shape a fact about
-    PostgreSQL rather than about which decoder is installed.
+    The driver decodes `jsonb` to *text* (`_decode_value` returns
+    `data.decode("utf-8")` for it), and a fake may hand back a dict. Accepting
+    both keeps the storage shape a fact about PostgreSQL rather than about
+    which decoder is installed.
     """
     if value is None:
         return {}

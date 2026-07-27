@@ -22,10 +22,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from orm.conftest import FakeDatabase, Post, User, user_row  # noqa: E402
+from orm.conftest import FakeDatabase, Post, User, user_row
 
-from wreath._nplusone import QueryLedger, query_ledger, watch  # noqa: E402
-from wreath.doctor import (  # noqa: E402
+from wreath._nplusone import QueryLedger, query_ledger, watch
+from wreath.doctor import (
     Finding,
     NPlusOneDetected,
     NPlusOneGuard,
@@ -33,8 +33,8 @@ from wreath.doctor import (  # noqa: E402
     diagnose_n_plus_one,
     find_n_plus_one,
 )
-from wreath.orm.registry import Registry  # noqa: E402
-from wreath.orm.session import Session  # noqa: E402
+from wreath.orm.registry import Registry
+from wreath.orm.session import Session
 
 # --- recorded traces ---------------------------------------------------------
 

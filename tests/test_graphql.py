@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from orm.conftest import (  # noqa: E402
+from orm.conftest import (
     FakeDatabase,
     Post,
     User,
@@ -18,14 +18,14 @@ from orm.conftest import (  # noqa: E402
     user_row,
 )
 
-from wreath._graphql.parser import (  # noqa: E402
+from wreath._graphql.parser import (
     GraphQLSyntaxError,
     Limits,
     parse,
 )
-from wreath.graphql import GraphQL, ResolverError  # noqa: E402
-from wreath.orm.registry import Registry  # noqa: E402
-from wreath.orm.session import Session  # noqa: E402
+from wreath.graphql import GraphQL, ResolverError
+from wreath.orm.registry import Registry
+from wreath.orm.session import Session
 
 # --- parser: syntax ----------------------------------------------------------
 

@@ -1,19 +1,42 @@
 """Shared models and a scriptable fake driver for ORM tests.
 
-The fake connection speaks the same surface as ``wreath.postgres.Connection``
-(execute/fetch/fetchrow/fetchval/close plus the ``_plans`` description cache),
+The fake connection speaks the same surface as `wreath.postgres.Connection`
+(execute/fetch/fetchrow/fetchval/close plus the `_plans` description cache),
 so these tests exercise the real compiler, session, and hydrator without a
 database. Behavior that depends on catalog fidelity belongs in the PostgreSQL
 integration tests instead.
+
+**The fake refuses what the driver refuses and returns what the driver
+returns.** Both come from the driver itself rather than from a restatement
+here -- `check_statement` is the shipped refusal path and `ScriptedRecord` is
+the row surface, so neither can drift from what a real connection does. This
+matters more than it looks: thirteen introspection tests once passed against a
+fake scripted with `str` and `int` rows, modelling a driver with catalog codecs
+that does not exist, and `validate_schema="error"` -- the framework default --
+had never once completed lifespan startup against a real PostgreSQL. See
+`docs/decisions/0020-a-double-is-never-more-capable.md`.
 """
 
 from __future__ import annotations
 
 import datetime
+import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+# `tests/` is not a package, so the shared helpers are reached by path. Same
+# mechanism the other suites use.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from _pgfidelity import (
+    PreparedStatements,
+    check_statement,
+    record,
+)
+
+from wreath._replay_adapters import ScriptedRecord
 from wreath.orm import Mapped, Model, column, relationship
 from wreath.orm.registry import Registry
 from wreath.orm.session import Session
@@ -43,6 +66,23 @@ class Membership(Model, table="memberships"):
     role: Mapped[str] = column(Text)
 
 
+def _row(scripted: Any) -> Any:
+    """A scripted row in the driver's own `Record` surface.
+
+    A mapping keeps its column names; a positional sequence has none to keep,
+    so it is wrapped with empty names -- positional access works, named access
+    raises, and that is honest about what the fake was told. Anything already
+    `Record`-shaped, or a scalar (`fetchval` results, counts), passes through.
+    """
+    if isinstance(scripted, ScriptedRecord):
+        return scripted
+    if isinstance(scripted, dict):
+        return record(scripted)
+    if isinstance(scripted, (list, tuple)):
+        return ScriptedRecord((), tuple(scripted))
+    return scripted
+
+
 class FakePlan:
     __slots__ = ("result_names", "result_oids")
 
@@ -61,9 +101,21 @@ class FakeConnection:
         #: Matched against each statement in order; first hit wins.
         self.responses: list[tuple[str, Any]] = []
         self.fail_on: dict[str, Exception] = {}
+        #: The prepared-statement cache, so a cast on a placeholder is fine on
+        #: the first execution and fatal on the second, exactly as it is against
+        #: a server. Without it the fake cannot reproduce the whole class.
+        self._prepared = PreparedStatements()
 
     def script(self, fragment: str, rows: Any) -> None:
-        self.responses.append((fragment, rows))
+        """Script rows, shaped the way `fetch` actually hands them back.
+
+        A positional list is wrapped rather than passed through: the driver
+        yields `Record`s, and a bare `list` accepts `.append`, `.index` and
+        slicing that a real row does not. Wrapping keeps positional access --
+        which is all the hydrator uses -- and removes the surface that lets a
+        test lean on something production never gets.
+        """
+        self.responses.append((fragment, [_row(r) for r in rows]))
 
     def describe(self, sql: str, names: tuple[str, ...], oids: tuple[int, ...]) -> None:
         self._plans[sql] = FakePlan(names, oids)
@@ -75,6 +127,9 @@ class FakeConnection:
         return []
 
     def _record(self, sql: str, args: tuple[Any, ...]) -> None:
+        # Derived from the driver, not restated: one unbindable argument, one
+        # statement per command, and the second execution of a poisoned cast.
+        check_statement(sql, args, self._prepared)
         self.calls.append((sql, args))
         for fragment, error in self.fail_on.items():
             if fragment in sql:

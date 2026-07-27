@@ -67,9 +67,13 @@ FICTIONS = [
         id="depends-in-annotated",
     ),
     pytest.param(
+        # `legacy_page_params` is a frozen replica of the signature that
+        # shipped; `wreath.pagination.page_params` has since been fixed, and
+        # importing the fixed one here would leave this case asserting nothing.
+        # See `tests/_paging_fiction.py`.
+        'from _paging_fiction import legacy_page_params\n'
         'from wreath.binding import Depends\n'
-        'from wreath.pagination import page_params\n'
-        'async def handler(request, params = Depends(page_params)):\n'
+        'async def handler(request, params = Depends(legacy_page_params)):\n'
         '    pass',
         "carry binding markers",
         id="markers-in-a-dependency",

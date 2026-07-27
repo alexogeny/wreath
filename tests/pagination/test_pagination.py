@@ -33,11 +33,36 @@ def test_parse_sort():
     assert parse_sort("name,-created_at, id ") == ("name", "-created_at", "id")
 
 
+class _Q:
+    """The one member `page_params` reads. It is a `Depends`, so it takes the
+    request: a dependency's own parameters are never bound from the request, and
+    the previous signature (`page_params(page, size, sort)` carrying `Query()`
+    markers) received the request object *as* the page number."""
+
+    def __init__(self, query: str = "") -> None:
+        self.query_string = query.encode()
+
+
 def test_page_params_defaults():
-    p = page_params()
-    assert p == PageParams(page=1, size=DEFAULT_SIZE, sort=())
-    p2 = page_params(page=3, size=5, sort="name,-id")
-    assert p2.page == 3 and p2.size == 5 and p2.sort == ("name", "-id")
+    assert page_params(_Q()) == PageParams(page=1, size=DEFAULT_SIZE, sort=())
+    bound = page_params(_Q("page=3&size=5&sort=name,-id"))
+    assert bound.page == 3 and bound.size == 5 and bound.sort == ("name", "-id")
+
+
+def test_page_params_clamps_and_falls_back():
+    """Out of range clamps; unparseable falls back. Neither raises.
+
+    A hand-edited URL should degrade to a page that exists, not 422 -- and
+    `MAX_PAGE` is a real ceiling because `LIMIT/OFFSET` walks and discards every
+    row before the offset.
+    """
+    from wreath.pagination import MAX_PAGE, MAX_SIZE
+
+    clamped = page_params(_Q(f"page={MAX_PAGE + 1}&size={MAX_SIZE + 1}"))
+    assert clamped.page == MAX_PAGE and clamped.size == MAX_SIZE
+    assert page_params(_Q("page=0")).page == 1
+    junk = page_params(_Q("page=abc&size="))
+    assert junk.page == 1 and junk.size == DEFAULT_SIZE
 
 
 # --- ORM query shaping (needs the built package for the model layout) --------

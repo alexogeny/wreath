@@ -182,7 +182,7 @@ class Constraint:
     check_: str
 
     def __post_init__(self) -> None:
-        from .keyset import _IDENTIFIER  # noqa: PLC0415 - one shared identifier rule
+        from .keyset import _IDENTIFIER  # one shared identifier rule
 
         if not _IDENTIFIER.fullmatch(self.name or ""):
             raise PassDeclarationError(
