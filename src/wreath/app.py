@@ -164,6 +164,10 @@ def _make_dependency_capturer(scope: Any, rule: tuple[Any, int]) -> Any:
 #: Environments in which `enable_docs()` publishes the docs page and the
 #: OpenAPI document. Anything not named here -- including the default,
 #: "production" -- gets neither route and no existence leak.
+#: Most distinct access clauses one route may compile to. See
+#: `_requirement_clauses`.
+MAX_ACCESS_CLAUSES = 64
+
 NON_PRODUCTION_ENVIRONMENTS: tuple[str, ...] = (
     "dev", "development", "local", "test", "testing",
 )
@@ -210,6 +214,12 @@ class _StaticMatcher:
     mounts in order and taking the first hit is exact -- the scan stops at the
     winner rather than having to see every candidate.
 
+    That does mean a broad mount registered before a narrower one shadows it
+    (`/assets/` before `/assets/images/` leaves the second unreachable). It is
+    the documented rule rather than an oversight -- two tests in
+    `tests/test_app.py` pin it, one of them named for it -- and the ordering is
+    the application's to choose. Register the narrower mount first.
+
     This was a character trie, which is asymptotically better in the mount
     count but pays one *Python* loop iteration and dict lookup per path
     character, bounded by the longest registered prefix. `str.startswith` does
@@ -250,6 +260,7 @@ class Wreath:
         "_capabilities",
         "_classify",
         "_crud_enabled",
+        "background_errors",
         "_dirty",
         "_databases",
         "_exception_handlers",
@@ -353,6 +364,10 @@ class Wreath:
         self._status_handlers: dict[int, ExceptionHandler] = {}
         self._dirty = False
         self._crud_enabled = False
+        #: Background tasks that raised after their response was sent. Nothing
+        #: can be reported to the client at that point, so this is the only
+        #: place the failure exists.
+        self.background_errors = 0
         self._databases: dict[str, Any] = {}
         self._http_clients: dict[str, Any] = {}
         self._orm_registries: dict[str, Any] = {}
@@ -1120,7 +1135,11 @@ class Wreath:
                 # NotFound exception handler) covers a routing miss -- which is
                 # the case people register one for. With nothing registered this
                 # produces the same response it always did.
-                response = await self._handle_exception(request, NotFound("Not Found"))
+                response = (
+                    _NOT_FOUND
+                    if not self._exception_handlers and not self._status_handlers
+                    else await self._handle_exception(request, NotFound("Not Found"))
+                )
                 await self._finish_http(
                     request, response, send, method, scope, native_response, active_global
                 )
@@ -1295,7 +1314,17 @@ class Wreath:
             await response(send)
         background = response.background
         if background is not None:
-            await background()
+            try:
+                await background()
+            except Exception:
+                # Counted, then re-raised. Propagating is the shipped contract
+                # (tests/test_background.py asserts it) and it is the right one:
+                # the response has already gone, so the *server* is the only
+                # thing left that can log this, and swallowing it here would
+                # take that away. What was missing is that the application had
+                # no way to know it had happened at all.
+                self.background_errors += 1
+                raise
 
     async def _handle_websocket(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         router = self._ws_router
@@ -1662,7 +1691,19 @@ class Wreath:
                     clauses = [clause | combined for clause in clauses]
                 else:
                     clauses = [clause | mask for clause in clauses for mask in masks]
-        return tuple(dict.fromkeys(clauses))
+        distinct = tuple(dict.fromkeys(clauses))
+        if len(distinct) > MAX_ACCESS_CLAUSES:
+            # `mode="any"` multiplies: k checks of n values each is n**k
+            # clauses, and every one of them is a row the router compares on
+            # every request. Refused at compile time, where the declaration that
+            # caused it is still in view.
+            raise ValueError(
+                f"this route's authorization expands to {len(distinct)} clauses "
+                f"(limit {MAX_ACCESS_CLAUSES}). Combining several mode='any' "
+                "checks multiplies them; express the requirement as one check, or "
+                "as a Cedar policy."
+            )
+        return distinct
 
     def _identity_mask(self, identity: Identity | None) -> int:
         if identity is None:
@@ -1780,7 +1821,11 @@ class Wreath:
         body_state: dict[str, Any] = {}
 
         def spec_bytes() -> bytes:
-            key = len(self._routes)
+            # Keyed on the route tuple's identity, not its length: swapping one
+            # route for another leaves the count identical, and the cached spec
+            # then described routes that no longer existed. The same trap
+            # `_vocabulary_reader` in `_auth/permissions` avoids by comparing.
+            key = tuple(self._routes)
             if spec_state.get("bytes") is None or spec_state.get("key") != key:
                 spec_state["bytes"] = _json_dumps(
                     generate_openapi(self, title=title, version=version)
@@ -1789,7 +1834,7 @@ class Wreath:
             return spec_state["bytes"]
 
         def body_html() -> str:
-            key = len(self._routes)
+            key = tuple(self._routes)
             if body_state.get("html") is None or body_state.get("key") != key:
                 body_state["html"] = render_docs_body(
                     self, title=title, version=version, try_it_out=try_it_out

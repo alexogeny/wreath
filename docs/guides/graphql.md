@@ -37,6 +37,12 @@ type Query {
 Nullability comes from the column definition, so a `NOT NULL` column is
 non-null in GraphQL without you restating it.
 
+A document that mutates gets a **write** session; queries get a read one. A
+resolver that raises something other than an `ExecutionError` answers a GraphQL
+error rather than a transport `500` — clients read a 500 as a network failure —
+and the message is generic, with the count on `api.resolver_errors`.
+
+
 ## Relationships are batched, not N+1
 
 This is the reason to use Wreath's GraphQL rather than mount a library beside it.

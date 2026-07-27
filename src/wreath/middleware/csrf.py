@@ -141,6 +141,13 @@ class CSRFMiddleware:
             raise ValueError("CSRF secret must contain at least 32 bytes")
         if not _TOKEN_NAME.fullmatch(cookie_name) or not _TOKEN_NAME.fullmatch(header_name):
             raise ValueError("CSRF cookie and header names must be valid HTTP tokens")
+        # The browser enforces these prefixes by *dropping* a cookie that does
+        # not meet them, so a mismatch here is a CSRF cookie that silently never
+        # arrives (RFC 6265bis 4.1.3).
+        if cookie_name.startswith("__Host-") and not secure:
+            raise ValueError("a __Host- CSRF cookie must be Secure; pass secure=True")
+        if cookie_name.startswith("__Secure-") and not secure:
+            raise ValueError("a __Secure- CSRF cookie must be Secure; pass secure=True")
         if max_age <= 0:
             raise ValueError("CSRF max_age must be positive")
         normalized_same_site = same_site.lower()
@@ -212,7 +219,7 @@ class CSRFMiddleware:
         headers = request._index_headers()
         cookie = request.cookies.get(self._cookie_name)
         submitted = headers.get(self._header_name_bytes)
-        valid = False
+        valid, issued = False, now
         # `latin-1` cannot raise on a str that came out of header parsing,
         # where `ascii` could: a cookie value is attacker-controlled, and an
         # encode error there turned a would-be 403 into a 500.
@@ -221,11 +228,18 @@ class CSRFMiddleware:
             and submitted is not None
             and hmac.compare_digest(cookie.encode("latin-1", "replace"), submitted)
         ):
-            valid, _issued = self._validate(cookie, now)
+            valid, issued = self._validate(cookie, now)
         if not valid or not self._origin_valid(request, headers):
             return ProblemResponse(status=403, title="Forbidden", detail="CSRF validation failed")
-        request.state.__setattr__(_STATE_TOKEN, cookie)
-        request.state.__setattr__(_STATE_ISSUE, False)
+        # Renewed here as well as on safe methods. A client that only ever POSTs
+        # -- an SPA doing background writes, a form-less API caller -- never took
+        # the safe-method path, so its token aged out and every write started
+        # answering 403 with nothing to refresh it.
+        renew = now - issued >= self._max_age * 3 // 4
+        request.state.__setattr__(
+            _STATE_TOKEN, self._new_token(now) if renew else cookie
+        )
+        request.state.__setattr__(_STATE_ISSUE, renew)
         return None
 
     async def after(self, request: Request, response):

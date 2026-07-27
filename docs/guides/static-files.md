@@ -37,3 +37,12 @@ file can never go stale under the name it was served with. Files you don't set a
 policy for still get `ETag` / `If-None-Match` revalidation for free.
 
 **Reference:** [`wreath.staticfiles`](../reference/staticfiles.md).
+
+Conditional requests follow RFC 9110 §13.1.2: `If-None-Match` is parsed as a
+list, `*` matches anything, and the weak `W/` prefix is ignored when comparing.
+Responses carry `Last-Modified` alongside the `ETag`.
+
+A directory reached without its trailing slash (`/assets/sub`) answers `308` to
+`/assets/sub/` rather than serving the index from the wrong base — otherwise
+every relative link in that page resolves one level up.
+

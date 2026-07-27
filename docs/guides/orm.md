@@ -53,6 +53,12 @@ Binding the body to `Widget` runs it through the same column rules the database
 will enforce, so the check and the schema can't drift apart. `flush()` outside an
 explicit transaction opens one for the write and commits it atomically.
 
+A write built from a loaded object raises `StaleDataError` when it matches no
+row — the object was deleted, or the key it was found by changed, in another
+session. The statement "succeeded" in the driver's terms, so this used to pass
+unnoticed and only showed up as the next read disagreeing.
+
+
 ## User story: fetch a row, or a filtered page
 
 > *As an API author, I want to read one row by id and run a small filtered query

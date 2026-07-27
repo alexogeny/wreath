@@ -54,16 +54,24 @@ from .orm.expressions import (
 from .orm.model import Model
 from .orm.query import Select
 
-__all__ = ["BoundQuery", "Param", "Queries", "QueryDeclaration", "query"]
+__all__ = ["BoundQuery", "Param", "Placeholder", "Queries", "QueryDeclaration", "query"]
 
 
-class _Placeholder(Expression):
+class Placeholder(Expression):
     """The gap a declaration leaves in its predicate tree.
 
     Not a :class:`~wreath.orm.expressions.ValueExpr`: a placeholder must never
     be mistaken for a bound value. Neither the cache key nor the SQL renderer
     knows this node, so one that reached them by another route fails loudly
     rather than compiling a query with a missing value in it.
+
+    Public because it is half of a contract rather than an implementation
+    detail: :func:`~wreath.orm.compiler.compile_rebind` takes the marker class
+    to look for, so any module that lets a caller write :class:`Param` in a
+    predicate and binds it later has to name this type. ``wreath.series`` is the
+    second such module. What it is *not* is something to construct — a
+    ``Param`` compared against a column builds one, and that is the only route
+    that gives it a type to coerce with.
     """
 
     __slots__ = ("name", "pg_type")
@@ -102,7 +110,7 @@ class Param(RelatedColumnExpr):
     both ``Llama.paddock_id == Param(...)`` and ``Llama.paddock.name ==
     Param(...)`` build a placeholder instead of trying to coerce one into a
     ``bigint``. A ``Param`` is bait for an operator, never a node in a tree; the
-    tree gets a ``_Placeholder``.
+    tree gets a ``Placeholder``.
 
     Because interception happens in the operator, a parameter works with the six
     comparisons (``==``, ``!=``, ``<``, ``<=``, ``>``, ``>=``) in either order.
@@ -132,7 +140,7 @@ class Param(RelatedColumnExpr):
                 f"a parameter compares against a model column such as "
                 f"Llama.paddock_id, got {other!r}"
             )
-        return BinaryExpr(operator, other, _Placeholder(self.name, other.column.pg_type))
+        return BinaryExpr(operator, other, Placeholder(self.name, other.column.pg_type))
 
     # The operator that reaches these is the *reflected* one -- `column < param`
     # arrives as `param.__gt__(column)` -- so each builds the predicate read
@@ -245,11 +253,11 @@ class QueryDeclaration:
         select = Select.build(model, ())
         for method, args in self._steps:
             select = getattr(select, method)(*args)
-        found: list[_Placeholder] = []
+        found: list[Placeholder] = []
         binders = []
         for predicate in select.predicates:
             check_predicate_columns(model, predicate)
-            binders.append(compile_rebind(predicate, _Placeholder, found))
+            binders.append(compile_rebind(predicate, Placeholder, found))
         return QueryDeclaration(
             self._steps,
             single=self._single,

@@ -32,6 +32,8 @@ from .model import (
     Operation,
     Parameter,
     PermissionSet,
+    SeriesMeasure,
+    SeriesShape,
     TypegenError,
     TypeRef,
 )
@@ -399,6 +401,7 @@ def build_api_model(
         models=builder.registry.models(),
         operations=tuple(operations),
         permissions=_permission_sets(app),
+        series=_series_shapes(routes),
     )
 
 
@@ -414,6 +417,85 @@ def _permission_sets(app: Any) -> tuple[PermissionSet, ...]:
         PermissionSet(resource_type=resource_type, actions=actions)
         for resource_type, actions in declared_actions(app).items()
         if resource_type
+    )
+
+
+def _series_shapes(routes: list[Any]) -> tuple[SeriesShape, ...]:
+    """Calculated views reachable from the routes, typed for the client.
+
+    Read off the handlers the same way :func:`_permission_sets` reads off the
+    route declarations, and for the same reason: the shape a chart endpoint
+    returns is decided by a declaration on the server, and a component that
+    types it by hand is a second copy nothing keeps honest.
+
+    A declaration is a value written once at import time next to the handler
+    that runs it, which is the shape the guide teaches, so
+    ``activity = Series(...)`` used by a routed handler becomes ``ActivityResult``
+    in TypeScript. The variable name is the name because a declaration has no
+    other; requiring a separate ``name=`` would be a second spelling to keep in
+    step with the first.
+
+    A handler is matched to its declarations through the globals it actually
+    loads (``co_names``), not through everything its module can see. Module
+    scope alone was the first attempt and it was too loose: a handler in a
+    module that merely *imports* a declaration for some other reason dragged it
+    into the generated client. Typegen describes the API surface, and a view no
+    route serves is not part of it.
+
+    The limitation that buys: a handler reaching its declaration indirectly --
+    passed in as an argument, or looked up in a dict -- is not seen. That shows
+    up immediately as a missing type rather than a wrong one, which is the
+    direction to be wrong in.
+    """
+    from ..series import Aggregate, Series
+
+    found: dict[str, SeriesShape] = {}
+    for definition in routes:
+        endpoint = definition.endpoint
+        namespace = getattr(endpoint, "__globals__", None)
+        code = getattr(endpoint, "__code__", None)
+        if not isinstance(namespace, dict) or code is None:
+            continue
+        for variable in code.co_names:
+            value = namespace.get(variable)
+            if variable.startswith("_") or not isinstance(value, (Series, Aggregate)):
+                continue
+            shape = _series_shape(variable, value)
+            # Two routers using one declaration is the ordinary case, and both
+            # see the same object under the same name.
+            found.setdefault(shape.name, shape)
+    return tuple(sorted(found.values(), key=lambda shape: shape.name))
+
+
+def _series_shape(variable: str, declaration: Any) -> SeriesShape:
+    from ..series import Series
+
+    measures = tuple(
+        SeriesMeasure(
+            name=name,
+            kind=measure.kind,
+            unit=measure.unit,
+            # An explicit `.fill(name=...)` makes even an average dense; without
+            # one the measure's own identity decides, and only a measure with an
+            # identity fills. This is what makes the difference between
+            # `number[]` and `(number | null)[]` downstream.
+            fills=name in declaration._d.fills or measure.has_identity,
+        )
+        for name, measure in declaration.measures
+    )
+    series = isinstance(declaration, Series)
+    return SeriesShape(
+        name=variable,
+        form="series" if series else "aggregate",
+        measures=measures,
+        bucket=declaration._bucket.name if series else None,
+        grouped=declaration.group is not None,
+        compares=(
+            declaration._compare.name
+            if series and declaration._compare is not None
+            else None
+        ),
+        events=bool(series and declaration._events is not None),
     )
 
 

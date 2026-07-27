@@ -222,8 +222,7 @@ def crud_router(
     def serialize(instance: Any) -> dict[str, Any]:
         return {name: _jsonable(getattr(instance, name)) for name in output_fields}
 
-    def coerce_pk(raw: str) -> Any:
-        return int(raw) if raw.lstrip("-").isdigit() else raw
+    coerce_pk = _coerce_pk_for(model)
 
     def clean_input(body: Any) -> dict[str, Any] | None:
         if not isinstance(body, dict):
@@ -306,8 +305,8 @@ def crud_router(
                     await session.flush()
                     payload = serialize(instance)
                 return JSONResponse(payload, status=201)
-            except (TypeError, ValueError) as error:
-                return _unprocessable(str(error))
+            except Exception as error:  # noqa: BLE001 - see `_unprocessable`
+                return _unprocessable(error)
             finally:
                 await session.close()
         _apply_requirement(create, create_rule)
@@ -335,8 +334,8 @@ def crud_router(
                     await session.flush()
                     payload = serialize(instance)
                 return JSONResponse(payload)
-            except (TypeError, ValueError) as error:
-                return _unprocessable(str(error))
+            except Exception as error:  # noqa: BLE001 - see `_unprocessable`
+                return _unprocessable(error)
             finally:
                 await session.close()
         _apply_requirement(update, update_rule)
@@ -364,6 +363,35 @@ def crud_router(
         _apply_requirement(delete, delete_rule)
 
     return router
+
+
+#: Column types whose primary key is an integer. Anything else keeps the raw
+#: path segment, so a text or UUID key is not silently coerced.
+_INTEGER_PG_TYPES = frozenset({"int2", "int4", "int8", "smallint", "integer", "bigint"})
+
+
+def _coerce_pk_for(model: type) -> Callable[[str], Any]:
+    """Build the path-segment -> primary-key conversion for ``model``.
+
+    Driven by the declared column type rather than by what the segment *looks
+    like*: coercing any digit-string to `int` turned `/tokens/12` into a lookup
+    for the integer 12 against a text key, which is a 500 rather than the 404
+    the caller asked about.
+    """
+    key = _as_model(model).__wreath_primary_key__[0]
+    name = getattr(getattr(key, "pg_type", None), "name", "")
+    if name.lower() not in _INTEGER_PG_TYPES:
+        return lambda raw: raw
+
+    def coerce(raw: str) -> Any:
+        try:
+            return int(raw)
+        except ValueError:
+            # Not a number, so it cannot be this key -- handed through so the
+            # lookup misses and answers 404.
+            return raw
+
+    return coerce
 
 
 def _rule_for(authorize: Access | Mapping[str, Access] | None, op: str) -> Access:
@@ -455,5 +483,16 @@ def _bad_request(detail: str) -> Response:
     return JSONResponse({"error": detail}, status=400)
 
 
-def _unprocessable(detail: str) -> Response:
+def _unprocessable(error: Exception) -> Response:
+    """422 for a body the model would not accept.
+
+    The exception text does not travel: only `TypeError`/`ValueError` came from
+    the model's own validation and are safe to quote, and everything else here
+    is a driver error whose message carries table names, SQL, and constraint
+    identifiers. Catching only the first two also meant a driver error was not
+    caught at all, and answered 500.
+    """
+    detail = str(error) if isinstance(error, (TypeError, ValueError)) else (
+        "the request body was not accepted"
+    )
     return JSONResponse({"error": detail}, status=422)

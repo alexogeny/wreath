@@ -418,6 +418,15 @@ def _retention_purge_pass(
         frontier=Sealed(),
         work=Purge(where=where),
         pace=pace if pace is not None else DutyCycle(),
+        # Stated rather than inherited. `halt` is the right default for a pass
+        # with something irreversible at the end of it, because nothing should
+        # be skipped by omission -- but a retention purge has no terminal step,
+        # so there is no irreversible thing a skip could buy. One undeletable
+        # row must not stop the inbox from being kept small forever. The hole is
+        # still recorded and `wreath passes retry` still comes back for it; this
+        # is the same call `keyed_purge_pass` makes for the three keyed stores,
+        # and it is written out here because these two build their pass directly.
+        on_chunk_failure="skip",
         shift=shift,
         schema=schema,
     )

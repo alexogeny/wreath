@@ -57,10 +57,17 @@ Reference: :doc:`/reference/series`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from calendar import monthrange
+from dataclasses import dataclass, field, replace
 from typing import Any
 
-from ._series.compile import compile_aggregate, compile_series
+from ._series.compile import (
+    CURRENT,
+    PREVIOUS,
+    compile_aggregate,
+    compile_events,
+    compile_series,
+)
 from ._series.envelope import aggregate_rows, fill, series_rows
 from .orm.compiler import check_predicate_columns, compile_rebind
 from .orm.errors import DeclarationError
@@ -76,12 +83,12 @@ from .orm.types import (
     TimestampTz,
 )
 
-# `Param` builds this node in place of a value. It is the marker
-# `compile_rebind` looks for, and reaching it through the private name is a
-# small wart: `wreath.queries` should give it a public one, and this import
-# becomes a plain one when it does.
-from .queries import _Placeholder
-from .temporal import Bucket, Instant
+# `Param` builds this node in place of a value; it is the marker
+# `compile_rebind` looks for. Public in `wreath.queries` precisely because two
+# modules now share that contract.
+from .queries import Placeholder
+from .temporal import Bucket, Instant, wall_clock
+from .temporal import zone as _zone_of
 
 __all__ = [
     "Aggregate",
@@ -90,8 +97,10 @@ __all__ = [
     "Measure",
     "Range",
     "Series",
+    "SeriesComparison",
     "SeriesData",
     "SeriesError",
+    "SeriesEvent",
     "SeriesResult",
     "avg",
     "count",
@@ -134,6 +143,13 @@ DEFAULT_TOP = 7
 #: well into the territory where the answer is a table. Refusing here means a
 #: typo cannot turn into a thousand-series payload.
 MAX_TOP = 24
+
+#: How many markers an annotation layer carries before it refuses. A hundred
+#: markers is not an annotation layer, it is noise -- so the default is a
+#: quarter of that, and :data:`MAX_EVENTS` is where "annotation" stops being a
+#: description of what you asked for.
+DEFAULT_EVENTS = 25
+MAX_EVENTS = 100
 
 #: How many groups an ungrouped-in-time aggregate returns before it refuses.
 #: Unlike a series it does not fold: a bar chart's bars are the answer, and
@@ -259,6 +275,75 @@ class SeriesData:
     values: tuple[Any, ...]
     other: bool = False
 
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "measure": self.measure,
+            "key": self.key,
+            "label": self.label,
+            "unit": self.unit,
+            "kind": self.kind,
+            "values": list(self.values),
+            "other": self.other,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SeriesEvent:
+    """One marker: when it happened, which bucket that was, and what to call it.
+
+    Both times are carried because both are wanted and neither can be derived
+    from the other on the client. :attr:`at` puts the marker at its true
+    x-position; :attr:`bucket` says which column it annotates, computed by the
+    same ``date_trunc`` in the same zone as the series it sits over, so a
+    marker cannot land a bucket away from the bar it describes.
+    """
+
+    at: Any
+    bucket: Any
+    label: Any
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"at": self.at, "bucket": self.bucket, "label": self.label}
+
+
+@dataclass(frozen=True, slots=True)
+class _Events:
+    """A declared annotation layer, waiting for a range to run against."""
+
+    model: type
+    at: ColumnExpr
+    label: ColumnExpr
+    predicates: tuple[Predicate, ...]
+    limit: int
+
+
+@dataclass(frozen=True, slots=True)
+class SeriesComparison:
+    """The same declaration over the period before it.
+
+    Its own bucket run rather than values slotted into the primary one, because
+    the two periods are legitimately different lengths: February against March
+    is 28 buckets against 31. Padding one to match the other would invent data;
+    lining them up by index is a decision for whoever draws the chart, and this
+    payload gives them what they need to make it rather than making it for them.
+    """
+
+    #: The bucket width the range was shifted by — ``"month"`` for a
+    #: month-over-month comparison. What a legend calls it.
+    previous: str
+    buckets: tuple[Any, ...]
+    series: tuple[SeriesData, ...]
+
+    def __len__(self) -> int:
+        return len(self.buckets)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "previous": self.previous,
+            "buckets": list(self.buckets),
+            "series": [item.as_dict() for item in self.series],
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class SeriesResult:
@@ -271,9 +356,37 @@ class SeriesResult:
     #: gaps. A renderer can use this as the x axis directly.
     buckets: tuple[Any, ...]
     series: tuple[SeriesData, ...]
+    #: The prior period, when the declaration asked for one. ``None`` otherwise,
+    #: so a caller that never compares never has to check for it.
+    comparison: SeriesComparison | None = None
+    #: Markers over the same range, in the order they happened. Empty unless the
+    #: declaration asked for them.
+    events: tuple[SeriesEvent, ...] = ()
 
     def __len__(self) -> int:
         return len(self.buckets)
+
+    def as_dict(self) -> dict[str, Any]:
+        """The JSON body, with the field names the generated TypeScript expects.
+
+        Written out rather than derived from the dataclass, because these keys
+        are a wire contract shared with ``wreath typegen`` and a field rename
+        should have to be made in both places on purpose.
+
+        Needed because the JSON encoder does not know dataclasses: returning the
+        result object itself raises ``TypeError`` on the first request. Teaching
+        ``temporal.jsonable`` a hook would let the object go back directly and is
+        the better long-term shape; it belongs to that module rather than here.
+        """
+        return {
+            "range": {"start": self.range.start, "end": self.range.end},
+            "zone": self.zone,
+            "bucket": self.bucket,
+            "buckets": list(self.buckets),
+            "series": [item.as_dict() for item in self.series],
+            "comparison": None if self.comparison is None else self.comparison.as_dict(),
+            "events": [event.as_dict() for event in self.events],
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +394,9 @@ class AggregateRow:
     key: Any
     label: str
     values: dict[str, Any]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"key": self.key, "label": self.label, "values": dict(self.values)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,6 +408,13 @@ class AggregateResult:
 
     def __len__(self) -> int:
         return len(self.rows)
+
+    def as_dict(self) -> dict[str, Any]:
+        """The JSON body, matching the generated ``AggregateResult<M>``."""
+        return {
+            "rows": [row.as_dict() for row in self.rows],
+            "measures": list(self.measures),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +471,53 @@ class _Builder:
                 owner = related.column.owner
                 if owner is not None and owner not in found:
                     found.append(owner)
+        return tuple(found)
+
+    @property
+    def predicates(self) -> tuple[Predicate, ...]:
+        """The declared filters, for a reader that wants to inspect them.
+
+        Public for the same reason :attr:`sources` is: a declaration is a value,
+        and a tool that has to know what this view touches should read it here
+        rather than re-deriving it from source.
+        """
+        return self._d.predicates
+
+    @property
+    def declared_columns(self) -> tuple[tuple[str, ColumnExpr], ...]:
+        """Every column this view names, tagged with what it does to it.
+
+        ``("time", …)`` is the bucketing column, ``("aggregate", …)`` a column
+        summed or averaged, ``("group", …)`` the grouping key. Filters are
+        :attr:`predicates` instead, because for a filter the *operator* decides
+        whether it is safe and a bare column would throw that away.
+
+        This exists for a reader that does not exist yet, and the reason is
+        worth writing down. Design 24 (deferred data migrations) refuses
+        ``SUM``, ``AVG``, ``MIN``, ``MAX``, ``GROUP BY`` and joins on a column
+        that is *mid-conversion* — a backfill rewriting values underneath a
+        running application. Those are not exotic operations here; they are most
+        of what a calculated view is made of, and a grouped chart over a
+        half-converted column shows one category forking into two with nothing
+        raising.
+
+        The check belongs to the migrations side, which is the only half that
+        knows a conversion is running — this module deliberately has no notion
+        of a converting column and should not grow one. What it owes is
+        *inspectability*: a declaration is a value written at import time, so a
+        scan can read this instead of parsing handlers. That is the contract,
+        and it is why this is a property rather than a note in a design
+        document.
+        """
+        found: list[tuple[str, ColumnExpr]] = []
+        at = getattr(self, "_at", None)
+        if at is not None:
+            found.append(("time", at))
+        for _name, measure in self._d.measures:
+            if measure.column is not None:
+                found.append(("aggregate", measure.column))
+        if self._d.group is not None:
+            found.append(("group", self._d.group))
         return tuple(found)
 
     def where(self, *predicates: Predicate) -> Any:
@@ -460,7 +630,7 @@ class _Builder:
         expected: list[str] = []
         for predicate in self._d.predicates:
             found: list[Any] = []
-            binders.append(compile_rebind(predicate, _Placeholder, found))
+            binders.append(compile_rebind(predicate, Placeholder, found))
             expected.extend(item.name for item in found)
         missing = [name for name in expected if name not in values]
         if missing:
@@ -562,7 +732,7 @@ class Series(_Builder):
     segment joining Monday to Wednesday.
     """
 
-    __slots__ = ("_at", "_bucket", "_stored_in", "_top")
+    __slots__ = ("_at", "_bucket", "_compare", "_events", "_stored_in", "_top")
 
     def __init__(
         self,
@@ -573,6 +743,8 @@ class Series(_Builder):
         stored_in: Any = None,
         _state: _Declaration | None = None,
         _top: int = DEFAULT_TOP,
+        _compare: Bucket | None = None,
+        _events: _Events | None = None,
     ) -> None:
         self._d = _state if _state is not None else _Declaration(model=model)
         self._at = _temporal(at)
@@ -583,6 +755,8 @@ class Series(_Builder):
         self._bucket = bucket
         self._stored_in = stored_in
         self._top = _top
+        self._compare = _compare
+        self._events = _events
 
     def _with(self, **changes: Any) -> Series:
         return Series(
@@ -592,6 +766,8 @@ class Series(_Builder):
             stored_in=self._stored_in,
             _state=replace_declaration(self._d, **changes),
             _top=self._top,
+            _compare=self._compare,
+            _events=self._events,
         )
 
     @property
@@ -605,6 +781,27 @@ class Series(_Builder):
     @property
     def top(self) -> int:
         return self._top
+
+    @property
+    def sources(self) -> tuple[type, ...]:
+        """Every model this view reads, the annotation layer included.
+
+        A new deploy changes the chart just as a new trek does, so a cache keyed
+        on ``sources`` has to know about both. Leaving the events model out is
+        the kind of omission that shows up as a marker missing for five minutes
+        and gets blamed on the browser.
+        """
+        found = list(super().sources)
+        if self._events is None:
+            return tuple(found)
+        for expression in (self._events.at, self._events.label, *self._events.predicates):
+            for related in _related_columns(expression):
+                owner = related.column.owner
+                if owner is not None and owner not in found:
+                    found.append(owner)
+        if self._events.model not in found:
+            found.append(self._events.model)
+        return tuple(found)
 
     def by(self, column: Any, *, top: int = DEFAULT_TOP) -> Series:
         """Split into one series per value of ``column``, keeping the top ``top``.
@@ -635,6 +832,126 @@ class Series(_Builder):
             stored_in=self._stored_in,
             _state=replace_declaration(self._d, group=checked),
             _top=top,
+            _compare=self._compare,
+            _events=self._events,
+        )
+
+    def compare(self, *, previous: Bucket) -> Series:
+        """Also compute the same range one ``previous`` earlier.
+
+        ``previous=Month`` answers "and what did this look like last month?".
+        The shift is a bucket width from :mod:`wreath.temporal` rather than a
+        duration, because the useful comparisons are calendar ones: a month is
+        28 to 31 days depending on when you ask, and "the same days last month"
+        is what a reader means even though no fixed number of hours expresses it.
+
+        It stays one statement. Two statements are how the periods end up
+        misaligned by a bucket, and the alignment is the entire value of the
+        feature — anyone can run the query twice.
+
+        The comparison period must not overlap the primary one. A shift shorter
+        than the range would put some rows in both periods, and there is no
+        honest way to draw that: counting them twice inflates the comparison,
+        counting them once silently drops them from one side.
+        """
+        if not isinstance(previous, Bucket):
+            raise SeriesError(
+                f"compare(previous=) takes a bucket from wreath.temporal such as "
+                f"Month, got {previous!r}"
+            )
+        if self._compare is not None:
+            raise SeriesError(
+                "compare() is already declared; one comparison period per view, "
+                "because a second one is a second chart rather than more of this one"
+            )
+        return Series(
+            self._d.model,
+            at=self._at,
+            bucket=self._bucket,
+            stored_in=self._stored_in,
+            _state=self._d,
+            _top=self._top,
+            _compare=previous,
+            _events=self._events,
+        )
+
+    def events(
+        self,
+        model: type,
+        *,
+        at: Any,
+        label: Any,
+        where: Any = (),
+        limit: int = DEFAULT_EVENTS,
+    ) -> Series:
+        """Annotate the chart with markers — deploys, incidents, releases.
+
+        The markers come from their own model and are read over the range the
+        series already has, which is the whole reason this belongs on the
+        declaration rather than beside it. Two hand-written queries drift: one
+        clips its range differently, or buckets in a different zone, and a
+        marker lands a column away from the event it describes.
+
+        Each marker carries both its exact instant and the bucket it falls in,
+        computed by the same ``date_trunc`` in the same zone as the series, so
+        it can sit at its true x-position while still knowing what it annotates.
+
+        This is a **second statement** on the same session rather than a tagged
+        ``UNION ALL`` of buckets and markers. The union would force two
+        different row shapes into one, half the columns null in every row, with
+        a discriminator the client has to switch on — a worse envelope and worse
+        generated types, in exchange for a round trip the driver describes
+        itself as pipelining anyway. Whether it really costs one round trip or
+        two is a question for a real server; the alignment does not depend on
+        the answer.
+
+        With :meth:`compare`, markers cover the primary period only. An
+        annotation layer answers "what happened during *this*", and drawing last
+        month's deploys over this month's chart would need a second axis to be
+        readable at all.
+        """
+        if self._events is not None:
+            raise SeriesError(
+                "events() is already declared; one annotation layer per view, "
+                "because a second one is a second thing to draw rather than more "
+                "of this one"
+            )
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise SeriesError(f"events(limit=) must be a positive integer, got {limit!r}")
+        if limit > MAX_EVENTS:
+            raise SeriesError(
+                f"events(limit={limit}) is above the ceiling of {MAX_EVENTS}. Past "
+                f"a hundred markers an annotation layer is noise rather than "
+                f"annotation -- filter them, or show them as a table beside the chart"
+            )
+        if not isinstance(label, ColumnExpr):
+            raise SeriesError(
+                f"events(label=) takes a model column such as Deploy.version, "
+                f"got {label!r}"
+            )
+        predicates = tuple(where) if isinstance(where, (tuple, list)) else (where,)
+        for item in predicates:
+            if not isinstance(item, Predicate):
+                raise SeriesError(
+                    f"events(where=) takes SQL predicates such as "
+                    f"Deploy.environment == 'production', got {item!r}"
+                )
+            check_predicate_columns(model, item)
+        return Series(
+            self._d.model,
+            at=self._at,
+            bucket=self._bucket,
+            stored_in=self._stored_in,
+            _state=self._d,
+            _top=self._top,
+            _compare=self._compare,
+            _events=_Events(
+                model=model,
+                at=_temporal(at),
+                label=label,
+                predicates=predicates,
+                limit=limit,
+            ),
         )
 
     async def run(
@@ -654,24 +971,56 @@ class Series(_Builder):
         if not isinstance(range, Range):
             raise SeriesError(f"run() needs range=Range(start, end), got {range!r}")
         zone_name = _zone_name(zone if zone is not None else self._stored_in)
+        if self._compare is not None:
+            _refuse_overlap(range, self._compare, zone_name)
         predicates = self._bind(values)
-        window = (
-            self._at >= _instant(range.start),
-            self._at < _instant(range.end),
-        )
         sql, args, _oids = compile_series(
             session.registry,
             self,
-            (*window, *predicates),
-            start=range.start,
-            end=range.end,
+            predicates,
+            start=_instant(range.start),
+            end=_instant(range.end),
             zone_name=zone_name,
+            compare=self._compare,
         )
         rows = await session.declared(sql, args)
-        return self._envelope(rows, range, zone_name)
+        result = self._envelope(rows, range, zone_name)
+        if self._events is None:
+            return result
+        return replace(result, events=await self._markers(session, range, zone_name))
 
-    def _envelope(self, rows: list[Any], range: Range, zone_name: str) -> SeriesResult:
-        buckets, found = series_rows(self, rows)
+    async def _markers(
+        self, session: Any, range: Range, zone_name: str
+    ) -> tuple[SeriesEvent, ...]:
+        """The annotation layer, over the same range and in the same zone."""
+        declared = self._events
+        assert declared is not None
+        sql, args, _oids = compile_events(
+            session.registry,
+            declared.model,
+            declared.at,
+            declared.label,
+            declared.predicates,
+            start=_instant(range.start),
+            end=_instant(range.end),
+            zone_name=zone_name,
+            trunc=self._bucket.trunc,
+            limit=declared.limit,
+        )
+        rows = await session.declared(sql, args)
+        if len(rows) > declared.limit:
+            raise SeriesError(
+                f"this view matched more than {declared.limit} markers. Narrow "
+                f"them with events(where=...), or raise the ceiling in the "
+                f"declaration with events(..., limit=N) -- drawing the first "
+                f"{declared.limit} would annotate the chart with a subset nothing "
+                f"in it explains"
+            )
+        return tuple(
+            SeriesEvent(at=row[0], bucket=row[1], label=row[2]) for row in rows
+        )
+
+    def _series_of(self, buckets: list[Any], found: dict[Any, Any]) -> tuple[SeriesData, ...]:
         blank: dict[str, Any] = {}
         series: list[SeriesData] = []
         for (key, other), by_bucket in found.items():
@@ -691,12 +1040,32 @@ class Series(_Builder):
                         ),
                     )
                 )
+        return tuple(series)
+
+    def _envelope(self, rows: list[Any], range: Range, zone_name: str) -> SeriesResult:
+        if self._compare is None:
+            buckets, found = series_rows(self, rows)
+            return SeriesResult(
+                range=range,
+                zone=zone_name,
+                bucket=self._bucket.name,
+                buckets=tuple(buckets),
+                series=self._series_of(buckets, found),
+            )
+        periods = series_rows(self, rows, periods=True)
+        current_buckets, current = periods[CURRENT]
+        previous_buckets, previous = periods[PREVIOUS]
         return SeriesResult(
             range=range,
             zone=zone_name,
             bucket=self._bucket.name,
-            buckets=tuple(buckets),
-            series=tuple(series),
+            buckets=tuple(current_buckets),
+            series=self._series_of(current_buckets, current),
+            comparison=SeriesComparison(
+                previous=self._compare.name,
+                buckets=tuple(previous_buckets),
+                series=self._series_of(previous_buckets, previous),
+            ),
         )
 
     def __repr__(self) -> str:
@@ -743,6 +1112,44 @@ def _walk_related(node: Any, out: list[RelatedColumnExpr]) -> None:
     for attribute in ("operands", "values"):
         for child in getattr(node, attribute, ()) or ():
             _walk_related(child, out)
+
+
+def _refuse_overlap(range: Range, previous: Bucket, zone_name: str) -> None:
+    """Refuse a comparison period that would reach into the primary one.
+
+    A shift shorter than the range puts some rows in both periods, and neither
+    reading is defensible: counting them on both sides inflates the comparison,
+    counting them once drops them from one. Comparing March to "a week ago" is
+    not a period-over-period comparison at all, so this refuses rather than
+    picking a convention.
+
+    The arithmetic mirrors what the statement does — read the bound on the
+    zone's wall clock, step back a calendar unit, convert back — so the boundary
+    it enforces is the boundary the SQL would produce. Whether the two agree to
+    the microsecond across a clock change is a live-PostgreSQL question, but the
+    guard is one period wide and does not turn on a microsecond.
+    """
+    tzinfo = _zone_of(zone_name)
+    local = wall_clock(range.end, tzinfo)
+    # A bucket is either a fixed width or a calendar unit, never both, and the
+    # branch reads off which one rather than off a flag that could disagree
+    # with it.
+    if previous.delta is not None:
+        shifted = local - previous.delta
+    else:
+        total = local.year * 12 + local.month - 1 - previous.months
+        year, month = total // 12, total % 12 + 1
+        # `interval '1 month'` clamps rather than overflowing: the 31st of a
+        # month before a 30-day one is that month's last day, not its first.
+        day = min(local.day, monthrange(year, month)[1])
+        shifted = local.replace(year=year, month=month, day=day)
+    if shifted.replace(tzinfo=tzinfo) > _instant(range.start):
+        raise SeriesError(
+            f"compare(previous={previous.name}) overlaps the range it compares "
+            f"against: one {previous.name} is shorter than {range.start} to "
+            f"{range.end}, so rows would fall in both periods. Compare against a "
+            f"longer period, or narrow the range to at most one {previous.name}"
+        )
 
 
 def _or_fill(value: Any, empty: Any) -> Any:

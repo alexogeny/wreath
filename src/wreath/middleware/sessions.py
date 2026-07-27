@@ -51,8 +51,8 @@ class SessionMiddleware:
     """Hook-based middleware (has ``before``/``after``; tape-fusible)."""
 
     __slots__ = (
-        "_cookie", "_http_only", "_max_age", "_same_site", "_secret", "_secure",
-        "_store",
+        "_cookie", "_http_only", "_max_age", "_previous", "_same_site", "_secret",
+        "_secure", "_store",
     )
 
     def __init__(
@@ -65,6 +65,7 @@ class SessionMiddleware:
         secure: bool = True,
         http_only: bool = True,
         store: Any = None,
+        previous_secrets: Any = (),
     ) -> None:
         if len(secret.encode("utf-8")) < MIN_SECRET_BYTES:
             # The same floor `CSRFMiddleware` applies. This secret signs the
@@ -74,6 +75,14 @@ class SessionMiddleware:
                 f"session secret must contain at least {MIN_SECRET_BYTES} bytes"
             )
         self._secret = secret.encode("utf-8")
+        # Secrets a cookie may still *verify* under, though nothing is signed
+        # with them any more. Without this, rotating the secret invalidated
+        # every live session at once -- so the safe operation nobody could
+        # afford to perform was the one that limits the damage of a leak.
+        self._previous = tuple(
+            item.encode("utf-8") if isinstance(item, str) else bytes(item)
+            for item in previous_secrets
+        )
         self._cookie = cookie
         self._max_age = max_age
         self._same_site = same_site
@@ -96,6 +105,10 @@ class SessionMiddleware:
         mac = hmac.new(self._secret, body + b"." + stamp, "sha256").hexdigest()
         return f"{body.decode('ascii')}.{issued_at}.{mac}"
 
+    def _secrets(self) -> tuple[bytes, ...]:
+        """Every secret a cookie may verify under, current one first."""
+        return (self._secret, *self._previous)
+
     def _load(self, value: str) -> tuple[dict[str, Any], bytes] | None:
         """The session and the exact payload bytes it was decoded from.
 
@@ -107,10 +120,11 @@ class SessionMiddleware:
         """
         try:
             body, stamp, mac = value.split(".")
-            expected = hmac.new(
-                self._secret, f"{body}.{stamp}".encode("ascii"), "sha256"
-            ).hexdigest()
-            if not hmac.compare_digest(mac, expected):
+            signed = f"{body}.{stamp}".encode("ascii")
+            if not any(
+                hmac.compare_digest(mac, hmac.new(secret, signed, "sha256").hexdigest())
+                for secret in self._secrets()
+            ):
                 return None
             if int(stamp) + self._max_age < int(time.time()):
                 return None
@@ -119,7 +133,15 @@ class SessionMiddleware:
             data = _json_loads(payload)
         except (ValueError, TypeError):
             return None
-        return (data, payload) if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        # A cookie accepted under a *previous* secret must not compare equal to
+        # what `after` will serialize, or it would never be re-signed with the
+        # current one and the old secret could never actually be retired.
+        current = hmac.new(self._secret, signed, "sha256").hexdigest()
+        if not hmac.compare_digest(mac, current):
+            return (data, b"")
+        return (data, payload)
 
     # --- hooks ----------------------------------------------------------------
 
@@ -181,6 +203,15 @@ class SessionMiddleware:
             return response
 
         changed = _json_dumps(session) != state._session_loaded
+        if not changed and sid is not None and not rotate:
+            # Unchanged but live. Saving again would rewrite the row for nothing,
+            # but leaving it alone made expiry *absolute*: a session in constant
+            # use died at `max_age` from when it was created. A store that can
+            # extend a row without rewriting it is asked to; one that cannot is
+            # left exactly as before.
+            touch = getattr(self._store, "touch", None)
+            if touch is not None:
+                await touch(sid, self._max_age)
         if sid is not None and rotate:
             # Session fixation: the id a caller arrived with must not survive a
             # privilege change, so the old row goes and a new id is minted.
@@ -206,10 +237,11 @@ class SessionMiddleware:
         """The signed session id from a cookie, or None if it does not verify."""
         try:
             body, stamp, mac = value.split(".")
-            expected = hmac.new(
-                self._secret, f"{body}.{stamp}".encode("ascii"), "sha256"
-            ).hexdigest()
-            if not hmac.compare_digest(mac, expected):
+            signed = f"{body}.{stamp}".encode("ascii")
+            if not any(
+                hmac.compare_digest(mac, hmac.new(secret, signed, "sha256").hexdigest())
+                for secret in self._secrets()
+            ):
                 return None
             if int(stamp) + self._max_age < int(time.time()):
                 return None

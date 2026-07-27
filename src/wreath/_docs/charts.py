@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeIs
 
 __all__ = ["extract", "restore"]
 
@@ -99,7 +99,10 @@ def _render(config: dict[str, str], base_dir: Path, sources: set[Path] | None = 
                 node = node[key]
             except (KeyError, TypeError, IndexError):
                 return f'<div class="chart-error">chart: no data at {_esc(config["data"])}</div>'
-    pairs = _pairs(node, config)
+    try:
+        pairs = _pairs(node, config)
+    except _ChartError as error:
+        return f'<div class="chart-error">chart: {_esc(str(error))}</div>'
     if not pairs:
         return '<div class="chart-error">chart: no plottable numeric data</div>'
     if config.get("sort") == "desc":
@@ -110,7 +113,90 @@ def _render(config: dict[str, str], base_dir: Path, sources: set[Path] | None = 
     return _svg_bar(pairs[:limit], config.get("title", ""), config.get("unit", ""))
 
 
+def _series_pairs(node: Any, config: dict[str, str]) -> list[tuple[str, float]] | None:
+    """Plottable pairs from a serialized ``SeriesResult`` or ``AggregateResult``.
+
+    A calculated view already answers the question this block was written to ask
+    by hand: point ``source:`` at a file some job wrote with
+    ``result.as_dict()`` and the chart is the declaration's own numbers, bucket
+    labels and all. ``None`` means "not one of those envelopes", so the literal
+    JSON path below is reached exactly as before.
+
+    ``measure:`` picks one of several named measures and ``series:`` picks one
+    of several grouped lines. Both default to the first, and a name that matches
+    nothing is an error rather than a silent fallback -- a chart quietly drawing
+    a different measure than the one asked for is worse than a chart that says
+    it could not find it.
+    """
+    if not isinstance(node, dict):
+        return None
+    wanted = config.get("measure", "").strip()
+
+    if isinstance(node.get("rows"), list) and isinstance(node.get("measures"), list):
+        measure = wanted or (node["measures"][0] if node["measures"] else "")
+        if measure not in node["measures"]:
+            raise _ChartError(f"no measure {measure!r}; this view has "
+                              f"{', '.join(map(str, node['measures'])) or 'none'}")
+        pairs = []
+        for row in node["rows"]:
+            value = (row.get("values") or {}).get(measure)
+            if _is_num(value):
+                pairs.append((str(row.get("label", "")), float(value)))
+        return pairs
+
+    if not (isinstance(node.get("buckets"), list) and isinstance(node.get("series"), list)):
+        return None
+    lines = [item for item in node["series"] if isinstance(item, dict)]
+    if wanted:
+        lines = [item for item in lines if item.get("measure") == wanted]
+        if not lines:
+            names = sorted({str(item.get("measure")) for item in node["series"]
+                            if isinstance(item, dict)})
+            raise _ChartError(f"no measure {wanted!r}; this view has "
+                              f"{', '.join(names) or 'none'}")
+    label = config.get("series", "").strip()
+    if label:
+        lines = [item for item in lines if str(item.get("label")) == label]
+        if not lines:
+            raise _ChartError(f"no series labelled {label!r}")
+    if not lines:
+        return []
+    values = lines[0].get("values") or []
+    # The spine guarantees one value per bucket, so a mismatch means the file was
+    # edited or truncated rather than written by `as_dict`. Say so.
+    if len(values) != len(node["buckets"]):
+        raise _ChartError(
+            f"{len(values)} values against {len(node['buckets'])} buckets: "
+            "the series and its spine disagree"
+        )
+    return [
+        (_bucket_label(bucket, node.get("bucket")), float(value))
+        for bucket, value in zip(node["buckets"], values, strict=True)
+        if _is_num(value)
+    ]
+
+
+def _bucket_label(bucket: Any, unit: Any) -> str:
+    """A bucket start as an axis label, trimmed to the width it represents.
+
+    An ISO instant is exact and unreadable on an axis. A day bucket wants
+    ``2026-03-01``; anything sub-day keeps its time and drops the offset, which
+    is the same for every bucket in the run and so carries no information.
+    """
+    text = str(bucket)
+    if unit in ("year", "month", "week", "day"):
+        return text[:10]
+    return text[:16].replace("T", " ")
+
+
+class _ChartError(ValueError):
+    """A chart block that names something the data does not have."""
+
+
 def _pairs(node: Any, config: dict[str, str]) -> list[tuple[str, float]]:
+    envelope = _series_pairs(node, config)
+    if envelope is not None:
+        return envelope
     if isinstance(node, dict):
         return [(str(k), float(v)) for k, v in node.items() if _is_num(v)]
     if not isinstance(node, list):
@@ -211,7 +297,12 @@ def _fmt(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
-def _is_num(value: Any) -> bool:
+def _is_num(value: Any) -> TypeIs[int | float]:
+    """A plottable number. ``TypeIs`` so callers narrow before ``float(...)``.
+
+    ``bool`` is excluded deliberately: ``True`` is an ``int`` and would plot as
+    a bar of height one, which is never what a flag in the data meant.
+    """
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 

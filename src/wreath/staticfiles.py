@@ -21,12 +21,32 @@ from __future__ import annotations
 import asyncio
 import os
 import stat as _stat
+from email.utils import formatdate
 from typing import TYPE_CHECKING
 
 from ._fsguard import ContainmentError, open_beneath, open_root
 from .cache_control import CacheControl
 from .exceptions import NotFound
-from .response import FileResponse, Response
+from .response import FileResponse, RedirectResponse, Response
+
+
+def _etag_matches(header: str | None, etag: str) -> bool:
+    """Whether ``If-None-Match`` covers ``etag`` (RFC 9110 §13.1.2).
+
+    The header is a *list*, may be ``*``, and its entries may carry the weak
+    ``W/`` prefix -- which the weak comparison this needs ignores. Comparing the
+    whole header to one tag with ``==`` meant a client that sent two tags, or a
+    proxy that added one, re-downloaded the body every time.
+    """
+    if not header:
+        return False
+    if header.strip() == "*":
+        return True
+    target = etag.removeprefix("W/")
+    for candidate in header.split(","):
+        if candidate.strip().removeprefix("W/") == target:
+            return True
+    return False
 
 if TYPE_CHECKING:
     from .request import Request
@@ -58,17 +78,25 @@ class StaticFiles:
         if resolved is None:
             raise NotFound("Not Found")
         fd, stat, name = resolved
+        if isinstance(fd, str):
+            # A directory reached without its trailing slash. Serving the index
+            # from here would leave every relative link in it resolving one
+            # level up, so the client is sent to the canonical path instead.
+            return RedirectResponse(request.path + "/", status=308)
 
         etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
-        headers = [(b"etag", etag.encode("ascii"))]
+        headers = [
+            (b"etag", etag.encode("ascii")),
+            (b"last-modified", formatdate(stat.st_mtime, usegmt=True).encode("ascii")),
+        ]
         if self.cache_control is not None:
             headers.append((b"cache-control", self.cache_control.to_header()))
-        if request.header("if-none-match") == etag:
+        if _etag_matches(request.header("if-none-match"), etag):
             os.close(fd)
             return Response(b"", status=304, headers=headers)
         return FileResponse.from_descriptor(fd, stat, name, headers=headers)
 
-    def _resolve(self, rest: str) -> tuple[int, os.stat_result, str] | None:
+    def _resolve(self, rest: str) -> tuple[int | str, os.stat_result, str] | None:
         """Open a servable file beneath the root, or ``None``.
 
         Runs in a worker thread. Closes any descriptor it will not return, so a
@@ -83,6 +111,11 @@ class StaticFiles:
         os.close(fd)
         if not self.html_index:
             return None
+        if rest and not rest.endswith("/"):
+            # Signals "redirect to the canonical path" to the caller; see
+            # `__call__`. Returned rather than raised because this is an
+            # ordinary outcome, not an error.
+            return "redirect", stat, rest
         index = (rest.rstrip("/") + "/index.html").lstrip("/")
         try:
             fd, stat = open_beneath(self._root_fd, index)

@@ -26,6 +26,7 @@ a response depends on who is asking, pass a ``key`` that includes the principal
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Iterable
 from copy import deepcopy
 from functools import wraps
@@ -36,7 +37,7 @@ from ._orm_events import subscribe_writes
 from .cache import BoundedCache
 from .response import Response
 
-__all__ = ["cache_key_for", "cached", "default_cache_key"]
+__all__ = ["cache_key_for", "cached", "default_cache_key", "watched_name"]
 
 #: Response types whose body is produced lazily/streamed and must never be cached.
 _UNCACHEABLE_BODY = ("StreamingResponse", "FileResponse", "SSEResponse", "PreparedResponse")
@@ -126,6 +127,24 @@ def _snapshot(result: Any) -> tuple[str, Any] | None:
     return None
 
 
+def watched_name(model: Any) -> str:
+    """The name a model is announced under by the ORM.
+
+    The bare class name, matching what `Session._collect_written` publishes, so
+    a model may equally be named as a string by a caller that cannot import it.
+    Two models sharing a class name are one entry here; see
+    `Session._collect_written` for why that is accepted.
+    """
+    if isinstance(model, str):
+        return model
+    return getattr(model, "__name__", None) or str(model)
+
+
+def _copy_if_mutable(value: Any) -> Any:
+    """A private copy of a shared result, for the same reason `_snapshot` copies."""
+    return deepcopy(value) if isinstance(value, (dict, list)) else value
+
+
 def _revive(entry: tuple[str, Any]) -> Any:
     kind, payload = entry
     if kind == "response":
@@ -185,6 +204,14 @@ def cached(
         max_entries=max_entries, ttl=ttl)
 
     def decorate(handler: Callable[..., Any]) -> Callable[..., Any]:
+        # One in-flight computation per key. Without it, every request that
+        # arrives while a cold key is being computed runs the handler too -- so
+        # the moment an entry expires, the expensive rollup this decorator exists
+        # to avoid runs once per concurrent caller. The waiters share the first
+        # result; a handler that raises fails them all and leaves nothing cached,
+        # so the next request retries rather than inheriting a wedged key.
+        inflight: dict[str, asyncio.Future[Any]] = {}
+
         @wraps(handler)
         async def wrapper(request: Any, *args: Any, **kwargs: Any) -> Any:
             if request.method not in methods:
@@ -201,7 +228,25 @@ def cached(
             hit = the_store.get(cache_key)
             if hit is not None:
                 return _revive(hit)
-            result = await handler(request, *args, **kwargs)
+            pending = inflight.get(cache_key)
+            if pending is not None:
+                # Somebody else is already computing this key. Awaiting their
+                # result is both cheaper and more correct than racing them.
+                return _copy_if_mutable(await asyncio.shield(pending))
+            future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+            inflight[cache_key] = future
+            try:
+                result = await handler(request, *args, **kwargs)
+            except BaseException as error:
+                future.set_exception(error)
+                # Consumed here so a future nobody awaits does not log
+                # "exception was never retrieved"; every waiter still sees it.
+                future.exception()
+                raise
+            finally:
+                del inflight[cache_key]
+                if not future.done():
+                    future.set_result(result)
             entry = _snapshot(result)
             if entry is not None:
                 the_store.set(cache_key, entry)
@@ -213,9 +258,7 @@ def cached(
             else:
                 the_store.delete(key(request))
 
-        watched = frozenset(
-            getattr(model, "__name__", str(model)) for model in invalidate_on
-        )
+        watched = frozenset(watched_name(model) for model in invalidate_on)
         if watched:
             def _on_write(written: frozenset[str]) -> None:
                 # Model-grained, not row-grained: dropping a model's responses

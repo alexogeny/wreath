@@ -68,6 +68,11 @@ def _replayable_headers(
         (name, value)
         for name, value in headers
         if name.lower() not in _UNREPLAYABLE_HEADERS
+        # `jsonb` cannot hold a NUL, so a header carrying one made the *store*
+        # fail -- after the handler had already run its side effect, which is
+        # the worst possible moment for this middleware to raise.
+        and b"\x00" not in name
+        and b"\x00" not in value
     )
 
 #: A stored response: status, headers, body.

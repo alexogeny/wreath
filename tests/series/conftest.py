@@ -45,6 +45,20 @@ class Trek(Model, table="treks"):
     herd = relationship(Herd, foreign_key=herd_id, load="raise")
 
 
+class Deploy(Model, table="deploys"):
+    """A second, unrelated model — the annotation layer's source.
+
+    Deliberately not joined to ``Trek``: markers come from somewhere else in the
+    application, which is exactly why the range and the zone have to be shared
+    by construction rather than by both queries being written carefully.
+    """
+
+    id: Mapped[int] = column(Int64, primary_key=True)
+    version: Mapped[str] = column(Text)
+    environment: Mapped[str] = column(Text)
+    happened_at: Mapped[object] = column(TimestampTz)
+
+
 @pytest.fixture
 def database() -> FakeDatabase:
     return FakeDatabase()
@@ -52,7 +66,7 @@ def database() -> FakeDatabase:
 
 @pytest.fixture
 def registry(database: FakeDatabase) -> Registry:
-    return Registry(database, [Trek, Herd, Paddock], validate_schema="off")
+    return Registry(database, [Trek, Herd, Paddock, Deploy], validate_schema="off")
 
 
 @pytest.fixture

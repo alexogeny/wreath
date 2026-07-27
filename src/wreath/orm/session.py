@@ -10,6 +10,7 @@ direct result of an awaited call.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
@@ -44,6 +45,7 @@ from .errors import (
     RegistryError,
     SessionClosedError,
     SessionError,
+    StaleDataError,
 )
 from .model import DELETED, DETACHED, PERSISTENT, TRANSIENT, Model, validate_identifier
 from .query import Select
@@ -414,6 +416,13 @@ class Session:
     async def _rollback_all(self, connection: Any) -> None:
         try:
             await connection.execute("ROLLBACK")
+        except asyncio.CancelledError:
+            # Still a connection whose transaction state cannot be proven, so it
+            # is still broken -- but a cancellation is not ours to swallow, and
+            # catching BaseException here meant `close()` absorbed one and the
+            # task carried on as though it had not been cancelled.
+            self._broken = True
+            raise
         except BaseException:
             self._broken = True
 
@@ -924,6 +933,12 @@ class Session:
 
     def _collect_written(self) -> frozenset[str]:
         """Model names in the pending set, for write subscribers."""
+        # The bare class name, which is the name `invalidate_on` and
+        # `publish_write` callers use. Two models sharing one class name in
+        # different modules therefore invalidate each other -- accepted, because
+        # the failure is over-invalidation (a cache drops entries it did not
+        # have to) rather than stale data, and qualifying the name would break
+        # every caller that names a model as a string.
         names = {type(item).__name__ for item in self._new}
         names.update(type(item).__name__ for item in self._dirty_objects())
         names.update(type(item).__name__ for item in self._deleted)
@@ -1027,7 +1042,8 @@ class Session:
         sql = f"UPDATE {qualified(spec)} SET {assignments} WHERE {predicate}"
         values = [_wire_value(instance, item) for item in columns] + key_values
         connection = await self._acquire()
-        await connection.execute(sql, *values)
+        status = await connection.execute(sql, *values)
+        _check_affected(status, spec, "UPDATE")
         instance._orm_clear_dirty()
 
     async def _delete(self, instance: Any) -> None:
@@ -1035,7 +1051,8 @@ class Session:
         predicate, values = _key_predicate(spec, instance, 1)
         sql = f"DELETE FROM {qualified(spec)} WHERE {predicate}"
         connection = await self._acquire()
-        await connection.execute(sql, *values)
+        status = await connection.execute(sql, *values)
+        _check_affected(status, spec, "DELETE")
         key = instance._orm_primary_key()
         if key is not None:
             self._identity.pop((spec, key), None)
@@ -1188,6 +1205,25 @@ class Session:
             f"<Session {self._registry.database.name!r} {self._workload} {state} "
             f"identity={len(self._identity)}>"
         )
+
+
+def _check_affected(status: Any, spec: ModelSpec, verb: str) -> None:
+    """Raise when a write built from a loaded object matched no row.
+
+    PostgreSQL reports `UPDATE <n>` / `DELETE <n>`; anything else -- a test
+    double, a driver that reports nothing -- is left alone, because absence of
+    evidence is not evidence of a lost write and this must not start raising for
+    connections that never said anything either way.
+    """
+    if not isinstance(status, str) or not status.startswith(verb):
+        return
+    _, _, count = status.partition(" ")
+    if count.strip() != "0":
+        return
+    raise StaleDataError(
+        f"{verb} on {spec.model_type.__name__} matched no row; it was deleted or "
+        "its key changed in another session"
+    )
 
 
 def _sort_key(instance: Any) -> tuple[Any, ...]:

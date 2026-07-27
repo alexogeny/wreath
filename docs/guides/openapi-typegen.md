@@ -44,5 +44,13 @@ API itself, because both come from one source:
 wreath typegen app:app --output ./client --react-query
 ```
 
+Two things beyond the routes come along, when your application has them. The
+authorization vocabulary becomes typed permission flags, so asking about an
+action your API does not enforce is a compile error rather than a permanent
+`false`. And each [calculated view](calculated-views.md) your routes use becomes
+a `series.ts` type whose fields are the measure names you declared — a component
+destructures `line.values` with the compiler already knowing whether it can
+contain `null`. Neither module ships for an application that declares neither.
+
 **Reference:** [`wreath.openapi`](../reference/openapi.md),
 [`wreath.typegen`](../reference/typegen.md).

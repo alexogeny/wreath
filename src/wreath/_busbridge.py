@@ -28,7 +28,6 @@ publish methods below.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import secrets
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
@@ -63,6 +62,7 @@ class BusBridge:
         "_max_inflight",
         "_origin",
         "dropped_publishes",
+        "publish_errors",
         "untagged_applied",
     )
 
@@ -81,6 +81,8 @@ class BusBridge:
         self._max_inflight = max_inflight
         #: Deferred publishes dropped because too many were already in flight.
         self.dropped_publishes = 0
+        #: Deferred publishes the bus refused. Climbing means fan-out is down.
+        self.publish_errors = 0
         #: Inbound payloads that carried no origin tag -- i.e. published by
         #: something that is not a bridge. Delivered anyway (see `_receive`);
         #: non-zero on a healthy fleet means somebody else is writing to this
@@ -170,8 +172,16 @@ class BusBridge:
         future.add_done_callback(self._inflight.discard)
 
     async def _publish_quietly(self, payload: Mapping[str, Any]) -> None:
-        with contextlib.suppress(Exception):
+        try:
             await self._bus.publish(self._channel, self._tagged(payload))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - the caller's work is already durable
+            # Still swallowed -- raising here would turn a committed transaction
+            # into an application error -- but counted, because a bus that has
+            # been refusing every publish for a week looked exactly like one
+            # with nothing to say.
+            self.publish_errors += 1
 
     def _tagged(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """The payload with this worker's origin on it.

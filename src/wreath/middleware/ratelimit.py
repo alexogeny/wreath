@@ -278,7 +278,10 @@ class RateLimitMiddleware:
     """Reject requests that exceed a per-key token-bucket allowance."""
 
     global_scope = True
-    __slots__ = ("_cost", "_exempt", "_key", "_store", "_try_acquire", "before", "before_sync")
+    __slots__ = (
+        "_cost", "_exempt", "_key", "_policy_headers", "_store", "_try_acquire",
+        "before", "before_sync",
+    )
 
     def __init__(
         self,
@@ -313,6 +316,21 @@ class RateLimitMiddleware:
             )
         selected = store if store is not None else MemoryRateLimitStore()
         selected.configure(capacity, limit / window)
+        # Attached to a *refusal* only. Advertising the policy on every response
+        # meant a global `after` hook, and `wreath-request-trace` priced that at
+        # +18 boundary crossings per request -- real work on every successful
+        # request to carry a header that matters when one is refused. The 429
+        # already exists, so these are free there.
+        #
+        # The *remaining* allowance stays absent even then for an allowed
+        # request: neither store reports it (`acquire` answers "wait this long",
+        # not "you have this many left"), and a number invented here would be
+        # worse than no number. Exposing a real one needs a `TokenBucket` API
+        # change in both the pure and the native twin.
+        self._policy_headers = (
+            (b"x-ratelimit-limit", str(limit).encode("ascii")),
+            (b"ratelimit-policy", f"{limit};w={window:g}".encode("ascii")),
+        )
         self._store = selected
         self._cost = cost
         self._key = key if key is not None else _client_key
@@ -349,6 +367,9 @@ class RateLimitMiddleware:
         # Retry-After is whole seconds, and 0 would invite an instant retry.
         seconds = max(1, math.ceil(retry_after))
         response.headers.append((b"retry-after", str(seconds).encode("ascii")))
+        response.headers.extend(self._policy_headers)
+        # Remaining *is* known here: the request was refused, so there is none.
+        response.headers.append((b"x-ratelimit-remaining", b"0"))
         return response
 
     def _before_local_sync(self, request: Request) -> Any | None:

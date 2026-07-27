@@ -153,7 +153,9 @@ class MessageBus:
         self._groups_table = f'"{schema}".message_groups'
         self._supervisor: Any = None
         self._listen_conn: Any = None
-        self._wake = asyncio.Event()
+        # One waiter per consumer; see wreath.jobs for why a single shared
+        # Event loses wakes when several consumers park on it.
+        self._waiters: list[asyncio.Event] = []
         self._inflight: set[asyncio.Future[Any]] = set()
         # Channel -> the groups other processes registered for it. Refreshed on
         # a timer by `_group_refresher`, never read on the publish path: a
@@ -405,6 +407,60 @@ class MessageBus:
         except Exception:  # noqa: BLE001 - see above; the bus must still start
             self.group_registry_errors += 1
 
+    async def _deregister_groups(self) -> None:
+        """Remove this process's durable groups from the shared registry.
+
+        Run on the way out. A group that is registered and never removed keeps
+        every publisher enqueueing one copy per message for a consumer that no
+        longer exists -- a queue that only grows, and one nothing surfaces until
+        the table does. Counted rather than raised, like the rest of the
+        registry: a bus must still shut down against a database that is gone.
+        """
+        pairs = sorted(
+            {(sub.channel, sub.group) for sub in self._subs if sub.durable and sub.group}
+        )
+        if not pairs:
+            return
+        sql = f'DELETE FROM {self._groups_table} WHERE channel=$1 AND "group"=$2 AND bus=$3'
+        try:
+            connection = await self._db.acquire(self._workload)
+            try:
+                for channel, group in pairs:
+                    await connection.execute(sql, channel, group, self._name)
+            finally:
+                await self._db.release(self._workload, connection)
+        except Exception:  # noqa: BLE001 - see above; shutdown must not fail
+            self.group_registry_errors += 1
+
+    async def prune_groups(self, *, unseen_for: float) -> None:
+        """Drop registry rows nobody has re-registered in ``unseen_for`` seconds.
+
+        The backstop behind :meth:`_deregister_groups`: a consumer that was
+        killed rather than drained never deregistered, and `seen_at` is how that
+        becomes visible. Run it from a scheduled job.
+        """
+        if unseen_for <= 0:
+            raise ValueError("unseen_for must be positive")
+        await self._exec(
+            f"DELETE FROM {self._groups_table} "
+            "WHERE seen_at < now() - ($1 || ' seconds')::interval",
+            f"{float(unseen_for):.3f}",
+        )
+
+    async def purge(self, *, older_than: float) -> None:
+        """Delete finished messages older than ``older_than`` seconds.
+
+        As with :meth:`wreath.jobs.JobRunner.purge`: caller-driven, `done` and
+        `dead` only, and the thing that keeps this table from being append-only.
+        """
+        if older_than <= 0:
+            raise ValueError("older_than must be positive")
+        await self._exec(
+            f"DELETE FROM {self._table} WHERE state IN ('done', 'dead') "
+            "AND updated_at < now() - ($1 || ' seconds')::interval",
+            f"{float(older_than):.3f}",
+        )
+
     async def _refresh_groups(self) -> None:
         """Re-read every registered group into the publish-path snapshot.
 
@@ -549,6 +605,7 @@ class MessageBus:
             )
 
     async def drain(self, deadline: float) -> None:
+        await self._deregister_groups()
         loop = asyncio.get_running_loop()
         while self._inflight and loop.time() < deadline:
             with contextlib.suppress(Exception):
@@ -675,7 +732,7 @@ class MessageBus:
         wire_to_channel: dict[str, str],
         ephemeral_subs: dict[str, list[_Subscription]],
     ) -> None:
-        self._wake.set()  # wake durable consumers, whatever the channel was
+        self._wake_consumers()  # wake durable consumers, whatever the channel was
         channel = wire_to_channel.get(note.channel)
         if channel is None:
             return
@@ -704,14 +761,26 @@ class MessageBus:
 
     async def _consumer(self, sub: _Subscription) -> None:
         stopping = self._supervisor.stopping
+        wake = self._new_waiter()
+        try:
+            await self._consume(sub, stopping, wake)
+        finally:
+            self._waiters.remove(wake)
+
+    async def _consume(
+        self, sub: _Subscription, stopping: asyncio.Event, wake: asyncio.Event
+    ) -> None:
         while not stopping.is_set():
+            # Cleared before the claim, so a doorbell that rings mid-claim is
+            # still remembered by the park below.
+            wake.clear()
             try:
                 claimed = await self._claim(sub)
             except Exception:  # noqa: BLE001
-                await self._park()
+                await self._park(wake)
                 continue
             if claimed is None:
-                await self._park()
+                await self._park(wake)
                 continue
             if stopping.is_set():
                 break
@@ -725,7 +794,7 @@ class MessageBus:
                 # the life of the process. The message stays leased and the
                 # sweeper reclaims it.
                 self.delivery_errors += 1
-                await self._park()
+                await self._park(wake)
 
     async def _deliver(self, sub: _Subscription, message: Message) -> None:
         future = asyncio.ensure_future(sub.handler(message))
@@ -843,11 +912,20 @@ class MessageBus:
         finally:
             await self._db.release(self._workload, connection)
 
-    async def _park(self) -> None:
-        self._wake.clear()
+    def _new_waiter(self) -> asyncio.Event:
+        wake = asyncio.Event()
+        self._waiters.append(wake)
+        return wake
+
+    def _wake_consumers(self) -> None:
+        """Wake every parked consumer. One doorbell, every waiter."""
+        for wake in tuple(self._waiters):
+            wake.set()
+
+    async def _park(self, wake: asyncio.Event) -> None:
         with contextlib.suppress(asyncio.TimeoutError):
             async with asyncio.timeout(self._poll):
-                await self._wake.wait()
+                await wake.wait()
 
 
 def _doorbell_delay(attempt: int) -> float:

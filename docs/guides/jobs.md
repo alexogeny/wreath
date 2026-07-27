@@ -28,6 +28,29 @@ the rest up on restart rather than dropping it. The handler's first argument is 
 `JobContext`; the rest are the arguments you enqueued. The next sections cover
 retry tuning, transactional enqueue, and scheduling.
 
+### Retention
+
+Finished rows are kept until you delete them — nothing sweeps in the background,
+for the same reason nothing purges `wreath.store`: a background sweep duplicates
+across workers and swallows its own failures. Run it from a scheduled job:
+
+```python
+@runner.task("purge_jobs")
+async def purge_jobs(ctx):
+    await runner.purge(older_than=14 * 86_400)     # done + dead rows
+
+@bus_runner.task("purge_messages")
+async def purge_messages(ctx):
+    await bus.purge(older_than=14 * 86_400)
+    await bus.prune_groups(unseen_for=30 * 86_400)  # consumers long gone
+```
+
+A bus deregisters its own durable groups on drain, so an orderly shutdown leaves
+no registration behind; `prune_groups` is the backstop for a consumer that was
+killed rather than drained. A group that stays registered keeps every publisher
+enqueueing one copy per message into a queue nobody reads.
+
+
 ## A durable job runner
 
 Configure a runner on an existing `app.postgres()` database. Its workers, lease sweeper, and cron scheduler run for the process lifetime, started during lifespan:

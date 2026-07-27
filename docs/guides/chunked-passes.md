@@ -191,15 +191,148 @@ Apply(reencrypt, idempotent=Declared(
 
 ```console
 $ wreath passes status myapp:app
-PASS                             PHASE        UNITS         ROWS  PACED
+PASS                         STATE    PROGRESS               ROWS  ETA
 --------------------------------------------------------------------------
-purge_replays                    walking         14        14000  duty cycle 0.25
-                                 last advance 2026-07-27 12:00:00+00:00
+purge_replays                slow     41.2% (estimated)     14000  22m
+                             paced: duty cycle 0.25
 ```
 
 The ledger row is the durable status, so this is honest at three in the morning:
 a pass running for two hours is still there, and one that nothing is driving says
 so instead of looking idle. `--json` emits the same thing for a machine.
+
+### The percentage always says where it came from
+
+`64%` reads as a measurement and people plan around it. `64% (estimated)` reads
+as what it is. There are only three honest denominators and each lies in its own
+way, so the kind travels with the number everywhere it goes:
+
+| `progress=` | how | cost | lies when |
+| --- | --- | --- | --- |
+| `Estimated()` *(default)* | `pg_class.reltuples` | free | `ANALYZE` is stale |
+| `Exact()` | `SELECT count(*)` once at launch | a full scan | never |
+| `Keyspace()` | how far the cursor sits between the smallest key and the ceiling | free | the key is sparse or clumped |
+
+`Estimated()` is the default because a full count in front of a long pass delays
+the work you actually asked for in order to make a progress bar prettier. Reach
+for `Exact()` when the number matters more than the minutes.
+
+### There is no ETA unless there can be one
+
+Rate is measured over a trailing window of chunks rather than since launch, so
+ten minutes of hard pacing shows up instead of being averaged away against a fast
+first hour. When that window is empty there is **no ETA** — not infinity, not
+zero, not "calculating…" forever. The field is absent and the row says which
+input was missing:
+
+```console
+purge_replays                walking  ? (estimated)          1200  -
+                             no ETA: the rate window is empty: no chunk has
+                             finished recently
+```
+
+A fabricated ETA is worse than none, because somebody plans around it.
+`Keyspace()` never reports one at all: its progress is measured in keyspace and
+the rate is measured in rows, so dividing one by the other would not be a time.
+
+### Slow, stalled, and blocked are three different problems
+
+This is the part hand-rolled backfills leave out, and each state wants a
+different person to do a different thing:
+
+- **`slow`** — the cursor is advancing, below the rate you might expect. Usually
+  the pass *chose* this, and it says so: `paced: duty cycle 0.25`. A paced pass
+  that does not report being paced is indistinguishable from a broken one.
+- **`stalled`** — a chunk is stuck. Go and look at `pg_stat_activity` for a lock
+  wait or a pathological statement. The threshold is a multiple of the pass's own
+  observed chunk time, so a pass whose chunks take two minutes is not accused of
+  stalling after thirty seconds.
+- **`blocked`** — nothing is driving it, and it will silently never finish. A
+  dead-lettered chunk under `halt`, a scheduler that is not running, or an
+  enqueue that failed. This is the state that has no name in a `screen` session,
+  and it is the one that costs you three weeks.
+
+### Health checks: page someone, do not drain the pod
+
+```python
+from wreath.health import health_router, passes_check, postgres_check
+
+app.include_router(health_router(
+    [postgres_check(db)],                 # decides traffic
+    alerts=[passes_check(db)],            # decides who gets paged
+))
+```
+
+`passes_check` goes on `alerts=`, served at `/health/alerts`, which the load
+balancer does not read. A blocked backfill is a data problem and the application
+is still serving correctly — failing readiness for it turns that into an outage
+*and* removes the very workers that would have resumed the pass. The check is
+built non-critical as well, so putting it in the wrong list still cannot drop
+traffic.
+
+## When a chunk keeps failing
+
+Retries inside the shift come first: a lock wait that clears in fifty
+milliseconds does not deserve a trip through the job queue. After
+`chunk_retries` attempts the chunk becomes a **hole** — a row in
+`"wreath".pass_holes` carrying the range, the attempt count, and the statement
+that reproduces it:
+
+```console
+$ wreath passes status myapp:app --holes
+...
+1 dead-lettered chunk(s):
+
+  purge_replays  after 3 attempt(s), at 2026-07-27 12:00:00+00:00
+    error: RuntimeError('deadlock detected')
+    reproduce: SELECT * FROM replays WHERE (expires, key) > ('2026-07-27T10:00:00+00:00', 'k000') AND (expires, key) <= ('2026-07-27T11:00:00+00:00', 'k042')
+```
+
+That last line is what turns a hole into a task. Paste it into `psql`, in a
+transaction, and see the actual error rather than a truncated `repr` from three
+weeks ago.
+
+What happens next is declared, because no default suits both callers:
+
+- **`on_chunk_failure="halt"`** *(default)* — the pass stops at the hole and
+  nothing after it runs. Correct for a conversion, where a backfill with a hole
+  must never reach a terminal step; halting makes that structural rather than
+  remembered. It is the default because nothing should be skipped by omission.
+- **`on_chunk_failure="skip"`** — the cursor moves past, the pass carries on, and
+  **the terminal gate is barred until the hole is cleared**. Correct for a
+  recurring purge or rollup, where one malformed row must not stop the work
+  forever.
+
+The barring rule is the whole point:
+
+> Skipping is allowed for throughput. It cannot buy the irreversible step.
+
+Skipping is not silent, because the gate remembers. Blocking is not forever,
+because the cursor moves. The only way to un-bar the gate is to clear the hole:
+
+```console
+$ wreath passes retry myapp:app
+purge_replays: requeued 1 chunk(s)
+
+A hole clears when its chunk succeeds, not when it is queued -- check
+`wreath passes status` again once a shift has run.
+```
+
+### Walking one range out of order
+
+`retry` is one caller of a smaller primitive. `pass.requeue(db, unit, after=...)`
+appends a range to the ledger's pending queue, and the walk takes the oldest
+pending unit before it takes the cursor's next range. **The cursor never moves
+backwards** — rewinding it to collect one late row would redo months of correct
+work:
+
+```python
+await roll_up_days.requeue(db, bucket_end, after=bucket_start)
+```
+
+Two callers arrive at this from opposite directions — a rollup folding in a late
+correction, and an operator clearing a dead-lettered chunk — and get the same
+mechanism.
 
 ## Applying the schema
 

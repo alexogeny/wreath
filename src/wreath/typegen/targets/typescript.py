@@ -208,10 +208,135 @@ def _permissions_hook_module() -> str:
     )
 
 
-def _index_module(react_query: bool, base_url_env: str | None, permissions: bool) -> str:
+def _series_module(api: ApiModel) -> str:
+    """Typed envelopes for the app's calculated views.
+
+    The shared interfaces are generic over the measure names, so a component
+    destructures ``point.started`` and the compiler knows whether it can be
+    ``null``. That is the whole return on measures being named: a positional
+    measure arrives here as ``value_0`` and the component names it again by
+    hand, which is a copy of the declaration that nothing checks.
+
+    ``values`` stays parallel to ``buckets`` rather than becoming
+    ``{bucket, value}`` pairs, because the two are the same length by
+    construction -- the spine guarantees a dense run -- and a charting library
+    wants the two arrays.
+    """
+    from ..._pure.typegen import GENERATOR_HEADER
+
+    lines = [
+        GENERATOR_HEADER,
+        "\n/** An ISO-8601 instant. The start of a bucket, or when an event"
+        " happened. */\n"
+        "export type Instant = string;\n\n"
+        "/** One plottable line: a stable identity, its unit, and its values.\n"
+        " *\n"
+        " * `key` is the grouping value and never a rank, so a line keeps its\n"
+        " * identity when its neighbours come and go. `other` marks the folded\n"
+        " * remainder, which also carries a null key -- that flag is what tells\n"
+        " * it apart from a group whose value genuinely is null.\n"
+        " */\n"
+        "export interface SeriesData<V = number | null> {\n"
+        "  measure: string;\n"
+        "  key: string | number | null;\n"
+        "  label: string;\n"
+        "  unit: string | null;\n"
+        "  kind: string;\n"
+        "  values: readonly V[];\n"
+        "  other: boolean;\n"
+        "}\n\n"
+        "/** A marker over the same range: its exact instant and its bucket. */\n"
+        "export interface SeriesEvent {\n"
+        "  at: Instant;\n"
+        "  bucket: Instant;\n"
+        "  label: string;\n"
+        "}\n\n"
+        "/** The prior period, with its own bucket run.\n"
+        " *\n"
+        " * February against March is 28 buckets against 31. Lining them up by\n"
+        " * index is the renderer's decision, so both runs are given.\n"
+        " */\n"
+        "export interface SeriesComparison<S = SeriesData> {\n"
+        "  previous: string;\n"
+        "  buckets: readonly Instant[];\n"
+        "  series: readonly S[];\n"
+        "}\n\n"
+        "export interface SeriesRange {\n"
+        "  start: Instant;\n"
+        "  end: Instant;\n"
+        "}\n\n"
+        "/** A dense run of buckets and one named series per measure per group. */\n"
+        "export interface SeriesResult<S = SeriesData> {\n"
+        "  range: SeriesRange;\n"
+        "  zone: string;\n"
+        "  bucket: string;\n"
+        "  buckets: readonly Instant[];\n"
+        "  series: readonly S[];\n"
+        "  comparison: SeriesComparison<S> | null;\n"
+        "  events: readonly SeriesEvent[];\n"
+        "}\n\n"
+        "export interface AggregateRow<M extends string = string> {\n"
+        "  key: string | number | null;\n"
+        "  label: string;\n"
+        "  values: Record<M, number | null>;\n"
+        "}\n\n"
+        "export interface AggregateResult<M extends string = string> {\n"
+        "  rows: readonly AggregateRow<M>[];\n"
+        "  measures: readonly M[];\n"
+        "}\n\n",
+    ]
+    for shape in api.series:
+        lines.append(_series_declaration(shape))
+    return "".join(lines)
+
+
+def _series_declaration(shape: Any) -> str:
+    """The concrete types for one declaration."""
+    base = _pascal(shape.name)
+    names = " | ".join(f'"{measure.name}"' for measure in shape.measures)
+    out = [f"/** Measures declared on `{shape.name}`. */\n"]
+    out.append(f"export type {base}Measure = {names};\n\n")
+    if shape.form == "aggregate":
+        out.append(
+            f"export type {base}Result = AggregateResult<{base}Measure>;\n\n"
+        )
+        return "".join(out)
+
+    # A measure that fills has no nulls in its values; one that does not (an
+    # average of no rows is undefined) does, and the component is made to say
+    # what it draws in the gap.
+    arms = []
+    for measure in shape.measures:
+        cell = "number" if measure.fills else "number | null"
+        arms.append(
+            f'  | (SeriesData<{cell}> & {{ measure: "{measure.name}" }})'
+        )
+    out.append(f"export type {base}Series =\n" + "\n".join(arms) + ";\n\n")
+    detail = [f"bucket `{shape.bucket}`"]
+    if shape.grouped:
+        detail.append("grouped, so several lines per measure")
+    if shape.compares:
+        detail.append(f"compares against the previous {shape.compares}")
+    if shape.events:
+        detail.append("carries event markers")
+    out.append(
+        f"/** `{shape.name}`: {'; '.join(detail)}. */\n"
+        f"export type {base}Result = SeriesResult<{base}Series>;\n\n"
+    )
+    return "".join(out)
+
+
+def _index_module(
+    react_query: bool,
+    base_url_env: str | None,
+    permissions: bool,
+    series: bool = False,
+) -> str:
     from ..._pure.typegen import GENERATOR_HEADER
 
     lines = [GENERATOR_HEADER, '\nexport * from "./models";\nexport * from "./client";\n']
+    if series:
+        lines.append('export * from "./series";\n')
     if permissions:
         lines.append('export * from "./permissions";\n')
     if react_query:
@@ -349,9 +474,15 @@ def render_typescript(
     files["models.ts"] = render_models(_declarations(api), 0).decode("utf-8")
     client_payload = (tuple(_referenced_names(api)), _operation_tuples(api))
     files["client.ts"] = render_client(client_payload, 0).decode("utf-8")
-    files["index.ts"] = _index_module(react_query, base_url_env, bool(api.permissions))
+    files["index.ts"] = _index_module(
+        react_query, base_url_env, bool(api.permissions), bool(api.series)
+    )
     if react_query:
         files["react-query.ts"] = _react_query_module(api)
+    if api.series:
+        # Only when the application declares calculated views: an app with no
+        # charts should not ship a module about them.
+        files["series.ts"] = _series_module(api)
     if api.permissions:
         # Only when the application actually declares policies: an app with no
         # authorization should not ship a module about it.

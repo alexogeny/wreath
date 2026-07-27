@@ -90,11 +90,29 @@ class UploadedFile:
 class FormData:
     """Parsed form fields plus uploaded files (first value wins per name)."""
 
-    __slots__ = ("fields", "files")
+    __slots__ = ("_all", "fields", "files")
 
-    def __init__(self, fields: dict[str, str], files: dict[str, UploadedFile]) -> None:
+    def __init__(
+        self,
+        fields: dict[str, str],
+        files: dict[str, UploadedFile],
+        all_values: dict[str, list[str]] | None = None,
+    ) -> None:
         self.fields = fields
         self.files = files
+        self._all = all_values if all_values is not None else {
+            name: [value] for name, value in fields.items()
+        }
+
+    def getlist(self, name: str) -> list[str]:
+        """Every value submitted under ``name``, in order.
+
+        ``fields`` keeps the first, which is what most handlers want and what
+        the binding layer reads. The rest were being dropped with no way to see
+        them -- and a repeated field is exactly where an upstream proxy or WAF
+        may have read a *different* value than the application will.
+        """
+        return list(self._all.get(name, ()))
 
     def __getitem__(self, name: str) -> str:
         return self.fields[name]
@@ -392,12 +410,18 @@ class Request:
             if not tag or tag == "*":
                 continue
             quality = 1.0
-            key, _, raw = parameters.partition("=")
-            if key.strip() == "q":
+            # Every parameter, not just the first: `;charset=utf-8;q=0.1` is
+            # legal, and reading only the first one scored it 1.0 -- so the tag
+            # the client least wanted could win.
+            for parameter in parameters.split(";"):
+                key, _, raw = parameter.partition("=")
+                if key.strip().lower() != "q":
+                    continue
                 try:
                     quality = float(raw)
                 except ValueError:
-                    continue
+                    quality = 0.0
+                break
             # Negated index so that, at equal quality, the earlier tag wins --
             # which is the order the client listed its preference in.
             candidate = (quality, -index, tag)
@@ -492,6 +516,7 @@ class Request:
             files: dict[str, UploadedFile] = {}
             limits = self._limits
             retained = 0
+            all_values: dict[str, list[str]] = {}
             for part in multipart_parse(
                 body,
                 boundary,
@@ -515,13 +540,17 @@ class Request:
                         UploadedFile(part.name, part.filename, part.headers, part.data),
                     )
                 else:
-                    fields.setdefault(part.name, part.data.decode("utf-8", "replace"))
-            result = FormData(fields, files)
+                    decoded = part.data.decode("utf-8", "replace")
+                    fields.setdefault(part.name, decoded)
+                    all_values.setdefault(part.name, []).append(decoded)
+            result = FormData(fields, files, all_values)
             self._form = result
             return result
         fields = {}
+        every: dict[str, list[str]] = {}
         for key, value in parse_qs(body, self._limits.max_form_fields):
             fields.setdefault(key, value)
-        result = FormData(fields, {})
+            every.setdefault(key, []).append(value)
+        result = FormData(fields, {}, every)
         self._form = result
         return result

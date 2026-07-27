@@ -20,8 +20,16 @@ from typing import Final
 #
 # ``ready`` -> ``leased`` (a worker claims it) -> ``done`` | ``failed`` (retry,
 # back to ``ready``) | ``dead`` (attempts exhausted). ``leased`` -> ``ready`` is
-# the lease-expiry reclaim path. Every transition a worker performs is checked
-# against this table so a fenced/stale worker can never drive an illegal move.
+# the lease-expiry reclaim path.
+#
+# This table is the *reference* for that lifecycle, not a runtime gate. The
+# coordinators enforce it in SQL -- every transition is an UPDATE with
+# ``WHERE id=$1 AND fence=$2``, so a fenced or stale worker's move simply
+# matches no row -- which is the only place it can be enforced correctly, since
+# two workers can disagree about the current state but not about what the row
+# says. `valid_transition`/`check_transition` exist for callers reasoning about
+# the machine (and for the tests that pin it); this comment used to claim they
+# were checked on every worker transition, and nothing called them.
 
 READY: Final = "ready"
 LEASED: Final = "leased"
@@ -48,13 +56,18 @@ def validate_identifier(value: str, kind: str) -> str:
 
     The shared rule for every config-time name the jobs and messaging
     coordinators derive Postgres object names and LISTEN/NOTIFY channels from:
-    1..63 UTF-8 bytes, each character alphanumeric or ``_``/``$``. ``kind``
+    1..63 bytes, each character an ASCII alphanumeric or ``_``/``$``. ``kind``
     names the identifier in the error so callers get an actionable message.
     """
     if not value or len(value.encode("utf-8")) > 63:
         raise ValueError(f"{kind} must be 1..63 bytes: {value!r}")
     for character in value:
-        if not (character.isalnum() or character in "_$"):
+        # ASCII alphanumerics only. `str.isalnum()` is true for `café`, `½`, and
+        # Arabic-Indic digits, none of which are what "SQL-safe identifier"
+        # means here -- these names are interpolated into DDL and derived into
+        # LISTEN/NOTIFY channels, where the encoding assumptions are the
+        # server's, not Python's.
+        if not (character.isascii() and (character.isalnum() or character in "_$")):
             raise ValueError(f"invalid {kind} character {character!r} in {value!r}")
     return value
 

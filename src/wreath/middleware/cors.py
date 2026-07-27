@@ -20,12 +20,27 @@ from ..response import Response
 _DEFAULT_METHODS = ("GET", "HEAD", "POST", "OPTIONS")
 
 
+def _normalize_origin(value: str) -> str:
+    """Lower-case the scheme and host of an origin, leaving `*` alone.
+
+    An origin's scheme and authority are case-insensitive; the rest of a URL is
+    not, but an origin has no rest.
+    """
+    if value == "*":
+        return value
+    scheme, separator, authority = value.partition("://")
+    if not separator:
+        return value.lower()
+    return f"{scheme.lower()}://{authority.lower()}"
+
+
 class CORSMiddleware:
     """Global CORS hooks covering preflight, routes, and early responses."""
 
     global_scope = True
     __slots__ = (
         "_allow_all_origins",
+        "_allow_methods",
         "_allow_credentials",
         "_allow_origins",
         "_preflight_headers",
@@ -42,7 +57,7 @@ class CORSMiddleware:
         expose_headers: Iterable[str] = (),
         max_age: int = 600,
     ) -> None:
-        origins = tuple(allow_origins)
+        origins = tuple(_normalize_origin(item) for item in allow_origins)
         if "*" in origins and allow_credentials:
             # Reflecting an arbitrary origin *with* credentials lets any site
             # read authenticated responses from this one. Browsers refuse the
@@ -76,11 +91,23 @@ class CORSMiddleware:
             simple.append(credentials)
         self._preflight_headers = tuple(preflight)
         self._simple_headers = tuple(simple)
+        self._allow_methods = frozenset(method.upper() for method in allow_methods)
 
     def _origin_header(self, origin: str) -> tuple[bytes, bytes] | None:
         if self._allow_all_origins and not self._allow_credentials:
             return (b"access-control-allow-origin", b"*")
-        if self._allow_all_origins or origin in self._allow_origins:
+        # Exact match first: an origin arrives already lower-cased from every
+        # browser, so normalizing before comparing put string work on every
+        # cross-origin request to serve the rare header that is not. The
+        # normalized compare is the fallback, which is what makes
+        # `HTTPS://App.Example` the same origin as `https://app.example`
+        # (RFC 9110 §4.2.3 -- scheme and authority are case-insensitive).
+        if (
+            self._allow_all_origins
+            or origin in self._allow_origins
+            or _normalize_origin(origin) in self._allow_origins
+        ):
+            # Echoed as the client sent it, which is what it will compare against.
             return (b"access-control-allow-origin", origin.encode("latin-1"))
         return None
 
@@ -92,8 +119,16 @@ class CORSMiddleware:
         if request.method != "OPTIONS":
             return None
         origin = request.header("origin")
-        if origin is None or request.header("access-control-request-method") is None:
+        requested = request.header("access-control-request-method")
+        if origin is None or requested is None:
             return None  # not a CORS preflight; fall through to the route
+        if requested.upper() not in self._allow_methods:
+            # The preflight *asks* whether a method is allowed. Echoing the
+            # configured list regardless answered a question the client did not
+            # put, and told it nothing about the one it did.
+            refusal = Response(b"disallowed method", status=403, media_type=b"text/plain")
+            refusal.headers.append((b"vary", b"origin"))
+            return refusal
         allowed = self._origin_header(origin)
         if allowed is None:
             refusal = Response(b"disallowed origin", status=403, media_type=b"text/plain")

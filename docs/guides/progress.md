@@ -51,6 +51,28 @@ async def run_import(reporter, body):
 - **`GET .../stream`** is an SSE stream of `progress` events until the task reaches
   `done`/`failed`, ideal for a live bar with no polling.
 
+### Who may watch a task
+
+`status_response` and `progress_stream` take an `authorize(task_id) -> bool`
+predicate. It matters more than it looks: `jobs.launch` makes the task id the
+job id, which is a **sequence**, so without a guard the ids are countable and
+every task's state, message, and error text is readable by whoever counts.
+
+```python
+@app.get("/imports/{task_id}/status")
+async def status(request):
+    task_id = request.path_params["task_id"]
+    return status_response(progress, task_id, authorize=lambda tid: owns(request, tid))
+```
+
+A refused caller gets the same `404` an unknown id does — a distinct `403`
+would confirm which ids exist, which is most of what enumeration wants. The
+predicate is synchronous; await what you need before calling.
+
+`progress_stream(..., max_duration=…)` bounds how long one connection may stay
+open, and messages are capped at `MAX_MESSAGE_CHARS`.
+
+
 ## Over a WebSocket instead
 
 ```python

@@ -40,10 +40,12 @@ from ._busbridge import BusBridge
 __all__ = [
     "WRITE_CHANNEL",
     "WriteBroadcast",
+    "bridge_errors",
     "has_subscribers",
     "publish_write",
     "register_bridge",
     "subscribe_writes",
+    "subscriber_errors",
     "unregister_bridge",
     "unsubscribe_writes",
 ]
@@ -62,6 +64,22 @@ _subscribers: list[Callable[[frozenset[str]], None]] = []
 #: Bridges to other workers. Separate from `_subscribers` so a write that
 #: *arrived* from another worker is delivered without being sent back out.
 _bridges: list[Callable[[frozenset[str]], None]] = []
+
+#: Deliveries that raised. Swallowing is still right -- the write has committed
+#: and a broken listener must not turn it into an application error -- but
+#: swallowing *silently* meant a cache listener that had been raising since
+#: deploy was indistinguishable from one that worked.
+_errors = {"subscriber": 0, "bridge": 0}
+
+
+def subscriber_errors() -> int:
+    """How many subscriber deliveries have raised. Never resets."""
+    return _errors["subscriber"]
+
+
+def bridge_errors() -> int:
+    """How many bridge deliveries have raised. Never resets."""
+    return _errors["bridge"]
 
 
 class _OwnedSubscriber:
@@ -166,7 +184,7 @@ def publish_write(model_names: frozenset[str], *, remote: bool = False) -> None:
         try:
             callback(model_names)
         except Exception:  # noqa: BLE001 - see above; the write already committed
-            pass
+            _errors["subscriber"] += 1
     if remote:
         return
     # Local caches first, other workers second: this worker is never the one
@@ -175,7 +193,7 @@ def publish_write(model_names: frozenset[str], *, remote: bool = False) -> None:
         try:
             bridge(model_names)
         except Exception:  # noqa: BLE001 - as above
-            pass
+            _errors["bridge"] += 1
 
 
 def has_subscribers() -> bool:
@@ -208,15 +226,24 @@ class WriteBroadcast:
     received announcement from going back out.
     """
 
-    __slots__ = ("_bridge",)
+    __slots__ = ("_bridge", "_closed")
 
     def __init__(self, bus: Any, *, channel: str = WRITE_CHANNEL) -> None:
+        self._closed = False
         self._bridge = BusBridge(bus, channel=channel, apply=self._apply)
         register_bridge(self._carry)
 
     def close(self) -> None:
-        """Stop carrying local writes. The bus subscription outlives the bus."""
+        """Stop carrying local writes, and stop applying what arrives.
+
+        The bus subscription genuinely outlives this object -- a bus collects
+        its subscriptions before it starts and has no way to drop one -- so
+        `_apply` is disarmed instead. Without that, a closed broadcast went on
+        replaying other workers' writes into this worker's subscribers, which is
+        the half of the job `close()` reads as ending.
+        """
         unregister_bridge(self._carry)
+        self._closed = True
 
     def _carry(self, model_names: frozenset[str]) -> None:
         """Hand a local write to the bus, without making the writer wait.
@@ -234,6 +261,8 @@ class WriteBroadcast:
         exactly as they see a local write, and bridges do not, so it stops here
         instead of bouncing around the fleet.
         """
+        if self._closed:
+            return
         models = payload.get("models")
         if not isinstance(models, list):
             return

@@ -43,6 +43,7 @@ id as the task id and lets the runner set the terminal states itself.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -52,6 +53,7 @@ from .cache import BoundedCache
 from .response import JSONResponse, Response, ServerSentEvent, SSEResponse
 
 __all__ = [
+    "MAX_MESSAGE_CHARS",
     "PROGRESS_CHANNEL",
     "Progress",
     "ProgressRegistry",
@@ -66,6 +68,11 @@ __all__ = [
 PROGRESS_CHANNEL = "wreath_progress"
 
 _TERMINAL = ("done", "failed")
+
+#: Longest message a report may carry. Applies to what arrives over the bus,
+#: where the length is another worker's decision, and to local reports, where it
+#: keeps one runaway f-string from filling the registry.
+MAX_MESSAGE_CHARS = 4096
 
 #: How many consecutive polls a stream waits for a task that has never been
 #: reported before giving up. Covers the client-connects-first race without
@@ -116,7 +123,7 @@ class ProgressRegistry:
         bus: Any = None,
         *,
         max_tasks: int = 4096,
-        ttl: float | None = 3600,
+        ttl: float | None = 24 * 3600,
         channel: str = PROGRESS_CHANNEL,
     ) -> None:
         self._store: BoundedCache = BoundedCache(max_entries=max_tasks, ttl=ttl)
@@ -126,7 +133,7 @@ class ProgressRegistry:
         self, task_id: str, percent: float, message: str = "",
         *, state: str = "running", error: str | None = None,
     ) -> None:
-        progress = Progress(_clamp(percent), message, state, error)
+        progress = Progress(_clamp(percent), message[:MAX_MESSAGE_CHARS], state, error)
         self._store.set(task_id, progress)
         # Guarded rather than left to the bridge's own no-bus check, so a
         # registry with no bus -- the default, and every test -- does not build
@@ -152,7 +159,10 @@ class ProgressRegistry:
             task_id,
             Progress(
                 _clamp(percent),
-                str(payload.get("message") or ""),
+                # Bounded: this arrives from the bus, so its size is not this
+                # worker's to trust, and it is held in a bounded-by-count store
+                # and streamed to clients.
+                str(payload.get("message") or "")[:MAX_MESSAGE_CHARS],
                 state if isinstance(state, str) else "running",
                 error if isinstance(error, str) else None,
             ),
@@ -165,12 +175,15 @@ class ProgressRegistry:
     def get(self, task_id: str) -> Progress | None:
         return self._store.get(task_id)
 
-    async def stream(self, task_id: str, *, interval: float = 1.0):
+    async def stream(
+        self, task_id: str, *, interval: float = 1.0, max_duration: float | None = None
+    ):
         """Yield each new :class:`Progress` for ``task_id`` until it is terminal.
 
         Polls every ``interval`` seconds (thread-safe, no cross-task signalling);
-        stops after a ``done``/``failed`` state, once the entry is gone, or once
-        a task that never appeared has been waited for long enough.
+        stops after a ``done``/``failed`` state, once the entry is gone, once a
+        task that never appeared has been waited for long enough, or once
+        ``max_duration`` seconds have passed.
 
         That last case is the one worth naming: a stream for an id that does not
         exist used to poll forever, so any caller -- including an unauthenticated
@@ -181,7 +194,16 @@ class ProgressRegistry:
         """
         last: Progress | None = None
         missing = 0
+        deadline = (
+            None if max_duration is None
+            else asyncio.get_running_loop().time() + max_duration
+        )
         while True:
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                # A task that never finishes must not mean a connection that
+                # never closes. The client reconnects and picks up where the
+                # registry is, which is what an SSE client does anyway.
+                return
             current = self.get(task_id)
             if current is not None and current != last:
                 yield current
@@ -222,29 +244,78 @@ class ProgressReporter:
         return current.percent if current is not None else 0.0
 
 
-def status_response(registry: ProgressRegistry, task_id: str) -> Response:
-    """A JSON status for ``task_id`` (``404`` if unknown or expired)."""
+def status_response(
+    registry: ProgressRegistry,
+    task_id: str,
+    *,
+    authorize: Callable[[str], bool] | None = None,
+) -> Response:
+    """A JSON status for ``task_id`` (``404`` if unknown, expired, or refused).
+
+    ``authorize(task_id) -> bool`` decides whether *this* caller may watch that
+    task. It matters more than it looks: :meth:`wreath.jobs.JobRunner.launch`
+    makes the task id the job id, which is a sequence, so without a guard the
+    ids are countable and every task's state, message, and error text is
+    readable by whoever counts. The predicate is synchronous on purpose -- this
+    function is not a coroutine, and a handler that needs to await something can
+    do it before calling.
+
+    A refusal answers ``404``, identical to an unknown id: a distinct ``403``
+    would confirm which ids exist, which is most of what enumeration wants.
+    """
+    if authorize is not None and not authorize(task_id):
+        return _unknown_task(task_id)
     progress = registry.get(task_id)
     if progress is None:
-        return JSONResponse({"error": "unknown or expired task", "task_id": task_id}, status=404)
+        return _unknown_task(task_id)
     return JSONResponse({"task_id": task_id, **progress.as_dict()})
 
 
-async def _progress_events(registry: ProgressRegistry, task_id: str, interval: float):
-    async for progress in registry.stream(task_id, interval=interval):
+def _unknown_task(task_id: str) -> Response:
+    return JSONResponse({"error": "unknown or expired task", "task_id": task_id}, status=404)
+
+
+async def _progress_events(
+    registry: ProgressRegistry,
+    task_id: str,
+    interval: float,
+    max_duration: float | None = None,
+):
+    async for progress in registry.stream(
+        task_id, interval=interval, max_duration=max_duration
+    ):
         yield ServerSentEvent(data=_as_text(progress.as_dict()), event="progress")
 
 
 def progress_stream(
-    registry: ProgressRegistry, task_id: str, *, interval: float = 1.0
-) -> SSEResponse:
-    """An SSE response streaming ``progress`` events until the task is terminal."""
-    return SSEResponse(_progress_events(registry, task_id, interval))
+    registry: ProgressRegistry,
+    task_id: str,
+    *,
+    interval: float = 1.0,
+    max_duration: float | None = None,
+    authorize: Callable[[str], bool] | None = None,
+) -> SSEResponse | Response:
+    """An SSE response streaming ``progress`` events until the task is terminal.
+
+    ``authorize`` and ``max_duration`` are :func:`status_response`'s and
+    :meth:`ProgressRegistry.stream`'s respectively; a refused caller gets the
+    same ``404`` a missing task does, before any stream is opened.
+    """
+    if authorize is not None and not authorize(task_id):
+        return _unknown_task(task_id)
+    return SSEResponse(_progress_events(registry, task_id, interval, max_duration))
 
 
 async def push_progress(
-    websocket: Any, registry: ProgressRegistry, task_id: str, *, interval: float = 1.0
+    websocket: Any,
+    registry: ProgressRegistry,
+    task_id: str,
+    *,
+    interval: float = 1.0,
+    max_duration: float | None = None,
 ) -> None:
     """Push progress as JSON text frames over an accepted WebSocket until terminal."""
-    async for progress in registry.stream(task_id, interval=interval):
+    async for progress in registry.stream(
+        task_id, interval=interval, max_duration=max_duration
+    ):
         await websocket.send_text(_as_text(progress.as_dict()))

@@ -35,6 +35,13 @@ Both opt-ins are required. `app.crud(...)` without `app.enable_crud()` raises â€
 CRUD can't be switched on for one model without the app deciding to allow it at
 all.
 
+The primary key is converted according to the model's declared column type, not
+according to what the path segment looks like, so a text or UUID key is never
+coerced to an integer. A body the model rejects answers `422`; the exception
+text travels only when it came from the model's own validation, because a driver
+error's message carries table names and constraint identifiers.
+
+
 ## Secrets are hidden and unwritable by default
 
 Any column whose name looks like a secret â€” `password`, `*_hash`, `token`,

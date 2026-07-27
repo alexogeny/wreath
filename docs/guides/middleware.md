@@ -42,6 +42,10 @@ a socket or an unusual server — lands in one shared bucket rather than skippin
 the limiter. A limiter that lets a request past because it could not identify it
 is not a limiter; use `exempt=` to allow one deliberately.
 
+A preflight is checked against `allow_methods` rather than echoing it: asking
+whether `DELETE` is allowed now gets an answer about `DELETE`. Origins compare
+case-insensitively on scheme and host, as an origin should.
+
 `CORSMiddleware` refuses `allow_origins=["*"]` together with
 `allow_credentials=True` at construction: honouring it means reflecting whatever
 origin asked, alongside `Access-Control-Allow-Credentials: true`, which lets any
@@ -50,7 +54,19 @@ credentials.
 
 `SessionMiddleware` defaults to `secure=True` (matching `CSRFMiddleware`) and
 requires a secret of at least 32 bytes. Pass `secure=False` for local plaintext
-development.
+development. Rotate the secret without logging everyone out by naming
+the old one:
+
+```python
+SessionMiddleware(secret=NEW, previous_secrets=[OLD])
+```
+
+Cookies verify under either; new ones are signed with `secret`, and a session
+carried in on a previous secret is re-signed on its next write.
+
+A server-side session store may implement `touch(sid, max_age)`; when it does, a
+live but unchanged session has its expiry extended on each request, so expiry is
+sliding rather than absolute.
 
 
 The default key is the client address, so each caller gets its own bucket; a

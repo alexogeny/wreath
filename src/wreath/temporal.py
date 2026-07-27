@@ -64,6 +64,7 @@ __all__ = [
     "parse",
     "parse_duration",
     "relative",
+    "wall_clock",
     "zone",
 ]
 
@@ -226,8 +227,13 @@ def parse(text: str) -> Instant:
 # one object is what stops them drifting apart.
 
 
-def _wall_clock(value: datetime.datetime, tz: datetime.tzinfo) -> datetime.datetime:
+def wall_clock(value: datetime.datetime, tz: datetime.tzinfo) -> datetime.datetime:
     """``value`` as a plain naive ``datetime`` on ``tz``'s wall clock.
+
+    Public because reading an instant on somebody's clock is the first step of
+    every calendar calculation in the codebase, and each caller that reinvents
+    it reinvents the trap below with it. :class:`Bucket` uses it to truncate,
+    and :mod:`wreath.series` to step a comparison period back a month.
 
     Built component-wise rather than with ``replace(tzinfo=None)`` because
     ``replace`` preserves the subclass, and an :class:`Instant` refuses to exist
@@ -297,7 +303,7 @@ class Bucket:
         correct on every day but one.
         """
         tz = _tzinfo(in_zone)
-        return Instant.of(self._truncate(_wall_clock(value, tz)).replace(tzinfo=tz))
+        return Instant.of(self._truncate(wall_clock(value, tz)).replace(tzinfo=tz))
 
     def end_of(
         self, value: datetime.datetime, in_zone: str | datetime.tzinfo
@@ -314,7 +320,7 @@ class Bucket:
         month is a calendar month rather than an approximation.
         """
         tz = _tzinfo(in_zone)
-        local = self._truncate(_wall_clock(value, tz))
+        local = self._truncate(wall_clock(value, tz))
         return Instant.of(self._advance(local).replace(tzinfo=tz))
 
     def _truncate(self, local: datetime.datetime) -> datetime.datetime:

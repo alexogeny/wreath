@@ -33,6 +33,8 @@ class JwksCache:
     """Holds parsed JWKS keys and refreshes them on demand."""
 
     __slots__ = (
+        "duplicate_kids",
+        "fetch_errors",
         "_client",
         "_expires_at",
         "_jwks_path",
@@ -59,6 +61,10 @@ class JwksCache:
         self._last_refresh = 0.0
         self._ttl = ttl
         self._min_refresh = min_refresh_interval
+        #: Fetches that produced no usable document (too large, unparseable).
+        self.fetch_errors = 0
+        #: JWKs skipped for reusing a `kid` already seen in the same document.
+        self.duplicate_kids = 0
 
     def _now(self) -> float:
         return asyncio.get_running_loop().time()
@@ -109,8 +115,18 @@ class JwksCache:
             return
         body = response.body
         if len(body) > _MAX_JWKS_BYTES:
-            raise ValueError("JWKS document exceeds size cap")
-        document = json.loads(body)
+            # Counted and dropped rather than raised: this runs inside
+            # `resolve`, on the authentication path, so raising turned a hostile
+            # or misconfigured endpoint into a 500 where a 401 was the answer.
+            self.fetch_errors += 1
+            self._last_refresh = self._now()
+            return
+        try:
+            document = json.loads(body)
+        except ValueError:
+            self.fetch_errors += 1
+            self._last_refresh = self._now()
+            return
         keys: dict[str, JwtKey] = {}
         for index, jwk in enumerate(document.get("keys", ())):
             use = jwk.get("use")
@@ -121,7 +137,14 @@ class JwksCache:
             except Exception:  # noqa: BLE001 - skip a single malformed JWK
                 continue
             kid = jwk.get("kid")
-            keys[kid if isinstance(kid, str) else f"__nokid_{index}"] = key
+            name = kid if isinstance(kid, str) else f"__nokid_{index}"
+            if name in keys:
+                # Two JWKs claiming one kid: the document is ambiguous about
+                # which key signs a token naming it, and silently keeping the
+                # last one picks an answer the issuer did not give.
+                self.duplicate_kids += 1
+                continue
+            keys[name] = key
         if keys:
             self._keys = keys
         self._last_refresh = self._now()

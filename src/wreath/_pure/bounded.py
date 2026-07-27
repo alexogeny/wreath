@@ -116,6 +116,20 @@ class BoundedCache[K, V]:
     def clear(self) -> None:
         self._data.clear()
 
+    def snapshot(self) -> dict[K, V]:
+        """The unexpired entries, as a plain dict.
+
+        A copy, and deliberately not a live view: callers want to count or
+        inspect without the iteration order being disturbed by the LRU bookkeeping
+        a `get` performs.
+        """
+        now = self._clock()
+        return {
+            key: value
+            for key, (value, expiry) in self._data.items()
+            if expiry is None or now < expiry
+        }
+
     def __len__(self) -> int:
         return len(self._data)
 

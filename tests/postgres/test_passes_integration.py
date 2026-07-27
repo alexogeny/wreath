@@ -206,3 +206,68 @@ async def test_the_cursor_and_the_work_commit_together(database):
     assert remaining == 0
     assert units == 3
     assert result.complete is True
+
+
+# --- stage two and three, against a real planner -------------------------------
+
+
+async def test_the_dead_letter_table_is_created_by_the_same_ddl(database):
+    # One `schema_sql()` for both tables, because a hole with nowhere to go is
+    # the silent skip the whole design refuses -- and a pass whose ledger
+    # migrated but whose dead-letter table did not would do exactly that.
+    connection = await database.acquire("write")
+    try:
+        present = await connection.fetchval(
+            "SELECT to_regclass($1) IS NOT NULL", f"{_SCHEMA}.pass_holes"
+        )
+    finally:
+        await database.release("write", connection)
+
+    assert present is True
+
+
+async def test_reltuples_answers_for_a_real_table(database):
+    # The free denominator, and the reason it is the default. It is also the one
+    # that can answer -1 for a table ANALYZE has never seen, which is why the
+    # code checks rather than trusts.
+    await _seed(database, 200)
+    connection = await database.acquire("write")
+    try:
+        await connection.execute(f"ANALYZE {_TABLE}")
+        estimate = await connection.fetchval(
+            "SELECT reltuples::bigint FROM pg_class WHERE oid = $1::regclass", _TABLE
+        )
+    finally:
+        await database.release("write", connection)
+
+    assert estimate is not None
+    assert estimate >= 0
+
+
+async def test_the_rate_window_rolls_over_on_the_databases_clock(database):
+    # `now()` rather than `clock_timestamp()` in the window update, so the
+    # rollover test cannot disagree with itself between the CASE arms inside one
+    # transaction. A real server is the only place that distinction is visible.
+    await _seed(database, 200)
+    walk = _purge()
+    await walk.run(database)
+
+    status = await walk.status(database)
+
+    assert status.progress.denominator_kind == "estimated"
+    # Several chunks ran inside one window, so there is a real rate to report.
+    assert status.units_done > 1
+
+
+async def test_a_requeued_unit_survives_a_round_trip_through_jsonb(database):
+    # The pending array is jsonb, and a cursor encodes timestamps as ISO
+    # strings. A unit that cannot be read back is a hole that can never clear.
+    await _seed(database, 60)
+    walk = _purge()
+    await walk.run(database)
+
+    stamp = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=1)
+    assert await walk.requeue(database, (stamp, "kzzz")) is True
+
+    status = await walk.status(database)
+    assert status.pending == 1

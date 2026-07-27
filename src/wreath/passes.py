@@ -66,33 +66,23 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ._passes import driver as _driver
+from ._passes import duration as _duration
+from ._passes import gate as _gate
 from ._passes import keyset as _keyset
 from ._passes import ledger as _ledger
+from ._passes import progress as _progress
+from ._passes.buckets import Buckets
 from ._passes.driver import Chunk, ShiftResult
+from ._passes.gate import Constraint, Gate, NoRowsMatch, Reconcile, Verification
 from ._passes.keyset import Key, PassDeclarationError
+from ._passes.ledger import Hole, PublishedFact
 from ._passes.pace import DutyCycle
-
-_DURATION = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*(ms|s|m|h)?\s*$")
+from ._passes.progress import Denominator, Estimated, Exact, Keyspace, Progress
 
 
 def _seconds(value: Any, *, what: str, allow_zero: bool = False) -> float:
     """Read ``"2s"``, ``"250ms"``, ``"5m"`` or a plain number of seconds."""
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        seconds = float(value)
-    elif isinstance(value, str):
-        match = _DURATION.fullmatch(value)
-        if match is None:
-            raise PassDeclarationError(
-                f"{what} must be a number of seconds or a duration like '2s', "
-                f"'250ms', '5m'; got {value!r}"
-            )
-        scale = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}[match.group(2) or "s"]
-        seconds = float(match.group(1)) * scale
-    else:
-        raise PassDeclarationError(f"{what} must be a duration; got {value!r}")
-    if seconds < 0 or (seconds == 0 and not allow_zero):
-        raise PassDeclarationError(f"{what} must be positive; got {value!r}")
-    return seconds
+    return _duration.seconds(value, what=what, allow_zero=allow_zero)
 
 
 # --- what to walk ------------------------------------------------------------
@@ -151,6 +141,66 @@ class Rows:
             raise PassDeclarationError(f"Rows limit must be a positive int; got {self.limit!r}")
         object.__setattr__(self, "keys", _keyset.normalise(self.key))
         object.__setattr__(self, "within", _seconds(self.within, what="Rows within"))
+
+    # -- the range source protocol -------------------------------------------
+
+    def refuse(self, *, table: str) -> None:
+        _keyset.refuse_unsound_key(self.keys, table=table)
+
+    def chunk_where(
+        self,
+        binds: Any,
+        *,
+        cursor_from: tuple[Any, ...] | None,
+        cursor_to: tuple[Any, ...],
+        frontier: str | None,
+    ) -> str:
+        return _driver.chunk_predicate(
+            self.keys, binds, cursor_from=cursor_from, cursor_to=cursor_to, frontier=frontier
+        )
+
+    def reproduce(
+        self,
+        *,
+        table: str,
+        cursor_from: tuple[Any, ...] | None,
+        cursor_to: tuple[Any, ...],
+    ) -> str:
+        return _driver.reproduce_predicate(
+            self.keys, table=table, cursor_from=cursor_from, cursor_to=cursor_to
+        )
+
+    async def next_range(
+        self,
+        executor: Any,
+        *,
+        walk: Any,
+        cursor: tuple[Any, ...] | None,
+        ceiling: Any,
+        frontier_sql: Any,
+    ) -> tuple[tuple[Any, ...] | None, tuple[Any, ...]] | None:
+        """``(start, end)`` for the next chunk, or ``None`` when the walk is done.
+
+        Two probes, and the second one is the point. The first asks for the
+        *limit*-th key past the cursor; when fewer than a full chunk remain it
+        answers nothing -- which is **not** the end of the walk, because a chunk
+        is short whenever rows in its range were deleted or filtered out and the
+        next key can sit well beyond it. So the second probe walks the same index
+        from the far end. Completion is a probe, never an inference from a count.
+
+        The start is the cursor itself: a keyset chunk is open at the bottom, so
+        the row the last chunk finished on is not seen twice.
+        """
+        end = await _driver.fetch_key(
+            executor, table=walk.table, keys=self.keys, cursor=cursor,
+            frontier_sql=frontier_sql, offset=self.limit - 1, reverse=False,
+        )
+        if end is None:
+            end = await _driver.fetch_key(
+                executor, table=walk.table, keys=self.keys, cursor=cursor,
+                frontier_sql=frontier_sql, offset=None, reverse=True,
+            )
+        return None if end is None else (cursor, end)
 
 
 # --- how far to walk ---------------------------------------------------------
@@ -470,6 +520,12 @@ class PassStatus:
     commentary. This is what the CLI, and anything else that has to *decide*
     something, reads -- an in-process registry that is bounded and TTL'd cannot
     answer a question about a pass that has been running for two hours.
+
+    ``progress`` carries the percentage *with* its provenance, the trailing rate,
+    and either an ETA or the reason there is not one. A pass emits no phase
+    records and never appears in the Flight Recorder -- attribution is bound per
+    request through a ``ContextVar`` and a supervised background task has no
+    request -- so this row is the whole picture, deliberately.
     """
 
     name: str
@@ -484,7 +540,32 @@ class PassStatus:
     started_at: Any
     last_advance: Any
     cycle_started: Any
+    driven_at: Any
+    last_drive_error: str | None
     last_error: str | None
+    progress: Progress
+    #: Chunks given up on and not yet cleared. While this is non-zero the pass
+    #: has walked past work it did not do.
+    holes_open: int
+    #: Units requeued to be walked out of order and not yet taken.
+    pending: int
+
+    @property
+    def state(self) -> str:
+        """``walking`` | ``slow`` | ``stalled`` | ``blocked`` | ``done``."""
+        return self.progress.state
+
+    @property
+    def gate_barred(self) -> bool:
+        """Whether an irreversible terminal step may run for this pass.
+
+        Skipping a chunk buys throughput and never the irreversible step, so a
+        pass with an open hole is barred until the hole is cleared -- which is
+        what ``wreath passes retry`` does. The terminal gate itself is a later
+        stage; this is the fact it will read, and it is true as soon as there is
+        a hole to read it from.
+        """
+        return self.holes_open > 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -500,17 +581,27 @@ class PassStatus:
             "started_at": None if self.started_at is None else str(self.started_at),
             "last_advance": None if self.last_advance is None else str(self.last_advance),
             "cycle_started": None if self.cycle_started is None else str(self.cycle_started),
+            "driven_at": None if self.driven_at is None else str(self.driven_at),
+            "last_drive_error": self.last_drive_error,
             "last_error": self.last_error,
+            "holes_open": self.holes_open,
+            "pending": self.pending,
+            "gate_barred": self.gate_barred,
+            **self.progress.as_dict(),
         }
 
 
-def _status_from(row: Any) -> PassStatus:
+def _status_from(row: Any, keys: tuple[Key, ...] = ()) -> PassStatus:
     return PassStatus(
         name=row.name, tenant=row.tenant, phase=row.phase, cursor=row.cursor,
         ceiling=row.ceiling, units_done=row.units_done, rows_done=row.rows_done,
         chunk_limit=row.chunk_limit, paced_reason=row.paced_reason,
         started_at=row.started_at, last_advance=row.last_advance,
-        cycle_started=row.cycle_started, last_error=row.last_error,
+        cycle_started=row.cycle_started, driven_at=row.driven_at,
+        last_drive_error=row.last_drive_error, last_error=row.last_error,
+        progress=_progress.describe(row, keys, now=row.now),
+        holes_open=row.holes_open,
+        pending=len(row.pending or ()),
     )
 
 
@@ -537,8 +628,9 @@ class ChunkedPass:
     """
 
     __slots__ = (
-        "_alias", "_frontier", "_ledger", "_model", "_name", "_pace", "_schema",
-        "_shift", "_table", "_tenant", "_units", "_work", "_workload",
+        "_alias", "_chunk_retries", "_frontier", "_gate", "_ledger", "_model",
+        "_name", "_on_chunk_failure", "_pace", "_progress", "_schema", "_shift",
+        "_table", "_tenant", "_units", "_work", "_workload",
     )
 
     def __init__(
@@ -546,10 +638,14 @@ class ChunkedPass:
         name: str,
         *,
         over: Any,
-        units: Rows,
+        units: Rows | Buckets,
         frontier: Ceiling | Sealed,
         work: _Work,
+        gate: Gate | None = None,
         pace: DutyCycle | None = None,
+        progress: Denominator | None = None,
+        on_chunk_failure: str = "halt",
+        chunk_retries: int = 3,
         shift: Any = "10s",
         tenant: str = "",
         schema: str = "wreath",
@@ -557,9 +653,10 @@ class ChunkedPass:
     ) -> None:
         if not name or len(name) > 200:
             raise PassDeclarationError("a pass name must be 1..200 characters")
-        if not isinstance(units, Rows):
+        if not isinstance(units, (Rows, Buckets)):
             raise PassDeclarationError(
-                f"units= must be a range source such as Rows(...); got {units!r}"
+                f"units= must be a range source -- Rows(...) or Buckets(...); "
+                f"got {units!r}"
             )
         if not isinstance(work, _Work):
             raise PassDeclarationError(
@@ -571,18 +668,53 @@ class ChunkedPass:
             raise PassDeclarationError(
                 f"a pass writes, so it must use the write workload; got {workload!r}"
             )
+        if on_chunk_failure not in ("halt", "skip"):
+            raise PassDeclarationError(
+                f"on_chunk_failure must be 'halt' or 'skip'; got {on_chunk_failure!r}. "
+                "'halt' stops at the hole, so nothing after it runs and no "
+                "terminal step can follow a walk that did not finish. 'skip' "
+                "moves past it for throughput and bars the terminal gate until "
+                "the hole is cleared."
+            )
+        if not isinstance(chunk_retries, int) or isinstance(chunk_retries, bool):
+            raise PassDeclarationError(f"chunk_retries must be an int; got {chunk_retries!r}")
+        if chunk_retries < 1:
+            raise PassDeclarationError(
+                f"chunk_retries must be at least 1; got {chunk_retries}. Zero "
+                "attempts would dead-letter every chunk without running it."
+            )
+        if gate is not None and not isinstance(gate, Gate):
+            raise PassDeclarationError(
+                f"gate= must be a Gate(...); got {gate!r}"
+            )
         self._name = name
         self._tenant = tenant
         self._schema = schema
         self._units = units
         self._frontier = frontier
         self._work = work
+        self._gate = gate
         self._pace = pace if pace is not None else DutyCycle()
+        self._progress = progress if progress is not None else Estimated()
+        self._on_chunk_failure = on_chunk_failure
+        self._chunk_retries = chunk_retries
         self._workload = workload
         self._shift = _seconds(shift, what="shift")
         self._model, self._table, self._alias = _resolve_source(over)
 
-        _keyset.refuse_unsound_key(units.keys, table=self._table)
+        # Each range source owns its own refusals. A keyset walk needs a unique,
+        # indexed, single-direction key because its boundary is a row that
+        # exists; a bucketed one needs a timestamp and an index and *not*
+        # uniqueness, because its boundary is a value the calendar produced.
+        # Asking one set of questions for both would be a rule nobody could
+        # explain -- and it is the assumption stage one was written to avoid.
+        units.refuse(table=self._table)
+        if not isinstance(self._progress, Denominator):
+            raise PassDeclarationError(
+                "progress= must be Estimated(), Exact() or Keyspace(); "
+                f"got {progress!r}"
+            )
+        self._progress.refuse(units.keys, table=self._table)
         refuse = getattr(frontier, "refuse", None)
         if refuse is None:
             raise PassDeclarationError(
@@ -605,6 +737,15 @@ class ChunkedPass:
                 f"and its work writes {', '.join(shared)}. A key the work changes "
                 "moves rows past the cursor, so they are processed twice or never."
             )
+        if gate is not None:
+            _gate.refuse_reused_predicate(gate, work)
+            if gate.scope == "pass" and frontier.recurring:
+                raise PassDeclarationError(
+                    f"pass {name!r} recurs, so it has no completion for a "
+                    "whole-pass gate to fire at -- a cycle completes and the "
+                    "frontier moves on. Use Gate(scope='unit') to verify each "
+                    "range as the walk passes it, or a fixed Ceiling.at_launch()."
+                )
         self._ledger = _ledger.Ledger(schema=schema, name=name, tenant=tenant)
 
     # -- what a driver reads -------------------------------------------------
@@ -634,7 +775,7 @@ class ChunkedPass:
         return self._model
 
     @property
-    def units(self) -> Rows:
+    def units(self) -> Rows | Buckets:
         return self._units
 
     @property
@@ -646,8 +787,24 @@ class ChunkedPass:
         return self._work
 
     @property
+    def gate(self) -> Gate | None:
+        return self._gate
+
+    @property
     def pace(self) -> DutyCycle:
         return self._pace
+
+    @property
+    def progress(self) -> Denominator:
+        return self._progress
+
+    @property
+    def on_chunk_failure(self) -> str:
+        return self._on_chunk_failure
+
+    @property
+    def chunk_retries(self) -> int:
+        return self._chunk_retries
 
     @property
     def shift(self) -> float:
@@ -708,16 +865,18 @@ class ChunkedPass:
         """
         chunks = 0
         rows = 0
+        holes = 0
         while True:
             result = await self.run_shift(
                 database, stopping=stopping, budget=None, sleep=sleep
             )
             chunks += result.chunks
             rows += result.rows
+            holes += result.holes
             if result.stopped != "budget":
                 return ShiftResult(
                     chunks, rows, complete=result.complete,
-                    stopped=result.stopped, error=result.error,
+                    stopped=result.stopped, error=result.error, holes=holes,
                 )
 
     async def status(self, database: Any) -> PassStatus | None:
@@ -727,7 +886,93 @@ class ChunkedPass:
             row = await self._ledger.read(connection)
         finally:
             await database.release(self._workload, connection)
-        return None if row is None else _status_from(row)
+        return None if row is None else _status_from(row, self._units.keys)
+
+    async def holes(self, database: Any) -> list[Hole]:
+        """Chunks this pass gave up on, each with the statement that reproduces it."""
+        connection = await database.acquire(self._workload)
+        try:
+            return await self._ledger.holes(connection)
+        finally:
+            await database.release(self._workload, connection)
+
+    async def requeue(self, database: Any, unit: Any, *, after: Any = None) -> bool:
+        """Walk one range again, out of order. The cursor never rewinds.
+
+        Two callers reach for this from opposite directions and get the same
+        mechanism: a rollup folding a late correction into a bucket its cursor is
+        already past, and an operator clearing a dead-lettered chunk. Rewinding
+        the cursor instead would redo months of correct work to redo one range.
+
+        *unit* is the range's inclusive upper key and *after* its exclusive lower
+        one, in the same shape ``key=`` was declared -- one value, or a tuple.
+        Returns ``False`` when the unit is already queued, which makes calling it
+        twice harmless.
+        """
+        keys = self._units.keys
+        upper = _keyset.encode_cursor(keys, _as_tuple(unit, keys))
+        lower = None if after is None else _keyset.encode_cursor(keys, _as_tuple(after, keys))
+        connection = await database.acquire(self._workload)
+        try:
+            # A unit can be queued before the pass has ever run -- a correction
+            # that arrives during a deploy, say -- so the row has to exist for
+            # the queue to be appended to.
+            await self._ledger.seed(connection, chunk_limit=self._units.limit)
+            return await self._ledger.requeue(
+                connection, cursor_from=lower, cursor_to=upper
+            )
+        finally:
+            await database.release(self._workload, connection)
+
+    async def retry(self, database: Any) -> int:
+        """Schedule every hole to be walked again. Returns how many.
+
+        Clearing the holes is the only thing that un-bars a terminal gate, and
+        the clearing happens when the chunk *succeeds* rather than when it is
+        queued -- so this schedules the work, it does not declare the problem
+        solved.
+
+        It also lifts a ``blocked`` phase, and that half is not optional.
+        ``halt`` parks the cursor *before* its hole and stops the pass; every
+        later shift then sees a phase that is not ``walking`` and declines to
+        run, so without lifting it the chunk is never re-attempted, the hole is
+        never cleared, and the gate it bars is unreachable. ``halt`` would be a
+        trap rather than a policy. ``skip`` never blocks, so there the queueing
+        is the whole of it.
+
+        A halted pass therefore walks its parked chunk twice -- once as the
+        queued unit and once as the range the cursor is still pointing at.
+        That is deliberate rather than unnoticed: every declared work shape
+        re-runs as a no-op, which is the property the primitive is built on, and
+        paying for it once per operator retry is cheaper than teaching this
+        method to compare encoded cursors.
+
+        A pass stopped at a *failed verification* is deliberately not restarted.
+        That is not a transient failure to retry past; it means the walk's logic
+        is wrong and the check will answer no again at the same row.
+        """
+        connection = await database.acquire(self._workload)
+        try:
+            queued = 0
+            for hole in await self._ledger.holes(connection):
+                if await self._ledger.requeue(
+                    connection, cursor_from=hole.cursor_from, cursor_to=hole.cursor_to
+                ):
+                    queued += 1
+            await self._ledger.unblock(connection)
+            return queued
+        finally:
+            await database.release(self._workload, connection)
+
+
+def _as_tuple(value: Any, keys: tuple[Key, ...]) -> tuple[Any, ...]:
+    values = tuple(value) if isinstance(value, (tuple, list)) else (value,)
+    if len(values) != len(keys):
+        raise PassDeclarationError(
+            f"this pass walks by {len(keys)} key column(s), so a unit needs "
+            f"{len(keys)} value(s); got {value!r}"
+        )
+    return values
 
 
 def _resolve_source(over: Any) -> tuple[Any, str, str]:
@@ -753,7 +998,11 @@ def _resolve_source(over: Any) -> tuple[Any, str, str]:
 async def read_status(
     database: Any, *, schema: str = "wreath", name: str | None = None, workload: str = "write"
 ) -> list[PassStatus]:
-    """Every pass in one ledger, or one of them by name."""
+    """Every pass in one ledger, or one of them by name.
+
+    Reads the ledger without holding any declaration, which is what the CLI has:
+    a database and a schema. Everything a reader needs is in the row.
+    """
     connection = await database.acquire(workload)
     try:
         rows = await _ledger.read_all(connection, schema=schema, name=name)
@@ -762,28 +1011,74 @@ async def read_status(
     return [_status_from(row) for row in rows]
 
 
+async def read_holes(
+    database: Any, *, schema: str = "wreath", name: str | None = None, workload: str = "write"
+) -> list[Hole]:
+    """Every dead-lettered chunk in one ledger, or one pass's."""
+    connection = await database.acquire(workload)
+    try:
+        return await _ledger.read_holes(connection, schema=schema, name=name)
+    finally:
+        await database.release(workload, connection)
+
+
 def schema_sql(schema: str = "wreath") -> str:
     """DDL for the shared pass ledger in *schema*. Apply it as a migration."""
     return _ledger.schema_sql(schema)
 
 
+async def published_facts(
+    database: Any,
+    *,
+    schema: str = "wreath",
+    fact: str | None = None,
+    workload: str = "write",
+) -> list[PublishedFact]:
+    """Every fact a gate has verified in one ledger, or the passes claiming one.
+
+    The gate's durable output, readable with nothing but a connection and a
+    schema. That is the point of it: the consumer is a migration deciding
+    whether it may narrow a column, and it has no pass declaration in hand.
+    """
+    connection = await database.acquire(workload)
+    try:
+        return await _ledger.published_facts(connection, schema=schema, fact=fact)
+    finally:
+        await database.release(workload, connection)
+
+
 __all__ = [
     "Apply",
+    "Buckets",
     "Ceiling",
     "Chunk",
     "ChunkedPass",
+    "Constraint",
     "Declared",
+    "Denominator",
     "DutyCycle",
+    "Estimated",
+    "Exact",
+    "Gate",
+    "Hole",
     "Key",
+    "Keyspace",
+    "NoRowsMatch",
     "PassDeclarationError",
     "PassStatus",
+    "Progress",
+    "PublishedFact",
     "Purge",
+    "Reconcile",
     "Rewrite",
     "Rows",
     "Sealed",
     "ShiftResult",
     "Sql",
     "Table",
+    "Verification",
+    "published_facts",
+    "read_holes",
     "read_status",
     "schema_sql",
 ]

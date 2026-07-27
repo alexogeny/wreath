@@ -149,6 +149,11 @@ answer depends on, and this cache's key cannot represent them — so one entry
 would be served to every variant. That includes anything from
 `negotiation.serialize()`, which sets `Vary: Accept`.
 
+**Concurrent misses run the handler once.** The first caller to miss a key
+computes it; everyone who arrives while that is in flight waits for the same
+result rather than starting their own. A handler that raises fails its waiters
+and caches nothing, so the next request retries.
+
 **Bound the keyspace with `query_params`.** By default the whole query string is
 part of the key, so a caller varying a parameter the handler ignores (`?_=1`)
 fills the store and evicts everything real:

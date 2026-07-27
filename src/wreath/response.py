@@ -58,7 +58,13 @@ class Response:
         media_type: bytes | None = None,
         background: Background | None = None,
     ) -> None:
-        self.body = body
+        # Neither a 204 nor a 304 may carry content (RFC 9110 §6.4.1, §15.4.5),
+        # so a body passed with one is dropped here rather than sent. Decided at
+        # construction because the status is already being tested for the
+        # content-length below -- doing it again in `__call__` would put one
+        # more membership test on every response the server sends.
+        bodyless = status in _STATUS_WITHOUT_BODY
+        self.body = b"" if bodyless else body
         self.status = status
         self.background = background
         if headers is None:
@@ -69,7 +75,7 @@ class Response:
             response_headers: list[tuple[bytes, bytes]] = (
                 [media_type_header] if media_type_header is not None else []
             )
-            if status not in _STATUS_WITHOUT_BODY:
+            if not bodyless:
                 response_headers.append((_CONTENT_LENGTH, _content_length(len(body))))
         else:
             if media_type is None:
@@ -84,7 +90,7 @@ class Response:
                     has_length = True
             if media_type and not has_type:
                 response_headers.append((_CONTENT_TYPE, media_type))
-            if status not in _STATUS_WITHOUT_BODY and not has_length:
+            if not bodyless and not has_length:
                 response_headers.append((_CONTENT_LENGTH, _content_length(len(body))))
         self.headers = response_headers
 

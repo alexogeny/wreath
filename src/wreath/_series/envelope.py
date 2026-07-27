@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .compile import CURRENT, PREVIOUS
+
 
 def _value(row: Any, index: int) -> Any:
     """One column out of a driver row, by position.
@@ -41,9 +43,7 @@ def aggregate_rows(declaration: Any, rows: list[Any]) -> list[tuple[Any, dict[st
     return out
 
 
-def series_rows(
-    declaration: Any, rows: list[Any]
-) -> tuple[list[Any], dict[tuple[Any, bool], dict[Any, dict[str, Any]]]]:
+def series_rows(declaration: Any, rows: list[Any], *, periods: bool = False) -> Any:
     """Split returned rows into the bucket run and a per-series value map.
 
     The bucket run comes from the spine, so it is dense and ordered even where
@@ -51,19 +51,33 @@ def series_rows(
     them. A series is keyed by ``(key, other)`` rather than by ``key`` alone so
     that a grouping value which is genuinely ``NULL`` stays distinct from the
     folded remainder, which also carries a ``NULL`` key.
+
+    With ``periods``, the statement carried a discriminator in column 1 and this
+    returns one ``(buckets, map)`` pair per period instead of one overall. Each
+    period keeps its own bucket run: the two are legitimately different lengths,
+    and a shared run would have to invent buckets for whichever period is
+    shorter.
     """
     grouped = declaration.group is not None
-    offset = 3 if grouped else 1
-    buckets: list[Any] = []
-    seen: set[Any] = set()
-    found: dict[tuple[Any, bool], dict[Any, dict[str, Any]]] = {}
+    offset = (1 if periods else 0) + (2 if grouped else 0) + 1
+    tagged: dict[str, tuple[list[Any], set[Any], dict[tuple[Any, bool], Any]]] = {}
+    if periods:
+        # Seeded so a period that matched nothing at all still reports an empty
+        # run rather than being absent from the payload.
+        for name in (CURRENT, PREVIOUS):
+            tagged[name] = ([], set(), {})
+    else:
+        tagged[CURRENT] = ([], set(), {})
     for row in rows:
         bucket = _value(row, 0)
+        period = _value(row, 1) if periods else CURRENT
+        buckets, seen, found = tagged[period]
         if bucket not in seen:
             seen.add(bucket)
             buckets.append(bucket)
         if grouped:
-            key, other = _value(row, 1), bool(_value(row, 2))
+            base = 2 if periods else 1
+            key, other = _value(row, base), bool(_value(row, base + 1))
         else:
             key, other = None, False
         values = {
@@ -78,6 +92,9 @@ def series_rows(
         ):
             continue
         found.setdefault((key, other), {})[bucket] = values
+    if periods:
+        return {name: (buckets, found) for name, (buckets, _seen, found) in tagged.items()}
+    buckets, _seen, found = tagged[CURRENT]
     return buckets, found
 
 

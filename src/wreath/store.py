@@ -45,6 +45,24 @@ from .cache import BoundedCache
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+#: Reserved words that cannot be a bare identifier in PostgreSQL. Not the whole
+#: list -- that is hundreds long and mostly words nobody names a table -- but
+#: the ones people actually reach for. A name from here reaches the generated
+#: DDL unquoted and fails there, a long way from the declaration that caused it.
+_RESERVED = frozenset({
+    "all", "analyse", "analyze", "and", "any", "array", "as", "asc", "authorization",
+    "between", "both", "case", "cast", "check", "collate", "column", "constraint",
+    "create", "cross", "current_date", "current_role", "current_time",
+    "current_timestamp", "current_user", "default", "deferrable", "desc", "distinct",
+    "do", "else", "end", "except", "false", "fetch", "for", "foreign", "from", "grant",
+    "group", "having", "in", "initially", "inner", "intersect", "into", "is", "join",
+    "lateral", "leading", "left", "like", "limit", "localtime", "localtimestamp",
+    "natural", "not", "null", "offset", "on", "only", "or", "order", "outer", "overlaps",
+    "placing", "primary", "references", "returning", "right", "select", "session_user",
+    "similar", "some", "symmetric", "table", "then", "to", "trailing", "true", "union",
+    "unique", "user", "using", "variadic", "verbose", "when", "where", "window", "with",
+})
+
 #: The row alias every generated statement uses, so a caller writing its own SQL
 #: against the same store can reference columns the same way.
 ALIAS: Final = "s"
@@ -73,6 +91,11 @@ def sql_identifier(value: str, *, what: str = "table") -> str:
     """
     if not _IDENTIFIER.fullmatch(value):
         raise ValueError(f"{what} must be a plain SQL identifier")
+    if value.lower() in _RESERVED:
+        raise ValueError(
+            f"{what} {value!r} is a reserved SQL word; it reaches the generated "
+            "statement unquoted and would fail there. Pick another name."
+        )
     return value
 
 
@@ -499,7 +522,19 @@ class MemoryStore:
         self._cache.clear()
 
     def __len__(self) -> int:
-        return len(self._cache)
+        """How many keys the store still honours.
+
+        Entries past their deadline are dropped lazily -- on read, or when
+        capacity forces an eviction -- so counting the raw cache reported keys
+        this store would refuse. That made `len()` useless as the thing it looks
+        like: a measure of how much is being held.
+        """
+        now = self._clock()
+        live = 0
+        for _value, deadline in self._cache.snapshot().values():
+            if deadline is None or now < deadline:
+                live += 1
+        return live
 
 
 __all__ = [

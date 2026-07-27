@@ -39,6 +39,11 @@ _INT8_OID = 20
 #: mid-bucket still includes the bucket it stops in. See ``_spine``.
 _ONE_TICK = "interval '1 microsecond'"
 
+#: The two values the ``period`` discriminator takes when a view compares. Only
+#: ever emitted as literals from here, never taken from a caller.
+CURRENT = "current"
+PREVIOUS = "previous"
+
 
 def _column_sql(expression: Any, aliases: dict[tuple[Any, ...], str]) -> str:
     """A column reference, qualified by whichever alias holds it.
@@ -78,6 +83,50 @@ def _where(
         return
     builder.text(" WHERE ")
     render_predicate(conjoin(predicates), builder, "t0", aliases)
+
+
+def _local(bound: str, zone: str) -> str:
+    """A ``timestamptz`` read on the zone's wall clock, as a naive timestamp."""
+    return f"({bound} AT TIME ZONE {zone}::text)"
+
+
+def _shifted(builder: SqlBuilder, value: Any, zone_name: str, step: str) -> str:
+    """``value`` moved one comparison period earlier, as a ``timestamptz``.
+
+    The shift happens on the *local* wall clock and is converted back, which is
+    the whole of why a comparison period is worth compiling rather than
+    subtracting in Python. ``interval '1 month'`` applied to a naive local
+    timestamp is calendar arithmetic, so "the same day last month" lands on the
+    same day number whatever the month lengths are, and an intervening clock
+    change moves the instant rather than the wall time.
+
+    Binds run in the order they appear in the text, so the placeholder numbering
+    reads forwards.
+    """
+    bound = builder.bind(value, _TIMESTAMPTZ_OID)
+    inward = builder.bind(zone_name, _TEXT_OID)
+    outward = builder.bind(zone_name, _TEXT_OID)
+    return f"({_local(bound, inward)} - interval '{step}') AT TIME ZONE {outward}::text"
+
+
+def _window(
+    builder: SqlBuilder, at_sql: str, *, start: Any, end: Any, zone_name: str, step: str | None
+) -> str:
+    """``at`` inside one half-open window — ``start <= at < end``.
+
+    Rendered here rather than passed in as an ORM predicate because the spine's
+    bounds are rendered here too, from the same two values: a window and a spine
+    that disagree by a bucket is the failure this whole statement exists to make
+    impossible, and the surest way to keep them agreeing is to give them one
+    author. ``step`` shifts the window into the comparison period.
+    """
+    if step is None:
+        low = builder.bind(start, _TIMESTAMPTZ_OID)
+        high = builder.bind(end, _TIMESTAMPTZ_OID)
+        return f"({at_sql} >= {low} AND {at_sql} < {high})"
+    low = _shifted(builder, start, zone_name, step)
+    high = _shifted(builder, end, zone_name, step)
+    return f"({at_sql} >= {low} AND {at_sql} < {high})"
 
 
 def _plan(
@@ -141,6 +190,7 @@ def compile_series(
     start: Any,
     end: Any,
     zone_name: str,
+    compare: Any = None,
 ) -> tuple[str, tuple[Any, ...], tuple[int, ...]]:
     """The whole series — spine, aggregate, and top-N fold — as one statement.
 
@@ -162,18 +212,30 @@ def compile_series(
     the outer select
         the spine LEFT JOINed to the aggregate, so an empty bucket arrives as a
         row with nulls rather than as an absence the caller has to notice.
+
+    ``compare`` adds a second period. It stays *one* statement — two statements
+    are how the periods end up misaligned by a bucket — so the spine gains a
+    second arm over the shifted range, every row carries a ``period``
+    discriminator, and both arms join the same aggregate. The survivors are
+    still ranked over the primary period alone: "the top seven paddocks this
+    month, and what those seven did last month" keeps a legend that means one
+    thing, where ranking across both would let a series that has since gone to
+    zero hold a slot.
     """
     spec, joins, aliases = _plan(registry, declaration, predicates)
     at_sql = _column_sql(declaration.at, aliases)
     trunc = declaration.bucket.trunc
     builder = SqlBuilder()
     grouped = declaration.group is not None
+    step = None if compare is None else compare.step
 
     if grouped:
         key_sql = _column_sql(declaration.group, aliases)
         builder.text(f"WITH {quote('survivors')} AS (SELECT {key_sql} AS {quote('g')}")
         _from_clause(builder, spec, joins)
         _where(builder, predicates, aliases)
+        builder.text(" AND " if predicates else " WHERE ")
+        builder.text(_window(builder, at_sql, start=start, end=end, zone_name=zone_name, step=None))
         rank = _measure_sql(declaration.measures[0][1], aliases)
         builder.text(f" GROUP BY 1 ORDER BY {rank} DESC NULLS LAST, 1 ASC")
         builder.text(f" LIMIT {builder.bind(declaration.top, _INT8_OID)}), ")
@@ -183,6 +245,15 @@ def compile_series(
     builder.text(f"{quote('agg')} AS (SELECT ")
     zone_bind = builder.bind(zone_name, _TEXT_OID)
     builder.text(f"date_trunc('{trunc}', {at_sql} AT TIME ZONE {zone_bind}::text) AS {quote('b')}")
+    if compare is not None:
+        # The two windows are disjoint -- `compare()` refuses a shift shorter
+        # than the range -- so which period a row belongs to is decided by one
+        # comparison against the primary start rather than by testing both.
+        edge = builder.bind(start, _TIMESTAMPTZ_OID)
+        builder.text(
+            f", CASE WHEN {at_sql} >= {edge} THEN '{CURRENT}' ELSE '{PREVIOUS}' END"
+            f"::text AS {quote('period')}"
+        )
     if grouped:
         # `hit` is a marker column rather than an `IN` test because a grouping
         # value may itself be NULL. `IS NOT DISTINCT FROM` matches NULL to NULL,
@@ -202,12 +273,27 @@ def compile_series(
             f"ON {quote('sv')}.{quote('g')} IS NOT DISTINCT FROM {key_sql}"
         )
     _where(builder, predicates, aliases)
-    builder.text(" GROUP BY 1, 2, 3)" if grouped else " GROUP BY 1)")
+    builder.text(" AND " if predicates else " WHERE ")
+    primary = _window(builder, at_sql, start=start, end=end, zone_name=zone_name, step=None)
+    if step is None:
+        builder.text(primary)
+    else:
+        shifted = _window(
+            builder, at_sql, start=start, end=end, zone_name=zone_name, step=step
+        )
+        builder.text(f"({primary} OR {shifted})")
+    columns = 1 + (compare is not None) + 2 * grouped
+    builder.text(f" GROUP BY {', '.join(str(n) for n in range(1, columns + 1))})")
 
-    _spine(builder, declaration, start=start, end=end, trunc=trunc, zone_name=zone_name)
+    _spine(
+        builder, declaration, start=start, end=end, trunc=trunc,
+        zone_name=zone_name, step=step,
+    )
 
     builder.text(f"SELECT {quote('s')}.{quote('b')} AT TIME ZONE ")
     builder.text(f"{builder.bind(zone_name, _TEXT_OID)}::text AS {quote('bucket')}")
+    if compare is not None:
+        builder.text(f", {quote('s')}.{quote('period')}")
     if grouped:
         builder.text(f", {quote('a')}.{quote('g')}, {quote('a')}.{quote('other')}")
     for index, _measure in enumerate(declaration.measures):
@@ -216,9 +302,76 @@ def compile_series(
         f" FROM {quote('spine')} AS {quote('s')} LEFT JOIN {quote('agg')} AS {quote('a')} "
         f"ON {quote('a')}.{quote('b')} = {quote('s')}.{quote('b')}"
     )
+    if compare is not None:
+        # Joining on the discriminator as well as the bucket is what keeps the
+        # two periods from bleeding into each other: without it a bucket that
+        # exists in both arms would pick up both aggregates.
+        builder.text(f" AND {quote('a')}.{quote('period')} = {quote('s')}.{quote('period')}")
     # The surviving keys before the fold, so "other" is last in the payload the
-    # way it is last in a legend.
-    builder.text(" ORDER BY 1, 3, 2" if grouped else " ORDER BY 1")
+    # way it is last in a legend. The period leads when there is one, so each
+    # period's buckets arrive as one contiguous run.
+    order = ["1"]
+    if compare is not None:
+        order = ["2", "1"]
+    if grouped:
+        base = 2 + (compare is not None)
+        order += [str(base + 1), str(base)]
+    builder.text(f" ORDER BY {', '.join(order)}")
+    return builder.sql(), tuple(builder.values), tuple(builder.oids)
+
+
+def compile_events(
+    registry: Any,
+    spec_model: type,
+    at: Any,
+    label: Any,
+    predicates: tuple[Any, ...],
+    *,
+    start: Any,
+    end: Any,
+    zone_name: str,
+    trunc: str,
+    limit: int,
+) -> tuple[str, tuple[Any, ...], tuple[int, ...]]:
+    """Markers inside the range, each knowing its exact instant and its bucket.
+
+    Alignment is the requirement; one round trip is a nice-to-have that must not
+    be bought with a bad type. A tagged ``UNION ALL`` of buckets and events would
+    force both into one row shape with half the columns null in every row, and a
+    discriminator the client has to switch on — a worse envelope, worse generated
+    types, and a worse decode, in exchange for a round trip the driver may
+    already be pipelining.
+
+    So this is a second statement, and alignment is structural instead: ``trunc``
+    and ``zone_name`` arrive from the same declaration that rendered the series,
+    and the window from the same :class:`~wreath.series.Range`. There is no
+    second copy of either to drift from.
+
+    The bucket travels *with* the event rather than being recomputed on the
+    client, which is what lets a marker sit at its true x-position while still
+    knowing which column it belongs over.
+    """
+    spec = registry.spec_for(spec_model)
+    clauses: list[str] = []
+    aliases = plan_filter_joins(registry, spec, [*predicates, at, label], clauses)
+    at_sql = _column_sql(at, aliases)
+    builder = SqlBuilder()
+    builder.text(f"SELECT {at_sql} AS {quote('at')}, ")
+    inward = builder.bind(zone_name, _TEXT_OID)
+    outward = builder.bind(zone_name, _TEXT_OID)
+    builder.text(
+        f"date_trunc('{trunc}', {_local(at_sql, inward)}) AT TIME ZONE "
+        f"{outward}::text AS {quote('bucket')}, "
+        f"{_column_sql(label, aliases)} AS {quote('label')}"
+    )
+    _from_clause(builder, spec, clauses)
+    _where(builder, predicates, aliases)
+    builder.text(" AND " if predicates else " WHERE ")
+    builder.text(_window(builder, at_sql, start=start, end=end, zone_name=zone_name, step=None))
+    # Ordered by the instant so markers arrive in the order they happened, and
+    # bound one past the ceiling so the caller can tell a full answer from a
+    # truncated one and refuse rather than draw a partial annotation layer.
+    builder.text(f" ORDER BY 1 LIMIT {builder.bind(limit + 1, _INT8_OID)}")
     return builder.sql(), tuple(builder.values), tuple(builder.oids)
 
 
@@ -230,6 +383,7 @@ def _spine(
     end: Any,
     trunc: str,
     zone_name: str,
+    step: str | None = None,
 ) -> None:
     """Every bucket in the range, generated on the local wall clock.
 
@@ -245,18 +399,65 @@ def _spine(
     The upper bound subtracts one microsecond before truncating, which is how
     the half-open range is honoured in the one place it is written: a range
     ending exactly on a boundary excludes the bucket starting there.
+
+    ``step`` adds the comparison arm. Its bounds are the same two values shifted
+    on the *local* clock before truncating, so a comparison month is a calendar
+    month and the two arms can legitimately be different lengths — February
+    against March is 28 buckets against 31, and saying so is more honest than
+    padding one of them.
     """
-    step = declaration.bucket.step
-    # Bound in the order they appear in the text: placeholder numbering is
-    # positional, and a statement whose $n run backwards is correct but reads
-    # like a bug to the next person diffing it against the plan.
-    from_bind = builder.bind(start, _TIMESTAMPTZ_OID)
-    from_zone = builder.bind(zone_name, _TEXT_OID)
-    to_bind = builder.bind(end, _TIMESTAMPTZ_OID)
-    to_zone = builder.bind(zone_name, _TEXT_OID)
+    width = declaration.bucket.step
+    if step is None:
+        # Bound in the order they appear in the text: placeholder numbering is
+        # positional, and a statement whose $n run backwards is correct but reads
+        # like a bug to the next person diffing it against the plan.
+        from_bind = builder.bind(start, _TIMESTAMPTZ_OID)
+        from_zone = builder.bind(zone_name, _TEXT_OID)
+        to_bind = builder.bind(end, _TIMESTAMPTZ_OID)
+        to_zone = builder.bind(zone_name, _TEXT_OID)
+        builder.text(
+            f", {quote('spine')} AS (SELECT generate_series("
+            f"date_trunc('{trunc}', {from_bind} AT TIME ZONE {from_zone}::text), "
+            f"date_trunc('{trunc}', ({to_bind} AT TIME ZONE {to_zone}::text) - {_ONE_TICK}), "
+            f"interval '{width}') AS {quote('b')}) "
+        )
+        return
+    builder.text(f", {quote('spine')} AS (")
+    _spine_arm(
+        builder, start=start, end=end, trunc=trunc, zone_name=zone_name,
+        width=width, shift=None, period=CURRENT,
+    )
+    builder.text(" UNION ALL ")
+    _spine_arm(
+        builder, start=start, end=end, trunc=trunc, zone_name=zone_name,
+        width=width, shift=step, period=PREVIOUS,
+    )
+    builder.text(") ")
+
+
+def _spine_arm(
+    builder: SqlBuilder,
+    *,
+    start: Any,
+    end: Any,
+    trunc: str,
+    zone_name: str,
+    width: str,
+    shift: str | None,
+    period: str,
+) -> None:
+    """One period's buckets, tagged with which period they are."""
+    lower = f"{_local(builder.bind(start, _TIMESTAMPTZ_OID), builder.bind(zone_name, _TEXT_OID))}"
+    if shift is not None:
+        lower = f"({lower} - interval '{shift}')"
+    upper = f"{_local(builder.bind(end, _TIMESTAMPTZ_OID), builder.bind(zone_name, _TEXT_OID))}"
+    upper = f"({upper} - {_ONE_TICK})"
+    if shift is not None:
+        upper = f"({upper} - interval '{shift}')"
     builder.text(
-        f", {quote('spine')} AS (SELECT generate_series("
-        f"date_trunc('{trunc}', {from_bind} AT TIME ZONE {from_zone}::text), "
-        f"date_trunc('{trunc}', ({to_bind} AT TIME ZONE {to_zone}::text) - {_ONE_TICK}), "
-        f"interval '{step}') AS {quote('b')}) "
+        f"SELECT {quote('g')}.{quote('b')}, '{period}'::text AS {quote('period')} "
+        f"FROM generate_series("
+        f"date_trunc('{trunc}', {lower}), "
+        f"date_trunc('{trunc}', {upper}), "
+        f"interval '{width}') AS {quote('g')}({quote('b')})"
     )

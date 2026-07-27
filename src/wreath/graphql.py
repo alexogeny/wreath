@@ -50,6 +50,7 @@ from .response import JSONResponse
 from .router import Router
 
 __all__ = [
+    "MAX_CACHED_QUERY_CHARS",
     "ExecutionError",
     "GraphQL",
     "GraphQLSyntaxError",
@@ -60,6 +61,10 @@ __all__ = [
     "build_schema",
 ]
 
+
+#: Longest document the parse cache will hold. Past this the query is still
+#: served -- it is parsed every time instead of being remembered.
+MAX_CACHED_QUERY_CHARS = 16 * 1024
 
 #: Content types the POST endpoint accepts. Deliberately excludes the three a
 #: cross-origin <form> can send (`text/plain`, `application/x-www-form-urlencoded`,
@@ -74,7 +79,7 @@ class GraphQL:
     __slots__ = (
         "_authorizer", "_cache", "_frozen", "_introspection", "_limits",
         "_max_page_size", "_on_denied", "_registry", "_resolvers", "_schema",
-        "_session_factory",
+        "_session_factory", "resolver_errors",
     )
 
     def __init__(
@@ -106,6 +111,9 @@ class GraphQL:
         # client-supplied text -- an unbounded cache here is a memory DoS.
         self._cache: BoundedCache = BoundedCache(max_entries=cache_size)
         self._session_factory: Any = None
+        #: Resolver failures that were not `ExecutionError`. The message a
+        #: client gets is generic, so this is where the count lives.
+        self.resolver_errors = 0
 
     @property
     def schema(self) -> Schema:
@@ -266,7 +274,15 @@ class GraphQL:
         return self._schema.sdl()
 
     def parse(self, source: str) -> Any:
-        """Parse and cache ``source`` under the configured limits."""
+        """Parse and cache ``source`` under the configured limits.
+
+        Documents past :data:`MAX_CACHED_QUERY_CHARS` are parsed and *not*
+        cached: the key is the client's own text, so caching by entry count
+        alone let a few large documents hold far more memory than the count
+        suggested, and a caller choosing the key is a caller choosing the size.
+        """
+        if len(source) > MAX_CACHED_QUERY_CHARS:
+            return parse(source, self._limits)
         cached = self._cache.get(source)
         if cached is not None:
             return cached
@@ -305,6 +321,19 @@ class GraphQL:
             if error.path:
                 body["path"] = list(error.path)
             return {"data": None, "errors": [body]}
+        except Exception:  # noqa: BLE001 - a resolver, not the transport
+            # A resolver raising something that is not an `ExecutionError` used
+            # to escape into the ASGI layer and answer 500, which every GraphQL
+            # client reads as a network failure rather than a field error. The
+            # message is deliberately generic: a resolver's exception text is
+            # server-side detail (see `wreath.crud._unprocessable`).
+            self.resolver_errors += 1
+            return {
+                "data": None,
+                "errors": [{"message": "the resolver failed", "extensions": {
+                    "code": "RESOLVER_ERROR",
+                }}],
+            }
         return {"data": data}
 
     def router(
@@ -360,7 +389,11 @@ class GraphQL:
                 )
             operation_name = payload.get("operationName")
 
-            session, close = await graphql._session(request, session_factory)
+            # A document that mutates needs the write workload; a read session
+            # would send the mutation to a replica.
+            session, close = await graphql._session(
+                request, session_factory, mutating=graphql._is_mutation(payload["query"])
+            )
             try:
                 body = await graphql.run(
                     payload["query"],
@@ -388,12 +421,31 @@ class GraphQL:
 
         return router
 
-    async def _session(self, request: Any, session_factory: Any) -> tuple[Any, Any]:
+    def _is_mutation(self, source: str) -> bool:
+        """Whether ``source`` parses to a mutation. False for anything unparseable."""
+        try:
+            document = self.parse(source)
+        except GraphQLSyntaxError:
+            return False
+        try:
+            return document.operation().operation == "mutation"
+        except Exception:  # noqa: BLE001 - an unnamed/absent operation is not a mutation
+            return False
+
+    async def _session(
+        self, request: Any, session_factory: Any, *, mutating: bool = False
+    ) -> tuple[Any, Any]:
         """The session for one request, and how to release it (or None).
 
         A factory may return a session directly or an async context manager;
         both are common, and which one the caller chose is not something the
         endpoint should care about.
+
+        ``mutating`` selects the write workload. Without it every request --
+        mutations included -- opened a *read* session, so a registered mutation
+        ran against whatever the read pool points at, which on a replica is a
+        failed write and on a single database is an invisible non-issue until
+        the day a replica is added.
         """
         if session_factory is not None:
             supplied: Any = session_factory(request)
@@ -403,6 +455,6 @@ class GraphQL:
             return supplied, None
         from .orm.session import Session
 
-        # No factory: a read session per request, closed when it is done.
-        session = Session(self._registry, "read")
+        # No factory: one session per request, closed when it is done.
+        session = Session(self._registry, "write" if mutating else "read")
         return session, session.close

@@ -108,6 +108,31 @@ def verify_password(password: str, encoded: str) -> bool:
 # --- signed action tokens ---------------------------------------------------
 
 
+def _frame(*fields: str) -> str:
+    """Join fields so each is recoverable whatever it contains.
+
+    ``<len>:<field>`` per field. A plain ``":".join`` meant a value containing a
+    colon reassigned every field after it -- and the signature covers the joined
+    form, so both sides agreed on bytes that meant two different things.
+    """
+    return "".join(f"{len(field)}:{field}" for field in fields)
+
+
+def _unframe(body: str, count: int) -> list[str]:
+    """The inverse of :func:`_frame`. Raises ValueError on anything malformed."""
+    fields: list[str] = []
+    position = 0
+    for _ in range(count):
+        marker = body.index(":", position)
+        length = int(body[position:marker])
+        start = marker + 1
+        fields.append(body[start : start + length])
+        position = start + length
+    if position != len(body):
+        raise ValueError("trailing data in a framed token")
+    return fields
+
+
 def fingerprint(hashed_password: str) -> str:
     """A short, opaque fingerprint of the current password hash (for single-use)."""
     return hashlib.sha256(hashed_password.encode("utf-8")).hexdigest()[:16]
@@ -119,7 +144,10 @@ def sign_token(
     """Sign an expiring, purpose-scoped token bound to ``subject`` (+ optional ``bound``)."""
     issued = int(time.time() if now is None else now)
     expires = issued + int(ttl)
-    body = f"{purpose}:{subject}:{expires}:{bound}"
+    # Length-framed rather than delimiter-joined: a subject or bound value
+    # containing ":" used to shift the fields, so `verify_token` could read a
+    # different subject than `sign_token` wrote.
+    body = _frame(purpose, subject, str(expires), bound)
     encoded = _b64(body.encode("utf-8"))
     mac = hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), "sha256").hexdigest()
     return f"{encoded}.{mac}"
@@ -136,7 +164,9 @@ def verify_token(
         ).hexdigest()
         if not hmac.compare_digest(mac, expected):
             return None
-        got_purpose, subject, expires, got_bound = _unb64(encoded).decode("utf-8").split(":", 3)
+        got_purpose, subject, expires, got_bound = _unframe(
+            _unb64(encoded).decode("utf-8"), 4
+        )
     except (ValueError, TypeError):
         return None
     if got_purpose != purpose or got_bound != bound:
@@ -451,6 +481,6 @@ def _token_subject(token: str) -> str | None:
     """Peek the subject from a token WITHOUT trusting it (caller must verify)."""
     try:
         encoded = token.split(".", 1)[0]
-        return _unb64(encoded).decode("utf-8").split(":", 3)[1]
+        return _unframe(_unb64(encoded).decode("utf-8"), 4)[1]
     except (ValueError, TypeError, IndexError):
         return None

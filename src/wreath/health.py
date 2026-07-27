@@ -45,10 +45,12 @@ Probe = Callable[[], Awaitable[Any]]
 
 __all__ = [
     "HealthCheck",
+    "PassesUnhealthy",
     "callable_check",
     "database_check",
     "evaluate",
     "health_router",
+    "passes_check",
     "postgres_check",
     "readiness_status",
 ]
@@ -121,6 +123,67 @@ def postgres_check(
     return HealthCheck(name=name, probe=probe, critical=critical, timeout=timeout)
 
 
+def passes_check(
+    database: Any,
+    *,
+    name: str = "passes",
+    schema: str = "wreath",
+    workload: str = "write",
+    timeout: float = 2.0,
+) -> HealthCheck:
+    """Report every chunked pass, failing when one is blocked or stalled.
+
+    **Mount this on ``alerts=``, never in ``checks=``.** It is built
+    ``critical=False`` so that putting it in the readiness list cannot take an
+    instance out of rotation, but the right place for it is the alerts endpoint,
+    which the load balancer does not read at all.
+
+    The reason is worth stating plainly, because the instinct runs the other way.
+    A blocked backfill is a data problem; the application is still serving
+    correctly. Failing readiness for it converts that data problem into an
+    outage -- and, worse, removes the very workers that would have resumed the
+    pass. What a stuck pass needs is a person, not a load balancer.
+
+    A pass that is merely ``walking`` or ``slow`` is reported as in flight, so an
+    orchestrator can tell that a deploy's data work is not finished even though
+    the pods are up.
+    """
+
+    async def probe() -> dict[str, Any]:
+        from .passes import read_status
+
+        rows = await read_status(database, schema=schema, workload=workload)
+        in_flight = [row.name for row in rows if row.state in ("walking", "slow")]
+        stalled = [row.name for row in rows if row.state == "stalled"]
+        blocked = [row.name for row in rows if row.state == "blocked"]
+        barred = [row.name for row in rows if row.gate_barred]
+        detail = {
+            "in_flight": in_flight,
+            "stalled": stalled,
+            "blocked": blocked,
+            "gate_barred": barred,
+        }
+        if blocked or stalled:
+            raise PassesUnhealthy(
+                "; ".join(
+                    filter(
+                        None,
+                        (
+                            f"blocked: {', '.join(blocked)}" if blocked else "",
+                            f"stalled: {', '.join(stalled)}" if stalled else "",
+                        ),
+                    )
+                )
+            )
+        return detail
+
+    return HealthCheck(name=name, probe=probe, critical=False, timeout=timeout)
+
+
+class PassesUnhealthy(RuntimeError):
+    """A chunked pass needs a person: it is blocked or has stopped advancing."""
+
+
 async def _run_check(check: HealthCheck) -> tuple[bool, dict[str, Any]]:
     """Run one probe under its timeout, timing it. Never raises."""
     started = perf_counter()
@@ -185,17 +248,31 @@ def readiness_status(detail: dict[str, dict[str, Any]]) -> str:
 def health_router(
     checks: Iterable[HealthCheck] = (),
     *,
+    alerts: Iterable[HealthCheck] = (),
     liveness_path: str = "/health",
     readiness_path: str = "/ready",
+    alerts_path: str = "/health/alerts",
     is_live: Callable[[], bool] | None = None,
 ) -> Router:
-    """Build a ``Router`` exposing liveness + readiness endpoints.
+    """Build a ``Router`` exposing liveness, readiness and alert endpoints.
+
+    ``checks`` decide traffic: a critical failure makes the instance unready and
+    a load balancer takes it out. ``alerts`` decide nothing -- they are served on
+    their own path, evaluated only when that path is requested, and a failure
+    there never touches ``/ready``.
+
+    That separation exists because some conditions need a person rather than a
+    load balancer. A stuck backfill is the worked example: the application serves
+    correctly, so dropping the instance turns a data problem into an outage and
+    removes the workers that would have finished the pass. See
+    :func:`passes_check`.
 
     TODO: ``app.health(...)`` convenience wiring (``app.py`` owned by a
     concurrent fork); until then include the returned router yourself.
     """
     router = Router()
     check_list = tuple(checks)
+    alert_list = tuple(alerts)
 
     @router.get(liveness_path)
     async def _liveness(request: Request) -> JSONResponse:
@@ -212,5 +289,12 @@ def health_router(
             {"status": readiness_status(detail), "checks": detail},
             status=200 if serving else 503,
         )
+
+    @router.get(alerts_path)
+    async def _alerts(request: Request) -> JSONResponse:
+        _serving, detail = await evaluate(alert_list)
+        # Always 200: this endpoint reports, and the alerting system decides.
+        # A non-200 here would tempt somebody to point a probe at it.
+        return JSONResponse({"status": readiness_status(detail), "checks": detail})
 
     return router

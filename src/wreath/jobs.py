@@ -200,10 +200,27 @@ class JobRunner:
         self._channel = _channel(self._schema, self._name)
         # Runtime (set at start()):
         self._supervisor: Any = None
-        self._wake = asyncio.Event()
+        # One waiter per worker, not one shared Event. A shared Event is
+        # cleared by whichever worker parks next, so a `set()` from the doorbell
+        # could be consumed by a worker that was about to claim anyway while
+        # another worker -- already waiting -- slept the full poll interval with
+        # work sitting there. Each worker clears its own waiter immediately
+        # before claiming, so a wake that lands mid-claim is still remembered.
+        self._waiters: list[asyncio.Event] = []
         self._listen_conn: Any = None
         self._inflight: set[asyncio.Future[Any]] = set()
         self._worker_id = f"{self._name}"
+        #: Sweeps that raised. The sweeper suppresses everything so a transient
+        #: error cannot end the loop, which also meant a sweeper that had never
+        #: once succeeded -- a missing table, a revoked grant -- was
+        #: indistinguishable from one with nothing to reclaim.
+        self.sweep_errors = 0
+        #: Scheduler ticks that raised, for the same reason.
+        self.schedule_errors = 0
+        #: Jobs that exhausted their attempts. The one outcome nothing else
+        #: reports: a dead-lettered job is silent in the logs and invisible in
+        #: the queue depth, because it has left the queue.
+        self.dead_lettered = 0
         #: Failures *after* a job was claimed -- recording the outcome, not
         #: running the handler. Non-zero means jobs are being re-run on lease
         #: expiry rather than completing, which used to end a worker silently.
@@ -330,10 +347,18 @@ class JobRunner:
 
         async def run_shift(ctx: JobContext) -> None:
             stopping = self._supervisor.stopping if self._supervisor is not None else None
+            # Stamped before the work, so a shift that dies mid-chunk still
+            # leaves evidence that something was driving this pass -- otherwise
+            # a crashing shift and an absent scheduler look identical.
+            await self._record_drive_failure(walk, None)
             result = await walk.run_shift(self._db, stopping=stopping)
             if result.error is not None and result.stopped == "failed":
                 raise RuntimeError(f"pass {walk.name!r} chunk failed: {result.error}")
             ctx.report(0.0, f"pass {walk.name}: {result.rows} rows in {result.chunks} chunks")
+            if result.stopped == "blocked":
+                # Re-enqueuing a blocked pass would turn `halt` back into a
+                # retry loop, which is the silent skip halting exists to refuse.
+                return
             if result.should_continue or (result.chunks and not result.complete):
                 await self._enqueue_next_shift(task, walk)
 
@@ -379,8 +404,34 @@ class JobRunner:
                 await self._enqueue_next_shift(task, walk)
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - one pass must not strand the rest
+            except Exception as error:  # noqa: BLE001 - one pass must not strand the rest
                 self.pass_drive_errors += 1
+                # A counter is enough to know *something* is wrong; it is not
+                # enough to know *which* pass, and `wreath passes status` is
+                # where somebody looks. So the failure is written to the pass's
+                # own ledger row, which is the only place that survives this
+                # process and the only place the CLI reads.
+                await self._record_drive_failure(walk, error)
+            else:
+                await self._record_drive_failure(walk, None)
+
+    async def _record_drive_failure(self, walk: Any, error: BaseException | None) -> None:
+        """Stamp the ledger with this drive attempt, so a silent one is visible.
+
+        Best-effort by necessity: if the database is what failed, this cannot
+        record that it failed. The counter still moved, and the ledger's
+        ``driven_at`` going stale is itself the signal -- a pass nothing has
+        driven for five minutes reads as ``blocked`` whether or not the reason
+        was written.
+        """
+        with contextlib.suppress(Exception):
+            connection = await self._db.acquire(walk.workload)
+            try:
+                await walk.ledger.mark_driven(
+                    connection, error=None if error is None else repr(error)
+                )
+            finally:
+                await self._db.release(walk.workload, connection)
 
     # -- enqueue -------------------------------------------------------------
 
@@ -572,6 +623,27 @@ class JobRunner:
                 await asyncio.wait(pending, timeout=max(0.0, deadline - loop.time()))
         await self._release_listen()
 
+    async def purge(self, *, older_than: float) -> None:
+        """Delete finished rows older than ``older_than`` seconds.
+
+        Nothing calls this for you, for the same reason nothing purges
+        :mod:`wreath.store`: a background sweep duplicates across workers and
+        swallows its own failures. Run it from a scheduled job.
+
+        Only ``done`` and ``dead`` rows go: a ``dead`` one has exhausted its
+        attempts and is a record rather than work, and keeping either forever is
+        what makes `launch(key=...)` eventually raise :class:`JobVanished` --
+        the retention this table always assumed and never had.
+        """
+        if older_than <= 0:
+            raise ValueError("older_than must be positive")
+        await self._exec(
+            f"DELETE FROM {self._table} WHERE queue=$1 "
+            "AND state IN ('done', 'dead') "
+            "AND updated_at < now() - ($2 || ' seconds')::interval",
+            self._name, f"{float(older_than):.3f}",
+        )
+
     # -- loops ---------------------------------------------------------------
 
     async def _open_doorbell(self) -> bool:
@@ -669,18 +741,29 @@ class JobRunner:
         if connection is None:
             return
         async for _notification in connection.notifications():
-            self._wake.set()
+            self._wake_workers()
 
     async def _worker(self) -> None:
         stopping = self._supervisor.stopping
+        wake = self._new_waiter()
+        try:
+            await self._work(stopping, wake)
+        finally:
+            self._waiters.remove(wake)
+
+    async def _work(self, stopping: asyncio.Event, wake: asyncio.Event) -> None:
         while not stopping.is_set():
+            # Cleared *before* the claim: a doorbell that rings while this claim
+            # is in flight leaves the waiter set, so the park below returns at
+            # once instead of sleeping through work that has already arrived.
+            wake.clear()
             try:
                 claimed = await self._claim(self._batch)
             except Exception:  # noqa: BLE001 - a transient DB error must not kill the worker
-                await self._park()
+                await self._park(wake)
                 continue
             if not claimed:
-                await self._park()
+                await self._park(wake)
                 continue
             for job in claimed:
                 if stopping.is_set():
@@ -697,7 +780,7 @@ class JobRunner:
                     # process. The job stays leased and the sweeper reclaims it,
                     # which is the same path a crashed worker takes.
                     self.run_errors += 1
-                    await self._park()
+                    await self._park(wake)
 
     async def _run(self, job: _Claimed) -> None:
         handler = self._tasks.get(job.task)
@@ -730,6 +813,7 @@ class JobRunner:
                 "updated_at=now() WHERE id=$1 AND fence=$2",
                 job.id, job.fence, attempts, error[:2000],
             )
+            self.dead_lettered += 1
             self._report_terminal(job, "failed", error)
             return
         # A retry is not an ending. Reporting `failed` here would tell a watching
@@ -815,8 +899,12 @@ class JobRunner:
     async def _sweeper(self) -> None:
         stopping = self._supervisor.stopping
         while not stopping.is_set():
-            with contextlib.suppress(Exception):
+            try:
                 await self._reclaim_expired()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a transient error must not end the loop
+                self.sweep_errors += 1
             await _sleep_or_stop(stopping, self._lease)
 
     async def _reclaim_expired(self) -> None:
@@ -842,8 +930,12 @@ class JobRunner:
     async def _scheduler(self) -> None:
         stopping = self._supervisor.stopping
         while not stopping.is_set():
-            with contextlib.suppress(Exception):
+            try:
                 await self._tick_schedules()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - as in _sweeper
+                self.schedule_errors += 1
             # Wake near the next minute boundary; a coarse 30s tick is enough
             # because the per-minute dedup key makes double-fires harmless.
             await _sleep_or_stop(stopping, 30.0)
@@ -876,12 +968,22 @@ class JobRunner:
         finally:
             await self._db.release(self._workload, connection)
 
-    async def _park(self) -> None:
+    def _new_waiter(self) -> asyncio.Event:
+        """Register a waiter for one worker. See `_waiters`."""
+        wake = asyncio.Event()
+        self._waiters.append(wake)
+        return wake
+
+    def _wake_workers(self) -> None:
+        """Wake every parked worker. One doorbell, every waiter."""
+        for wake in tuple(self._waiters):
+            wake.set()
+
+    async def _park(self, wake: asyncio.Event) -> None:
         # Wait for a doorbell wake or the poll timeout, whichever comes first.
-        self._wake.clear()
         with contextlib.suppress(asyncio.TimeoutError):
             async with asyncio.timeout(self._poll):
-                await self._wake.wait()
+                await wake.wait()
 
 
 def _pass_task_name(name: str, tenant: str) -> str:

@@ -75,6 +75,53 @@ class Operation:
 
 
 @dataclass(frozen=True, slots=True)
+class SeriesMeasure:
+    """One named quantity on a calculated view.
+
+    The name is load-bearing in three places at once: it keys the series in the
+    envelope, it names the field in the generated TypeScript, and it is what a
+    ``fill=`` refers to. That is why measures are named rather than positional --
+    positional ones arrive in a component as ``value_0``.
+
+    ``fills`` says whether an absent bucket reads as a number or as ``null``,
+    which is the difference between ``number[]`` and ``(number | null)[]`` on the
+    other side. A count fills with zero; an average of no rows is undefined and
+    stays null, and a component that has to handle the gap should be made to.
+    """
+
+    name: str
+    kind: str
+    unit: str | None = None
+    fills: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class SeriesShape:
+    """A calculated view, typed for the client that will draw it.
+
+    In the IR for the same reason :class:`PermissionSet` is: the shape a chart
+    endpoint returns is decided by a declaration on the server, and a component
+    indexing ``number[][]`` by hand is a copy of that declaration which nothing
+    keeps honest.
+    """
+
+    name: str
+    #: ``"series"`` (a time axis) or ``"aggregate"`` (no time axis).
+    form: str
+    measures: tuple[SeriesMeasure, ...]
+    #: The bucket unit for a series -- ``"day"``, ``"month"``. ``None`` for an
+    #: aggregate, which has no time axis.
+    bucket: str | None = None
+    #: Whether ``.by(...)`` was declared: a grouped view returns several series
+    #: per measure, an ungrouped one returns exactly one.
+    grouped: bool = False
+    #: Whether the declaration carries a prior period, and by which bucket.
+    compares: str | None = None
+    #: Whether an annotation layer was declared.
+    events: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class PermissionSet:
     """The actions one resource type is authorized for, read off the routes.
 
@@ -94,6 +141,7 @@ class ApiModel:
     models: tuple[Model, ...] = ()
     operations: tuple[Operation, ...] = ()
     permissions: tuple[PermissionSet, ...] = ()
+    series: tuple[SeriesShape, ...] = ()
 
 
 # Reusable singletons for the common scalar shapes.
@@ -159,6 +207,8 @@ __all__ = [
     "Operation",
     "Parameter",
     "PermissionSet",
+    "SeriesMeasure",
+    "SeriesShape",
     "TypeKind",
     "TypeRef",
     "TypegenError",

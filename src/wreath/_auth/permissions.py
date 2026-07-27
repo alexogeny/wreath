@@ -47,6 +47,7 @@ from typing import Any
 from weakref import WeakKeyDictionary
 
 from .._livedoc import DEFAULT_KEEPALIVE, LiveDocument, change_stream
+from ..cache import BoundedCache
 from ..request import Request
 from ..response import JSONResponse, ProblemResponse, Response, SSEResponse
 from ..router import Router
@@ -163,9 +164,21 @@ def _entity(resource_type: str, identifier: str) -> Any:
 
 
 def _private(response: Response) -> Response:
-    # Per-principal by definition: a shared cache replaying this to the next
-    # caller would hand one user another's permissions.
+    """Mark a response as this principal's alone.
+
+    Per-principal by definition: a shared cache replaying it to the next caller
+    would hand one user another's permissions. The existing `cache-control` is
+    *replaced* rather than appended to -- two of them leaves a proxy reading the
+    first, which was whatever the handler happened to set -- and `Vary` names
+    the header the answer actually depends on, so a cache that ignores
+    `private` still keys on the caller.
+    """
+    response.headers[:] = [
+        header for header in response.headers
+        if header[0].lower() not in (b"cache-control", b"vary")
+    ]
     response.headers.append((b"cache-control", b"private, no-store"))
+    response.headers.append((b"vary", b"Authorization, Cookie"))
     return response
 
 
@@ -180,6 +193,43 @@ def _private_stream(response: SSEResponse) -> SSEResponse:
     ]
     response.headers.append((b"cache-control", b"private, no-cache, no-store"))
     return response
+
+
+def _etag_matches(header: str | None, tag: str) -> bool:
+    """Whether ``If-None-Match`` covers ``tag`` (RFC 9110 §13.1.2).
+
+    A list, `*`, and the weak `W/` prefix are all legal, and comparing the whole
+    header to one tag with `==` meant a client that sent two -- or a proxy that
+    added one -- refetched the manifest every time, which is the cost this
+    endpoint's ETag exists to avoid.
+    """
+    if not header:
+        return False
+    if header.strip() == "*":
+        return True
+    target = tag.removeprefix("W/")
+    return any(
+        candidate.strip().removeprefix("W/") == target for candidate in header.split(",")
+    )
+
+
+def _distinct_identifiers(identifiers: list[Any]) -> list[str]:
+    """The ids as strings, refusing a list that collapses.
+
+    Ids reach the policy engine as text, so `1` and `"1"` name one entity -- and
+    answering for 200 ids with 199 keys, silently, leaves the client to notice a
+    row it never got an answer for. Refused instead.
+    """
+    seen: dict[str, Any] = {}
+    for identifier in identifiers:
+        text = str(identifier)
+        if text in seen:
+            raise ValueError(
+                f"ids {seen[text]!r} and {identifier!r} are the same identifier once "
+                "stringified; send each row once"
+            )
+        seen[text] = identifier
+    return list(seen)
 
 
 def _principal_key(identity: Any) -> str:
@@ -321,7 +371,7 @@ def permissions_router(
         # policy set itself -- so a promotion or a deploy invalidates it and
         # nothing else does.
         tag = _manifest_etag(identity, authorizer, vocabulary)
-        if request.header("if-none-match") == tag:
+        if _etag_matches(request.header("if-none-match"), tag):
             response = Response(b"", status=304)
             response.headers.append((b"etag", tag.encode("ascii")))
             return _private(response)
@@ -438,9 +488,12 @@ def permissions_router(
             # endpoint refuses ids over.
             actions = tuple(dict.fromkeys(str(action) for action in actions))
 
+        try:
+            texts = _distinct_identifiers(identifiers)
+        except ValueError as error:
+            return _bad(str(error))
         permissions = {}
-        for identifier in identifiers:
-            text = str(identifier)
+        for text in texts:
             permissions[text] = await _allowed_actions(
                 request, authorizer, tuple(actions), _entity(resource_type, text)
             )
@@ -529,7 +582,12 @@ _INSTANCE_TOKENS: WeakKeyDictionary[Any, bytes] = WeakKeyDictionary()
 #: on every read, and :func:`_shared_fingerprint` is re-read on every stream
 #: keep-alive tick; that would tell every open stream the policies moved, every
 #: few seconds, forever.
-_PINNED_TOKENS: dict[int, tuple[Any, bytes]] = {}
+#:
+#: **Bounded**, because "one engine per instance, forever" is a leak in any
+#: process that builds engines repeatedly -- a reload loop, a test suite. An
+#: evicted engine simply gets a fresh token next time, which reads as "the
+#: policy set changed" and costs one refetch.
+_PINNED_TOKENS: BoundedCache = BoundedCache(max_entries=64)
 
 
 def _instance_token(engine: Any) -> bytes:
@@ -553,7 +611,7 @@ def _instance_token(engine: Any) -> bytes:
         pinned = _PINNED_TOKENS.get(id(engine))
         if pinned is None:
             pinned = (engine, token_bytes(16))
-            _PINNED_TOKENS[id(engine)] = pinned
+            _PINNED_TOKENS.set(id(engine), pinned)
         return pinned[1]
 
 

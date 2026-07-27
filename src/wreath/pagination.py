@@ -180,6 +180,13 @@ async def paginate(
 
     Pass ``total`` (an int or awaitable) when you already have an efficient count;
     otherwise a correctness-first fallback counts primary keys (see ``_count``).
+
+    **The count and the page are two statements.** Outside an explicit
+    transaction they see two snapshots, so a concurrent insert or delete can make
+    `total` disagree with `items` -- the page is right and the total is a moment
+    older, or the reverse. That is usually what a pager wants (a stale total
+    draws a stale last-page number and nothing more); wrap the call in
+    ``async with session.begin():`` when it is not.
     """
     if params.sort:
         query = apply_sort(query, params.sort, allow=allow_sort)

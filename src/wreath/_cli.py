@@ -464,7 +464,22 @@ def _add_passes_parser(commands: Any) -> None:
         "--schema", default=None, help="ledger schema (default: the job runner's)"
     )
     status.add_argument("--name", default=None, help="one pass by name")
+    status.add_argument(
+        "--holes", action="store_true",
+        help="list every dead-lettered chunk, with the statement that reproduces it",
+    )
     status.add_argument("--json", action="store_true", dest="as_json")
+
+    retry = actions.add_parser(
+        "retry",
+        help="requeue dead-lettered chunks, which is the only way to un-bar a gate",
+    )
+    retry.add_argument("target", help="application target as module:attribute")
+    retry.add_argument("--factory", action="store_true")
+    retry.add_argument("--database", default=None)
+    retry.add_argument("--schema", default=None)
+    retry.add_argument("--name", default=None, help="one pass by name")
+    retry.add_argument("--json", action="store_true", dest="as_json")
 
 
 def _add_doctor_parser(commands: Any) -> None:
@@ -1042,7 +1057,7 @@ def execute_typegen(namespace: argparse.Namespace) -> int:
 
 
 def execute_passes(namespace: argparse.Namespace) -> int:
-    """Read every driven pass's ledger row and print it."""
+    """Read every driven pass's ledger row and print it, or requeue its holes."""
     import asyncio
     import json as _json
 
@@ -1054,11 +1069,37 @@ def execute_passes(namespace: argparse.Namespace) -> int:
             "and no --database was given",
             exit_code=2,
         )
+    if getattr(namespace, "passes_action", "status") == "retry":
+        queued = asyncio.run(_retry_pass_holes(application, targets, name=namespace.name))
+        if namespace.as_json:
+            print(_json.dumps({"requeued": queued}, indent=2))
+            return 0
+        if not queued:
+            print("no dead-lettered chunks to requeue")
+            return 0
+        for name, count in sorted(queued.items()):
+            print(f"{name}: requeued {count} chunk(s)")
+        print(
+            "\nA hole clears when its chunk succeeds, not when it is queued -- "
+            "check `wreath passes status` again once a shift has run."
+        )
+        return 0
+
     rows = asyncio.run(_read_pass_ledgers(targets, name=namespace.name))
+    holes = (
+        asyncio.run(_read_pass_holes(targets, name=namespace.name))
+        if getattr(namespace, "holes", False)
+        else []
+    )
     if namespace.as_json:
-        print(_json.dumps({"passes": [row.as_dict() for row in rows]}, indent=2))
+        body: dict[str, Any] = {"passes": [row.as_dict() for row in rows]}
+        if getattr(namespace, "holes", False):
+            body["holes"] = [hole.as_dict() for hole in holes]
+        print(_json.dumps(body, indent=2))
         return 0
     _print_passes(rows)
+    if getattr(namespace, "holes", False):
+        _print_holes(holes)
     return 0
 
 
@@ -1097,25 +1138,110 @@ async def _read_pass_ledgers(
     return rows
 
 
+async def _read_pass_holes(
+    targets: list[tuple[Any, str]], *, name: str | None
+) -> list[Any]:
+    from .passes import read_holes
+
+    holes: list[Any] = []
+    for database, schema in targets:
+        await database.start()
+        try:
+            holes.extend(await read_holes(database, schema=schema, name=name))
+        finally:
+            await database.stop()
+    return holes
+
+
+async def _retry_pass_holes(
+    application: Any, targets: list[tuple[Any, str]], *, name: str | None
+) -> dict[str, int]:
+    """Requeue every hole, through the declarations the application holds.
+
+    Requeuing needs the pass itself rather than just its ledger: the unit goes
+    into the same ``pending`` array the walk reads, and only the declaration
+    knows the key it is encoded against.
+    """
+    queued: dict[str, int] = {}
+    databases = {id(database) for database, _schema in targets}
+    for runner in getattr(application, "_job_runners", {}).values():
+        if id(runner._db) not in databases:
+            continue
+        await runner._db.start()
+        try:
+            for _task, walk in getattr(runner, "_passes", ()):
+                if name is not None and walk.name != name:
+                    continue
+                count = await walk.retry(runner._db)
+                if count:
+                    queued[walk.name] = queued.get(walk.name, 0) + count
+        finally:
+            await runner._db.stop()
+    return queued
+
+
 def _print_passes(rows: list[Any]) -> None:
     if not rows:
         print("no passes have run yet")
         return
-    header = f"{'PASS':<32} {'PHASE':<9} {'UNITS':>8} {'ROWS':>12}  PACED"
+    header = f"{'PASS':<28} {'STATE':<8} {'PROGRESS':<18} {'ROWS':>11}  ETA"
     print(header)
     print("-" * len(header))
     for row in rows:
         label = row.name if not row.tenant else f"{row.name}@{row.tenant}"
         print(
-            f"{label[:32]:<32} {row.phase:<9} {row.units_done:>8} "
-            f"{row.rows_done:>12}  {row.paced_reason or '-'}"
+            f"{label[:28]:<28} {row.state:<8} {_progress_cell(row):<18} "
+            f"{row.rows_done:>11}  {_eta_cell(row)}"
         )
-        if row.last_advance is not None:
-            print(f"{'':<32} last advance {row.last_advance}")
-        if row.phase == "blocked" or row.last_error:
-            # The state hand-rolled backfills have no name for: nothing is
-            # driving it, and it will silently never finish.
-            print(f"{'':<32} {row.last_error or 'nothing is driving this pass'}")
+        if row.progress.state_reason:
+            print(f"{'':<28} {row.progress.state_reason}")
+        if row.last_error and row.last_error not in (row.progress.state_reason or ""):
+            # A chunk that failed and then recovered leaves this behind until the
+            # next advance clears it. Worth showing: it is the difference between
+            # a pass that is fine and one that is fine *for now*.
+            print(f"{'':<28} last chunk error: {row.last_error}")
+        if row.progress.eta_absent:
+            print(f"{'':<28} no ETA: {row.progress.eta_absent}")
+        if row.holes_open:
+            print(
+                f"{'':<28} {row.holes_open} dead-lettered chunk(s); the terminal "
+                "gate is barred until they clear -- `wreath passes retry`"
+            )
+        if row.pending:
+            print(f"{'':<28} {row.pending} unit(s) queued to be walked out of order")
+
+
+def _progress_cell(row: Any) -> str:
+    """``64% (estimated)`` -- never a percentage without where it came from."""
+    percent = row.progress.percent
+    if percent is None:
+        kind = row.progress.denominator_kind
+        return f"? ({kind})" if kind else "?"
+    return f"{percent:.1f}% ({row.progress.denominator_kind})"
+
+
+def _eta_cell(row: Any) -> str:
+    seconds = row.progress.eta_seconds
+    if seconds is None:
+        return "-"
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def _print_holes(holes: list[Any]) -> None:
+    print()
+    if not holes:
+        print("no dead-lettered chunks")
+        return
+    print(f"{len(holes)} dead-lettered chunk(s):")
+    for hole in holes:
+        label = hole.name if not hole.tenant else f"{hole.name}@{hole.tenant}"
+        print(f"\n  {label}  after {hole.attempts} attempt(s), at {hole.failed_at}")
+        print(f"    error: {hole.error}")
+        print(f"    reproduce: {hole.predicate}")
 
 
 def execute_inspect(namespace: argparse.Namespace) -> int:

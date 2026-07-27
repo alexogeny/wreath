@@ -153,3 +153,102 @@ async def _spine(database, start: str, end: str, unit: str) -> list:
         return [row[0] for row in rows]
     finally:
         await database.release("read", connection)
+
+
+class TestTheComparisonShift:
+    """`compare(previous=...)` shifts the local bounds, and only a real server
+    can confirm what `interval '1 month'` does to a naive local timestamp."""
+
+    async def test_a_month_shift_is_calendar_arithmetic_not_thirty_days(
+        self, database
+    ):
+        """"The same day last month" has to land on the same day number.
+
+        Subtracting a fixed number of days walks backwards through the calendar;
+        `interval '1 month'` on a naive local timestamp does not.
+        """
+        moment = datetime.datetime(2026, 3, 31, 12, tzinfo=datetime.UTC)
+        shifted = await fetchval(
+            database,
+            "SELECT (($1::timestamptz AT TIME ZONE $2) - interval '1 month') "
+            "AT TIME ZONE $2",
+            moment,
+            AUCKLAND,
+        )
+        local = shifted.astimezone(zone(AUCKLAND))
+        assert (local.month, local.day) == (2, 28), "clamped to February's last day"
+
+    async def test_the_shift_preserves_the_wall_clock_across_a_transition(
+        self, database
+    ):
+        """Shifting a local bound and converting back keeps the wall time and
+        moves the instant, which is what makes a comparison period comparable.
+
+        The other order — shifting the instant — keeps the instant's spacing and
+        moves the wall time by an hour, so every bucket after a transition is
+        compared against the wrong one.
+        """
+        # 2026-04-20 is after Auckland's April transition; one month earlier is
+        # before it, so the offset differs between the two.
+        moment = datetime.datetime(2026, 4, 19, 12, tzinfo=datetime.UTC)
+        shifted = await fetchval(
+            database,
+            "SELECT (($1::timestamptz AT TIME ZONE $2) - interval '1 month') "
+            "AT TIME ZONE $2",
+            moment,
+            AUCKLAND,
+        )
+        here = moment.astimezone(zone(AUCKLAND))
+        there = shifted.astimezone(zone(AUCKLAND))
+        assert (there.hour, there.minute) == (here.hour, here.minute)
+        assert there.utcoffset() != here.utcoffset(), "the offset really did change"
+
+    async def test_the_two_arms_may_be_different_lengths(self, database):
+        """March against February is 31 buckets against 28.
+
+        The envelope gives each period its own bucket run precisely because
+        this is true; a shared run would have to invent three buckets.
+        """
+        current = await _spine(database, "2026-03-01", "2026-04-01", "day")
+        previous = await _shifted_spine(database, "2026-03-01", "2026-04-01", "day")
+        assert len(current) == 31
+        assert len(previous) == 28
+
+
+class TestTheMarkerBucket:
+    async def test_a_marker_lands_in_the_bucket_that_contains_it(self, database):
+        """The bucket travels with the event, computed by the same `date_trunc`
+        in the same zone, so a marker cannot sit a column away from the bar it
+        describes."""
+        # 13:00 UTC on 4 April 2026 is 02:00 on the 5th in Auckland -- inside
+        # the ambiguous hour, and on the far side of local midnight from UTC.
+        moment = datetime.datetime(2026, 4, 4, 13, tzinfo=datetime.UTC)
+        bucket = await fetchval(
+            database,
+            "SELECT date_trunc('day', $1::timestamptz AT TIME ZONE $2) AT TIME ZONE $2",
+            moment,
+            AUCKLAND,
+        )
+        local = bucket.astimezone(zone(AUCKLAND))
+        assert (local.month, local.day, local.hour) == (4, 5, 0)
+        assert bucket <= moment, "a marker never precedes its own bucket"
+
+
+async def _shifted_spine(database, start: str, end: str, unit: str) -> list:
+    """The comparison arm exactly as ``_series.compile`` renders it."""
+    connection = await database.acquire("read")
+    try:
+        rows = await connection.fetch(
+            f"SELECT generate_series("
+            f"date_trunc('{unit}', (($1::timestamptz AT TIME ZONE $3) "
+            f"- interval '1 month')), "
+            f"date_trunc('{unit}', ((($2::timestamptz AT TIME ZONE $3) "
+            f"- interval '1 microsecond') - interval '1 month')), "
+            f"interval '1 {unit}') AT TIME ZONE $3 AS b",
+            datetime.datetime.fromisoformat(f"{start}T00:00:00+13:00"),
+            datetime.datetime.fromisoformat(f"{end}T00:00:00+13:00"),
+            AUCKLAND,
+        )
+        return [row[0] for row in rows]
+    finally:
+        await database.release("read", connection)

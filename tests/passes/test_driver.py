@@ -153,7 +153,9 @@ async def test_a_chunk_whose_work_fails_leaves_the_cursor_where_it_was(database,
     world.before = explode
     result = await walk.run(database, sleep=_nap)
 
-    assert result.stopped == "failed"
+    # A chunk that keeps failing exhausts its attempts and becomes a hole; the
+    # default policy halts there rather than walking past work it did not do.
+    assert result.stopped == "blocked"
     assert "the delete failed" in result.error
     # The cursor and the work commit together, so a failed chunk moves neither.
     status = await walk.status(database)
@@ -162,9 +164,7 @@ async def test_a_chunk_whose_work_fails_leaves_the_cursor_where_it_was(database,
     assert len(world.rows) == 13
 
 
-async def test_a_failed_chunk_is_retried_from_its_start_and_finishes_the_walk(
-    database, world
-):
+async def test_a_transient_chunk_failure_is_absorbed_inside_the_shift(database, world):
     walk = purge_pass()
     failures = {"left": 1}
 
@@ -174,16 +174,43 @@ async def test_a_failed_chunk_is_retried_from_its_start_and_finishes_the_walk(
             raise RuntimeError("transient")
 
     world.before = explode_once
-    first = await walk.run(database, sleep=_nap)
-    assert first.stopped == "failed"
+    result = await walk.run(database, sleep=_nap)
 
-    world.before = None
-    second = await walk.run(database, sleep=_nap)
-
+    # Per-chunk retry is the pass's own: a job retry would re-run the whole
+    # shift, and a lock wait that clears in fifty milliseconds does not deserve
+    # a trip through the queue.
+    assert result.complete is True
+    assert result.rows == 10
+    assert result.holes == 0
     # Nothing was lost and nothing was done twice: the retry starts from the
     # cursor, which never moved.
+    assert sorted(row["key"] for row in world.rows) == ["live0", "live1", "live2"]
+
+
+async def test_a_walk_resumes_from_the_cursor_after_the_shift_that_moved_it(
+    database, world
+):
+    # One chunk, then a shutdown at the boundary, then a fresh shift: the second
+    # one starts from the ledger rather than from the beginning.
+    walk = purge_pass()
+    stopping = asyncio.Event()
+
+    def stop_after_one(sql, args):
+        if sql.startswith("DELETE FROM replays"):
+            stopping.set()
+
+    world.before = stop_after_one
+    first = await walk.run_shift(database, stopping=stopping, sleep=_nap)
+    world.before = None
+    assert first.chunks == 1
+    assert first.stopped == "stopping"
+
+    after_first = await walk.status(database)
+    assert after_first.cursor is not None
+
+    second = await walk.run(database, sleep=_nap)
+
     assert second.complete is True
-    assert second.rows == 10
     assert sorted(row["key"] for row in world.rows) == ["live0", "live1", "live2"]
 
 
@@ -211,8 +238,6 @@ async def test_a_recovered_chunk_clears_the_recorded_error(database, world):
             raise RuntimeError("transient")
 
     world.before = explode_once
-    await walk.run(database, sleep=_nap)
-    world.before = None
     await walk.run(database, sleep=_nap)
 
     # A stale error beside a moving cursor is how a healthy pass looks broken.

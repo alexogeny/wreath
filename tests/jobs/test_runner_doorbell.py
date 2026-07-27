@@ -134,7 +134,7 @@ class RunningSupervisor:
 class CountingEvent(asyncio.Event):
     """An `asyncio.Event` that remembers how often it was set.
 
-    The parked workers clear `_wake` every time round their loop, so its
+    Each worker clears its own waiter every time round its loop, so the
     instantaneous state is a race. What the doorbell actually promises is that a
     notification *causes a wake*, which is an edge, not a level.
     """
@@ -200,14 +200,17 @@ async def test_a_reconnect_wakes_workers_again() -> None:
     database = FakeDatabase()
     runner, supervisor = await _started(database)
     try:
-        runner._wake = CountingEvent()
+        # Registered as one more waiter: the doorbell wakes every worker, so a
+        # counting waiter in the list sees each edge.
+        counter = CountingEvent()
+        runner._waiters.append(counter)
         database.live.drop()
         assert await _until(lambda: len(database.listeners) >= 2)
 
-        before = runner._wake.sets
+        before = counter.sets
         database.live.deliver()
 
-        assert await _until(lambda: runner._wake.sets > before), (
+        assert await _until(lambda: counter.sets > before), (
             "a notification on the reconnected connection did not wake the workers"
         )
     finally:

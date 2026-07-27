@@ -80,3 +80,14 @@ __all__ = [
     "UnloadedAttributeError",
     "UnloadedRelationshipError",
 ]
+
+
+class StaleDataError(ORMError):
+    """A write matched no row, so the object it came from is out of date.
+
+    Raised when an UPDATE or DELETE built from a loaded object affects zero
+    rows: another session deleted it, or changed the key it was found by. The
+    statement "succeeded" in the driver's terms, which is why this used to pass
+    unnoticed -- the caller's next read simply disagreed with what it thought it
+    had written.
+    """
