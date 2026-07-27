@@ -251,4 +251,15 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
 
 ## Current scope
 
-The first milestone is a small, correct ASGI core and a reproducible baseline. HTTP/2, production server hardening, validation, OpenAPI, dependency injection, and advanced middleware are roadmap items—not implied current features.
+Wreath ships HTTP/1.1, HTTP/2, and an optional HTTP/3 build; binding and
+validation; OpenAPI and typed client generation; dependencies; the middleware
+pipeline and its built-ins; the PostgreSQL driver, ORM, and migration stack;
+durable jobs and messaging; authentication and a built-in Cedar authorizer; and
+a native documentation site generator. Treat those as current features.
+
+**What is genuinely not shipped is listed in `docs/reference/roadmap.md`**, which
+is the single place that answer lives — the recording capture engine, isolated
+tenant session execution, and the rest. This section previously named HTTP/2,
+OpenAPI, dependencies, and advanced middleware as roadmap items long after all
+four had shipped, which is why the list now lives in one file that the docs gate
+reads rather than in prose here.

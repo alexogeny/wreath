@@ -147,7 +147,12 @@ def ts_type(node: tuple[Any, ...]) -> str:
         return " | ".join(ts_type(arg) for arg in args)
     if kind == "literal":
         return " | ".join(_ts_literal(value) for value in literals)
-    return "unknown"
+    raise ValueError(
+        f"no TypeScript type for TypeKind {kind!r}. A kind added to "
+        "`wreath.typegen.model.TypeKind` must be rendered here and in "
+        "`wreath.openapi._openapi_schema`; returning `unknown` instead would emit a "
+        "client that compiles and is wrong, and report success."
+    )
 
 
 def _property_key(wire_name: str) -> str:

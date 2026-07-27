@@ -27,6 +27,7 @@ nav = Nav(
         Page("Run it", "example/quickstart.md"),
         Page("A tour of the schema, in psql", "example/walkthrough.md"),
         Page("The read API", "example/read-api.md"),
+        Page("Uploads and ingest", "example/ingest.md"),
     ),
     Page("Performance", "perf/index.md"),
     Page("Under the hood", "internals/index.md"),

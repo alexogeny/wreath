@@ -15,6 +15,7 @@
 - [Camera-trap quickstart](example/quickstart.md): container, schema, migration artifact, deterministic seed, server, first request -- every command executed, real output pasted.
 - [Camera-trap walkthrough](example/walkthrough.md): the canonical example's schema toured in psql — local wall clocks, late data, partial indexes, and the free-text column chapter two recodes.
 - [Camera-trap read API](example/read-api.md): the canonical example's nine read routes -- nested routers, a local-date window bounded at bind time, declared queries, stable paging, and the species list the ORM invalidates.
+- [Camera-trap uploads and ingest](example/ingest.md): presigned upload where minting is authorised and the URL is not, a durable job that unpacks the card, and progress by poll or SSE. Also why the queue's tables are not in the migration artifact, and why the example generates no thumbnails.
 
 ## Coming from FastAPI, Pydantic, SQLModel, or Alembic
 
@@ -65,9 +66,9 @@ Read these first if you (or the code you are translating) use the FastAPI stack.
 
 - One page per public module under [reference/](reference/app.md), generated from the code.
 - [`wreath.migrations`](reference/migrations.md): metal-only readiness policy, configuration, and bounded fleet results. `resolve_fleet`/`TenantState` classify a whole tenant directory in one native call; `wreath.orm.TenantContext` binds a request's tenant schema/role transaction-locally (SET LOCAL search_path/ROLE) for isolated registries — tenant sessions require an explicit transaction.
-- [Telemetry](reference/telemetry.md), [Recording policies](reference/recording.md), [Replay and fault injection](reference/replay.md): the Native Flight Recorder surfaces (recording is policy types only; no capture engine yet).
+- [Telemetry](reference/telemetry.md), [Recording policies](reference/recording.md), [Replay and fault injection](reference/replay.md): the Native Flight Recorder. Capture ships — the native recorder arms, triggers, redacts, and writes `WFR1`; `wreath.recording` is the deny-by-default policy surface that decides what may be captured, not a placeholder.
 - `wreath replay to-test <target> <recording.wtr1>` turns a recorded request into a runnable pytest over `TestClient` — a characterisation test asserting what that request does today; chunked or truncated recordings are refused by name rather than guessed at.
-- [Reserved and in-progress surfaces](reference/roadmap.md): what genuinely isn't shipped — the migration DDL runner, the recording capture engine, isolated tenant session execution.
+- [Reserved and in-progress surfaces](reference/roadmap.md): what genuinely isn't shipped — tenant-*fleet* DDL execution (single-schema `apply` ships; applying one artifact across many tenant schemas under fleet locking does not), and the migration object types still emitted as `MANUAL`. The flight recorder's capture engine and tenant session execution are **not** on that list; both ship.
 
 ## For coding agents
 

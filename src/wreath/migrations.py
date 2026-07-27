@@ -771,10 +771,15 @@ def _registry_descriptor(registry: Any) -> bytes:
             reference = column.reference
             if reference is not None:
                 target = registry.spec_for(reference.model_type)
-                target_column = target.columns[reference.position - 1]
+                # `reference.column` already holds the target's name. Reading it
+                # back out of `target.columns` by position was self-consistent --
+                # that list is declaration-ordered, not catalog-ordered -- but it
+                # is the same positional assumption that made schema validation
+                # compare a `confkey` attnum against a declaration index, and the
+                # name needs no assumption at all.
                 foreign_name = (
                     f"f:{column.database_name}:{target.schema}:{target.table}:"
-                    f"{target_column.database_name}"
+                    f"{reference.column}"
                 )
                 # The name is the FK's identity (columns + target); the signature
                 # adds the referential actions so a changed ON DELETE/UPDATE or

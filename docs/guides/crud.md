@@ -44,9 +44,13 @@ error's message carries table names and constraint identifiers.
 
 ### Naming what may leave
 
-`expose` is the escape hatch on a deny-list, and a deny-list matches names that
-*look* like secrets — `dob`, `iban`, `recovery_answer`, and `pw` do not. When the
-model holds anything of that shape, name the columns instead:
+`expose` is the escape hatch on a deny-list, and **a deny-list over column names
+is a backstop, not a security boundary.** It matches names that *look* like
+secrets, so the column nobody thought about is withheld rather than published.
+It cannot match `iban`, `date_of_birth`, `tax_id`, or `passport_number` — and
+widening the pattern until it does would start withholding ordinary columns
+instead, which fails in the other direction. When the model holds anything of
+that shape, name the columns instead:
 
 ```python
 crud_router(Patient, open_session, fields=("id", "name"))   # only these
@@ -55,12 +59,19 @@ crud_router(Patient, open_session, fields=("id", "name"))   # only these
 `fields` is an allow-list: it survives somebody adding a column, which is the
 case the deny-list cannot cover. Mutually exclusive with `expose`.
 
+Treat the deny-list as insurance against oversight and `fields` as the decision.
+Reviewing a `crud_router` call means reading its `fields`; if there is no
+`fields`, the review question is what the model may hold next year, not what it
+holds today.
+
 
 ## Secrets are hidden and unwritable by default
 
-Any column whose name looks like a secret — `password`, `*_hash`, `token`,
-`secret`, `salt`, `api_key`, `ssn`, and friends — is **excluded from responses and
-rejected from input**, automatically:
+Any column whose name looks like a secret — `password`, `passcode`, `*_hash`,
+`token`, `secret`, `salt`, `api_key`, `signing_key`, `pin`, `cvc`, `ssn`,
+`account_number`, `recovery_code`, and friends — is **excluded from responses and
+rejected from input**, automatically. `public_key` is deliberately not on that
+list, being public by definition:
 
 ```python
 class Account(Model, table="accounts"):

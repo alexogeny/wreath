@@ -87,35 +87,6 @@ VOCABULARY: dict[str, str] = {
 }
 
 
-#: Real defects the floor found on the day it was written, parked so the gate
-#: could be turned on immediately rather than after nine prose fixes -- each one
-#: needs an answer about what the docs *meant*, which is a separate judgement
-#: from building the check. Every entry is a page whose Python is wrong today.
-#:
-#: This is a ratchet, not a parking lot: `tests/test_docs_codeblocks.py` pins the
-#: total, so it can shrink and never grow. A new defect on a listed page still
-#: fails the build, because the match is on the message, not the page.
-#:
-#: Deliberately *not* spelled as a `no-check` mark in the markdown. A mark says
-#: "this block is not meant to be checked"; these blocks are meant to be checked
-#: and are currently failing, which is a different fact and belongs in code where
-#: it is counted.
-#: Paths are relative to the docs root, matched as a suffix so a caller may pass
-#: either `guides/pagination.md` (what the site config holds) or the full path.
-KNOWN_DEFECTS: tuple[tuple[str, str], ...] = (
-    ("cookbook/recipes/paginate-a-list.md", "Depends inside Annotated"),
-    ("guides/pagination.md", "Depends inside Annotated"),
-    ("guides/pagination.md", "Request has no attribute `app`"),
-    ("cookbook/recipes/paginate-a-list.md", "carry binding markers"),
-    ("guides/pagination.md", "carry binding markers"),
-    ("guides/calculated-views.md", "Request has no attribute `zone`"),
-    ("guides/graphql.md", "Wreath has no attribute `authorizer`"),
-    # Held open by the camera-trap example build as this lands; the fence needs
-    # a `no-check` reason and that file is another author's right now.
-    ("example/read-api.md", "does not parse"),
-)
-
-
 @dataclass(frozen=True, slots=True)
 class Finding:
     """One defect in one block, addressed well enough to fix without hunting."""
@@ -687,15 +658,7 @@ def check_page(text: str, page: str = "") -> tuple[list[Finding], Coverage]:
                 )
             findings.extend(found)
         _bind_block(tree, env)
-    return [f for f in findings if not _known(f)], stats
-
-
-def _known(finding: Finding) -> bool:
-    """Whether this exact defect is on the shrink-only parked list."""
-    return any(
-        finding.page.endswith(page) and snippet in finding.message
-        for page, snippet in KNOWN_DEFECTS
-    )
+    return findings, stats
 
 
 def coverage(pages: dict[str, str]) -> Coverage:

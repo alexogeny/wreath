@@ -505,6 +505,24 @@ def _now() -> float:
     return time.time()
 
 
+def _checked_secret(url_secret: object) -> bytes | None:
+    """Refuse a non-`bytes` HMAC key where it is accepted, not where it is used.
+
+    `Wreath.objects()` takes `**options`, so an annotation alone does not stop a
+    `str` reaching here. Left unchecked it survives construction and raises from
+    inside `hmac.new` on the first `url()` call, naming neither the option nor
+    the registration that supplied it.
+
+    Raises:
+        TypeError: `url_secret` is neither `None` nor a bytes-like object.
+    """
+    if url_secret is None or isinstance(url_secret, bytes | bytearray | memoryview):
+        return None if url_secret is None else bytes(url_secret)
+    kind = type(url_secret).__name__
+    hint = " -- encode it, e.g. url_secret=secret.encode()" if kind == "str" else ""
+    raise TypeError(f"url_secret must be bytes, not {kind}{hint}")
+
+
 def _sign_local(secret: bytes, method: str, key: str, deadline: int) -> str:
     """HMAC over the method, the key, and the **absolute** expiry timestamp."""
     msg = f"{method.upper()}\n{key}\n{deadline}".encode()
@@ -536,7 +554,7 @@ class MemoryObjectStore:
 
     def __init__(self, *, url_secret: bytes | None = None) -> None:
         self._objects: dict[str, tuple[bytes, str | None]] = {}
-        self._secret = url_secret or os.urandom(32)
+        self._secret = _checked_secret(url_secret) or os.urandom(32)
 
     async def read(self, key: str) -> bytes:
         """The whole object as bytes.
@@ -744,13 +762,17 @@ class LocalObjectStore:
     """
 
     def __init__(self, root: str | os.PathLike[str], *, url_secret: bytes | None = None) -> None:
+        # Checked before the root is opened: a refusal after `open_root` would
+        # leak the descriptor, since the half-built store is discarded and its
+        # `close` never runs.
+        secret = _checked_secret(url_secret)
         self._root = os.fspath(root)
         os.makedirs(self._root, exist_ok=True)
         # Local imports keep this module import-clean for standalone zip/sigv4 testing.
         from ._fsguard import open_root
 
         self._root_fd = open_root(self._root)
-        self._secret = url_secret or os.urandom(32)
+        self._secret = secret or os.urandom(32)
 
     def close(self) -> None:
         """Release the root descriptor. Safe to call more than once.

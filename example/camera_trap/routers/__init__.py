@@ -19,7 +19,7 @@ Later stages add the review console and the admin surface to this same list.
 
 from __future__ import annotations
 
-from . import admin
+from . import admin, uploads
 from .reserves import reserves
 from .session import session
 from .sightings import sightings
@@ -28,8 +28,9 @@ from .species import species
 #: Included in this order by `camera_trap.app.build`.
 ROUTERS = (reserves, sightings, species, session)
 
-#: `admin` is a module rather than a router: its two CRUD surfaces are
-#: *generated* from the models, and generating them needs a session opener that
-#: only exists once the application has an ORM registry. `admin.mount(app, ...)`
-#: is called from `build` after that point.
-__all__ = ["ROUTERS", "admin", "reserves", "session", "sightings", "species"]
+#: `admin` and `uploads` are modules rather than routers, for the same reason:
+#: their routes need something that does not exist until the application has
+#: been assembled. `admin` needs a session opener, which needs the ORM registry;
+#: `uploads` needs the object store and the job runner. Both are mounted from
+#: `build` after that point, by `mount(app, ...)`.
+__all__ = ["ROUTERS", "admin", "reserves", "session", "sightings", "species", "uploads"]

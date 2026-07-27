@@ -28,11 +28,13 @@ from wreath.auth import SessionIdentityBackend
 from wreath.authorization import CedarAuthorizer, permissions_router
 from wreath.middleware import SessionMiddleware
 from wreath.orm import Session
+from wreath.progress import ProgressRegistry
 
+from . import tasks
 from .config import SETTINGS
-from .models import MODELS
+from .models import MODELS, SCHEMA
 from .policies import ENGINE
-from .routers import ROUTERS, admin
+from .routers import ROUTERS, admin, uploads
 
 
 def dsn() -> str:
@@ -103,6 +105,36 @@ def build(*, validate_schema: str = "error") -> Wreath:
         return Session(registry, "write")
 
     admin.mount(application, open_session)
+
+    # --- bytes, and the work that follows them -------------------------------
+    #
+    # The store is registered on the application so its root is opened at
+    # registration and closed on shutdown -- including when startup fails part
+    # way, which is the case a `finally` in this function would miss.
+    #
+    # `url_secret` is bytes. `app.objects` takes `**options: Any`, so a `str`
+    # here is not refused at registration; it flows through to the first
+    # `store.url(...)` call and raises `TypeError` from inside `hmac.new`,
+    # which names neither the option nor this line. Encoding at the call site
+    # is the whole fix, and the reason it is worth a comment is that nothing
+    # else would have told us.
+    store = application.objects(
+        "media",
+        backend="local",
+        root=SETTINGS.media_root,
+        url_secret=SETTINGS.media_secret().encode(),
+    )
+
+    # A progress registry with no bus: this example runs one process, and
+    # `ProgressRegistry` says plainly that the busless form is the right default
+    # for a single worker. Handing it the bus is the one change needed to make
+    # an ingest launched on one worker watchable from another.
+    progress = ProgressRegistry()
+    runner = application.jobs(
+        tasks.QUEUE, database="main", progress=progress, schema=SCHEMA
+    )
+    tasks.register(runner, registry, store)
+    uploads.mount(application, store, runner)
     return application
 
 

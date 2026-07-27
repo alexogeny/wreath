@@ -18,6 +18,12 @@ what the application answers:
   cleared by any write to the table, so this is the backstop rather than the
   mechanism.
 
+Four more are deployment facts rather than behaviour: ``CAMERA_TRAP_SESSION_SECRET``
+and ``CAMERA_TRAP_SESSION_INSECURE`` for the cookie, and
+``CAMERA_TRAP_MEDIA_ROOT`` and ``CAMERA_TRAP_MEDIA_SECRET`` for the object store
+that holds uploaded cards. The two secrets are separate keys on purpose; see
+``DEVELOPMENT_MEDIA_SECRET``.
+
 **Read at import, deliberately.** Two of these are baked into decorators — a
 ``Query(maximum=…)`` bound and a ``@cached(ttl=…)`` — so they have to be known
 when the module defining the route is imported. Setting the variable afterwards
@@ -137,10 +143,14 @@ class Settings:
     session_secure: bool
 
     #: Where uploaded card archives and the images unpacked out of them live.
-    media_root: Path
+    #:
+    #: Defaulted on the field, unlike `dsn`, because there is a right answer
+    #: that needs no operator opinion: a directory beside the package. Guessing
+    #: a database is dangerous; guessing a scratch directory is not.
+    media_root: Path = DEFAULT_MEDIA_ROOT
 
     #: `None` when unset, like `session_key`, and for the same reason.
-    media_key: str | None
+    media_key: str | None = None
 
     @classmethod
     def from_env(cls) -> Settings:

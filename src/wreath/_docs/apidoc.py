@@ -35,14 +35,6 @@ _REST_ROLE = re.compile(r":(?:mod|class|func|meth|attr|exc|data|obj|ref|term|doc
 _REST_BLOCK = re.compile(r"(?<!:)::\s*$", re.M)
 _FENCE = re.compile(r"^```.*?^```", re.M | re.S)
 
-#: Modules whose docstrings still carry reST, exempted so the gate can be turned
-#: on now rather than after every last one is converted. Each entry is a module
-#: another agent holds open as this is written, which is the only reason it is
-#: here — `tests/test_docs_ssg.py` pins this tuple, so it can shrink and never
-#: grow. Delete an entry the moment its module is converted.
-REST_PENDING = ("wreath.postgres",)
-
-
 def has_directives(source: str) -> bool:
     return any(_DIRECTIVE.match(line) for line in source.splitlines())
 
@@ -111,7 +103,7 @@ def expand(source: str, page: str = "", sink: list[str] | None = None) -> str:
                 sink.append(f"{where}::: {path} could not be rendered: {error}")
             continue
         out.append(rendered)
-        if sink is not None and not _rest_pending(path):
+        if sink is not None:
             found = sorted(set(rest_markup(rendered)))
             if found:
                 where = f"{page}: " if page else ""
@@ -121,11 +113,6 @@ def expand(source: str, page: str = "", sink: list[str] | None = None) -> str:
                     " -- wreath docstrings use single backticks"
                 )
     return "\n".join(out)
-
-
-def _rest_pending(path: str) -> bool:
-    """Whether *path* names a module still exempt from the reST gate."""
-    return any(path == mod or path.startswith(f"{mod}.") for mod in REST_PENDING)
 
 
 def _pin_anchor(markdown: str, path: str) -> str:

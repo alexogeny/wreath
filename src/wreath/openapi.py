@@ -65,7 +65,12 @@ def _openapi_schema(ref: TypeRef) -> dict[str, Any]:
         return {"anyOf": [_openapi_schema(arg) for arg in ref.arguments]}
     if ref.kind == "literal":
         return {"enum": list(ref.literals)}
-    return {}
+    raise ValueError(
+        f"no OpenAPI schema for TypeKind {ref.kind!r}. A kind added to "
+        "`wreath.typegen.model.TypeKind` must be rendered here and in "
+        "`wreath._pure.typegen.ts_type`; returning a default instead would emit a "
+        "silently wrong document and a silently wrong client, and report success."
+    )
 
 
 def _component_schema(model: Model) -> dict[str, Any]:
@@ -211,8 +216,15 @@ def generate_openapi(
 # so the three can never drift. Every user-authored string is escaped; the only
 # `Markup` (unescaped) fragments are framework-generated.
 #
-# TODO: de-dup these tokens with `_devtools/bench_report.py::_STYLE` -- copied
-# here to keep this subsystem within its file boundary.
+# These tokens look like `_devtools/bench_report.py::_STYLE` and are not it. The
+# two stylesheets share **no** line, and of the eight custom-property names they
+# have in common, seven carry different values (`--paper` #0E141B vs #0D1116,
+# `--ink` #E7ECF1 vs #E6EAF0, and so on); each also declares tokens the other
+# does not. They are two palettes that were forked, not one copied twice, so
+# extracting a shared block would mean reconciling seven colours and changing
+# how one of the two pages renders -- a visual decision, not a de-duplication.
+# A stale "TODO: de-dup these" lived here and prompted exactly that merge; it is
+# recorded as measured instead.
 _DOCS_STYLE = """
 :root{--paper:#F6F7F9;--raise:#fff;--ink:#0E141B;--muted:#5A6672;--rule:#DDE2E8;
 --brass:#8A6416;--good:#0B6E4F;--bad:#A8341A;--accent:#00838F}

@@ -36,6 +36,12 @@ Findings:
   ASan/UBSan. A file missing here is not a broken build: it is C that the
   sanitizer suites silently do not cover, which is the worst way to be wrong
   about memory safety.
+* `MAP009` -- a map cites a path `.gitignore` excludes. This is the one that
+  hides best: the file is on disk, every other check resolves it, and the map is
+  wrong only for someone who clones the repository. `.gitignore` excluded
+  `docs/decisions/` while the manifest cited twenty ADRs from it, so a fresh
+  checkout had none of them, and `MAP002` -- which asks only whether the path
+  exists -- passed on every developer machine. Existence is not availability.
 
 Run it with `uv run wreath-map-lint`; `0` means clean.
 """
@@ -45,7 +51,9 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 from .native_lint import repo_root
@@ -108,6 +116,31 @@ def _is_repo_path(text: str) -> bool:
     return not any(char in text for char in "*<> \t|")
 
 
+@cache
+def _is_ignored(root: Path, cited: str) -> bool:
+    """True when `.gitignore` excludes `cited`, so a clone would not have it.
+
+    *Ignored*, deliberately, rather than *untracked*. An untracked file is
+    ordinary uncommitted work and will be in the next commit; an ignored one
+    never can be, so a map citing it is wrong for everyone but the machine it
+    was written on. Flagging untracked paths would fire on every new file and
+    get the rule turned off, which is how the drift returns.
+
+    Failure is silence. Outside a checkout, or with no git on `PATH`, whether a
+    path is ignored is unknown -- and a lint that fires on everything when it
+    cannot tell is worse than one that stays quiet.
+    """
+    try:
+        result = subprocess.run(
+            ("git", "-C", str(root), "check-ignore", "-q", "--", cited.rstrip("/")),
+            capture_output=True, check=False, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    # 0 = ignored, 1 = not ignored, 128 = not a repository or git unavailable.
+    return result.returncode == 0
+
+
 def _public_modules(root: Path) -> list[str]:
     """Every public surface under `src/wreath`, module or package."""
     package = root / "src" / "wreath"
@@ -158,6 +191,11 @@ def check_manifest(root: Path) -> list[Finding]:
     for where, value in cited:
         if not (root / value).exists():
             findings.append(Finding("MAP002", MANIFEST, f"{where}: no such path {value!r}"))
+        elif _is_ignored(root, value):
+            findings.append(
+                Finding("MAP009", MANIFEST, f"{where}: {value!r} is excluded by .gitignore;"
+                        " a fresh clone would not have it")
+            )
 
     for module in _public_modules(root):
         if module not in covered:
@@ -183,6 +221,11 @@ def check_prose(root: Path, relative: str) -> list[Finding]:
         seen.add(cited)
         if not (root / cited.rstrip("/")).exists():
             findings.append(Finding("MAP005", relative, f"cites {cited!r}, which does not exist"))
+        elif _is_ignored(root, cited):
+            findings.append(
+                Finding("MAP009", relative, f"cites {cited!r}, which .gitignore excludes;"
+                        " a fresh clone would not have it")
+            )
     return findings
 
 

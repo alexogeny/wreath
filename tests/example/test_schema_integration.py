@@ -24,6 +24,7 @@ import pytest
 from _camera_trap import build_schema, drop_schema, statements
 from camera_trap.models import SCHEMA
 from camera_trap.seed import build_rows, seed
+from camera_trap.tasks import QUEUE_TABLES
 
 #: No ``pytest.mark.asyncio`` here: ``asyncio_mode = "auto"`` already marks the
 #: async tests, and a module-level mark also lands on the two synchronous ones,
@@ -93,16 +94,45 @@ def test_the_artifact_emits_its_statements_in_a_usable_order() -> None:
 
 @skip_without_database
 async def test_the_artifact_builds_the_whole_schema(seeded) -> None:
-    """Nine tables, and the partial indexes survived into the catalog."""
-    tables = await seeded.fetchval(
-        "SELECT count(*) FROM pg_tables WHERE schemaname = $1::text", SCHEMA
+    """Nine model tables plus the durable queue, and the partial indexes survived.
+
+    The tenth table is `ingest_jobs`, and counting it separately is the point.
+    It does **not** come from the migration artifact: `wreath migrations
+    generate` derives that from the ORM models, and the job queue is not one --
+    it is described by `JobRunner.schema_sql()` and applied alongside. So this
+    assertion is really two, and splitting them is what stops a future artifact
+    losing a model table while the queue keeps the total right.
+    """
+    # One placeholder per value rather than `= ANY($1)`: the driver refuses to
+    # bind a list, because a sequence has no inferable element type. Its own
+    # error says to write it this way. `QUEUE_TABLES` is one name today, and
+    # the assertion below is what fails loudly if that stops being true rather
+    # than letting this query quietly check the wrong thing.
+    assert len(QUEUE_TABLES) == 1, "this query binds exactly one queue table name"
+    (queue_table,) = QUEUE_TABLES
+
+    model_tables = await seeded.fetchval(
+        "SELECT count(*) FROM pg_tables "
+        "WHERE schemaname = $1::text AND tablename <> $2::text",
+        SCHEMA,
+        queue_table,
     )
-    assert tables == 9
+    assert model_tables == 9
+    queue_tables = await seeded.fetchval(
+        "SELECT count(*) FROM pg_tables "
+        "WHERE schemaname = $1::text AND tablename = $2::text",
+        SCHEMA,
+        queue_table,
+    )
+    assert queue_tables == 1, "the durable queue's table was never applied"
     partial = await seeded.fetchval(
         "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE n.nspname = $1::text AND i.indpred IS NOT NULL",
+        "JOIN pg_class t ON t.oid = i.indrelid "
+        "WHERE n.nspname = $1::text AND i.indpred IS NOT NULL "
+        "AND t.relname <> $2::text",
         SCHEMA,
+        queue_table,
     )
     assert partial == 5, "the five declared partial indexes are not in the catalog"
 
@@ -114,12 +144,19 @@ async def test_a_partial_index_covers_its_own_predicate(seeded) -> None:
     If these drift apart, ``wreath migrations detect`` reports a change on every
     run forever, which is the failure partial-index support was built to avoid.
     """
+    # Restricted to the ORM's own tables. The durable queue brings a partial
+    # index of its own (`jobs_dedup_idx`, `WHERE dedup_key IS NOT NULL`), and
+    # it is not one of the five this test is about — it is `JobRunner`'s, and
+    # wreath tests it where it is declared.
     predicates = await seeded.fetch(
         "SELECT pg_get_expr(i.indpred, i.indrelid) FROM pg_index i "
         "JOIN pg_class c ON c.oid = i.indexrelid "
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE n.nspname = $1::text AND i.indpred IS NOT NULL",
+        "JOIN pg_class t ON t.oid = i.indrelid "
+        "WHERE n.nspname = $1::text AND i.indpred IS NOT NULL "
+        "AND t.relname <> $2::text",
         SCHEMA,
+        QUEUE_TABLES[0],
     )
     rendered = sorted(row[0] for row in predicates)
     assert rendered == [

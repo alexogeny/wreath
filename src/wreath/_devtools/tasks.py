@@ -377,6 +377,12 @@ _PYTEST_MAX_WORKERS = 6
 #: The gates a change has to pass, in the order that fails cheapest first.
 _CHECKS: tuple[tuple[str, list[str]], ...] = (
     ("map-lint", [sys.executable, "-m", "wreath._devtools.map_lint"]),
+    ("roadmap-lint", [sys.executable, "-m", "wreath._devtools.roadmap_lint"]),
+    # `wreath-build-lint` is deliberately absent: it reports the stale
+    # `_http3` artifact today, and a gate that fails on arrival is a gate
+    # somebody appends `|| true` to. It joins this list when it reaches zero,
+    # which needs the rebuild blocked on `pkg-config`.
+    ("sql-lint", [sys.executable, "-m", "wreath._devtools.sql_lint"]),
     ("ruff", [sys.executable, "-m", "ruff", "check", "."]),
     ("ty", [sys.executable, "-m", "ty", "check"]),
     ("pytest", _pytest_command()),

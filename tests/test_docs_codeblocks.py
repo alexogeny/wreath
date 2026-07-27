@@ -193,47 +193,19 @@ def test_the_floor_still_resolves_most_of_the_corpus() -> None:
     )
 
 
-#: The parked real defects, pinned so the list shrinks and never grows. Raising
-#: this number requires deciding that a broken page may stay broken, which is a
-#: choice someone should have to make explicitly.
-MAXIMUM_KNOWN_DEFECTS = 8
+def test_there_is_no_parked_defect_list() -> None:
+    """The floor has no waiver, so a finding is a failure with nowhere to go.
 
-
-def test_the_parked_defect_list_only_shrinks() -> None:
-    assert len(codeblocks.KNOWN_DEFECTS) <= MAXIMUM_KNOWN_DEFECTS, (
-        "a new entry was added to KNOWN_DEFECTS; park a defect only with a "
-        "deliberate decision, and lower MAXIMUM_KNOWN_DEFECTS as they are fixed"
-    )
-
-
-def test_every_parked_defect_still_exists() -> None:
-    """A stale entry is a waiver for a bug that is gone -- delete it.
-
-    Without this the list becomes exactly what it was built to avoid: a set of
-    exemptions nobody rechecks, quietly excusing defects nobody has.
+    `KNOWN_DEFECTS` held the eight real defects the floor found on the day it
+    landed, parked because each needed a decision about what the page *meant*.
+    All eight are fixed, so the list and its filter are gone rather than kept at
+    zero: an empty waiver still reads as permission, and the next author with an
+    awkward page finds a mechanism instead of a decision. A block that genuinely
+    should not be checked says so at the fence, with a reason, where a reviewer
+    reads it.
     """
-    corpus = _corpus()
-    unmatched = []
-    for target, snippet in codeblocks.KNOWN_DEFECTS:
-        text = next((t for p, t in corpus.items() if p.endswith(target)), None)
-        if text is None:
-            unmatched.append(f"{target} (page not found)")
-            continue
-        findings, _ = codeblocks.check_page(text, target)
-        # `check_page` filters known defects, so re-check against the raw rules
-        # by asking whether removing this entry would surface anything.
-        without = tuple(
-            e for e in codeblocks.KNOWN_DEFECTS if e != (target, snippet)
-        )
-        original = codeblocks.KNOWN_DEFECTS
-        try:
-            codeblocks.KNOWN_DEFECTS = without  # type: ignore[misc]
-            findings, _ = codeblocks.check_page(text, target)
-        finally:
-            codeblocks.KNOWN_DEFECTS = original  # type: ignore[misc]
-        if not any(snippet in f.message for f in findings):
-            unmatched.append(f"{target}: {snippet!r}")
-    assert not unmatched, f"KNOWN_DEFECTS entries that no longer match: {unmatched}"
+    assert not hasattr(codeblocks, "KNOWN_DEFECTS")
+    assert not hasattr(codeblocks, "_known")
 
 
 def test_the_published_corpus_has_no_unparked_findings() -> None:

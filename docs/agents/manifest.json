@@ -77,9 +77,8 @@
         "tests/_routing_impls.py"
       ],
       "decisions": [
-        "docs/decisions/0014-composable-router-inheritance.md",
-        "docs/decisions/0015-protected-decision-tree-pruning.md",
-        "docs/decisions/0017-single-pass-route-classification-with-global-pipeline-hooks.md"
+        "docs/decisions/0011-bitset-routing-is-the-default.md",
+        "docs/decisions/0004-the-public-api-is-literal.md"
       ]
     },
     {
@@ -122,7 +121,9 @@
         "tests/test_native_response_regressions.py"
       ],
       "decisions": [
-        "docs/decisions/0020-json-object-key-cache-ownership.md"
+        "docs/decisions/0007-native-code-owns-no-process-global-state.md",
+        "docs/decisions/0009-rfc-9457-problem-json.md",
+        "docs/decisions/0010-one-shot-response-extension.md"
       ]
     },
     {
@@ -154,7 +155,8 @@
         "tests/test_webhooks_postgres.py"
       ],
       "decisions": [
-        "docs/decisions/0018-keep-webhook-replay-and-signature-base-construction-in-python.md"
+        "docs/decisions/0002-no-mandatory-runtime-dependencies.md",
+        "docs/decisions/0019-refuse-rather-than-half-wire.md"
       ]
     },
     {
@@ -224,7 +226,7 @@
         "tests/test_server_env.py"
       ],
       "decisions": [
-        "docs/decisions/0016-environment-and-problem-response-defaults.md"
+        "docs/decisions/0009-rfc-9457-problem-json.md"
       ]
     },
     {
@@ -271,9 +273,8 @@
         "tests/test_store.py"
       ],
       "decisions": [
-        "docs/decisions/0009-middleware-fusion-execution-model.md",
-        "docs/decisions/0018-use-signed-double-submit-csrf-tokens.md",
-        "docs/decisions/0019-use-cpython-zlib-instead-of-shipping-direct-zlib-extension.md"
+        "docs/decisions/0002-no-mandatory-runtime-dependencies.md",
+        "docs/decisions/0019-refuse-rather-than-half-wire.md"
       ],
       "policy": "Hooks are fused into a linear tape; global middleware (`global_scope = True`) runs around routing and every response, including misses and error responses, so its `after` still runs when a handler raises. Idempotency is *response replay*, not the effect-once guarantee: `IdempotencyMiddleware`'s claim must be atomic (`MemoryIdempotencyStore` is sync between read and write; `PostgresIdempotencyStore` is one INSERT ... ON CONFLICT ... RETURNING, where a returned row *is* the claim -- no owner column). The default store is per-worker, so the durable guarantee has to come from a unique index on the key (`jobs.enqueue(key=...)`, a unique column); design so that losing the store costs work, never correctness. `docs/cookbook/recipes/exactly-once.md` and `tests/test_exactly_once.py` hold that composition. Rate limiting has two shapes for one reason: `request.identity` is set during route authorization, so a limiter keyed on the principal cannot be a global hook. `RateLimitMiddleware` stays global and keyed on the address (ingress: 404 floods, login floods) and *raises at construction* if handed `principal_key`, because degrading silently to one shared bucket is a production incident. `TieredRateLimitMiddleware` is route middleware (`global_scope = False`), keyed on the principal, with one store per tier so a promotion gets a full allowance; the tier comes from the caller's roles -- the same roles Cedar authorizes with -- and the most generous match wins. The claim, the lazy statement preparation, the `clock_timestamp()` clock and the offered-not-applied schema live once, in `wreath.store`; a returned row *is* the claim, and `live`/`expired` are exact complements so a purge can never drop a row a read would still honour. `MemoryRateLimitStore` stays outside it deliberately: a token bucket is arithmetic every read advances, not a stored payload."
     },
@@ -312,7 +313,8 @@
       ],
       "policy": "Authentication (identity) and authorization (roles, permissions, Cedar) stay firmly apart. The Cedar engine is built in and dependency-free: policies parse at startup, evaluation is native with a pure twin, forbid overrides permit, default deny. `permissions_router(app)` answers what the caller may do from the *same* authorizer that enforces it, and `declared_actions(app)` reads the vocabulary off the routes' `@authorize` declarations -- there is no second list to drift, and an undeclared action is refused rather than evaluated (otherwise the endpoint is an oracle for probing policies). Two questions, two shapes: the manifest is resource-type level and ETagged (the tag covers principal, roles, and the policy set, so a promotion or a deploy invalidates it and nothing else does); the batch endpoint is row level, because a Cedar decision depends on the resource. Neither is enforcement -- the route is re-evaluated on the next request, so a stale answer can only draw a button that then 403s. The vocabulary reaches the generated TS client through `ApiModel.permissions`. The permission change stream (`_livedoc.LiveDocument`, transported by `_busbridge`) is **at-most-once and advisory**: a narrowing change may arrive late, which is safe only because the manifest is for chrome and enforcement is re-evaluated on the route -- a stale manifest can draw a button that then 403s and can never permit anything. A stream never emits an ETag it cannot state truthfully: on a roles change the captured identity is stale by definition, so it emits `etag: null` rather than a tag that would tell the client to skip exactly the refetch it needs, and coalescing two pending changes lets *unknown* win. Subscriptions are capped per principal and overall and **refused** (503, client falls back to If-None-Match) rather than evicted, since evicting the oldest tab invites a reconnect that evicts the next; the ORM write subscription is registered on the first subscriber and dropped on the last, so the process-global listener list is bounded by live streams.",
       "decisions": [
-        "docs/decisions/0023-built-in-cedar-engine.md"
+        "docs/decisions/0017-cedar-is-built-in.md",
+        "docs/decisions/0019-refuse-rather-than-half-wire.md"
       ]
     },
     {
@@ -350,8 +352,9 @@
       ],
       "policy": "Connection.map/Statement.map run one Sync-delimited operation per input in input order (no coalescing/dedup); Connection.transaction() orders reads before dependent writes and discards a connection whose synchronization cannot be proven.",
       "decisions": [
-        "docs/decisions/0010-keep-postgresql-execute-completion-ownership-in-python.md",
-        "docs/decisions/0011-eagerly-flush-idle-postgresql-connections.md"
+        "docs/decisions/0013-postgresql-is-the-queue.md",
+        "docs/decisions/0005-c-first-with-a-pure-twin.md",
+        "docs/decisions/0020-a-double-is-never-more-capable.md"
       ]
     },
     {
@@ -424,7 +427,8 @@
       ],
       "policy": "Readiness resolution is metal-only. The inverse `down` is derived from the same artifact as the forward migration and refuses to strand live ORM code unless --force. The DDL runner is still unshipped; see docs/reference/roadmap.md. A deferred migration declares its conversion beside the model rather than in a migration file, because artifacts are generated from the catalog and there is nothing to decorate. `Recode` (same type, new values) is guarded by a predicate scan that refuses ordered comparison, patterns, `GROUP BY`, `ORDER BY` and joins on a converting column; `Retype` (new type, two columns) is guarded by the gate instead, because an unconverted row reads NULL rather than reading wrong. Refusal is the default: a false refusal costs an argument, a false permission costs a silent incident. A scan that examined nothing refuses rather than reporting clean.",
       "decisions": [
-        "docs/decisions/0001-keep-fixed-and-named-migration-representations-separate.md"
+        "docs/decisions/0014-migrations-are-generated-from-the-catalog.md",
+        "docs/decisions/0016-validate-the-schema-at-startup.md"
       ]
     },
     {
@@ -611,10 +615,10 @@
         "tests/test_statsd.py",
         "tests/test_cloudwatch_emf.py"
       ],
-      "policy": "Recording is policy value types only and deny-by-default; the capture engine and WFR1 sink are not shipped (see docs/reference/roadmap.md). The projector drains the recorder's ring off the request path. `replay.generate_test` turns a WTR1 transport recording into a runnable pytest over TestClient: it parses the request out of the recorded bytes (request line + headers + Content-Length body only -- chunked or truncated is refused by name, never guessed), replays it now, and asserts what it observes. That makes it a *characterisation* test, and the generated docstring says so -- generated against a broken build it encodes the bug, generated after the fix it locks the fix in. Host/content-length/connection headers are dropped from the generated call because they are the test client's business, not the behaviour under test.",
+      "policy": "Recording is deny-by-default: `wreath.recording` decides what may be captured, and capture itself ships -- the native recorder arms, triggers, redacts, and writes WFR1 (tests/test_flight_capture_live.py drives an armed forensic request end to end and reads the capture back). The projector drains the recorder's ring off the request path. `replay.generate_test` turns a WTR1 transport recording into a runnable pytest over TestClient: it parses the request out of the recorded bytes (request line + headers + Content-Length body only -- chunked or truncated is refused by name, never guessed), replays it now, and asserts what it observes. That makes it a *characterisation* test, and the generated docstring says so -- generated against a broken build it encodes the bug, generated after the fix it locks the fix in. Host/content-length/connection headers are dropped from the generated call because they are the test client's business, not the behaviour under test.",
       "decisions": [
-        "docs/decisions/0021-native-flight-recorder-provisional-parameters.md",
-        "docs/decisions/0022-native-flight-recorder-stage-1-followups.md"
+        "docs/decisions/0005-c-first-with-a-pure-twin.md",
+        "docs/decisions/0022-complexity-is-a-contract.md"
       ]
     },
     {
@@ -655,10 +659,9 @@
       ],
       "policy": "Framework and server layers stay separable: Wreath must remain usable on any conforming ASGI server. ASGI semantics come before implementation speed.",
       "decisions": [
-        "docs/decisions/0008-native-http-server-boundary.md",
-        "docs/decisions/0011-optional-quic-backend.md",
-        "docs/decisions/0012-serialize-native-http-1-responses-directly-into-transport-owned-bytes.md",
-        "docs/decisions/0013-use-an-inline-one-pass-builder-for-small-native-http-1-responses.md"
+        "docs/decisions/0006-optional-extensions-and-tiers.md",
+        "docs/decisions/0010-one-shot-response-extension.md",
+        "docs/decisions/0007-native-code-owns-no-process-global-state.md"
       ]
     },
     {
@@ -674,7 +677,8 @@
       ],
       "policy": "The metal tier's loop. Free-threading and the optional JIT are separately tested execution modes, not assumptions. See tests/reactor/README.md for the tier layout and counter contracts.",
       "decisions": [
-        "docs/decisions/0001-keep-generic-asyncio-timers-separate-from-server-deadlines.md"
+        "docs/decisions/0012-server-deadlines-leave-the-heap.md",
+        "docs/decisions/0022-complexity-is-a-contract.md"
       ]
     },
     {
@@ -896,8 +900,11 @@
     {
       "name": "example",
       "guides": [
+        "docs/example/index.md",
+        "docs/example/quickstart.md",
         "docs/example/walkthrough.md",
-        "docs/example/read-api.md"
+        "docs/example/read-api.md",
+        "docs/example/ingest.md"
       ],
       "reference": [],
       "sources": [

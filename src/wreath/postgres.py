@@ -306,7 +306,7 @@ class Pool:
 def _encode_db_params(params: Any) -> bytes:
     """A deterministic byte encoding of query parameters for forensic capture.
 
-    Only reached on the Forensic-armed, dependency-permitting path. ``repr`` is
+    Only reached on the Forensic-armed, dependency-permitting path. `repr` is
     stable for a given argument set and handles every parameter type; the native
     capture then redacts it (hash/mask/bounded-raw) per the arm's dependency
     disposition, so raw values only ever persist when the policy allowed it.
@@ -318,8 +318,8 @@ def _encode_db_rows(rows: Any) -> bytes:
     """A deterministic byte encoding of a query's result for forensic capture.
 
     Only reached on the Forensic-armed, dependency-permitting path (rows are
-    dependency data, redacted by the arm's dependency disposition). ``repr`` is
-    stable and handles rows, a single row, a scalar, or ``None``; the native
+    dependency data, redacted by the arm's dependency disposition). `repr` is
+    stable and handles rows, a single row, a scalar, or `None`; the native
     capture bounds/redacts it, so raw values persist only when policy allowed it.
     """
     return repr(rows).encode("utf-8", "replace")
@@ -384,7 +384,7 @@ class Statement:
         """Run this prepared statement once per argument set, in input order.
 
         Acquires one connection for the whole fan-out; each input becomes a
-        distinct ``Sync``-delimited operation (duplicates are not coalesced or
+        distinct `Sync`-delimited operation (duplicates are not coalesced or
         deduplicated), and results are returned in input order.
         """
         connection = await self.database.acquire(self.workload)
@@ -470,7 +470,7 @@ class Database:
 
         The duplicate check and the assignment run under a lock because
         separately they are not a check at all: two threads registering the same
-        name both passed ``name in self._statements`` before either assigned, so
+        name both passed `name in self._statements` before either assigned, so
         *both* succeeded and the loser was left holding a `Statement` that no
         pool ever prepares -- `_for_workload` only ever sees the survivor. A
         guard that exists to catch two subsystems claiming one name silently
@@ -584,8 +584,8 @@ class Database:
 
     # -- distributed advisory locks ----------------------------------------
     # Cluster-global mutexes built on PostgreSQL advisory locks. See
-    # ``wreath._locks`` for the connection-affinity contract; xact-scoped locks
-    # live on ``wreath.orm.session.Session.lock``.
+    # `wreath._locks` for the connection-affinity contract; xact-scoped locks
+    # live on `wreath.orm.session.Session.lock`.
 
     def lock(
         self,
@@ -595,10 +595,10 @@ class Database:
         mode: str = "exclusive",
         workload: Workload = "write",
     ) -> AdvisoryLock:
-        """A blocking, session-scoped advisory lock held across an ``async with``.
+        """A blocking, session-scoped advisory lock held across an `async with`.
 
         The lock pins one connection from *workload* (the primary by default) for
-        the block's duration. Prefer ``Session.lock(scope="xact")`` for
+        the block's duration. Prefer `Session.lock(scope="xact")` for
         request-path exclusion; use this for long-lived fleet locks.
         """
         return AdvisoryLock(self, key, namespace=namespace, mode=mode, workload=workload)
@@ -612,10 +612,10 @@ class Database:
         mode: str = "exclusive",
         workload: Workload = "write",
     ) -> AdvisoryTryLock:
-        """A non-blocking advisory lock: ``async with db.try_lock(k) as held:``.
+        """A non-blocking advisory lock: `async with db.try_lock(k) as held:`.
 
-        *held* is the handle when acquired or ``None`` otherwise. With *timeout*
-        set, acquisition blocks up to that many seconds via ``lock_timeout``.
+        *held* is the handle when acquired or `None` otherwise. With *timeout*
+        set, acquisition blocks up to that many seconds via `lock_timeout`.
         """
         return AdvisoryTryLock(
             self, key, timeout=timeout, namespace=namespace, mode=mode, workload=workload
@@ -633,8 +633,8 @@ class Database:
         """Run *work* once across the fleet, guarded by an advisory lock.
 
         *work* is a zero-argument callable returning a fresh awaitable. Returns a
-        handle with ``await handle.stop()``; wire it through ``on_startup`` /
-        ``on_shutdown``. The guarded critical section must be idempotent.
+        handle with `await handle.stop()`; wire it through `on_startup` /
+        `on_shutdown`. The guarded critical section must be idempotent.
         """
         return SingletonRunner(
             self, key, work, namespace=namespace, workload=workload,

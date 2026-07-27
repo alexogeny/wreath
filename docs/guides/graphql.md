@@ -204,11 +204,22 @@ errors, which are usually just a client bug.
 
 Every field, relationship, and root has an authorization **resource** — by
 default `Type.field` for fields and `Query.name` / `Mutation.name` for roots.
-Wire the app's authorizer and Cedar covers REST and GraphQL with one policy set:
+Build the authorizer once and hand the same object to both, and Cedar covers REST
+and GraphQL with one policy set:
 
 ```python
-api = GraphQL(registry, models=[User, Post], authorizer=app.authorizer)
+from wreath.authorization import CedarAuthorizer, CedarPolicies
+
+engine = CedarPolicies(POLICY_SOURCE)
+authorizer = CedarAuthorizer(engine=engine)
+
+app.configure_auth(BearerTokenBackend(verify), authorizer)
+api = GraphQL(registry, models=[User, Post], authorizer=authorizer)
 ```
+
+There is deliberately no `app.authorizer` to read back. The authorizer is a value
+you construct, so the way to share it is to keep it — reaching into the app for
+one you already have is the indirection, not the convenience.
 
 | Selection | Resource asked |
 | --- | --- |

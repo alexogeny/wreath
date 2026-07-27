@@ -48,6 +48,15 @@ async def build_schema(connection, *, seed_rows: int | None = None) -> None:
     await connection.execute(f'CREATE SCHEMA "{SCHEMA}"')
     for statement in statements():
         await connection.execute(statement)
+    # The durable queue's tables are not in the artifact -- `wreath migrations`
+    # derives that from the ORM models, and the queue is not one. See
+    # `camera_trap.tasks.queue_schema_sql`, which is the single name for this
+    # DDL so the quickstart and these fixtures cannot drift apart.
+    from camera_trap.tasks import queue_schema_sql
+
+    for statement in queue_schema_sql(SCHEMA).split(";"):
+        if statement.strip():
+            await connection.execute(statement)
     if seed_rows is not None:
         from camera_trap.seed import seed
 

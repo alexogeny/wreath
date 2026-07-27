@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 _EXAMPLE = Path(__file__).resolve().parents[2] / "example"
@@ -47,3 +48,18 @@ if str(_EXAMPLE) not in sys.path:
 #: with ``setdefault``, none with assignment.
 _WORKER = os.environ.get("PYTEST_XDIST_WORKER", "main")
 os.environ["CAMERA_TRAP_SCHEMA"] = f"camera_trap_{_WORKER}"
+
+#: The object store's root, per worker and inside the temp directory, for the
+#: same two reasons as the schema: it is start-up configuration read once at
+#: import, and two workers sharing one root would write and delete each other's
+#: uploads. Unset, it defaults to ``example/media`` next to the package, and a
+#: test run would leave archives in the working tree.
+_MEDIA = Path(tempfile.gettempdir()) / f"camera-trap-media-{_WORKER}"
+_MEDIA.mkdir(parents=True, exist_ok=True)
+os.environ["CAMERA_TRAP_MEDIA_ROOT"] = str(_MEDIA)
+
+#: Long enough to satisfy the minimum, and fixed so the warning about the
+#: public development secret does not fire on every test run. Its value is not
+#: a secret in any sense that matters: nothing outside this process ever sees a
+#: URL it signs.
+os.environ["CAMERA_TRAP_MEDIA_SECRET"] = "camera-trap-test-presign-secret-0123456789"

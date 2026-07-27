@@ -11,7 +11,9 @@ accident:
   name looks like a secret — `password`, `*_hash`, `token`, `secret`,
   `salt`, `api_key`, `ssn`, … — is excluded from both responses and accepted
   input. To expose one you must name it explicitly in `expose=(...)`, an
-  auditable, deliberate act.
+  auditable, deliberate act. **That name check is a backstop, not a boundary**:
+  it withholds the column nobody thought about, and it cannot recognise a secret
+  that does not look like one. `fields=(...)` is the control.
 
     router = crud_router(Widget, open_session, expose=(), readonly=("owner_id",))
     app.include_router(router)          # after app.enable_crud()
@@ -108,8 +110,55 @@ class Access:
         `resource` is a `Type::"{id}"` template (`{id}` and other path
         params are filled in), a plain `'Type::"id"'` string, or a
         `(request) -> resource` callable.
+
+        A string resource is parsed here, at declaration, rather than when a
+        request arrives. The shape is knowable now, and a reference that cannot
+        parse would otherwise surface as a 500 on a route whose declaration
+        plainly intends a 403 -- the framework blaming the caller for the
+        author's typo.
+
+        Args:
+            action: The Cedar action name the policy is asked about.
+            resource: The entity reference, its `{param}` template, or a
+                callable that builds one per request.
+
+        Returns:
+            The rule, for `crud_router(authorize=...)`.
+
+        Raises:
+            ValueError: `resource` is a string that is not a Cedar entity
+                reference. Pass a callable or an `EntityUid` when a custom
+                `CedarAuthorizer(resource=...)` mapper builds the reference
+                from something else.
         """
-        return cls("cedar", action=action, resource=resource)
+        return cls("cedar", action=action, resource=_checked_resource(resource))
+
+
+#: A `{param}` placeholder in a resource template, filled from `path_params`.
+_TEMPLATE_PARAM = re.compile(r"\{[^{}]*\}")
+
+
+def _checked_resource(resource: Any) -> Any:
+    """Refuse a string resource that cannot be a Cedar entity reference.
+
+    Templates are validated by substituting each `{param}`, so `Type::"{id}"`
+    is checked for shape without knowing any request's values.
+    """
+    if not isinstance(resource, str):
+        return resource
+    from ._auth.cedar_engine import CedarParseError, EntityUid
+
+    probe = _TEMPLATE_PARAM.sub("x", resource)
+    try:
+        EntityUid.parse(probe)
+    except CedarParseError as error:
+        raise ValueError(
+            f"Access.cedar(resource={resource!r}) is not a Cedar entity reference; "
+            'expected Type::"id" or a Type::"{param}" template, e.g. '
+            f'\'{resource}::"{{id}}"\'. Pass a callable or an EntityUid if a custom '
+            "CedarAuthorizer(resource=...) mapper builds the reference instead."
+        ) from error
+    return resource
 
 
 def _mode(mode: str) -> str:
@@ -126,9 +175,26 @@ _OP_GROUP = {
 
 #: A column whose name matches this is treated as a secret: hidden from output
 #: and rejected from input unless explicitly `expose`d.
+#:
+#: **This is a backstop, not a boundary.** It catches the names a secret usually
+#: has, so a column nobody thought about is withheld rather than published by
+#: default. It cannot catch the ones that do not look like secrets — `iban`,
+#: `date_of_birth`, `tax_id`, `passport_number` — and no list of names ever will.
+#: `crud_router(fields=...)` is the control: naming what may leave is the only
+#: form that stays correct when somebody adds a column.
+#:
+#: Short tokens are anchored to a name boundary so a real column is not withheld
+#: by accident: `pin` matches `pin` and `pin_code`, not `pin_board_id`. Two
+#: deliberate exclusions: `public_key`, which is public by definition, and the
+#: ambiguous three-letter national identifiers (`sin`, `nin`, `bic`), which occur
+#: inside ordinary words too often to anchor usefully.
 SENSITIVE_FIELD = re.compile(
-    r"pass(word|wd|phrase)|secret|token|_hash|hash_|^hash$|salt|private[_-]?key"
-    r"|api[_-]?key|credential|ssn|otp|mfa|totp|cvv|security[_-]?code",
+    r"pass[_-]?(word|wd|phrase|code)|secret|token|_hash|hash_|^hash$|salt"
+    r"|(private|api|access|signing|signature|encryption|master|session)[_-]?key"
+    r"|credential|ssn|otp|mfa|totp|cv[cv]|security[_-]?code"
+    r"|(?:^|[_-])pin([_-]?(code|number))?$|(?:^|[_-])pwd?(?:[_-]|$)|bearer"
+    r"|(account|routing)[_-]?number|(recovery|backup)[_-]?(code|answer)"
+    r"|security[_-]?answer",
     re.IGNORECASE,
 )
 
@@ -179,10 +245,12 @@ def crud_router(
     exclusive. `expose` is the deny-list's escape hatch: `SENSITIVE_FIELD` hides
     every column whose *name* looks like a secret, and `expose` names the ones to
     send anyway. `fields` is an allow-list, and the answer to the deny-list's
-    real weakness — `dob`, `iban`, `recovery_answer`, and `pw` do not look like
-    secrets. Naming what may leave is the only form that stays correct when
-    somebody adds a column. Passing both raises `ValueError`, as does naming a
-    column in `fields` that the model does not have.
+    real weakness — `iban`, `date_of_birth`, `tax_id`, and `passport_number` do
+    not look like secrets, and widening the pattern until they do would start
+    withholding ordinary columns instead. Naming what may leave is the only form
+    that stays correct when somebody adds a column. Passing both raises
+    `ValueError`, as does naming a column in `fields` that the model does not
+    have.
 
     Sensitive columns are unwritable as well as unreadable, and `expose` does not
     change that: no CRUD route will ever set one. Change a password through a

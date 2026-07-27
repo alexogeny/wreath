@@ -1156,13 +1156,18 @@ def test_a_strict_build_refuses_rest_markup_in_a_rendered_docstring() -> None:
     assert "single backticks" in sink[0]
 
 
-def test_the_rest_exemption_list_only_shrinks() -> None:
-    """`REST_PENDING` waives modules another agent held open when the gate went
-    in. It is pinned so it cannot quietly grow into a permanent excuse: adding a
-    module here must be a deliberate edit to this test as well."""
+def test_the_rest_gate_has_no_exemption_list() -> None:
+    """The gate applies to every module, with no waiver to reason about.
+
+    `REST_PENDING` existed only because agents held modules open when the gate
+    went in. The last entry (`wreath.postgres`) is converted, so the list and its
+    `_rest_pending` lookup are gone rather than kept at zero -- an empty waiver
+    still reads as permission, and a reader who finds one asks which module it is
+    for. This test is what stops it coming back by habit."""
     from wreath._docs import apidoc
 
-    assert set(apidoc.REST_PENDING) <= {"wreath.postgres"}
+    assert not hasattr(apidoc, "REST_PENDING")
+    assert not hasattr(apidoc, "_rest_pending")
 
 
 def test_wreaths_own_reference_pages_are_free_of_rest_markup() -> None:

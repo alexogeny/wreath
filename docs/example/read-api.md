@@ -46,7 +46,7 @@ below where the role changes the answer is called out where it happens.
 A reserve owns stations; a station owns sightings and the SD cards they came off.
 The paths say so, and no handler spells one out. Two routers do it:
 
-```python
+```python no-check="the handler's parameters are elided; the shape being shown is the router nesting, and the real signature is in routers/reserves.py"
 reserves = Router(prefix="/reserves", tags=("reserves",))
 stations = Router(prefix="/{slug}/stations", tags=("stations",))
 

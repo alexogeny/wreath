@@ -89,6 +89,15 @@ wreath-complexity-probe = "wreath._devtools.complexity_probe:main"
 wreath-sanitize = "wreath._devtools.sanitize:main"
 # Checks that the agent-facing maps still describe the repository.
 wreath-map-lint = "wreath._devtools.map_lint:main"
+# Fails when a compiled extension is older than the sources it is built from.
+# Not in the gate yet: `_http3` is genuinely stale and cannot be rebuilt here.
+wreath-build-lint = "wreath._devtools.build_lint:main"
+# Fails when the roadmap claims a surface is absent and the symbol resolves.
+# Not in the gate yet: the one in-scope row still needs its `absent:` marker.
+wreath-roadmap-lint = "wreath._devtools.roadmap_lint:main"
+# Fails when a query's parameter type would be inferred as something the driver
+# cannot encode -- the shape that works once and raises on every call after.
+wreath-sql-lint = "wreath._devtools.sql_lint:main"
 # Checks (--update regenerates) the pinned `wreath port` emitter output.
 wreath-port-golden = "wreath._devtools.port_golden:main"
 # Reports function bodies sharing a structure. A report, not a gate.

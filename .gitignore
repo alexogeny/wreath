@@ -46,9 +46,14 @@ compile_commands.json
 # Generated documentation
 /site/
 
-# Work-in-progress planning docs and ADRs (not published or tracked yet)
-/docs/plans/
-/docs/decisions/
+# `docs/plans/` and `docs/decisions/` are tracked. They are excluded from the
+# published site by `wreath_docs.py`'s `exclude` tuple, not by being absent from
+# the repository -- `docs/agents/manifest.json` cites the ADRs as the authority
+# for subsystem invariants, and `repo-map.md` routes native implementation
+# detail into `docs/plans/`. Ignoring them meant a fresh clone had neither, so
+# twenty manifest citations dangled and `wreath-map-lint` failed on any clean
+# checkout while passing here. `MAP009` now fails a citation into an untracked
+# path, so this cannot recur silently.
 
 # Benchmark results, diagnostics, profiles, and smoke-run output
 /.profiles/

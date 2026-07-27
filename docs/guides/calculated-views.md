@@ -38,15 +38,28 @@ Then, per request:
 ```python
 @app.get("/herds/{herd_id}/activity")
 @cached(ttl=300, invalidate_on=activity.sources)
-async def herd_activity(request, herd_id: int, session: Session):
+async def herd_activity(
+    request,
+    herd_id: int,
+    session: Session,
+    zone: str = "UTC",
+):
     result = await activity.run(
         session,
         herd=herd_id,
         range=Range(start, end),
-        zone=request.zone,
+        zone=zone,
     )
     return result.as_dict()
 ```
+
+The zone is an ordinary bound parameter — `?zone=Pacific/Auckland` — because
+wreath does not guess it. There is no reliable timezone in an HTTP request:
+`Accept-Language` carries a *language*, and an offset gathered from the browser
+is not a zone (it cannot tell Auckland from Adelaide in February). So the caller
+names it, or you take it from the resource — a venue row's own `timezone` column
+is usually the better answer, since "the herd's day" rarely means "the reader's
+day".
 
 `as_dict()` is what goes on the wire. The result itself is a declared type
 rather than a dictionary — `result.series[0].values` is a tuple you can read in
@@ -157,7 +170,7 @@ activity = (
         .compare(previous=Month)
 )
 
-result = await activity.run(session, range=Range(start, end), zone=request.zone)
+result = await activity.run(session, range=Range(start, end), zone="Pacific/Auckland")
 result.buckets              # this period
 result.comparison.buckets   # the one before it
 result.comparison.previous  # "month" — what a legend should call it
@@ -496,7 +509,7 @@ Reading is transparent. A range spanning several tiers comes back as one dense
 run of buckets and one series per measure, exactly as an untiered read does:
 
 ```python
-result = await activity.run(session, range=Range(start, end), zone=request.zone)
+result = await activity.run(session, range=Range(start, end), zone="Pacific/Auckland")
 for segment in result.segments:
     print(segment.grain)      # "month", then "day", then "raw"
 ```
