@@ -99,6 +99,80 @@ def test_orphan_page_is_warned(tmp_path) -> None:
     (tmp_path / "docs" / "loose.md").write_text("# Loose\n")   # not in nav
     report = build(site, root=tmp_path)
     assert any("orphan" in warning for warning in report.warnings)
+    assert report.ok and report.pages == 2          # an orphan is not built
+
+
+def test_a_dead_link_on_an_orphan_page_is_still_reported(tmp_path) -> None:
+    """The hole this closes: unreachable never meant unchecked.
+
+    A page not in the nav had its outbound links skipped entirely, so a broken
+    link on one drew no warning at all -- and then three appeared at once the
+    day the page was added to the nav. That is a gate with a hole in exactly the
+    place a new page starts life, since not-in-the-nav-yet is what every page is
+    while it is being written.
+    """
+    site = _site(tmp_path)
+    (tmp_path / "docs" / "loose.md").write_text(
+        "# Loose\n\nSee [gone](guides/missing.md) and [up](nowhere.md).\n")
+    report = build(site, root=tmp_path)
+    dead = [error for error in report.errors if "dead link" in error]
+    assert len(dead) == 2
+    assert all("loose.html (orphan)" in error for error in dead)
+
+
+def test_the_orphan_warning_and_its_link_errors_are_separate_signals(tmp_path) -> None:
+    """Two facts, two reports: not in the nav, and links that do not resolve."""
+    site = _site(tmp_path)
+    (tmp_path / "docs" / "loose.md").write_text("# Loose\n\n[x](gone.md)\n")
+    report = build(site, root=tmp_path)
+    assert [w for w in report.warnings if "orphan page not in nav: loose.md" in w]
+    assert [e for e in report.errors if "loose.html (orphan): dead link to gone.md" in e]
+
+
+def test_an_orphan_may_link_to_a_nav_page_and_to_another_orphan(tmp_path) -> None:
+    """An orphan is judged on whether its links name real docs, not on the nav.
+
+    Otherwise a pair of pages written together could not be checked until both
+    joined the nav, which is the same hole one step further along.
+    """
+    site = _site(tmp_path)
+    (tmp_path / "docs" / "loose.md").write_text(
+        "# Loose\n\n[nav](guides/routing.md#basics) and [sibling](other.md).\n")
+    (tmp_path / "docs" / "other.md").write_text("# Other\n")
+    report = build(site, root=tmp_path)
+    assert report.ok, report.errors
+
+
+def test_a_nav_page_linking_to_an_orphan_is_still_dead(tmp_path) -> None:
+    """The orphan is not written, so the href would 404. That has not changed."""
+    site = _site(tmp_path)
+    (tmp_path / "docs" / "index.md").write_text("# Home\n\n[loose](loose.md)\n")
+    (tmp_path / "docs" / "loose.md").write_text("# Loose\n")
+    report = build(site, root=tmp_path)
+    assert any("index.html: dead link to loose.md" in e for e in report.errors)
+
+
+def test_a_broken_anchor_on_an_orphan_page_is_reported(tmp_path) -> None:
+    site = _site(tmp_path)
+    (tmp_path / "docs" / "loose.md").write_text(
+        "# Loose\n\n[a](#nope) and [b](guides/routing.md#nope).\n")
+    report = build(site, root=tmp_path)
+    assert any("loose.html (orphan): broken anchor #nope" in e for e in report.errors)
+    assert any(
+        "loose.html (orphan): link to missing anchor #nope" in e for e in report.errors)
+
+
+def test_an_excluded_page_is_neither_an_orphan_nor_link_checked(tmp_path) -> None:
+    """``exclude`` means "not part of this site", so it opts out of both signals."""
+    docs = tmp_path / "docs"
+    (docs / "guides").mkdir(parents=True)
+    (docs / "index.md").write_text("# Home\n")
+    (docs / "guides" / "routing.md").write_text("# Routing\n")
+    (docs / "plans").mkdir()
+    (docs / "plans" / "draft.md").write_text("# Draft\n\n[x](gone.md)\n")
+    site = Site("S", "docs", "out", Nav(Page("Home", "index.md")), exclude=("plans/",))
+    report = build(site, root=tmp_path)
+    assert not any("draft" in message for message in report.errors + report.warnings)
 
 
 def test_content_tabs_need_no_javascript() -> None:

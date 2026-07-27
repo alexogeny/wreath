@@ -3,37 +3,39 @@
 Sooner or later a table gets big enough that you cannot change all of it at once.
 Ten million rows need a new column filled in. A month of raw events needs folding
 into a daily summary. Every row needs re-encrypting under a new key. The shape is
-always the same, and so is the script people write for it: a ``while True`` loop
-with ``OFFSET``, one transaction around the whole thing, a ``sleep`` somebody
-tuned once on a laptop, a ``print`` for progress, and an ``except: continue``
+always the same, and so is the script people write for it: a `while True` loop
+with `OFFSET`, one transaction around the whole thing, a `sleep` somebody
+tuned once on a laptop, a `print` for progress, and an `except: continue`
 that turns a failed chunk into a silent hole. It runs in a terminal on a jump
 host and it is nobody's job to watch it.
 
-A :class:`ChunkedPass` is that script, written once and correctly::
+A `ChunkedPass` is that script, written once and correctly:
 
-    purge_replays = ChunkedPass(
-        "idempotency_purge",
-        over=Table("wreath_idempotency"),
-        units=Rows(
-            key=(
-                Key("expires", "timestamptz", indexed=True),
-                Key("key", "text", unique=True),
-            ),
-            limit=1_000,
-            within="2s",
+```python
+purge_replays = ChunkedPass(
+    "idempotency_purge",
+    over=Table("wreath_idempotency"),
+    units=Rows(
+        key=(
+            Key("expires", "timestamptz", indexed=True),
+            Key("key", "text", unique=True),
         ),
-        frontier=Sealed(),
-        work=Purge(),
-        pace=DutyCycle(0.25),
-    )
+        limit=1_000,
+        within="2s",
+    ),
+    frontier=Sealed(),
+    work=Purge(),
+    pace=DutyCycle(0.25),
+)
 
-    jobs.drive(purge_replays, cron="*/5 * * * *")
+jobs.drive(purge_replays, cron="*/5 * * * *")
+```
 
 What that buys, and every item is a specific thing the hand-rolled loop gets
 wrong:
 
-* **Keyset ranges, never ``OFFSET``.** The walk stays the same speed at row nine
-  million as at row nine. See :mod:`wreath._passes.keyset` for the arithmetic.
+* **Keyset ranges, never `OFFSET`.** The walk stays the same speed at row nine
+  million as at row nine. See `wreath._passes.keyset` for the arithmetic.
 * **One transaction per chunk, with the cursor advanced inside it.** The position
   and the data are two rows in one database, so they commit together; a chunk is
   either wholly applied or wholly not, and a crash resumes where it stopped.
@@ -53,7 +55,7 @@ The guide is [Chunked passes](../guides/chunked-passes.md).
 
 **What a pass deliberately does not know.** It has no opinion on what a chunk
 *means*, and no clock of its own -- scheduling belongs to
-:mod:`wreath.jobs`, which already deduplicates a cron tick fleet-wide. Its whole
+`wreath.jobs`, which already deduplicates a cron tick fleet-wide. Its whole
 vocabulary is "a half-open range over one ordered domain"; row counts are
 reported and never structural, which is what keeps the door open for a range
 source that counts no rows at all.
@@ -81,7 +83,7 @@ from ._passes.progress import Denominator, Estimated, Exact, Keyspace, Progress
 
 
 def _seconds(value: Any, *, what: str, allow_zero: bool = False) -> float:
-    """Read ``"2s"``, ``"250ms"``, ``"5m"`` or a plain number of seconds."""
+    """Read `"2s"`, `"250ms"`, `"5m"` or a plain number of seconds."""
     return _duration.seconds(value, what=what, allow_zero=allow_zero)
 
 
@@ -97,7 +99,7 @@ class Table:
     outbox -- and none of them is a model. Naming the table directly is honest
     about that, and it means a legacy table nobody has mapped is still walkable.
 
-    The facts the refusals need travel with the :class:`Key`, not with the table,
+    The facts the refusals need travel with the `Key`, not with the table,
     because that is where a reader is looking when they ask "is this key unique?".
     """
 
@@ -113,6 +115,12 @@ class Table:
 
     @property
     def sql(self) -> str:
+        """This table as it is written in a statement, quoted when qualified.
+
+        Both parts are checked as plain identifiers at construction, because the
+        name is interpolated into statement text rather than bound -- a table
+        name cannot be a parameter.
+        """
         return self.name if self.schema is None else f'"{self.schema}"."{self.name}"'
 
 
@@ -120,15 +128,18 @@ class Table:
 class Rows:
     """The next chunk is the next *limit* rows after the cursor, by key.
 
+    All key columns must be ordered the same way: a row comparison has no
+    mixed-direction form, and expanding one into ORs costs the single index scan
+    that makes a keyset walk cheap.
+
+    The chunk transaction sets its own `statement_timeout` from *within*, so a
+    chunk that hits a lock wait dies as a chunk failure rather than as a
+    transaction nobody notices.
+
     Args:
-        key: one column, or a tuple of them, ordered. Model columns
-            (``Trek.id``) or :class:`Key` declarations for a table the ORM does
-            not own. All columns must be ordered the same way -- a row
-            comparison has no mixed-direction form.
+        key: one column or an ordered tuple. Model columns, or `Key` declarations.
         limit: how many rows one chunk covers.
-        within: the chunk's time budget. The chunk transaction sets its own
-            ``statement_timeout`` from it, so a chunk that hits a lock wait dies
-            as a chunk failure rather than as a transaction nobody notices.
+        within: the chunk's time budget, as a duration string or seconds.
     """
 
     key: Any
@@ -143,8 +154,18 @@ class Rows:
         object.__setattr__(self, "within", _seconds(self.within, what="Rows within"))
 
     # -- the range source protocol -------------------------------------------
+    #
+    # A ChunkedPass calls these; a caller declares Rows(...) and never does.
 
     def refuse(self, *, table: str) -> None:
+        """Refuse a key a keyset walk cannot follow correctly.
+
+        Called once, when the pass is declared. A keyset walk needs a key that
+        is unique, indexed on its leading column, and ordered one way
+        throughout; each of those is a silent wrong answer rather than an error
+        if it is missing. `wreath._passes.keyset` carries the arithmetic
+        for why.
+        """
         _keyset.refuse_unsound_key(self.keys, table=table)
 
     def chunk_where(
@@ -155,6 +176,19 @@ class Rows:
         cursor_to: tuple[Any, ...],
         frontier: str | None,
     ) -> str:
+        """The `WHERE` clause selecting exactly one chunk's rows.
+
+        Open at the bottom and closed at the top, so consecutive chunks neither
+        overlap nor leave a gap, and emitted as a single row comparison rather
+        than the equivalent chain of ORs -- only the row comparison is reliably
+        one index scan.
+
+        Args:
+            binds: the statement's bind collector. Values are appended, not interpolated.
+            cursor_from: the exclusive lower key, or `None` for the first chunk.
+            cursor_to: the inclusive upper key.
+            frontier: the frontier predicate to AND in, when there is one.
+        """
         return _driver.chunk_predicate(
             self.keys, binds, cursor_from=cursor_from, cursor_to=cursor_to, frontier=frontier
         )
@@ -166,6 +200,11 @@ class Rows:
         cursor_from: tuple[Any, ...] | None,
         cursor_to: tuple[Any, ...],
     ) -> str:
+        """The statement an operator pastes into `psql` to see the real error.
+
+        Recorded on a hole, with the keys as literals rather than binds, so
+        diagnosing a dead-lettered chunk needs nothing but the ledger row.
+        """
         return _driver.reproduce_predicate(
             self.keys, table=table, cursor_from=cursor_from, cursor_to=cursor_to
         )
@@ -179,7 +218,7 @@ class Rows:
         ceiling: Any,
         frontier_sql: Any,
     ) -> tuple[tuple[Any, ...] | None, tuple[Any, ...]] | None:
-        """``(start, end)`` for the next chunk, or ``None`` when the walk is done.
+        """`(start, end)` for the next chunk, or `None` when the walk is done.
 
         Two probes, and the second one is the point. The first asks for the
         *limit*-th key past the cursor; when fewer than a full chunk remain it
@@ -232,8 +271,8 @@ class Ceiling:
         """Capture the largest key in the table when the walk starts.
 
         Sound only when a row inserted afterwards cannot land beneath the
-        ceiling. An identity primary key or a ``now()`` default gives that;
-        ``gen_random_uuid()`` does not, and a row that lands behind the cursor is
+        ceiling. An identity primary key or a `now()` default gives that;
+        `gen_random_uuid()` does not, and a row that lands behind the cursor is
         one the pass will never see. So this is refused on a key the declaration
         cannot prove is assigned in order, and *monotone* is the way past it --
         a sentence a reviewer reads, not a flag, because ULIDs and UUIDv7 really
@@ -247,9 +286,23 @@ class Ceiling:
         return cls(monotone=monotone)
 
     def refuse(self, keys: tuple[Key, ...], *, table: str) -> None:
+        """Refuse a fixed ceiling over a key not assigned in increasing order.
+
+        Called once, when the pass is declared. A row that can land beneath a
+        captured ceiling is a row behind the cursor, which this pass will never
+        see; `monotone=` is the written escape for a key the declaration
+        cannot prove but the caller knows.
+        """
         _keyset.refuse_unmonotone_key(keys, table=table, reason=self.monotone)
 
     async def derive(self, executor: Any, *, table: str, keys: tuple[Key, ...]) -> Any:
+        """Capture the ceiling: the largest key in the table, encoded for the ledger.
+
+        One index descent -- `ORDER BY key DESC LIMIT 1` against the same index
+        the walk uses. Runs once, when the walk starts, and the value is durable
+        from then on. `None` when the table is empty, which `predicate`
+        turns into a walk with nothing to do.
+        """
         order = _keyset.order_clause(keys, reverse=True)
         projection = ", ".join(item.name for item in keys)
         record = await executor.fetchrow(
@@ -263,6 +316,12 @@ class Ceiling:
         return _keyset.encode_cursor(keys, values)
 
     def predicate(self, keys: tuple[Key, ...], ceiling: Any, binds: Any) -> str:
+        """The `WHERE` fragment meaning "not past the ceiling".
+
+        A row comparison against the captured key, in whichever direction the
+        key is ordered. `FALSE` when no ceiling was captured, so an empty
+        table's walk completes immediately.
+        """
         if ceiling is None:
             # The table was empty when the ceiling was captured, so the walk has
             # nothing to do and says so rather than scanning to find out.
@@ -305,9 +364,21 @@ class Sealed:
         )
 
     def refuse(self, keys: tuple[Key, ...], *, table: str) -> None:
+        """Refuse a clock-derived frontier over a key that is not a timestamp.
+
+        Called once, when the pass is declared. `clock_timestamp()` produces a
+        timestamp, so the leading key column has to be measured in the same
+        domain for the comparison to mean anything.
+        """
         _keyset.refuse_unclocked_key(keys, table=table)
 
     async def derive(self, executor: Any, *, table: str, keys: tuple[Key, ...]) -> Any:
+        """Read the frontier for this cycle: `clock_timestamp() - after`.
+
+        The database's clock, not the caller's, so workers on disagreeing wall
+        clocks agree on where a cycle stops. Read once per cycle and bound for
+        the whole of it -- see the comment below for why it cannot be inline.
+        """
         # The frontier is read once per cycle and bound for the whole of it. An
         # inline clock_timestamp() would move the finish line as the walk ran,
         # so a busy table's cycle could never end.
@@ -317,6 +388,12 @@ class Sealed:
         return _keyset.encode_cursor(keys[:1], (value,))
 
     def predicate(self, keys: tuple[Key, ...], ceiling: Any, binds: Any) -> str:
+        """The `WHERE` fragment meaning "the clock has already passed this row".
+
+        A comparison on the leading key column alone, not a row comparison:
+        the frontier is a point on the clock, and later key columns exist to
+        break ties within it rather than to bound it.
+        """
         if ceiling is None:  # pragma: no cover - the clock always answers
             return "FALSE"
         decoded = _keyset.decode_cursor(keys[:1], ceiling)
@@ -332,11 +409,14 @@ class Sealed:
 class Sql:
     """A SQL fragment and its bind values, for a table the ORM does not own.
 
-    Placeholders are written ``?`` and renumbered when the fragment is spliced
-    into a statement, because a fragment cannot know which ``$n`` it will land
-    on::
+    Placeholders are written `?` and renumbered when the fragment is spliced
+    into a statement, because a fragment cannot know which `$n` it will land
+    on:
 
-        Purge(where=Sql("state = ANY(?)", [["delivered", "failed"]]))
+    ```python
+    Purge(where=Sql("state = ANY(?)", [["delivered", "failed"]]))
+    ```
+
     """
 
     text: str
@@ -384,7 +464,7 @@ class _Work:
 
     Every shape here re-runs as a no-op, which is what lets the pass promise
     exactly-once *inside the database* without asking the caller for anything.
-    :class:`Apply` is the exception, and it asks in writing.
+    `Apply` is the exception, and it asks in writing.
     """
 
     __slots__ = ()
@@ -405,6 +485,16 @@ class Purge(_Work):
     where: Any = None
 
     async def apply(self, tx: Any, chunk: Chunk, binds: Any) -> int:
+        """Delete one chunk's rows inside the chunk transaction.
+
+        Args:
+            tx: the chunk's transaction, which the cursor also advances in.
+            chunk: the range being walked.
+            binds: the statement's bind collector.
+
+        Returns:
+            Rows deleted, read from the command tag, for the report.
+        """
         extra = _render_filter(self.where, binds, model=chunk.model, alias=chunk.alias)
         clause = chunk.where if extra is None else f"{chunk.where} AND ({extra})"
         tag = await tx.execute(f"DELETE FROM {chunk.table} WHERE {clause}", *binds.args)
@@ -420,8 +510,7 @@ class Rewrite(_Work):
     later stage's verification is deliberately *not* allowed to reuse.
 
     Args:
-        set_: ``column -> SQL expression``. A column may be a model column or a
-            plain name; an expression may be raw SQL or a :class:`Sql` with binds.
+        set_: `column -> SQL expression`. Model columns or plain names, either way.
         where: which rows still need converting.
     """
 
@@ -434,9 +523,23 @@ class Rewrite(_Work):
 
     @property
     def writes(self) -> tuple[str, ...]:
+        """The columns `set_` assigns.
+
+        A pass refuses to walk by one of these: a key the work itself changes
+        moves rows past the cursor, so they are processed twice or never.
+        """
         return tuple(_column_name(column) for column in self.set_)
 
     async def apply(self, tx: Any, chunk: Chunk, binds: Any) -> int:
+        """Update one chunk's rows inside the chunk transaction.
+
+        On a re-run the count is zero, because *where* no longer matches the rows
+        already converted -- which is the property that makes the shape safe to
+        repeat.
+
+        Returns:
+            Rows actually updated, read from the command tag.
+        """
         assignments = []
         for column, expression in self.set_.items():
             rendered = _render_filter(expression, binds, model=chunk.model, alias=chunk.alias)
@@ -453,14 +556,17 @@ class Rewrite(_Work):
 class Declared:
     """A written reason that a callback is safe to run twice.
 
-    There is no default and no ``strict=False``. Job delivery is at-least-once,
+    There is no default and no `strict=False`. Job delivery is at-least-once,
     so the question cannot be avoided -- it can only be answered, and being wrong
-    on purpose should at least be legible to whoever reviews it::
+    on purpose should at least be legible to whoever reviews it:
 
-        Apply(reencrypt, idempotent=Declared(
-            "re-wrapping a key is idempotent: the row records the wrapping key id "
-            "and rows already carrying the new id are excluded by `where`"
-        ))
+    ```python
+    Apply(reencrypt, idempotent=Declared(
+        "re-wrapping a key is idempotent: the row records the wrapping key id "
+        "and rows already carrying the new id are excluded by `where`"
+    ))
+    ```
+
     """
 
     reason: str
@@ -474,11 +580,11 @@ class Declared:
 class Apply(_Work):
     """Hand each chunk to a callback, for work no declared shape covers.
 
-    The callback is awaited as ``callback(tx, chunk, binds)`` *inside* the chunk
+    The callback is awaited as `callback(tx, chunk, binds)` *inside* the chunk
     transaction, so anything it writes commits with the cursor. It returns the
     number of rows it touched, for the report.
 
-    ``idempotent=`` is required: see :class:`Declared`.
+    `idempotent=` is required: see `Declared`.
     """
 
     callback: Any
@@ -495,12 +601,21 @@ class Apply(_Work):
             )
 
     async def apply(self, tx: Any, chunk: Chunk, binds: Any) -> int:
+        """Await the callback inside the chunk transaction.
+
+        `None` and `False` count as zero, so a callback with nothing useful to
+        report may return nothing. The number reaches the report only; it does
+        not affect whether the chunk committed.
+
+        Returns:
+            Whatever the callback returned, as an int.
+        """
         affected = await self.callback(tx, chunk, binds)
         return int(affected or 0)
 
 
 def _rows_in(tag: Any) -> int:
-    """The row count out of a command tag such as ``DELETE 412``."""
+    """The row count out of a command tag such as `DELETE 412`."""
     if isinstance(tag, int):
         return tag
     if not isinstance(tag, str):
@@ -521,10 +636,10 @@ class PassStatus:
     something, reads -- an in-process registry that is bounded and TTL'd cannot
     answer a question about a pass that has been running for two hours.
 
-    ``progress`` carries the percentage *with* its provenance, the trailing rate,
+    `progress` carries the percentage *with* its provenance, the trailing rate,
     and either an ETA or the reason there is not one. A pass emits no phase
     records and never appears in the Flight Recorder -- attribution is bound per
-    request through a ``ContextVar`` and a supervised background task has no
+    request through a `ContextVar` and a supervised background task has no
     request -- so this row is the whole picture, deliberately.
     """
 
@@ -561,7 +676,7 @@ class PassStatus:
 
     @property
     def state(self) -> str:
-        """``walking`` | ``slow`` | ``stalled`` | ``blocked`` | ``done``."""
+        """`walking` | `slow` | `stalled` | `blocked` | `done`."""
         return self.progress.state
 
     @property
@@ -570,13 +685,21 @@ class PassStatus:
 
         Skipping a chunk buys throughput and never the irreversible step, so a
         pass with an open hole is barred until the hole is cleared -- which is
-        what ``wreath passes retry`` does. The terminal gate itself is a later
+        what `wreath passes retry` does. The terminal gate itself is a later
         stage; this is the fact it will read, and it is true as soon as there is
         a hole to read it from.
         """
         return self.holes_open > 0
 
     def as_dict(self) -> dict[str, Any]:
+        """This status as JSON-safe primitives, for an API or the CLI.
+
+        Timestamps become strings and the `Progress`
+        record is flattened in alongside the rest, so the result is one flat
+        object rather than a nested one. `gate_barred` and the progress fields
+        are derived here, so a consumer of this dictionary never has to
+        recompute what `gate_barred` means.
+        """
         return {
             "name": self.name,
             "tenant": self.tenant,
@@ -623,22 +746,25 @@ class ChunkedPass:
     """A durable, resumable, paced walk over one table.
 
     Declared once, validated at declaration time, and driven by the job runner
-    with :meth:`wreath.jobs.JobRunner.drive`. See the module docstring for what
+    with `wreath.jobs.JobRunner.drive`. See the module docstring for what
     the machinery buys and the guide for how to reach for it.
 
     Args:
         name: this pass's identity in the ledger, and how the CLI names it.
-        over: a model class, or a :class:`Table` for a table the ORM does not own.
-        units: where the next range comes from. :class:`Rows` today.
-        frontier: how far the walk goes -- :meth:`Ceiling.at_launch` for a pass
-            that finishes, :class:`Sealed` for one that recurs.
+        over: a model class, or a `Table` for a table the ORM does not own.
+        units: where the next range comes from. `Rows` today.
+        frontier: `Ceiling.at_launch()` for a pass that finishes, `Sealed` to recur.
         work: what to do to a chunk.
+        gate: the terminal verification, and the fact it publishes when it passes.
         pace: how much of the machine the pass may be. There is no "off".
-        shift: how long one stretch of work runs before it hands back to the job
-            runner. Must be shorter than the runner's lease, which
-            :meth:`~wreath.jobs.JobRunner.drive` checks.
+        progress: what the percentage is measured against. `Estimated()` by default.
+        on_chunk_failure: `"halt"` to stop at a hole, `"skip"` to walk past it.
+        chunk_retries: attempts a chunk gets before it is dead-lettered. At least 1.
+        shift: how long one stretch of work runs. Shorter than the lease; `drive` checks.
         tenant: the ledger row's tenant, for a fleet that keeps them apart.
         schema: where the ledger table lives; match the job runner's.
+        workload: must be `"write"`; a read pool opens read-only and a pass writes.
+        rewrites: the column this pass overwrites in place, so a downgrade can refuse.
     """
 
     __slots__ = (
@@ -765,50 +891,75 @@ class ChunkedPass:
         self._ledger = _ledger.Ledger(schema=schema, name=name, tenant=tenant)
 
     # -- what a driver reads -------------------------------------------------
+    #
+    # A declaration is read-only once built. Every refusal has already run, so
+    # anything reading these -- the driver, the CLI, a test -- is looking at a
+    # shape that was validated at declaration time and cannot drift afterwards.
 
     @property
     def name(self) -> str:
+        """This pass's identity: its ledger row's key, and how the CLI names it."""
         return self._name
 
     @property
     def tenant(self) -> str:
+        """The ledger row's tenant. `""` for a fleet that does not separate them."""
         return self._tenant
 
     @property
     def schema(self) -> str:
+        """The schema holding the ledger table. Must match the job runner's."""
         return self._schema
 
     @property
     def table(self) -> str:
+        """The table being walked, as it is written in a statement.
+
+        Already quoted and qualified where that was resolvable. A model on a
+        logical (central or tenant) schema resolves to a bare quoted name and
+        reaches its schema through `search_path`, because the schema mode is
+        not known when a pass is declared.
+        """
         return self._table
 
     @property
     def alias(self) -> str:
+        """The bare table name, used to qualify columns in a model predicate."""
         return self._alias
 
     @property
     def model(self) -> Any:
+        """The model class walked, or `None` when `over=` named a `Table`.
+
+        `None` is what makes a model predicate impossible for that pass: there
+        is no class to check the columns against, so the filter has to be an
+        explicit `Sql` fragment.
+        """
         return self._model
 
     @property
     def units(self) -> Rows | Buckets:
+        """Where the next range comes from."""
         return self._units
 
     @property
     def frontier(self) -> Ceiling | Sealed:
+        """How far the walk goes: a fixed ceiling, or one re-derived each cycle."""
         return self._frontier
 
     @property
     def work(self) -> _Work:
+        """What is done to each chunk."""
         return self._work
 
     @property
     def gate(self) -> Gate | None:
+        """The terminal verification, or `None` when this pass publishes no fact."""
         return self._gate
 
     @property
     def guards(self) -> str | None:
-        """The fact this pass claims, or ``None`` if its gate publishes none.
+        """The fact this pass claims, or `None` if its gate publishes none.
 
         Seeded into the ledger so a migration can ask what is still in flight.
         """
@@ -819,40 +970,69 @@ class ChunkedPass:
         """The column whose values this pass overwrites in place, if any.
 
         Seeded into the ledger so a *downgrade* can refuse forever after. A pass
-        that only reads, or that fills a column it added, leaves this ``None``.
+        that only reads, or that fills a column it added, leaves this `None`.
         """
         return self._rewrites
 
     @property
     def pace(self) -> DutyCycle:
+        """How much of the machine this pass may be. Never absent -- there is no "off"."""
         return self._pace
 
     @property
     def progress(self) -> Denominator:
+        """What the reported percentage is measured against.
+
+        `Estimated` unless another was declared,
+        because a denominator that costs a count of the whole table is not a
+        sensible default for a walk that exists because the table is large.
+        """
         return self._progress
 
     @property
     def on_chunk_failure(self) -> str:
+        """`"halt"` or `"skip"`.
+
+        `halt` parks the cursor before the failing chunk and blocks the pass,
+        so nothing after the hole runs. `skip` walks past it and bars the
+        terminal gate until the hole is cleared. Both are recoverable only
+        through `retry`.
+        """
         return self._on_chunk_failure
 
     @property
     def chunk_retries(self) -> int:
+        """Attempts a chunk gets before it becomes a hole. At least 1."""
         return self._chunk_retries
 
     @property
     def shift(self) -> float:
+        """Seconds of work per `run_shift`, as a float.
+
+        Declared as a duration string or a number and normalised here. Shorter
+        than the job runner's lease, which is what keeps the runner from
+        reclaiming a handler that is still working.
+        """
         return self._shift
 
     @property
     def workload(self) -> str:
+        """Always `"write"`. A read pool opens read-only, so a pass on one fails."""
         return self._workload
 
     @property
     def ledger(self) -> Any:
+        """The durable state this pass reads and advances. Owned by the driver."""
         return self._ledger
 
     @property
     def recurring(self) -> bool:
+        """Whether cycles repeat rather than the pass completing.
+
+        True for `Sealed`, whose frontier moves each cycle, and false for
+        a fixed `Ceiling`. A whole-pass gate needs a completion to fire
+        at, so it is refused on a recurring pass.
+        """
         return bool(self._frontier.recurring)
 
     def __repr__(self) -> str:
@@ -864,7 +1044,7 @@ class ChunkedPass:
         """DDL for the shared ledger table. Apply it as a migration.
 
         Nothing in Wreath runs this, for the same reason nothing runs
-        :meth:`wreath.jobs.JobRunner.schema_sql`: a table that appears because a
+        `wreath.jobs.JobRunner.schema_sql`: a table that appears because a
         process started is a schema change with no history and no review.
         """
         return self._ledger.schema_sql()
@@ -893,7 +1073,7 @@ class ChunkedPass:
         The chunking, the per-chunk transaction, and the pacing all still apply,
         so this is not the long transaction a pass exists to avoid -- but it does
         occupy the caller for as long as the walk takes. For anything that might
-        run for minutes, hand it to :meth:`wreath.jobs.JobRunner.drive` instead
+        run for minutes, hand it to `wreath.jobs.JobRunner.drive` instead
         and let it run in bounded shifts that survive a redeploy.
         """
         chunks = 0
@@ -938,8 +1118,8 @@ class ChunkedPass:
         the cursor instead would redo months of correct work to redo one range.
 
         *unit* is the range's inclusive upper key and *after* its exclusive lower
-        one, in the same shape ``key=`` was declared -- one value, or a tuple.
-        Returns ``False`` when the unit is already queued, which makes calling it
+        one, in the same shape `key=` was declared -- one value, or a tuple.
+        Returns `False` when the unit is already queued, which makes calling it
         twice harmless.
         """
         keys = self._units.keys
@@ -970,12 +1150,12 @@ class ChunkedPass:
         queued -- so this schedules the work, it does not declare the problem
         solved.
 
-        It also lifts a ``blocked`` phase, and that half is not optional.
-        ``halt`` parks the cursor *before* its hole and stops the pass; every
-        later shift then sees a phase that is not ``walking`` and declines to
+        It also lifts a `blocked` phase, and that half is not optional.
+        `halt` parks the cursor *before* its hole and stops the pass; every
+        later shift then sees a phase that is not `walking` and declines to
         run, so without lifting it the chunk is never re-attempted, the hole is
-        never cleared, and the gate it bars is unreachable. ``halt`` would be a
-        trap rather than a policy. ``skip`` never blocks, so there the queueing
+        never cleared, and the gate it bars is unreachable. `halt` would be a
+        trap rather than a policy. `skip` never blocks, so there the queueing
         is the whole of it.
 
         A halted pass therefore walks its parked chunk twice -- once as the
@@ -1014,7 +1194,7 @@ def _as_tuple(value: Any, keys: tuple[Key, ...]) -> tuple[Any, ...]:
 
 
 def _resolve_source(over: Any) -> tuple[Any, str, str]:
-    """(model, table SQL, alias) for whatever ``over=`` was given."""
+    """(model, table SQL, alias) for whatever `over=` was given."""
     if isinstance(over, Table):
         return None, over.sql, over.name
     table = getattr(over, "__wreath_table__", None)
@@ -1069,16 +1249,16 @@ def column_fact(schema: str, table: str, column: str) -> str:
     """The canonical name for "this column has finished converting".
 
     One spelling, used by both sides of a contract that would otherwise be a
-    convention: a pass declares ``Gate(publishes=column_fact(...))``, and
-    :mod:`wreath.migrations` refuses to narrow or drop that column until the
+    convention: a pass declares `Gate(publishes=column_fact(...))`, and
+    `wreath.migrations` refuses to narrow or drop that column until the
     fact is published. A free-form string on each side would agree right up
-    until someone wrote ``public.treks.grade`` where the other expected
-    ``treks.grade``, and the failure would be a migration that sails through
+    until someone wrote `public.treks.grade` where the other expected
+    `treks.grade`, and the failure would be a migration that sails through
     instead of one that refuses.
 
     The column named is **the one a later migration will narrow**, not the one
-    being filled. For a retype that drains ``grade`` into ``grade_next``, the
-    fact is about ``grade``: that is the column whose drop has to wait.
+    being filled. For a retype that drains `grade` into `grade_next`, the
+    fact is about `grade`: that is the column whose drop has to wait.
     """
     for part, what in ((schema, "schema"), (table, "table"), (column, "column")):
         if not str(part).strip():
@@ -1115,7 +1295,7 @@ async def pending_facts(
 ) -> list[PendingFact]:
     """Which of *facts* a pass claims and has not yet established.
 
-    The half :func:`published_facts` cannot answer. A migration about to narrow
+    The half `published_facts` cannot answer. A migration about to narrow
     a column needs to tell "nothing guards this" from "something guards it and
     is still working", and an absent published fact means both. This reads the
     claim a pass records when its ledger row is seeded.

@@ -979,3 +979,57 @@ async def test_pool_bounds_waiters_and_cancellation_removes_waiter() -> None:
     await client.close()
     server.close()
     await server.wait_closed()
+
+
+def test_the_public_surface_exports_nothing_unraisable() -> None:
+    """`ProxyError` was exported by a client with no proxy support.
+
+    An exception nothing can raise is a `except` clause that never fires, and
+    a reader cannot tell it apart from one that guards a real failure mode.
+    """
+    import wreath.http_client as http_client
+
+    assert "ProxyError" not in http_client.__all__
+    assert not hasattr(http_client, "ProxyError")
+
+
+def test_redirect_policy_offers_no_flag_it_does_not_honour() -> None:
+    """`allow_cross_origin` changed the message and nothing else."""
+    with pytest.raises(TypeError):
+        RedirectPolicy(enabled=True, max_hops=2, allow_cross_origin=True)  # type: ignore[call-arg]
+
+    assert not hasattr(RedirectPolicy(), "allow_cross_origin")
+
+
+@pytest.mark.asyncio
+async def test_cross_origin_redirect_is_refused_with_one_reason() -> None:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            while True:
+                await reader.readuntil(b"\r\n\r\n")
+                writer.write(
+                    b"HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:9/elsewhere\r\n"
+                    b"content-length: 0\r\n\r\n"
+                )
+                await writer.drain()
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server, port = await _serve(handler)
+    client = HTTPClient(
+        "crossorigin",
+        base_url=f"http://127.0.0.1:{port}",
+        destination=_local_policy(),
+        redirect=RedirectPolicy(enabled=True, max_hops=2),
+    )
+    try:
+        await client.start()
+        with pytest.raises(RedirectError, match="separately configured client"):
+            await client.get("/go")
+    finally:
+        await client.close()
+        server.close()
+        await server.wait_closed()

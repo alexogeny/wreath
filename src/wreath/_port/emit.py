@@ -23,7 +23,12 @@ from .analyzer import (
     _SKIPPABLE,
     HTTP_METHODS,
     _base_kind,
+    _config_extra,
     _Imports,
+    _is_false,
+    _is_field_constraint,
+    _is_lifespan,
+    _is_true,
     _iter_py,
     _relative_to,
     _returns_in,
@@ -627,7 +632,9 @@ class _Emitter(ast.NodeVisitor):
             tail = dec_origin.split(".")[-1]
             if tail in ("field_validator", "model_validator", "validator", "root_validator"):
                 self._annotate(getattr(dec, "lineno", node.lineno), "pydantic.validator")
-            elif tail == "asynccontextmanager" and self._is_lifespan(node):
+            elif tail == "asynccontextmanager" and _is_lifespan(
+                node, self._lifespan_names, self.imports
+            ):
                 rule_id, reason = lifespan_shape(node)
                 self._annotate(node.lineno, rule_id, reason)
             elif tail == "shared_task" or (tail == "task" and "celery" in dec_origin.lower()):
@@ -642,22 +649,6 @@ class _Emitter(ast.NodeVisitor):
         self.generic_visit(node)
 
     visit_AsyncFunctionDef = visit_FunctionDef
-
-    def _is_lifespan(self, node) -> bool:
-        """Mirrors the analyzer: only the app's lifespan gets the split advice.
-
-        `contextlib.asynccontextmanager` is stdlib, and an advisory-lock or
-        connection helper written with it needs no porting at all.
-        """
-        if node.name in self._lifespan_names or node.name == "lifespan":
-            return True
-        parameters = list(node.args.args) + list(node.args.posonlyargs)
-        return (
-            len(parameters) == 1
-            and parameters[0].annotation is not None
-            and self.imports.origin(parameters[0].annotation).split(".")[-1]
-            in ("FastAPI", "Starlette")
-        )
 
     def _ensure_request_param(self, node) -> None:
         positional = list(node.args.posonlyargs) + list(node.args.args)
@@ -915,26 +906,10 @@ class _Emitter(ast.NodeVisitor):
 
 
 # --------------------------------------------------------------------------- module predicates
-def _config_extra(value: ast.AST | None) -> str | None:
-    if isinstance(value, ast.Call):
-        for kw in value.keywords:
-            if kw.arg == "extra" and isinstance(kw.value, ast.Constant):
-                # A Constant holds any literal; only a string is an `extra=`
-                # setting. Callers compare against "forbid"/"ignore", so a
-                # non-string was already as good as absent.
-                extra = kw.value.value
-                return extra if isinstance(extra, str) else None
-    return None
-
-
-def _is_field_constraint(value: ast.AST | None, imports: _Imports) -> bool:
-    if isinstance(value, ast.Call) and imports.origin(value.func).split(".")[-1] == "Field":
-        return any(
-            k.arg in ("ge", "le", "gt", "lt", "multiple_of", "min_length", "max_length",
-                      "regex", "pattern")
-            for k in value.keywords
-        )
-    return False
+# `_config_extra`, `_is_field_constraint`, `_is_lifespan`, `_is_false` and
+# `_is_true` are imported from the analyzer rather than restated here: the
+# emitter must recognize exactly what the analyzer billed, or the report and the
+# output disagree about the same line.
 
 
 def _mutable_factory(value: ast.AST | None) -> str | None:
@@ -948,14 +923,6 @@ def _mutable_factory(value: ast.AST | None) -> str | None:
             and value.func.id in ("list", "dict", "set") and not value.args):
         return value.func.id
     return None
-
-
-def _is_false(node: ast.AST) -> bool:
-    return isinstance(node, ast.Constant) and node.value is False
-
-
-def _is_true(node: ast.AST) -> bool:
-    return isinstance(node, ast.Constant) and node.value is True
 
 
 def _copy_tablename(value: ast.AST | None) -> str | None:

@@ -1,17 +1,19 @@
 """Static file serving.
 
-``app.static("/assets", "public/")`` registers a route that serves files from
+`app.static("/assets", "public/")` registers a route that serves files from
 the directory, with path-traversal and symlink containment, conditional requests
-(``ETag`` / ``If-None-Match``), and streamed bodies via ``FileResponse``::
+(`ETag` / `If-None-Match`), and streamed bodies via `FileResponse`:
 
-    app = Wreath()
-    app.static("/assets", "public")
+```python
+app = Wreath()
+app.static("/assets", "public")
+```
 
-Directory listings are intentionally not provided. ``index.html`` is served
+Directory listings are intentionally not provided. `index.html` is served
 for directory paths when present.
 
 Files are opened *beneath a trusted root directory descriptor* (see
-``wreath._fsguard``): the file that is checked is the file that is served, so
+`wreath._fsguard`): the file that is checked is the file that is served, so
 there is no revalidate-then-reopen-by-name window, and no symlinked component
 can redirect the request outside the root.
 """
@@ -38,11 +40,11 @@ from .response import (
 
 
 def _etag_matches(header: str | None, etag: str) -> bool:
-    """Whether ``If-None-Match`` covers ``etag`` (RFC 9110 §13.1.2).
+    """Whether `If-None-Match` covers `etag` (RFC 9110 §13.1.2).
 
-    The header is a *list*, may be ``*``, and its entries may carry the weak
-    ``W/`` prefix -- which the weak comparison this needs ignores. Comparing the
-    whole header to one tag with ``==`` meant a client that sent two tags, or a
+    The header is a *list*, may be `*`, and its entries may carry the weak
+    `W/` prefix -- which the weak comparison this needs ignores. Comparing the
+    whole header to one tag with `==` meant a client that sent two tags, or a
     proxy that added one, re-downloaded the body every time.
     """
     if not header:
@@ -60,7 +62,44 @@ if TYPE_CHECKING:
 
 
 class StaticFiles:
-    """A handler serving files under one directory subtree."""
+    """A handler serving files under one directory subtree.
+
+    Register it with `app.static(prefix, directory)` rather than constructing
+    it directly; the route it needs captures the rest of the path as
+    `path_params["path"]`. Calling the instance serves one request.
+
+    What one call guarantees:
+
+    * The file is opened *beneath* a root directory descriptor held since
+      construction, so no symlinked path component and no `..` can leave the
+      subtree, and there is no window between the check and the open.
+    * A missing, unreadable, or escaping path raises `NotFound` -- the same
+      404 either way, so probing cannot distinguish them.
+    * Every response advertises `Accept-Ranges: bytes` and carries a strong
+      `ETag` derived from mtime and size, plus `Last-Modified`.
+    * Conditional requests are answered before ranges. A matching
+      `If-None-Match` returns 304 with the validators and no body.
+    * A `Range` is honoured only if `If-Range` (when present) still matches; a
+      stale `If-Range` sends the whole file, and an unsatisfiable range returns
+      416 carrying `Content-Range` with the current size.
+    * With `html_index`, a directory reached without a trailing slash returns
+      a 308 to the canonical path, so relative links in the index resolve
+      correctly rather than one level up.
+
+    Directory listings are deliberately not implemented; a directory either
+    serves its `index.html` or 404s. Lookups run on the instance's own bounded
+    thread pool, so a burst of static requests cannot exhaust the loop's default
+    executor and stall unrelated work.
+
+    Args:
+        directory: Must exist at construction; resolved to a real path and pinned by fd.
+        html_index: Serve `index.html` for a directory path; when False a directory 404s.
+        cache_control: Emitted as `Cache-Control` on every response. None sends none.
+        max_workers: Lookup threads. The work is one `openat`, so more buys queueing.
+
+    Raises:
+        ValueError: `directory` does not exist or is not a directory.
+    """
 
     __slots__ = ("_executor", "_root", "_root_fd", "cache_control", "html_index")
 
@@ -155,11 +194,29 @@ class StaticFiles:
         return parse_range(request.header("range"), size)
 
     def close(self) -> None:
-        """Shut the lookup pool down. Idempotent."""
-        self._executor.shutdown(wait=False)
+        """Shut the lookup pool down and release the root descriptor. Idempotent.
+
+        **Waits for lookups already in the pool**, because releasing the root
+        descriptor requires it: every lookup calls `openat` against that
+        descriptor, and closing it under a running lookup either fails the
+        request or -- once the kernel hands the number to the next `open` in the
+        process -- resolves the path beneath something else entirely. Not
+        waiting is what made the descriptor unreleasable, so the two halves are
+        one change rather than two. The wait is bounded: a queued lookup is a
+        single `openat`, and the queue is bounded by `max_workers`.
+
+        Call it at shutdown, after the server has stopped accepting. A lookup
+        submitted after it raises `RuntimeError` from the pool, as it did before.
+        """
+        self._executor.shutdown(wait=True)
+        # Read-and-clear before closing, so a second call cannot close a
+        # descriptor number the process has since reissued to something else.
+        root_fd, self._root_fd = self._root_fd, -1
+        if root_fd >= 0:
+            os.close(root_fd)
 
     def _resolve(self, rest: str) -> tuple[int | str, os.stat_result, str] | None:
-        """Open a servable file beneath the root, or ``None``.
+        """Open a servable file beneath the root, or `None`.
 
         Runs in a worker thread. Closes any descriptor it will not return, so a
         directory, a symlink escape, or a missing index never leaks an fd.

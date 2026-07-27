@@ -403,3 +403,45 @@ def test_query_range_on_non_numeric_rejected() -> None:
 
     with pytest.raises(TypeError):
         compile_binder(handler, "/")
+
+
+def test_the_lossy_validation_error_converter_is_gone() -> None:
+    """`binding.validation_error_response()` was dead and lossy at once.
+
+    Nothing called it, it was not in `__all__`, and what it produced -- an
+    `UnprocessableEntity` whose detail was the string "N validation error(s)" --
+    dropped the per-field `errors` list that the real 422 path carries. A public
+    helper that is strictly worse than the path the framework actually takes is
+    a trap for the first caller who finds it, so it was removed rather than
+    fixed: there is nowhere for the field list to go on an `HTTPException`.
+    """
+    import wreath.binding as binding
+
+    assert not hasattr(binding, "validation_error_response")
+
+
+@pytest.mark.asyncio
+async def test_the_real_422_path_keeps_every_field_error() -> None:
+    """What the removed helper dropped, and the reason nothing should use it."""
+    from wreath.testing import TestClient
+
+    app = Wreath()
+
+    @app.get("/items")
+    async def items(
+        request: Any,
+        limit: Annotated[int, Query()],
+        offset: Annotated[int, Query()],
+    ) -> Any:
+        return {"limit": limit, "offset": offset}
+
+    async with TestClient(app) as client:
+        response = await client.get("/items?limit=nope&offset=also-nope")
+
+    assert response.status == 422
+    body = response.json()
+    assert body["detail"] == "Request validation failed"
+    # The `errors` member, with a `loc` naming the source and the field, is
+    # exactly what `validation_error_response()` threw away.
+    assert body["errors"][0]["loc"] == ["query", "limit"]
+    assert body["errors"][0]["type"] == "int"

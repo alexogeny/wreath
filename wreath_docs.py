@@ -21,6 +21,11 @@ nav = Nav(
         Page("Installation and first app", "getting-started/index.md"),
         Page("Project structure and deployment", "getting-started/deployment.md"),
     ),
+    Section(
+        "The camera-trap example",
+        Page("A tour of the schema, in psql", "example/walkthrough.md"),
+        Page("The read API", "example/read-api.md"),
+    ),
     Page("Performance", "perf/index.md"),
     Page("Under the hood", "internals/index.md"),
     Section(

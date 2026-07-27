@@ -21,9 +21,12 @@ async def start_upload(request):
 your own route with `store.verify_local_url(...)` — so the same handler works in
 dev without an S3 bucket. For a download link, pass `method="GET"` instead.
 
-Presign expiry is in seconds and clamped by the provider (SigV4 max is 7 days).
-The URL embeds its own signing time, so client clock skew doesn't matter, and no
-credentials are ever exposed to the browser.
+Presign expiry is in seconds from now, and it is enforced on both backends, by
+different machinery. S3 embeds the signing time in `X-Amz-Date` and AWS applies
+the window — clamped by the provider, SigV4's maximum being 7 days. The local and
+memory stores embed the resulting **deadline** in the signed query string, and
+`verify_local_url(...)` refuses a URL past it. Neither depends on the client's
+clock, and no credentials are ever exposed to the browser.
 
 If you'd rather stream the bytes *through* your process — to validate or
 transform them — write to `store.write_stream(...)` from a multipart handler

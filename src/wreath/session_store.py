@@ -1,22 +1,24 @@
 """Server-side session storage.
 
-The default :class:`~wreath.middleware.SessionMiddleware` keeps the whole
+The default `SessionMiddleware` keeps the whole
 session in a signed cookie: nothing on the server, but nothing revocable
 either, and a 4 KiB ceiling. Hand the middleware a store and the cookie carries
-only a signed session id, while the contents live in PostgreSQL::
+only a signed session id, while the contents live in PostgreSQL:
 
-    store = PostgresSessionStore(app.postgres("main"))
-    app.add_middleware(SessionMiddleware(secret="…", store=store))
+```python
+store = PostgresSessionStore(app.postgres("main"))
+app.add_middleware(SessionMiddleware(secret="…", store=store))
+```
 
 Then a session can be revoked (delete the row), inspected, and grown past what a
 cookie holds. No Redis: the database the application already has is the store,
-the same choice :class:`~wreath.middleware.PostgresRateLimitStore` makes.
+the same choice `PostgresRateLimitStore` makes.
 
-**The table is not created for you.** Apply :meth:`PostgresSessionStore.schema_sql`
+**The table is not created for you.** Apply `PostgresSessionStore.schema_sql`
 as a migration, so schema changes stay in the migration history where the rest
 of the schema lives.
 
-Expired rows are removed by :meth:`PostgresSessionStore.purge_pass` -- a chunked,
+Expired rows are removed by `PostgresSessionStore.purge_pass` -- a chunked,
 resumable, paced walk you hand to the job runner rather than a background thread,
 so it retries, does not duplicate across workers, and cannot hold one long
 transaction open over a table that grows with every login.
@@ -35,30 +37,30 @@ class SessionStore(Protocol):
     """Where server-side session contents live."""
 
     async def load(self, sid: str) -> dict[str, Any] | None:
-        """The session for ``sid``, or None when absent or expired."""
+        """The session for `sid`, or None when absent or expired."""
         ...
 
     async def save(self, sid: str, data: dict[str, Any], max_age: int) -> None:
-        """Store ``data`` under ``sid``, expiring ``max_age`` seconds from now."""
+        """Store `data` under `sid`, expiring `max_age` seconds from now."""
         ...
 
     async def delete(self, sid: str) -> None:
-        """Drop ``sid``. Must not fail when it is already gone."""
+        """Drop `sid`. Must not fail when it is already gone."""
         ...
 
 
 class PostgresSessionStore:
     """Sessions in a PostgreSQL table, shared by every worker.
 
-    ``jsonb`` rather than ``text``: the contents stay queryable, so "log out
+    `jsonb` rather than `text`: the contents stay queryable, so "log out
     every session for this user" is one statement rather than a scan.
 
-    PostgreSQL owns the clock (``clock_timestamp()``), so workers on disagreeing
+    PostgreSQL owns the clock (`clock_timestamp()`), so workers on disagreeing
     wall clocks cannot disagree about expiry -- the same reasoning, and now the
-    same :mod:`wreath.store` primitive, as the PostgreSQL rate-limit store.
+    same `wreath.store` primitive, as the PostgreSQL rate-limit store.
 
     Unlike the other two stores over that primitive, the lifetime is not the
-    store's to decide: the cookie's ``max_age`` is what a session should outlive,
+    store's to decide: the cookie's `max_age` is what a session should outlive,
     so it is bound per write rather than fixed at construction.
     """
 
@@ -100,6 +102,14 @@ class PostgresSessionStore:
         return self._store.schema_sql()
 
     async def load(self, sid: str) -> dict[str, Any] | None:
+        """The session under `sid`, or `None` when it is absent or expired.
+
+        Expiry is decided by the database's clock in the same statement as the
+        lookup, so an expired row is never returned even though nothing has
+        purged it yet. Anything that is not a JSON object -- a row whose payload
+        was written by something else -- also reads as `None` rather than
+        reaching a handler as a value it cannot use.
+        """
         row = await self._store.read(sid, live=True)
         if row is None:
             return None
@@ -112,6 +122,21 @@ class PostgresSessionStore:
         return data if isinstance(data, dict) else None
 
     async def save(self, sid: str, data: dict[str, Any], max_age: int) -> None:
+        """Store `data` under `sid`, expiring `max_age` seconds from now.
+
+        One `INSERT ... ON CONFLICT DO UPDATE`, so creating a session and
+        rewriting one are the same statement and neither can lose a race to the
+        other. Every write moves the deadline, which is what a session wants and
+        is the opposite of the rule the other stores over this primitive follow:
+        a session should survive for `max_age` past the last time it was used,
+        while an idempotency key must not be extendable by the request holding
+        it.
+
+        Args:
+            sid: the session id, as the cookie carries it.
+            data: the whole session, as `jsonb`. Replaces; this is not a merge.
+            max_age: seconds, applied against the database's clock, not this worker's.
+        """
         from ._json import dumps as _json_dumps
 
         await self._store.statement("save").execute(
@@ -119,10 +144,15 @@ class PostgresSessionStore:
         )
 
     async def delete(self, sid: str) -> None:
+        """Revoke one session. Not an error when it is already gone.
+
+        Takes effect for every worker at once, which is the thing a
+        cookie-only session cannot do.
+        """
         await self._store.delete(sid)
 
     async def delete_for(self, subject: str) -> int:
-        """Drop every session whose principal is ``subject``.
+        """Drop every session whose principal is `subject`.
 
         One statement over the payload, because the alternative -- read every
         row, decode each one, delete the matches -- is the whole table across
@@ -141,20 +171,22 @@ class PostgresSessionStore:
     def purge_pass(self, *, chunk: int = 1000, **options: Any) -> Any:
         """A recurring pass that deletes expired sessions, chunk by chunk.
 
-        The supported way to keep the table small::
+        The supported way to keep the table small:
 
-            jobs.drive(store.purge_pass(), cron="*/10 * * * *")
+        ```python
+        jobs.drive(store.purge_pass(), cron="*/10 * * * *")
+        ```
 
         A session table is one row per login rather than one per request, so it
-        is exactly the size where a single unbounded ``DELETE`` starts holding a
+        is exactly the size where a single unbounded `DELETE` starts holding a
         snapshot open long enough for the application to notice afterwards. The
         pass walks it in expiry order, one transaction per chunk, resumably, and
-        paced. See :mod:`wreath.passes`.
+        paced. See `wreath.passes`.
         """
         from ._passes.stores import keyed_purge_pass
 
         return keyed_purge_pass(
-            self._store.declaration, self._database,
+            self._store.declaration,
             name=f"purge_{self._store.table}", chunk=chunk, **options,
         )
 
@@ -162,6 +194,6 @@ class PostgresSessionStore:
         """Delete expired rows in **one unbounded statement**.
 
         Safe to run concurrently, and fine for a small table -- but on a large
-        one it is the long transaction :meth:`purge_pass` exists to prevent.
+        one it is the long transaction `purge_pass` exists to prevent.
         """
         return await self._store.purge()

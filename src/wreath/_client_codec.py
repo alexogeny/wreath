@@ -1,4 +1,20 @@
-"""Pure/native selection for outbound HTTP byte codecs."""
+"""Pure/native selection for outbound HTTP byte codecs.
+
+Three tiers, not two, and the order is deliberate. `_client` is the dedicated
+client protocol extension and wins when built. `_core` is the framework
+accelerator, which happens to carry the same two functions for the inbound path;
+it is the fallback because a build may have one extension and not the other.
+`_pure.http_client` is the reference implementation and the parity contract --
+the native tiers are asserted byte-for-byte equal to it, so a divergence is a
+parity bug rather than a behaviour change.
+
+`response_framing` has no native twin and is imported unconditionally: it decides
+the framing *mode* from a method, status, and header list, which is control flow
+rather than byte work and has nothing to gain from C.
+
+`_implementation` records which tier was chosen, for tests and diagnostics that
+need to know which one they measured.
+"""
 
 from __future__ import annotations
 

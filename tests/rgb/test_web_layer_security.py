@@ -94,6 +94,61 @@ class TestCorsVaryOnRejection:
         assert _header(response, b"vary") == b"origin"
 
 
+def _vary_tokens(response) -> set[bytes]:
+    """Every `Vary` token on a response, however many headers carry them."""
+    tokens: set[bytes] = set()
+    for name, value in response.headers:
+        if name.lower() == b"vary":
+            tokens.update(item.strip().lower() for item in value.split(b",") if item.strip())
+    return tokens
+
+
+def _vary_headers(response) -> list[bytes]:
+    return [value for name, value in response.headers if name.lower() == b"vary"]
+
+
+class TestCorsVaryMergesWithAnExistingVary:
+    """The reject path added `Vary: origin` only when the response carried *no*
+    `Vary` at all, so a response already varying on something else (compression
+    adds `accept-encoding`, content negotiation adds `accept`) never gained
+    `origin` -- and a shared cache could replay one origin's answer to another.
+    That is exactly the failure the surrounding comment claims to prevent.
+    """
+
+    class _Response:
+        def __init__(self, headers=()):
+            self.headers: list[tuple[bytes, bytes]] = list(headers)
+
+    async def test_a_disallowed_origin_merges_into_an_existing_vary(self):
+        middleware = CORSMiddleware(allow_origins=["https://app.example"])
+        response = await middleware.after(
+            _Request(origin="https://evil.example"),
+            self._Response([(b"vary", b"accept-encoding")]),
+        )
+        assert _vary_tokens(response) == {b"accept-encoding", b"origin"}
+        assert len(_vary_headers(response)) == 1
+        assert _header(response, b"access-control-allow-origin") is None
+
+    async def test_an_allowed_origin_merges_into_an_existing_vary(self):
+        middleware = CORSMiddleware(allow_origins=["https://app.example"])
+        response = await middleware.after(
+            _Request(origin="https://app.example"),
+            self._Response([(b"vary", b"accept-encoding")]),
+        )
+        assert _vary_tokens(response) == {b"accept-encoding", b"origin"}
+        assert len(_vary_headers(response)) == 1
+        assert _header(response, b"access-control-allow-origin") == b"https://app.example"
+
+    async def test_an_existing_origin_vary_is_not_duplicated(self):
+        middleware = CORSMiddleware(allow_origins=["https://app.example"])
+        response = await middleware.after(
+            _Request(origin="https://evil.example"),
+            self._Response([(b"vary", b"Accept-Encoding, Origin")]),
+        )
+        assert _vary_tokens(response) == {b"accept-encoding", b"origin"}
+        assert len(_vary_headers(response)) == 1
+
+
 class TestRateLimitKeyIsRequired:
     """R-57: a key function returning None means *no limiting at all*, so any
     deployment where `scope["client"]` is absent is silently unlimited."""

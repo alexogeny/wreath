@@ -219,7 +219,15 @@ migrations require `--parent CHECKSUM`. The sole `WMA1` artifact binds all three
 authoritative representations: fixed operations (`WMO1`), literal names and
 signatures (`WMP1`), and dependency-ordered SQL statements (`WMS1`). Wreath-metal
 re-derives both WMO1 and WMS1 from WMP1 while building and loading the artifact;
-a matching operation count is not considered sufficient. Unsupported alterations
+a matching operation count is not considered sufficient. "Dependency-ordered"
+is a specific promise: statements come out as tables, columns, column
+alterations, primary and unique keys, indexes, then foreign keys — so a foreign
+key never arrives before the key or unique index it references — and a reverse
+plan is the same order inverted, dropping foreign keys before anything they
+point at. Within a phase the order is the deterministic object-id one, which is
+where the guarantee used to stop: every constraint shared one phase, and whether
+a schema with relationships applied at all came down to which content hash
+happened to sort first. Unsupported alterations
 are encoded as `MANUAL` with no executable statement, which makes application
 ineligible rather than inviting a guess. The exported JSON and SQL files are
 review conveniences for the same bound artifact, not a second source of truth. A strict status check can verify the complete parent/source chain in

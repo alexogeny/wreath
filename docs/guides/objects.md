@@ -23,7 +23,9 @@ async def start_upload(request):
 `store.url(...)` signs the URL in-process — there is no network call to mint it.
 On S3 it is a fully query-signed URL the client uses directly; on `LocalObjectStore`
 it is a signed relative path you verify at your own route, so the same handler
-works in dev. Streaming the bytes through your process instead is the
+works in dev. Either way the URL stops working when `expires` runs out — S3 applies
+the window itself, and `verify_local_url` checks the deadline before it serves
+anything. Streaming the bytes through your process instead is the
 [upload-into-storage](#uploads-land-straight-in-storage) pattern below.
 
 ## One protocol, three backends
@@ -104,7 +106,17 @@ async with store.path("big.parquet").open("rb") as f:
         ...
 ```
 
-`open("wb")` **buffers** and flushes on exit — for true streaming writes call `write_stream` directly.
+**`iterdir` and `glob` are not `pathlib`'s.** An object store has no directories to
+stop at, only keys with slashes in them, so `iterdir` yields every key under the
+prefix at any depth and `glob` matches `fnmatch`-style over the whole key — `*`
+crosses `/`. Under `reports/`, `glob("*.csv")` therefore matches
+`reports/2026/q3.csv` as well as `reports/summary.csv`. For one level only, pass
+`delimiter="/"` to `store.list(...)`, which S3 honours (the local and memory
+backends ignore it).
+
+`open("wb")` **buffers** and flushes when the block ends normally — a block that
+raises stores nothing, so a failed handler leaves no truncated object under the
+key. For true streaming writes call `write_stream` directly.
 
 ## Presigned URLs
 
@@ -115,29 +127,73 @@ url = store.url("reports/q3.csv", expires=900, method="GET")   # seconds
 url = p.presigned_url(expires=900, method="PUT")               # from a path
 ```
 
-On S3 this is a fully query-signed URL the client can use directly. On `LocalObjectStore` it is a signed **relative** path (`/<key>?expires=…&signature=…`) you verify at your own route with `store.verify_local_url(...)` — so the same code path works in dev.
+On S3 this is a fully query-signed URL the client can use directly. On `LocalObjectStore` it is a signed **relative** path (`/<key>?expires=…&signature=…`) you verify at your own route with `store.verify_local_url(...)` — so the same code path works in dev. `MemoryObjectStore` mints an unroutable `memory://` URL and verifies it the same way, which is how a presign route gets a test.
 
-## Uploads land straight in storage
-
-A multipart upload streams into `write_stream` — bridge the parsed part's bytes with `file_chunks`:
+The local `expires` in the query is the **absolute UNIX time** the URL dies, not the lifetime you passed; it is covered by the signature, so it cannot be edited, and `verify_local_url` refuses both a bad signature and a passed deadline:
 
 ```python
 from typing import Annotated
+
+from wreath import Request
+from wreath.binding import Query
+from wreath.response import Response
+
+@app.get("/blobs/{name}")
+async def serve(
+    request: Request,
+    name: str,
+    expires: Annotated[int, Query()],
+    signature: Annotated[str, Query()],
+) -> Response:
+    if not store.verify_local_url(name, method="GET", expires=expires, signature=signature):
+        return Response(b"", status=403)
+    return Response(await store.read(name))
+```
+
+A path parameter captures one segment, so a key with `/` in it needs a route per
+level or a key carried in the query string — the URL's path is the key verbatim,
+and how you route to it is yours.
+
+## Uploads land straight in storage
+
+A parsed upload streams into `write_stream`. Read it with `UploadedFile.chunks()`, which
+covers both kinds of part — wreath spools any part over `spool_max_bytes` (1 MiB by
+default) to a temporary file and leaves `.data` **empty**, so `file_chunks(file.data)`
+would store a zero-byte object for exactly the uploads big enough to care:
+
+```python
+from typing import Annotated
+
+from wreath import Request
 from wreath.binding import File
 from wreath.request import UploadedFile
-from wreath.objects import file_chunks
+
+async def _body(upload: UploadedFile):
+    for chunk in upload.chunks():        # in memory or spooled, both read here
+        yield chunk
 
 @app.post("/upload")
-async def upload(request, file: Annotated[UploadedFile, File()]) -> dict:
+async def upload(request: Request, file: Annotated[UploadedFile, File()]) -> dict:
     stat = await store.write_stream(
-        file.filename,
-        file_chunks(file.data),
+        f"incoming/{file.filename}",
+        _body(file),
         content_type=file.content_type,
     )
     return {"key": stat.key, "size": stat.size}
 ```
 
-On S3, `write_stream` automatically switches to a **multipart upload** once the buffered data crosses the part size (≥ 5 MiB parts, 8 MiB default), aborting the upload if any part fails — so large files never fully materialize.
+`file.filename` is whatever the client sent. `normalize_key` still contains it — `..`,
+absolute keys and control characters raise `ObjectError` rather than escaping — but a
+hostile name raises where you may have wanted a 400, so validate it if that matters.
+`file_chunks(data)` remains the bridge when you already hold the bytes.
+
+On S3, `write_stream` automatically switches to a **multipart upload** once the buffered
+data crosses the part size (≥ 5 MiB parts, 8 MiB default), so large files never fully
+materialize. Once that upload exists, any failure — a rejected part, a producer that
+raises, a failed completion, a cancellation — aborts it before the exception propagates;
+if the abort itself fails, the store's `orphaned_uploads` counter records that parts were
+left in the bucket. A bucket taking streamed writes still wants a lifecycle rule expiring
+incomplete multipart uploads, because a process killed outright never reaches the abort.
 
 ## Hero: stream a zip of many objects
 
@@ -152,19 +208,36 @@ async def export(request):
     keys = [o.key async for o in store.list(prefix="reports/2026/")]
     return StreamingResponse(
         zip_stream(store, keys),
-        headers=[(b"content-disposition", b'attachment; filename="export.zip"')],
-        media_type=b"application/zip",
+        headers=[
+            (b"content-type", b"application/zip"),
+            (b"content-disposition", b'attachment; filename="export.zip"'),
+        ],
     )
 ```
 
-Memory stays flat whether the archive holds one object or ten thousand. (`unzip_stream` goes the other way, though Phase 1 buffers the archive via stdlib `zipfile`.)
+`StreamingResponse` invents no headers — there is no `media_type` parameter — so the
+`content-type` goes in the header list with everything else.
+
+Memory stays flat whether the archive holds one object or ten thousand. A key that turns
+out to be missing raises *mid-stream*, after bytes have already gone out, so the client
+receives a truncated archive; check the keys first if that matters.
+
+`unzip_stream` goes the other way and is **not** its equal in memory: a zip's directory
+lives at the end of the file, so the stdlib `zipfile` reader needs the whole archive in
+hand and each entry is decompressed whole. Peak memory is the archive plus its largest
+entry, and nothing bounds the expansion ratio — safe for an archive an operator uploaded,
+not for one an anonymous caller did.
 
 ## Gotchas
 
 - **Keys are normalized and contained.** `..`, absolute keys, and control characters raise `ObjectError`; `LocalObjectStore` additionally refuses symlinked path components.
 - **S3 part size.** Multipart parts are ≥ 5 MiB (`part_size` default 8 MiB); `read_stream` fetches in a `window` (8 MiB default). Both are tunable on the `S3ObjectStore` backend.
 - **MinIO / R2 / other S3-compatible.** The S3 backend supports path-style addressing and a custom host — point it at the endpoint and it just works, same code.
-- **Presign expiry** is in seconds and clamped by the provider (SigV4 max is 7 days); the URL embeds its own signing time, so client clock skew doesn't matter.
+- **Presign expiry** is in seconds from now on every backend, and enforced on every backend — but by different machinery. S3 embeds its signing time in `X-Amz-Date` and AWS applies the window (max 7 days, rejected at use time). `LocalObjectStore` and `MemoryObjectStore` embed the resulting **deadline** in the signed query, and `verify_local_url` compares it against *this process's* clock. Neither depends on the client's clock. Rotating `url_secret` still invalidates every outstanding local URL at once.
+- **`url_secret` is a local/memory setting.** `S3ObjectStore` signs with your AWS credentials and raises `TypeError` if you pass one, rather than accepting a security-shaped argument it would ignore.
+- **Etags are unquoted everywhere, and only comparable within one backend.** Memory hashes the content (MD5), local uses an `mtime-size` pair — cheap, not a content hash — and S3 returns whatever it stores. The HTTP header's quotes are added by whoever emits the header.
+- **`content_type` reaches S3 but not the disk.** The S3 backend sends and signs it on the `PUT` (or the multipart initiate), so the object is stored with that type; `LocalObjectStore` has nowhere to persist it and guesses from the key's extension on the way back out. Nothing is guessed for S3.
+- **A local write's leftovers are not objects.** A hard kill can leave `.<name>.<hex>.tmp` beside the target; `list` skips exactly that shape, so an object you genuinely named `notes.tmp` is still listed. The rename is atomic but not durable — the file is `fsync`'d, its directory is not.
 - **Credentials never leak** — `S3ObjectStore.__repr__` omits them; `AWS_SESSION_TOKEN` is honored for assumed roles.
 
 See also: [HTTP client](http-client.md) (the wire S3 rides on), [static files](static-files.md) (the same `openat` containment), [forms & uploads](forms.md).

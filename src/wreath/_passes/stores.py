@@ -20,7 +20,6 @@ from typing import Any
 
 def keyed_purge_pass(
     declaration: Any,
-    database: Any,
     *,
     name: str,
     after: float = 0.0,
@@ -31,7 +30,14 @@ def keyed_purge_pass(
     schema: str = "wreath",
     tenant: str = "",
 ) -> Any:
-    """A recurring :class:`~wreath.passes.ChunkedPass` that drops this store's dead rows."""
+    """A recurring :class:`~wreath.passes.ChunkedPass` that drops this store's dead rows.
+
+    Takes no database. A :class:`~wreath.passes.ChunkedPass` is a declaration --
+    it is handed the database when it is *driven*, by
+    :meth:`~wreath.passes.ChunkedPass.run` or by the scheduler -- so a connection
+    passed at build time had nowhere to go and was silently discarded by all
+    three callers.
+    """
     from ..passes import (
         ChunkedPass,
         DutyCycle,

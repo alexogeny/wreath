@@ -103,7 +103,15 @@ downgrade: WMA1 ─verify→ WMP1 ─reverse_plan→ WMP1' ─render_sql→ WMS1
   swapping before/after — no database, no guessing. The reversed WMP1 is itself a
   valid forward-shaped plan and re-derives its own WMO1/WMS1. `operation_rank`
   orders drops inner-to-outer and adds outer-to-inner so a reverse plan sequences
-  correctly (drop index → constraint → column → table; add the reverse order).
+  correctly: **add** table → column → alter column → primary/unique key → index →
+  foreign key, and **drop** exactly that inverted (foreign key → index →
+  primary/unique key → column → table). A foreign key is ranked apart from the
+  other constraints because it *depends* on one — `REFERENCES t (c)` is rejected
+  until a unique constraint or unique index over those columns exists. Ranking
+  every constraint together left the order inside the block to `object_id`, a
+  content hash, and a nine-table schema with relationships then applied or failed
+  according to which hash sorted first. Within a rank the object-id order is what
+  keeps the tape deterministic; across ranks it must never decide anything.
 - **Constraints and indexes are named deterministically** as
   `"wreath_" + hex(object_id)` (`append_derived_object_name`). Forward creates
   them by that name so a downgrade can drop them by the same name. This is

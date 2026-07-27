@@ -62,15 +62,13 @@ class DuplicateObject(PostgresError):
     driver errors, which is correct, stopped seeing the ordinary re-verify case.
     """
 
-    def __init__(self, message: str) -> None:
-        super().__init__(message, sqlstate="42710")
+    sqlstate = "42710"
 
 
 class UndefinedObject(PostgresError):
     """``42704``, for an object the statement names and the database does not have."""
 
-    def __init__(self, message: str) -> None:
-        super().__init__(message, sqlstate="42704")
+    sqlstate = "42704"
 
 
 # --- predicate evaluation ----------------------------------------------------
@@ -589,9 +587,11 @@ class CheckViolation(PostgresError):
     which is the correct narrowing -- would not have caught it. A double whose
     exception hierarchy differs from the driver's tests a different program.
 
-    `sqlstate` is passed through `super().__init__` rather than declared as a
-    class attribute: `PostgresError.__init__` assigns `self.sqlstate` on every
-    instance, so a class-level default is silently shadowed by `None`.
+    `sqlstate` rides through `super().__init__` because this constructor is
+    already formatting the message; a class attribute would work equally well
+    now. It did not always: `PostgresError.__init__` assigned `self.sqlstate`
+    unconditionally, so a class-level declaration was shadowed by `None` and
+    passing it up was the only spelling that survived.
     """
 
     def __init__(self, name: str, row: Any) -> None:

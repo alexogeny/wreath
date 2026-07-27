@@ -1,15 +1,15 @@
-"""Deprecated alias for :mod:`wreath.objects`.
+"""Deprecated alias for `wreath.objects`.
 
 The module was renamed because "store" meant two unrelated things in this
 codebase: blob storage, and the small keyed tables behind rate limiting,
-idempotency, and sessions. ``wreath.objects`` stores objects; ``wreath.store``
+idempotency, and sessions. `wreath.objects` stores objects; `wreath.store`
 is free for the other meaning.
 
 Importing this module still works and returns the same classes under their old
-names. It will be removed in a future release -- move to ``wreath.objects``,
-where ``Storage`` is ``ObjectStore``, ``LocalStorage`` is
-``LocalObjectStore``, ``S3Storage`` is ``S3ObjectStore``, ``StoragePath`` is
-``ObjectPath``, and ``StorageError`` is ``ObjectError``.
+names. It will be removed in a future release -- move to `wreath.objects`,
+where `Storage` is `ObjectStore`, `LocalStorage` is
+`LocalObjectStore`, `S3Storage` is `S3ObjectStore`, `StoragePath` is
+`ObjectPath`, and `StorageError` is `ObjectError`.
 """
 
 from __future__ import annotations

@@ -1,4 +1,26 @@
-"""Request/response middleware contracts and startup compilation."""
+"""Middleware contracts and the startup compilation that turns them into a tape.
+
+Wreath accepts middleware in two forms. The *hook* form is an object carrying
+`before` or `before_sync` and/or `after` attributes; `MiddlewareHooks` is the
+canonical container, but any object with those attributes qualifies, which is
+how `CORSMiddleware` and the rest are written. The *legacy* form is the familiar
+`async def (request, call_next)` callable. An object carrying both is rejected
+with `TypeError` at compile time, because which form it is cannot be guessed.
+
+Hook middleware is compiled once, at startup, into a `MiddlewareTape`: a flat
+tuple of instructions with precomputed jump targets, walked by one loop instead
+of a stack of nested closures. A contiguous run of `before_sync` hooks is fused
+into a single instruction that runs them in one synchronous pass, with no
+per-hook coroutine and no await. One legacy middleware anywhere in a route's
+chain opts that whole route out of the tape: the chain falls back to nested
+closures, with the hook middleware adapted into that shape.
+
+Setting `global_scope = True` on a middleware object makes `Wreath.add_middleware`
+route it to `Wreath.add_global_middleware` instead of a route's chain. Global hooks
+run around routing itself, so they also cover route misses, static files, and
+authentication and authorization failures, and their `after` hooks are handed
+error responses.
+"""
 
 from __future__ import annotations
 
@@ -21,7 +43,20 @@ type RoutePredicate = Callable[[MiddlewareRoute], bool]
 
 @dataclass(frozen=True, slots=True)
 class MiddlewareRoute:
-    """Static route facts available while middleware is compiled."""
+    """The static route facts an `applies_to` predicate is given.
+
+    One instance is built per route and method during startup compilation and
+    passed to every candidate middleware's `applies_to`. Nothing here varies per
+    request, and that is the point: the decision is made once, and the
+    middleware is either present in that route's compiled chain or absent from
+    it, with no per-request predicate call.
+
+    Args:
+        path: The registered route template, parameter placeholders intact.
+        method: The HTTP method, uppercased at registration.
+        endpoint: The handler function as registered, before argument binding.
+        authenticated: True when the route declares an authentication requirement.
+    """
 
     path: str
     method: str
@@ -30,20 +65,52 @@ class MiddlewareRoute:
 
 
 class LegacyMiddleware(Protocol):
+    """The nested `(request, call_next)` middleware form.
+
+    Await `call_next(request)` to continue down the chain and return what it
+    gives you, or return a response without calling it to short-circuit. This
+    form is the one to reach for when the endpoint call itself must be wrapped
+    -- a `try`/`finally`, a context manager, a timeout. It costs the tape: a
+    single legacy middleware makes the whole route compile to nested closures.
+    Everything else is better expressed as `MiddlewareHooks`.
+
+    An object that defines `__call__` *and* any of `before`, `before_sync`, or
+    `after` is rejected with `TypeError` when the route compiles.
+    """
+
     async def __call__(self, request: Request, call_next: CallNext) -> ResponseValue: ...
 
 
 @dataclass(frozen=True, slots=True)
 class MiddlewareHooks:
-    """Middleware hooks that can be fused into a linear execution tape.
+    """A middleware expressed as hooks, so it can be fused into a linear tape.
 
-    A before hook returns ``None`` to continue or a response value to
-    short-circuit. After hooks receive responses from either path.
+    A `before` hook returns `None` to continue to the next hook, or a response
+    value to short-circuit: the endpoint and every hook below are skipped. An
+    `after` hook receives the response -- from the endpoint, from a
+    short-circuit, or from the error handler -- and returns the response to
+    carry on with, which is normally the one it was handed.
 
-    ``before_sync`` is the synchronous form of ``before``: when set, the hook
-    is a plain function and a contiguous run of such hooks executes in one
-    synchronous pass with no per-hook coroutine or await. Provide ``before``
-    (async) or ``before_sync`` (sync), not both.
+    `before_sync` is the synchronous form of `before`. It is a plain function,
+    not a coroutine function, and a contiguous run of `before_sync` hooks is
+    compiled into one instruction that calls them in a single pass, with no
+    per-hook coroutine and no await. Set `before` or `before_sync`, never both;
+    when both are set `before_sync` wins and `before` is silently unreachable.
+
+    **When `after` runs.** An `after` hook runs only when its own `before`
+    completed, or when the middleware has no `before` at all -- but it may run
+    for a request that never reached the endpoint, and it may be handed an error
+    response. Returning a response from `before` is a *completed* `before`, so
+    that middleware keeps its `after`. Raising is not, so it does not. In a
+    route-scoped tape a `before` that raises propagates out of the tape and no
+    `after` hook runs at all; registered globally, the hooks whose `before`
+    already completed still unwind and see the error response.
+
+    Args:
+        before: Async hook run on the way in; returns None or a response.
+        after: Async hook run on the way out; returns the response to continue with.
+        applies_to: Predicate over `MiddlewareRoute` deciding route membership.
+        before_sync: The synchronous, fusible form of `before`.
     """
 
     before: BeforeHook | None = None
@@ -54,10 +121,31 @@ class MiddlewareHooks:
 
 @dataclass(frozen=True, slots=True)
 class PipelineHooks:
-    """Global hooks at explicit request-pipeline cost boundaries.
+    """Global hooks placed at the named boundaries of the request pipeline.
 
-    Each stage hook returns ``None`` to continue or a response to terminate.
-    ``before`` is ingress, while ``after`` finalizes every entered response.
+    `global_scope` is always True, so `Wreath.add_middleware` registers these
+    globally: `before` and `after` bracket every HTTP request, including route
+    misses, static files, and error responses. The four stage hooks in between
+    fire only when the request reaches that boundary, which is what makes them
+    cheap -- a stage nobody registered is not dispatched at all.
+
+    Every hook returns `None` to continue or a response to terminate the request
+    there. A stage hook that raises is converted to an error response rather
+    than propagating.
+
+    `after` runs only when this object's `before` completed, or when it has no
+    `before`; a `before` that returns a response counts as completed, a `before`
+    that raises does not. A terminating stage hook does not change that: `after`
+    still runs, and is handed the stage's response. So `after` sees requests that
+    never reached a handler, and it sees error responses.
+
+    Args:
+        before: Ingress, before routing. Every HTTP request passes through it.
+        miss: No route matched, before the static-file and preflight fallbacks.
+        pre_auth: A protected route matched and the caller is not yet identified.
+        identity: The backend has run and `request.identity` is set.
+        action: Authorization passed; the handler is about to be invoked.
+        after: Egress, wrapping every response this middleware was entered for.
     """
 
     before: BeforeHook | None = None
@@ -69,6 +157,7 @@ class PipelineHooks:
 
     @property
     def global_scope(self) -> bool:
+        """Always True. `Wreath.add_middleware` registers this as global middleware."""
         return True
 
 
@@ -85,7 +174,7 @@ class _BeforeInstruction:
 @dataclass(frozen=True, slots=True)
 class _FusedBeforeInstruction:
     """A contiguous run of synchronous before hooks, run in one pass. Each
-    ``(hook, failure_target)`` pair short-circuits to its own target -- the
+    `(hook, failure_target)` pair short-circuits to its own target -- the
     after-region position of its middleware -- so entered after hooks still
     run correctly when a fused hook responds."""
 
@@ -139,7 +228,32 @@ def _opcode(instruction: _Instruction) -> tuple[int, str]:
 
 
 class MiddlewareTape:
-    """One immutable, linear middleware program compiled for a route."""
+    """One immutable, linear middleware program compiled for a single route.
+
+    Built by `compile_middleware` when every middleware on a route is in the
+    hook form; not constructed directly, and the instruction type it takes is
+    private. It is the compiled artifact you inspect, not one you assemble.
+
+    Calling the tape runs one request through it. Instructions are laid out in
+    execution order -- the before-region, the endpoint, then the after-region in
+    reverse registration order -- and each before instruction carries the
+    position to jump to when it short-circuits, so a response returned from a
+    `before` lands directly on the first `after` that must still run. Every
+    branch the loop takes was decided at compile time; the dispatch is on an
+    integer opcode, not a chain of `isinstance` tests.
+
+    The tape guarantees the response it returns came from an endpoint or from a
+    short-circuiting `before`, and that every `after` whose own `before`
+    completed was applied to it in reverse order. It does *not* catch
+    exceptions: a hook or endpoint that raises propagates out of the tape, and
+    no `after` runs for it. That is deliberate -- the application's exception
+    handlers turn it into a response, and global middleware still unwinds
+    around the result.
+
+    `operations` holds the opcode name of each instruction in order -- one of
+    `fused_before`, `before`, `endpoint`, `after` -- which is how a test or a
+    complexity probe asserts what the compiler produced.
+    """
 
     __slots__ = ("_program", "operations")
 
@@ -158,6 +272,11 @@ class MiddlewareTape:
         self.operations = tuple(name for _code, name in decoded)
 
     async def __call__(self, request: Request) -> ResponseValue:
+        """Run one request through the program and return its response.
+
+        Raises:
+            RuntimeError: The program ran to completion without producing a response.
+        """
         program = self._program
         count = len(program)
         response: ResponseValue = _UNSET
@@ -217,7 +336,7 @@ def _is_fused(middleware: Middleware) -> bool:
 
 def _fuse_sync_befores(instructions: list[_Instruction]) -> list[_Instruction]:
     """Collapse each contiguous run of synchronous before instructions into one
-    ``_FusedBeforeInstruction`` and remap every jump position to the new layout.
+    `_FusedBeforeInstruction` and remap every jump position to the new layout.
 
     Failure targets only ever point into the after-region (>= endpoint), never
     back into the before-region, so fusing the before-region shifts those
@@ -337,7 +456,32 @@ def compile_middleware(
     *,
     route: MiddlewareRoute | None = None,
 ) -> CallNext:
-    """Compile applicable middleware once, using a tape when every item is fusible."""
+    """Compile applicable middleware once, using a tape when every item is fusible.
+
+    Called at startup, once per route and method. Each middleware's `applies_to`
+    predicate is evaluated here and never again -- a middleware that does not
+    apply is simply not part of what this returns, so it costs the request
+    nothing. A middleware with no `applies_to`, or a call with no `route`,
+    always applies.
+
+    When every applicable middleware is in the hook form the result is a
+    `MiddlewareTape`. One legacy `(request, call_next)` middleware among them
+    drops the whole chain to nested closures, with the hook middleware wrapped
+    into the legacy shape; the observable behaviour is the same, the flat
+    dispatch is not. With nothing applicable, `endpoint` is returned unchanged,
+    so an unused registration adds no frame at all.
+
+    Args:
+        endpoint: The route handler the compiled chain terminates in.
+        middleware: Registered middleware, outermost first.
+        route: Static route facts for `applies_to`. None applies everything.
+
+    Returns:
+        An awaitable taking the request and returning the response.
+
+    Raises:
+        TypeError: A middleware defines both `__call__` and hook attributes.
+    """
     applicable = tuple(
         current
         for current in middleware

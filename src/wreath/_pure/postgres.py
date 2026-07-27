@@ -121,11 +121,29 @@ _DATE_NEGATIVE_INFINITY = -0x80000000
 
 
 class PostgresError(Exception):
-    """An error reported by PostgreSQL."""
+    """An error reported by PostgreSQL.
+
+    A subclass that stands for exactly one SQLSTATE declares it as a class
+    attribute; anything raised from a server ``ErrorResponse`` passes the code
+    it actually carried. Both spellings answer to ``.sqlstate``.
+    """
+
+    #: The condition this class always means, or ``None`` when it depends on
+    #: what the server said. Declared here so `.sqlstate` resolves on every
+    #: instance without the constructor having to write one.
+    sqlstate: str | None = None
 
     def __init__(self, message: str, *, sqlstate: str | None = None) -> None:
         super().__init__(message)
-        self.sqlstate = sqlstate
+        # Only shadow the class attribute when there is something to shadow it
+        # with. Assigning unconditionally set `self.sqlstate = None` over a
+        # subclass's own declaration, so the classes that named their condition
+        # were exactly the ones that lost it, and every caller classifying by
+        # sqlstate read `None` for them. The workaround -- pass it back through
+        # `super().__init__` -- was load-bearing and undiscoverable; it is now
+        # merely one of two spellings that work.
+        if sqlstate is not None:
+            self.sqlstate = sqlstate
 
 
 class InterfaceError(PostgresError):
@@ -632,7 +650,22 @@ def _build_cold_query_packet(
     args: tuple[object, ...],
     parameter_oids: tuple[int, ...],
     mode: str,
+    *,
+    binary_results: bool = False,
 ) -> bytes:
+    """Parse, describe, bind and execute a statement seen for the first time.
+
+    Results come back as *text* by default, because a cold operation has not yet
+    learned its result OIDs and the text decoder handles anything. A caller whose
+    destination can only read binary -- the catalog image decoder is the one --
+    passes ``binary_results=True``, and the Describe(Portal) reply then reports
+    format 1 so the compiled decoder plan matches what the server will send.
+
+    Getting this wrong does not produce a wrong answer, it produces a *hang*: the
+    decoder raises inside the reader task, which is not the caller's task, so the
+    caller waits on a future nobody will ever resolve. That is why the format is
+    a parameter rather than something the destination checks after the fact.
+    """
     if mode not in {"execute", "fetch", "fetchrow", "fetchval"}:
         raise ValueError(f"unknown PostgreSQL result mode {mode!r}")
     parse = _cstring(statement_name) + _cstring(sql) + struct.pack("!H", len(args))
@@ -647,7 +680,7 @@ def _build_cold_query_packet(
                 args,
                 parameter_oids,
                 binary_parameters=False,
-                binary_results=False,
+                binary_results=binary_results and mode != "execute",
             ),
         ),
     ]
@@ -1075,14 +1108,7 @@ class Connection:
         for task in tuple(self._background_tasks):
             if task is not current_task:
                 task.cancel()
-        error = InterfaceError("connection is closed")
-        for operation in (*self._waiting, *self._emitted, *self._completed):
-            if not operation.future.done():
-                operation.future.set_exception(error)
-        self._waiting.clear()
-        self._emitted.clear()
-        self._completed.clear()
-        self._current = None
+        self._resolve_pending(InterfaceError("connection is closed"))
         if not self._writer.is_closing():
             self._writer.write(_message(b"X"))
             with contextlib.suppress(ConnectionError):
@@ -1284,13 +1310,35 @@ class Connection:
             self._statement_id += 1
             operation.statement_name = f"wreath_{self._statement_id}".encode()
             operation.parameter_oids = tuple(_infer_oid(value) for value in args)
-            operation.packet = self._build_cold(
-                operation.statement_name,
-                sql,
-                args,
-                operation.parameter_oids,
-                mode,
-            )
+            if dest is None:
+                operation.packet = self._build_cold(
+                    operation.statement_name,
+                    sql,
+                    args,
+                    operation.parameter_oids,
+                    mode,
+                )
+            else:
+                # A catalog destination decodes binary only, and a cold operation
+                # otherwise binds text -- so the *first* catalog read on any
+                # connection failed, and failed as a hang. See
+                # `_build_cold_query_packet` for why the format has to be decided
+                # here rather than caught downstream.
+                #
+                # Deliberately the Python builder even when the C one is bound:
+                # the accelerated `_build_cold` takes five positional arguments
+                # and adding a sixth means moving both twins under the
+                # byte-for-byte parity contract to serve a path that runs once
+                # per connection, off the hot path, only for migration reads.
+                # The bytes are identical bar the result-format code.
+                operation.packet = _build_cold_query_packet(
+                    operation.statement_name,
+                    sql,
+                    args,
+                    operation.parameter_oids,
+                    mode,
+                    binary_results=True,
+                )
         else:
             operation.statement_name = plan.statement_name
             operation.parameter_oids = plan.parameter_oids
@@ -1429,6 +1477,11 @@ class Connection:
                     if len(payload) != 1:
                         raise ProtocolError("invalid ReadyForQuery")
                     self._transaction_status = payload
+                    # From here until `_finish_operation` appends it to
+                    # `_completed`, `operation` belongs to no queue, and the
+                    # work in between (decoding the batch, caching the plan)
+                    # can raise. `_current` is what keeps it reachable --
+                    # see `_resolve_pending`.
                     self._emitted.popleft()
                     if self._batch_decode and operation.field_tape is not None:
                         self._flush_decode_batch(operation)
@@ -1446,6 +1499,26 @@ class Connection:
             self._fail_connection(OperationalError("PostgreSQL connection lost"), error)
         except PostgresError as error:
             self._fail_connection(error)
+        except BaseException as error:  # noqa: BLE001 -- see below; it re-raises
+            # Anything else reaching here is a defect in the driver rather than a
+            # wire condition -- a decoder that cannot read the format it was sent,
+            # a plan that does not match its rows. It still has to fail every
+            # caller before it leaves.
+            #
+            # This runs in the reader task, which is nobody's awaiter. Without
+            # this clause the task died, the `finally` tidied `_reader_task`, and
+            # every in-flight operation waited on a future that would never be
+            # resolved -- so a driver bug surfaced as a permanent hang. That is
+            # exactly how `catalog destination requires binary rows` sat unseen:
+            # it only ran under `-m ''`, where it hung the whole suite instead of
+            # failing one test.
+            #
+            # Broad on purpose, and `BaseException` on purpose: a `SystemExit` or
+            # a `KeyboardInterrupt` raised in here would strand the same callers.
+            # It re-raises, so nothing is swallowed -- the catch exists to resolve
+            # the futures, not to survive.
+            self._fail_connection(InterfaceError(f"PostgreSQL reader failed: {error}"), error)
+            raise
         finally:
             self._reader_task = None
             self._current = None
@@ -1689,14 +1762,43 @@ class Connection:
         if self._flush_handle is not None:
             self._flush_handle.cancel()
             self._flush_handle = None
-        for operation in (*self._waiting, *self._emitted, *self._completed):
-            if not operation.future.done():
+        self._resolve_pending(error)
+        self._idle_event.set()
+        self._writer.close()
+
+    def _resolve_pending(self, error: PostgresError) -> None:
+        """Fail every operation this connection could still have resolved.
+
+        The three queues do not account for all of them. An operation moves
+        between queues without ever being in two at once, and the reader hands
+        it across those seams *while running code that can raise* -- decoding a
+        batch, caching a plan. `_read_pipeline` pops the head of `_emitted`
+        before decoding it and only then appends it to `_completed`, so a decode
+        failure left the operation in no queue at all: the sweep could not see
+        it, its future was never resolved, and the caller waited forever. The
+        `except BaseException` in the reader was already calling this and still
+        did not save that caller, because the operation had fallen through the
+        gap between two of the containers it was searching.
+
+        `_current` closes the gap. The reader publishes the head-of-line
+        operation there before it touches the socket and clears it only once the
+        operation is finished, so it names whatever is in transit no matter
+        which queue currently holds it (or none). Sweeping it costs one extra
+        entry that is usually a duplicate of `_emitted[0]`, and the `done()`
+        guard makes the duplicate free.
+        """
+        for operation in (
+            self._current,
+            *self._waiting,
+            *self._emitted,
+            *self._completed,
+        ):
+            if operation is not None and not operation.future.done():
                 operation.future.set_exception(error)
         self._waiting.clear()
         self._emitted.clear()
         self._completed.clear()
-        self._idle_event.set()
-        self._writer.close()
+        self._current = None
 
 
 def _is_transaction_sql(sql: str) -> bool:

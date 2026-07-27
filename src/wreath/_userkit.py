@@ -4,7 +4,7 @@ Kept dependency-free and import-light so the password hashing, signed action
 tokens, store protocol, and flow logic are unit-testable without the native
 package. The wreath-coupled router glue lives in :mod:`wreath.users`.
 
-Password hashing uses stdlib ``hashlib.scrypt`` (zero-dep, memory-hard). Action
+Password hashing uses stdlib `hashlib.scrypt` (zero-dep, memory-hard). Action
 tokens (email verification, password reset) are HMAC-SHA256 signed and expiring;
 a per-user *fingerprint* (a hash of the current password hash) is folded into the
 signature so a reset link self-invalidates the moment the password changes —
@@ -72,7 +72,7 @@ def _unb64(text: str) -> bytes:
 def hash_password(
     password: str, *, n: int = _SCRYPT_N, r: int = _SCRYPT_R, p: int = _SCRYPT_P
 ) -> str:
-    """Hash ``password`` with a fresh salt; returns ``scrypt$n$r$p$salt$hash``."""
+    """Hash `password` with a fresh salt; returns `scrypt$n$r$p$salt$hash`."""
     if not password:
         raise ValueError("password must not be empty")
     if len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
@@ -86,7 +86,7 @@ def hash_password(
 
 
 def verify_password(password: str, encoded: str) -> bool:
-    """Constant-time verify ``password`` against a stored ``encoded`` hash."""
+    """Constant-time verify `password` against a stored `encoded` hash."""
     if len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
         # Refused before scrypt: a password this long cannot be the one that was
         # stored, so hashing it is work an attacker chose for us.
@@ -111,7 +111,7 @@ def verify_password(password: str, encoded: str) -> bool:
 def _frame(*fields: str) -> str:
     """Join fields so each is recoverable whatever it contains.
 
-    ``<len>:<field>`` per field. A plain ``":".join`` meant a value containing a
+    `<len>:<field>` per field. A plain `":".join` meant a value containing a
     colon reassigned every field after it -- and the signature covers the joined
     form, so both sides agreed on bytes that meant two different things.
     """
@@ -141,7 +141,7 @@ def fingerprint(hashed_password: str) -> str:
 def sign_token(
     secret: str, purpose: str, subject: str, *, ttl: int, bound: str = "", now: float | None = None
 ) -> str:
-    """Sign an expiring, purpose-scoped token bound to ``subject`` (+ optional ``bound``)."""
+    """Sign an expiring, purpose-scoped token bound to `subject` (+ optional `bound`)."""
     issued = int(time.time() if now is None else now)
     expires = issued + int(ttl)
     # Length-framed rather than delimiter-joined: a subject or bound value
@@ -156,7 +156,7 @@ def sign_token(
 def verify_token(
     secret: str, purpose: str, token: str, *, bound: str = "", now: float | None = None
 ) -> str | None:
-    """Return the token ``subject`` if valid/unexpired/purpose-and-bound-matched, else None."""
+    """Return the token `subject` if valid/unexpired/purpose-and-bound-matched, else None."""
     try:
         encoded, mac = token.split(".")
         expected = hmac.new(
@@ -242,7 +242,7 @@ class InMemoryUserStore:
 
 @runtime_checkable
 class EmailSender(Protocol):
-    """Delivery seam. Actual transport (SMTP/SES) is the separate email gap (#5)."""
+    """Delivery seam. `SmtpEmailSender` below is the shipped transport."""
 
     async def send_verification(self, email: str, link: str) -> None: ...
     async def send_password_reset(self, email: str, link: str) -> None: ...
@@ -277,12 +277,12 @@ class CapturingEmailSender:
 
 @dataclass(slots=True)
 class SmtpEmailSender:
-    """Real SMTP delivery via stdlib ``smtplib``/``email`` (zero-dep).
+    """Real SMTP delivery via stdlib `smtplib`/`email` (zero-dep).
 
-    STARTTLS by default (or implicit TLS on ``port=465``). The blocking
-    ``smtplib`` work runs in a worker thread so the event loop is never blocked.
+    STARTTLS by default (or implicit TLS on `port=465`). The blocking
+    `smtplib` work runs in a worker thread so the event loop is never blocked.
     Build from env with :meth:`from_env`
-    (``WREATH_SMTP_HOST``/``_FROM``/``_PORT``/``_USER``/``_PASSWORD``/``_TLS``).
+    (`WREATH_SMTP_HOST`/`_FROM`/`_PORT`/`_USER`/`_PASSWORD`/`_TLS`).
     """
 
     host: str

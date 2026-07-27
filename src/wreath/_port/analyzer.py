@@ -24,6 +24,10 @@ _MARKER_RULE = {
     "File": "param.file",
 }
 _STR_CONSTRAINTS = frozenset({"min_length", "max_length", "regex", "pattern"})
+#: Every constraint keyword a `Field(...)` can carry. Derived from
+#: `_STR_CONSTRAINTS` rather than spelled out again, so the string constraints
+#: cannot be extended in one place and missed in the other.
+_FIELD_CONSTRAINTS = _STR_CONSTRAINTS | frozenset({"ge", "le", "gt", "lt", "multiple_of"})
 
 # ormar QuerySet verb -> rule. The verb immediately after `.objects.` is the one
 # that names the shape of the rewrite; a trailing `.all()`/`.get_or_none()` is
@@ -363,7 +367,7 @@ _PK_PGTYPE = {
 }
 
 
-def _is_true_c(node: ast.AST) -> bool:
+def _is_true(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and node.value is True
 
 
@@ -380,7 +384,7 @@ def module_pk_types(tree: ast.Module, imports: _Imports) -> dict[str, str]:
                 value = stmt.value if isinstance(stmt, (ast.AnnAssign, ast.Assign)) else None
                 if not isinstance(value, ast.Call):
                     continue
-                if any(kw.arg == "primary_key" and _is_true_c(kw.value) for kw in value.keywords):
+                if any(kw.arg == "primary_key" and _is_true(kw.value) for kw in value.keywords):
                     pg = _PK_PGTYPE.get(imports.origin(value.func).split(".")[-1])
                     if pg:
                         out[node.name] = pg
@@ -746,7 +750,7 @@ class _Analyzer(ast.NodeVisitor):
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 if stmt.target.id == "model_config":
                     continue
-                if (self._is_field_with_constraints(stmt.value)
+                if (_is_field_constraint(stmt.value, self.imports)
                         or self._annotation_is_constrained(stmt.annotation)):
                     self._emit("pydantic.field_constraint", stmt.lineno)
                 else:
@@ -754,7 +758,7 @@ class _Analyzer(ast.NodeVisitor):
             elif isinstance(stmt, ast.Assign) and any(
                 isinstance(t, ast.Name) and t.id == "model_config" for t in stmt.targets
             ):
-                extra = self._config_extra(stmt.value)
+                extra = _config_extra(stmt.value)
                 if extra == "ignore":
                     self._emit("pydantic.config_ignore", stmt.lineno)
                 elif extra == "forbid":
@@ -848,20 +852,10 @@ class _Analyzer(ast.NodeVisitor):
         startup. So the decorator alone is not the signal — being handed to the
         application as ``lifespan=`` is.
         """
-        if not self._is_lifespan(node):
+        if not _is_lifespan(node, self.lifespan_names, self.imports):
             return
         rule_id, reason = lifespan_shape(node)
         self._emit(rule_id, node.lineno, reason)
-
-    def _is_lifespan(self, node) -> bool:
-        if node.name in self.lifespan_names:
-            return True
-        parameters = list(node.args.args) + list(node.args.posonlyargs)
-        if len(parameters) == 1 and parameters[0].annotation is not None:
-            annotation = self.imports.origin(parameters[0].annotation).split(".")[-1]
-            if annotation in ("FastAPI", "Starlette"):
-                return True
-        return node.name == "lifespan"
 
     def _scan_route_options(self, dec: ast.Call, node) -> None:
         for kw in dec.keywords:
@@ -891,7 +885,7 @@ class _Analyzer(ast.NodeVisitor):
                     # has no switch for that — the DTO has to gain the wrapper.
                     self._emit(
                         "param.body_embed"
-                        if any(k.arg == "embed" and _is_true_c(k.value)
+                        if any(k.arg == "embed" and _is_true(k.value)
                                for k in default.keywords)
                         else "param.body",
                         arg.lineno,
@@ -1189,32 +1183,59 @@ class _Analyzer(ast.NodeVisitor):
             )
         return False
 
-    def _is_field_with_constraints(self, value: ast.AST | None) -> bool:
-        if (isinstance(value, ast.Call)
-                and self.imports.origin(value.func).split(".")[-1] == "Field"):
-            return any(
-                k.arg in _STR_CONSTRAINTS or k.arg in ("ge", "le", "gt", "lt", "multiple_of")
-                for k in value.keywords
-            )
-        return False
-
-    def _config_extra(self, value: ast.AST | None) -> str | None:
-        if isinstance(value, ast.Call):
-            for kw in value.keywords:
-                if kw.arg == "extra" and isinstance(kw.value, ast.Constant):
-                    # A Constant holds any literal; only a string is an `extra=`
-                    # setting. Callers compare against "forbid"/"ignore", so a
-                    # non-string was already as good as absent.
-                    extra = kw.value.value
-                    return extra if isinstance(extra, str) else None
-        return None
-
     def _has_kw(self, call: ast.Call, name: str) -> bool:
         return any(kw.arg == name for kw in call.keywords)
 
 
 def _is_false(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and node.value is False
+
+
+# --- predicates shared with the emitter -------------------------------------
+# The analyzer decides a verdict and the emitter performs the rewrite, so a
+# predicate the two disagree about is the worst kind of codemod bug: the report
+# says "translated" and the output is not. They are defined once here and
+# imported by `emit`, which already draws its other primitives from this module.
+
+
+def _is_field_constraint(value: ast.AST | None, imports: _Imports) -> bool:
+    """A ``Field(...)`` carrying at least one value or string constraint."""
+    if isinstance(value, ast.Call) and imports.origin(value.func).split(".")[-1] == "Field":
+        return any(k.arg in _FIELD_CONSTRAINTS for k in value.keywords)
+    return False
+
+
+def _config_extra(value: ast.AST | None) -> str | None:
+    """The ``extra=`` setting on a ``model_config``/``Config`` call, if any."""
+    if isinstance(value, ast.Call):
+        for kw in value.keywords:
+            if kw.arg == "extra" and isinstance(kw.value, ast.Constant):
+                # A Constant holds any literal; only a string is an `extra=`
+                # setting. Callers compare against "forbid"/"ignore", so a
+                # non-string was already as good as absent.
+                extra = kw.value.value
+                return extra if isinstance(extra, str) else None
+    return None
+
+
+def _is_lifespan(node, lifespan_names, imports: _Imports) -> bool:
+    """Whether this function is *the app's* lifespan, and not merely an
+    ``@asynccontextmanager``.
+
+    ``contextlib.asynccontextmanager`` is stdlib, and an advisory-lock or
+    connection helper written with it needs no porting at all. Recognized three
+    ways: registered as a lifespan on the app, named ``lifespan`` by convention,
+    or taking exactly one ``FastAPI``/``Starlette``-annotated parameter.
+    """
+    if node.name in lifespan_names or node.name == "lifespan":
+        return True
+    parameters = list(node.args.args) + list(node.args.posonlyargs)
+    return (
+        len(parameters) == 1
+        and parameters[0].annotation is not None
+        and imports.origin(parameters[0].annotation).split(".")[-1]
+        in ("FastAPI", "Starlette")
+    )
 
 
 def settings_field_shape(

@@ -11,6 +11,7 @@ A quick routing guide for Wreath contributors and coding agents. Start with `AGE
 | `benchmarks/` | Reproducible framework/server/ORM benchmarks, competitor apps, load tooling, and reports. |
 | `docs/` | User guides, API reference, internals, ADRs, plans, and agent guidance. |
 | `tools/` | Native checks and sanitizer build helpers. |
+| `example/` | The canonical camera-trap application built on wreath. Not shipped to users who install the package. |
 | `setup.py` | Optional C-extension build definitions and feature detection. |
 | `pyproject.toml` | Package metadata, dependency groups, test markers, lint/type configuration, and CLI entry points. |
 | `wreath_docs.py` | Documentation site structure and theme, built by `wreath docs`. |

@@ -49,7 +49,42 @@ async def _compressed_stream(source: AsyncIterable[bytes], level: int) -> AsyncI
 
 
 class CompressionMiddleware:
-    """Compress eligible in-memory and streaming responses with gzip."""
+    """Compress eligible in-memory and streaming responses with gzip.
+
+    Global middleware, so static files and error responses are compressed on the
+    same terms as routed ones. gzip is the only coding offered; a client that
+    does not accept it, by naming it with `q=0` or by offering neither `gzip`
+    nor a usable `*`, gets the response uncompressed.
+
+    A response is compressed only when all of these hold. The request method is
+    not `HEAD` and the status is not 204, 304, or 206. The response carries
+    neither `Content-Encoding` -- an already-encoded body is never re-encoded --
+    nor `Content-Range`. Its `Cache-Control` does not say `no-transform`. Its
+    `Content-Type` is compressible, meaning `text/*`, `application/json`,
+    `application/problem+json`, `application/javascript`, `application/xml`,
+    `image/svg+xml`, or any `application/*+json` or `application/*+xml`; a
+    response with no `Content-Type` at all is left alone. And any `ETag` it
+    carries is a well-formed quoted tag, strong or weak, since the encoded body
+    needs a distinct one.
+
+    An in-memory response is compressed only when its body is at least
+    `minimum_size` bytes, and its `Content-Length` is rewritten. A streaming
+    response is compressed chunk by chunk as it is produced, and loses its
+    `Content-Length`; `minimum_size` cannot apply to it, because the length is
+    not known when the decision is made. A `FileResponse` is never compressed.
+
+    A compressed response gains `Content-Encoding: gzip`, gains
+    `Accept-Encoding` in its `Vary`, and has its `ETag` suffixed with `--gzip`
+    inside the quotes so the encoded and unencoded bodies never share a tag.
+
+    Args:
+        minimum_size: Smallest in-memory body to compress, in bytes.
+        gzip_level: zlib compression level from 0 to 9.
+        compress_streaming: Compress streaming responses as chunks are produced.
+
+    Raises:
+        ValueError: `minimum_size` is negative, or `gzip_level` is outside 0-9.
+    """
 
     global_scope = True
     __slots__ = ("compress_streaming", "gzip_level", "minimum_size")
@@ -70,6 +105,12 @@ class CompressionMiddleware:
         self.compress_streaming = compress_streaming
 
     async def after(self, request: Request, response):
+        """Compress the response when every eligibility condition holds.
+
+        Returns the response object either way; an in-memory body is replaced in
+        place, and a streaming body is wrapped in a compressing iterator that
+        does its work as the response is sent.
+        """
         if request.method == "HEAD" or response.status in _BODYLESS or response.status == 206:
             return response
         headers = response.headers

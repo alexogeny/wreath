@@ -69,6 +69,28 @@ async def test_head_uses_get(mode: RoutingMode) -> None:
     assert sent[1]["body"] == b""
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["decision", "trie", "bitset"])
+async def test_a_method_miss_is_405_under_every_backend(mode: RoutingMode) -> None:
+    """The 404-vs-405 split is derived by re-classifying the path under each
+    registered method, so it has to agree across all three backends -- including
+    the trie, whose `classify` is a shim over `match`."""
+    app = _build(mode)
+
+    @app.route("/users/{uid}", methods=("DELETE",))
+    async def delete_user(request):
+        return None
+
+    sent = await invoke(app, "/users/42", method="POST")
+    assert sent[0]["status"] == 405
+    allow = dict(sent[0]["headers"])[b"allow"]
+    assert set(allow.split(b", ")) == {b"GET", b"HEAD", b"DELETE"}
+    # A path no route claims is still a plain 404 with no Allow.
+    missing = await invoke(app, "/nowhere", method="POST")
+    assert missing[0]["status"] == 404
+    assert b"allow" not in dict(missing[0]["headers"])
+
+
 def test_default_routing_mode_is_bitset() -> None:
     app = Wreath()
     assert app._routing == "bitset"

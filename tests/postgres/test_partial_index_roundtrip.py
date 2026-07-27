@@ -22,11 +22,20 @@ from wreath.migrations import (
     detect_single,
     generate_single_plan,
 )
-from wreath.orm import Mapped, Model, column
+from wreath.orm import DeclarationError, Mapped, Model, column
 from wreath.orm._index_predicate import RESERVED_WORDS, render_predicate
 from wreath.orm.registry import Registry
-from wreath.orm.table import all_of, eq, index, is_not_null, one_of
-from wreath.orm.types import Bool, Int64, Text
+from wreath.orm.table import all_of, eq, index, is_not_null, is_null, one_of
+from wreath.orm.types import (
+    Bool,
+    Date,
+    Int64,
+    Jsonb,
+    Numeric,
+    Text,
+    TimestampTz,
+    Uuid,
+)
 from wreath.postgres import connect
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.network]
@@ -186,6 +195,65 @@ async def test_two_predicates_over_one_column_set_are_two_indexes() -> None:
     predicates, first, second = await _roundtrip(build)
     assert predicates == ["(state = 'done'::text)", "(state = 'ready'::text)"]
     assert first.current and second.current
+
+
+async def test_is_null_round_trips_on_types_no_literal_could_use() -> None:
+    """``IS NULL`` renders no literal, so the literal vocabulary does not apply.
+
+    The ``IsNull`` branch used to compute the column's type kind and then discard
+    it, which refused ``timestamptz`` -- and ``retired_at IS NULL`` is the
+    archetypal partial index, so the restriction cost real indexes and bought
+    nothing. This is the proof it bought nothing: one index per type that
+    ``eq()`` still refuses, read back from ``pg_get_expr``, then ``detect``
+    twice. A ``NullTest`` node has no operand to coerce, which is why the type
+    never reaches the deparsed text.
+    """
+
+    def build(schema: str) -> Any:
+        class Card(Model, table="cards", schema=schema):
+            id: Mapped[int] = column(Int64, primary_key=True)
+            retired_at: Mapped[object] = column(TimestampTz, nullable=True)
+            external_id: Mapped[object] = column(Uuid, nullable=True)
+            balance: Mapped[object] = column(Numeric, nullable=True)
+            seen_on: Mapped[object] = column(Date, nullable=True)
+            payload: Mapped[object] = column(Jsonb, nullable=True)
+            _live = index("id", where=is_null("retired_at"))
+            _identified = index("id", where=is_not_null("external_id"))
+            _unpriced = index("id", where=is_null("balance"))
+            _undated = index("id", where=is_null("seen_on"))
+            _payloaded = index("id", where=is_not_null("payload"))
+
+        return Card
+
+    predicates, first, second = await _roundtrip(build)
+    assert predicates == [
+        "(balance IS NULL)",
+        "(external_id IS NOT NULL)",
+        "(payload IS NOT NULL)",
+        "(retired_at IS NULL)",
+        "(seen_on IS NULL)",
+    ]
+    assert first.current, "the schema should be current right after applying it"
+    assert second.current, "a second detect must not rediscover the same indexes"
+
+
+async def test_widening_is_null_did_not_widen_the_comparisons() -> None:
+    """``eq()`` and ``one_of()`` do render a literal, and still refuse the type."""
+
+    class Mixed(Model, table="mixed", schema="app"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        at: Mapped[object] = column(TimestampTz, nullable=True)
+
+    registry = Registry(_Database(), [Mixed], validate_schema="off")
+    columns = {item.database_name: item for item in registry.spec_for(Mixed).columns}
+    assert render_predicate(is_null("at"), columns, "Mixed") == "(at IS NULL)"
+    assert render_predicate(is_not_null("at"), columns, "Mixed") == "(at IS NOT NULL)"
+    with pytest.raises(DeclarationError, match="timestamptz"):
+        render_predicate(eq("at", "2026-01-01"), columns, "Mixed")
+    with pytest.raises(DeclarationError, match="timestamptz"):
+        render_predicate(one_of("at", ["2026-01-01", "2026-01-02"]), columns, "Mixed")
+    with pytest.raises(DeclarationError, match="unknown column"):
+        render_predicate(is_null("nope"), columns, "Mixed")
 
 
 async def test_the_reserved_word_list_matches_the_server() -> None:

@@ -1,19 +1,22 @@
 """Pagination, sorting, and filtering for the ORM query builder.
 
-A thin, safe layer over ``Select``: turn ``?page=&size=&sort=`` query parameters
-into ``LIMIT``/``OFFSET``/``ORDER BY`` against an **allow-list** of columns (never
-an arbitrary column name from the request), and return a ``Page`` with the total.
+A thin, safe layer over `Select`: turn `?page=&size=&sort=` query parameters
+into `LIMIT`/`OFFSET`/`ORDER BY` against an **allow-list** of columns (never
+an arbitrary column name from the request), and return a `Page` with the total.
 
-Consumer-wired, no ``app.py`` changes needed::
+Consumer-wired, no `app.py` changes needed:
 
-    from wreath.pagination import Page, PageParams, page_params, paginate
-    from wreath.binding import Depends
+```python
+from wreath.pagination import Page, PageParams, page_params, paginate
+from wreath.binding import Depends
 
-    @app.get("/llamas")
-    async def list_llamas(request, params: Annotated[PageParams, Depends(page_params)]):
-        page = await paginate(session, Llama.select(), params,
-                              allow_sort=("name", "created_at"))
-        return page.as_dict()
+@app.get("/llamas")
+async def list_llamas(request, params: Annotated[PageParams, Depends(page_params)]):
+    page = await paginate(session, Llama.select(), params,
+                          allow_sort=("name", "created_at"))
+    return page.as_dict()
+```
+
 """
 
 from __future__ import annotations
@@ -30,8 +33,8 @@ if TYPE_CHECKING:
 
 
 def _as_model(model: type) -> type[Model]:
-    """Narrow a ``Select.model`` (typed ``type``) to a wreath model for the type
-    checker, so the ORM-injected ``__wreath_*__`` class attributes resolve."""
+    """Narrow a `Select.model` (typed `type`) to a wreath model for the type
+    checker, so the ORM-injected `__wreath_*__` class attributes resolve."""
     return cast("type[Model]", model)
 
 DEFAULT_SIZE = 20
@@ -69,19 +72,38 @@ class Page[T]:
 
     @property
     def pages(self) -> int:
+        """How many pages of this size `total` rows fill, rounding up.
+
+        `0` for a page size of zero, rather than a division error: a page
+        object is often built to be rendered, and a template asking for the page
+        count should not be where an invalid size surfaces.
+        """
         if self.size <= 0:
             return 0
         return (self.total + self.size - 1) // self.size
 
     @property
     def has_next(self) -> bool:
+        """Whether a page after this one exists, according to `total`.
+
+        Derived from the count, not from having looked -- so it inherits the
+        count's staleness. See `paginate` on the two snapshots.
+        """
         return self.page < self.pages
 
     @property
     def has_prev(self) -> bool:
+        """Whether this is past the first page. Pages are numbered from 1."""
         return self.page > 1
 
     def as_dict(self) -> dict[str, Any]:
+        """This page as a JSON-ready dict, derived fields included.
+
+        The shape a list endpoint returns: `items` plus `total`, `page`,
+        `size`, `pages`, `has_next` and `has_prev`, so a client renders
+        controls without recomputing any of them. `items` are passed through
+        as they are -- serialising them is the response encoder's job.
+        """
         return {
             "items": list(self.items),
             "total": self.total,
@@ -95,7 +117,7 @@ class Page[T]:
 
 @dataclass(frozen=True, slots=True)
 class PageParams:
-    """Normalized paging + sort request. ``sort`` items may be ``-field`` for DESC."""
+    """Normalized paging + sort request. `sort` items may be `-field` for DESC."""
 
     page: int = 1
     size: int = DEFAULT_SIZE
@@ -103,7 +125,7 @@ class PageParams:
 
 
 def parse_sort(raw: str) -> tuple[str, ...]:
-    """``"name,-created_at"`` -> ``("name", "-created_at")``; blank -> ``()``."""
+    """`"name,-created_at"` -> `("name", "-created_at")`; blank -> `()`."""
     if not raw:
         return ()
     return tuple(token.strip() for token in raw.split(",") if token.strip())
@@ -114,12 +136,12 @@ def page_params(
     size: Annotated[int, Query(minimum=1, maximum=MAX_SIZE)] = DEFAULT_SIZE,
     sort: Annotated[str, Query()] = "",
 ) -> PageParams:
-    """A ``Depends``-able that binds ``?page=&size=&sort=`` into ``PageParams``."""
+    """A `Depends`-able that binds `?page=&size=&sort=` into `PageParams`."""
     return PageParams(page=min(page, MAX_PAGE), size=size, sort=parse_sort(sort))
 
 
 def sortable_fields(model: type) -> tuple[str, ...]:
-    """Every column name of ``model`` -- the default sort/filter allow-list."""
+    """Every column name of `model` -- the default sort/filter allow-list."""
     return tuple(_as_model(model).__wreath_column_map__)
 
 
@@ -130,10 +152,10 @@ def _column(model: type, name: str, allowed: frozenset[str], what: str) -> Any:
 
 
 def apply_sort(query: Select, sort: Iterable[str], *, allow: Iterable[str] | None = None) -> Select:
-    """Apply ``sort`` tokens (``field`` / ``-field``) against an allow-list.
+    """Apply `sort` tokens (`field` / `-field`) against an allow-list.
 
-    All tokens are folded into a *single* ``order_by`` call. ``Select`` is
-    immutable, so a per-token ``order_by`` would recopy a growing tuple on every
+    All tokens are folded into a *single* `order_by` call. `Select` is
+    immutable, so a per-token `order_by` would recopy a growing tuple on every
     step -- O(k^2) in the request-controlled token count. Building the orderings
     once and applying them together keeps this O(k).
     """
@@ -151,11 +173,11 @@ def apply_sort(query: Select, sort: Iterable[str], *, allow: Iterable[str] | Non
 def apply_filters(
     query: Select, filters: Mapping[str, Any], *, allow: Iterable[str] | None = None
 ) -> Select:
-    """Apply equality filters ``{field: value}`` against an allow-list.
+    """Apply equality filters `{field: value}` against an allow-list.
 
     Values are handed to the ORM, which coerces/validates them against the
     column's type -- an out-of-range or wrong-typed value fails at bind time.
-    Richer operators (ranges, ``in``, ``ilike``) are a deliberate follow-up.
+    Richer operators (ranges, `in`, `ilike`) are a deliberate follow-up.
     """
     model = _as_model(query.model)
     allowed = frozenset(allow) if allow is not None else frozenset(model.__wreath_column_map__)
@@ -163,7 +185,7 @@ def apply_filters(
     for name, value in filters.items():
         column = _column(model, name, allowed, "filter")
         predicates.append(column == value)
-    # One combined ``where`` call: repeated per-filter calls would recopy the
+    # One combined `where` call: repeated per-filter calls would recopy the
     # immutable predicate tuple each time -- O(k^2) in the filter count.
     return query.where(*predicates) if predicates else query
 
@@ -176,17 +198,17 @@ async def paginate(
     allow_sort: Iterable[str] | None = None,
     total: int | Awaitable[int] | None = None,
 ) -> Page[Any]:
-    """Fetch one page of ``query`` and its total.
+    """Fetch one page of `query` and its total.
 
-    Pass ``total`` (an int or awaitable) when you already have an efficient count;
-    otherwise a correctness-first fallback counts primary keys (see ``_count``).
+    Pass `total` (an int or awaitable) when you already have an efficient count;
+    otherwise a correctness-first fallback counts primary keys (see `_count`).
 
     **The count and the page are two statements.** Outside an explicit
     transaction they see two snapshots, so a concurrent insert or delete can make
     `total` disagree with `items` -- the page is right and the total is a moment
     older, or the reverse. That is usually what a pager wants (a stale total
     draws a stale last-page number and nothing more); wrap the call in
-    ``async with session.begin():`` when it is not.
+    `async with session.begin():` when it is not.
     """
     if params.sort:
         query = apply_sort(query, params.sort, allow=allow_sort)
@@ -201,13 +223,13 @@ async def paginate(
 
 
 async def _count(session: Any, query: Select) -> int:
-    """Total rows matching ``query`` (ignoring paging/order).
+    """Total rows matching `query` (ignoring paging/order).
 
-    Uses the session's efficient ``SELECT COUNT(*)`` (``Session.count``) when it
+    Uses the session's efficient `SELECT COUNT(*)` (`Session.count`) when it
     exposes one, so counting a large result set is a single aggregate round trip
     rather than transferring every matching row. Falls back to re-projecting to
     the primary key and counting client-side for a minimal session that only
-    implements ``fetch`` (e.g. a lightweight test double).
+    implements `fetch` (e.g. a lightweight test double).
     """
     counter = getattr(session, "count", None)
     if callable(counter):

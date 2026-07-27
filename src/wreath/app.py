@@ -1,10 +1,18 @@
-"""Wreath ASGI application."""
+"""The `Wreath` application: registration, startup compilation, and dispatch.
+
+An application is an ordinary ASGI 3 callable. Routes, middleware, exception
+handlers, lifespan handlers, and infrastructure (databases, job runners, object
+stores) are registered on the instance; the first request compiles them once into
+the route table, the per-handler binders, the middleware tape, and the capability
+masks that dispatch actually uses. Registering anything afterwards is allowed and
+marks the application dirty, so the next request recompiles.
+"""
 
 from __future__ import annotations
 
-import contextlib
 import threading
 from collections.abc import Awaitable, Callable, Iterable
+from inspect import isawaitable
 from time import monotonic_ns as _monotonic_ns
 from typing import Any, Literal, cast
 
@@ -37,7 +45,13 @@ from .binding import (
     inspect_handler,
 )
 from .cache_control import CacheControl
-from .exceptions import Forbidden, HTTPException, NotFound, Unauthorized
+from .exceptions import (
+    Forbidden,
+    HTTPException,
+    MethodNotAllowed,
+    NotFound,
+    Unauthorized,
+)
 from .middleware.base import Middleware, MiddlewareRoute, compile_middleware
 from .request import DEFAULT_LIMITS, Request, RequestLimits
 from .response import (
@@ -151,7 +165,7 @@ def _make_dependency_capturer(scope: Any, rule: tuple[Any, int]) -> Any:
     """Bind a dependency capturer over the request's native context and the
     narrowed dependency rule. Called only for a Forensic-armed request whose
     active arms permit dependency payloads; the returned callable takes
-    ``(field_class, data)`` and is propagated via ``capture_marker`` to the
+    `(field_class, data)` and is propagated via `capture_marker` to the
     PostgreSQL and HTTP-client seams."""
     disposition, limit = rule
     disposition_int = int(disposition)
@@ -163,15 +177,15 @@ def _make_dependency_capturer(scope: Any, rule: tuple[Any, int]) -> Any:
 
     return _capture_dependency
 
-#: Environments in which `enable_docs()` publishes the docs page and the
-#: OpenAPI document. Anything not named here -- including the default,
-#: "production" -- gets neither route and no existence leak.
 #: Most distinct access clauses one route may compile to. See
 #: `_requirement_clauses`. Every clause is scanned on every request by
 #: `_eligible`, so this bounds request-path work as well as declaration-time
 #: memory.
 MAX_ACCESS_CLAUSES = 64
 
+#: Environments in which `enable_docs()` publishes the docs page and the
+#: OpenAPI document. Anything not named here -- including the default,
+#: "production" -- gets neither route and no existence leak.
 NON_PRODUCTION_ENVIRONMENTS: tuple[str, ...] = (
     "dev", "development", "local", "test", "testing",
 )
@@ -253,7 +267,42 @@ class _StaticMatcher:
 
 
 class Wreath:
-    """A compact ASGI application with an intentionally provisional API."""
+    """An ASGI application: the registration surface and the request dispatcher.
+
+    An instance is an ordinary ASGI 3 callable, so it runs on any conforming server
+    as well as on wreath's own. Everything belongs to the instance -- routes,
+    middleware, handlers, and the databases, job runners, message buses, HTTP
+    clients and object stores registered on it. None of it is a module global, so
+    two applications in one process share no state and tear down independently.
+
+    Registration only records. The first request compiles the route table, the
+    per-handler binders, the middleware tapes and the capability masks in one pass,
+    and no request afterwards pays for introspection. Registering anything later
+    marks the application dirty and the next request recompiles.
+
+    Five attributes are public. `state` is a namespace for application-owned
+    objects, where each registration helper publishes its result -- `postgres("main")`
+    puts its database on `app.state.postgres_main`. `router` is the compiled route
+    table, replaced wholesale on each recompile.
+
+    The remaining three count failures that no caller is in a position to see,
+    which makes them the only record that anything went wrong: `background_errors`
+    for background tasks that raised after their response had already been sent,
+    `exception_handler_errors` for a registered error renderer that raised while
+    rendering, and `lifespan_teardown_errors` for a resource that refused to
+    close while a lifespan failure path was releasing it.
+
+    The three routing backends are behaviourally identical and the tests assert
+    parity across them; they differ in how the table compiles. `bitset` and
+    `decision` classify a protected route before selecting it, so authentication
+    runs once and route selection is filtered by the caller's capabilities; `trie`
+    selects first and the same requirement is enforced by the authorization stage.
+
+    Args:
+        debug: Put the exception type and message in the body of an unhandled 500.
+        routing: Route-table backend -- `bitset` (default), `decision`, or `trie`.
+        limits: Body, form and cookie ceilings applied to every request built here.
+    """
 
     __slots__ = (
         "_all_capability_mask",
@@ -266,6 +315,8 @@ class Wreath:
         "_compile_lock",
         "_crud_enabled",
         "background_errors",
+        "exception_handler_errors",
+        "lifespan_teardown_errors",
         "_dirty",
         "_databases",
         "_exception_handlers",
@@ -291,6 +342,7 @@ class Wreath:
         "_preflight_fallback",
         "_probe",
         "_resolve",
+        "_route_methods",
         "_routes",
         "_routing",
         "_shutdown_handlers",
@@ -346,6 +398,9 @@ class Wreath:
         self._startup_handlers: list[LifespanHandler] = []
         self._shutdown_handlers: list[LifespanHandler] = []
         self._routes: list[RouteDefinition] = []
+        #: Every distinct HTTP method any route declares, recomputed on compile.
+        #: Read only when a request misses, to tell a 404 from a 405.
+        self._route_methods: tuple[str, ...] = ()
         self._application_image = _ApplicationImage(self)
         self._middleware: list[tuple[int, int, Middleware]] = []
         self._global_middleware: list[tuple[int, int, Middleware]] = []
@@ -374,6 +429,18 @@ class Wreath:
         #: can be reported to the client at that point, so this is the only
         #: place the failure exists.
         self.background_errors = 0
+        #: Registered exception handlers, status handlers, validation formatters
+        #: and fallback handlers that raised while rendering an error response.
+        #: The client still gets a 500, so the failure is invisible to it; this
+        #: counter and the logged traceback are where it shows up.
+        self.exception_handler_errors = 0
+        #: Teardown steps -- app-scoped dependencies, object stores, HTTP
+        #: clients, databases -- that raised while a lifespan failure path was
+        #: releasing them. Teardown continues past a failure so the resources
+        #: behind it are still released, and the lifespan reply carries the
+        #: original error, so this counter and the logged traceback are the only
+        #: record that a close refused.
+        self.lifespan_teardown_errors = 0
         self._databases: dict[str, Any] = {}
         self._http_clients: dict[str, Any] = {}
         self._orm_registries: dict[str, Any] = {}
@@ -409,12 +476,12 @@ class Wreath:
         return client
 
     def objects(self, name: str, *, backend: str = "local", **options: Any) -> Any:
-        """Register a lifespan-managed object-storage backend (``local`` or ``s3``).
+        """Register a lifespan-managed object-storage backend (`local` or `s3`).
 
-        Exposed on ``app.state.objects_<name>``. An ``s3`` backend owns a pinned
-        outbound ``HTTPClient`` started/stopped with the app; ``local`` opens its root
+        Exposed on `app.state.objects_<name>`. An `s3` backend owns a pinned
+        outbound `HTTPClient` started/stopped with the app; `local` opens its root
         at registration and is closed on shutdown. Credentials come from
-        ``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY``/``AWS_SESSION_TOKEN`` unless
+        `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` unless
         given explicitly.
         """
         from .objects import LocalObjectStore, S3ObjectStore
@@ -474,8 +541,8 @@ class Wreath:
     ) -> Any:
         """Register an OIDC identity provider (Cognito/Auth0/Okta/…).
 
-        ``http_client`` is the name of an :meth:`http_client` pinned to the
-        issuer origin, or an ``HTTPClient`` instance. Discovery and the first
+        `http_client` is the name of a client registered with `http_client()` and
+        pinned to the issuer origin, or an `HTTPClient` instance. Discovery and the first
         JWKS fetch run during lifespan startup (after HTTP clients start), so
         the first request never pays for them.
         """
@@ -508,7 +575,7 @@ class Wreath:
         scopes: tuple[str, ...] = ("openid", "email"),
         **options: Any,
     ) -> None:
-        """Register ``/auth/login`` + ``/auth/callback`` for ``provider``.
+        """Register `/auth/login` + `/auth/callback` for `provider`.
 
         Env/auth gating is the app's business; this only wires the routes. See
         the design's SSO bridge: the callback verifies the id_token with the
@@ -567,16 +634,15 @@ class Wreath:
         batch: int = 1,
         progress: Any = None,
     ) -> Any:
-        """Configure a durable job runner on an existing ``app.postgres()`` database.
+        """Configure a durable job runner on an existing `app.postgres()` database.
 
         Its workers, sweeper, and scheduler run for the process lifetime, started
-        during lifespan after the databases come up. See :mod:`wreath.jobs`.
+        during lifespan after the databases come up. See `wreath.jobs`.
 
-        Pass a :class:`~wreath.progress.ProgressRegistry` to make the queue
-        watchable: :meth:`~wreath.jobs.JobRunner.launch` hands back a task id, a
-        handler reports through ``ctx.report()``, and the runner sets the
-        terminal state itself. Give the registry the message bus and a job
-        running on any worker is watchable from every worker.
+        Pass a `ProgressRegistry` to make the queue watchable: `JobRunner.launch()`
+        hands back a task id, a handler reports through `ctx.report()`, and the
+        runner sets the terminal state itself. Give the registry the message bus and
+        a job running on any worker is watchable from every worker.
         """
         from .jobs import JobRunner
 
@@ -605,8 +671,8 @@ class Wreath:
         poll_interval: float = 5.0,
         lease: float = 30.0,
     ) -> Any:
-        """Configure a pub/sub + durable message bus on an ``app.postgres()``
-        database. Consumers run for the process lifetime. See :mod:`wreath.messaging`."""
+        """Configure a pub/sub + durable message bus on an `app.postgres()`
+        database. Consumers run for the process lifetime. See `wreath.messaging`."""
         from .messaging import MessageBus
 
         if name in self._message_buses:
@@ -632,7 +698,7 @@ class Wreath:
         query_cache_size: int = 512,
         schema_mode: Any = None,
     ) -> Any:
-        """Compile ``models`` against an existing ``app.postgres()`` database.
+        """Compile `models` against an existing `app.postgres()` database.
 
         Models and relationships resolve immediately, so an invalid declaration
         fails here rather than on a request. Schema validation runs later,
@@ -660,11 +726,15 @@ class Wreath:
         return registry
 
     def flags(self, provider: Any = None, **values: str) -> Any:
-        """Register a feature-flag provider on ``app.state.flags``.
+        """Register a feature-flag provider on `app.state.flags`, and return it.
 
-        Pass a ``FlagProvider`` (e.g. ``FeatureFlags(...)``), keyword flag values,
-        or nothing to build one from the environment (``WREATH_FLAG_*``).
-        ``wreath.flags.flags_dependency`` reads ``app.state.flags``.
+        Pass a `FlagProvider` (e.g. `FeatureFlags(...)`), keyword flag values, or
+        nothing to build one from `WREATH_FLAG_<NAME>` in the environment.
+
+        The provider is returned because that is how it reaches a handler.
+        `wreath.flags.flags_dependency` captures the provider it is given once,
+        when the dependency is built, and never reads `app.state`. Wire it as
+        `Depends(flags_dependency(app.flags(...)))`.
         """
         from .flags import FeatureFlags
 
@@ -681,7 +751,18 @@ class Wreath:
         readiness_path: str = "/ready",
         is_live: Any = None,
     ) -> Any:
-        """Mount liveness (``/health``) + readiness (``/ready``) endpoints."""
+        """Mount liveness and readiness endpoints, `/health` and `/ready` by default.
+
+        `checks` are readiness probes: one critical failure answers 503 on the
+        readiness path, and a load balancer takes the instance out of rotation.
+        `is_live` decides liveness alone -- returning false answers 503 while the
+        process drains -- and reports the process, never its dependencies.
+
+        This mounts that pair only. `wreath.health.health_router` also builds an
+        alerts endpoint, for conditions that need a person rather than a load
+        balancer, and there is no argument for it here: build that router yourself
+        and pass it to `include_router()`.
+        """
         from .health import health_router
 
         router = health_router(
@@ -694,7 +775,7 @@ class Wreath:
         self, source: Any, *, path: str = "/metrics", namespace: str = "wreath",
         route_labels: Any = None,
     ) -> Any:
-        """Mount a Prometheus scrape endpoint rendering ``source.snapshot()``."""
+        """Mount a Prometheus scrape endpoint rendering `source.snapshot()`."""
         from ._prometheus import metrics_router
 
         router = metrics_router(source, path=path, namespace=namespace, route_labels=route_labels)
@@ -702,7 +783,15 @@ class Wreath:
         return router
 
     def users(self, store: Any, *, secret: str, **options: Any) -> Any:
-        """Mount the user-management lifecycle router (register/login/verify/reset)."""
+        """Mount the user-management lifecycle router (register/login/verify/reset).
+
+        Mounted under `/users` unless `options` says otherwise; `options` are
+        `wreath.users.user_router`'s keyword arguments. `secret` signs the
+        verification and password-reset tokens, so it must be stable across
+        restarts. Login writes the session principal the auth stack reads, which
+        requires `SessionMiddleware`: without it `/login` answers 500 and signs
+        nobody in.
+        """
         from .users import user_router
 
         router = user_router(store, secret=secret, **options)
@@ -710,7 +799,7 @@ class Wreath:
         return router
 
     def enable_crud(self) -> None:
-        """Allow :meth:`crud` to mount auto-generated CRUD routers.
+        """Allow `crud()` to mount auto-generated CRUD routers.
 
         CRUD is off by default: generating write endpoints from a model is a
         deliberate, app-wide decision, so it must be turned on explicitly before
@@ -719,11 +808,14 @@ class Wreath:
         self._crud_enabled = True
 
     def crud(self, model: type, open_session: Any, **options: Any) -> Any:
-        """Mount auto-generated CRUD routes for one ``model`` (requires opt-in).
+        """Mount auto-generated CRUD routes for one `model` (requires opt-in).
 
-        Off unless :meth:`enable_crud` was called (config-level opt-in) *and* you
-        call this per model (model-level opt-in). Sensitive columns are hidden and
-        unwritable unless named in ``expose=``. See :mod:`wreath.crud`.
+        Off unless `enable_crud()` was called (config-level opt-in) *and* you
+        call this per model (model-level opt-in); without the first this raises
+        `RuntimeError`. A column whose name looks sensitive is hidden from
+        responses unless named in `expose=`, and it stays unwritable even then --
+        no generated route will ever set one. `options` are `crud_router()`'s
+        keyword arguments. See `wreath.crud`.
         """
         if not getattr(self, "_crud_enabled", False):
             raise RuntimeError(
@@ -747,6 +839,41 @@ class Wreath:
         permissions: Iterable[str] = (),
         operation_id: str | None = None,
     ) -> Callable[[Handler], Handler]:
+        """Register the decorated handler for `path` under each of `methods`.
+
+        The handler is returned unchanged, so it stays directly callable and stacks
+        with `@authenticated`, `@roles`, `@permissions` and `@authorize`, whose
+        requirements are merged with `permissions=` rather than replaced by it.
+
+        A handler's first parameter is the `Request`. Every further parameter is
+        bound by name at compile time from the path, query string, headers, cookies
+        or body. Where the source is not obvious, name it with a marker inside
+        `Annotated` and leave the default an ordinary Python default --
+        `limit: Annotated[int, Query(...)] = 20`, never `Query(20)`.
+
+        A handler may return a `Response`, `StreamingResponse`, `FileResponse` or
+        `PreparedResponse` to control the whole reply, or a value that is coerced
+        into one: `str` becomes `text/plain; charset=utf-8`, `bytes` becomes
+        `application/octet-stream`, and a `dict`, `list`, `tuple`, number, `bool` or
+        `None` becomes `application/json`. Any other type is a `TypeError`, which
+        the dispatch error boundary turns into a 500 like any other handler error.
+
+        Registration only appends to the route table. Signature inspection, binder
+        compilation, middleware fusing and capability-mask assignment all happen
+        once, when the routes are compiled, and cost a request nothing.
+
+        Args:
+            methods: HTTP methods, upper-cased here. A GET route also answers HEAD.
+            middleware: Route-scoped middleware, applied inside app-wide middleware.
+            tags: OpenAPI tags for the operation.
+            summary: OpenAPI summary. The handler's docstring becomes its description.
+            dependencies: `Depends` values resolved per request before the handler.
+            permissions: Permission names the caller must hold, all of them.
+            operation_id: OpenAPI operationId, and the generated clients' method name.
+
+        Raises:
+            ValueError: This method and path are already registered.
+        """
         route_methods = tuple(method.upper() for method in methods)
         route_middleware = tuple(middleware)
         route_tags = tuple(tags)
@@ -783,18 +910,28 @@ class Wreath:
         return register
 
     def get(self, path: str, **metadata: Any) -> Callable[[Handler], Handler]:
+        """Register a GET route. A GET route answers HEAD as well, without a body.
+
+        `metadata` is `route()`'s keyword arguments -- `middleware`, `tags`,
+        `summary`, `dependencies`, `permissions`, `operation_id` -- and the handler
+        contract, parameter binding and return-value coercion are the same.
+        """
         return self.route(path, methods=("GET",), **metadata)
 
     def post(self, path: str, **metadata: Any) -> Callable[[Handler], Handler]:
+        """Register a POST route. `metadata` is `route()`'s keyword arguments."""
         return self.route(path, methods=("POST",), **metadata)
 
     def put(self, path: str, **metadata: Any) -> Callable[[Handler], Handler]:
+        """Register a PUT route. `metadata` is `route()`'s keyword arguments."""
         return self.route(path, methods=("PUT",), **metadata)
 
     def patch(self, path: str, **metadata: Any) -> Callable[[Handler], Handler]:
+        """Register a PATCH route. `metadata` is `route()`'s keyword arguments."""
         return self.route(path, methods=("PATCH",), **metadata)
 
     def delete(self, path: str, **metadata: Any) -> Callable[[Handler], Handler]:
+        """Register a DELETE route. `metadata` is `route()`'s keyword arguments."""
         return self.route(path, methods=("DELETE",), **metadata)
 
     def include_router(
@@ -807,6 +944,25 @@ class Wreath:
         dependencies: Iterable[Depends] = (),
         permissions: Iterable[str] = (),
     ) -> None:
+        """Copy `router`'s routes onto this application beneath `prefix`.
+
+        The router is read here, not retained: each of its routes is re-registered
+        on the application with the prefix applied, and this call's `tags`,
+        `middleware` and `dependencies` placed ahead of the route's own. Routes
+        added to `router` afterwards are not picked up -- include it last.
+
+        Access requirements merge rather than replace. A route keeps whatever
+        `@authenticated`, `@roles`, `@permissions` or `@authorize` it declares, and
+        `permissions=` here is required on top of it, so including a router can only
+        tighten a route.
+
+        Args:
+            prefix: Path prefix. Must begin with `/`; a trailing `/` is stripped.
+            permissions: Permission names required on every included route, all of them.
+
+        Raises:
+            ValueError: `prefix` does not begin with `/`, or a route it adds is a duplicate.
+        """
         if prefix and not prefix.startswith("/"):
             raise ValueError("router prefixes must begin with '/'")
         prefix = prefix.rstrip("/")
@@ -846,11 +1002,62 @@ class Wreath:
         backend: AuthenticationBackend,
         authorizer: AuthorizationProvider | None = None,
     ) -> None:
+        """Install the application-wide authentication backend and policy authorizer.
+
+        `backend.authenticate(request)` returns an `Identity` or `None` and runs at
+        most once per request: before route selection when the compiled table
+        classified the path as protected, otherwise on first need in the
+        authorization stage. A request that produces no identity where one is
+        required becomes a 401 carrying `backend.challenge(request)` as its
+        `WWW-Authenticate` value; an identity that fails a role or permission check
+        becomes a 403.
+
+        `authorizer` is consulted only for routes carrying `@authorize` policies.
+        Such a route with no authorizer configured raises `RuntimeError` when it is
+        requested, rather than allowing the request through.
+
+        Calling this replaces any previous backend and authorizer, and marks the
+        routes for recompilation.
+        """
         self._auth_backend = backend
         self._authorizer = authorizer
         self._dirty = True
 
     def add_middleware(self, middleware: Middleware, *, priority: int = 0) -> None:
+        """Register middleware, routed by its own scope to one of two pipelines.
+
+        Middleware carrying a truthy `global_scope` attribute -- `PipelineHooks`, and
+        the shipped CORS, CSRF, compression, rate-limit, request-id, security,
+        timing and idempotency middlewares -- goes to `add_global_middleware()` and
+        wraps the whole request, routing misses and static files included. Anything
+        else is route middleware: it is compiled into each route's tape and runs
+        only once a route has matched and its authorization has passed, so it never
+        sees a 404 or a 401.
+
+        Route middleware is either the hook form (`before`, `before_sync`, `after`,
+        or a `MiddlewareHooks`) or the legacy `(request, call_next)` callable. An
+        object carrying both raises `TypeError` when the routes compile, rather than
+        silently running one and ignoring the other.
+
+        Ordering within a pipeline is by `priority` ascending, ties broken by
+        registration order, and the first item is the outermost: its `before` runs
+        first and its `after` runs last. Middleware passed to `route(middleware=...)`
+        sits inside everything registered here.
+
+        The `after` guarantee is narrower than it is usually stated, and it differs
+        between the two pipelines. Global: an `after` hook runs only if its own
+        `before` completed, where returning a response counts as completing, so it
+        may run for a request that never reached the endpoint and may be handed an
+        error response rather than the handler's; an `after` that raises becomes an
+        error response and the remaining `after` hooks keep unwinding with it.
+        Route: a `before` that returns a response still runs its own `after` and
+        those outside it, but a `before` or an `after` that *raises* abandons the
+        rest of that tape entirely -- no further `after` hook on the route runs, and
+        the exception becomes the response through the ordinary error boundary.
+
+        Args:
+            priority: Lower runs earlier and further out. Ties keep registration order.
+        """
         if getattr(middleware, "global_scope", False):
             self.add_global_middleware(middleware, priority=priority)
             return
@@ -861,10 +1068,24 @@ class Wreath:
     def add_global_middleware(self, middleware: Middleware, *, priority: int = 0) -> None:
         """Register hook middleware around routing and all HTTP responses.
 
-        Global middleware must expose ``before``, ``before_sync``, and/or
-        ``after`` hooks. Unlike route middleware, it covers misses, static
+        Global middleware must expose `before`, `before_sync`, and/or
+        `after` hooks. Unlike route middleware, it covers misses, static
         files, and authorization failures, so it is suitable for ingress checks
         and response headers.
+
+        A `PipelineHooks` may also carry the stage hooks `miss`, `pre_auth`,
+        `identity` and `action`, each running at the pipeline boundary it names and
+        each able to end the request by returning a response. Ordering and the
+        `after` contract are those documented on `add_middleware()`.
+
+        A middleware may additionally expose `handle_preflight`, which answers an
+        OPTIONS request that matched no route. Only one may, because two CORS
+        policies answering the same preflight would silently resolve to whichever
+        was registered first.
+
+        Raises:
+            TypeError: `middleware` exposes none of the three hooks.
+            ValueError: A second `handle_preflight` middleware was registered.
         """
         if not any(
             hasattr(middleware, name) for name in ("before", "before_sync", "after")
@@ -884,6 +1105,15 @@ class Wreath:
     def middleware(
         self, middleware: Middleware | None = None, *, priority: int = 0
     ) -> Middleware | Callable[[Middleware], Middleware]:
+        """Register middleware as a decorator or a direct call.
+
+        `@app.middleware` registers the object it decorates and hands it back
+        unchanged; `@app.middleware(priority=10)` returns the decorator that does
+        the same; `app.middleware(obj)` registers `obj` directly. Every form goes
+        through `add_middleware()`, so a `global_scope` object still lands in the
+        global pipeline and the ordering rules there apply unchanged.
+        """
+
         def register(value: Middleware) -> Middleware:
             self.add_middleware(value, priority=priority)
             return value
@@ -898,10 +1128,23 @@ class Wreath:
         html_index: bool = True,
         cache_control: CacheControl | None = None,
     ) -> None:
-        """Serve files under ``directory`` for paths beginning with ``prefix``.
+        """Serve files under `directory` for paths beginning with `prefix`.
 
         Mounts are consulted only when no route matches, so they cost nothing
         on the routed hot path.
+
+        `prefix` is normalised to a leading and trailing `/`. Mounts are scanned in
+        registration order and the first whose prefix matches wins, so precedence is
+        registration order and not longest prefix: mounting `/assets/` before
+        `/assets/images/` leaves the second unreachable. Register the narrower mount
+        first. A prefix registered twice keeps its first handler.
+
+        Args:
+            html_index: Serve `index.html` for a directory path; when False it 404s.
+            cache_control: Sent as Cache-Control on every file from this mount.
+
+        Raises:
+            ValueError: `directory` does not exist or is not a directory.
         """
         from .staticfiles import StaticFiles
 
@@ -912,7 +1155,21 @@ class Wreath:
         self._static_matcher.add(normalized, cast("Handler", handler))
 
     def websocket(self, path: str) -> Callable[[WebSocketHandler], WebSocketHandler]:
-        """Register a WebSocket handler; it receives one WebSocket per connection."""
+        """Register a WebSocket handler; it receives one WebSocket per connection.
+
+        WebSocket routes live in their own table, so a path may carry both an HTTP
+        route and a WebSocket route without either shadowing the other.
+
+        A handler carrying `@authenticated`, `@roles`, `@permissions` or
+        `@authorize` has it enforced before the handshake is accepted, using the
+        same backend `configure_auth()` installed and reading the headers and
+        cookies the handshake carries. A refused caller is closed with 1008 and
+        never holds an accepted socket; a path with no WebSocket route is closed
+        with 1000. Servers turn a pre-accept close into their own rejection.
+
+        A `WebSocketDisconnect` raised out of the handler is absorbed: the peer has
+        already gone and there is nothing left to send.
+        """
 
         def register(handler: WebSocketHandler) -> WebSocketHandler:
             if self._ws_router is None:
@@ -931,11 +1188,44 @@ class Wreath:
     def add_exception_handler(
         self, error_type: type[Exception], handler: ExceptionHandler
     ) -> None:
+        """Handle `error_type` and its subclasses with `handler`.
+
+        `handler(request, error)` is awaited and may return anything a route handler
+        may return; the result is coerced the same way, and a bare value therefore
+        gets status 200 -- return a `Response` or `ProblemResponse` to choose the
+        status. Lookup walks the raised exception's MRO and takes the first
+        registration it finds, so the most derived registered class wins and a
+        handler registered for `Exception` catches `HTTPException` too. Registering
+        one for `NotFound` also covers a routing miss.
+
+        Registered handlers take precedence over everything built in. With none
+        registered, an `HTTPException` becomes an RFC 9457
+        `application/problem+json` body carrying its status, title and detail, a
+        `ValidationError` becomes a 422 whose `errors` extension holds the field
+        errors, and anything else becomes a 500 whose detail is `Internal Server
+        Error` -- never a `{"detail": ...}` body. `BaseException` is caught nowhere
+        in dispatch, so `CancelledError`, `KeyboardInterrupt` and `SystemExit` still
+        unwind the request.
+
+        A handler that itself raises does not end the request without a reply.
+        The failure is counted on `exception_handler_errors` and logged with its
+        traceback to the `wreath` logger, and the client is answered with the
+        built-in 500 problem document -- in `debug`, one naming the handler's own
+        exception rather than the original. Treat a non-zero count as a bug in
+        the handler: it means clients are getting a generic 500 where the
+        application meant to shape something.
+        """
         self._exception_handlers[error_type] = handler
 
     def exception_handler(
         self, error_type: type[Exception]
     ) -> Callable[[ExceptionHandler], ExceptionHandler]:
+        """Register the decorated function with `add_exception_handler()`.
+
+        The function is returned unchanged, and the handler contract, precedence
+        and coercion rules are exactly that method's.
+        """
+
         def register(handler: ExceptionHandler) -> ExceptionHandler:
             self.add_exception_handler(error_type, handler)
             return handler
@@ -943,19 +1233,45 @@ class Wreath:
         return register
 
     def add_status_handler(self, status: int, handler: ExceptionHandler) -> None:
+        """Render every `HTTPException` of this status with `handler`.
+
+        `handler(request, error)` receives the `HTTPException` itself and is awaited;
+        its return value is coerced exactly as a route handler's, so a plain `dict`
+        or `str` is sent with status 200 -- the handler owns the status, and should
+        return a `Response` or `ProblemResponse` carrying `status`.
+
+        Status handlers are consulted only after the exception handlers, and only
+        for an `HTTPException`. A `ValidationError` is not one: shape a 422 with
+        `set_validation_formatter()`, or with an exception handler registered for
+        `ValidationError`. An ordinary crash is not one either, so a handler
+        registered for 500 sees a deliberately raised `HTTPException` of that
+        status and never an unhandled error.
+        """
         self._status_handlers[status] = handler
 
     def set_validation_formatter(self, formatter: Any) -> None:
-        """Shape 422 bodies with ``formatter(errors, request) -> ProblemDetail``.
+        """Shape 422 bodies with `formatter(errors, request) -> ProblemDetail`.
 
-        ``errors`` is the raw list of ``{"loc", "msg", "type"}`` dicts from the
-        validator. Pass ``None`` to restore the built-in RFC 9457 output.
-        ``wreath.validation_errors`` ships a catalogue-backed formatter that
-        translates on ``type`` and negotiates ``Accept-Language``.
+        `errors` is the raw list of `{"loc", "msg", "type"}` dicts from the
+        validator. Pass `None` to restore the built-in RFC 9457 output.
+        `wreath.validation_errors` ships a catalogue-backed formatter that
+        translates on `type` and negotiates `Accept-Language`.
         """
         self._validation_formatter = formatter
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Send) -> None:
+        """Serve one ASGI connection. The application's entry point on any server.
+
+        Handles the three scope types wreath implements -- `http`, `websocket` and
+        `lifespan` -- and raises `ValueError` naming the type for anything else,
+        rather than returning silently, because an ASGI server that offers a scope
+        this application cannot serve is a deployment error and not a request error.
+
+        Compilation happens here, before dispatch, whenever registration has marked
+        the application dirty. That covers the first request and any registration
+        made after startup, and it is guarded by a lock, so under free-threading two
+        threads arriving together compile once.
+        """
         if self._dirty:
             self._compile_routes()
         scope_type = scope["type"]
@@ -1155,16 +1471,28 @@ class Wreath:
                 if global_hooks:
                     request._set_route_outcome("static")
             else:
+                # The path may exist under another method. Answering that 404
+                # told a client to stop looking when the correct reply is "not
+                # like that": RFC 9110 15.5.6 is a 405 carrying `Allow`. The
+                # probe re-runs classification once per registered method, which
+                # is a handful of lookups on a path that is already an error --
+                # nothing on the hot path pays for it.
+                allow = self._allowed_methods(method, path)
                 # Through the exception path rather than straight to a
                 # ProblemResponse, so a registered 404 status handler (or a
                 # NotFound exception handler) covers a routing miss -- which is
                 # the case people register one for. With nothing registered this
                 # produces the same response it always did.
-                response = (
-                    _NOT_FOUND
-                    if not self._exception_handlers and not self._status_handlers
-                    else await self._handle_exception(request, NotFound("Not Found"))
-                )
+                if allow:
+                    response = await self._handle_exception(
+                        request, MethodNotAllowed(allow=allow)
+                    )
+                else:
+                    response = (
+                        _NOT_FOUND
+                        if not self._exception_handlers and not self._status_handlers
+                        else await self._handle_exception(request, NotFound("Not Found"))
+                    )
                 await self._finish_http(
                     request, response, send, method, scope, native_response, active_global
                 )
@@ -1406,7 +1734,7 @@ class Wreath:
     ) -> Response | StreamingResponse | FileResponse | PreparedResponse:
         """Turn an exception into a response. The dispatch error boundary.
 
-        Every ``except Exception`` in dispatch funnels here, and each is waived
+        Every `except Exception` in dispatch funnels here, and each is waived
         against BLE001 pointing at this docstring. The breadth is the contract,
         not an oversight: the code being guarded is *the caller's* -- middleware
         hooks, the route handler, the auth backend, exception handlers themselves
@@ -1414,13 +1742,79 @@ class Wreath:
         raises must still produce a response rather than drop the connection.
 
         Nothing is swallowed. The error becomes a registered handler's response,
-        a problem+json for ``HTTPException``/``ValidationError``, or a 500 -- and
-        in ``debug`` the type and message go in the body. It is visible to the
+        a problem+json for `HTTPException`/`ValidationError`, or a 500 -- and
+        in `debug` the type and message go in the body. It is visible to the
         client on every path.
+
+        **A registered handler that itself raises does not escape.** Rendering
+        runs inside this boundary, so a broken exception handler, status handler,
+        fallback handler or validation formatter still produces a 500 problem
+        document instead of leaving the request with no response at all. That
+        failure is a bug in application code, so it is not merely survived: it
+        increments `exception_handler_errors` and is logged with its traceback to
+        the `wreath` logger. This is the only place the framework can report it.
 
         `BaseException` is deliberately not caught anywhere in dispatch, so
         `CancelledError` still unwinds a request that is being torn down and
         `KeyboardInterrupt`/`SystemExit` still end the process.
+        """
+        try:
+            return await self._render_exception(request, error)
+        except Exception as failure:  # the handler is the caller's
+            # Counted and logged, then answered. The waiver: the code that just
+            # raised is a *user-registered renderer*, so there is no set of types
+            # to name, and returning nothing would hang the request. Degrading
+            # silently is the shape AGENTS.md forbids, so the failure gets a
+            # counter and a traceback rather than a shrug.
+            import logging
+
+            self.exception_handler_errors += 1
+            logging.getLogger("wreath").exception(
+                "exception handler for %s raised; answering 500",
+                type(error).__name__,
+                exc_info=failure,
+            )
+            if self.debug:
+                return ProblemResponse(
+                    status=500,
+                    detail=f"exception handler raised {type(failure).__name__}: {failure}",
+                )
+            return ProblemResponse(status=500, detail="Internal Server Error")
+
+    def _allowed_methods(self, method: str, path: str) -> tuple[str, ...]:
+        """Methods other than `method` that this `path` does answer, for `Allow`.
+
+        Called only after the route table, the static mounts and the CORS
+        preflight fallback have all missed, so this runs on a request that is
+        already an error and never on the hot path. It asks the compiled table
+        one classification per *registered* method -- the distinct set across the
+        whole application, which is at most the handful of HTTP verbs the routes
+        actually use -- so it costs nothing to a router that simply has no route
+        at this path, which is the common miss.
+
+        Returns an empty tuple when nothing answers this path, which is the real
+        404. A `GET` route also answers `HEAD` (dispatch sends the headers with
+        no body), so `HEAD` is listed with it even though nothing registered it.
+        """
+        classify = self.router.classify
+        allowed = [
+            candidate
+            for candidate in self._route_methods
+            if candidate != method and classify(candidate, path)[0] != 0
+        ]
+        if "GET" in allowed and "HEAD" not in allowed and method != "HEAD":
+            allowed.append("HEAD")
+        return tuple(allowed)
+
+    async def _render_exception(
+        self, request: Request, error: Exception
+    ) -> Response | StreamingResponse | FileResponse | PreparedResponse:
+        """Choose and build the response for `error`. Called only under the boundary.
+
+        Split out from `_handle_exception` so every user-supplied renderer it
+        consults -- exception handler, validation formatter, status handler,
+        fallback handler -- sits inside one `try`, and so no single one of them
+        can end a request without a response.
         """
         # Guarded: most applications register no exception handlers at all, and
         # the walk was paying one dict lookup per class in the MRO to find that
@@ -1554,6 +1948,11 @@ class Wreath:
         if self._ws_router is not None:
             self._ws_router.compile()
         self._handler_requirements = handler_requirements
+        # Sorted for a stable `Allow` header; deduplicated because a method
+        # appears once per route that declares it.
+        self._route_methods = tuple(
+            sorted({method for route in self._routes for method in route.methods})
+        )
         self._flight_route_keys = flight_route_keys
         self._flight_route_ids = None  # rebuilt lazily against the new routes
         self.router = router
@@ -1612,7 +2011,7 @@ class Wreath:
         """Install (or clear) the forensic capture plan + runtime arm registry.
 
         The server calls this at startup under a Forensic recorder, and clears it
-        on shutdown. With ``plan`` None the request-path capture seam stays a
+        on shutdown. With `plan` None the request-path capture seam stays a
         single not-taken branch (every non-Forensic server, and Forensic before a
         recording policy is compiled).
         """
@@ -1643,14 +2042,14 @@ class Wreath:
     def _capture_request(self, scope: Any, request: Request) -> Any:
         """Capture policy-approved request headers for an armed Forensic request.
 
-        Reached only when the native context reported ``flight == 2`` (armed) and
+        Reached only when the native context reported `flight == 2` (armed) and
         a capture plan is installed -- i.e. only on the Forensic-sampled subset of
         requests. Capture is gated on *active* runtime arms, narrows to each arm's
         compiled plan (within the startup ceiling), and counts one match per
-        active arm. The native ``_flight_capture`` is deny-by-default and redacts
+        active arm. The native `_flight_capture` is deny-by-default and redacts
         each field, so a header no arm permits never leaves recorder memory.
         Returns the active-arm snapshot (shared with the completion and dependency
-        seams) or ``None`` when nothing is armed.
+        seams) or `None` when nothing is armed.
         """
         registry = self._flight_arm_registry
         arms = registry.active() if registry is not None else ()
@@ -1688,12 +2087,12 @@ class Wreath:
     ) -> None:
         """Capture policy-approved response headers and request/response bodies.
 
-        Called only when :meth:`_capture_request` found active arms, so the match
+        Called only when `_capture_request()` found active arms, so the match
         is already counted; this adds the response side under the same arm
         snapshot. Response headers resolve against the same direction-agnostic
         redaction rules as the request headers. The request body is captured only
         from what the handler already buffered -- never a fresh read that would
-        consume the stream or change behavior -- and only plain-``bytes``
+        consume the stream or change behavior -- and only plain-`bytes`
         responses are captured (streaming/file bodies fall back to nothing, never
         raw, per the redaction rules).
         """
@@ -1800,9 +2199,9 @@ class Wreath:
     ) -> Response | StreamingResponse | FileResponse | PreparedResponse | None:
         """Run authentication and authorization before route middleware.
 
-        ``backend`` overrides the app-wide auth backend for route-scoped
+        `backend` overrides the app-wide auth backend for route-scoped
         authentication (e.g. the API-docs subsystem); it defaults to
-        ``self._auth_backend`` so ordinary routes are unaffected.
+        `self._auth_backend` so ordinary routes are unaffected.
         """
         auth_backend = backend if backend is not None else self._auth_backend
         identity = request.identity
@@ -1862,21 +2261,21 @@ class Wreath:
 
         Gating is declarative and fail-closed:
 
-        * ``environments`` -- if set, the routes are registered *only* when the
-          current environment (``env`` arg, else ``WREATH_ENV``, else
-          ``"production"``) is listed. Otherwise nothing is registered and both
+        * `environments` -- if set, the routes are registered *only* when the
+          current environment (`env` arg, else `WREATH_ENV`, else
+          `"production"`) is listed. Otherwise nothing is registered and both
           paths 404 -- no existence leak. Forgetting to set an env therefore
           means production, which means docs OFF.
-        * ``authenticated`` / ``permissions`` / ``authorize`` -- require auth on
-          the two routes, enforced (401/403) by a route-scoped guard. ``authorize``
-          is a decorator such as :func:`wreath.authorize`.
-        * ``auth`` -- a backend that authenticates ONLY these two routes,
-          independent of :meth:`configure_auth` (no global side effect). When it
+        * `authenticated` / `permissions` / `authorize` -- require auth on
+          the two routes, enforced (401/403) by a route-scoped guard. `authorize`
+          is a decorator such as `wreath.authorization.authorize`.
+        * `auth` -- a backend that authenticates ONLY these two routes,
+          independent of `configure_auth()` (no global side effect). When it
           and the other auth args are all omitted, the docs are open within the
           allowed environments (environment gating is the only guard). A live
           try-it-out console inherits exactly this gate.
 
-        Returns ``True`` when the routes were registered, ``False`` when the
+        Returns `True` when the routes were registered, `False` when the
         environment gate withheld them.
         """
         import os
@@ -1989,14 +2388,14 @@ class Wreath:
         version: str = "0.1.0",
         environments: Iterable[str] | None = NON_PRODUCTION_ENVIRONMENTS,
     ) -> bool:
-        """Backwards-compatible alias for :meth:`enable_api_docs`.
+        """Backwards-compatible alias for `enable_api_docs()`.
 
         Serves the self-contained docs page and OpenAPI document **outside
         production**. The gate is the difference from what this used to do: the
         alias registered both routes unconditionally, so the shorter, older,
         more-copied spelling was the one that published the whole API surface
-        from a production deployment. Pass ``environments=None`` to register
-        everywhere, or use :meth:`enable_api_docs` for auth as well as env
+        from a production deployment. Pass `environments=None` to register
+        everywhere, or use `enable_api_docs()` for auth as well as env
         gating.
 
         Returns whether the routes were registered.
@@ -2010,26 +2409,75 @@ class Wreath:
         )
 
     def on_startup(self, handler: LifespanHandler) -> LifespanHandler:
-        """Run ``handler(app)`` during lifespan startup, in registration order."""
+        """Run `handler(app)` during lifespan startup, in registration order."""
         self._startup_handlers.append(handler)
         return handler
 
     def on_shutdown(self, handler: LifespanHandler) -> LifespanHandler:
-        """Run ``handler(app)`` during lifespan shutdown, in registration order."""
+        """Run `handler(app)` during lifespan shutdown, in registration order."""
         self._shutdown_handlers.append(handler)
         return handler
+
+    async def _close_all(
+        self, steps: list[tuple[str, Callable[[], Any]]]
+    ) -> BaseException | None:
+        """Run every teardown step in order, even when one of them raises.
+
+        Releasing resources on a failing path is the one place where stopping at
+        the first error is strictly wrong: the steps are independent, nothing
+        later depends on an earlier one succeeding, and whatever is skipped is
+        never released at all -- on the startup path the server is told startup
+        failed and never calls shutdown. A refusing `close()` used to abandon
+        every pool queued behind it *and* the lifespan reply itself.
+
+        Each failure is counted on `lifespan_teardown_errors` and logged with its
+        traceback. The first is returned so the shutdown path can report it,
+        while the startup path keeps reporting the error that caused the failure
+        rather than the one raised while cleaning up after it.
+
+        Args:
+            steps: `(label, callable)` pairs in teardown order. The callable
+                takes no arguments; an awaitable result is awaited.
+
+        Returns:
+            The first exception raised by a step, or None if all of them ran
+            cleanly.
+        """
+        import logging
+
+        first: BaseException | None = None
+        for label, close in steps:
+            try:
+                result = close()
+                if isawaitable(result):
+                    await result
+            except Exception as failure:
+                # Broad by necessity: these are user-supplied and driver-supplied
+                # closers, so there is no set of types to name, and the whole
+                # point of this loop is that one failure must not stop the rest.
+                # It is not a swallow -- counted, logged with its traceback, and
+                # the first one is handed back to the caller.
+                self.lifespan_teardown_errors += 1
+                logging.getLogger("wreath").exception(
+                    "lifespan teardown step %r failed; continuing", label
+                )
+                if first is None:
+                    first = failure
+        return first
 
     async def _lifespan(self, receive: Any, send: Send) -> None:
         while True:
             message = await receive()
             message_type = message["type"]
             if message_type == "lifespan.startup":
-                started_databases: list[Any] = []
-                started_clients: list[Any] = []
+                # Names travel with the objects so a teardown failure names the
+                # registration that refused, not just its type.
+                started_databases: list[tuple[str, Any]] = []
+                started_clients: list[tuple[str, Any]] = []
                 try:
-                    for database in self._databases.values():
+                    for name, database in self._databases.items():
                         await database.start()
-                        started_databases.append(database)
+                        started_databases.append((name, database))
                     if self._orm_registries:
                         # Ordered explicitly rather than through a synthetic
                         # startup handler: the schema must be checked once the
@@ -2038,9 +2486,9 @@ class Wreath:
 
                         for registry in self._orm_registries.values():
                             await validate_registry(registry)
-                    for client in self._http_clients.values():
+                    for name, client in self._http_clients.items():
                         await client.start()
-                        started_clients.append(client)
+                        started_clients.append((name, client))
                     # Supervised jobs/messaging start after their dependencies
                     # (databases, clients) and before user startup handlers, so a
                     # startup handler may enqueue onto a running runner.
@@ -2057,48 +2505,73 @@ class Wreath:
                     for handler in self._startup_handlers:
                         await handler(self)
                 except Exception as error:  # noqa: BLE001 - reported to the server
-                    if self._supervisor is not None:
-                        await self._supervisor.stop()
-                        self._supervisor = None
+                    # Everything started so far is released here or never: the
+                    # server is about to be told startup failed, and it will not
+                    # call shutdown. `_close_all` is what makes that total.
+                    supervisor, self._supervisor = self._supervisor, None
+                    steps: list[tuple[str, Callable[[], Any]]] = []
+                    if supervisor is not None:
+                        steps.append(("supervisor", supervisor.stop))
                     # App-scoped dependencies first, as on the ordinary shutdown
                     # path: a startup handler may have opened one before the
                     # failure, and it was being left open along with whatever it
                     # holds -- a connection, a file, a client.
-                    with contextlib.suppress(Exception):
-                        await self._app_scope.aclose()
-                    for client in reversed(started_clients):
-                        await client.close()
-                    for database in reversed(started_databases):
-                        await database.stop()
+                    steps.append(("app scope", self._app_scope.aclose))
+                    steps += [
+                        (f"http client {name!r}", client.close)
+                        for name, client in reversed(started_clients)
+                    ]
+                    steps += [
+                        (f"database {name!r}", database.stop)
+                        for name, database in reversed(started_databases)
+                    ]
+                    await self._close_all(steps)
+                    # The original failure is what the server needs to see; a
+                    # close that also refused is on `lifespan_teardown_errors`.
                     await send(
                         {"type": "lifespan.startup.failed", "message": f"{error!r}"}
                     )
                     return
                 await send({"type": "lifespan.startup.complete"})
             elif message_type == "lifespan.shutdown":
+                failure: BaseException | None = None
                 try:
                     for handler in self._shutdown_handlers:
                         await handler(self)
-                    # Stop supervised work before the resources it depends on:
-                    # stop fetching, drain in-flight, release leases (design 01).
-                    if self._supervisor is not None:
-                        await self._supervisor.stop()
-                        self._supervisor = None
-                    # App-scoped dependencies before the resources they were
-                    # built from: an app-scoped generator may still want to
-                    # talk to a database or HTTP client on the way out.
-                    await self._app_scope.aclose()
-                    for store in reversed(tuple(self._object_stores.values())):
-                        close = getattr(store, "close", None)
-                        if close is not None:
-                            close()
-                    for client in reversed(tuple(self._http_clients.values())):
-                        await client.close()
-                    for database in reversed(tuple(self._databases.values())):
-                        await database.stop()
                 except Exception as error:  # noqa: BLE001 - reported to the server
+                    # Held, not returned on: a shutdown handler that raises is
+                    # still a shutdown, and the resources below are released here
+                    # or never. Returning early leaked every pool the app owned.
+                    failure = error
+                # Stop supervised work before the resources it depends on:
+                # stop fetching, drain in-flight, release leases (design 01).
+                supervisor, self._supervisor = self._supervisor, None
+                steps: list[tuple[str, Callable[[], Any]]] = []
+                if supervisor is not None:
+                    steps.append(("supervisor", supervisor.stop))
+                # App-scoped dependencies before the resources they were built
+                # from: an app-scoped generator may still want to talk to a
+                # database or HTTP client on the way out.
+                steps.append(("app scope", self._app_scope.aclose))
+                steps += [
+                    (f"object store {name!r}", close)
+                    for name, store in reversed(tuple(self._object_stores.items()))
+                    if (close := getattr(store, "close", None)) is not None
+                ]
+                steps += [
+                    (f"http client {name!r}", client.close)
+                    for name, client in reversed(tuple(self._http_clients.items()))
+                ]
+                steps += [
+                    (f"database {name!r}", database.stop)
+                    for name, database in reversed(tuple(self._databases.items()))
+                ]
+                teardown_failure = await self._close_all(steps)
+                if failure is None:
+                    failure = teardown_failure
+                if failure is not None:
                     await send(
-                        {"type": "lifespan.shutdown.failed", "message": f"{error!r}"}
+                        {"type": "lifespan.shutdown.failed", "message": f"{failure!r}"}
                     )
                     return
                 await send({"type": "lifespan.shutdown.complete"})
@@ -2128,9 +2601,9 @@ def _ensure_response(endpoint: Handler) -> Handler:
 def _coerce_response(value: Any) -> Response | StreamingResponse | FileResponse | PreparedResponse:
     """Turn a handler's return value into a response object.
 
-    Two deliberate tiers, not redundant checks: the exact-type ``kind is`` arms
+    Two deliberate tiers, not redundant checks: the exact-type `kind is` arms
     are the common fast path (str/dict/bytes build a response in one frame,
-    skipping the ladder); the ``isinstance`` arms below the response-type check
+    skipping the ladder); the `isinstance` arms below the response-type check
     then catch the rarer subclasses (a str/bytes subclass, or a dict/list/scalar
     for JSON) that the exact-type tests miss.
     """

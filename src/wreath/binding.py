@@ -1,28 +1,50 @@
 """Typed handler binding and validation, compiled at startup.
 
-A handler that takes only ``request`` runs exactly as before — binding costs
+A handler that takes only `request` runs exactly as before — binding costs
 nothing unless a signature asks for more. Extra parameters are bound by
 inspecting the signature once at route-compile time (never per request):
 
-- names matching a path placeholder become **path params**, converted to the
-  annotated scalar type,
-- a parameter annotated with a **dataclass** receives the validated JSON
-  body,
-- remaining scalar-annotated parameters come from the **query string**
-  (defaults apply when absent).
+- a name matching a path placeholder becomes a **path parameter**, converted to
+  the annotated scalar type,
+- a parameter annotated with a **dataclass** or a mapped `wreath.orm` model
+  receives the validated JSON body,
+- every remaining scalar-annotated parameter comes from the **query string**,
+  falling back to the handler default when absent.
 
-Validation failures raise :class:`wreath.exceptions.UnprocessableEntity` with a
-``detail`` listing each error's location, message, and type::
+```python
+@dataclass
+class NewItem:
+    name: str
+    price: float
+    tags: list[str] = field(default_factory=list)
 
-    @dataclass
-    class NewItem:
-        name: str
-        price: float
-        tags: list[str] = field(default_factory=list)
+@app.post("/items/{item_id}")
+async def create(request, item_id: int, item: NewItem, dry_run: bool = False):
+    ...
+```
 
-    @app.post("/items/{item_id}")
-    async def create(request, item_id: int, item: NewItem, dry_run: bool = False):
-        ...
+`Path`, `Query`, `Header`, `Cookie`, `Body`, `Form` and `File` override that
+inference. **A marker rides in `Annotated`; the default stays a plain Python
+default** — write `limit: Annotated[int, Query()] = 20`, never
+`limit: int = Query(20)`. That second form is the most common mistake when
+porting from FastAPI, and it used to fail quietly. Markers are read only from
+`Annotated` metadata, so a marker written as a default is not recognised as a
+marker at all: `Query(20)` would become the literal default value, every alias
+and bound on it ignored, and a request that omits the parameter would hand the
+marker object itself to the handler. It is therefore refused when routes
+compile — a startup `TypeError` naming the parameter and the form to write
+instead, rather than a wrong value at request time. `Depends` is the one
+exception; it is written as the default, not in `Annotated`, and is not
+refused.
+
+Every binding failure raises `ValidationError`, and the application's error
+boundary answers RFC 9457 `application/problem+json` — status 422, `detail`
+"Request validation failed", and an `errors` member carrying one
+`{"loc", "msg", "type"}` object per failure. There is no `{"detail": [...]}`
+body; `loc` names the source first (`"path"`, `"query"`, `"header"`,
+`"cookie"`, `"form"`, `"file"` or `"body"`) and then the field path.
+`Wreath.set_validation_formatter` replaces that shaping. A request body that is
+not JSON at all is a 400 instead, because nothing could be validated.
 """
 
 from __future__ import annotations
@@ -43,7 +65,7 @@ from ._flight_markers import PH_DI_CONSTRUCT as _PH_DI_CONSTRUCT
 from ._flight_markers import phase_marker as _phase_marker
 from ._json import loads as _json_loads
 from ._native import _core
-from .exceptions import BadRequest, UnprocessableEntity
+from .exceptions import BadRequest
 from .request import Request
 from .temporal import Instant, TemporalError
 
@@ -75,7 +97,7 @@ class _PlanUnsupported(Exception):
 
 
 def _compile_plan(annotation: Any, seen: frozenset[type]) -> tuple[Any, ...]:
-    """Compile ``annotation`` into the native validator's plan tuples.
+    """Compile `annotation` into the native validator's plan tuples.
 
     Raises :class:`_PlanUnsupported` for shapes the flat plan cannot express
     (currently recursive dataclasses), signalling a pure-validator fallback.
@@ -122,9 +144,26 @@ def _compile_plan(annotation: Any, seen: frozenset[type]) -> tuple[Any, ...]:
 
 
 class ValidationError(Exception):
-    """Collected field errors; converted to a 422 at the route boundary."""
+    """The field errors collected from one request, converted to a 422.
+
+    Raised by `validate`, by path/query/header/cookie/form scalar conversion, by
+    a numeric `Query` range, and by the compiled ORM model validators. The
+    application's error boundary catches it and answers RFC 9457
+    `application/problem+json` with status 422, detail "Request validation
+    failed", and an `errors` member holding this list verbatim.
+    `Wreath.set_validation_formatter` reshapes that body;
+    `Wreath.add_exception_handler(ValidationError, ...)` replaces the response
+    outright.
+
+    The collected list is available as the `errors` attribute. `str(error)` is
+    only a count summary — everything a client needs is in `errors`.
+
+    Args:
+        errors: One dict per failure, with keys `loc`, `msg` and `type`.
+    """
 
     def __init__(self, errors: list[dict[str, Any]]) -> None:
+        """Keep `errors` and set the exception message to a count summary."""
         super().__init__(f"{len(errors)} validation error(s)")
         self.errors = errors
 
@@ -148,12 +187,37 @@ _VALIDATE_MAX_STEPS = 2_000_000
 
 
 def validate(annotation: Any, value: Any, loc: tuple[Any, ...] = ()) -> Any:
-    """Validate ``value`` (a decoded-JSON shape) against ``annotation``.
+    """Validate a decoded-JSON `value` against `annotation`.
 
-    Returns the validated (possibly coerced) value or raises ValidationError.
-    Supported annotations: scalars (str/int/float/bool), Any, None, list[T],
-    tuple[T, ...] (as list input), dict[str, T], Optional/unions, and
-    dataclasses (recursively).
+    The reference implementation of body validation, in pure Python. The native
+    validator executes a compiled plan with identical semantics and identical
+    error ordering; this is what runs under `WREATH_PURE=1` and for the shapes
+    the flat plan cannot express.
+
+    Understood annotations are the scalars `str`, `int`, `float` and `bool`,
+    `Any`, `None`, `list[T]`, `tuple[T, ...]` (from list input), `dict[str, T]`,
+    unions including `Optional`, and dataclasses, recursively. Anything else
+    is reported as an `unsupported` error rather than passed through. A JSON
+    number binds to `float` whether or not it was written with a decimal point,
+    but `bool` never satisfies `int` or `float`. A dataclass rejects a field it
+    does not declare and reports each missing required field. Every error in the
+    whole value is collected before raising, not just the first.
+
+    Validation is bounded to two million node visits, because a nest of unions
+    re-explores each branch at every level and would otherwise let a small body
+    cost exponential work. Exceeding it aborts with one `too_complex` error at
+    the root and constructs nothing from the truncated result.
+
+    Args:
+        annotation: The type to check against, as it appears on the parameter.
+        value: A decoded JSON value — dicts, lists, strings, numbers, bools, None.
+        loc: Path prefix for reported errors, such as `("body",)`.
+
+    Returns:
+        The validated value, with dataclasses constructed and ints widened to floats.
+
+    Raises:
+        ValidationError: The value did not match, or the step budget ran out.
     """
     errors: list[dict[str, Any]] = []
     budget = [_VALIDATE_MAX_STEPS]
@@ -370,7 +434,7 @@ ScalarConstraint = tuple[Any, Any, str]  # (minimum, maximum, overflow)
 
 
 def _apply_constraint(value: Any, constraint: ScalarConstraint, loc: tuple[Any, ...]) -> Any:
-    """Clamp or reject a converted numeric ``value`` against a range.
+    """Clamp or reject a converted numeric `value` against a range.
 
     Runs only for values that parsed cleanly (invalid syntax already raised in
     :func:`_convert_scalar`) and only when the parameter actually supplied a
@@ -393,18 +457,51 @@ def _apply_constraint(value: Any, constraint: ScalarConstraint, loc: tuple[Any, 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Path:
+    """Bind a parameter to a path placeholder.
+
+    Written in `Annotated`, never as a default — `Annotated[int, Path()]`. A
+    parameter whose name already matches a placeholder binds without this
+    marker; `Path("item_id")` is what lets the handler call it something else.
+
+    A path parameter is always required and its handler default is never
+    consulted, because the router only matches a request that supplied every
+    placeholder. Naming a placeholder the route path does not contain is a
+    `TypeError` when routes compile, not a 404 at request time. A value that
+    does not convert to the annotated type fails with 422 and a `loc` of
+    `["path", name]`.
+
+    Args:
+        alias: Placeholder name to read, when it differs from the parameter name.
+    """
+
     alias: str | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Query:
-    """Marks a query-string parameter, optionally with a reusable numeric range.
+    """Bind a parameter to a query-string value, optionally with a numeric range.
 
-    ``minimum``/``maximum`` bound a valid ``int`` or ``float`` value. ``overflow``
-    decides what an out-of-range value does: ``"error"`` (the default) returns the
-    existing structured 422, ``"clamp"`` pins it to the nearest bound. Missing input
-    still falls back to the handler default before any bound is considered, and
-    invalid integer syntax remains an error regardless of ``overflow``.
+    Written in `Annotated`, never as a default — `Annotated[int, Query()] = 20`.
+    Writing `limit: int = Query(20)`, which is FastAPI's spelling, is a
+    `TypeError` when routes compile: it binds nothing, so accepting it would
+    ignore the bounds below and hand the `Query` object itself to the handler as
+    the value. Every marker below refuses the same way.
+
+    A repeated key takes its first value. An absent parameter falls back to the
+    handler default before any bound is considered; with no default it fails
+    with 422 and a `loc` of `["query", name]`. Invalid syntax stays an error
+    whatever `overflow` says, because a range applies only to a value that
+    parsed. `minimum` and `maximum` apply only to an `int` or `float` parameter;
+    a range on any other annotation is a `TypeError` when routes compile.
+
+    Args:
+        alias: Query key to read, when it differs from the parameter name.
+        minimum: Inclusive lower bound. None leaves the value unbounded below.
+        maximum: Inclusive upper bound. None leaves the value unbounded above.
+        overflow: "error" for a 422 on an out-of-range value, "clamp" to pin it.
+
+    Raises:
+        ValueError: overflow is neither "error" nor "clamp", or minimum exceeds maximum.
     """
 
     alias: str | None = None
@@ -429,26 +526,109 @@ class Query:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Header:
+    """Bind a parameter to a request header.
+
+    Written in `Annotated`, never as a default — `Annotated[str, Header()]`.
+    The lookup is case-insensitive and takes the first value when a header
+    repeats. **The name is used literally.** Unlike FastAPI, wreath does not
+    rewrite `user_agent` into `user-agent`, so any header whose name is not a
+    Python identifier needs an explicit alias.
+
+    An absent header falls back to the handler default; with no default the
+    request fails with 422 and a `loc` of `["header", name]`.
+
+    Args:
+        alias: Header name to read, when it differs from the parameter name.
+    """
+
     alias: str | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Cookie:
+    """Bind a parameter to a request cookie.
+
+    Written in `Annotated`, never as a default — `Annotated[str, Cookie()]`.
+    Cookie names are matched exactly, case included, and the name is used
+    literally — no underscore-to-hyphen rewriting. An absent cookie falls back
+    to the handler default; with no default the request fails with 422 and a
+    `loc` of `["cookie", name]`.
+
+    Reading any cookie parses the whole Cookie header, which is refused with a
+    431 when it exceeds the configured `max_cookie_bytes`.
+
+    Args:
+        alias: Cookie name to read, when it differs from the parameter name.
+    """
+
     alias: str | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Body:
+    """Bind a parameter to the whole decoded JSON request body.
+
+    Written in `Annotated`, never as a default — `Annotated[list[int], Body()]`.
+    A dataclass or mapped ORM model already binds the body without any marker;
+    `Body()` is what makes a non-dataclass annotation — a list, a dict, a scalar
+    — the body rather than a query parameter. The payload is checked against the
+    annotation by a validator compiled once at route-compile time, so a handler
+    annotated with a dataclass or model receives a constructed instance.
+
+    A handler declares at most one body parameter and cannot combine a body with
+    `Form()` or `File()` parameters; either is a `TypeError` when routes compile.
+    A body that is not valid JSON is a 400, not a 422, because nothing could be
+    validated against the annotation.
+
+    Args:
+        alias: Accepted for symmetry and ignored — a body has no name to look up.
+    """
+
     alias: str | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Form:
+    """Bind a parameter to a multipart or urlencoded form field.
+
+    Written in `Annotated`, never as a default — `Annotated[str, Form()]`. A
+    scalar-annotated parameter takes one form field, converted to the annotated
+    type. A parameter annotated with a dataclass or a mapped ORM model instead
+    binds that whole model from the form fields and runs the same validator a
+    JSON body would use, so a form-posted model accepts exactly the shapes a
+    JSON-posted one does. A whole-model form rejects any field the model does
+    not declare, and ignores `alias`.
+
+    File parts are never model fields — bind an upload with a separate `File()`
+    parameter. A handler declares at most one form model, cannot mix a form
+    model with individual `Form()` fields, and cannot combine either with a body
+    parameter; each is a `TypeError` when routes compile. A missing field with
+    no handler default fails with 422 and a `loc` of `["form", name]`.
+
+    Args:
+        alias: Form field name to read, when it differs from the parameter name.
+    """
+
     alias: str | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class File:
+    """Bind a parameter to an uploaded multipart file part.
+
+    Written in `Annotated`, never as a default —
+    `Annotated[UploadedFile, File()]`. The handler always receives a
+    `wreath.request.UploadedFile`; the annotation documents intent and is never
+    used to convert or validate the part. A multipart part carrying no filename
+    is a form field, not a file, and binds with `Form()` instead.
+
+    A missing upload with no handler default fails with 422 and a `loc` of
+    `["file", name]`.
+
+    Args:
+        alias: Part name to read, when it differs from the parameter name.
+    """
+
     alias: str | None = None
 
 
@@ -458,38 +638,61 @@ _SOURCE_MARKERS = (Path, Query, Header, Cookie, Body, Form, File)
 class Depends:
     """Marks a handler parameter as provided by a dependency callable.
 
-    The callable takes ``request`` (plus its own ``Depends`` parameters,
-    resolved recursively) and may be a plain function, a coroutine function,
-    or an async generator — generators yield the value and resume for cleanup
-    after the handler finishes, even on error::
+    Alone among the markers, `Depends` is written as the parameter's *default* —
+    `session = Depends(get_session)` — not inside `Annotated`.
 
-        async def get_session(request):
-            session = Session()
-            try:
-                yield session
-            finally:
-                await session.close()
+    ```python
+    async def get_session(request):
+        session = Session()
+        try:
+            yield session
+        finally:
+            await session.close()
 
-        @app.get("/items")
-        async def items(request, session = Depends(get_session)):
-            ...
+    @app.get("/items")
+    async def items(request, session = Depends(get_session)):
+        ...
+    ```
 
-    Within one request, each callable resolves at most once (``use_cache``).
+    The callable takes `request` first, plus its own `Depends` parameters,
+    resolved recursively. Every other parameter of a dependency must be a
+    `Depends` or carry a default, and a cycle in the graph is a `TypeError`
+    naming the cycle when routes compile. A plain function, a coroutine
+    function, and an async generator function are all accepted; a synchronous
+    dependency runs inline on the event loop and is never moved to a thread, so
+    a blocking one blocks the request. An async generator yields the value and
+    is resumed once for cleanup after the handler returns — on success, on
+    error, and on cancellation alike — innermost first. A plain, non-async
+    generator gets no cleanup: its generator object is handed to the handler
+    as the value.
 
-    ``scope`` decides how long that value lives:
+    Dependencies resolve per request, after path, query, header, cookie and body
+    binding and after any injected connection or ORM session. With `use_cache`
+    (the default) a callable resolves at most once per request, keyed by
+    callable *and* scope, so a diamond in the graph costs one call rather than
+    two, and the same factory used at both scopes stays two distinct values.
 
-    ``"request"`` (default)
-        Resolved per request, cleaned up when the handler returns. What every
-        dependency did before scopes existed.
-    ``"app"``
-        Resolved once, on first use, and shared by every later request. An
-        async generator's cleanup runs at lifespan shutdown instead of after
-        the request. Use it for something expensive and stateless -- a client,
-        a compiled ruleset, a warmed lookup table.
+    `scope="request"`, the default, resolves per request and cleans up when the
+    handler returns. `scope="app"` resolves once, on first use, and shares that
+    value with every later request; an async generator's cleanup then runs at
+    lifespan shutdown instead. Use it for something expensive and stateless — a
+    client, a compiled ruleset, a warmed lookup table. An app-scoped value is
+    held by the application's `AppScope` whatever `use_cache` says; that flag
+    governs only the per-request cache. App scope is reachable only through a
+    route on a `Wreath` application — compiling one without a container is a
+    `TypeError`.
 
     An app-scoped dependency may not depend on a request-scoped one: the value
     would outlive the request it was built from. That is a **compile-time**
     error, raised when routes compile, not a surprise on request 2.
+
+    Args:
+        fn: The dependency callable, taking `request` and its own dependencies.
+        use_cache: Reuse one resolved value across a single request. Default True.
+        scope: Lifetime of the value, "request" or "app". Default "request".
+
+    Raises:
+        ValueError: scope is neither "request" nor "app".
     """
 
     __slots__ = ("fn", "scope", "use_cache")
@@ -501,6 +704,7 @@ class Depends:
         use_cache: bool = True,
         scope: str = "request",
     ) -> None:
+        """Check `scope` here, where a typo fails at import, not per request."""
         if scope not in ("request", "app"):
             raise ValueError(f"scope must be 'request' or 'app', got {scope!r}")
         self.fn = fn
@@ -514,9 +718,12 @@ Resolver = Callable[[Request, dict, list], Awaitable[Any]]
 class AppScope:
     """Values that outlive a request, owned by one application.
 
-    Explicitly owned rather than global: the container hangs off the `Wreath`
-    instance, is passed into binder compilation, and is torn down by that app's
-    lifespan shutdown. Two apps in one process do not share values.
+    Backs `Depends(..., scope="app")`. Explicitly owned rather than global: the
+    container hangs off the `Wreath` instance, is passed into binder
+    compilation, and is torn down by that app's lifespan shutdown. Two apps in
+    one process do not share values. A new container is empty and constructs
+    nothing until a request first asks for a value; `fn in scope` reports
+    whether the dependency `fn` has resolved yet.
 
     First use resolves; later uses read. A burst of concurrent first requests
     constructs once, not once per request in flight.
@@ -533,6 +740,7 @@ class AppScope:
     __slots__ = ("_cleanups", "_pending", "_values")
 
     def __init__(self) -> None:
+        """Start empty: values, in-flight futures, and cleanups all accrue lazily."""
         self._values: dict[Callable[..., Any], Any] = {}
         self._pending: dict[Callable[..., Any], asyncio.Future[Any]] = {}
         self._cleanups: list[Any] = []
@@ -543,6 +751,21 @@ class AppScope:
     async def get_or_create(
         self, fn: Callable[..., Any], factory: Callable[[], Awaitable[Any]]
     ) -> Any:
+        """Return the value held for `fn`, constructing it once if it is absent.
+
+        Concurrent callers for the same key collapse onto a single `factory`
+        call and all receive its result; callers for different keys never block
+        each other, so one app-scoped dependency can resolve another without
+        deadlocking. A `factory` that raises is not cached and its exception
+        reaches every waiter, so the next request retries construction.
+
+        Args:
+            fn: Cache key — the dependency callable itself, not the factory.
+            factory: Zero-argument coroutine function that builds the value.
+
+        Returns:
+            The value for `fn`, built by this call or by an earlier one.
+        """
         # The warm path: one dict lookup, no lock, no future.
         try:
             return self._values[fn]
@@ -571,6 +794,17 @@ class AppScope:
         return value
 
     def track_cleanup(self, generator: Any) -> None:
+        """Register a started app-scoped async generator for shutdown cleanup.
+
+        Called by the resolver for a `Depends(..., scope="app")` async generator
+        once its first `yield` has produced the value. Cleanup is held on the
+        container rather than on the request that happened to construct the
+        value, because that request ends long before the value does; `aclose`
+        resumes everything tracked here at lifespan shutdown.
+
+        Args:
+            generator: A started async generator awaiting its cleanup resume.
+        """
         self._cleanups.append(generator)
 
     async def aclose(self) -> None:
@@ -806,7 +1040,7 @@ class _MultipartValidationTape:
 
 
 def _unwrap_form_type(annotation: Any) -> Any:
-    """Peel ``Mapped[T]`` and ``Optional[T]`` down to the scalar type that
+    """Peel `Mapped[T]` and `Optional[T]` down to the scalar type that
     :func:`_convert_scalar` understands; leave anything else unchanged."""
     origin = typing.get_origin(annotation)
     if origin in (types.UnionType, typing.Union):
@@ -822,9 +1056,9 @@ def _unwrap_form_type(annotation: Any) -> Any:
 
 
 def _form_model_fields(annotation: Any) -> tuple[tuple[str, Any, bool], ...]:
-    """``(field_name, python_type, required)`` for each scalar field of a
+    """`(field_name, python_type, required)` for each scalar field of a
     dataclass or ORM model bound from multipart form fields. File parts are not
-    model fields — bind an upload with a separate ``File()`` parameter."""
+    model fields — bind an upload with a separate `File()` parameter."""
     try:
         hints = typing.get_type_hints(annotation)
     except (TypeError, ValueError):
@@ -852,12 +1086,13 @@ class _FormModelValidationTape:
     """Bind a whole dataclass/ORM model from multipart form fields, then run the
     SAME native body validator (the JSON-body path) over the assembled dict — so
     a form-posted model is validated exactly like a JSON-posted one. Reuses the
-    native multipart parser (``request.form()``) and the native validation tape;
-    no new native code. File parts are bound by separate ``File()`` params.
+    native multipart parser (`request.form()`) and the native validation tape;
+    no new native code. File parts are bound by separate `File()` params.
 
-    TODO(pure-twin): the reuse means there is nothing new to twin — validation
-    already runs native-or-pure via ``_body_validator``; this tape is pure-Python
-    glue and works identically under ``WREATH_PURE=1``.
+    That reuse is also why this tier needs no pure twin of its own: both pieces
+    it stands on already select native-or-pure themselves (`_body_validator` and
+    `request.form()`), and what is left here is pure-Python glue that behaves
+    identically under `WREATH_PURE=1`.
     """
 
     __slots__ = ("_name", "_fields", "_validator")
@@ -943,7 +1178,32 @@ def _path_placeholders(path: str) -> frozenset[str]:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class BindingSpec:
-    """The compiled shape of a typed handler signature."""
+    """The compiled shape of a typed handler signature.
+
+    Produced once by `inspect_handler` at route-compile time and consumed by
+    `compile_binder`, by the OpenAPI generator, and by typegen — so a handler's
+    signature is read once and three subsystems agree on what it said.
+
+    Each scalar entry is `(parameter_name, wire_name, annotation)` for a path
+    parameter and `(parameter_name, wire_name, annotation, default)` elsewhere,
+    where `default` is `inspect.Parameter.empty` when the parameter is required.
+    An annotation here is the base type with `Annotated` already stripped.
+
+    Args:
+        path_params: Placeholders bound from the matched path.
+        query_params: Parameters bound from the query string.
+        header_params: Parameters bound from request headers.
+        cookie_params: Parameters bound from request cookies.
+        form_params: Scalar parameters bound from individual form fields.
+        file_params: Parameters bound to uploaded multipart file parts.
+        body: The `(parameter_name, annotation)` bound from the JSON body, or None.
+        returns: The handler's return annotation, or `inspect.Parameter.empty`.
+        depends: `(parameter_name, Depends)` for each injected dependency.
+        connections: `(parameter_name, FromDatabase)` for each injected connection.
+        sessions: `(parameter_name, FromORM)` for each injected ORM session.
+        query_constraints: `(parameter_name, (minimum, maximum, overflow))` ranges.
+        form_model: The `(parameter_name, model)` bound whole from a form, or None.
+    """
 
     path_params: tuple[tuple[str, str, Any], ...]
     query_params: tuple[tuple[str, str, Any, Any], ...]
@@ -965,8 +1225,30 @@ class BindingSpec:
 
 
 def inspect_handler(handler: Handler, path: str) -> BindingSpec | None:
-    """The binding spec for ``handler`` on ``path``; None for request-only
-    handlers (or objects whose signature cannot be inspected)."""
+    """Read a handler signature once and resolve every parameter to a source.
+
+    Called at route-compile time, never per request. Markers in `Annotated`
+    decide the source when present; otherwise a parameter matching a path
+    placeholder is a path parameter, a dataclass or mapped ORM model annotation
+    is the JSON body, and everything else is a query parameter. The first
+    parameter is always the request and is never bound.
+
+    Every conflict a signature can express is refused here rather than at
+    request time — `*args`/`**kwargs`, two body parameters, a body mixed with
+    form or file parameters, a form model mixed with individual form fields, a
+    numeric range on a non-numeric parameter, a `Path` alias absent from the
+    route path, and a bare `Session` that does not say which registry it wants.
+
+    Args:
+        handler: The endpoint callable, whose first parameter is the request.
+        path: The route path, including its `{placeholder}` segments.
+
+    Returns:
+        The spec, or None for a request-only handler or an uninspectable object.
+
+    Raises:
+        TypeError: The signature is self-contradictory or cannot be bound.
+    """
     try:
         signature = inspect.signature(handler)
     except (TypeError, ValueError):
@@ -1017,6 +1299,29 @@ def inspect_handler(handler: Handler, path: str) -> BindingSpec | None:
         )
         alias = parameter.name if source is None or source.alias is None else source.alias
         default = parameter.default
+        if isinstance(default, _SOURCE_MARKERS):
+            # FastAPI's spelling, and the single most common porting mistake.
+            # Accepting it was silently wrong three ways: nothing bound, the
+            # marker's constraints were ignored, and the marker *object* was
+            # handed to the handler as the parameter's value. Refused here, so it
+            # is a startup error rather than a wrong value at request time.
+            # `Depends` is deliberately not among `_SOURCE_MARKERS`: it is the
+            # one marker that really is written as a default.
+            label = getattr(handler, "__qualname__", handler)
+            marker = type(default).__name__
+            shown = (
+                base_annotation.__name__
+                if isinstance(base_annotation, type)
+                and base_annotation is not inspect.Parameter.empty
+                else "T"
+            )
+            raise TypeError(
+                f"handler {label!s} parameter {parameter.name!r} uses "
+                f"{marker}() as its default; wreath binds nothing from that. "
+                f"Write the marker inside Annotated and leave the default an "
+                f"ordinary Python default: "
+                f"Annotated[{shown}, {marker}(...)] = <default>"
+            )
         if base_annotation is Session:
             if orm_marker is None:
                 label = getattr(handler, "__qualname__", handler)
@@ -1109,9 +1414,34 @@ def compile_binder(
     binding_spec: BindingSpec | None | object = _BINDING_SPEC_UNSET,
     app_scope: AppScope | None = None,
 ) -> Handler:
-    """Wrap ``handler`` so typed parameters are bound per request.
+    """Wrap `handler` so its typed parameters are bound on each request.
 
-    Handlers whose signature is exactly ``(request)`` are returned unchanged.
+    Everything expensive happens here, once: the signature is resolved, the body
+    validator is compiled, dependency graphs are flattened into resolvers, and
+    the database and ORM registry names are looked up. A request then only runs
+    the resulting closure.
+
+    A handler whose signature is exactly `(request)` and that carries no
+    route-level dependencies is returned unchanged, so binding costs an
+    unbound handler nothing. A handler that needs no connection, session, or
+    dependency gets a leaner closure with no acquire/release machinery around
+    it — that machinery was measured at roughly half the cost of a small
+    request, which is why the distinction exists.
+
+    Args:
+        handler: The endpoint callable to wrap.
+        path: The route path, including its `{placeholder}` segments.
+        databases: Configured PostgreSQL databases by name, for `Connection` params.
+        orm_registries: Configured ORM registries by name, for `Session` params.
+        dependencies: Route-level dependencies resolved for their side effects only.
+        binding_spec: A spec already computed by `inspect_handler`, to avoid redoing it.
+        app_scope: The application's container for `scope="app"` dependencies.
+
+    Returns:
+        The wrapped handler, or the original when there is nothing to bind.
+
+    Raises:
+        TypeError: A named database is unknown, or a security_read connection was asked for.
     """
     spec = (
         inspect_handler(handler, path)
@@ -1373,10 +1703,6 @@ async def _release(borrowed: list, opened: list) -> None:
             failure = failure or error
     if failure is not None:
         raise failure
-
-
-def validation_error_response(error: ValidationError) -> UnprocessableEntity:
-    return UnprocessableEntity(str(error))
 
 
 __all__ = [

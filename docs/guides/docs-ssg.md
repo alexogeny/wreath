@@ -58,9 +58,23 @@ wreath docs check          # exit 1 on a dead link; reports orphan pages
 `check` builds strictly and reports:
 
 - **dead links** — a `[text](other.md)` whose target isn't a real page → error, exit 1
+- **broken anchors** — a `#heading` no heading on that page produces → error, exit 1
 - **orphan pages** — a `.md` under `source/` that no nav entry references → warning
 
 It's the same drop-into-a-pipeline ergonomics as `wreath migrations check`.
+
+**Being an orphan does not exempt a page from the link check.** The two are
+separate signals and both are reported: `orphan page not in nav: drafts/new.md`
+says where the page sits in the nav, and `drafts/new.html (orphan): dead link to
+gone.md` says its links don't resolve. Reachability decides what gets *written* —
+an orphan is not built, so a nav page linking to one still counts as dead — but
+never what gets *verified*. A page that isn't in the nav yet is exactly the page
+whose links nobody has clicked, and the checker used to skip it entirely: a
+deliberately broken link on an orphan drew no warning at all, and three of them
+surfaced at once the day the page joined the nav. An orphan's links are resolved
+against the nav plus the other orphans, so a set of pages written together checks
+out before any of them lands. To opt a directory out of both signals, `exclude`
+it.
 
 ## Safe by construction
 
@@ -320,8 +334,10 @@ with a trailing `{#custom-id}`.)
 ## Keeping working notes out of the build
 
 Not every markdown file under `source` is meant to publish — design notes, ADRs,
-an agent manifest. List glob patterns in `exclude` and they won't be built or
-flagged as orphans (the equivalent of mkdocs' `exclude_docs`):
+an agent manifest. List glob patterns in `exclude` and they won't be built, or
+flagged as orphans, or link-checked — `exclude` means "not part of this site", so
+it opts out of every signal, which is the difference between it and simply
+leaving a page out of the nav (the equivalent of mkdocs' `exclude_docs`):
 
 ```python
 site = Site(

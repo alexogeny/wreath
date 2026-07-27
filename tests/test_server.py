@@ -601,3 +601,38 @@ def test_server_response_header_configuration_validates_values() -> None:
         ServerConfig(server_header="")
     with pytest.raises(ValueError, match="date_header must be bool"):
         ServerConfig(date_header=1)  # type: ignore[arg-type]
+
+
+def test_no_unreachable_socket_helper_survives() -> None:
+    """`_open_socket` bound and listened, and nothing ever called it.
+
+    Kept as a test rather than deleted-and-forgotten because a helper that
+    binds a port is exactly the kind of thing that gets re-added "for the
+    multiworker path" and then diverges from the one `Server._start` uses.
+    """
+    import wreath.server as server_module
+
+    assert not hasattr(server_module, "_open_socket")
+
+
+def test_server_holds_no_write_only_signal_flag() -> None:
+    """`_signal_handlers_installed` was set and never read by anything."""
+    import wreath.server as server_module
+
+    async def scenario() -> None:
+        server = await serve(_ok_app, ServerConfig(port=0, lifespan="off"))
+        try:
+            assert not hasattr(server, "_signal_handlers_installed")
+        finally:
+            await server.close()
+
+    source = server_module.Server.__init__.__code__.co_names
+    assert "_signal_handlers_installed" not in source
+    asyncio.run(scenario())
+
+
+async def _ok_app(scope, receive, send) -> None:
+    if scope["type"] != "http":
+        return
+    await send({"type": "http.response.start", "status": 200, "headers": []})
+    await send({"type": "http.response.body", "body": b"ok"})

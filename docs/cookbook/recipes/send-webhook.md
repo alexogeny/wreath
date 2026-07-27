@@ -43,8 +43,12 @@ receiver = partners.destination(
     signer=signer, outbox=PostgresWebhookOutbox(),
 )
 
-async with db.pool("write").acquire() as conn, conn.transaction() as tx:
-    await receiver.enqueue(tx, "order.shipped", {"order_id": order_id})
+conn = await db.acquire("write")
+try:
+    async with conn.transaction() as tx:
+        await receiver.enqueue(tx, "order.shipped", {"order_id": order_id})
+finally:
+    await db.release("write", conn)
 ```
 
 `enqueue` commits the delivery *in your transaction*, so the webhook is only sent

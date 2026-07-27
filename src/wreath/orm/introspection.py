@@ -7,6 +7,24 @@ database and the compiled models disagree.
 ``information_schema`` is deliberately not used: it reports SQL-standard type
 names and loses the type OIDs and array element identity this comparison
 depends on.
+
+**Every catalog column is cast to a type the driver has a codec for.** Wreath's
+PostgreSQL driver decodes a deliberately small set -- bool, the int and float
+widths, text/varchar, bytea, uuid, the date and timestamp types, numeric, json
+and jsonb -- and hands anything else back as the raw wire bytes. The catalog is
+made almost entirely of types outside that set: ``nspname``, ``relname`` and
+``attname`` are ``name``, ``atttypid`` and ``typelem`` are ``oid``, ``contype``
+is ``"char"``, ``conkey`` is ``int2[]`` and ``indkey`` is ``int2vector``. Read
+uncast, a column name arrives as ``b'id'`` and matches no declared column, so
+the validator reported every column of every table missing.
+
+The casts are not cosmetic, and they are not only about arrays. The raw bytes
+also differ between the two result formats -- ``atttypid`` is ``b'20'`` on a
+cold operation (text) and ``b'\\x00\\x00\\x00\\x14'`` once the plan is cached
+(binary) -- so an uncast read gives a different wrong answer on the first call
+than on the second. Casting to ``text``/``bigint`` makes both formats decode to
+the same Python value, which is why this file does not need to care whether the
+statement is cold or warm.
 """
 
 from __future__ import annotations
@@ -21,14 +39,14 @@ from .schema import ModelSpec
 #: One row per column of every table a registry maps.
 _COLUMNS_SQL = """
 SELECT
-    n.nspname AS schema_name,
-    c.relname AS table_name,
-    a.attname AS column_name,
-    a.attnum AS position,
-    a.atttypid AS type_oid,
+    n.nspname::text AS schema_name,
+    c.relname::text AS table_name,
+    a.attname::text AS column_name,
+    a.attnum::int AS position,
+    a.atttypid::bigint AS type_oid,
     a.attnotnull AS not_null,
-    COALESCE(t.typelem, 0) AS element_oid,
-    COALESCE(pg_get_expr(d.adbin, d.adrelid), '') AS column_default
+    COALESCE(t.typelem, 0)::bigint AS element_oid,
+    COALESCE(pg_get_expr(d.adbin, d.adrelid), '')::text AS column_default
 FROM pg_catalog.pg_class c
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
@@ -45,11 +63,11 @@ ORDER BY a.attnum
 #: Primary key, unique, and foreign-key constraints for one table.
 _CONSTRAINTS_SQL = """
 SELECT
-    con.contype AS kind,
-    con.conkey AS local_positions,
-    con.confkey AS remote_positions,
-    COALESCE(fn.nspname, '') AS remote_schema,
-    COALESCE(fc.relname, '') AS remote_table
+    con.contype::text AS kind,
+    con.conkey::text AS local_positions,
+    con.confkey::text AS remote_positions,
+    COALESCE(fn.nspname::text, '') AS remote_schema,
+    COALESCE(fc.relname::text, '') AS remote_table
 FROM pg_catalog.pg_constraint con
 JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -63,7 +81,7 @@ ORDER BY con.contype, con.conname
 
 #: Unique indexes, which satisfy a declared unique= without a named constraint.
 _INDEXES_SQL = """
-SELECT i.indkey AS positions
+SELECT i.indkey::text AS positions
 FROM pg_catalog.pg_index i
 JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -287,7 +305,17 @@ def _text(value: Any) -> str:
 
 
 def _positions(value: Any) -> list[int]:
-    """Read a catalog int2vector/int2[] however the driver surfaced it."""
+    """Read a column position list out of a catalog vector.
+
+    The SQL casts both spellings to ``text``, and they render differently:
+    ``conkey`` is an ``int2[]`` and arrives as ``{1,2}``, while ``indkey`` is an
+    ``int2vector`` and arrives as ``1 2``. ``confkey`` is NULL on every
+    constraint that is not a foreign key. All three are handled here so the
+    callers do not branch on which catalog column they came from.
+
+    The list branch stays because a driver that grows an array codec would
+    surface these as sequences; it is not currently reachable.
+    """
     if value is None:
         return []
     if isinstance(value, (list, tuple)):

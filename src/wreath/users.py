@@ -1,19 +1,25 @@
-"""User-management lifecycle flows — the ``fastapi-users`` equivalent.
+"""User-management lifecycle flows — the `fastapi-users` equivalent.
 
 Builds registration / login / logout / email-verification / password-reset / me
 *on top of* wreath's existing auth: login writes the same signed-session principal
-(``{"sub", "type", "roles"}``) that :class:`wreath.auth.SessionIdentityBackend`
-already reads, so this integrates with the auth stack rather than reinventing it.
+(`{"sub", "type", "roles"}`) that `wreath.auth.SessionIdentityBackend` already
+reads, so this integrates with the auth stack rather than reinventing it. It
+writes no `exp` and no `permissions`, so a session minted here lasts the session
+cookie's own lifetime and carries roles only.
 
 The security-sensitive core (scrypt hashing, HMAC action tokens, flow logic) lives
-in the stdlib-only :mod:`wreath._userkit`; this module is the thin wreath glue.
+in the stdlib-only `wreath._userkit`; this module is the thin wreath glue.
 
     store = InMemoryUserStore()            # or an ORM-backed UserStore
     app.include_router(user_router(store, secret=SECRET, base_url="https://app"))
 
-Requires ``SessionMiddleware`` for login/logout/``/me``. Email delivery is a
-pluggable :class:`EmailSender` (the dev default just logs the link); a real
-SMTP/SES backend is the separate email gap (#5).
+`SessionMiddleware` is required for login: without it `POST /login` answers 500
+rather than signing anyone in. `POST /logout` and `GET /me` degrade instead --
+logout reports success having cleared nothing, and `/me` answers 401.
+
+Email delivery is a pluggable `EmailSender`. The default `LogEmailSender` prints
+the link rather than sending it; `SmtpEmailSender` (stdlib `smtplib`, STARTTLS or
+implicit TLS on port 465) is the shipped production transport.
 """
 
 from __future__ import annotations
@@ -61,28 +67,79 @@ __all__ = [
 
 @dataclass(slots=True)
 class RegisterInput:
+    """The JSON body of `POST /register`.
+
+    Bound with `Annotated[RegisterInput, Body()]`, which is the wreath
+    convention throughout: a marker rides inside `Annotated` and a default stays
+    an ordinary Python default (`limit: Annotated[int, Query()] = 20`, never
+    `Query(20)`). Both members are required and must be JSON strings; a missing
+    member, a wrong type, or any member not named here is refused with a 422
+    `application/problem+json` whose `errors` list carries one entry per failure.
+
+    No format or length rule is applied at binding time -- the email is not
+    checked for shape at all, and the password's only bound is
+    `wreath._userkit.MAX_PASSWORD_BYTES` (1024 UTF-8 bytes), which
+    `hash_password` enforces later in the flow along with its refusal of an
+    empty password.
+    """
+
     email: str
     password: str
 
 
 @dataclass(slots=True)
 class LoginInput:
+    """The JSON body of `POST /login`. Same binding rules as `RegisterInput`.
+
+    Both shipped stores normalize the email to `strip().lower()`, and the
+    router lower-cases it again before keying the login throttle, so
+    `Ann@Example.com` and `ann@example.com` are one account and one bucket.
+    """
+
     email: str
     password: str
 
 
 @dataclass(slots=True)
 class TokenInput:
+    """The JSON body of `POST /verify`: one HMAC-signed verification token.
+
+    Nothing about the token is validated at binding time beyond it being a
+    string; `wreath._userkit.verify_token` checks the signature, the purpose,
+    and the expiry, and an unusable token yields 400 with
+    `{"status": "invalid_token"}` rather than a distinguishing error.
+    """
+
     token: str
 
 
 @dataclass(slots=True)
 class ForgotInput:
+    """The JSON body of `POST /forgot-password`: the address to send a link to.
+
+    The address is not checked for shape or existence. The flow answers the same
+    200 `{"status": "reset_email_sent"}` whether or not an account matches, so
+    the response tells an attacker nothing. The work is kept comparable rather
+    than identical: a miss still mints and discards a token, and the mail send
+    on a hit remains a timing asymmetry the flow acknowledges in place.
+    """
+
     email: str
 
 
 @dataclass(slots=True)
 class ResetInput:
+    """The JSON body of `POST /reset-password`: a reset token and the new password.
+
+    Both members are required strings. The token is single-use by construction --
+    it is bound to a fingerprint of the password hash that was current when it
+    was minted, so it stops working the moment the password changes.
+
+    The new password carries the same 1024-byte bound and non-empty rule as
+    registration, checked when it is hashed. The flow does not distinguish that
+    refusal from a bad token: both answer 400 `{"status": "invalid_token"}`.
+    """
+
     token: str
     password: str
 
@@ -90,14 +147,41 @@ class ResetInput:
 class LoginLimiter:
     """Counts failed sign-ins per identifier and refuses past a budget.
 
-    Deliberately here rather than in :mod:`wreath._userkit`: that module is
+    The policy is a fixed window, not a sliding one: the window opens at the
+    first counted failure, later failures increment the count without moving the
+    start, and the identifier is refused once the count reaches `max_attempts`
+    until `window` seconds have passed since that first failure. `allow` records
+    nothing -- a caller must report the outcome with `record_failure` or
+    `record_success` itself.
+
+    Deliberately here rather than in `wreath._userkit`: that module is
     stdlib-only on purpose, and a limiter wants a bounded store. The primitive
-    it guards -- ``_userkit.authenticate`` -- stays unthrottled, so an
-    application calling it directly owns this decision itself.
+    it guards -- `_userkit.authenticate` -- stays unthrottled, so an application
+    calling it directly owns this decision itself.
 
     Keyed per identifier, so failing against one account cannot lock another
-    out. A success clears the count, so a legitimate user who mistypes twice and
-    then succeeds starts clean.
+    out. `wreath.users.user_router` passes the submitted email, lower-cased and
+    stripped, which makes the budget per account rather than per client: it
+    slows password guessing against one account, and does nothing about one
+    client spraying one password across many accounts. While an identifier is
+    refused its legitimate owner is refused too, so an attacker who knows an
+    address can keep that person out for one window.
+
+    **Per-process and in-memory.** The counts live in a `BoundedCache` inside
+    this object, shared with nothing. Across N workers the real budget is
+    N x `max_attempts`, a restart clears every count, and only `max_tracked`
+    identifiers are counted at once -- failures against more identifiers than
+    that evict the least recently used counts. This is a limitation of the
+    design, not a defect: it needs no Redis and no coordination.
+
+    Args:
+        max_attempts: failed attempts allowed per identifier within one window.
+        window: seconds the window lasts, timed from the first counted failure.
+        max_tracked: identifiers counted at once, least-recently-used evicted first.
+        clock: monotonic seconds source, injectable for deterministic tests.
+
+    Raises:
+        ValueError: max_attempts below 1, or a window that is not positive.
     """
 
     __slots__ = ("_attempts", "_clock", "_max", "_window")
@@ -122,7 +206,12 @@ class LoginLimiter:
         )
 
     def allow(self, identifier: str) -> bool:
-        """Whether another attempt may be made for ``identifier`` right now."""
+        """Whether another attempt may be made for `identifier` right now.
+
+        A pure question: it counts nothing and starts no window. An identifier
+        that has never failed, or whose window has elapsed, is allowed and its
+        expired entry is dropped in passing.
+        """
         entry = self._attempts.get(identifier)
         if entry is None:
             return True
@@ -133,6 +222,13 @@ class LoginLimiter:
         return count < self._max
 
     def record_failure(self, identifier: str) -> None:
+        """Count one failed attempt against `identifier`.
+
+        The first failure, and the first after a window elapsed, opens a new
+        window at the current clock reading. Every later failure inside that
+        window increments the count and keeps the original start, which is what
+        makes the window fixed rather than sliding.
+        """
         entry = self._attempts.get(identifier)
         now = self._clock()
         if entry is None or now - entry[1] >= self._window:
@@ -141,6 +237,12 @@ class LoginLimiter:
         self._attempts.set(identifier, (entry[0] + 1, entry[1]))
 
     def record_success(self, identifier: str) -> None:
+        """Clear the failure count and window for `identifier`.
+
+        The entry is dropped outright rather than decremented, so a user who
+        mistypes twice and then signs in starts from a full budget. Nothing else
+        is stored per identifier, so this leaves no state behind.
+        """
         self._attempts.delete(identifier)
 
 
@@ -157,8 +259,15 @@ async def reset_password_endpoint(
     The second half is the point. A user resets a password *because* somebody
     else is in the account, and changing the credential only stops the next
     sign-in -- whoever is already holding a session keeps it. `sessions` is any
-    session store; one that cannot enumerate (no ``delete_for``) is used for
+    session store; one that cannot enumerate (no `delete_for`) is used for
     nothing and does not fail the reset.
+
+    Sessions are dropped only for the subject named in the token, and only after
+    the reset succeeded: a token that fails verification changes no password and
+    ends no session.
+
+    Returns:
+        True when the password changed, False for a bad token or a refused new password.
     """
     subject = _userkit._token_subject(token)
     ok = await _userkit.reset_password(
@@ -200,19 +309,43 @@ def user_router(
     max_login_attempts: int = 10,
     login_window: float = 300.0,
 ) -> Router:
-    """Build a mountable :class:`Router` with the full user lifecycle.
+    """Build a mountable `Router` with the full user lifecycle.
 
-    ``secret`` signs the action tokens (use a stable app secret). ``link_builder``
-    maps ``(purpose, token) -> URL`` for the emailed links; the default points at
-    this router's own verify route and a ``reset-password?token=`` query.
+    Mounts, under `prefix`, `POST /register`, `/login`, `/logout`, `/verify`,
+    `/forgot-password` and `/reset-password`, plus `GET /verify/{token}` and
+    `GET /me`. Login writes the session principal the auth stack already reads,
+    so it requires `SessionMiddleware`; without it `/login` answers 500 with
+    `{"error": "session_middleware_required"}` and signs nobody in.
 
-    ``sessions`` is the server-side session store, if there is one. Passing it
+    `secret` signs the action tokens (use a stable app secret). `link_builder`
+    maps `(purpose, token) -> URL` for the emailed links; the default points at
+    this router's own verify route and a `reset-password?token=` query.
+
+    `sessions` is the server-side session store, if there is one. Passing it
     is what lets a password reset end the sessions somebody else is already
     holding; without it the reset changes the credential and nothing more.
 
-    ``max_login_attempts``/``login_window`` throttle failed sign-ins per
-    identifier -- in this router only. ``wreath._userkit.authenticate`` stays
-    unguarded for direct callers.
+    `max_login_attempts`/`login_window` throttle failed sign-ins per identifier
+    -- in this router only. `wreath._userkit.authenticate` stays unguarded for
+    direct callers, and `LoginLimiter` documents what the throttle does and does
+    not protect (in particular that it is per-process).
+
+    No response here reveals whether an account exists. Register answers 202 and
+    forgot-password answers 200 either way, a failed login answers 401
+    `{"error": "invalid_credentials"}` whether the email is unknown or the
+    password is wrong, and a throttled login reuses that same body with 429 plus
+    a `Retry-After` of `login_window` seconds rather than saying the account is
+    locked. The timing is kept comparable too — an unknown email still pays a
+    dummy scrypt verify, and registration hashes before it checks for an
+    existing account — but the emails these flows send are not queued, so a mail
+    send remains an observable difference.
+
+    These handlers answer with plain JSON `{"status": ...}` / `{"error": ...}`
+    bodies. Failures raised by the framework around them keep the standard
+    shape -- a malformed or invalid body is an RFC 9457
+    `application/problem+json`, 400 for unparseable JSON and 422 for a body that
+    fails validation, the latter carrying an `errors` list of one entry per
+    field.
     """
     if not secret:
         raise ValueError("user_router requires a non-empty secret")
@@ -314,10 +447,18 @@ def user_router(
 
 
 def default_user_model(table: str = "users") -> type[Any]:
-    """Build a reference ORM user model. Import-lazy so importing ``users`` needs no DB.
+    """Build a reference ORM user model. Import-lazy so importing `users` needs no DB.
 
-    The uuid primary key auto-generates via ``default=uuid.uuid4`` (wreath's
-    client-side default convention); the app may supply its own model instead.
+    Declares exactly the columns the flows use -- `id`, `email`,
+    `hashed_password`, `is_active`, `is_verified` -- plus nullable `created_at`
+    and `updated_at` that nothing in this module writes. `email` is unique and
+    indexed, which is what makes a duplicate registration a database refusal
+    rather than a second row.
+
+    The uuid primary key auto-generates via `default=uuid.uuid4` (wreath's
+    client-side default convention, applied when the instance is constructed);
+    the app may supply its own model instead. Calling this twice builds two
+    distinct classes, so build the model once and pass it around.
     """
     import uuid
 
@@ -337,11 +478,34 @@ def default_user_model(table: str = "users") -> type[Any]:
 
 
 class OrmUserStore:
-    """Reference :class:`UserStore` over a wreath ORM session + user model.
+    """Reference `UserStore` over a wreath ORM session and a user model.
 
-    Reads use ``Model.select().where(...)`` + ``session.fetch_one`` / ``session.get``;
-    writes use wreath's unit-of-work API: ``session.add(instance)`` + ``await
-    session.flush()`` (there is no ``session.update`` — a loaded row is flushed).
+    The model must carry `id`, `email`, `hashed_password`, `is_active` and
+    `is_verified`; `default_user_model()` builds one, and any model naming those
+    columns works. Reads use `Model.select().where(...)` with `session.fetch_one`
+    and `session.get`; writes use wreath's unit-of-work API,
+    `session.add(instance)` then `await session.flush()` (there is no
+    `session.update` — a loaded row is mutated and flushed). Nothing here
+    commits: the transaction belongs to whoever opened the session.
+
+    **It hashes nothing.** `create` stores the string it is handed, and the flows
+    in `wreath._userkit` hash before calling it. Handing it a plaintext password
+    stores a plaintext password.
+
+    Emails are normalized with `strip().lower()` on `create` and on
+    `get_by_email`, so a lookup matches rows this store wrote whatever case the
+    caller used. The comparison is a plain SQL `=` rather than `lower(email)` or
+    a citext column, so a row some other writer inserted with upper-case
+    characters is not found — the case-insensitivity is normalization on both
+    sides, not a case-insensitive column.
+
+    `created_at`/`updated_at` are a stated gap: no method writes them and
+    `_to_record` does not read them, so every `UserRecord` this store returns
+    carries 0.0 for both.
+
+    Args:
+        session: an open ORM session; every method awaits it and none commits.
+        model: the ORM model class carrying the columns above.
     """
 
     __slots__ = ("_model", "_session")
@@ -364,13 +528,38 @@ class OrmUserStore:
         return None if row is None else self._to_record(row)
 
     async def get_by_email(self, email: str) -> UserRecord | None:
+        """Return the user with this email, or None when no row matches.
+
+        The argument is normalized with `strip().lower()` before the comparison,
+        which is what makes the lookup case-insensitive for rows `create` wrote.
+        A miss is an answer, not an error.
+        """
         query = self._model.select().where(self._model.email == email.strip().lower())
         return self._found(await self._session.fetch_one(query))
 
     async def get_by_id(self, user_id: str) -> UserRecord | None:
+        """Return the user with this primary key, or None when no row matches.
+
+        `user_id` reaches `session.get` unconverted, so the model's primary-key
+        column has to accept a `str`. The `Uuid` key `default_user_model`
+        declares does not: the ORM coerces a comparison value against the column
+        type and raises `TypeError: expected UUID, got str`. Pair a uuid model
+        with a store that converts, or give the model a text primary key.
+        """
         return self._found(await self._session.get(self._model, user_id))
 
     async def create(self, email: str, hashed_password: str) -> UserRecord:
+        """Insert a user from an already-hashed password and return the record.
+
+        `hashed_password` is stored verbatim. The email is normalized with
+        `strip().lower()`; `is_active` and `is_verified` take the model's own
+        defaults. Uniqueness belongs to the database — the reference model marks
+        `email` unique, so a duplicate surfaces as an error from the flush rather
+        than as an existing record.
+
+        The row is added and flushed, not committed, so it is visible to later
+        statements in the same transaction and lands when that transaction does.
+        """
         instance = self._model(email=email.strip().lower(), hashed_password=hashed_password)
         self._session.add(instance)
         await self._session.flush()
@@ -379,6 +568,19 @@ class OrmUserStore:
         return self._to_record(instance)
 
     async def update(self, user: UserRecord) -> UserRecord:
+        """Write `user` back over its row and flush. Returns the argument.
+
+        Not a partial update. The row is loaded by primary key and then `email`,
+        `hashed_password`, `is_active` and `is_verified` are all assigned from
+        `user`, so a record that was read, changed in one field, and passed back
+        rewrites the other three with whatever it was still holding. Loading it
+        by primary key carries the same typing rule as `get_by_id`.
+
+        `created_at`/`updated_at` are left untouched, the email is written as
+        given rather than normalized, and the returned record is the argument
+        rather than a re-read of the row. A `user.id` with no row raises
+        `AttributeError` on the first assignment — this never inserts.
+        """
         row = await self._session.get(self._model, user.id)
         row.email = user.email
         row.hashed_password = user.hashed_password

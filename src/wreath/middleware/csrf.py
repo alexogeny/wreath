@@ -1,4 +1,23 @@
-"""Signed double-submit CSRF protection for browser cookie authentication."""
+"""Signed double-submit CSRF protection for browser cookie authentication.
+
+Needed wherever the browser attaches credentials on its own -- a session cookie,
+HTTP basic auth -- because then a cross-site form post carries them too. An API
+authenticated by a bearer token the client has to attach deliberately is not
+exposed to this and does not need the middleware::
+
+    app.add_middleware(CSRFMiddleware(secret=SECRET, trusted_hosts=["app.example"]))
+
+    @app.get("/whoami")
+    async def whoami(request):
+        return {"csrf": csrf_token(request)}
+
+The resubmitted token is read from a request *header* only -- `x-csrf-token` by
+default. A plain HTML form post cannot carry one, so this suits a script client
+that reads the cookie or calls `csrf_token` and sets the header itself.
+
+Mount `ProxyHeadersMiddleware` ahead of this one behind a TLS-terminating proxy;
+see `CSRFMiddleware` for why the origin check depends on it.
+"""
 
 from __future__ import annotations
 
@@ -98,7 +117,22 @@ def _request_origin(request: Request, headers: dict[bytes, bytes]) -> bytes | No
 
 
 def csrf_token(request: Request) -> str:
-    """Return the request token prepared by :class:`CSRFMiddleware`."""
+    """Return the CSRF token `CSRFMiddleware` prepared for this request.
+
+    This is the value a client sends back in the configured request header,
+    `x-csrf-token` by default. It is the same value that goes into the cookie,
+    which is what makes the pair a double submit.
+
+    A token is prepared for every safe-method request and for every unsafe one
+    that passed validation. It is *not* prepared for a request the `exempt`
+    predicate excused, which never ran validation and has nothing to hand back.
+
+    Returns:
+        The signed token string, shaped `v1.issued.nonce.mac`.
+
+    Raises:
+        RuntimeError: No token was prepared for this request.
+    """
 
     token = request.state.get(_STATE_TOKEN)
     if token is None:
@@ -107,7 +141,71 @@ def csrf_token(request: Request) -> str:
 
 
 class CSRFMiddleware:
-    """Protect unsafe browser requests with a signed double-submit token."""
+    """Protect unsafe browser requests with a signed double-submit token.
+
+    Global middleware. `GET`, `HEAD`, and `OPTIONS` are treated as safe and only
+    have a token prepared for them; every other method is validated, including
+    ones a route does not implement.
+
+    Validation is two independent checks, and both must pass. The double submit:
+    the request carries the token in the configured header -- a header, never a
+    form field, so a classic HTML form post cannot satisfy it -- and in the cookie,
+    the two are byte-equal under a constant-time compare, and the cookie's own
+    HMAC signature verifies and is within `max_age`. The origin check: the
+    request's `Origin` header, or failing that the origin parsed out of
+    `Referer`, matches the origin built from the request scheme and `Host`, or
+    one of `trusted_origins`. A request with neither header is refused unless
+    `allow_missing_origin` says otherwise.
+
+    A failure is a 403 `application/problem+json` document titled `Forbidden`
+    with detail `CSRF validation failed`. Nothing distinguishes which of the two
+    checks failed, deliberately.
+
+    The token reaches the application through `csrf_token(request)` and the
+    browser through the cookie, which `after` writes whenever the token was
+    minted or renewed. Renewal happens once a token is three quarters of the way
+    through `max_age`, on unsafe methods as well as safe ones -- a client that
+    only ever POSTs never takes the safe path, and would otherwise watch its
+    token expire with nothing to refresh it.
+
+    The cookie is written with `Path=/`, `Max-Age`, `SameSite`, and `Secure`
+    when configured. It is deliberately **not** `HttpOnly`, because a script
+    client has to read it to put it in the header; the signature, not
+    inaccessibility, is what makes it unforgeable.
+
+    The expected origin is built from the client-supplied `Host` header, so
+    something must constrain that. Naming `trusted_hosts` here does it and keeps
+    this middleware self-contained; leaving it empty means
+    `TrustedHostMiddleware` must be mounted instead. Behind a TLS-terminating
+    proxy, `ProxyHeadersMiddleware` must run first or the expected origin is
+    built as `http://host` while the browser sends `https://host`, and every
+    unsafe request is refused.
+
+    `exempt_errors` counts the times the `exempt` predicate raised. Each of
+    those requests was refused -- failing closed is the only defensible
+    direction -- but a broken predicate refuses everything forever and looks
+    exactly like a site under attack, so the count is how the two are told apart.
+
+    Args:
+        secret: HMAC key, at least 32 bytes. A str is encoded as UTF-8.
+        cookie_name: Cookie the token is written to and read from.
+        header_name: Request header the resubmitted token is read from.
+        max_age: Token lifetime in seconds, and the cookie `Max-Age`.
+        secure: Mark the cookie `Secure`. Leave True outside local plaintext development.
+        same_site: Cookie `SameSite`, one of strict, lax, or none.
+        trusted_origins: Extra origins accepted besides the request's own.
+        trusted_hosts: Host values accepted. Empty defers to `TrustedHostMiddleware`.
+        exempt: Predicate excusing an unsafe request. Raising refuses it.
+        allow_missing_origin: Accept an unsafe request carrying no Origin and no Referer.
+
+    Raises:
+        ValueError: The secret is under 32 bytes.
+        ValueError: `cookie_name` or `header_name` is not a valid HTTP token.
+        ValueError: A `__Host-` or `__Secure-` cookie name was given without `secure`.
+        ValueError: `max_age` is not positive.
+        ValueError: `same_site` is not strict, lax, or none.
+        ValueError: `same_site` is none without `secure`.
+    """
 
     global_scope = True
     __slots__ = (
@@ -223,6 +321,14 @@ class CSRFMiddleware:
         return self._allow_missing_origin
 
     async def before(self, request: Request):
+        """Prepare a token on a safe method, or validate one on an unsafe method.
+
+        Returns None to let the request proceed, or a 403 problem+json response
+        when the double-submit or origin check fails. On a safe method it always
+        returns None, having recorded the token -- reused, or freshly minted when
+        the cookie is absent, invalid, or three quarters expired -- for
+        `csrf_token` and for `after` to write out.
+        """
         now = int(time.time())
         if request.method in _SAFE_METHODS:
             token = request.cookies.get(self._cookie_name)
@@ -276,6 +382,11 @@ class CSRFMiddleware:
         return None
 
     async def after(self, request: Request, response):
+        """Write the CSRF cookie when `before` minted or renewed the token.
+
+        A request that reused a still-fresh token gets no `Set-Cookie` at all,
+        so an unchanged token does not defeat downstream response caching.
+        """
         if not request.state.get(_STATE_ISSUE, False):
             return response
         token = request.state.get(_STATE_TOKEN)

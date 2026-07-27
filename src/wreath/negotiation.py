@@ -1,19 +1,26 @@
 """Content negotiation: serialize a response in the format the client asked for.
 
 Most endpoints return JSON, and JSON stays the default. But a client that sends
-``Accept: application/msgpack`` (a mobile app minimizing bytes, a service-to-
+`Accept: application/msgpack` (a mobile app minimizing bytes, a service-to-
 service call) can be served MessagePack from the *same* handler — the handler
-returns plain data, and the format is chosen from the ``Accept`` header.
+returns plain data, and the format is chosen from the `Accept` header.
 
-    from wreath.negotiation import serialize
+```python
+from wreath.negotiation import serialize
 
-    @app.get("/report")
-    async def report(request):
-        return serialize(request, {"rows": rows})   # JSON or msgpack per Accept
+@app.get("/report")
+async def report(request):
+    return serialize(request, {"rows": rows})   # JSON or msgpack per Accept
+```
 
 `Accept` is parsed with q-values per RFC 9110 §12.5.1; an unsatisfiable `Accept`
-yields ``406 Not Acceptable`` listing what is available. Responses carry
-``Vary: Accept`` so a shared cache keys on the negotiated type.
+yields `406 Not Acceptable` listing what is available. A negotiated response
+carries `Vary: Accept` so a shared cache keys on the negotiated type; the 406
+does not, because it varies with nothing a cache should reuse.
+
+The msgpack encoder is the same pure/native pair as JSON: the C implementation
+is used when built, the pure one is the reference, and `WREATH_PURE=1` selects
+the reference. `tests/test_msgpack_parity.py` holds them byte-for-byte equal.
 """
 
 from __future__ import annotations
@@ -40,7 +47,16 @@ __all__ = ["JSON", "MSGPACK", "Serializer", "negotiate", "parse_accept", "serial
 
 @dataclass(frozen=True, slots=True)
 class Serializer:
-    """A media type and the function that encodes data to its bytes."""
+    """A media type and the function that encodes data to its bytes.
+
+    `encode` takes the handler's data and returns the response body. It is
+    called once per response, on the request's task, and whatever it raises
+    propagates to the handler -- there is no fallback to another format.
+
+    Args:
+        media_type: Compared case-sensitively against a lowercased `Accept` range.
+        encode: Any callable from data to `bytes`; `JSON` and `MSGPACK` are the built-ins.
+    """
 
     media_type: str
     encode: Callable[[Any], bytes]
@@ -59,10 +75,22 @@ DEFAULT_SERIALIZERS: tuple[Serializer, ...] = (JSON, MSGPACK)
 
 
 def parse_accept(header: str | None) -> list[tuple[str, float]]:
-    """Parse an ``Accept`` header into ``(media_range, q)`` pairs, best first.
+    """Parse an `Accept` header into `(media_range, q)` pairs, best first.
 
-    Ordered by q (desc) then specificity (exact > ``type/*`` > ``*/*``). A
-    ``q=0`` range (explicitly not acceptable) is kept so matching can reject it.
+    Ordered by q (desc) then specificity (exact > `type/*` > `*/*`), with
+    header order breaking a remaining tie. A `q=0` range (explicitly *not*
+    acceptable) is kept rather than dropped, so `negotiate` can apply it as
+    an exclusion. Media ranges are lowercased; parameters other than `q` are
+    discarded, so `text/html;level=1` and `text/html` are one range.
+
+    This never raises. A malformed `q` is read as `q=0` -- refusing the range
+    rather than promoting it -- and an empty element is skipped.
+
+    Args:
+        header: A raw `Accept` header value, or None/empty for "no preference".
+
+    Returns:
+        `(media_range, q)` best first; empty when the header is absent or empty.
     """
     if not header:
         return []
@@ -100,9 +128,23 @@ def _matches(media_type: str, media_range: str) -> bool:
 def negotiate(
     accept: str | None, serializers: Sequence[Serializer] = DEFAULT_SERIALIZERS
 ) -> Serializer | None:
-    """Pick the best serializer for an ``Accept`` header, or None if unsatisfiable.
+    """Pick the best serializer for an `Accept` header, or None if unsatisfiable.
 
-    A missing or ``*/*`` ``Accept`` yields the first (default) serializer.
+    Ranges are tried best-first (see `parse_accept`) and the first
+    `serializers` entry matching one wins, so the *offer* order decides between
+    two types the client ranked equally. A missing or empty `Accept` yields
+    `serializers[0]`; so does `*/*`, because it matches everything and the
+    first offer is the first match.
+
+    A `q=0` range excludes every type it matches, across the whole header, and
+    that exclusion is applied even when a later wildcard would have matched:
+    `application/json;q=0, */*` will not return JSON.
+
+    Args:
+        serializers: Offers in preference order; an empty sequence always yields None.
+
+    Returns:
+        The chosen serializer, or None when nothing offered is acceptable.
     """
     parsed = parse_accept(accept)
     if not parsed:
@@ -131,7 +173,24 @@ def serialize(
     serializers: Sequence[Serializer] = DEFAULT_SERIALIZERS,
     status: int = 200,
 ) -> Response:
-    """Serialize ``data`` in the client's preferred format, or return ``406``."""
+    """Serialize `data` in the client's preferred format, or return `406`.
+
+    The successful response carries the negotiated `Content-Type` and
+    `Vary: Accept`, so a shared cache keys on the format rather than serving
+    one client's msgpack to another client's JSON request. An unsatisfiable
+    `Accept` produces a `ProblemResponse` listing what was offered -- returned,
+    not raised, so it flows through the ordinary response path.
+
+    `status` applies only to the successful case; the refusal is always 406.
+
+    Args:
+        data: Anything the chosen serializer's `encode` accepts.
+        serializers: Offers in preference order; defaults to JSON then MessagePack.
+        status: Status for the encoded response.
+
+    Returns:
+        A `Response` with the negotiated body, or a 406 `ProblemResponse`.
+    """
     chosen = negotiate(request.header("accept"), serializers)
     if chosen is None:
         available = ", ".join(s.media_type for s in serializers)

@@ -6,6 +6,9 @@ cached content-length table; these tests pin the observable output.
 
 from __future__ import annotations
 
+import gc
+import os
+
 import pytest
 
 from wreath.response import (
@@ -189,3 +192,65 @@ async def test_prepared_is_reusable_and_immutable() -> None:
 def test_prepared_rejects_non_bytes() -> None:
     with pytest.raises(TypeError):
         PreparedResponse("not bytes")  # type: ignore[arg-type]
+
+
+def _fd_is_open(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return False
+    return True
+
+
+def test_from_descriptor_closes_the_file_when_the_response_is_never_sent(tmp_path) -> None:
+    """`from_descriptor` takes ownership of an open descriptor, but only the
+    reader ever closed it -- and the reader runs when the response is *sent*.
+    A response built and then dropped (a handler that raises, a middleware that
+    replaces it, a conditional 304 answered instead) leaked the descriptor for
+    the life of the process."""
+    path = tmp_path / "asset.bin"
+    path.write_bytes(b"payload")
+    fd = os.open(path, os.O_RDONLY)
+
+    response = FileResponse.from_descriptor(fd, os.stat(fd), "asset.bin")
+    assert _fd_is_open(fd)
+
+    del response
+    gc.collect()
+
+    assert not _fd_is_open(fd)
+
+
+def test_from_descriptor_close_is_explicit_and_idempotent(tmp_path) -> None:
+    path = tmp_path / "asset.bin"
+    path.write_bytes(b"payload")
+    fd = os.open(path, os.O_RDONLY)
+
+    response = FileResponse.from_descriptor(fd, os.stat(fd), "asset.bin")
+    response.close()
+    assert not _fd_is_open(fd)
+    response.close()  # a second close must not touch a now-reused descriptor
+    del response
+    gc.collect()
+
+
+@pytest.mark.asyncio
+async def test_a_sent_descriptor_response_is_not_closed_twice(tmp_path) -> None:
+    """The reader still owns the descriptor once the send starts, so the
+    ownership handover must leave nothing for `__del__` to close."""
+    path = tmp_path / "asset.bin"
+    path.write_bytes(b"payload")
+    fd = os.open(path, os.O_RDONLY)
+
+    sent: list[dict] = []
+
+    async def send(message) -> None:
+        sent.append(message)
+
+    response = FileResponse.from_descriptor(fd, os.stat(fd), "asset.bin")
+    await response(send)
+
+    assert response._fd is None
+    assert b"".join(m.get("body", b"") for m in sent[1:]) == b"payload"
+    del response
+    gc.collect()

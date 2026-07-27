@@ -21,17 +21,28 @@ PostgreSQL 17.10, not inferred:
 * an identifier is quoted only when it has to be, by the same rule
   ``quote_ident`` uses
 
-Types outside :data:`_LITERAL` are refused rather than guessed at, because their
-normal forms are not simply predictable: a ``varchar`` comparison casts the
-*column* (``((vch)::text = 'x'::text)``), ``double precision`` parenthesises and
-casts the literal, and ``timestamptz`` rewrites the literal's format. Each would
-be a permanent-drift bug. Widening this set means measuring the new type's normal
-form first and pinning it in ``tests/postgres/test_partial_index_roundtrip.py``.
+Types outside :data:`_LITERAL` are refused rather than guessed at **wherever a
+literal is rendered**, because their normal forms are not simply predictable: a
+``varchar`` comparison casts the *column* (``((vch)::text = 'x'::text)``),
+``double precision`` parenthesises and casts the literal, and ``timestamptz``
+rewrites the literal's format. Each would be a permanent-drift bug. Widening
+:data:`_LITERAL` means measuring the new type's normal form first and pinning it
+in ``tests/postgres/test_partial_index_roundtrip.py``.
+
+``IS NULL`` and ``IS NOT NULL`` render **no literal**, and so accept any declared
+column type. That branch used to compute the type kind and then throw it away,
+which meant it refused ``timestamptz`` for a reason that only applies to the
+comparison branches -- and ``retired_at IS NULL`` is the archetypal partial index.
+Measured against PostgreSQL 17.10: every one of the 32 types
+``wreath.orm.types.BY_OID`` can declare (16 scalars and their array forms), in
+both polarities, deparses to exactly ``(<ident> IS [NOT] NULL)``. A ``NullTest``
+node carries no operand to coerce, so there is nothing for the type to change.
 """
 
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from .errors import DeclarationError
 from .table import AllOf, Eq, InValues, IsNull
@@ -98,21 +109,30 @@ def _literal(value: object, kind: str, column: str, model: str) -> str:
     return "true" if value else "false"
 
 
-def _kind(column: str, spec_columns: dict, model: str) -> tuple[str, str]:
+def _column(column: str, spec_columns: dict, model: str) -> Any:
+    """The declared column *column* names, whatever its type."""
     item = spec_columns.get(column)
     if item is None:
         raise DeclarationError(
             f"{model} index predicate names unknown column {column!r}; "
             "declare it as a column first"
         )
+    return item
+
+
+def _kind(column: str, spec_columns: dict, model: str) -> tuple[str, str]:
+    """The literal renderer for *column*, for the branches that render one."""
+    item = _column(column, spec_columns, model)
     type_name = item.pg_type.name
     kind = _LITERAL.get(type_name)
     if kind is None:
         raise DeclarationError(
-            f"{model} index predicate on column {column!r} has type {type_name}, "
-            "which wreath cannot render in PostgreSQL's normal form -- partial "
-            f"index predicates support {', '.join(sorted(_LITERAL))}. Declare the "
-            "index without where= and manage the predicate outside migrations."
+            f"{model} index predicate compares column {column!r}, whose type "
+            f"{type_name} wreath cannot render as a literal in PostgreSQL's "
+            "normal form -- eq() and one_of() support "
+            f"{', '.join(sorted(_LITERAL))}. is_null() and is_not_null() render "
+            "no literal and take any type; otherwise declare the index without "
+            "where= and manage the predicate outside migrations."
         )
     return kind, item.database_name
 
@@ -123,8 +143,10 @@ def _render_one(predicate: object, spec_columns: dict, model: str) -> str:
         literal = _literal(predicate.value, kind, predicate.column, model)
         return f"({quote_identifier(name)} = {literal})"
     if isinstance(predicate, IsNull):
-        _kind(predicate.column, spec_columns, model)
-        name = spec_columns[predicate.column].database_name
+        # No literal is rendered, so no type can change the normal form; the
+        # column only has to exist. See this module's docstring for the
+        # measurement that says so.
+        name = _column(predicate.column, spec_columns, model).database_name
         test = "IS NOT NULL" if predicate.negated else "IS NULL"
         return f"({quote_identifier(name)} {test})"
     if isinstance(predicate, InValues):

@@ -6,21 +6,25 @@ instant of the next, delivering double the intended rate across the boundary.
 A bucket refills continuously, so the average rate holds over any interval while
 still admitting a configured burst.
 
-The default store keeps buckets in this process::
+The default store keeps buckets in this process:
 
-    app.add_middleware(RateLimitMiddleware(limit=60, window=60.0))
+```python
+app.add_middleware(RateLimitMiddleware(limit=60, window=60.0))
+```
 
 That is per-worker: with four workers the effective limit is four times the
 configured one. When the limit must hold across workers, hand it a store backed
-by a table the workers share::
+by a table the workers share:
 
-    store = PostgresRateLimitStore(app.postgres("main"))
-    app.add_middleware(RateLimitMiddleware(limit=60, window=60.0, store=store))
+```python
+store = PostgresRateLimitStore(app.postgres("main"))
+app.add_middleware(RateLimitMiddleware(limit=60, window=60.0, store=store))
+```
 
-By default each client IP gets its own bucket, read from ``scope["client"]``.
+By default each client IP gets its own bucket, read from `scope["client"]`.
 Behind a proxy that address is the proxy's, and every client would share one
-bucket -- add :class:`~wreath.middleware.ProxyHeadersMiddleware` ahead of this one
-so the scope carries the real client.
+bucket -- add `ProxyHeadersMiddleware` ahead of this one so the scope carries
+the real client.
 """
 
 from __future__ import annotations
@@ -44,19 +48,28 @@ else:  # pragma: no cover - exercised by the WREATH_PURE test matrix
 class RateLimitStore(Protocol):
     """Where buckets live.
 
-    ``configure`` is called once, when the middleware is constructed, so the
+    `configure` is called once, when the middleware is constructed, so the
     policy has a single owner and the store can prepare statements before
-    startup. A store may additionally expose a synchronous ``try_acquire`` with
-    the same contract as ``acquire``; the middleware binds to it and skips
+    startup. A store may additionally expose a synchronous `try_acquire` with
+    the same contract as `acquire`; the middleware binds to it and skips
     awaiting when it exists.
     """
 
-    def configure(self, capacity: float, rate: float) -> None: ...
+    def configure(self, capacity: float, rate: float) -> None:
+        """Fix the policy this store enforces, before any request arrives.
+
+        Called by `RateLimitMiddleware.__init__`, not at startup, so a store can
+        prepare statements and a misconfiguration is a construction-time error.
+        `capacity` is the bucket size in tokens (the burst) and `rate` is tokens
+        per second. Both shipped stores refuse a second call, because sharing
+        one store between two middlewares means sharing one keyspace.
+        """
+        ...
 
     async def acquire(self, key: str, cost: float, now: float) -> float:
         """Return 0.0 when allowed, else the seconds until enough tokens.
 
-        ``now`` is a monotonic reading from the caller. A store that owns a
+        `now` is a monotonic reading from the caller. A store that owns a
         clock its workers agree on (Postgres does) should ignore it.
         """
         ...
@@ -65,10 +78,18 @@ class RateLimitStore(Protocol):
 class MemoryRateLimitStore:
     """In-process buckets. Fast and dependency-free, but per-worker.
 
-    Not a :class:`wreath.store.MemoryStore`: a bucket is not a stored payload
-    but an arithmetic state that every read advances, and the whole
-    refill-and-consume step lives in ``TokenBucket`` (native, with its own
-    bounded table) so the hot path stays one call.
+    **A limitation worth stating plainly**: a limit of N per window is N *per
+    worker*, not per cluster, and nothing here observes the other workers. Four
+    workers admit four times the configured rate. Use `PostgresRateLimitStore`
+    when the number has to mean something across a deployment.
+
+    Not a `wreath.store.MemoryStore`: a bucket is not a stored payload but an
+    arithmetic state that every read advances, and the whole refill-and-consume
+    step lives in `TokenBucket` (native, with its own bounded table) so the hot
+    path stays one call.
+
+    Args:
+        max_entries: Distinct keys tracked. The fullest bucket is evicted at the ceiling.
     """
 
     __slots__ = ("_bucket", "_max_entries", "_policy")
@@ -79,6 +100,11 @@ class MemoryRateLimitStore:
         self._policy: tuple[float, float] | None = None
 
     def configure(self, capacity: float, rate: float) -> None:
+        """Build the bucket table for this policy. Once, and only once.
+
+        Raises `ValueError` on any second call, even one repeating the same
+        numbers.
+        """
         # Any second call, not merely a conflicting one -- matching
         # `PostgresRateLimitStore`, so the two halves of one middleware cannot
         # disagree about what sharing a store means. A second `configure` is
@@ -99,15 +125,29 @@ class MemoryRateLimitStore:
 
     @property
     def tracked(self) -> int:
+        """Keys with a live bucket right now, and 0 before `configure`."""
         return 0 if self._bucket is None else self._bucket.tracked
 
     def try_acquire(self, key: str, cost: float, now: float) -> float:
+        """Spend `cost` tokens without awaiting anything.
+
+        Returns 0.0 when the request is allowed, else the seconds until the
+        bucket holds enough. Nothing is spent on a refusal. `now` is a monotonic
+        reading. This is the hook `RateLimitMiddleware` binds to for a local
+        store, so an allowed request costs no coroutine at all.
+        """
         return float(self._bucket.acquire(key, now, cost))
 
     async def acquire(self, key: str, cost: float, now: float) -> float:
+        """`try_acquire` behind the awaiting `RateLimitStore` protocol."""
         return self.try_acquire(key, cost, now)
 
     def clear(self) -> None:
+        """Forget every bucket, restoring a full allowance to every key.
+
+        Safe as a reset between tests. In production it is an amnesty, not a
+        purge -- a throttled caller is let straight back through.
+        """
         if self._bucket is not None:
             self._bucket.clear()
 
@@ -115,20 +155,24 @@ class MemoryRateLimitStore:
 class PostgresRateLimitStore:
     """Buckets in a shared table, so one limit covers every worker.
 
-    The whole refill-and-consume decision is one ``INSERT ... ON CONFLICT DO
-    UPDATE``. That statement takes a row lock, so concurrent workers serialize
+    The whole refill-and-consume decision is one `INSERT ... ON CONFLICT DO
+    UPDATE`. That statement takes a row lock, so concurrent workers serialize
     per key and the limit holds exactly; two statements or a read-then-write
-    would race and overspend.
+    would race and overspend. The database clock drives the refill, so the
+    workers cannot disagree about how much time has passed.
 
-    ``updated`` is a last-touched mark rather than a deadline, which is what
-    makes this store's ageing different from the other two in
-    :mod:`wreath.store`: a bucket never expires, it refills, and the elapsed
-    time since ``updated`` is the arithmetic the statement above does. Only an
-    idle purge can retire one.
+    `updated` is a last-touched mark rather than a deadline, which is what makes
+    this store's ageing different from the other two in `wreath.store`: a bucket
+    never expires, it refills, and the elapsed time since `updated` is the
+    arithmetic the statement above does. Only an idle purge can retire one.
 
-    The table is not created for you; apply :meth:`schema_sql` as a migration.
-    Rows are small and bounded by distinct keys -- call :meth:`purge`
-    periodically to drop idle ones.
+    The table is not created for you; apply `schema_sql()` as a migration. Rows
+    are small and bounded by distinct keys -- run `purge_pass()` periodically to
+    drop idle ones.
+
+    Args:
+        database: The pool to run against, such as `app.postgres("main")`.
+        table: Table holding the buckets. Default `wreath_rate_limit`.
     """
 
     __slots__ = ("_capacity", "_database", "_policy", "_rate", "_store")
@@ -195,6 +239,13 @@ class PostgresRateLimitStore:
         return self._store.schema_sql()
 
     def configure(self, capacity: float, rate: float) -> None:
+        """Record the policy bound into every `acquire`. Once, and only once.
+
+        The statement text carries no policy -- capacity and rate are bound per
+        call -- so this only stores the numbers. Raises `ValueError` on any
+        second call, even one repeating the same numbers, because a second
+        caller means two middlewares sharing one keyspace.
+        """
         if self._policy is not None:
             raise ValueError(
                 "this store is already configured; give each RateLimitMiddleware "
@@ -205,6 +256,13 @@ class PostgresRateLimitStore:
         self._rate = rate
 
     async def acquire(self, key: str, cost: float, now: float) -> float:
+        """Spend `cost` tokens from the shared bucket for `key`.
+
+        Returns 0.0 when the request is allowed, else the seconds until the
+        bucket holds enough. One round trip, and `now` is ignored -- the
+        database clock is the only one every worker agrees on. Requires
+        `configure` to have run.
+        """
         # `now` is ignored: Postgres is the clock, so workers cannot disagree.
         row = await self._store.statement("acquire").fetchrow(
             key, self._capacity, cost, self._rate
@@ -217,18 +275,25 @@ class PostgresRateLimitStore:
     def purge_pass(self, idle_seconds: float, *, chunk: int = 1000, **options: Any) -> Any:
         """A recurring pass that retires buckets untouched for *idle_seconds*.
 
-        The supported way to keep the table small::
+        The supported way to keep the table small:
 
-            jobs.drive(store.purge_pass(3600), cron="17 * * * *")
+        ```python
+        jobs.drive(store.purge_pass(3600), cron="17 * * * *")
+        ```
 
         It walks in last-touched order behind a frontier the database clock
         re-derives each cycle, one transaction per chunk, paced. See
-        :mod:`wreath.passes`.
+        `wreath.passes`. Remaining keyword options are the pass's own --
+        `within`, `shift`, `pace`, `schema`, `tenant`.
+
+        Args:
+            idle_seconds: Seconds a bucket must sit untouched before it is dropped.
+            chunk: Rows deleted per transaction. Default 1000.
         """
         from .._passes.stores import keyed_purge_pass
 
         return keyed_purge_pass(
-            self._store.declaration, self._database,
+            self._store.declaration,
             name=f"purge_{self._store.table}", after=float(idle_seconds),
             chunk=chunk, **options,
         )
@@ -239,7 +304,7 @@ class PostgresRateLimitStore:
         Safe -- an idle bucket has refilled to capacity, so forgetting it grants
         nothing it would not have granted anyway -- but on a table big enough to
         matter this is the long transaction a chunked pass exists to prevent.
-        Prefer :meth:`purge_pass`.
+        Prefer `purge_pass()`.
         """
         return await self._store.purge(idle_seconds)
 
@@ -251,14 +316,24 @@ def principal_key(request: Request) -> str | None:
     into one bucket and lets one caller earn a fresh allowance per device. For
     an authenticated API the principal is the honest key.
 
+    An authenticated caller is keyed on `type:id` from `request.identity` — the
+    same identity the Cedar policies authorize with, so there is one answer to
+    "who is this" rather than two that can disagree.
+
     Anonymous callers fall back to their address, because a single shared
     "anonymous" bucket is a denial of service you inflict on yourself. The
-    ``ip:`` prefix keeps an address from ever colliding with a principal id.
+    `ip:` prefix keeps an address from ever colliding with a principal id. That
+    fallback is only as trustworthy as `scope["client"]`, which behind a proxy
+    is the proxy's address and puts every anonymous caller in one bucket — put
+    `ProxyHeadersMiddleware` ahead of the limiter so the scope carries the real
+    client. Returns None when there is no identity and no client address, which
+    lands the request in the limiter's shared unkeyed bucket.
 
     **Must run after authentication.** `request.identity` is set during route
     authorization, so a limiter using this key has to be route middleware --
-    a global hook runs at ingress, before anyone has been identified. See
-    :class:`TieredRateLimitMiddleware`.
+    a global hook runs at ingress, before anyone has been identified.
+    `RateLimitMiddleware` refuses this key at construction for that reason; use
+    `TieredRateLimitMiddleware`.
     """
     identity = request.identity
     if identity is not None:
@@ -275,7 +350,51 @@ def _client_key(request: Request) -> str | None:
 
 
 class RateLimitMiddleware:
-    """Reject requests that exceed a per-key token-bucket allowance."""
+    """Reject requests that exceed a per-key token-bucket allowance.
+
+    Each key owns a bucket holding `burst` tokens (`limit` when no burst is
+    given) that refills continuously at `limit / window` tokens per second. A
+    request spends `cost`; when the bucket is short, the request is refused and
+    nothing is spent. Continuous refill rather than a window counter is the
+    point — a window lets a caller spend its whole allowance in the last instant
+    of one window and again in the first instant of the next.
+
+    A refused request is `429` as an RFC 9457 `application/problem+json` body,
+    carrying `Retry-After` in whole seconds (rounded up, and never 0),
+    `X-RateLimit-Limit`, `RateLimit-Policy`, and `X-RateLimit-Remaining: 0`.
+    Those headers ride on the refusal only. Advertising the policy on every
+    response needs a global `after` hook, which `wreath-request-trace` priced at
+    +18 boundary crossings per request, to carry a header that matters when a
+    request is refused. The remaining allowance stays absent from an allowed
+    response for a second reason: neither store reports it — `acquire` answers
+    "wait this long", not "you have this many left" — and a number invented here
+    would be worse than no number.
+
+    This is a **global hook**, so it runs at ingress, before authentication.
+    Keying it on `principal_key` is refused at construction for that reason;
+    `TieredRateLimitMiddleware` is the per-principal limiter. The default key is
+    the client address from `scope["client"]`, which behind a proxy is the
+    proxy's — put `ProxyHeadersMiddleware` ahead of this one. A request whose
+    key function returns None lands in one shared `UNKEYED` bucket rather than
+    skipping the limit, because a limiter that skips what it cannot name is not
+    a limiter; use `exempt` to let a request past deliberately.
+
+    `throttled` counts refusals. Without it, a limiter that keys everyone the
+    same — the default key behind a proxy — looks exactly like one with nothing
+    to do.
+
+    Args:
+        limit: Requests admitted per `window`. Must be positive.
+        window: Seconds the limit is measured over. Default 60.
+        burst: Bucket capacity in requests. Defaults to `limit`; never less than `cost`.
+        cost: Tokens one request spends. Default 1.0.
+        store: Where buckets live. Default a per-process `MemoryRateLimitStore`.
+        key: The bucket key for a request. Default the client address.
+        exempt: A request it answers True for is not limited at all.
+
+    Raises:
+        ValueError: Non-positive limit, window or cost; burst below cost; `key=principal_key`.
+    """
 
     global_scope = True
     __slots__ = (
@@ -405,23 +524,31 @@ class TieredRateLimitMiddleware:
     An authenticated API rarely wants one limit for everybody: the free tier and
     the enterprise tier are different products. The tier comes from the caller's
     roles -- the same roles the Cedar policies authorize with -- so there is one
-    answer to "who is this" rather than two that can disagree::
+    answer to "who is this" rather than two that can disagree:
 
-        app.add_middleware(TieredRateLimitMiddleware(
-            tiers={"pro": (600, 60.0), "enterprise": (10_000, 60.0)},
-            default=(60, 60.0),
-        ))
+    ```python
+    app.add_middleware(TieredRateLimitMiddleware(
+        tiers={"pro": (600, 60.0), "enterprise": (10_000, 60.0)},
+        default=(60, 60.0),
+    ))
+    ```
 
-    Each entry is ``(limit, window_seconds)``. A caller holding more than one
-    named role gets the **most generous** of them, because holding two plans
-    must not be worse than holding the better one. Anyone else gets ``default``.
+    Each entry is `(limit, window_seconds)`. A caller holding more than one
+    named role gets the **most generous** of them, ranked by `limit / window`,
+    because holding two plans must not be worse than holding the better one. A
+    caller whose roles name no tier -- and an anonymous caller, who has no roles
+    at all -- is charged against `default`, so every request is limited by
+    something. Each tier is a whole `RateLimitMiddleware` with its own store, so
+    the 429, the `Retry-After`, and the policy headers are the ones documented
+    there.
 
     **This is route middleware, not a global hook**, and that is not an
     oversight: global hooks run at ingress, before authentication, where there
-    is no principal to key on. Register it with ``add_middleware`` on routes
-    that require authentication. For unauthenticated ingress protection --
-    a flood of 404s, a login-endpoint flood -- use the global
-    :class:`RateLimitMiddleware` keyed on the address, and use both.
+    is no principal to key on. Register it with `add_middleware` on routes that
+    require authentication. For unauthenticated ingress protection -- a flood of
+    404s, a login-endpoint flood -- use the global `RateLimitMiddleware` keyed
+    on the address, and use both. They compose without knowing about each other,
+    and a request that has to pass both spends a token in each.
 
     Each tier keeps its own buckets, so a promotion arrives with a full
     allowance rather than whatever was left of the old plan's. That is the
@@ -430,6 +557,18 @@ class TieredRateLimitMiddleware:
     allowance every time**, so where roles are self-service, toggling one twice
     is a way to bypass the limit on demand. Keep tier membership
     server-controlled, or key the limit on something the caller cannot change.
+
+    Args:
+        tiers: Role name to `(limit, window_seconds)`. At least one is required.
+        default: The `(limit, window_seconds)` for a caller matching no tier.
+        tier: Names the tier for a request. Default the caller's most generous role.
+        key: The bucket key within a tier. Default `principal_key`.
+        cost: Tokens one request spends, in every tier. Default 1.0.
+        exempt: A request it answers True for is not limited at all.
+        store_factory: Builds one store per tier. Default `MemoryRateLimitStore`.
+
+    Raises:
+        ValueError: `tiers` is empty.
     """
 
     global_scope = False
@@ -484,6 +623,13 @@ class TieredRateLimitMiddleware:
         return max(matched, key=lambda role: self._tiers[role][0] / self._tiers[role][1])
 
     async def before(self, request: Request) -> Any | None:
+        """Charge this request to its tier's bucket.
+
+        Returns None when the request is admitted, or the 429 the tier's
+        `RateLimitMiddleware` built when it is not. A tier name that is not in
+        `tiers` -- including None, which is what an unmatched or anonymous
+        caller gets -- is charged against `default`.
+        """
         hook, awaiting = self._dispatch.get(
             self._tier(request), self._dispatch[None]
         )

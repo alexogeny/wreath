@@ -246,8 +246,8 @@ unique constraint that ignores the nulls:
 
 ```python
 from wreath.orm import Mapped, Model, column, index
-from wreath.orm.table import eq, is_not_null, one_of, all_of
-from wreath.orm.types import Int64, Text
+from wreath.orm.table import eq, is_null, is_not_null, one_of, all_of
+from wreath.orm.types import Int64, Text, TimestampTz
 
 class Job(Model, table="jobs"):
     id: Mapped[int] = column(Int64, primary_key=True)
@@ -275,13 +275,30 @@ when the registry compiles, naming what it was:
 | --- | --- |
 | `one_of("state", ["only"])` | PostgreSQL rewrites a one-element `IN` to `=`, so the catalog would never match the declaration. Use `eq()`. |
 | `one_of` on a non-text column | each `ARRAY` element gets a cast that depends on the column's width. |
-| a column that is not `text`, an integer, or `bool` | `varchar` casts the column, `double precision` casts the literal, `timestamptz` rewrites its format. |
+| `eq` or `one_of` on a column that is not `text`, an integer, or `bool` | `varchar` casts the column, `double precision` casts the literal, `timestamptz` rewrites its format. |
 | a literal of the wrong Python type | `eq("tries", "3")` is a mistake worth catching at startup. |
 
 The reason for that strictness is worth knowing, because it is not fussiness: if
 the declared text and the catalog text disagree by one character, `detect` reports
 drift on an index it created moments ago, on every run, forever — and nothing is
 actually wrong, so nothing ever resolves it.
+
+**`is_null` and `is_not_null` take any column type**, including `timestamptz`,
+`uuid`, `numeric` and the array types. They are the exception because they render
+no literal at all: PostgreSQL's `IS NULL` node has no operand to coerce, so it
+deparses to `(retired_at IS NULL)` whatever the column is. That is the shape most
+partial indexes want anyway — "the rows that are still open" is a null test:
+
+```python
+class Camera(Model, table="cameras"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    station_id: Mapped[int] = column(Int64, index=True)
+    retired_at: Mapped[object] = column(TimestampTz, nullable=True)
+
+    #: Retired cameras outnumber live ones as a network ages, so the index that
+    #: answers "which camera is live here" should not carry them.
+    _live = index("station_id", where=is_null("retired_at"))
+```
 
 ## Queries, relationships, and sessions
 

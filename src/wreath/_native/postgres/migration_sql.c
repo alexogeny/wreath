@@ -125,21 +125,46 @@ append_qualified(WreathPgBuffer *buffer, const WreathSqlOperation *operation)
 }
 
 
+/* A constraint's logical name is its identity: "p:cols:::", "u:cols:::", or
+   "f:cols:schema:table:cols" (see _registry_descriptor and the catalog SQL,
+   which both spell it from pg_constraint.contype). Only the leading tag is
+   needed to separate a foreign key from the keys it depends on. */
+static int
+constraint_is_foreign_key(const WreathSqlOperation *operation)
+{
+    return operation->name_length >= 2 &&
+           operation->name[0] == 'f' && operation->name[1] == ':';
+}
+
+
 static uint32_t
 operation_rank(const WreathSqlOperation *operation)
 {
-    /* Drops run inner-to-outer (index, constraint, column, table); adds run
-       outer-to-inner (table, column, alter, constraint, index). The reverse of
-       any forward plan is therefore itself a valid forward-shaped plan. */
-    if (operation->action == OP_DROP && operation->kind == KIND_INDEX) return 0;
-    if (operation->action == OP_DROP && operation->kind == KIND_CONSTRAINT) return 1;
-    if (operation->action == OP_DROP && operation->kind == KIND_COLUMN) return 2;
-    if (operation->action == OP_DROP && operation->kind == KIND_TABLE) return 3;
-    if (operation->action == OP_ADD && operation->kind == KIND_TABLE) return 4;
-    if (operation->action == OP_ADD && operation->kind == KIND_COLUMN) return 5;
-    if (operation->action == OP_ALTER && operation->kind == KIND_COLUMN) return 6;
-    if (operation->action == OP_ADD && operation->kind == KIND_CONSTRAINT) return 7;
-    if (operation->action == OP_ADD && operation->kind == KIND_INDEX) return 8;
+    /* Drops run inner-to-outer (foreign key, index, key, column, table); adds
+       run outer-to-inner (table, column, alter, key, index, foreign key). The
+       reverse of any forward plan is therefore itself a valid forward-shaped
+       plan.
+
+       A foreign key is ranked apart from the primary and unique keys because it
+       *depends* on one: PostgreSQL rejects "REFERENCES t (c)" until a unique
+       constraint or unique index over exactly those columns exists. Ranking all
+       constraints together left the order inside the block decided by object id
+       -- a content hash -- so whether a nine-table schema applied at all came
+       down to which hash sorted first. Foreign keys therefore go after the keys
+       *and* after the indexes, since a unique index is also a valid target;
+       dropping reverses that, taking foreign keys out before anything they
+       might reference. */
+    if (operation->action == OP_DROP && operation->kind == KIND_CONSTRAINT)
+        return constraint_is_foreign_key(operation) ? 0 : 2;
+    if (operation->action == OP_DROP && operation->kind == KIND_INDEX) return 1;
+    if (operation->action == OP_DROP && operation->kind == KIND_COLUMN) return 3;
+    if (operation->action == OP_DROP && operation->kind == KIND_TABLE) return 4;
+    if (operation->action == OP_ADD && operation->kind == KIND_TABLE) return 5;
+    if (operation->action == OP_ADD && operation->kind == KIND_COLUMN) return 6;
+    if (operation->action == OP_ALTER && operation->kind == KIND_COLUMN) return 7;
+    if (operation->action == OP_ADD && operation->kind == KIND_CONSTRAINT)
+        return constraint_is_foreign_key(operation) ? 10 : 8;
+    if (operation->action == OP_ADD && operation->kind == KIND_INDEX) return 9;
     return 99;
 }
 

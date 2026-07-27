@@ -1,4 +1,15 @@
-"""Lazy ASGI request wrapper."""
+"""The incoming HTTP request, read lazily from an ASGI scope.
+
+`Request` keeps the scope and the receive channel and parses nothing until it is
+asked. Method, path, scheme, client, query string and the raw header list are
+reads of what the server already delivered, so they cost nothing to touch. The
+cookies, the body, the decoded JSON and the parsed form are produced on first
+access and cached on the request, so a middleware, a dependency and the handler
+that each read the body share one read of it.
+
+`RequestLimits` bounds what a single request may buffer in memory before it is
+refused. An application owns one and hands it to every request it builds.
+"""
 
 from __future__ import annotations
 
@@ -30,9 +41,31 @@ class RequestLimits:
     enforced while receiving, before an oversized body is joined or a part is
     copied out of it.
 
+    Every one of them refuses with a status a client can act on. All but one
+    raise `PayloadTooLarge` (413); `max_cookie_bytes` raises
+    `RequestHeaderFieldsTooLarge` (431), because the fix is to send fewer
+    cookies rather than a smaller body. The multipart parser limits --
+    `max_parts`, `max_part_header_bytes`, `max_part_bytes` -- are enforced
+    inside the codec, which raises `ValueError`; `form()` converts those three
+    to 413. A body the parser cannot *read* is a different failure and still
+    raises `ValueError`.
+
+    Every limit must be positive; constructing one with a zero or negative value
+    raises `ValueError`.
+
     Defaults are conservative but chosen not to break working applications, and
     are a pre-1.0 decision: they may tighten before 1.0. Raise them on the
     application (`Wreath(limits=...)`) rather than working around them.
+
+    Args:
+        max_body_bytes: total bytes `Request.body()` buffers before it refuses
+        max_parts: parts one multipart form may contain
+        max_part_header_bytes: header-block bytes allowed per multipart part
+        max_part_bytes: bytes one multipart part may hold in memory
+        max_form_memory_bytes: aggregate in-memory bytes across all retained parts
+        spool_max_bytes: part size past which the payload spools to a temporary file
+        max_cookie_bytes: bytes the `Cookie` header may carry before it refuses
+        max_form_fields: fields one urlencoded body may contain
     """
 
     #: Total bytes `Request.body()` will buffer. Refused with 413.
@@ -49,8 +82,11 @@ class RequestLimits:
     #: parse-time amplification (body plus materialized parts) more tightly.
     max_form_memory_bytes: int = 16 * 1024 * 1024
     #: Bytes one multipart part may hold in memory before its payload is spooled
-    #: to a temporary file. Past this the part's bytes never become a Python
-    #: object: `UploadedFile` reads them back from disk on demand.
+    #: to a temporary file. Past this the parsed form keeps no reference to the
+    #: payload -- it is written out and dropped, and `UploadedFile` reads it back
+    #: from disk on demand. The parse still copies the part out of the body as
+    #: `bytes` once on its way to the spool, so this bounds what is *retained*,
+    #: not the peak.
     #:
     #: This bounds what a parsed form *retains*, which is what made an upload
     #: cost memory for as long as the handler ran. It does **not** bound the
@@ -73,10 +109,22 @@ class RequestLimits:
     max_cookie_bytes: int = 16 * 1024
     #: Fields one urlencoded form body may contain. A large body is otherwise
     #: only bounded by `max_body_bytes`, which admits millions of tiny fields;
-    #: this bounds the field count directly, refused while scanning with 413.
+    #: this bounds the field count directly, refused while scanning and before
+    #: the offending field is decoded.
+    #:
+    #: Refused with 413. The codec raises `ValueError`, which `form()` converts
+    #: to `PayloadTooLarge`: a limit whose whole purpose is to refuse hostile
+    #: input has to report the caller's fault as the caller's.
     max_form_fields: int = 1024
 
     def __post_init__(self) -> None:
+        """Refuse a non-positive limit at construction.
+
+        Zero is not "unlimited" here: every check compares against the value, so
+        a zero bound rejects essentially everything -- or, for `spool_max_bytes`,
+        spools it. Catching that where the limit is written beats discovering it
+        on the first request.
+        """
         for name in (
             "max_body_bytes",
             "max_cookie_bytes",
@@ -93,19 +141,46 @@ class RequestLimits:
 
 DEFAULT_LIMITS = RequestLimits()
 
+#: How `form()` tells a multipart *limit* from a malformed multipart body: both
+#: leave the parser as `ValueError`, and only the limits are a 413. These are
+#: the exact message prefixes both parsers emit, and
+#: `tests/test_native_parity.py::test_multipart_limit_parity` compares the C and
+#: pure messages byte for byte on every limit -- which is what makes the prefix
+#: a contract to key on rather than a guess. Adding a limit to the parser adds a
+#: prefix here; `tests/test_request.py` fails if one goes missing.
+_MULTIPART_LIMIT_MESSAGES = (
+    "multipart form has more than ",
+    "multipart part headers exceed ",
+    "multipart part exceeds ",
+)
+
 
 class UploadedFile:
     """One file field from a multipart form.
 
-    Small payloads stay in memory and are reachable as :attr:`data`, exactly as
-    before. A payload past :attr:`RequestLimits.spool_max_bytes` is written to a
-    temporary file instead and never becomes a Python `bytes` -- read it with
-    :meth:`chunks` (streaming) or :meth:`read` (materialising, which undoes the
-    point of spooling for anything large).
+    Built by `Request.form()`, one per part that carried a filename. A payload of
+    `RequestLimits.spool_max_bytes` or less stays in memory and is reachable as
+    `data`. A larger one is written to an unnamed temporary file, `data` is left
+    empty, and the payload is reachable only through `chunks()` (streaming) or
+    `read()` (materialising, which undoes the point of spooling for anything
+    large). Ask `spooled` which kind you hold rather than testing `data`, since
+    a spooled upload and an empty one both report `data == b""`.
 
-    The spool is closed by :meth:`FormData.close`, or when the object is
-    collected; a handler that hands the file somewhere else should copy it
-    first.
+    `size` is the payload length either way. `field_name`, `filename` and
+    `headers` come from the part itself, so `filename` is whatever the client
+    sent -- it is not sanitised, and joining it onto a path unchecked is how a
+    caller writes outside the directory it meant to.
+
+    The spool is released by `close()` here, by `FormData.close()`, or when the
+    last reference to this object goes away and CPython closes the temporary
+    file; the file is deleted when it closes and cannot be reopened. Nothing in
+    the framework closes a form for you, so a handler that keeps an upload past
+    its own return must copy the bytes out first.
+
+    Args:
+        data: the payload when it is held in memory, empty when it is spooled
+        spool: an open temporary file holding the payload, or None
+        size: payload length, which the caller must pass when it spools
     """
 
     __slots__ = ("_size", "_spool", "data", "field_name", "filename", "headers")
@@ -119,6 +194,13 @@ class UploadedFile:
         spool: Any = None,
         size: int | None = None,
     ) -> None:
+        """Hold a multipart payload, in memory or as an already-written spool.
+
+        `data` and `spool` are alternatives, and nothing here enforces that:
+        `size` defaults to `len(data)`, which is 0 for a spooled payload, so a
+        caller that passes a spool passes its length too. `_uploaded` is the
+        only builder in the framework and does both.
+        """
         self.field_name = field_name
         self.filename = filename
         self.headers = headers
@@ -140,7 +222,15 @@ class UploadedFile:
         """Yield the payload in pieces, without materialising it.
 
         The streaming read. For an in-memory payload this yields it in one
-        piece, so a caller does not have to know which kind it holds.
+        piece, so a caller does not have to know which kind it holds. For a
+        spooled one it rereads from the start of the temporary file, so two
+        iterations both see the whole payload; `size` bounds each read.
+
+        This is a generator, so a closed spool is reported when iteration
+        begins rather than when `chunks` is called.
+
+        Raises:
+            ValueError: the payload was spooled and the spool has been closed
         """
         if self._spool is None:
             if self.data:
@@ -160,30 +250,67 @@ class UploadedFile:
 
         Materialises a spooled file, which is exactly what spooling avoided --
         fine for a small one, and a way to reintroduce the problem for a large
-        one. Prefer :meth:`chunks`.
+        one. Prefer `chunks()`.
+
+        Raises:
+            ValueError: the payload was spooled and the spool has been closed
         """
         if self._spool is None:
             return self.data
         return b"".join(self.chunks())
 
     def close(self) -> None:
-        """Release the spool, if there is one. Idempotent."""
+        """Release the spool, if there is one. Idempotent.
+
+        A no-op for an in-memory payload, which stays readable. For a spooled
+        one the temporary file is deleted, and `chunks()` and `read()` raise
+        `ValueError` from then on.
+        """
         if self._spool is not None and not self._spool.closed:
             self._spool.close()
 
     @property
     def content_type(self) -> str:
+        """The part's declared `Content-Type`, or `application/octet-stream`.
+
+        Scanned out of the part's headers on every read; nothing is cached. The
+        value is client-supplied and describes nothing about the bytes -- check
+        the content itself before trusting it.
+        """
         value = find_header(self.headers, b"content-type")
         return value.decode("latin-1") if value else "application/octet-stream"
 
 
 class FormData:
-    """Parsed form fields plus uploaded files (first value wins per name)."""
+    """Parsed form fields plus uploaded files, first value wins per name.
+
+    The mapping protocol -- `form[name]`, `get()`, `in`, `len()`, iteration --
+    covers `fields` only: the text parts, decoded as UTF-8 with undecodable
+    bytes replaced rather than raising. Parts that carried a filename are in
+    `files`, keyed by field name, and are invisible to the mapping and to
+    `getlist()`. A name submitted twice keeps its first value in `fields`, and
+    the rest stay reachable through `getlist()`.
+
+    Built by `Request.form()` and cached on the request, so every reader of a
+    request shares one parse and one set of spooled uploads. Nothing closes
+    those for you; see `close()`.
+
+    Args:
+        all_values: every value per name, in order, defaulting to one per field
+    """
 
     __slots__ = ("_all", "fields", "files")
 
     def close(self) -> None:
-        """Release every spooled upload this form holds."""
+        """Release every spooled upload this form holds. Idempotent.
+
+        The framework never calls this: a form is cached on the request and the
+        request does not know when the last reader is finished with it. Left
+        unclosed, a spool survives until the `UploadedFile` is collected, so a
+        handler that is done with its uploads closes the form to give the
+        temporary files back at a moment it chooses. Fields stay readable
+        afterwards; the uploads do not.
+        """
         for uploaded in self.files.values():
             uploaded.close()
 
@@ -193,6 +320,13 @@ class FormData:
         files: dict[str, UploadedFile],
         all_values: dict[str, list[str]] | None = None,
     ) -> None:
+        """Take the parsed parts as they came out of the codec.
+
+        `all_values` is what `getlist` reads. Omitting it says the caller kept
+        no duplicates, and every field is then treated as having been submitted
+        exactly once -- which is true of a form built by hand, and not of one
+        parsed from a body, so `Request.form()` always passes it.
+        """
         self.fields = fields
         self.files = files
         self._all = all_values if all_values is not None else {
@@ -200,28 +334,47 @@ class FormData:
         }
 
     def getlist(self, name: str) -> list[str]:
-        """Every value submitted under ``name``, in order.
+        """Every value submitted under `name`, in order. Empty when there is none.
 
-        ``fields`` keeps the first, which is what most handlers want and what
-        the binding layer reads. The rest were being dropped with no way to see
-        them -- and a repeated field is exactly where an upstream proxy or WAF
-        may have read a *different* value than the application will.
+        `fields` keeps the first, which is what most handlers want and what the
+        binding layer reads. The rest were being dropped with no way to see them
+        -- and a repeated field is exactly where an upstream proxy or WAF may
+        have read a *different* value than the application will.
+
+        Text fields only. A repeated file field keeps its first upload in
+        `files` and the others are not retained.
         """
         return list(self._all.get(name, ()))
 
     def __getitem__(self, name: str) -> str:
+        """The first value submitted under `name`. Raises `KeyError` when absent.
+
+        Uploads are not reachable this way; read `files` for those.
+        """
         return self.fields[name]
 
     def get(self, name: str, default: str | None = None) -> str | None:
+        """The first value submitted under `name`, or `default` when absent.
+
+        Text fields only, like the rest of the mapping protocol -- an uploaded
+        file is not found here even when a part of that name was submitted.
+        Read `files` for those.
+        """
         return self.fields.get(name, default)
 
     def __contains__(self, name: str) -> bool:
+        """Whether a text field of that name was submitted. False for an upload."""
         return name in self.fields
 
     def __iter__(self) -> Any:
+        """Iterate the text field names, in submission order.
+
+        Uploads are not included; iterate `files` for those.
+        """
         return iter(self.fields)
 
     def __len__(self) -> int:
+        """How many distinct text fields were submitted, uploads excluded."""
         return len(self.fields)
 
 
@@ -232,7 +385,7 @@ _BOUNDARY_CHARS = frozenset(
 
 
 def _valid_boundary(value: bytes) -> bool:
-    """Whether ``value`` is a boundary the RFC allows.
+    """Whether `value` is a boundary the RFC allows.
 
     Unchecked, a boundary was whatever followed `boundary=` -- any length, any
     byte. That is where a parser differential lives: the proxy or WAF in front
@@ -278,7 +431,29 @@ _MISSING = object()
 
 
 class Request:
-    """A deliberately small request object backed directly by an ASGI scope."""
+    """A deliberately small request object backed directly by an ASGI scope.
+
+    Construction parses nothing. `method`, `path`, `scheme`, `client`,
+    `query_string` and `headers` hand back what the server already delivered.
+    `cookies`, `body()`, `json()` and `form()` each parse on first access and
+    cache the result on the request, so a middleware, a dependency and the
+    handler that all read the body pay for one read between them. `state` and
+    `path_params` allocate their container on first read and not before.
+
+    Behind wreath's own server there is no ASGI scope dict until something reads
+    `scope`: the properties come off a native request context, and reading one
+    header does not materialise the scope.
+
+    A request belongs to the task handling it. Nothing here takes a lock, so two
+    tasks awaiting `body()` on the same request at the same time race for the
+    receive channel.
+
+    Args:
+        scope: an ASGI HTTP scope dict, or wreath's native request context
+        receive: the ASGI receive callable, awaited only by `body()`
+        path_params: the router's decoded path parameters
+        limits: what this request may buffer in memory before it is refused
+    """
 
     __slots__ = (
         "_body",
@@ -304,6 +479,14 @@ class Request:
         path_params: dict[str, str] | None = None,
         limits: RequestLimits = DEFAULT_LIMITS,
     ) -> None:
+        """Wrap one request. Two backings, one interface.
+
+        A dict is an ASGI scope from a conforming server and is used as-is;
+        anything else is wreath's native request context, and `_scope` stays
+        None until `scope` is read so the dict is never built for a request
+        that does not ask for it. Every accessor below branches on which of the
+        two it holds.
+        """
         if isinstance(scope, dict):
             self._scope: dict[str, Any] | None = scope
             self._context: Any | None = None
@@ -325,10 +508,24 @@ class Request:
 
     @property
     def identity(self) -> Identity | None:
+        """Who the pipeline authenticated this request as, or None.
+
+        A plain read of what the pipeline stored. Reading it never runs the
+        authentication backend, and it is None until the backend has run --
+        which happens only for a route that requires authentication, so a public
+        route sees None even when the client sent perfectly good credentials.
+        Before the `identity` stage hook it is None on every request.
+        """
         return self._identity
 
     @property
     def authenticated(self) -> bool:
+        """Whether an `Identity` has been established for this request.
+
+        Exactly `identity is not None`, with the same caveat: False means
+        nothing has authenticated this request yet, not that the client is
+        anonymous.
+        """
         return self._identity is not None
 
     def _set_identity(self, identity: Identity | None) -> None:
@@ -336,6 +533,13 @@ class Request:
 
     @property
     def state(self) -> State:
+        """Per-request scratch space, shared by middleware, hooks and handlers.
+
+        A `State` namespace scoped to this request and thrown away with it; the
+        application-wide one is `app.state`. Allocated on first read and cached,
+        so a request whose hooks never touch it never builds one, and the
+        routing outcome the pipeline recorded is copied in when it is built.
+        """
         state = self._state
         if state is None:
             state = self._state = State()
@@ -362,6 +566,19 @@ class Request:
 
     @property
     def scope(self) -> dict[str, Any]:
+        """The ASGI scope dict for this request.
+
+        Behind a third-party server this is the dict the server passed in, so a
+        write is visible to anything else holding it. Behind wreath's own server
+        there is no dict until this is read, and the first read builds one and
+        caches it on both the request and the native context -- which is why the
+        properties above exist: each reads one field without paying for that.
+
+        Reach for it for the parts of ASGI wreath does not surface, such as
+        `root_path` or `extensions`. To override the peer or the scheme, use
+        `ProxyHeadersMiddleware`; writing to this dict after something has read
+        a property does not update the native context behind it.
+        """
         scope = self._scope
         if scope is None:
             context = self._context
@@ -371,6 +588,11 @@ class Request:
 
     @property
     def method(self) -> str:
+        """The HTTP method, uppercase, as the server parsed it.
+
+        A field read on either backing. Nothing is parsed or cached, and the
+        value never changes for the life of the request.
+        """
         context = self._context
         if context is not None:
             return context.method
@@ -380,6 +602,12 @@ class Request:
 
     @property
     def path(self) -> str:
+        """The percent-decoded request path, without the query string.
+
+        A field read on either backing -- nothing is parsed or cached. It is the
+        whole path the server delivered, prefixes included; the undecoded form
+        is in `scope["raw_path"]` when the server supplied one.
+        """
         context = self._context
         if context is not None:
             return context.path
@@ -389,6 +617,15 @@ class Request:
 
     @property
     def path_params(self) -> dict[str, str]:
+        """The path parameters the router captured, as raw strings.
+
+        Values are undecoded from the router's point of view -- conversion to
+        the types a handler declared is the binding layer's job, and a handler
+        reading this dict directly gets strings. Empty for a route with no
+        parameters, and for a request that never matched one; the dict is
+        allocated on the first read that finds none and then cached, so
+        mutating it is a way to pass a value along the rest of the request.
+        """
         params = self._path_params
         if params is None:
             params = self._path_params = {}
@@ -396,10 +633,28 @@ class Request:
 
     @path_params.setter
     def path_params(self, params: dict[str, str]) -> None:
+        """Replace the captured parameters wholesale.
+
+        The seam the application uses to attach a match to a request built
+        before routing ran. Assigning to it in a handler or middleware is
+        supported and immediately visible, but it overwrites what the router
+        captured -- the binding layer has already read these by the time a
+        handler runs, so a late write changes what later readers see and not
+        the arguments the handler was called with.
+        """
         self._path_params = params
 
     @property
     def client(self) -> tuple[str, int | None] | None:
+        """The peer's `(host, port)`, or None when the server did not report one.
+
+        The socket peer, which behind a load balancer or a reverse proxy is the
+        proxy and not the caller. `X-Forwarded-For` is deliberately ignored here
+        -- any client can send it. Add `ProxyHeadersMiddleware` with the proxy
+        networks you trust and it rewrites this from the forwarded header, in
+        which case the port is None because no forwarding header carries it.
+        Everything that buckets by caller, rate limiting included, reads this.
+        """
         context = self._context
         if context is not None:
             return cast("tuple[str, int | None] | None", context.client)
@@ -409,6 +664,15 @@ class Request:
 
     @property
     def scheme(self) -> str:
+        """The request scheme, `"http"` or `"https"`, defaulting to `"http"`.
+
+        The scheme of the connection this process accepted. Behind a
+        TLS-terminating proxy that connection is plaintext, so this reads
+        `"http"` for a request the browser made over HTTPS -- which silently
+        disables HSTS and breaks CSRF's origin check. `ProxyHeadersMiddleware`,
+        configured with the proxy networks you trust, restores it from
+        `X-Forwarded-Proto`; nothing else honours that header.
+        """
         context = self._context
         if context is not None:
             return cast(str, context.scheme)
@@ -439,6 +703,13 @@ class Request:
 
     @property
     def query_string(self) -> bytes:
+        """The raw query string, undecoded, without the `?`. Empty when absent.
+
+        Bytes, and never parsed here: a field read on either backing, with no
+        cache because there is nothing to cache. Handlers take query parameters
+        through `Query` markers rather than reading this; it is here for the
+        cases that need the bytes exactly as they arrived.
+        """
         context = self._context
         if context is not None:
             return context.query_string
@@ -448,6 +719,16 @@ class Request:
 
     @property
     def headers(self) -> list[tuple[bytes, bytes]]:
+        """The raw ASGI header list -- `(name, value)` pairs of bytes, in order.
+
+        Names arrive lowercase, as ASGI requires of servers, and a header sent
+        more than once appears more than once here. No copy is made: this is the
+        list the request is backed by, so appending to it or rewriting an entry
+        changes what every later reader sees -- except that it does not update
+        the name index `header()` may already have built, which keeps returning
+        the old value. Use `header()` to read one by name; it decodes the value
+        and resolves duplicates.
+        """
         context = self._context
         if context is not None:
             return context.headers
@@ -457,6 +738,23 @@ class Request:
 
     @property
     def cookies(self) -> dict[str, str]:
+        """The `Cookie` header parsed into a dict. Empty when there is none.
+
+        Parsed on first read and cached, so the session, the CSRF check and a
+        bearer-cookie backend share one parse. A cookie sent twice keeps its
+        first value, and only the first `Cookie` header is read. Values are the
+        octets as they arrived, decoded latin-1 -- neither unquoted nor
+        percent-decoded, because a cookie is bytes and only its writer knows how
+        it was encoded.
+
+        A `Cookie` header longer than `RequestLimits.max_cookie_bytes` is
+        refused rather than parsed, and refused again on every subsequent read
+        -- the failure is not cached, so a later reader sees the same 431 and
+        not an empty dict.
+
+        Raises:
+            RequestHeaderFieldsTooLarge: the header exceeds `max_cookie_bytes`
+        """
         # Parsed once and cached request-locally, like `_body` and
         # `_header_map`: repeated reads are common (session, CSRF, auth) and
         # each one otherwise rescanned the header list and rebuilt the dict.
@@ -506,6 +804,21 @@ class Request:
         return header_map
 
     def header(self, name: str | bytes, default: str | None = None) -> str | None:
+        """One header by name, decoded, or `default` when it was not sent.
+
+        `name` may be `str` or `bytes` and is matched case-insensitively -- it is
+        lowercased here, and ASGI servers deliver names already lowercased. A
+        header sent more than once yields its first value; read `headers` to see
+        the rest. The value is decoded latin-1, which is what HTTP header octets
+        are, so a UTF-8 header value arrives mojibaked unless you re-encode it.
+
+        The first lookup on a request scans the header list; the second builds a
+        name index, and every lookup after that is a dict hit.
+
+        Args:
+            name: header name, in any case
+            default: returned when the header is absent
+        """
         # ASGI servers must deliver header names already lowercased, so the
         # raw keys are usable directly; first value wins for duplicates.
         target = name.encode("latin-1") if isinstance(name, str) else name
@@ -526,17 +839,21 @@ class Request:
 
     @property
     def locale(self) -> str:
-        """The caller's preferred language tag, or ``"en"``.
+        """The caller's preferred language tag, or `"en"`.
 
-        Read from ``Accept-Language``, highest ``q`` first. This is what
-        :func:`wreath.temporal.relative` takes, so "3 hours ago" can be
-        translated later without finding every call site that renders one.
+        Read from `Accept-Language`, highest `q` first, with ties going to the
+        tag the client listed earlier. This is what `wreath.temporal.relative()`
+        takes, so "3 hours ago" can be translated later without finding every
+        call site that renders one.
 
         Deliberately forgiving: the header is attacker-controlled and a
         malformed one must never fail a request, so anything unparseable falls
-        back to the default rather than raising. Only the tag is returned — no
+        back to the default rather than raising. Only the tag is returned -- no
         negotiation against a list of supported languages, because the caller
         knows which those are and this does not.
+
+        Computed on every read from `header()`, which caches the header index
+        but not this result.
         """
         header = self.header("accept-language")
         if not header:
@@ -568,6 +885,24 @@ class Request:
         return best[2] if best is not None else "en"
 
     async def body(self) -> bytes:
+        """The whole request body as bytes, read once and cached.
+
+        The first call drains the ASGI receive channel; every call after it
+        returns the same object without touching the channel, so middleware, a
+        dependency and the handler can each ask for the body. There is no
+        streaming read: the body is materialised in full, bounded by
+        `RequestLimits.max_body_bytes`, and the limit is checked as chunks
+        arrive rather than after the whole thing is in memory.
+
+        A request that is refused or cut short caches an **empty** body, so a
+        second call returns `b""` instead of raising again. The channel is
+        already spent by then and re-reading it would hand back a truncated
+        payload; the caller that saw the exception is the one that knows.
+
+        Raises:
+            PayloadTooLarge: the body exceeds `RequestLimits.max_body_bytes`
+            ClientDisconnect: the peer went away before the body finished
+        """
         cached = self._body
         if cached is not _MISSING:
             return cast(bytes, cached)
@@ -625,6 +960,24 @@ class Request:
         return result
 
     async def json(self) -> Any:
+        """The body decoded as JSON, decoded once and cached.
+
+        Reads `body()`, so the same limits and the same read-once rule apply,
+        and the decoded value is cached separately -- two handlers asking for
+        the JSON share one decode. The `Content-Type` is not consulted: a body
+        that parses as JSON is returned whatever the client called it.
+
+        A malformed body raises on every call, since nothing is cached until a
+        decode succeeds. Note that this is a bare `ValueError`, which the
+        pipeline reports as a 500. A handler that declares a body parameter
+        instead of reading this gets the binding layer's 400 with the decoder's
+        message.
+
+        Raises:
+            ValueError: the body is not valid JSON
+            PayloadTooLarge: the body exceeds `RequestLimits.max_body_bytes`
+            ClientDisconnect: the peer went away before the body finished
+        """
         cached = self._json
         if cached is not _MISSING:
             return cached
@@ -633,11 +986,36 @@ class Request:
         return result
 
     async def form(self) -> FormData:
-        """Parse a urlencoded or multipart request body.
+        """Parse a urlencoded or multipart request body. Parsed once and cached.
 
-        Returns a :class:`FormData` mapping field names to string values,
-        with uploaded files (multipart parts carrying a filename) available
-        via :attr:`FormData.files`.
+        A `multipart/form-data` content type is parsed as multipart, and
+        anything else -- including a missing content type -- is parsed as
+        urlencoded. The urlencoded codec refuses nothing: a JSON body handed to
+        it comes back as one field whose name is the whole body, not an error.
+        Uploaded parts, meaning the ones carrying a filename, land in
+        `FormData.files`; every other part is a text field.
+
+        Reads `body()`, so the body limit applies first, and then the form
+        limits: `max_parts`, `max_part_header_bytes` and `max_part_bytes` inside
+        the parser, `max_form_memory_bytes` across the parts kept in memory, and
+        `max_form_fields` while scanning a urlencoded body. A part over
+        `spool_max_bytes` is written to a temporary file and does not count
+        against the in-memory total. **Every one of those limits refuses with a
+        413**, including the three the codec reports as a `ValueError`, which
+        this method converts: a limit that exists to refuse hostile input has to
+        report the caller's fault as the caller's, not as a 500.
+
+        A body the parser cannot read -- a bad boundary, an unterminated part, a
+        malformed header line -- is a different failure and still raises
+        `ValueError`.
+
+        The parsed form is cached on the request, so its spooled uploads live
+        until `FormData.close()` is called or the request is collected.
+
+        Raises:
+            ValueError: the multipart body is malformed
+            PayloadTooLarge: the body, the parts, or the field count exceed a limit
+            ClientDisconnect: the peer went away before the body finished
         """
         cached = self._form
         if cached is not _MISSING:
@@ -655,13 +1033,26 @@ class Request:
             limits = self._limits
             retained = 0
             all_values: dict[str, list[str]] = {}
-            for part in multipart_parse(
-                body,
-                boundary,
-                limits.max_parts,
-                limits.max_part_header_bytes,
-                limits.max_part_bytes,
-            ):
+            try:
+                parts = multipart_parse(
+                    body,
+                    boundary,
+                    limits.max_parts,
+                    limits.max_part_header_bytes,
+                    limits.max_part_bytes,
+                )
+            except ValueError as error:
+                # The parser reports a *limit* and a *malformed body* with the
+                # same type, so the message is what tells them apart. Only the
+                # limits become a 413: they refuse well-formed but oversized
+                # input, which is the caller's fault and answerable. A malformed
+                # body keeps raising `ValueError`, which is the documented
+                # contract for `form()` and a different conversation.
+                message = str(error)
+                if message.startswith(_MULTIPART_LIMIT_MESSAGES):
+                    raise PayloadTooLarge(message) from None
+                raise
+            for part in parts:
                 if part.name is None:
                     continue
                 # Bound the aggregate payload retained *in memory* across all
@@ -688,7 +1079,18 @@ class Request:
             return result
         fields = {}
         every: dict[str, list[str]] = {}
-        for key, value in parse_qs(body, self._limits.max_form_fields):
+        limit = self._limits.max_form_fields
+        try:
+            pairs = parse_qs(body, limit)
+        except ValueError:
+            # The one thing `parse_qs` refuses. It is not "malformed input" --
+            # the codec decodes anything else it is handed, so this call raises
+            # `ValueError` for the field-count bound and nothing else. A limit
+            # that exists to refuse hostile input has to refuse it as a client
+            # error: a bare `ValueError` reaches the boundary as an unhandled
+            # 500, which reports the caller's fault as the server's.
+            raise PayloadTooLarge(f"urlencoded form exceeds {limit} fields") from None
+        for key, value in pairs:
             fields.setdefault(key, value)
             every.setdefault(key, []).append(value)
         result = FormData(fields, {}, every)

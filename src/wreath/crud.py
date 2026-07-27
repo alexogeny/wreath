@@ -5,20 +5,19 @@ everyone's `password_hash`. Wreath's version is built to make that impossible by
 accident:
 
 * **Off unless you ask** — twice. It is enabled at the app level
-  (:meth:`Wreath.enable_crud`) *and* opted into per model (you call
-  :func:`crud_router` / :meth:`Wreath.crud` for each one). A model is never
-  exposed just because it exists.
+  (`Wreath.enable_crud()`) *and* opted into per model (you call `crud_router()` /
+  `Wreath.crud()` for each one). A model is never exposed just because it exists.
 * **Sensitive fields are hidden and unwritable by default.** Any column whose
-  name looks like a secret — ``password``, ``*_hash``, ``token``, ``secret``,
-  ``salt``, ``api_key``, ``ssn``, … — is excluded from both responses and accepted
-  input. To expose one you must name it explicitly in ``expose=(...)``, an
+  name looks like a secret — `password`, `*_hash`, `token`, `secret`,
+  `salt`, `api_key`, `ssn`, … — is excluded from both responses and accepted
+  input. To expose one you must name it explicitly in `expose=(...)`, an
   auditable, deliberate act.
 
     router = crud_router(Widget, open_session, expose=(), readonly=("owner_id",))
     app.include_router(router)          # after app.enable_crud()
 
-Routes (any subset via ``operations=``): ``GET /`` (paginated list),
-``GET /{id}``, ``POST /``, ``PATCH /{id}``, ``DELETE /{id}``.
+Routes (any subset via `operations=`): `GET /` (paginated list),
+`GET /{id}`, `POST /`, `PATCH /{id}`, `DELETE /{id}`.
 """
 
 from __future__ import annotations
@@ -49,7 +48,7 @@ __all__ = ["SENSITIVE_FIELD", "Access", "crud_router", "sensitive_fields"]
 class Access:
     """A per-operation authorization rule for generated CRUD routes.
 
-    Build one with a factory and hand it to ``crud_router(authorize=...)``, either
+    Build one with a factory and hand it to `crud_router(authorize=...)`, either
     as a single rule for every operation or keyed by operation / group::
 
         crud_router(Widget, open_session, authorize={
@@ -59,15 +58,15 @@ class Access:
             "delete": Access.deny(),              # nobody, ever (403)
         })
 
-    Keys may be an operation (``list``/``retrieve``/``create``/``update``/
-    ``delete``), a group (``read`` = list+retrieve, ``write`` = create+update+
-    delete), or ``"*"`` as the default. A more specific key wins.
+    Keys may be an operation (`list`/`retrieve`/`create`/`update`/
+    `delete`), a group (`read` = list+retrieve, `write` = create+update+
+    delete), or `"*"` as the default. A more specific key wins.
 
-    :meth:`cedar` attaches a policy decision that the app's configured
-    :class:`~wreath.authorization.CedarAuthorizer` resolves — that authorizer (its
-    principal/resource/entity mappers) is the adapter layer for richer evaluations.
+    `Access.cedar()` attaches a policy decision that the app's configured
+    `CedarAuthorizer` resolves — that authorizer (its principal/resource/entity
+    mappers) is the adapter layer for richer evaluations.
     For decisions that need the *loaded row* (ownership, tenant match), pass
-    ``crud_router(object_authorizer=...)`` instead.
+    `crud_router(object_authorizer=...)` instead.
     """
 
     kind: str
@@ -88,7 +87,7 @@ class Access:
 
     @classmethod
     def roles(cls, *names: str, mode: str = "all") -> Access:
-        """Callers holding these roles (``mode="all"`` requires every one)."""
+        """Callers holding these roles (`mode="all"` requires every one)."""
         return cls("roles", tuple(names), _mode(mode))
 
     @classmethod
@@ -103,11 +102,11 @@ class Access:
 
     @classmethod
     def cedar(cls, *, action: str, resource: Any) -> Access:
-        """A Cedar policy decision (needs a configured ``CedarAuthorizer``).
+        """A Cedar policy decision (needs a configured `CedarAuthorizer`).
 
-        ``resource`` is a ``Type::"{id}"`` template (``{id}`` and other path
-        params are filled in), a plain ``'Type::"id"'`` string, or a
-        ``(request) -> resource`` callable.
+        `resource` is a `Type::"{id}"` template (`{id}` and other path
+        params are filled in), a plain `'Type::"id"'` string, or a
+        `(request) -> resource` callable.
         """
         return cls("cedar", action=action, resource=resource)
 
@@ -138,7 +137,7 @@ _MAX_PAGE_SIZE = 100
 
 
 def sensitive_fields(model: type) -> frozenset[str]:
-    """Column names of ``model`` that look sensitive (hidden by default)."""
+    """Column names of `model` that look sensitive (hidden by default)."""
     return frozenset(
         name for name in _as_model(model).__wreath_column_map__ if SENSITIVE_FIELD.search(name)
     )
@@ -169,31 +168,58 @@ def crud_router(
     authorize: Access | Mapping[str, Access] | None = None,
     object_authorizer: Callable[..., Any] | None = None,
 ) -> Any:
-    """Build a :class:`~wreath.router.Router` of CRUD routes for ``model``.
+    """Build a `Router` of CRUD routes for `model`, mounted under `prefix`.
+
+    `model` must have a single-column primary key; anything else raises
+    `ValueError`. `prefix` defaults to the lower-cased model name, and so does
+    the OpenAPI tag when `tags` is empty.
+
+    There are two ways to control what leaves the server and they are mutually
+    exclusive. `expose` is the deny-list's escape hatch: `SENSITIVE_FIELD` hides
+    every column whose *name* looks like a secret, and `expose` names the ones to
+    send anyway. `fields` is an allow-list, and the answer to the deny-list's
+    real weakness — `dob`, `iban`, `recovery_answer`, and `pw` do not look like
+    secrets. Naming what may leave is the only form that stays correct when
+    somebody adds a column. Passing both raises `ValueError`, as does naming a
+    column in `fields` that the model does not have.
+
+    Sensitive columns are unwritable as well as unreadable, and `expose` does not
+    change that: no CRUD route will ever set one. Change a password through a
+    purpose-built endpoint, not through `PATCH`. The primary key and everything
+    in `readonly` are likewise refused on input — silently dropped from the body
+    rather than rejected, so a client sending them gets the row it would have got.
+
+    `authorize` rules attach as route metadata that the app enforces in its
+    single-pass pipeline, so a denied write never touches the database.
+    `Access.deny()` is the exception: it is enforced inside the handler and answers
+    403 whatever the identity. Rules default to `Access.public()`.
+
+    `object_authorizer` is the seam for decisions that need the row itself —
+    ownership, tenant match, a Cedar evaluation over the object's own attributes.
+    It runs after the row is loaded on retrieve, update and delete, on the new
+    instance before create commits, and on **every row of a list page**, which is
+    why a page can come back shorter than `size`. It may be async, and it returns
+    a bool or an `AuthorizationDecision` — anything falsey, or a decision whose
+    `allowed` is false, answers 403.
+
+    `page_size` sets the default page size for `GET /`. A `size` query
+    parameter overrides it and is clamped to 100; `page` is clamped to
+    `pagination.MAX_PAGE`, because `OFFSET` makes the database walk every
+    skipped row and an unbounded page number is a table scan on request.
 
     Args:
-        open_session: ``(request) -> Session`` — a fresh ORM session per request;
-            the CRUD handlers close it when done.
-        expose: sensitive columns to include in responses anyway (explicit opt-in).
-        fields: the *only* columns to serialize. An allow-list, and the answer to
-            the deny-list's real weakness: `SENSITIVE_FIELD` matches names that
-            look like secrets, and `dob`, `iban`, `recovery_answer`, and `pw` do
-            not look like secrets. Naming what may leave is the only form that
-            stays correct when somebody adds a column. Mutually exclusive with
-            `expose`, which is the deny-list's escape hatch.
-        readonly: columns excluded from create/update input (e.g. server-set).
-        exclude: columns never serialized at all.
-        operations: which of list/retrieve/create/update/delete to generate.
-        authorize: an :class:`Access` rule for every operation, or a mapping keyed
-            by operation / group / ``"*"``. Roles, permissions, and Cedar policies
-            attach as route metadata the app enforces in its single-pass pipeline
-            (a denied write never touches the database); ``Access.deny()`` answers
-            403 unconditionally. Rules default to :meth:`Access.public`.
-        object_authorizer: ``(request, op, instance) -> bool | AuthorizationDecision``
-            (optionally async) run *after* the row is loaded on retrieve / update /
-            delete and on the new instance for create — the seam for row-level
-            checks (ownership, tenant) and richer Cedar evaluations that need the
-            object's own attributes. Returning falsey answers 403.
+        open_session: `(request) -> Session`, one per request, closed by the handler
+        expose: sensitive columns to include in responses anyway, an explicit opt-in
+        fields: the *only* columns to serialize; mutually exclusive with `expose`
+        readonly: columns excluded from create and update input, e.g. server-set ones
+        exclude: columns never serialized at all
+        operations: which of list/retrieve/create/update/delete to generate
+        page_size: default page size for `GET /`, raisable per request up to 100
+        authorize: one `Access` rule, or a mapping keyed by operation, group or `"*"`
+        object_authorizer: `(request, op, instance) -> bool`, optionally async
+
+    Raises:
+        ValueError: the model has a composite primary key, or the field lists conflict
     """
     from .router import Router
 
@@ -396,7 +422,7 @@ _INTEGER_PG_TYPES = frozenset({"int2", "int4", "int8", "smallint", "integer", "b
 
 
 def _coerce_pk_for(model: type) -> Callable[[str], Any]:
-    """Build the path-segment -> primary-key conversion for ``model``.
+    """Build the path-segment -> primary-key conversion for `model`.
 
     Driven by the declared column type rather than by what the segment *looks
     like*: coercing any digit-string to `int` turned `/tokens/12` into a lookup
@@ -420,7 +446,7 @@ def _coerce_pk_for(model: type) -> Callable[[str], Any]:
 
 
 def _rule_for(authorize: Access | Mapping[str, Access] | None, op: str) -> Access:
-    """Resolve the :class:`Access` rule for ``op`` (op > group > ``"*"`` > public)."""
+    """Resolve the `Access` rule for `op` (op > group > `"*"` > public)."""
     if authorize is None:
         return Access.public()
     if isinstance(authorize, Access):
@@ -436,9 +462,9 @@ def _rule_for(authorize: Access | Mapping[str, Access] | None, op: str) -> Acces
 
 
 def _apply_requirement(handler: Any, rule: Access) -> Any:
-    """Attach ``rule`` to ``handler`` as auth metadata the app enforces (single-pass).
+    """Attach `rule` to `handler` as auth metadata the app enforces (single-pass).
 
-    ``public`` and ``deny`` attach nothing — ``deny`` is enforced inside the
+    `public` and `deny` attach nothing — `deny` is enforced inside the
     handler so it 403s regardless of identity.
     """
     from ._auth.decorators import authenticated, authorize, permissions, roles
@@ -457,7 +483,7 @@ def _apply_requirement(handler: Any, rule: Access) -> Any:
 
 
 def _resource_fn(resource: Any) -> Any:
-    """Normalize a Cedar ``resource`` into what ``@authorize`` accepts."""
+    """Normalize a Cedar `resource` into what `@authorize` accepts."""
     if callable(resource):
         return resource
     if isinstance(resource, str) and "{" in resource:

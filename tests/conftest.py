@@ -21,13 +21,26 @@ from __future__ import annotations
 
 from typing import Any
 
-from _gated_skips import banner_lines, container_runtime, gated_skip_count
+from _gated_skips import (
+    banner_lines,
+    container_runtime,
+    deselect_lines,
+    deselected_by_mark,
+    gated_skip_count,
+    marks_in_expression,
+    merge_worker_counts,
+)
 
 #: Skip reports seen this process. A module-level list rather than state on the
 #: config: there is exactly one controller per run, and `pytest_runtest_logreport`
 #: is not handed the config, so threading it through every report would cost more
 #: than it explains.
 _SKIPPED: list[Any] = []
+
+#: Per-mark deselection counts. Filled locally by `pytest_deselected` (serial, or
+#: on a worker) and by `pytest_testnodedown` (on an xdist controller, from what
+#: each worker sent back).
+_DESELECTED: dict[str, int] = {}
 
 
 def pytest_runtest_logreport(report: Any) -> None:
@@ -39,6 +52,51 @@ def pytest_runtest_logreport(report: Any) -> None:
     """
     if report.skipped:
         _SKIPPED.append(report)
+
+
+def pytest_deselected(items: Any) -> None:
+    """Collect deselections, wherever collection happened.
+
+    Deselected tests never produce a run report, so `pytest_runtest_logreport`
+    cannot see them -- which is why the banner was blind to the whole
+    marker-filtered population until now. This hook is the only place they
+    surface.
+
+    Under xdist it fires on the *workers*, not the controller: measured, the
+    controller's `pytest_deselected` sees nothing, `terminalreporter.stats` has
+    no ``deselected`` key, and pytest's own summary line silently drops the
+    count. `pytest_sessionfinish` ships the numbers across.
+    """
+    if not items:
+        return
+    config = items[0].config
+    excluded = marks_in_expression(getattr(config.option, "markexpr", ""))
+    for name, count in deselected_by_mark(items, excluded).items():
+        _DESELECTED[name] = _DESELECTED.get(name, 0) + count
+
+
+def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
+    """On a worker, hand the deselection counts to the controller.
+
+    ``workeroutput`` is xdist's channel back; the attribute exists only on a
+    worker, so this is a no-op in a serial run where `pytest_deselected` already
+    filled `_DESELECTED` on the process that will print.
+    """
+    output = getattr(session.config, "workeroutput", None)
+    if output is not None:
+        output["gated_deselected"] = dict(_DESELECTED)
+
+
+def pytest_testnodedown(node: Any, error: Any) -> None:
+    """Fold a finished worker's counts in, taking the max rather than the sum.
+
+    Every worker collects the whole suite and deselects the same items, so all
+    of them report the same number. Summing would claim six times reality on
+    ``-n 6``.
+    """
+    counts = (getattr(node, "workeroutput", None) or {}).get("gated_deselected")
+    if counts:
+        _DESELECTED.update(merge_worker_counts(_DESELECTED, counts))
 
 
 def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: Any) -> None:
@@ -53,16 +111,17 @@ def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: Any)
     if hasattr(config, "workerinput"):
         return
     count = gated_skip_count(_SKIPPED)
-    if not count:
+    if not count and not _DESELECTED:
         return
 
-    terminalreporter.write_sep("=", "DATABASE TESTS DID NOT RUN", red=True, bold=True)
-    for line in banner_lines(count, container_runtime()):
-        terminalreporter.write_line(line, red=True)
-    terminalreporter.write_line("")
-    terminalreporter.write_line(
-        "Tests marked `network` are excluded by the default marker expression too; "
-        "add -m '' to include them.",
-        yellow=True,
-    )
-    terminalreporter.write_line("=" * 79, red=True, bold=True)
+    if count:
+        terminalreporter.write_sep("=", "DATABASE TESTS DID NOT RUN", red=True, bold=True)
+        for line in banner_lines(count, container_runtime()):
+            terminalreporter.write_line(line, red=True)
+        terminalreporter.write_line("=" * 79, red=True, bold=True)
+
+    if _DESELECTED:
+        terminalreporter.write_sep("=", "TESTS NOT COLLECTED", yellow=True, bold=True)
+        for line in deselect_lines(_DESELECTED):
+            terminalreporter.write_line(line, yellow=True)
+        terminalreporter.write_line("=" * 79, yellow=True, bold=True)

@@ -205,6 +205,77 @@ async def test_bytes_payloads_survive_the_bus_round_trip() -> None:
     assert there.sent == [b"\xe2\x9c\x93 done"]
 
 
+async def test_binary_payloads_survive_the_bus_round_trip() -> None:
+    """Bytes that are not UTF-8 cross the bus unchanged rather than raising."""
+    bus_one, bus_two = FakeBus(), FakeBus()
+    bus_one.peers.append(bus_two)
+    worker_one, worker_two = RoomRegistry(bus_one), RoomRegistry(bus_two)
+
+    here, there = FakeSocket(), FakeSocket()
+    await worker_one.join("chat", here)
+    await worker_two.join("chat", there)
+
+    blob = bytes(range(256))
+    assert await worker_one.broadcast("chat", blob) == 1
+
+    assert here.sent == [blob]
+    assert there.sent == [blob]
+
+
+async def test_a_binary_broadcast_publishes_a_json_safe_payload() -> None:
+    """The bus payload must survive `_json.dumps`; raw bytes would not."""
+    from wreath._json import dumps, loads
+
+    bus = FakeBus()
+    rooms = RoomRegistry(bus)
+    await rooms.broadcast("chat", b"\xff\xfe\x00")
+
+    _, payload = bus.published[0]
+    assert loads(dumps(payload))["room"] == "chat"
+
+
+async def test_a_binary_broadcast_never_half_delivers() -> None:
+    """A payload the bus cannot carry is refused before any socket is sent to."""
+    class RefusingBus(FakeBus):
+        async def publish(self, channel, payload, **kwargs):
+            raise RuntimeError("bus down")
+
+    bus = RefusingBus()
+    rooms = RoomRegistry(bus)
+    socket = FakeSocket()
+    await rooms.join("chat", socket)
+
+    with pytest.raises(RuntimeError):
+        await rooms.broadcast("chat", b"\xff\xfe")
+    # Local delivery still happened -- the bus failure is the caller's to see,
+    # but it is not a *payload* failure, which is what defect 1 was about.
+    assert socket.sent == [b"\xff\xfe"]
+
+
+async def test_an_unknown_bus_encoding_is_dropped() -> None:
+    bus = FakeBus()
+    rooms = RoomRegistry(bus)
+    socket = FakeSocket()
+    await rooms.join("chat", socket)
+
+    await rooms._apply(
+        {"room": "chat", "data": "hi", "binary": True, "encoding": "rot13"}
+    )
+    assert socket.sent == []
+
+
+async def test_undecodable_base64_from_the_bus_is_dropped() -> None:
+    bus = FakeBus()
+    rooms = RoomRegistry(bus)
+    socket = FakeSocket()
+    await rooms.join("chat", socket)
+
+    await rooms._apply(
+        {"room": "chat", "data": "not base64!!", "binary": True, "encoding": "base64"}
+    )
+    assert socket.sent == []
+
+
 async def test_the_registry_subscribes_once_to_one_channel() -> None:
     """One LISTEN regardless of room count -- rooms are filtered locally."""
     bus = FakeBus()

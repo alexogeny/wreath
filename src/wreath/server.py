@@ -1,19 +1,19 @@
 """Wreath's optional native HTTP/1.1 server facade.
 
 Wreath remains a normal ASGI framework: it runs behind Uvicorn or any other
-conforming server without importing this module. ``wreath.server`` is an
+conforming server without importing this module. `wreath.server` is an
 *additional* way to serve an ASGI application, moving the HTTP hot path into a
 Wreath-owned protocol implementation that runs on top of an asyncio (or uvloop)
 transport.
 
 The protocol implementation is selected at import time:
 
-1. ``WREATH_PURE`` set -> the pure-Python reference (``wreath._pure.server``).
-2. otherwise the native extension (``wreath._native._server``) when built.
+1. `WREATH_PURE` set -> the pure-Python reference (`wreath._pure.server`).
+2. otherwise the native extension (`wreath._native._server`) when built.
 3. falling back to the pure reference if the extension is absent.
 
-Server availability is independent of the framework accelerator ``_core``: a
-missing ``_server`` extension never disables JSON, routing, codec, or parser
+Server availability is independent of the framework accelerator `_core`: a
+missing `_server` extension never disables JSON, routing, codec, or parser
 acceleration.
 
 This server is **experimental** until fuzzing, sanitizer, soak, and security
@@ -27,7 +27,6 @@ import importlib
 import importlib.util
 import os
 import signal
-import socket
 import warnings
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -105,7 +104,7 @@ def _create_recorder(config: ServerConfig) -> Any:
 def _create_projector(recorder: Any, config: ServerConfig, app: Any) -> tuple[Any, Any]:
     """Build the off-path projector for a run (and its OTLP export pipeline).
 
-    Returns ``(projector, export)`` where either may be None. The projector is
+    Returns `(projector, export)` where either may be None. The projector is
     the ring's only consumer: without it a running recorder's completion cells
     accumulate and drop, so one is created whenever a recorder exists. The export
     pipeline is added only when OTLP is enabled and given an endpoint; otherwise
@@ -145,7 +144,7 @@ def _create_projector(recorder: Any, config: ServerConfig, app: Any) -> tuple[An
 def _create_recording(recorder: Any, config: ServerConfig, app: Any) -> tuple[Any, Any]:
     """Build the forensic recording sink and runtime arm registry for a run.
 
-    Returns ``(sink, arm_registry)``, either of which may be None. Both are
+    Returns `(sink, arm_registry)`, either of which may be None. Both are
     Forensic-only: a `RecordingPolicy` is the redaction/memory ceiling the runtime
     arm registry cannot exceed, and (when a path is configured) the async `WFR1`
     sink drains committed capture slabs to an owner-only file off the loop.
@@ -185,9 +184,19 @@ _VALID_PROTOCOLS: frozenset[str] = frozenset({"http/1.1", "h2", "h3"})
 class TLSConfig:
     """TLS material for TCP (HTTP/1.1, HTTP/2) and the QUIC backend (HTTP/3).
 
-    ``TLSConfig`` builds the TCP :class:`ssl.SSLContext` and also supplies the
+    `TLSConfig` builds the TCP `ssl.SSLContext` and also supplies the
     certificate/key paths to the QUIC backend. Private-key material is never
-    extracted from a Python ``SSLContext``.
+    extracted from a Python `SSLContext`.
+
+    That is why `h3` requires this rather than an `ssl=` context: the QUIC
+    backend needs the files, and a built `SSLContext` will not give them up.
+    Paths are read by the backend at bind time, so they must remain readable for
+    the life of the process.
+
+    Args:
+        certfile: PEM certificate chain, leaf first.
+        keyfile: PEM private key for `certfile`.
+        password: Passphrase for an encrypted key; None when the key is unencrypted.
     """
 
     certfile: str | os.PathLike[str]
@@ -195,7 +204,22 @@ class TLSConfig:
     password: str | None = None
 
     def build_ssl_context(self, protocols: tuple[HttpProtocolName, ...]) -> SSLContext:
-        """Build a server ``SSLContext`` advertising ALPN for the TCP protocols."""
+        """Build a server `SSLContext` advertising ALPN for the TCP protocols.
+
+        Only `http/1.1` and `h2` reach ALPN; `h3` is negotiated by QUIC and
+        is filtered out here. A protocol set with neither TCP protocol produces a
+        context that advertises no ALPN at all rather than an empty list.
+
+        Args:
+            protocols: The configured protocol set, in preference order.
+
+        Returns:
+            A `PROTOCOL_TLS_SERVER` context with the certificate chain loaded.
+
+        Raises:
+            OSError: A certificate or key file could not be read.
+            ssl.SSLError: The material is malformed, or `password` is wrong.
+        """
         import ssl as _ssl
 
         context = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
@@ -230,7 +254,12 @@ class _DefaultResponseHeaders:
 
 
 class EnvConfigWarning(UserWarning):
-    """Warns that a variable declared critical for boot is unset or empty."""
+    """Warns that a variable declared critical for boot is unset or empty.
+
+    A warning rather than an error on purpose: only the application knows
+    whether it can run degraded, so this reports and lets it decide. Filter it
+    to `error` to make a missing variable fatal.
+    """
 
 
 def _env_bool(value: str) -> bool:
@@ -286,6 +315,57 @@ _SERVER_ENV_REGISTRY: tuple[_EnvSpec, ...] = (
 
 @dataclass(frozen=True, slots=True)
 class ServerConfig:
+    """Everything one server run is configured with. Frozen; validated at construction.
+
+    Constructing it is the whole validation: a bad port, a non-printable server
+    header, a low watermark above its high one, an unknown or duplicated
+    protocol name -- each raises here, so a misconfigured deployment fails at
+    boot rather than on a request. `from_env` and
+    `configure_from_env` build one from `WREATH_*` variables.
+
+    The limits are a request budget, not tuning knobs: each one bounds work a
+    single untrusted peer can cause. The pairs exist because a byte count alone
+    does not bound work -- an empty WebSocket continuation frame and an empty
+    ASGI message both cost dispatch while adding no bytes, so the message and
+    fragment counters bound what the byte watermarks cannot.
+
+    Defaults bind `127.0.0.1`, not `0.0.0.0`: reaching the network is a
+    decision, not something that happens by omission.
+
+    Args:
+        host: Bind address for both the TCP listener and the HTTP/3 UDP socket.
+        port: 0 asks the OS for a port; HTTP/3 then binds the one TCP received.
+        backlog: Listen backlog. Must be positive.
+        keep_alive_timeout: Seconds an idle connection is held between requests.
+        request_timeout: Seconds one request may take before the connection is closed.
+        shutdown_timeout: Seconds in-flight responses get to drain during a graceful close.
+        server_header: Value for the `Server` header. Printable ASCII, or None to send none.
+        date_header: Send a `Date` header, refreshed once a second by the running server.
+        max_request_line: Bytes in the request line before 414.
+        max_header_count: Header fields before 431.
+        max_header_bytes: Bytes in the whole head before 431.
+        max_body_bytes: Request-body bytes before 413; also caps one WebSocket message.
+        read_high_water: Queued request-body bytes before reading is paused.
+        read_high_water_messages: Queued ASGI messages before reading is paused.
+        response_high_water: Unacknowledged response bytes before ASGI `send` waits.
+        response_low_water: Where a waiting `send` resumes. Must be below the high mark.
+        response_high_water_segments: Unacknowledged response segments before `send` waits.
+        response_low_water_segments: Where a waiting `send` resumes. Must be below the high mark.
+        max_ws_fragments: Fragments in one WebSocket message; empty ones count.
+        lifespan: `"on"` requires it, `"off"` skips it, `"auto"` runs it if supported.
+        protocols: Non-empty, no duplicates, drawn from `http/1.1`, `h2`, `h3`.
+        max_concurrent_streams: Concurrent HTTP/2 and HTTP/3 streams per connection.
+        initial_stream_window: Initial per-stream flow-control window, in bytes.
+        initial_connection_window: Initial per-connection flow-control window, in bytes.
+        max_header_list_bytes: Decoded header-list ceiling for HTTP/2 and HTTP/3.
+        hpack_table_bytes: HPACK dynamic-table size. 0 disables the dynamic table.
+        qpack_table_bytes: QPACK dynamic-table size. 0 disables the dynamic table.
+        qpack_blocked_streams: Streams that may block on QPACK state. 0 forbids blocking.
+
+    Raises:
+        ValueError: Any bound is out of range, or the protocol set is malformed.
+    """
+
     host: str = "127.0.0.1"
     port: int = 8000
     backlog: int = 2048
@@ -415,14 +495,28 @@ class ServerConfig:
         env: Mapping[str, str] | None = None,
         **overrides: Any,
     ) -> ServerConfig:
-        """Build a configuration from ``WREATH_*`` environment variables.
+        """Build a configuration from `WREATH_*` environment variables.
 
-        Precedence is defaults < environment < explicit ``overrides``. When
-        ``env`` is omitted the process environment is read exactly once, via a
-        single native ``read_osenv`` crossing; pass a mapping (e.g. a snapshot
+        Precedence is defaults < environment < explicit `overrides`. When
+        `env` is omitted the process environment is read exactly once, via a
+        single native `read_osenv` crossing; pass a mapping (e.g. a snapshot
         already taken for a required-variable check) to avoid crossing at all.
         An unset or empty variable leaves the field at its default. A value that
-        will not coerce raises ``ValueError`` naming the offending variable.
+        will not coerce raises `ValueError` naming the offending variable.
+
+        Only the fields in the `WREATH_*` registry are environment-settable;
+        the HTTP/2 and HTTP/3 window sizes are deliberately code-only, being
+        tuning an operator has no way to choose well from outside.
+
+        Args:
+            env: A mapping to read instead of the process environment.
+            overrides: Field values that win over both the environment and the defaults.
+
+        Returns:
+            A validated configuration.
+
+        Raises:
+            ValueError: A variable would not coerce, or the resulting field is out of range.
         """
         snapshot = read_osenv() if env is None else env
         values: dict[str, Any] = {}
@@ -451,7 +545,17 @@ def missing_required_env(
     required: Iterable[str],
     env: Mapping[str, str] | None = None,
 ) -> list[str]:
-    """Return the names in ``required`` that are unset or empty in the env."""
+    """Return the names in `required` that are unset or empty in the env.
+
+    Empty counts as missing: an exported-but-blank variable is a deployment
+    mistake, not a configured empty value.
+
+    Args:
+        env: A mapping to check instead of the process environment.
+
+    Returns:
+        The missing names, in the order given. Empty when nothing is missing.
+    """
     snapshot = read_osenv() if env is None else env
     return [name for name in required if not snapshot.get(name)]
 
@@ -463,14 +567,30 @@ def configure_from_env(
     warn: bool = True,
     **overrides: Any,
 ) -> tuple[ServerConfig, list[str]]:
-    """Build a :class:`ServerConfig` and report missing critical variables.
+    """Build a `ServerConfig` and report missing critical variables.
 
     The environment is snapshotted once and reused for both the required-variable
     check and field binding, so the whole boot path costs a single native
-    crossing. Names in ``required`` that are unset or empty are returned and,
-    when ``warn`` is set, emitted as :class:`EnvConfigWarning`. ``required`` is
+    crossing. Names in `required` that are unset or empty are returned and,
+    when `warn` is set, emitted as `EnvConfigWarning`. `required` is
     how an app declares boot-critical keys it reads itself (a database DSN, a
     signing secret) that have no ServerConfig field.
+
+    A missing required variable is reported, never fatal -- the caller decides
+    whether to boot without it. A variable that is *present but uncoercible*
+    still raises, because that is a typo rather than an absence.
+
+    Args:
+        env: A mapping to read instead of the process environment.
+        required: Boot-critical names with no `ServerConfig` field of their own.
+        warn: Emit an `EnvConfigWarning` per missing name.
+        overrides: Passed to `ServerConfig`; they win over the environment.
+
+    Returns:
+        `(config, missing)` -- the built configuration and the missing names.
+
+    Raises:
+        ValueError: An environment value would not coerce, or a field is out of range.
     """
     snapshot = read_osenv() if env is None else env
     missing = [name for name in required if not snapshot.get(name)]
@@ -504,21 +624,36 @@ def _native_server_module() -> Any | None:
         return None
 
 
+def _require_native_h2() -> Any:
+    """The native server extension, or `RuntimeError` naming what is missing.
+
+    Called from `_resolve_tls` at startup, so an `h2` listener that could never
+    serve a request is refused before anything binds. Called again from
+    `_select_tcp_protocol`, which is the only other way to reach a protocol
+    class -- constructing a `Server` directly bypasses `serve`.
+    """
+    ext = _native_server_module()
+    if ext is None or not hasattr(ext, "Http2Protocol"):
+        raise RuntimeError(
+            "HTTP/2 (h2) requires the native wreath._native._server extension; "
+            "build it, or remove 'h2' from config.protocols."
+        )
+    return ext
+
+
 def _select_tcp_protocol(config: ServerConfig) -> type:
     """Choose the TCP protocol class for the configured protocol set.
 
-    ``h2`` requires the native extension. A combined ``http/1.1``+``h2`` listener
-    negotiates via TLS ALPN through ``NegotiatingHttpProtocol``.
+    `h2` requires the native extension, which `serve` has already insisted on;
+    the check is repeated here because a `Server` built by hand never went
+    through it. A combined `http/1.1`+`h2` listener negotiates via TLS ALPN
+    through `NegotiatingHttpProtocol`.
     """
     protocols = config.protocols
     wants_h1 = "http/1.1" in protocols
     wants_h2 = "h2" in protocols
     if wants_h2:
-        ext = _native_server_module()
-        if ext is None or not hasattr(ext, "Http2Protocol"):
-            raise RuntimeError(
-                "HTTP/2 (h2) requires the native wreath._native._server extension"
-            )
+        ext = _require_native_h2()
         if not wants_h1:
             return cast(type, ext.Http2Protocol)
         return NegotiatingHttpProtocol
@@ -528,11 +663,25 @@ def _select_tcp_protocol(config: ServerConfig) -> type:
 class NegotiatingHttpProtocol(asyncio.Protocol):
     """Selects HTTP/1.1 or HTTP/2 from the TLS ALPN result after the handshake.
 
-    A single TLS listener can serve both protocols: ``connection_made`` reads the
-    negotiated ALPN protocol and delegates every subsequent callback to the
-    matching native protocol. Missing/unknown/unconfigured ALPN closes the
-    transport without invoking ASGI; the first application bytes are never
-    inspected to guess the protocol.
+    A single TLS listener can serve both protocols: `connection_made` reads the
+    negotiated ALPN protocol and delegates every subsequent `asyncio.Protocol`
+    callback to the matching native protocol.
+
+    The mapping is exact and closed. `h2` selects HTTP/2; `http/1.1` and *no
+    ALPN at all* select HTTP/1.1, the latter because a client too old to offer
+    ALPN, or a plaintext connection, is an HTTP/1.1 client. Anything else closes
+    the transport without invoking ASGI. The first application bytes are never
+    inspected to guess a protocol, so a client cannot reach a protocol it did not
+    negotiate.
+
+    Selected only for a combined `http/1.1` + `h2` listener, and only when the
+    native server extension is present -- a single-protocol listener instantiates
+    its protocol directly. If the extension turns out to be missing at connection
+    time the transport is closed rather than downgraded.
+
+    Args:
+        registry: The server's live-protocol set; the delegate registers itself in it.
+        recorder: The run's Flight Recorder, or None. Passed straight to the delegate.
     """
 
     def __init__(
@@ -551,6 +700,13 @@ class NegotiatingHttpProtocol(asyncio.Protocol):
         self._delegate: Any = None
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        """Read the ALPN result, build the delegate, and hand it the transport.
+
+        The only callback that decides anything; the rest forward. When no
+        delegate is chosen the transport is closed here and every later callback
+        becomes a no-op, so a rejected connection reaches neither ASGI nor a
+        protocol implementation.
+        """
         ssl_object = transport.get_extra_info("ssl_object")
         alpn = ssl_object.selected_alpn_protocol() if ssl_object is not None else None
         ext = _native_server_module()
@@ -572,23 +728,28 @@ class NegotiatingHttpProtocol(asyncio.Protocol):
         self._delegate.connection_made(transport)
 
     def data_received(self, data: bytes) -> None:
+        """Forward to the delegate. Discards the bytes when ALPN chose none."""
         if self._delegate is not None:
             self._delegate.data_received(data)
 
     def eof_received(self) -> bool | None:
+        """Forward to the delegate. Returns None with no delegate, closing the transport."""
         if self._delegate is not None:
             return self._delegate.eof_received()
         return None
 
     def connection_lost(self, exc: BaseException | None) -> None:
+        """Forward to the delegate, so it deregisters and unwinds its requests."""
         if self._delegate is not None:
             self._delegate.connection_lost(exc)
 
     def pause_writing(self) -> None:
+        """Forward write backpressure to the delegate."""
         if self._delegate is not None:
             self._delegate.pause_writing()
 
     def resume_writing(self) -> None:
+        """Forward the release of write backpressure to the delegate."""
         if self._delegate is not None:
             self._delegate.resume_writing()
 
@@ -599,12 +760,12 @@ _http3_available_cache: bool | None = None
 def _http3_available() -> bool:
     """Report whether the optional native HTTP/3 extension can be loaded.
 
-    The extension is only configured when ``WREATH_BUILD_HTTP3=1`` at build time,
-    so a default install returns ``False``. "Available" means *loadable*, not
-    merely discoverable: a partial build where the ``.so`` exists but a
-    transitive shared library (e.g. ``libngtcp2_crypto_ossl``) is missing must
-    report ``False`` so ``serve()`` raises its actionable "not built" error
-    rather than a raw ``ImportError`` from deep in the import machinery. The
+    The extension is only configured when `WREATH_BUILD_HTTP3=1` at build time,
+    so a default install returns `False`. "Available" means *loadable*, not
+    merely discoverable: a partial build where the `.so` exists but a
+    transitive shared library (e.g. `libngtcp2_crypto_ossl`) is missing must
+    report `False` so `serve()` raises its actionable "not built" error
+    rather than a raw `ImportError` from deep in the import machinery. The
     import is attempted once and the result cached.
     """
     global _http3_available_cache
@@ -628,8 +789,14 @@ def _resolve_tls(
     """Validate the requested protocol/TLS combination and return the TCP context.
 
     Enforces the plan's startup rules: no silent downgrade for an unavailable
-    ``h3`` build, ``h3`` requires a :class:`TLSConfig`, network ``h2``/``h3``
-    require TLS, and ``ssl=``/``tls=`` are mutually exclusive.
+    `h2` or `h3` build, `h3` requires a `TLSConfig`, network `h2`/`h3`
+    require TLS, and `ssl=`/`tls=` are mutually exclusive.
+
+    Both extension checks live here rather than where the protocol object is
+    built, because a missing extension is a deployment fact and not a property
+    of one connection: checked per connection it starts a server that refuses
+    every request it is ever offered, which is the failure a startup check
+    exists to turn into a refusal to start.
     """
     if ssl is not None and tls is not None:
         raise ValueError("pass either ssl= or tls=, not both")
@@ -649,10 +816,12 @@ def _resolve_tls(
                 "ngtcp2/nghttp3 backend, or remove 'h3' from config.protocols."
             )
 
-    if wants_h2 and ssl is None and tls is None:
-        raise ValueError(
-            "HTTP/2 (h2) network serving requires TLS with ALPN; pass tls= or ssl="
-        )
+    if wants_h2:
+        _require_native_h2()
+        if ssl is None and tls is None:
+            raise ValueError(
+                "HTTP/2 (h2) network serving requires TLS with ALPN; pass tls= or ssl="
+            )
 
     if tls is not None:
         return tls.build_ssl_context(protocols)
@@ -660,7 +829,24 @@ def _resolve_tls(
 
 
 class Server:
-    """Owns the listening socket, active protocols, lifespan, and shutdown."""
+    """Owns the listening socket, active protocols, lifespan, and shutdown.
+
+    Constructed by `serve`, not directly: construction only wires the
+    object up, and it is `serve` that binds and starts it. What a caller
+    does with the result is drive it -- `serve_forever` to block,
+    `close` to shut down, `wait_closed` to join.
+
+    Startup is atomic. If any requested listener, the lifespan, the recorder
+    pipeline, or the Inspector fails to come up -- including by cancellation --
+    everything already created is torn down and the original error propagates. A
+    half-bound server is never returned.
+
+    Shutdown is graceful and ordered: the Inspector stops reading first, the
+    listener stops accepting, live protocols are told to finish their current
+    requests, in-flight work drains until `shutdown_timeout`, remaining
+    transports are closed, the telemetry threads are joined off the loop, and
+    the ASGI lifespan shutdown runs last.
+    """
 
     def __init__(
         self,
@@ -683,11 +869,16 @@ class Server:
         self._lifespan: _LifespanManager | None = None
         self._closed = loop.create_future()
         self._closing = False
-        self._signal_handlers_installed = False
         self._date_timer: asyncio.TimerHandle | None = None
 
     @property
     def sockets(self) -> tuple[Any, ...]:
+        """Bound TCP sockets, or empty when no TCP listener exists.
+
+        The supported way to learn the port after binding `port=0`:
+        `server.sockets[0].getsockname()[1]`. Empty for an `h3`-only server,
+        which binds UDP -- see `datagram_addresses`.
+        """
         server = self._asyncio_server
         sockets = getattr(server, "sockets", None)
         if not sockets:
@@ -865,6 +1056,27 @@ class Server:
             self._lifespan = None
 
     async def close(self) -> None:
+        """Shut the server down gracefully, then resolve `wait_closed`.
+
+        Concurrency-safe and idempotent: a second call while the first is running
+        does not restart the sequence, it waits for it.
+
+        The ordering is the contract, and each step exists because the one before
+        it must have finished. The Inspector closes first so nothing reads a
+        recorder mid-teardown. The listener stops accepting, then live protocols
+        are asked to stop accepting new *requests* on connections they already
+        hold. In-flight responses then drain, polled until `shutdown_timeout`
+        expires; the HTTP/3 endpoint is deliberately not counted as work, because
+        it is a listener rather than a connection and waiting on it would drain
+        nothing and spend the whole timeout. Remaining transports are closed,
+        the UDP endpoint after them, the projector and export threads are joined
+        off the loop so a final drain captures the last completions, and the ASGI
+        lifespan shutdown runs last -- after every request that might have used
+        what it tears down.
+
+        Returns once that sequence completes. Requests still running at the end
+        of the drain window are cut off, not waited for.
+        """
         if self._closing:
             await self.wait_closed()
             return
@@ -925,7 +1137,7 @@ class Server:
             self._closed.set_result(None)
 
     def _has_work_to_drain(self) -> bool:
-        """Whether anything in ``_protocols`` still owes a response.
+        """Whether anything in `_protocols` still owes a response.
 
         A TCP protocol *is* one connection, so its presence in the set is the
         work, and it leaves once the connection is done. The HTTP/3 endpoint is
@@ -944,9 +1156,20 @@ class Server:
         return False
 
     async def wait_closed(self) -> None:
+        """Wait until `close` has finished. Does not itself start a shutdown.
+
+        Shielded, so cancelling the waiter does not cancel the shutdown a
+        different task is running. Awaitable from any number of tasks.
+        """
         await asyncio.shield(self._closed)
 
     async def serve_forever(self) -> None:
+        """Wait for shutdown, and convert a cancellation into a graceful one.
+
+        Unlike `wait_closed`, cancelling this *does* shut the server down:
+        it closes gracefully first, then re-raises `CancelledError`. That makes
+        it the coroutine to put in a task group or under `asyncio.timeout`.
+        """
         try:
             await self.wait_closed()
         except asyncio.CancelledError:
@@ -962,7 +1185,6 @@ class Server:
                 self._loop.add_signal_handler(signame, handler)
             except (NotImplementedError, RuntimeError):
                 return
-        self._signal_handlers_installed = True
 
 
 async def serve(
@@ -972,10 +1194,35 @@ async def serve(
     ssl: SSLContext | None = None,
     tls: TLSConfig | None = None,
 ) -> Server:
-    """Start serving ``app`` and return the running :class:`Server`.
+    """Start serving `app` and return the running `Server`.
 
-    Does not install process signal handlers. The caller drives shutdown via
-    ``server.close()`` / ``server.wait_closed()``.
+    Returns only once every requested listener is bound and the ASGI lifespan
+    startup has completed, so a caller may send a request the instant it
+    returns. If anything fails to come up nothing is left running and the error
+    propagates; there is no partly-started server to clean up.
+
+    Does not install process signal handlers -- use `run` for that. The
+    caller drives shutdown via `server.close()` / `server.wait_closed()`.
+
+    `ssl` and `tls` are alternatives, not layers: `tls` builds the context
+    *and* supplies the certificate paths HTTP/3 needs, so `h3` requires it.
+
+    A missing extension for any requested protocol is refused here rather than
+    silently downgrading: `h3` without `wreath._native._http3` and `h2` without
+    `wreath._native._server` both raise before anything binds. Neither can start
+    a server that would refuse every connection it is offered.
+
+    Args:
+        config: Defaults to a plain `ServerConfig`; the environment is not read here.
+        ssl: A ready `SSLContext`. Sufficient for TCP, but not for `h3`.
+        tls: Certificate and key paths. Required for `h3`.
+
+    Returns:
+        The running server.
+
+    Raises:
+        ValueError: Both `ssl` and `tls` were passed, or `h3`/`h2` lacks the TLS it needs.
+        RuntimeError: `h2` or `h3` was requested and its native extension is not built.
     """
     config = config or ServerConfig()
     ssl_context = _resolve_tls(config, ssl, tls)
@@ -994,17 +1241,29 @@ def run(
     loop_factory: Callable[[], asyncio.AbstractEventLoop] | None = None,
     required_env: Iterable[str] = (),
 ) -> None:
-    """Serve ``app`` until interrupted, then gracefully shut down.
+    """Serve `app` until interrupted, then gracefully shut down.
 
     Installs SIGINT/SIGTERM handlers when running in the main thread. Pass an
-    explicit ``loop_factory`` to use an optional event-loop implementation;
+    explicit `loop_factory` to use an optional event-loop implementation;
     Wreath never selects one implicitly.
 
-    When ``config`` is omitted it is built from the environment via
-    :func:`configure_from_env`, so ``WREATH_*`` variables take effect. ``required_env``
+    When `config` is omitted it is built from the environment via
+    `configure_from_env`, so `WREATH_*` variables take effect. `required_env`
     names boot-critical variables (a database DSN, a signing secret); any that
-    are unset emit an :class:`EnvConfigWarning` before serving. The environment
-    is read once whether or not ``config`` is supplied.
+    are unset emit an `EnvConfigWarning` before serving. The environment
+    is read once whether or not `config` is supplied.
+
+    Returns when the graceful shutdown has finished. A `KeyboardInterrupt` that
+    outruns the signal handler is caught rather than propagated, so an
+    interactive Ctrl-C exits cleanly instead of printing a traceback. Off the
+    main thread the platform does not permit signal handlers and they are skipped
+    without complaint; `serve` is the entry point for embedding a server in
+    a loop somebody else owns.
+
+    Args:
+        config: Built from the environment when omitted.
+        loop_factory: Passed to `asyncio.run`, e.g. `uvloop.new_event_loop`.
+        required_env: Boot-critical variable names to warn about when unset.
     """
     if config is None:
         config, _ = configure_from_env(required=required_env)
@@ -1131,15 +1390,6 @@ class _LifespanManager:
             # expected. `_main` already routes an app exception into
             # `_startup_event`/`_shutdown_event`, so nothing else escapes here.
             pass
-
-
-def _open_socket(config: ServerConfig) -> socket.socket:  # pragma: no cover - helper
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((config.host, config.port))
-    sock.listen(config.backlog)
-    sock.setblocking(False)
-    return sock
 
 
 __all__ = [

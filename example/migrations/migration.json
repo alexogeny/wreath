@@ -1,0 +1,1585 @@
+{
+  "actual_fingerprint": "59ba344334afa8fdd8ed07d7ddd68bdfb38c37d0710f9bd860051f8cb5f991e4",
+  "artifact_checksum": "bee756e60319f983e7324618eaa02beb9c99931e9cef0f6720bcb93ae9b2d4da",
+  "desired_fingerprint": "45e00e91b95227e60e0247e7761b28e7ae4fe2e4618311e76dba9f0125a844b9",
+  "destructive_count": 0,
+  "format": "WMP1+WMS1",
+  "manual_count": 0,
+  "migration_id": "0000000000000000000000000000c101",
+  "operation_count": 112,
+  "operations": [
+    {
+      "action": "add",
+      "after": "table\u001fr\u001fp",
+      "before": "",
+      "kind": "table",
+      "name": "",
+      "schema": "camera_trap",
+      "table": "stations"
+    },
+    {
+      "action": "add",
+      "after": "table\u001fr\u001fp",
+      "before": "",
+      "kind": "table",
+      "name": "",
+      "schema": "camera_trap",
+      "table": "species"
+    },
+    {
+      "action": "add",
+      "after": "table\u001fr\u001fp",
+      "before": "",
+      "kind": "table",
+      "name": "",
+      "schema": "camera_trap",
+      "table": "assignments"
+    },
+    {
+      "action": "add",
+      "after": "table\u001fr\u001fp",
+      "before": "",
+      "kind": "table",
+      "name": "",
+      "schema": "camera_trap",
+      "table": "audit_entries"
+    },
+    {
+      "action": "add",
+      "after": "table\u001fr\u001fp",
+      "before": "",
+      "kind": "table",
+      "name": "",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "table\u001fr\u001fp",
+      "before": "",
+      "kind": "table",
+      "name": "",
+      "schema": "camera_trap",
+      "table": "reserves"
+    },
+    {
+      "action": "add",
+      "after": "table\u001fr\u001fp",
+      "before": "",
+      "kind": "table",
+      "name": "",
+      "schema": "camera_trap",
+      "table": "cameras"
+    },
+    {
+      "action": "add",
+      "after": "table\u001fr\u001fp",
+      "before": "",
+      "kind": "table",
+      "name": "",
+      "schema": "camera_trap",
+      "table": "observers"
+    },
+    {
+      "action": "add",
+      "after": "table\u001fr\u001fp",
+      "before": "",
+      "kind": "table",
+      "name": "",
+      "schema": "camera_trap",
+      "table": "deployments"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "name",
+      "schema": "camera_trap",
+      "table": "reserves"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "id",
+      "schema": "camera_trap",
+      "table": "cameras"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "name",
+      "schema": "camera_trap",
+      "table": "stations"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f3802\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "tags",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "sighting_id",
+      "schema": "camera_trap",
+      "table": "audit_entries"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "id",
+      "schema": "camera_trap",
+      "table": "observers"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f1184\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "at",
+      "schema": "camera_trap",
+      "table": "audit_entries"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f0\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "thumbnail_key",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f1184\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "deployed_at",
+      "schema": "camera_trap",
+      "table": "cameras"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "id",
+      "schema": "camera_trap",
+      "table": "deployments"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f23\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "area_hectares",
+      "schema": "camera_trap",
+      "table": "reserves"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "reserve_id",
+      "schema": "camera_trap",
+      "table": "stations"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "action",
+      "schema": "camera_trap",
+      "table": "audit_entries"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "reserve_id",
+      "schema": "camera_trap",
+      "table": "assignments"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f1184\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "created_at",
+      "schema": "camera_trap",
+      "table": "reserves"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "role",
+      "schema": "camera_trap",
+      "table": "observers"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "common_name",
+      "schema": "camera_trap",
+      "table": "species"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f0\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "reserve_id",
+      "schema": "camera_trap",
+      "table": "observers"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "station_id",
+      "schema": "camera_trap",
+      "table": "deployments"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f21\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "confidence",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "id",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f1700\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "longitude",
+      "schema": "camera_trap",
+      "table": "stations"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "camera_id",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "timezone",
+      "schema": "camera_trap",
+      "table": "reserves"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "model",
+      "schema": "camera_trap",
+      "table": "cameras"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f0\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "identified_by",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "id",
+      "schema": "camera_trap",
+      "table": "audit_entries"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "code",
+      "schema": "camera_trap",
+      "table": "species"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "scientific_name",
+      "schema": "camera_trap",
+      "table": "species"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "observer_id",
+      "schema": "camera_trap",
+      "table": "assignments"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f0\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "deployment_id",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "station_id",
+      "schema": "camera_trap",
+      "table": "cameras"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f1184\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "captured_at",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "id",
+      "schema": "camera_trap",
+      "table": "species"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f1184\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "uploaded_at",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "image_key",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f0\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "notes",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "species_id",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "slug",
+      "schema": "camera_trap",
+      "table": "reserves"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f21\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "battery_pct",
+      "schema": "camera_trap",
+      "table": "cameras"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "serial",
+      "schema": "camera_trap",
+      "table": "cameras"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f1700\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "latitude",
+      "schema": "camera_trap",
+      "table": "stations"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "protection",
+      "schema": "camera_trap",
+      "table": "species"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "review_state",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f16\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "sensitive",
+      "schema": "camera_trap",
+      "table": "stations"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "email",
+      "schema": "camera_trap",
+      "table": "observers"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "card_serial",
+      "schema": "camera_trap",
+      "table": "deployments"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "id",
+      "schema": "camera_trap",
+      "table": "reserves"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f1184\u001f\u001f0\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "retired_at",
+      "schema": "camera_trap",
+      "table": "cameras"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "id",
+      "schema": "camera_trap",
+      "table": "stations"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f16\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "nocturnal",
+      "schema": "camera_trap",
+      "table": "species"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "observer_id",
+      "schema": "camera_trap",
+      "table": "audit_entries"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f1184\u001f\u001f0\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "ingested_at",
+      "schema": "camera_trap",
+      "table": "deployments"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "habitat",
+      "schema": "camera_trap",
+      "table": "stations"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f23\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "image_count",
+      "schema": "camera_trap",
+      "table": "deployments"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "firmware",
+      "schema": "camera_trap",
+      "table": "cameras"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "station_id",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f1184\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "collected_at",
+      "schema": "camera_trap",
+      "table": "deployments"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "level",
+      "schema": "camera_trap",
+      "table": "assignments"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "display_name",
+      "schema": "camera_trap",
+      "table": "observers"
+    },
+    {
+      "action": "add",
+      "after": "f:reserve_id:camera_trap:reserves:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:reserve_id:camera_trap:reserves:id",
+      "schema": "camera_trap",
+      "table": "assignments"
+    },
+    {
+      "action": "add",
+      "after": "f:identified_by:camera_trap:observers:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:identified_by:camera_trap:observers:id",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "f:observer_id:camera_trap:observers:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:observer_id:camera_trap:observers:id",
+      "schema": "camera_trap",
+      "table": "assignments"
+    },
+    {
+      "action": "add",
+      "after": "f:deployment_id:camera_trap:deployments:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:deployment_id:camera_trap:deployments:id",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "p:id:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "p:id:::",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "u:email:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "u:email:::",
+      "schema": "camera_trap",
+      "table": "observers"
+    },
+    {
+      "action": "add",
+      "after": "f:station_id:camera_trap:stations:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:station_id:camera_trap:stations:id",
+      "schema": "camera_trap",
+      "table": "deployments"
+    },
+    {
+      "action": "add",
+      "after": "f:camera_id:camera_trap:cameras:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:camera_id:camera_trap:cameras:id",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "f:reserve_id:camera_trap:reserves:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:reserve_id:camera_trap:reserves:id",
+      "schema": "camera_trap",
+      "table": "stations"
+    },
+    {
+      "action": "add",
+      "after": "u:serial:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "u:serial:::",
+      "schema": "camera_trap",
+      "table": "cameras"
+    },
+    {
+      "action": "add",
+      "after": "u:code:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "u:code:::",
+      "schema": "camera_trap",
+      "table": "species"
+    },
+    {
+      "action": "add",
+      "after": "u:slug:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "u:slug:::",
+      "schema": "camera_trap",
+      "table": "reserves"
+    },
+    {
+      "action": "add",
+      "after": "f:station_id:camera_trap:stations:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:station_id:camera_trap:stations:id",
+      "schema": "camera_trap",
+      "table": "cameras"
+    },
+    {
+      "action": "add",
+      "after": "f:species_id:camera_trap:species:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:species_id:camera_trap:species:id",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "p:id:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "p:id:::",
+      "schema": "camera_trap",
+      "table": "deployments"
+    },
+    {
+      "action": "add",
+      "after": "p:id:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "p:id:::",
+      "schema": "camera_trap",
+      "table": "species"
+    },
+    {
+      "action": "add",
+      "after": "p:id:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "p:id:::",
+      "schema": "camera_trap",
+      "table": "reserves"
+    },
+    {
+      "action": "add",
+      "after": "u:observer_id,sighting_id,at:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "u:observer_id,sighting_id,at:::",
+      "schema": "camera_trap",
+      "table": "audit_entries"
+    },
+    {
+      "action": "add",
+      "after": "p:id:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "p:id:::",
+      "schema": "camera_trap",
+      "table": "cameras"
+    },
+    {
+      "action": "add",
+      "after": "f:reserve_id:camera_trap:reserves:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:reserve_id:camera_trap:reserves:id",
+      "schema": "camera_trap",
+      "table": "observers"
+    },
+    {
+      "action": "add",
+      "after": "f:sighting_id:camera_trap:sightings:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:sighting_id:camera_trap:sightings:id",
+      "schema": "camera_trap",
+      "table": "audit_entries"
+    },
+    {
+      "action": "add",
+      "after": "p:id:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "p:id:::",
+      "schema": "camera_trap",
+      "table": "audit_entries"
+    },
+    {
+      "action": "add",
+      "after": "p:id:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "p:id:::",
+      "schema": "camera_trap",
+      "table": "stations"
+    },
+    {
+      "action": "add",
+      "after": "f:observer_id:camera_trap:observers:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:observer_id:camera_trap:observers:id",
+      "schema": "camera_trap",
+      "table": "audit_entries"
+    },
+    {
+      "action": "add",
+      "after": "p:id:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "p:id:::",
+      "schema": "camera_trap",
+      "table": "observers"
+    },
+    {
+      "action": "add",
+      "after": "f:station_id:camera_trap:stations:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:station_id:camera_trap:stations:id",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "p:observer_id,reserve_id:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "p:observer_id,reserve_id:::",
+      "schema": "camera_trap",
+      "table": "assignments"
+    },
+    {
+      "action": "add",
+      "after": "index:i:observer_id:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:observer_id",
+      "schema": "camera_trap",
+      "table": "audit_entries"
+    },
+    {
+      "action": "add",
+      "after": "index:i:station_id,deployed_at:btree\u001f(retired_at IS NULL)",
+      "before": "",
+      "kind": "index",
+      "name": "i:station_id,deployed_at:btree:6b5b3f33",
+      "schema": "camera_trap",
+      "table": "cameras"
+    },
+    {
+      "action": "add",
+      "after": "index:i:camera_id:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:camera_id",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "index:i:reserve_id,id:btree\u001f(sensitive = true)",
+      "before": "",
+      "kind": "index",
+      "name": "i:reserve_id,id:btree:6758c9f9",
+      "schema": "camera_trap",
+      "table": "stations"
+    },
+    {
+      "action": "add",
+      "after": "index:i:station_id,captured_at:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:station_id,captured_at",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "index:i:reserve_id,level:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:reserve_id,level",
+      "schema": "camera_trap",
+      "table": "assignments"
+    },
+    {
+      "action": "add",
+      "after": "index:i:species_id:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:species_id",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "index:i:station_id:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:station_id",
+      "schema": "camera_trap",
+      "table": "cameras"
+    },
+    {
+      "action": "add",
+      "after": "index:i:deployment_id:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:deployment_id",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "index:i:protection,id:btree\u001f(protection = ANY (ARRAY['sensitive'::text, 'restricted'::text]))",
+      "before": "",
+      "kind": "index",
+      "name": "i:protection,id:btree:2a24b872",
+      "schema": "camera_trap",
+      "table": "species"
+    },
+    {
+      "action": "add",
+      "after": "index:i:station_id:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:station_id",
+      "schema": "camera_trap",
+      "table": "deployments"
+    },
+    {
+      "action": "add",
+      "after": "index:i:station_id:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:station_id",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "index:i:station_id,captured_at:btree\u001f(review_state = 'needs-review'::text)",
+      "before": "",
+      "kind": "index",
+      "name": "i:station_id,captured_at:btree:bd6c55dd",
+      "schema": "camera_trap",
+      "table": "sightings"
+    },
+    {
+      "action": "add",
+      "after": "index:i:station_id,collected_at:btree\u001f(ingested_at IS NULL)",
+      "before": "",
+      "kind": "index",
+      "name": "i:station_id,collected_at:btree:8b2b32a5",
+      "schema": "camera_trap",
+      "table": "deployments"
+    },
+    {
+      "action": "add",
+      "after": "index:i:reserve_id:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:reserve_id",
+      "schema": "camera_trap",
+      "table": "stations"
+    },
+    {
+      "action": "add",
+      "after": "index:i:captured_at:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:captured_at",
+      "schema": "camera_trap",
+      "table": "sightings"
+    }
+  ],
+  "output": "/tmp/claude-1000/-home-alex-private-neo/9f515d4b-cd0f-4bcd-bf2b-b069ba0b547b/scratchpad/ct/mig",
+  "parent_checksum": "0000000000000000000000000000000000000000000000000000000000000000",
+  "review_sql": "create table \"camera_trap\".\"stations\" ();\ncreate table \"camera_trap\".\"species\" ();\ncreate table \"camera_trap\".\"assignments\" ();\ncreate table \"camera_trap\".\"audit_entries\" ();\ncreate table \"camera_trap\".\"sightings\" ();\ncreate table \"camera_trap\".\"reserves\" ();\ncreate table \"camera_trap\".\"cameras\" ();\ncreate table \"camera_trap\".\"observers\" ();\ncreate table \"camera_trap\".\"deployments\" ();\nalter table \"camera_trap\".\"reserves\" add column \"name\" text not null;\nalter table \"camera_trap\".\"cameras\" add column \"id\" bigint not null;\nalter table \"camera_trap\".\"stations\" add column \"name\" text not null;\nalter table \"camera_trap\".\"sightings\" add column \"tags\" jsonb not null;\nalter table \"camera_trap\".\"audit_entries\" add column \"sighting_id\" bigint not null;\nalter table \"camera_trap\".\"observers\" add column \"id\" bigint not null;\nalter table \"camera_trap\".\"audit_entries\" add column \"at\" timestamp with time zone not null;\nalter table \"camera_trap\".\"sightings\" add column \"thumbnail_key\" text;\nalter table \"camera_trap\".\"cameras\" add column \"deployed_at\" timestamp with time zone not null;\nalter table \"camera_trap\".\"deployments\" add column \"id\" bigint not null;\nalter table \"camera_trap\".\"reserves\" add column \"area_hectares\" integer not null;\nalter table \"camera_trap\".\"stations\" add column \"reserve_id\" bigint not null;\nalter table \"camera_trap\".\"audit_entries\" add column \"action\" text not null;\nalter table \"camera_trap\".\"assignments\" add column \"reserve_id\" bigint not null;\nalter table \"camera_trap\".\"reserves\" add column \"created_at\" timestamp with time zone not null;\nalter table \"camera_trap\".\"observers\" add column \"role\" text not null;\nalter table \"camera_trap\".\"species\" add column \"common_name\" text not null;\nalter table \"camera_trap\".\"observers\" add column \"reserve_id\" bigint;\nalter table \"camera_trap\".\"deployments\" add column \"station_id\" bigint not null;\nalter table \"camera_trap\".\"sightings\" add column \"confidence\" smallint not null;\nalter table \"camera_trap\".\"sightings\" add column \"id\" bigint not null;\nalter table \"camera_trap\".\"stations\" add column \"longitude\" numeric not null;\nalter table \"camera_trap\".\"sightings\" add column \"camera_id\" bigint not null;\nalter table \"camera_trap\".\"reserves\" add column \"timezone\" text not null;\nalter table \"camera_trap\".\"cameras\" add column \"model\" text not null;\nalter table \"camera_trap\".\"sightings\" add column \"identified_by\" bigint;\nalter table \"camera_trap\".\"audit_entries\" add column \"id\" bigint not null;\nalter table \"camera_trap\".\"species\" add column \"code\" text not null;\nalter table \"camera_trap\".\"species\" add column \"scientific_name\" text not null;\nalter table \"camera_trap\".\"assignments\" add column \"observer_id\" bigint not null;\nalter table \"camera_trap\".\"sightings\" add column \"deployment_id\" bigint;\nalter table \"camera_trap\".\"cameras\" add column \"station_id\" bigint not null;\nalter table \"camera_trap\".\"sightings\" add column \"captured_at\" timestamp with time zone not null;\nalter table \"camera_trap\".\"species\" add column \"id\" bigint not null;\nalter table \"camera_trap\".\"sightings\" add column \"uploaded_at\" timestamp with time zone not null;\nalter table \"camera_trap\".\"sightings\" add column \"image_key\" text not null;\nalter table \"camera_trap\".\"sightings\" add column \"notes\" text;\nalter table \"camera_trap\".\"sightings\" add column \"species_id\" bigint not null;\nalter table \"camera_trap\".\"reserves\" add column \"slug\" text not null;\nalter table \"camera_trap\".\"cameras\" add column \"battery_pct\" smallint not null;\nalter table \"camera_trap\".\"cameras\" add column \"serial\" text not null;\nalter table \"camera_trap\".\"stations\" add column \"latitude\" numeric not null;\nalter table \"camera_trap\".\"species\" add column \"protection\" text not null;\nalter table \"camera_trap\".\"sightings\" add column \"review_state\" text not null;\nalter table \"camera_trap\".\"stations\" add column \"sensitive\" boolean not null;\nalter table \"camera_trap\".\"observers\" add column \"email\" text not null;\nalter table \"camera_trap\".\"deployments\" add column \"card_serial\" text not null;\nalter table \"camera_trap\".\"reserves\" add column \"id\" bigint not null;\nalter table \"camera_trap\".\"cameras\" add column \"retired_at\" timestamp with time zone;\nalter table \"camera_trap\".\"stations\" add column \"id\" bigint not null;\nalter table \"camera_trap\".\"species\" add column \"nocturnal\" boolean not null;\nalter table \"camera_trap\".\"audit_entries\" add column \"observer_id\" bigint not null;\nalter table \"camera_trap\".\"deployments\" add column \"ingested_at\" timestamp with time zone;\nalter table \"camera_trap\".\"stations\" add column \"habitat\" text not null;\nalter table \"camera_trap\".\"deployments\" add column \"image_count\" integer not null;\nalter table \"camera_trap\".\"cameras\" add column \"firmware\" text not null;\nalter table \"camera_trap\".\"sightings\" add column \"station_id\" bigint not null;\nalter table \"camera_trap\".\"deployments\" add column \"collected_at\" timestamp with time zone not null;\nalter table \"camera_trap\".\"assignments\" add column \"level\" text not null;\nalter table \"camera_trap\".\"observers\" add column \"display_name\" text not null;\nalter table \"camera_trap\".\"sightings\" add constraint \"wreath_2303c15eb5602a9a\" primary key (\"id\");\nalter table \"camera_trap\".\"observers\" add constraint \"wreath_26fea6258c4c3e3b\" unique (\"email\");\nalter table \"camera_trap\".\"cameras\" add constraint \"wreath_486e04939350b1c6\" unique (\"serial\");\nalter table \"camera_trap\".\"species\" add constraint \"wreath_48a96531b33c71e5\" unique (\"code\");\nalter table \"camera_trap\".\"reserves\" add constraint \"wreath_527420a77e2b9ea8\" unique (\"slug\");\nalter table \"camera_trap\".\"deployments\" add constraint \"wreath_6cdb10234fedcd36\" primary key (\"id\");\nalter table \"camera_trap\".\"species\" add constraint \"wreath_71043dcc5a86f70c\" primary key (\"id\");\nalter table \"camera_trap\".\"reserves\" add constraint \"wreath_7d22dea5a111a04f\" primary key (\"id\");\nalter table \"camera_trap\".\"audit_entries\" add constraint \"wreath_7f5694a3da0ff72e\" unique (\"observer_id\", \"sighting_id\", \"at\");\nalter table \"camera_trap\".\"cameras\" add constraint \"wreath_893d4760749e198e\" primary key (\"id\");\nalter table \"camera_trap\".\"audit_entries\" add constraint \"wreath_95cd5611cae6442e\" primary key (\"id\");\nalter table \"camera_trap\".\"stations\" add constraint \"wreath_a787d64e2c928a7b\" primary key (\"id\");\nalter table \"camera_trap\".\"observers\" add constraint \"wreath_e7857d4e8f22b57f\" primary key (\"id\");\nalter table \"camera_trap\".\"assignments\" add constraint \"wreath_f085195025b3e227\" primary key (\"observer_id\", \"reserve_id\");\ncreate index \"wreath_0b894d4a5ca84d03\" on \"camera_trap\".\"audit_entries\" (\"observer_id\");\ncreate index \"wreath_17bbb28e11831755\" on \"camera_trap\".\"cameras\" (\"station_id\", \"deployed_at\") where (retired_at IS NULL);\ncreate index \"wreath_2f7b9a56d0a18562\" on \"camera_trap\".\"sightings\" (\"camera_id\");\ncreate index \"wreath_3beb3dadca332db6\" on \"camera_trap\".\"stations\" (\"reserve_id\", \"id\") where (sensitive = true);\ncreate index \"wreath_523012549caeed63\" on \"camera_trap\".\"sightings\" (\"station_id\", \"captured_at\");\ncreate index \"wreath_6044f03a11cb3b45\" on \"camera_trap\".\"assignments\" (\"reserve_id\", \"level\");\ncreate index \"wreath_6f66df50ccb2c7a7\" on \"camera_trap\".\"sightings\" (\"species_id\");\ncreate index \"wreath_7489c8ca792fc97d\" on \"camera_trap\".\"cameras\" (\"station_id\");\ncreate index \"wreath_8cdfe6906bae2c1a\" on \"camera_trap\".\"sightings\" (\"deployment_id\");\ncreate index \"wreath_92ab428c7f777e6d\" on \"camera_trap\".\"species\" (\"protection\", \"id\") where (protection = ANY (ARRAY['sensitive'::text, 'restricted'::text]));\ncreate index \"wreath_97549b2afbffc675\" on \"camera_trap\".\"deployments\" (\"station_id\");\ncreate index \"wreath_a38fba66cd33258d\" on \"camera_trap\".\"sightings\" (\"station_id\");\ncreate index \"wreath_d1006d8f04327f48\" on \"camera_trap\".\"sightings\" (\"station_id\", \"captured_at\") where (review_state = 'needs-review'::text);\ncreate index \"wreath_e268bd7e0cc134d1\" on \"camera_trap\".\"deployments\" (\"station_id\", \"collected_at\") where (ingested_at IS NULL);\ncreate index \"wreath_e26c2e928caa6c5c\" on \"camera_trap\".\"stations\" (\"reserve_id\");\ncreate index \"wreath_f0694d738eaa9993\" on \"camera_trap\".\"sightings\" (\"captured_at\");\nalter table \"camera_trap\".\"assignments\" add constraint \"wreath_023c045f57791e78\" foreign key (\"reserve_id\") references \"camera_trap\".\"reserves\" (\"id\");\nalter table \"camera_trap\".\"sightings\" add constraint \"wreath_09c6c60ec98328dd\" foreign key (\"identified_by\") references \"camera_trap\".\"observers\" (\"id\");\nalter table \"camera_trap\".\"assignments\" add constraint \"wreath_0c8d7ac367ee4de2\" foreign key (\"observer_id\") references \"camera_trap\".\"observers\" (\"id\");\nalter table \"camera_trap\".\"sightings\" add constraint \"wreath_211a48f62baa7e68\" foreign key (\"deployment_id\") references \"camera_trap\".\"deployments\" (\"id\");\nalter table \"camera_trap\".\"deployments\" add constraint \"wreath_292b6ec00817b232\" foreign key (\"station_id\") references \"camera_trap\".\"stations\" (\"id\");\nalter table \"camera_trap\".\"sightings\" add constraint \"wreath_2d171e90d0e22208\" foreign key (\"camera_id\") references \"camera_trap\".\"cameras\" (\"id\");\nalter table \"camera_trap\".\"stations\" add constraint \"wreath_44d07acbfee164c1\" foreign key (\"reserve_id\") references \"camera_trap\".\"reserves\" (\"id\");\nalter table \"camera_trap\".\"cameras\" add constraint \"wreath_5d113306d8b59c3a\" foreign key (\"station_id\") references \"camera_trap\".\"stations\" (\"id\");\nalter table \"camera_trap\".\"sightings\" add constraint \"wreath_6108791da55aa5e1\" foreign key (\"species_id\") references \"camera_trap\".\"species\" (\"id\");\nalter table \"camera_trap\".\"observers\" add constraint \"wreath_8f6edff4cdcacc75\" foreign key (\"reserve_id\") references \"camera_trap\".\"reserves\" (\"id\");\nalter table \"camera_trap\".\"audit_entries\" add constraint \"wreath_9437634cdafad3b4\" foreign key (\"sighting_id\") references \"camera_trap\".\"sightings\" (\"id\");\nalter table \"camera_trap\".\"audit_entries\" add constraint \"wreath_ac280301c2077168\" foreign key (\"observer_id\") references \"camera_trap\".\"observers\" (\"id\");\nalter table \"camera_trap\".\"sightings\" add constraint \"wreath_ea604496651c2196\" foreign key (\"station_id\") references \"camera_trap\".\"stations\" (\"id\");\n",
+  "statements": [
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create table \"camera_trap\".\"stations\" ();"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create table \"camera_trap\".\"species\" ();"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create table \"camera_trap\".\"assignments\" ();"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create table \"camera_trap\".\"audit_entries\" ();"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create table \"camera_trap\".\"sightings\" ();"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create table \"camera_trap\".\"reserves\" ();"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create table \"camera_trap\".\"cameras\" ();"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create table \"camera_trap\".\"observers\" ();"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create table \"camera_trap\".\"deployments\" ();"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"reserves\" add column \"name\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"cameras\" add column \"id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"stations\" add column \"name\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add column \"tags\" jsonb not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"audit_entries\" add column \"sighting_id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"observers\" add column \"id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"audit_entries\" add column \"at\" timestamp with time zone not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add column \"thumbnail_key\" text;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"cameras\" add column \"deployed_at\" timestamp with time zone not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"deployments\" add column \"id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"reserves\" add column \"area_hectares\" integer not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"stations\" add column \"reserve_id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"audit_entries\" add column \"action\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"assignments\" add column \"reserve_id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"reserves\" add column \"created_at\" timestamp with time zone not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"observers\" add column \"role\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"species\" add column \"common_name\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"observers\" add column \"reserve_id\" bigint;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"deployments\" add column \"station_id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add column \"confidence\" smallint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add column \"id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"stations\" add column \"longitude\" numeric not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add column \"camera_id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"reserves\" add column \"timezone\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"cameras\" add column \"model\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add column \"identified_by\" bigint;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"audit_entries\" add column \"id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"species\" add column \"code\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"species\" add column \"scientific_name\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"assignments\" add column \"observer_id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add column \"deployment_id\" bigint;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"cameras\" add column \"station_id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add column \"captured_at\" timestamp with time zone not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"species\" add column \"id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add column \"uploaded_at\" timestamp with time zone not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add column \"image_key\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add column \"notes\" text;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add column \"species_id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"reserves\" add column \"slug\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"cameras\" add column \"battery_pct\" smallint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"cameras\" add column \"serial\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"stations\" add column \"latitude\" numeric not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"species\" add column \"protection\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add column \"review_state\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"stations\" add column \"sensitive\" boolean not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"observers\" add column \"email\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"deployments\" add column \"card_serial\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"reserves\" add column \"id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"cameras\" add column \"retired_at\" timestamp with time zone;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"stations\" add column \"id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"species\" add column \"nocturnal\" boolean not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"audit_entries\" add column \"observer_id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"deployments\" add column \"ingested_at\" timestamp with time zone;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"stations\" add column \"habitat\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"deployments\" add column \"image_count\" integer not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"cameras\" add column \"firmware\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add column \"station_id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"deployments\" add column \"collected_at\" timestamp with time zone not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"assignments\" add column \"level\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"observers\" add column \"display_name\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add constraint \"wreath_2303c15eb5602a9a\" primary key (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"observers\" add constraint \"wreath_26fea6258c4c3e3b\" unique (\"email\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"cameras\" add constraint \"wreath_486e04939350b1c6\" unique (\"serial\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"species\" add constraint \"wreath_48a96531b33c71e5\" unique (\"code\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"reserves\" add constraint \"wreath_527420a77e2b9ea8\" unique (\"slug\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"deployments\" add constraint \"wreath_6cdb10234fedcd36\" primary key (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"species\" add constraint \"wreath_71043dcc5a86f70c\" primary key (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"reserves\" add constraint \"wreath_7d22dea5a111a04f\" primary key (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"audit_entries\" add constraint \"wreath_7f5694a3da0ff72e\" unique (\"observer_id\", \"sighting_id\", \"at\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"cameras\" add constraint \"wreath_893d4760749e198e\" primary key (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"audit_entries\" add constraint \"wreath_95cd5611cae6442e\" primary key (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"stations\" add constraint \"wreath_a787d64e2c928a7b\" primary key (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"observers\" add constraint \"wreath_e7857d4e8f22b57f\" primary key (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"assignments\" add constraint \"wreath_f085195025b3e227\" primary key (\"observer_id\", \"reserve_id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_0b894d4a5ca84d03\" on \"camera_trap\".\"audit_entries\" (\"observer_id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_17bbb28e11831755\" on \"camera_trap\".\"cameras\" (\"station_id\", \"deployed_at\") where (retired_at IS NULL);"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_2f7b9a56d0a18562\" on \"camera_trap\".\"sightings\" (\"camera_id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_3beb3dadca332db6\" on \"camera_trap\".\"stations\" (\"reserve_id\", \"id\") where (sensitive = true);"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_523012549caeed63\" on \"camera_trap\".\"sightings\" (\"station_id\", \"captured_at\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_6044f03a11cb3b45\" on \"camera_trap\".\"assignments\" (\"reserve_id\", \"level\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_6f66df50ccb2c7a7\" on \"camera_trap\".\"sightings\" (\"species_id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_7489c8ca792fc97d\" on \"camera_trap\".\"cameras\" (\"station_id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_8cdfe6906bae2c1a\" on \"camera_trap\".\"sightings\" (\"deployment_id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_92ab428c7f777e6d\" on \"camera_trap\".\"species\" (\"protection\", \"id\") where (protection = ANY (ARRAY['sensitive'::text, 'restricted'::text]));"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_97549b2afbffc675\" on \"camera_trap\".\"deployments\" (\"station_id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_a38fba66cd33258d\" on \"camera_trap\".\"sightings\" (\"station_id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_d1006d8f04327f48\" on \"camera_trap\".\"sightings\" (\"station_id\", \"captured_at\") where (review_state = 'needs-review'::text);"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_e268bd7e0cc134d1\" on \"camera_trap\".\"deployments\" (\"station_id\", \"collected_at\") where (ingested_at IS NULL);"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_e26c2e928caa6c5c\" on \"camera_trap\".\"stations\" (\"reserve_id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_f0694d738eaa9993\" on \"camera_trap\".\"sightings\" (\"captured_at\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"assignments\" add constraint \"wreath_023c045f57791e78\" foreign key (\"reserve_id\") references \"camera_trap\".\"reserves\" (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add constraint \"wreath_09c6c60ec98328dd\" foreign key (\"identified_by\") references \"camera_trap\".\"observers\" (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"assignments\" add constraint \"wreath_0c8d7ac367ee4de2\" foreign key (\"observer_id\") references \"camera_trap\".\"observers\" (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add constraint \"wreath_211a48f62baa7e68\" foreign key (\"deployment_id\") references \"camera_trap\".\"deployments\" (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"deployments\" add constraint \"wreath_292b6ec00817b232\" foreign key (\"station_id\") references \"camera_trap\".\"stations\" (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add constraint \"wreath_2d171e90d0e22208\" foreign key (\"camera_id\") references \"camera_trap\".\"cameras\" (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"stations\" add constraint \"wreath_44d07acbfee164c1\" foreign key (\"reserve_id\") references \"camera_trap\".\"reserves\" (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"cameras\" add constraint \"wreath_5d113306d8b59c3a\" foreign key (\"station_id\") references \"camera_trap\".\"stations\" (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add constraint \"wreath_6108791da55aa5e1\" foreign key (\"species_id\") references \"camera_trap\".\"species\" (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"observers\" add constraint \"wreath_8f6edff4cdcacc75\" foreign key (\"reserve_id\") references \"camera_trap\".\"reserves\" (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"audit_entries\" add constraint \"wreath_9437634cdafad3b4\" foreign key (\"sighting_id\") references \"camera_trap\".\"sightings\" (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"audit_entries\" add constraint \"wreath_ac280301c2077168\" foreign key (\"observer_id\") references \"camera_trap\".\"observers\" (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"camera_trap\".\"sightings\" add constraint \"wreath_ea604496651c2196\" foreign key (\"station_id\") references \"camera_trap\".\"stations\" (\"id\");"
+    }
+  ]
+}

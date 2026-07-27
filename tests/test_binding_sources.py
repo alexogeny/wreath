@@ -93,3 +93,112 @@ def test_body_cannot_be_combined_with_form() -> None:
 
     with pytest.raises(TypeError, match="body and form/file"):
         app._compile_routes()
+
+
+# --- FastAPI-style marker defaults -------------------------------------------
+#
+# `limit: int = Query(20)` is the single most common porting mistake from
+# FastAPI. Wreath accepted it and did the wrong thing three times over: the
+# constraints were ignored, nothing bound, and the marker *object* was handed to
+# the handler as the value. It is refused when routes compile, which is before
+# the first request under any server.
+
+
+def test_query_marker_as_a_default_is_refused() -> None:
+    app = Wreath()
+
+    @app.get("/items")
+    async def items(request: Any, limit: int = Query(20)) -> Any:  # noqa: B008
+        return limit
+
+    with pytest.raises(TypeError, match="Annotated"):
+        app._compile_routes()
+
+
+def test_the_refusal_names_the_parameter_and_the_correct_form() -> None:
+    app = Wreath()
+
+    @app.get("/items")
+    async def items(request: Any, limit: int = Query(minimum=1)) -> Any:  # noqa: B008
+        return limit
+
+    with pytest.raises(TypeError) as caught:
+        app._compile_routes()
+    message = str(caught.value)
+    assert "limit" in message
+    assert "Annotated[int, Query(...)] = <default>" in message
+
+
+@pytest.mark.parametrize(
+    ("marker", "argument"),
+    [
+        (Path, "item_id"),
+        (Query, None),
+        (Header, "x-token"),
+        (Cookie, "session"),
+        (Body, None),
+        (Form, None),
+    ],
+)
+def test_every_source_marker_is_refused_as_a_default(marker, argument) -> None:
+    app = Wreath()
+    default = marker(argument) if argument is not None else marker()
+
+    @app.post("/items/{item_id}")
+    async def items(request: Any, value: str = default) -> Any:
+        return value
+
+    with pytest.raises(TypeError, match="Annotated"):
+        app._compile_routes()
+
+
+def test_a_marker_without_an_annotation_is_refused_too() -> None:
+    app = Wreath()
+
+    @app.get("/items")
+    async def items(request: Any, limit=Query(20)) -> Any:  # noqa: B008
+        return limit
+
+    with pytest.raises(TypeError, match="Annotated"):
+        app._compile_routes()
+
+
+@pytest.mark.asyncio
+async def test_the_correct_annotated_form_still_binds_and_constrains() -> None:
+    app = Wreath()
+
+    @app.get("/items")
+    async def items(
+        request: Any, limit: Annotated[int, Query(minimum=1, maximum=100)] = 20
+    ) -> dict[str, int]:
+        return {"limit": limit}
+
+    async with TestClient(app) as client:
+        default = await client.get("/items")
+        given = await client.get("/items?limit=50")
+        over = await client.get("/items?limit=500")
+
+    assert default.json() == {"limit": 20}
+    assert given.json() == {"limit": 50}
+    assert over.status == 422
+
+
+@pytest.mark.asyncio
+async def test_depends_is_still_written_as_a_default() -> None:
+    """`Depends` is the one marker that *is* a default; the refusal must not
+    catch it."""
+    from wreath.binding import Depends
+
+    app = Wreath()
+
+    async def provide(request: Any) -> str:
+        return "provided"
+
+    @app.get("/items")
+    async def items(request: Any, value: str = Depends(provide)) -> dict[str, str]:
+        return {"value": value}
+
+    async with TestClient(app) as client:
+        response = await client.get("/items")
+
+    assert response.json() == {"value": "provided"}

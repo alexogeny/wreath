@@ -97,9 +97,13 @@ Enqueue from a handler on the *same transaction* as the business row, so the job
 ```python
 @app.post("/orders")
 async def create(request):
-    async with db.pool("write").acquire() as conn, conn.transaction() as tx:
-        order = await place_order(tx, await request.json())
-        await jobs.enqueue("send_receipt", order.id, tx=tx, key=f"receipt:{order.id}")
+    conn = await db.acquire("write")
+    try:
+        async with conn.transaction() as tx:
+            order = await place_order(tx, await request.json())
+            await jobs.enqueue("send_receipt", order.id, tx=tx, key=f"receipt:{order.id}")
+    finally:
+        await db.release("write", conn)
     return {"id": order.id}
 ```
 

@@ -25,10 +25,14 @@ app.add_global_middleware(
 @app.post("/orders")
 async def place_order(request, cart: Cart):
     key = request.header("idempotency-key")
-    async with db.pool("write").acquire() as conn, conn.transaction() as tx:
-        order = await write_order(tx, cart, idempotency_key=key)
-        await jobs.enqueue("send_receipt", order.id, tx=tx, key=key)
-        await bus.publish("order_placed", {"id": order.id}, tx=tx, durable=True)
+    conn = await db.acquire("write")
+    try:
+        async with conn.transaction() as tx:
+            order = await write_order(tx, cart, idempotency_key=key)
+            await jobs.enqueue("send_receipt", order.id, tx=tx, key=key)
+            await bus.publish("order_placed", {"id": order.id}, tx=tx, durable=True)
+    finally:
+        await db.release("write", conn)
     return {"id": order.id}, 201
 ```
 
@@ -107,15 +111,19 @@ identity all the way down:
 ```python
 @jobs.task("send_receipt")
 async def send_receipt(ctx, order_id):
-    async with db.pool("write").acquire() as conn, conn.transaction() as tx:
-        sent = await tx.fetchval(
-            "INSERT INTO receipts (order_id, key) VALUES ($1, $2) "
-            "ON CONFLICT (key) DO NOTHING RETURNING id",
-            order_id, ctx.key,
-        )
-        if sent is None:
-            return                       # a previous attempt already sent it
-        await email(order_id)
+    conn = await db.acquire("write")
+    try:
+        async with conn.transaction() as tx:
+            sent = await tx.fetchval(
+                "INSERT INTO receipts (order_id, key) VALUES ($1, $2) "
+                "ON CONFLICT (key) DO NOTHING RETURNING id",
+                order_id, ctx.key,
+            )
+            if sent is None:
+                return                   # a previous attempt already sent it
+            await email(order_id)
+    finally:
+        await db.release("write", conn)
 ```
 
 The same rule applies to a durable bus subscriber: it is delivered at least

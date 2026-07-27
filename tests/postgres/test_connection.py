@@ -368,6 +368,57 @@ async def test_error_is_consumed_through_ready_for_query_and_connection_reused(
         await conn.close()
 
 
+def test_a_declared_sqlstate_survives_construction(postgres: Any) -> None:
+    """A subclass that names its condition keeps it.
+
+    `PostgresError.__init__` used to assign `self.sqlstate` unconditionally, so
+    a class-level declaration was overwritten with `None` by the very
+    constructor that was supposed to leave it alone -- and a caller classifying
+    by sqlstate, which is the correct way to tell a lock timeout from a
+    deadlock, read `None` for exactly the classes that had bothered to say.
+    Both spellings are pinned here because both are in use: the fakes in
+    `tests/passes/fakes.py` pass it up through `super().__init__` (the
+    workaround, which had to stay working) and the declaration is what should
+    have worked all along.
+    """
+
+    class Declared(postgres.PostgresError):
+        sqlstate = "23514"
+
+    class PassedUp(postgres.PostgresError):
+        def __init__(self, message: str) -> None:
+            super().__init__(message, sqlstate="42710")
+
+    assert Declared("check violated").sqlstate == "23514"
+    assert PassedUp("already there").sqlstate == "42710"
+    # An explicit code still wins over the declaration, and does not leak back
+    # onto the class for the next instance.
+    assert Declared("elsewhere", sqlstate="40P01").sqlstate == "40P01"
+    assert Declared("check violated").sqlstate == "23514"
+    # A class that names nothing still answers, rather than raising.
+    assert postgres.PostgresError("plain").sqlstate is None
+    assert postgres.InterfaceError("closed").sqlstate is None
+
+
+def test_the_error_classes_are_one_set_across_both_backends() -> None:
+    """The native backend re-exports the pure classes rather than redefining them.
+
+    Which is why the fix above needs no C twin: there is no second constructor
+    to keep in step. If that ever changes, this fails and the parity contract
+    applies to the new one.
+    """
+    if native_postgres is None:
+        pytest.skip("the native PostgreSQL extension is not built")
+    for name in (
+        "PostgresError",
+        "InterfaceError",
+        "OperationalError",
+        "ProtocolError",
+        "PipelineFullError",
+    ):
+        assert getattr(native_postgres, name) is getattr(pure_postgres, name), name
+
+
 @pytest.mark.asyncio
 async def test_cleartext_password_authentication(postgres: Any) -> None:
     server = FakePostgres(auth="cleartext")

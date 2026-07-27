@@ -937,6 +937,12 @@ class HttpProtocol(asyncio.Protocol):
             finally:
                 self._receive_waiter = None
             if not self._receive_queue:
+                # Woken with nothing queued. Every current waker enqueues before
+                # it wakes, so this is a guard rather than a live path -- but an
+                # ASGI `receive` must return a message, and popping an empty
+                # deque here would surface as an `IndexError` out of the
+                # application instead of a disconnect. Synthesising the
+                # disconnect keeps the contract total.
                 return self._disconnect_message()
             message = self._receive_queue.popleft()
 

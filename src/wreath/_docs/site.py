@@ -5,6 +5,12 @@ collection from the nav, output-path mapping, relative-link resolution, the
 nav/TOC assembly, strict orphan/dead-link checks, and all file I/O. The result is
 a plain directory of self-contained HTML you can serve with wreath's hardened
 :class:`~wreath.staticfiles.StaticFiles`.
+
+**Every markdown page under the source tree is link-checked, in the nav or not.**
+Reachability decides what gets *written*, never what gets *verified*: an orphan
+is warned about as an orphan and then held to the same link and anchor rules as
+anything else, because a page that is not in the nav yet is precisely the page
+whose links nobody has read.
 """
 
 from __future__ import annotations
@@ -168,6 +174,14 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
     errors: list[str] = []
     warnings: list[str] = []
 
+    # Orphans are still reported *as* orphans — that is a fact about the nav, and
+    # a page mid-authoring is allowed to be one. But being unreachable never made
+    # its links right, and skipping them meant the gate had a hole in exactly the
+    # place a new page starts life: a deliberately dead link on an orphan drew no
+    # warning at all, and three of them appeared at once the day the page was
+    # added to the nav. So an orphan is rendered and link-checked like any other
+    # page; only its *output* is withheld, because nothing links to it.
+    orphans: list[Page] = []
     if source_dir.is_dir():
         listed = {p.source for p in pages}
         for md in sorted(source_dir.rglob("*.md")):
@@ -175,20 +189,31 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
             if rel in listed or _excluded(rel, site.exclude):
                 continue
             warnings.append(f"orphan page not in nav: {rel}")
+            orphans.append(Page(rel, rel))
 
     # Phase 1 — render every page and collect its heading slugs (needed before
     # any cross-page anchor can be validated).
     rendered_pages: list[_RenderedPage] = []
+    rendered_orphans: list[_RenderedPage] = []
     chart_sources: set[Path] = set()
-    for page in pages:
+    #: An orphan's chart data is read to render it, but not published — nothing
+    #: in the built site would link to it.
+    unpublished_chart_sources: set[Path] = set()
+    queue = [(page, False) for page in pages] + [(page, True) for page in orphans]
+    for page, orphan in queue:
         src = source_dir / page.source
         if not src.is_file():
-            errors.append(f"nav page missing on disk: {page.source}")
+            # An orphan was listed by rglob moments ago, so this only fires if it
+            # was deleted mid-build (`docs serve` rebuilds on every change).
+            errors.append(
+                f"{'orphan' if orphan else 'nav'} page missing on disk: {page.source}")
             continue
         text = src.read_text(encoding="utf-8")
         description = _frontmatter_description(text) or site.description
         # ```chart -> SVG; note any data files read so we can publish them.
-        text, chart_tokens = charts.extract(text, source_dir, chart_sources)
+        text, chart_tokens = charts.extract(
+            text, source_dir,
+            unpublished_chart_sources if orphan else chart_sources)
         text, figure_tokens = figures.extract(text)
         text, hero_tokens = hero.extract(text)
         if apidoc.has_directives(text):
@@ -201,17 +226,26 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
         html = hero.restore(
             figures.restore(charts.restore(rendered.html, chart_tokens), figure_tokens),
             hero_tokens)
-        rendered_pages.append(_RenderedPage(
+        (rendered_orphans if orphan else rendered_pages).append(_RenderedPage(
             page, _output_path(page.source),
             rendered.title or hero.title_of(hero_tokens) or page.title,
             html, rendered.toc, frozenset(e.slug for e in rendered.toc), description))
 
-    slugs_by_page = {rp.out_rel: rp.slugs for rp in rendered_pages}
+    slugs_by_page = {
+        rp.out_rel: rp.slugs for rp in [*rendered_pages, *rendered_orphans]}
 
     # Phase 2 — validate dead links and broken anchors against the full slug map.
     sink = errors if site.strict else warnings
     for rp in rendered_pages:
         _check_page(rp.html, rp.out_rel, known, slugs_by_page, sink)
+    # An orphan is judged against what the site *would* contain once it joined
+    # the nav — nav pages plus the other orphans — so the answer is "are these
+    # links right", not a second copy of "this page is not in the nav". A nav
+    # page linking to an orphan is still dead, because the orphan is not built.
+    reachable = known | {rp.out_rel for rp in rendered_orphans}
+    for rp in rendered_orphans:
+        _check_page(
+            rp.html, rp.out_rel, reachable, slugs_by_page, sink, label="orphan")
 
     # Phase 3 — write each page with prev/next from nav order.
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -379,20 +413,28 @@ def _rewrite_md_links(html: str) -> str:
 def _check_page(
     html: str, current: str, known: set[str],
     slugs_by_page: dict[str, frozenset[str]], sink: list[str],
+    label: str = "",
 ) -> None:
+    """Report every dead link and broken anchor on one rendered page.
+
+    *label* tags the page's findings when it is not a normal nav page, so an
+    orphan's broken links read as an orphan's without being folded into the
+    single "orphan page not in nav" warning that already exists for it.
+    """
+    where = f"{current} ({label})" if label else current
     current_dir = posixpath.dirname(current)
     for match in _INTERNAL_MD.finditer(html):
         target = posixpath.normpath(posixpath.join(current_dir, match.group(1) + ".html"))
         if target not in known:
-            sink.append(f"{current}: dead link to {match.group(1)}.md")
+            sink.append(f"{where}: dead link to {match.group(1)}.md")
             continue
         anchor = match.group(2)
         if anchor and anchor[1:] not in slugs_by_page.get(target, frozenset()):
-            sink.append(f"{current}: link to missing anchor {anchor} in {match.group(1)}.md")
+            sink.append(f"{where}: link to missing anchor {anchor} in {match.group(1)}.md")
     for match in _ANCHOR.finditer(html):        # same-page #anchor links
         name = match.group(1)
         if name and name not in slugs_by_page.get(current, frozenset()):
-            sink.append(f"{current}: broken anchor #{name}")
+            sink.append(f"{where}: broken anchor #{name}")
 
 
 def _write_asset(path: Path, text: str) -> None:

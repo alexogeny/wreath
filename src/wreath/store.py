@@ -7,26 +7,28 @@ three times, the PostgreSQL half is re-derived three times -- and the six
 re-derivations are exactly the parts that are easy to get subtly wrong:
 
 * the table name reaches SQL by interpolation, so it must be a plain identifier;
-* the schema is *offered* (:meth:`Keyed.schema_sql`) and never applied, because
+* the schema is *offered* (`Keyed.schema_sql`) and never applied, because
   schema changes belong in the migration history with the rest of the schema;
 * statements are prepared lazily, because a store is built while the application
   is being described and the database is not up yet;
-* a claim is one ``INSERT ... ON CONFLICT ... RETURNING``, never a read followed
+* a claim is one `INSERT ... ON CONFLICT ... RETURNING`, never a read followed
   by a write;
-* the clock is ``clock_timestamp()`` and never ``now()``, which is frozen at
+* the clock is `clock_timestamp()` and never `now()`, which is frozen at
   transaction start;
-* expired rows are dropped by an explicit :meth:`PostgresStore.purge`, never by a
+* expired rows are dropped by an explicit `PostgresStore.purge`, never by a
   background thread.
 
-Declare the shape once and pick a backend::
+Declare the shape once and pick a backend:
 
-    declaration = Keyed(
-        table="wreath_session",
-        columns=(Column("data", "jsonb", null=False),),
-        key="sid",
-        prefix="wreath_session",
-    )
-    store = PostgresStore(database, declaration)
+```python
+declaration = Keyed(
+    table="wreath_session",
+    columns=(Column("data", "jsonb", null=False),),
+    key="sid",
+    prefix="wreath_session",
+)
+store = PostgresStore(database, declaration)
+```
 
 What is *not* shared is the payload and the semantics: what the columns mean,
 whether the deadline is fixed per store or supplied per write, and whether the
@@ -92,7 +94,7 @@ class Sql(str):
     arrived from a request cannot reach the statement without somebody having
     written `Sql(...)` around it and meant it.
 
-    A bind placeholder (``$1``) needs no marker -- it is the safe form, and
+    A bind placeholder (`$1`) needs no marker -- it is the safe form, and
     requiring ceremony for it would push callers toward the unsafe one.
     """
 
@@ -116,7 +118,7 @@ def _expression(value: object, *, what: str) -> str:
 
 
 def sql_identifier(value: str, *, what: str = "table") -> str:
-    """Return ``value`` if it is a bare SQL identifier, else raise.
+    """Return `value` if it is a bare SQL identifier, else raise.
 
     Table and column names are interpolated into statement text (they cannot be
     bound as parameters), so the only safe policy is to refuse anything that is
@@ -144,24 +146,26 @@ class Column(NamedTuple):
 class Keyed:
     """The declaration of a keyed store: one key, some payload, one timestamp.
 
+    A last-touched store (`deadline=False`) expires nothing: the stamp is
+    arithmetic for whoever reads it, and only an idle purge ages a row out.
+
+    `claim=True` requires a deadline -- there is nothing to reclaim without one
+    -- and every payload column nullable, because a claim resets the payload.
+
+    An index on the stamp is what keeps purging a large table cheap, and the
+    prefix is what keeps two stores over different tables from colliding on one
+    prepared-statement name.
+
     Args:
         table: the backing table. Interpolated, so it must be a plain identifier.
         columns: the payload. Their meaning belongs to the caller.
         key: the primary-key column.
-        stamp: the ``timestamptz`` column rows are aged by.
-        deadline: whether ``stamp`` is a deadline (the row is dead once the clock
-            passes it) or a last-touched mark. A last-touched store expires
-            nothing -- ``updated`` is arithmetic for whoever reads it, and only
-            an idle purge ages a row out.
-        ttl: seconds a row lives, when the store owns that decision. ``None``
-            means the caller supplies the lifetime per write.
-        index_stamp: also declare an index on ``stamp``, which is what keeps
-            purging a large table cheap.
-        claim: build the atomic claim statement. Requires a deadline (there is
-            nothing to reclaim without one) and a nullable payload (a claim
-            resets it).
-        prefix: prepended to prepared-statement names, so two stores over
-            different tables never collide on one.
+        stamp: the `timestamptz` column rows are aged by.
+        deadline: whether `stamp` is a deadline or a last-touched mark.
+        ttl: seconds a row lives. `None` means the caller supplies it per write.
+        index_stamp: also declare an index on `stamp`.
+        claim: build the atomic claim statement.
+        prefix: prepended to prepared-statement names.
     """
 
     table: str
@@ -248,24 +252,26 @@ class PostgresStore:
     """A keyed store in a table every worker shares.
 
     Holds the six disciplines named in this module's docstring, and generates
-    the statements a keyed store always wants -- :meth:`claim`, :meth:`read`,
-    :meth:`delete`, :meth:`purge` -- from the declaration. Anything shaped by
+    the statements a keyed store always wants -- `claim`, `read`,
+    `delete`, `purge` -- from the declaration. Anything shaped by
     the caller's payload is written by the caller and registered with
-    :meth:`define`, which gets it the same lazy preparation and the same
+    `define`, which gets it the same lazy preparation and the same
     statement naming.
 
     PostgreSQL owns the clock. Every generated statement reads
-    ``clock_timestamp()``, so workers on disagreeing wall clocks cannot disagree
-    about when a row expires, and ``clock_timestamp`` rather than ``now()``
-    because ``now()`` is fixed at transaction start -- inside a transaction it
+    `clock_timestamp()`, so workers on disagreeing wall clocks cannot disagree
+    about when a row expires, and `clock_timestamp` rather than `now()`
+    because `now()` is fixed at transaction start -- inside a transaction it
     would freeze time for as long as the transaction runs.
 
+    Generated reads go to the write pool by default, because a store that claims
+    must read back from the primary that accepted its claim. A store that only
+    reads may pass `read_workload="read"`.
+
     Args:
-        database: a :class:`~wreath.postgres.Database`.
+        database: a `wreath.postgres.Database`.
         declaration: what the store holds.
-        read_workload: the pool generated reads go to. ``"write"`` by default,
-            because a store that claims must read back from the primary that
-            accepted its claim; a store that only reads may pass ``"read"``.
+        read_workload: the pool generated reads go to. `"write"` by default.
     """
 
     __slots__ = ("_database", "_declaration", "_defined", "_prepare_lock")
@@ -316,10 +322,17 @@ class PostgresStore:
 
     @property
     def declaration(self) -> Keyed:
+        """The `Keyed` this store was built from. Frozen, so it is safe to share.
+
+        What a purge pass is handed: everything needed to walk the table --
+        its name, its key, its stamp -- with no reference back to this store or
+        its connection pool.
+        """
         return self._declaration
 
     @property
     def table(self) -> str:
+        """The backing table's name, already checked as a plain identifier."""
         return self._declaration.table
 
     @property
@@ -331,15 +344,15 @@ class PostgresStore:
     def live(self) -> Sql:
         """The predicate for a row that is still good.
 
-        The exact complement of :attr:`expired`, so a purge can never drop a row
+        The exact complement of `expired`, so a purge can never drop a row
         a read would still have honoured.
         """
         return Sql(f"{ALIAS}.{self._declaration.stamp} >= clock_timestamp()")
 
     def window(self, seconds: float | str | None = None) -> Sql:
-        """A deadline ``seconds`` from the database's clock, not the caller's.
+        """A deadline `seconds` from the database's clock, not the caller's.
 
-        A string lifetime must be a bind placeholder; see :class:`Sql`.
+        A string lifetime must be a bind placeholder; see `Sql`.
         """
         if seconds is None:
             seconds = self._declaration.ttl
@@ -355,11 +368,11 @@ class PostgresStore:
         where: str | None = None,
         returning: str | None = None,
     ) -> str:
-        """One ``INSERT ... ON CONFLICT DO UPDATE`` over this store's key.
+        """One `INSERT ... ON CONFLICT DO UPDATE` over this store's key.
 
-        Both mappings are ``column -> expression``. The columns are
+        Both mappings are `column -> expression`. The columns are
         interpolated, so each is checked as an identifier; the expressions are
-        checked as :class:`Sql` -- a bind placeholder, or a fragment the caller
+        checked as `Sql` -- a bind placeholder, or a fragment the caller
         marked deliberately. The result is a single statement by construction --
         two statements would be two chances for a concurrent worker to
         interleave.
@@ -388,7 +401,7 @@ class PostgresStore:
         return sql
 
     def define(self, name: str, sql: str, *, workload: str = "write") -> None:
-        """Register ``sql`` under ``name`` for lazy preparation."""
+        """Register `sql` under `name` for lazy preparation."""
         if name in self._defined:
             raise ValueError(f"{name!r} is already defined on this store")
         # Checked here, at description time, rather than left to the first
@@ -410,24 +423,29 @@ class PostgresStore:
         return f"{self._declaration.prefix}_{name}_{self.table}"
 
     def sql(self, name: str) -> str:
-        """The text registered under ``name``. Useful when explaining a plan."""
+        """The text registered under `name`. Useful when explaining a plan."""
         return self._entry(name).sql
 
     def workload(self, name: str) -> str:
+        """Which pool the statement registered under `name` runs against.
+
+        Raises:
+            ValueError: when nothing is registered under that name.
+        """
         return self._entry(name).workload
 
     def statement(self, name: str) -> Any:
-        """The prepared statement for ``name``, preparing it on first use.
+        """The prepared statement for `name`, preparing it on first use.
 
         Locked, because the first use is not atomic: the window spans a call
-        into ``Database.statement``, and two threads arriving together both see
-        ``None`` and both register. That is not a benign duplicate --
-        ``Database.statement`` *raises* on a name it already holds, so the loser
+        into `Database.statement`, and two threads arriving together both see
+        `None` and both register. That is not a benign duplicate --
+        `Database.statement` *raises* on a name it already holds, so the loser
         gets `duplicate PostgreSQL statement` on an ordinary first call.
 
         This does not need a free-threaded interpreter to happen: the GIL is
         released across that call, so plain threads reproduce it. A single event
-        loop cannot, because there is no ``await`` between the check and the
+        loop cannot, because there is no `await` between the check and the
         assignment -- which is why it has not been seen.
 
         Double-checked so the settled path stays one attribute read: after the
@@ -455,10 +473,10 @@ class PostgresStore:
         return self._declaration.schema_sql()
 
     async def claim(self, key: str) -> bool:
-        """Take ownership of ``key``, or report that someone else has it.
+        """Take ownership of `key`, or report that someone else has it.
 
-        One ``INSERT ... ON CONFLICT (key) DO UPDATE ... WHERE expired
-        RETURNING``. A row comes back only when the insert succeeded or an
+        One `INSERT ... ON CONFLICT (key) DO UPDATE ... WHERE expired RETURNING`.
+        A row comes back only when the insert succeeded or an
         expired row was reclaimed, so **"a row came back" is the claim** -- no
         owner column, no second round trip, and no window in which two workers
         both proceed. A read followed by a write would let both of them conclude
@@ -467,23 +485,23 @@ class PostgresStore:
         return await self.statement("claim").fetchrow(key) is not None
 
     async def read(self, key: str, *, live: bool = False) -> Any:
-        """The payload columns for ``key``, or None.
+        """The payload columns for `key`, or None.
 
-        ``live=True`` refuses a row whose deadline has passed, for a store that
+        `live=True` refuses a row whose deadline has passed, for a store that
         purges lazily -- which is every store, since nothing purges in the
         background.
         """
         return await self.statement("read_live" if live else "read").fetchrow(key)
 
     async def delete(self, key: str) -> str:
-        """Drop ``key``. Not an error when it is already gone."""
+        """Drop `key`. Not an error when it is already gone."""
         return await self.statement("delete").execute(key)
 
     async def purge_count(self, idle_seconds: float | None = None) -> int | None:
-        """:meth:`purge`, reporting how many rows went.
+        """`purge`, reporting how many rows went.
 
-        ``None`` when the driver's status cannot be read -- a test double, a
-        backend that reports nothing. Splitting this from :meth:`purge` keeps
+        `None` when the driver's status cannot be read -- a test double, a
+        backend that reports nothing. Splitting this from `purge` keeps
         the status string available to callers that want it while giving the
         scheduled job that runs this something it can actually record: "the
         purge ran" and "the purge removed 40 000 rows" are different facts.
@@ -503,7 +521,7 @@ class PostgresStore:
         Nothing calls this for you: a background thread would duplicate across
         workers and swallow its own failures. Run it from a durable job.
 
-        With ``idle_seconds``, drops rows untouched for that long instead --
+        With `idle_seconds`, drops rows untouched for that long instead --
         which is the only way to age out a last-touched store, whose stamp is
         never a deadline.
         """
@@ -526,19 +544,26 @@ class MemoryStore:
     this.
 
     Being synchronous is the feature, not an implementation detail: it is what
-    makes :meth:`claim` atomic. There is no await between the read and the
+    makes `claim` atomic. There is no await between the read and the
     write, so no other task on this loop can interleave -- the in-process
-    counterpart of the single statement :meth:`PostgresStore.claim` uses.
+    counterpart of the single statement `PostgresStore.claim` uses.
 
-    Nothing needs purging: entries expire lazily when read and ``max_entries``
+    Nothing needs purging: entries expire lazily when read and `max_entries`
     bounds whatever is never read again.
 
     **The window opens when a key is first written, and writing again does not
-    move it** -- the same lifetime :class:`PostgresStore` gives a claimed key,
-    whose generated ``DO UPDATE`` leaves the stamp alone on purpose. A store
-    that restarted the clock on every write would let a slow holder extend its
-    own key indefinitely, and would mean the two backends honoured a key for
-    different lengths of time behind one caller.
+    move it.** A store that restarted the clock on every write would let a slow
+    holder extend its own key indefinitely -- an idempotency key would outlive
+    its TTL for as long as the handler kept touching it.
+
+    Over PostgreSQL the same rule is enforced a statement at a time rather than
+    by this class: a caller's own upsert omits the stamp from its `DO UPDATE`,
+    the way `middleware.idempotency.PostgresIdempotencyStore`'s `store`
+    statement does. The generated `PostgresStore.claim` is the deliberate
+    exception -- its `DO UPDATE` *does* reset the stamp, because it only fires
+    on an already-expired row and a reclaimed row must look exactly like a fresh
+    one. Matching here is what lets one caller swap the backends and have a key
+    honoured for the same length of time.
     """
 
     __slots__ = ("_cache", "_clock", "_ttl")
@@ -563,14 +588,14 @@ class MemoryStore:
         self._clock = clock
 
     def claim(self, key: str) -> bool:
-        """Take ownership of ``key``, or report that it is already held."""
+        """Take ownership of `key`, or report that it is already held."""
         if self.read(key) is not None:
             return False
         self._write(key, CLAIMED, deadline=None)
         return True
 
     def read(self, key: str) -> Any:
-        """The stored value, :data:`CLAIMED` when claimed but unwritten, or None."""
+        """The stored value, `CLAIMED` when claimed but unwritten, or None."""
         entry = self._cache.get(key)
         if entry is None:
             return None
@@ -581,7 +606,7 @@ class MemoryStore:
         return value
 
     def set(self, key: str, value: Any) -> None:
-        """Store ``value`` under ``key``, keeping the deadline the key already has.
+        """Store `value` under `key`, keeping the deadline the key already has.
 
         A key that is absent or already past its deadline starts a fresh window;
         one that is live keeps the deadline it was claimed or first written with.
@@ -600,10 +625,16 @@ class MemoryStore:
         self._cache.set(key, (value, deadline))
 
     def delete(self, key: str) -> bool:
-        """Drop ``key``; report whether it was there."""
+        """Drop `key`; report whether it was there."""
         return self._cache.delete(key)
 
     def clear(self) -> None:
+        """Drop every key, live or expired.
+
+        For a test between cases. Nothing in a running application should need
+        it: a claim that is forgotten wholesale is a claim two workers can both
+        take again.
+        """
         self._cache.clear()
 
     def __len__(self) -> int:

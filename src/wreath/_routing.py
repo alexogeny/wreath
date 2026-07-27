@@ -1,16 +1,16 @@
 """Routing with three interchangeable compiled backends.
 
-The ``"decision"`` backend compiles the route set into a decision tree that
+The `"decision"` backend compiles the route set into a decision tree that
 tests the cheapest, most-discriminating feature first (HTTP method, then segment
 count, then selected segment values) so a request classifies in a few hash
-lookups and only one route is fully verified. The ``"trie"`` backend keeps the
+lookups and only one route is fully verified. The `"trie"` backend keeps the
 earlier left-to-right segment trie.
 
-The default ``"bitset"`` backend gives every route in a (method, segment-count) group a
+The default `"bitset"` backend gives every route in a (method, segment-count) group a
 bit and intersects one mask per segment position, so a parameter route no longer
 folds into every literal branch the way the decision tree needs it to. That
 folding is what makes the tree grow super-linearly with the parameter fraction;
-the bitset stays linear. See ``docs/plans/bitset-routing.md`` for the
+the bitset stays linear. See `docs/plans/bitset-routing.md` for the
 measurements.
 
 All three run in C when the extension is available, with pure-Python twins
@@ -96,7 +96,13 @@ class Router:
             table.add(path, method.upper(), handler)
 
     def classify(self, method: str, path: str) -> tuple[int, Any]:
-        """Classify one path traversal into miss, public match, or protected ticket."""
+        """Classify one path traversal into miss, public match, or protected ticket.
+
+        The `"trie"` backend stores no capability clauses, so it has no protected
+        class to report and this shim answers every hit as a public match. Nothing
+        is lost by that: a trie route's requirement is enforced by the dispatcher's
+        authorization stage instead, which is the branch `_CLASSIFYING` selects.
+        """
         if self._mode in _CLASSIFYING:
             table: Any = self._table
             return table.classify(method, path)
@@ -104,7 +110,12 @@ class Router:
         return (0, None) if matched is None else (1, matched)
 
     def resolve(self, ticket: Any, caller_mask: int) -> Any:
-        """Resolve a protected ticket without restarting path search."""
+        """Resolve a protected ticket without restarting path search.
+
+        The `"trie"` shim returns its argument unchanged rather than filtering on
+        `caller_mask`, because `classify` above issues no ticket for that backend.
+        The pair keeps one shape for a caller that does not branch on the mode.
+        """
         if self._mode in _CLASSIFYING:
             table: Any = self._table
             return table.resolve(ticket, caller_mask)

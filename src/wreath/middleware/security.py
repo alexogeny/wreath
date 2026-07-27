@@ -1,4 +1,17 @@
-"""First-party trusted-host and browser security-header middleware."""
+"""First-party trusted-host and browser security-header middleware.
+
+Two independent global middlewares. `TrustedHostMiddleware` refuses a request
+whose `Host` is not one this application serves, before routing.
+`SecurityHeadersMiddleware` adds the browser hardening headers to every response
+that does not already declare them::
+
+    app.add_middleware(TrustedHostMiddleware(["app.example", "*.app.example"]))
+    app.add_middleware(SecurityHeadersMiddleware(hsts_max_age=31_536_000,
+                                                 hsts_include_subdomains=True))
+
+Both read the request scheme and `Host`, so behind a proxy both belong after
+`ProxyHeadersMiddleware`.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +38,33 @@ else:
 
 
 class TrustedHostMiddleware:
-    """Reject requests whose Host value does not match a compiled allowlist."""
+    """Reject requests whose Host value does not match a compiled allowlist.
+
+    Global middleware with a synchronous `before_sync` hook, so it is fused into
+    the pipeline with no coroutine and no await. It runs before routing, which
+    is the point -- a request for a host this application does not serve never
+    reaches a handler.
+
+    The check is on the host alone. Any port is stripped before comparison, an
+    IPv6 literal keeps its brackets, and the comparison is case-insensitive. A
+    pattern is either an exact host, `*` for any host, or `*.example.com`, which
+    matches any subdomain of `example.com` but *not* the bare `example.com`; to
+    accept both, list both. A `*` anywhere else in a pattern is rejected at
+    construction rather than being treated as a literal.
+
+    A request with no `Host` header, or one that matches nothing, is answered
+    400 `application/problem+json` with detail `Invalid Host header`.
+
+    Behind a proxy this must be mounted after `ProxyHeadersMiddleware`, which is
+    what turns `X-Forwarded-Host` into the `Host` this reads.
+
+    Args:
+        allowed_hosts: Host patterns to accept. Must not be empty.
+
+    Raises:
+        ValueError: `allowed_hosts` is empty.
+        ValueError: A pattern contains `*` other than as `*` or a leading `*.`.
+    """
 
     global_scope = True
     __slots__ = ("allowed_hosts",)
@@ -40,6 +79,7 @@ class TrustedHostMiddleware:
         self.allowed_hosts = patterns
 
     def before_sync(self, request: Request):
+        """Return None for an allowed host, or a 400 problem response otherwise."""
         # Host validation is pure and synchronous: a before_sync hook so the
         # global pipeline runs it with no coroutine or await.
         value = request.header("host")
@@ -49,7 +89,45 @@ class TrustedHostMiddleware:
 
 
 class SecurityHeadersMiddleware:
-    """Append a precompiled set of browser security headers to responses."""
+    """Append a precompiled set of browser security headers to responses.
+
+    Global middleware, so error responses and static files are covered too. The
+    header list is built once in the constructor; the per-response work is one
+    scheme comparison and an append of whatever is not already there.
+
+    A header is added only when the response does not already carry one by that
+    name, matched case-insensitively. A handler that set its own
+    `Content-Security-Policy` keeps it -- this sets defaults, it does not
+    enforce them.
+
+    By default it emits `Content-Security-Policy: default-src 'self'`,
+    `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and
+    `Referrer-Policy: strict-origin-when-cross-origin`. Pass None for any of
+    those to omit it. `Permissions-Policy` is off unless configured.
+
+    `Strict-Transport-Security` is emitted only on responses to requests whose
+    scheme is `https`, and only when HSTS was configured at all. Behind a
+    TLS-terminating proxy the scheme Wreath sees is `http`, so without
+    `ProxyHeadersMiddleware` in front the header is silently never sent.
+    Configure HSTS either structurally through `hsts_max_age` and its companions
+    or verbatim through `strict_transport_security`, never both.
+
+    Args:
+        content_security_policy: The CSP value, or None to emit no CSP header.
+        frame_options: The `X-Frame-Options` value, or None to omit it.
+        content_type_options: Emit `X-Content-Type-Options: nosniff`.
+        referrer_policy: The `Referrer-Policy` value, or None to omit it.
+        permissions_policy: The `Permissions-Policy` value. None omits it.
+        hsts_max_age: HSTS lifetime in seconds. None emits no HSTS header.
+        hsts_include_subdomains: Add `includeSubDomains` to the HSTS value.
+        hsts_preload: Add `preload`, which the preload list requires.
+        strict_transport_security: A verbatim HSTS value instead of the structured ones.
+
+    Raises:
+        ValueError: Both `hsts_max_age` and `strict_transport_security` were given.
+        ValueError: `hsts_max_age` is not a non-negative integer.
+        ValueError: `hsts_preload` without `hsts_include_subdomains` and a year of max-age.
+    """
 
     global_scope = True
     __slots__ = ("headers", "hsts_header", "https_headers")
@@ -106,6 +184,11 @@ class SecurityHeadersMiddleware:
         )
 
     async def after(self, request: Request, response):
+        """Append every configured header the response does not already carry.
+
+        The HSTS header is part of that set only when the request scheme is
+        `https`.
+        """
         # `request.scheme`, not `request.scope[...]`: this hook is global, so
         # reading the scope here materialized the lazy native scope dict on
         # every single response just to compare one string.

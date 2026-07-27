@@ -740,7 +740,7 @@ def load_application(target: str, *, factory: bool = False) -> ASGIApplication:
     module_name, attribute = _split_target(target)
     try:
         module = importlib.import_module(module_name)
-    except Exception as error:  # noqa: BLE001 -- target imports can fail arbitrarily
+    except Exception as error:  # target imports can fail arbitrarily
         raise CliError(f"could not import application module {module_name!r}: {error}") from error
     try:
         selected = getattr(module, attribute)
@@ -753,7 +753,7 @@ def load_application(target: str, *, factory: bool = False) -> ASGIApplication:
             raise CliError(f"application factory {target!r} is not callable")
         try:
             selected = selected()
-        except Exception as error:  # noqa: BLE001 -- user factory failure
+        except Exception as error:  # user factory failure
             raise CliError(f"application factory {target!r} failed: {error}") from error
         if inspect.isawaitable(selected):
             close = getattr(selected, "close", None)

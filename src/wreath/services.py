@@ -8,7 +8,7 @@ fetching new work, drain bounded in-flight handlers, then cancel anything that
 outlives the grace period.
 
 Design 01 §3 (lifespan) is the contract implemented here. A "service" is any
-object exposing ``async start(supervisor)`` and ``async drain(deadline)``.
+object exposing `async start(supervisor)` and `async drain(deadline)`.
 """
 
 from __future__ import annotations
@@ -19,15 +19,47 @@ from typing import Any, Protocol
 
 
 class Service(Protocol):
-    """A process-lifetime background service managed by the supervisor."""
+    """A process-lifetime background service managed by the supervisor.
 
-    async def start(self, supervisor: Supervisor) -> None: ...
+    Structural, not nominal: any object with these two coroutines is a service.
+    Implementations are expected to spawn their long-lived tasks through
+    `Supervisor.spawn` rather than owning them, so the supervisor can
+    cancel what outlives the grace period.
+    """
 
-    async def drain(self, deadline: float) -> None: ...
+    async def start(self, supervisor: Supervisor) -> None:
+        """Begin running. Raising here aborts startup and rolls back siblings.
+
+        Args:
+            supervisor: The owner, for `spawn` and for reading `stopping`.
+        """
+        ...
+
+    async def drain(self, deadline: float) -> None:
+        """Stop taking new work and finish what is in flight, by `deadline`.
+
+        Returning does not have to mean every task exited: whatever is still
+        running when this returns is cancelled. Raising is survivable and
+        counted in `Supervisor.drain_errors`; it never aborts a sibling's drain.
+
+        Args:
+            deadline: An event-loop clock time (`loop.time()` units), not a duration.
+        """
+        ...
 
 
 class Supervisor:
-    """Owns and lifecycles the background tasks of registered services."""
+    """Owns and lifecycles the background tasks of registered services.
+
+    Register every service with `add` before `start`; services come
+    up in registration order and drain in reverse, so a producer quiesces before
+    whatever it feeds. `stop` is the only path that resolves the shutdown,
+    and it always completes -- a service whose `drain` fails increments
+    `drain_errors` instead of aborting its siblings.
+
+    Args:
+        drain_timeout: Seconds allowed for the whole drain, shared by every service.
+    """
 
     __slots__ = (
         "_services", "_tasks", "_stopping", "_started", "drain_timeout", "drain_errors",
@@ -47,6 +79,11 @@ class Supervisor:
         self.drain_errors = 0
 
     def add(self, service: Service) -> None:
+        """Register a service to be started and drained with this supervisor.
+
+        Raises:
+            RuntimeError: The supervisor has already started; registration is closed.
+        """
         if self._started:
             raise RuntimeError("cannot register a service after the supervisor started")
         self._services.append(service)
@@ -57,14 +94,28 @@ class Supervisor:
         return self._stopping
 
     def is_stopping(self) -> bool:
+        """Whether shutdown has begun. The non-awaiting read of `stopping`."""
         return self._stopping.is_set()
 
     @property
     def empty(self) -> bool:
+        """Whether no service is registered. An empty supervisor still starts."""
         return not self._services
 
     def spawn(self, name: str, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
-        """Own a long-lived task; it is cancelled on stop if it outlives drain."""
+        """Own a long-lived task; it is cancelled on stop if it outlives drain.
+
+        The supervisor holds a strong reference until the task completes, which
+        is what keeps a fire-and-forget worker from being garbage collected
+        mid-flight. A task that raises is not observed until `stop` reaps it,
+        and its exception is counted in `drain_errors` rather than re-raised.
+
+        Args:
+            name: Task name, as it appears in `asyncio` diagnostics.
+
+        Returns:
+            The task, for a caller that wants to await or cancel it itself.
+        """
         task = asyncio.ensure_future(coro)
         # `ensure_future` over a coroutine always yields a Task, and `Task.set_name`
         # has existed since 3.8 -- on a 3.14-only codebase there is nothing here
@@ -75,6 +126,18 @@ class Supervisor:
         return task
 
     async def start(self) -> None:
+        """Start every registered service, in registration order.
+
+        Idempotent: a second call on a started supervisor returns immediately.
+        Startup is all-or-nothing. If one service's `start` raises -- including
+        by cancellation -- the services that already came up are drained in
+        reverse, every spawned task is cancelled, and the original exception
+        propagates unchanged. The supervisor is left un-started, so it can be
+        started again once the cause is fixed.
+
+        Raises:
+            Exception: Whatever a service's `start` raised, after the rollback.
+        """
         if self._started:
             return
         self._stopping.clear()
@@ -83,7 +146,7 @@ class Supervisor:
             for service in self._services:
                 await service.start(self)
                 started.append(service)
-        except BaseException:  # noqa: BLE001 -- re-raised below; see the comment
+        except BaseException:  # re-raised below; see the comment
             # Broad *and* re-raised: a partial start must be rolled back however
             # it failed, including when the failure is a `CancelledError` that
             # `except Exception` would miss -- leaving half the services running
@@ -100,6 +163,16 @@ class Supervisor:
         self._started = True
 
     async def stop(self) -> None:
+        """Signal shutdown, drain in reverse registration order, cancel the rest.
+
+        Idempotent: a call on a supervisor that never started returns
+        immediately. This never raises on a service's behalf -- a `drain` that
+        fails, and a spawned task that died of something other than the
+        supervisor's own cancellation, each increment `drain_errors`. Read that
+        counter to tell "everything quiesced" from "shutdown finished anyway";
+        the shutdown itself completes either way. `CancelledError` still
+        propagates, so a cancelled shutdown stays cancelled.
+        """
         if not self._started:
             return
         self._stopping.set()

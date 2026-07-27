@@ -1,4 +1,42 @@
-"""Signed inbound and outbound webhook primitives."""
+"""Signed inbound and outbound webhook primitives.
+
+A webhook is somebody else's HTTP request arriving with a claim about who sent
+it, or one of yours leaving with the same claim attached. Both halves are here,
+and both are built around the same signature profile.
+
+**The profile.** Wreath signs `wreath-v1`: HMAC-SHA256 over the exact request
+body joined with the event's timestamp, id and type. The MAC covers the bytes
+that were sent, not a re-serialization of them, so a verifier that reformats the
+JSON before checking would fail -- which is the point. Signed fields are refused
+if they contain a control character, because the signature base joins them with
+newlines and an embedded newline would make the split ambiguous. Verification
+also bounds the timestamp (`HMACWebhookVerifier.max_age`), so a captured
+request cannot be replayed forever. Keys are a mapping of key id to secret, and
+the id travels in a header, which is what makes rotation an ordinary deployment
+rather than a cutover.
+
+**Receiving.** `WebhookHub` registers a `WebhookSource` per sender
+and a handler per event type. A request is bounded, verified, deduplicated and
+dispatched, in that order. Deduplication has two forms and they are not
+equivalent: `LocalReplayStore` is per process, and
+`PostgresWebhookInbox` is a claim in a table every replica shares, with a
+fencing token so a lease that expired cannot complete over the top of the worker
+that took it over.
+
+**Sending.** `WebhookDestination` signs and posts. `send` does it
+now, and reports the outcome as `delivered`, `failed` or `unknown` --
+three states because a transport failure genuinely does not say whether the peer
+processed the request. `enqueue` instead commits the intent to
+`PostgresWebhookOutbox` inside the caller's transaction, so the delivery
+exists exactly when the change that caused it does, and
+`WebhookDispatcher` sends it afterwards with leases, retries and backoff.
+
+**Relaying.** An event received can cause an event sent. `relay` and
+`enqueue_relay` carry correlation and causation ids forward and append this
+service to the envelope's relay path, which is itself signed. A path that would
+repeat a service, or grow past the hop limit, is refused -- that is what stops
+two services that subscribe to each other from generating traffic forever.
+"""
 
 from __future__ import annotations
 
@@ -35,6 +73,32 @@ _RELAY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
 @dataclass(frozen=True, slots=True)
 class WebhookEnvelope:
+    """One event, in the form the signature covers. Immutable; validated at construction.
+
+    Both directions use it: a signer turns one into headers, and a verifier
+    returns one after the MAC checks out. Holding the raw `body` rather than a
+    decoded payload is deliberate -- the signature is over those exact bytes, and
+    re-encoding them would break it.
+
+    Construction refuses anything that would make the signature base ambiguous or
+    the relay path unusable, so an envelope that exists is one that can be signed.
+
+    Args:
+        id: Unique per event, and the deduplication key on the receiving side.
+        type: Event type; selects the handler on the receiving side.
+        version: Payload schema version, carried through and signed.
+        timestamp: Must be timezone-aware. Bounds replay via the verifier's window.
+        content_type: Sent as `Content-Type`; not covered by the signature.
+        body: The exact bytes signed and sent.
+        correlation_id: Ties an event to the chain it belongs to.
+        causation_id: The id of the event that caused this one.
+        ordering_key: Advisory grouping stored on an outbox row. Not signed, not enforced.
+        relay_path: Services this event has already passed through. Signed, and loop-checked.
+
+    Raises:
+        ValueError: An empty or control-character field, a naive timestamp, or a bad relay path.
+    """
+
     id: str
     type: str
     version: str
@@ -70,6 +134,24 @@ class WebhookEnvelope:
 
 @dataclass(frozen=True, slots=True)
 class WebhookLimits:
+    """What one inbound webhook request may cost. Validated at construction.
+
+    Applied before the signature is checked, and that order matters: verifying a
+    MAC over a body an unauthenticated caller controls the size of is work the
+    caller chose for you. Every breach answers `413` -- except an oversized
+    event id, which answers `400`, because it is a valid signed request that
+    this receiver will not store.
+
+    Args:
+        max_body_bytes: Body ceiling, checked once the body is read and before the MAC.
+        max_headers: Header fields accepted; over it the request is refused unread.
+        max_header_bytes: Total header name+value bytes, accumulated as they are scanned.
+        max_event_id_bytes: UTF-8 bytes in the event id, checked after verification.
+
+    Raises:
+        ValueError: Any limit is non-positive.
+    """
+
     max_body_bytes: int = 1024 * 1024
     max_headers: int = 32
     max_header_bytes: int = 16 * 1024
@@ -87,6 +169,23 @@ class WebhookLimits:
 
 @dataclass(frozen=True, slots=True)
 class WebhookContext:
+    """What a receiving handler is told about the event it is handling.
+
+    The second argument to a handler is the validated payload; this is the
+    first, and carries everything around it.
+
+    `session` is the distinction that matters. On a durable source it is the
+    same transaction the inbox claim was made in, so anything the handler writes
+    commits atomically with "this event was processed" -- there is no window in
+    which the work landed but the deduplication did not. On a non-durable source
+    it is None and the handler must open its own.
+
+    Args:
+        source: The registered source name; also the deduplication namespace.
+        request: The live request, for headers the envelope does not carry.
+        session: The claim's transaction on a durable source, else None.
+    """
+
     source: str
     envelope: WebhookEnvelope
     request: Request
@@ -95,6 +194,21 @@ class WebhookContext:
 
 @dataclass(frozen=True, slots=True)
 class WebhookDeliveryResult:
+    """The outcome of one delivery attempt.
+
+    Three outcomes, not two, because a transport failure is genuinely not a
+    failed delivery: a request that timed out may well have been processed. Only
+    `failed` means the peer answered and refused; `unknown` means nobody
+    knows, which is why the dispatcher settles those rows separately instead of
+    retrying them into a duplicate.
+
+    Args:
+        outcome: `delivered` (2xx), `failed` (a non-2xx answer), or `unknown` (no answer).
+        event_id: The envelope id this attempt was for.
+        status: The response status; None when no response arrived.
+        failure: A short failure code, e.g. a client exception name; None when the peer answered.
+    """
+
     outcome: Literal["delivered", "failed", "unknown"]
     event_id: str
     status: int | None = None
@@ -102,7 +216,24 @@ class WebhookDeliveryResult:
 
 
 class HMACWebhookSigner:
-    """Sign Wreath's versioned exact-body HMAC-SHA256 profile."""
+    """Sign Wreath's versioned exact-body HMAC-SHA256 profile.
+
+    Holds every key it may ever have to sign with, and one id to sign with by
+    default. The others are not spares: a redelivery from the outbox must be
+    signed with the key the row was enqueued under, or a receiver that has since
+    rotated would reject a delivery it had already accepted. That is why
+    `headers` takes a `key_id` at all.
+
+    Keys are copied at construction, so the caller's mapping may change
+    afterwards without affecting an in-flight signer.
+
+    Args:
+        keys: Key id to secret. Must contain `key_id`, and that secret must be non-empty.
+        key_id: The key used when a caller does not name one.
+
+    Raises:
+        ValueError: `key_id` is not in `keys`, or its secret is empty.
+    """
 
     __slots__ = ("_key_id", "_keys")
 
@@ -116,11 +247,29 @@ class HMACWebhookSigner:
 
     @property
     def key_id(self) -> str:
+        """The default signing key id. Recorded on an outbox row at enqueue time."""
         return self._key_id
 
     def headers(
         self, envelope: WebhookEnvelope, *, key_id: str | None = None
     ) -> tuple[tuple[bytes, bytes], ...]:
+        """The signed header set for `envelope`. Does not include `Content-Type`.
+
+        Always carries the id, type, version, timestamp, key id and signature;
+        correlation, causation and relay-path headers appear only when the
+        envelope has them. The timestamp is normalized to UTC with microsecond
+        precision and a `Z` suffix, and it is the normalized form that is
+        signed -- so the header must be transmitted byte-for-byte as returned.
+
+        Args:
+            key_id: Sign with this key instead of the default, e.g. redelivering an old row.
+
+        Returns:
+            Raw `(name, value)` byte pairs, ready to pass to the HTTP client.
+
+        Raises:
+            ValueError: `key_id` names a key this signer does not hold.
+        """
         selected_key = self._key_id if key_id is None else key_id
         key = self._keys.get(selected_key)
         if key is None:
@@ -155,7 +304,26 @@ class HMACWebhookSigner:
 
 
 class HMACWebhookVerifier:
-    """Verify Wreath's HMAC profile with a bounded timestamp window."""
+    """Verify Wreath's HMAC profile with a bounded timestamp window.
+
+    Holding several keys is how rotation works: a sender switches key id when it
+    is ready, and both are accepted until the old one is dropped. The key id
+    arrives in a header and selects the secret, so an unknown id is rejected
+    before any MAC is computed.
+
+    `max_age` bounds replay in both directions -- a request whose timestamp is
+    too far in the *future* is refused too, so a clock-skewed or forged forward
+    timestamp cannot buy an attacker an arbitrarily long window. It does not
+    stop a replay inside the window; that is what a replay store or the inbox is
+    for.
+
+    Args:
+        keys: Key id to secret. At least one, and none may be empty.
+        max_age: Seconds a timestamp may differ from now, either way.
+
+    Raises:
+        ValueError: `keys` is empty or holds an empty secret, or `max_age` is non-positive.
+    """
 
     __slots__ = ("_keys", "max_age")
 
@@ -174,6 +342,27 @@ class HMACWebhookVerifier:
         headers: Mapping[bytes, bytes],
         now: datetime | None = None,
     ) -> WebhookEnvelope:
+        """Verify `body` against `headers` and return the envelope they describe.
+
+        Returning is the success signal: there is no boolean, and no partially
+        trusted result. Every rejection is a `ValueError`, deliberately without
+        distinguishing which check failed, so the exception cannot be used as an
+        oracle. The MAC comparison itself is constant-time.
+
+        The signature covers the timestamp, id, type, relay path and the exact
+        body bytes -- so pass the raw body, never a re-serialization of a parsed
+        payload.
+
+        Args:
+            headers: Header names in any case; lowercased before lookup.
+            now: Reference time for the age window. Defaults to the current UTC time.
+
+        Returns:
+            The verified envelope, with `content_type` taken from the request headers.
+
+        Raises:
+            ValueError: Any failed check: missing header, unknown key id, bad timestamp, bad MAC.
+        """
         normalized = {key.lower(): value for key, value in headers.items()}
         return self._verify_normalized(body=body, headers=normalized, now=now)
 
@@ -323,8 +512,25 @@ class LocalReplayStore:
     Enough for a single worker. Behind more than one it is a fast path rather
     than the guarantee: each worker has its own view, so the same event
     delivered twice to two workers is claimed twice and handled twice. Use
-    :class:`PostgresWebhookInbox` when the deduplication has to hold across
+    `PostgresWebhookInbox` when the deduplication has to hold across
     replicas -- it is the same claim in a table every worker shares.
+
+    Doubly bounded, because a replay store that grows without limit is a memory
+    leak an unauthenticated sender controls: entries expire after `ttl`, and
+    the oldest is evicted once `max_entries` is reached. Eviction means an
+    event *can* be re-accepted before its TTL under sustained load. Size the
+    store for the burst you expect rather than treating the bound as advisory.
+
+    `ttl` should be at least the verifier's `max_age`: a request older than
+    that window is rejected on the signature anyway, so a shorter TTL only
+    creates a gap in which a replay is neither too old nor remembered.
+
+    Args:
+        max_entries: Claims retained. The oldest is evicted when the store is full.
+        ttl: Seconds a claim is remembered, on the monotonic clock.
+
+    Raises:
+        ValueError: Either bound is non-positive.
     """
 
     __slots__ = ("_entries", "_heap", "_lock", "_sequence", "max_entries", "ttl")
@@ -341,9 +547,23 @@ class LocalReplayStore:
 
     @property
     def size(self) -> int:
+        """Live claims held right now, expired ones included until they are swept."""
         return len(self._entries)
 
     async def claim(self, source: str, event_id: str, *, now: float | None = None) -> bool:
+        """Claim `(source, event_id)`, returning whether this caller won it.
+
+        The whole check-and-insert happens under one lock, so two concurrent
+        deliveries of the same event cannot both be told they won. Expiry and
+        eviction run here, which is why the store needs no sweeper task.
+
+        Args:
+            source: Namespace, so two senders may use the same event id.
+            now: Monotonic reference time. Defaults to `time.monotonic()`.
+
+        Returns:
+            True if this caller claimed it; False if it was already claimed.
+        """
         current = time.monotonic() if now is None else now
         key = (source, event_id)
         async with self._lock:
@@ -359,6 +579,17 @@ class LocalReplayStore:
             return True
 
     async def complete(self, source: str, event_id: str, outcome: str) -> None:
+        """Record how a claimed event turned out. Does not extend or release the claim.
+
+        The claim keeps its original expiry either way, so a handler that failed
+        does *not* make the event redeliverable -- a retry from the sender is
+        still refused until the TTL passes. Recording the outcome is for
+        observability, not for control flow. A claim that has already expired is
+        silently not updated.
+
+        Args:
+            outcome: A free-form label; the receiver writes `"completed"` or `"failed"`.
+        """
         key = (source, event_id)
         async with self._lock:
             entry = self._entries.get(key)
@@ -391,7 +622,6 @@ _SETTLED_STATES = "state IN ('delivered','failed','cancelled','unknown')"
 
 
 def _retention_purge_pass(
-    database: Any,
     *,
     table: str,
     key: str,
@@ -404,7 +634,7 @@ def _retention_purge_pass(
 ) -> Any:
     """The chunked pass behind the inbox's and the outbox's retention purge.
 
-    Both walk ``(retention_until, <primary key>)``: the retention stamp because
+    Both walk `(retention_until, <primary key>)`: the retention stamp because
     that is the ordered domain the frontier lives in, and the key appended
     because two rows can share a stamp and a boundary that is not unique either
     skips its siblings or loops on them.
@@ -441,13 +671,48 @@ def _retention_purge_pass(
 
 @dataclass(frozen=True, slots=True)
 class InboxClaim:
+    """The result of trying to claim an inbound event in the shared inbox.
+
+    Four outcomes, and only one of them means "run the handler":
+
+    * `claimed` -- this worker owns the event; process it and complete it.
+    * `duplicate` -- it was already processed; replay `result_status`.
+    * `active` -- another worker holds an unexpired lease; answer 409 and
+      let the sender retry rather than processing it twice.
+    * `failed` -- a previous attempt recorded a failure and the row is not
+      reclaimable; a human decides what happens next.
+
+    Args:
+        fencing_token: Rises on every claim; `PostgresWebhookInbox.complete` refuses a stale one.
+        result_status: The status a completed attempt returned, when one is recorded.
+    """
+
     outcome: Literal["claimed", "duplicate", "active", "failed"]
     fencing_token: int
     result_status: int | None = None
 
 
 class PostgresWebhookInbox:
-    """Transactional cross-replica webhook deduplication and fencing."""
+    """Transactional cross-replica webhook deduplication and fencing.
+
+    A row per `(source, message_id)` in a table every replica shares, so
+    "already handled" is a fact in the database rather than a fact in one
+    process's memory. Claiming, handling and completing happen in the caller's
+    transaction, which is what makes them atomic with whatever the handler
+    writes: an event cannot be marked processed unless its effects committed,
+    and its effects cannot commit unless it was marked processed.
+
+    A crashed worker's lease expires and the event becomes claimable again, with
+    the fencing token incremented. The old worker coming back cannot then
+    complete the row over the top of its successor -- `complete` matches
+    on the token and raises instead.
+
+    Args:
+        table: Table name. Must be a plain SQL identifier; it is interpolated, not bound.
+
+    Raises:
+        ValueError: `table` is not a plain SQL identifier.
+    """
 
     __slots__ = ("table",)
 
@@ -457,6 +722,16 @@ class PostgresWebhookInbox:
         self.table = table
 
     def schema_sql(self) -> str:
+        """DDL creating the inbox table and its retention index. Idempotent.
+
+        `IF NOT EXISTS` throughout, so it is safe to run at every boot. It is
+        plain SQL rather than a migration because the table belongs to whoever
+        deploys the receiver; feed it to a migration if that is how the
+        application manages its schema.
+
+        Returns:
+            One SQL script; may contain several statements.
+        """
         table = self.table
         return (
             f"CREATE TABLE IF NOT EXISTS {table} (\n"
@@ -490,6 +765,31 @@ class PostgresWebhookInbox:
         lease_owner: str,
         lease_seconds: float,
     ) -> InboxClaim:
+        """Claim `envelope` for processing, or report why it cannot be claimed.
+
+        One statement does the whole decision: an insert that, on conflict, takes
+        the row over only when the previous lease has actually expired. There is
+        no read-then-write, so two replicas racing on the same event cannot both
+        be told they claimed it -- the loser reads the existing row and gets
+        `active`.
+
+        Runs in the caller's transaction and commits with it. A handler that
+        raises therefore rolls the claim back too, leaving the event
+        redeliverable, which is the behaviour you want when the failure was
+        transient.
+
+        Args:
+            session: An open session inside a transaction. Not committed here.
+            lease_owner: Identifies the claiming worker; recorded on the row.
+            lease_seconds: How long the claim is exclusive before another worker may take it.
+
+        Returns:
+            An `InboxClaim`; only `claimed` authorises running the handler.
+
+        Raises:
+            ValueError: `lease_seconds` is not positive.
+            RuntimeError: The row vanished mid-transaction, which should not be reachable.
+        """
         if lease_seconds <= 0:
             raise ValueError("webhook inbox lease_seconds must be positive")
         payload_hash = hashlib.sha256(envelope.body).digest()
@@ -535,21 +835,36 @@ class PostgresWebhookInbox:
             return InboxClaim("failed", token, status)
         return InboxClaim("active", token, status)
 
-    def purge_pass(self, database: Any, *, chunk: int = 1000, **options: Any) -> Any:
+    def purge_pass(self, *, chunk: int = 1000, **options: Any) -> Any:
         """A recurring pass that drops inbox rows past their retention.
 
-        The supported way to keep the inbox small::
+        The supported way to keep the inbox small:
 
-            jobs.drive(inbox.purge_pass(db), cron="23 * * * *")
+        ```python
+        jobs.drive(inbox.purge_pass(), cron="23 * * * *")
+        ```
 
-        :meth:`purge` has a chunk size and nothing else -- no cursor, so it
+        `purge` has a chunk size and nothing else -- no cursor, so it
         starts from the beginning of the index every time; no resumption, so a
         redeploy loses where it was; and no pacing, so it competes with delivery
         for the same pool. The pass supplies all three, and keeps one
-        transaction per chunk. See :mod:`wreath.passes`.
+        transaction per chunk. See `wreath.passes`.
+
+        Only rows with a `retention_until` in the past are eligible; a row
+        whose retention was never stamped is never purged by either form.
+
+        Takes no database: the pass is a declaration, and it is handed one when
+        the scheduler drives it.
+
+        Args:
+            chunk: Rows per transaction.
+            options: Forwarded to the pass -- `within`, `shift`, `pace`, `schema`.
+
+        Returns:
+            An unstarted `wreath.passes.ChunkedPass`; drive it from the scheduler.
         """
         return _retention_purge_pass(
-            database, table=self.table, key="message_id", chunk=chunk, **options
+            table=self.table, key="message_id", chunk=chunk, **options
         )
 
     async def purge(self, session: Any, *, limit: int = 1000) -> int:
@@ -558,7 +873,20 @@ class PostgresWebhookInbox:
         One bounded chunk with no cursor, no resumption, and no pacing. It is
         the right tool when you already hold a session and want a bounded amount
         of work done right now; for keeping the table small forever, use
-        :meth:`purge_pass`.
+        `purge_pass`.
+
+        Locks with `SKIP LOCKED`, so two callers running it at once delete
+        disjoint rows instead of blocking on each other.
+
+        Args:
+            session: An open session inside a transaction. Not committed here.
+            limit: Maximum rows deleted in this call.
+
+        Returns:
+            How many rows were deleted; 0 when nothing was past retention.
+
+        Raises:
+            ValueError: `limit` is not positive.
         """
         if limit <= 0:
             raise ValueError("webhook inbox purge limit must be positive")
@@ -582,6 +910,22 @@ class PostgresWebhookInbox:
         fencing_token: int,
         result_status: int,
     ) -> None:
+        """Mark a claimed event completed, if this worker still holds the claim.
+
+        The fencing check is the point. A worker whose lease expired while it was
+        working has already been superseded, and letting it write `completed`
+        would mark an event done that its successor is still processing --
+        exactly the split-brain the lease exists to prevent. It raises instead,
+        and the caller's transaction rolls back with it.
+
+        Args:
+            session: The same transaction the claim was made in.
+            fencing_token: The token from the `InboxClaim`. A stale one is refused.
+            result_status: Status recorded for replay on a later duplicate.
+
+        Raises:
+            RuntimeError: The lease was taken over, or the row is no longer processing.
+        """
         updated = await session.raw(
             f"UPDATE {self.table} SET state='completed', completed_at=clock_timestamp(), "
             "result_status=$4, lease_expires_at=clock_timestamp() "
@@ -604,7 +948,32 @@ def _row_value(row: Any, key: str, index: int) -> Any:
 
 
 class PostgresWebhookOutbox:
-    """Transactional durable intent for a supervised webhook dispatcher."""
+    """Transactional durable intent for a supervised webhook dispatcher.
+
+    The transactional outbox pattern. A delivery is *inserted* in the same
+    transaction as the change that caused it, so the two commit together: there
+    is no state in which the order shipped but the notification was lost, and
+    none in which it was sent for an order that rolled back. Sending happens
+    afterwards, out of band, by `WebhookDispatcher`.
+
+    Rows move through `pending` -> `leased` -> `sending` -> one of
+    `delivered`, `retry_wait`, `failed`, `unknown` or `cancelled`.
+    Every transition is fenced on `(delivery_id, fencing_token)`, so a worker
+    whose lease expired mid-send cannot write over the worker that took the row
+    from it -- it raises instead. Claiming uses `FOR UPDATE SKIP LOCKED`, so
+    workers do not contend.
+
+    Because the transport can fail without an answer, `unknown` is a terminal
+    state distinct from `failed`: the dispatcher does not retry it, since a
+    request that may already have been processed must not be sent twice on a
+    guess.
+
+    Args:
+        table: Table name. Must be a plain SQL identifier; it is interpolated, not bound.
+
+    Raises:
+        ValueError: `table` is not a plain SQL identifier.
+    """
 
     __slots__ = ("table",)
 
@@ -614,6 +983,18 @@ class PostgresWebhookOutbox:
         self.table = table
 
     def schema_sql(self) -> str:
+        """DDL creating the outbox table and its two indexes. Idempotent.
+
+        `IF NOT EXISTS` throughout, plus an `ADD COLUMN IF NOT EXISTS` for
+        `relay_path`, so running it against an older deployment upgrades it in
+        place. One index serves the dispatcher's ready-row query and one serves
+        the retention purge -- the latter was added because the chunked pass
+        refuses to walk an unindexed key, which is how a purge that had always
+        been a sequential scan came to light.
+
+        Returns:
+            One SQL script; may contain several statements.
+        """
         table = self.table
         return (
             f"CREATE TABLE IF NOT EXISTS {table} (\n"
@@ -668,6 +1049,25 @@ class PostgresWebhookOutbox:
         envelope: WebhookEnvelope,
         key_id: str,
     ) -> str:
+        """Insert one pending delivery in the caller's transaction.
+
+        Writes only; nothing is sent here and no connection is opened. The row
+        becomes visible to the dispatcher when the caller's transaction commits,
+        and disappears if it rolls back -- which is the whole point of the
+        pattern.
+
+        The signing key id is recorded on the row rather than resolved at send
+        time, so a delivery that sits in the outbox across a key rotation is
+        still signed with the key its receiver was expecting.
+
+        Args:
+            session: An open session inside a transaction. Not committed here.
+            destination: The registered destination name the dispatcher routes on.
+            key_id: The signing key id to use when this row is eventually sent.
+
+        Returns:
+            The generated delivery id, distinct from the event id.
+        """
         delivery_id = uuid.uuid4().hex
         sql = (
             f"INSERT INTO {self.table} "
@@ -696,20 +1096,31 @@ class PostgresWebhookOutbox:
         ).execute()
         return delivery_id
 
-    def purge_pass(self, database: Any, *, chunk: int = 1000, **options: Any) -> Any:
+    def purge_pass(self, *, chunk: int = 1000, **options: Any) -> Any:
         """A recurring pass that drops settled deliveries past their retention.
 
-        The supported way to keep the outbox small::
+        The supported way to keep the outbox small:
 
-            jobs.drive(outbox.purge_pass(db), cron="43 * * * *")
+        ```python
+        jobs.drive(outbox.purge_pass(), cron="43 * * * *")
+        ```
 
-        Only rows in a settled state are eligible, exactly as :meth:`purge`
+        Only rows in a settled state are eligible, exactly as `purge`
         does it -- a delivery still waiting on a retry is not rubbish. What the
         pass adds is the cursor, the resumption, and the pacing that a bare
-        ``LIMIT`` does not have. See :mod:`wreath.passes`.
+        `LIMIT` does not have. See `wreath.passes`.
+
+        Takes no database: the pass is a declaration, and it is handed one when
+        the scheduler drives it.
+
+        Args:
+            chunk: Rows per transaction.
+            options: Forwarded to the pass -- `within`, `shift`, `pace`, `schema`.
+
+        Returns:
+            An unstarted `wreath.passes.ChunkedPass`; drive it from the scheduler.
         """
         return _retention_purge_pass(
-            database,
             table=self.table,
             key="delivery_id",
             chunk=chunk,
@@ -721,7 +1132,21 @@ class PostgresWebhookOutbox:
         """Delete up to *limit* settled rows past retention, in the caller's transaction.
 
         One bounded chunk with no cursor, no resumption, and no pacing; see
-        :meth:`purge_pass` for the form that keeps the table small forever.
+        `purge_pass` for the form that keeps the table small forever.
+
+        A delivery still waiting on a retry is never eligible, whatever its
+        retention stamp says -- only `delivered`, `failed`, `cancelled` and
+        `unknown` rows are rubbish.
+
+        Args:
+            session: An open session inside a transaction. Not committed here.
+            limit: Maximum rows deleted in this call.
+
+        Returns:
+            How many rows were deleted; 0 when nothing was eligible.
+
+        Raises:
+            ValueError: `limit` is not positive.
         """
         if limit <= 0:
             raise ValueError("webhook outbox purge limit must be positive")
@@ -744,6 +1169,29 @@ class PostgresWebhookOutbox:
         lease_owner: str,
         lease_seconds: float,
     ) -> OutboxDelivery | None:
+        """Lease the single most overdue delivery, or return None when none is due.
+
+        Two kinds of row are due: one that is `pending` or `retry_wait` with
+        its `next_attempt_at` in the past, and one whose worker died holding it
+        -- `leased` or `sending` with an expired lease. Recovering the second
+        kind is why a crashed dispatcher does not strand deliveries.
+
+        `FOR UPDATE SKIP LOCKED` on one row means concurrent dispatchers each
+        get a different delivery rather than blocking, and the attempt counter
+        and fencing token both advance as the lease is taken, so the row this
+        returns is already fenced against its previous owner.
+
+        Args:
+            session: An open session inside a transaction. Not committed here.
+            lease_owner: Identifies the claiming worker; recorded on the row.
+            lease_seconds: How long the claim holds before another worker may take it.
+
+        Returns:
+            The leased delivery, or None when nothing was due.
+
+        Raises:
+            ValueError: `lease_seconds` is not positive.
+        """
         if lease_seconds <= 0:
             raise ValueError("webhook outbox lease_seconds must be positive")
         table = self.table
@@ -771,6 +1219,15 @@ class PostgresWebhookOutbox:
     async def mark_sending(
         self, session: Any, delivery: OutboxDelivery
     ) -> None:
+        """Move a leased delivery to `sending`, just before the request goes out.
+
+        The state a recovering worker reads as "this may already have reached the
+        peer". Like every transition here it is fenced, so a worker that lost its
+        lease cannot re-enter `sending`.
+
+        Raises:
+            RuntimeError: The fencing token is stale, or the row is no longer leased.
+        """
         await self._transition(
             session,
             delivery,
@@ -785,6 +1242,21 @@ class PostgresWebhookOutbox:
         *,
         lease_seconds: float,
     ) -> None:
+        """Extend the lease on a delivery that is still `sending`.
+
+        For a slow peer: without renewal a request that outlasts the lease would
+        be handed to a second worker while the first is still waiting on it. Only
+        `sending` rows renew, and the fencing token must still match, so a
+        worker that has already been superseded cannot claw the row back.
+
+        Args:
+            session: A session for this renewal, separate from the one carrying the send.
+            lease_seconds: New lease length, measured from now.
+
+        Raises:
+            ValueError: `lease_seconds` is not positive.
+            RuntimeError: The fencing token is stale, or the row is no longer sending.
+        """
         if lease_seconds <= 0:
             raise ValueError("webhook outbox lease_seconds must be positive")
         renewed = await session.raw(
@@ -805,6 +1277,14 @@ class PostgresWebhookOutbox:
         *,
         status: int,
     ) -> None:
+        """Settle a delivery as `delivered` and release its lease. Terminal.
+
+        Args:
+            status: The 2xx the peer answered with; recorded for audit.
+
+        Raises:
+            RuntimeError: The fencing token is stale, or the row is not leased or sending.
+        """
         await self._transition(
             session,
             delivery,
@@ -822,6 +1302,22 @@ class PostgresWebhookOutbox:
         status: int | None,
         failure: str | None,
     ) -> None:
+        """Return a delivery to `retry_wait`, due again after `delay` seconds.
+
+        Not terminal: the row releases its lease and becomes claimable again once
+        `next_attempt_at` passes. The attempt counter is not touched here --
+        it advanced when the lease was taken -- so a row cannot be retried
+        forever by a worker that keeps failing before it claims.
+
+        Args:
+            delay: Seconds from now until the row is due again. May be 0.
+            status: The response status that triggered the retry, or None on a transport failure.
+            failure: A short failure code, truncated to 256 characters.
+
+        Raises:
+            ValueError: `delay` is negative.
+            RuntimeError: The fencing token is stale, or the row is not leased or sending.
+        """
         if delay < 0:
             raise ValueError("webhook retry delay cannot be negative")
         await self._transition(
@@ -840,6 +1336,19 @@ class PostgresWebhookOutbox:
         *,
         failure: str | None,
     ) -> None:
+        """Settle a delivery as `unknown`: nobody knows whether it arrived. Terminal.
+
+        Deliberately not retried. The request may have been processed by the
+        peer, and resending on that guess is how a transport failure becomes a
+        duplicate charge. These rows are for a human or a reconciliation job to
+        resolve against the receiver.
+
+        Args:
+            failure: A short failure code, truncated to 256 characters.
+
+        Raises:
+            RuntimeError: The fencing token is stale, or the row is not leased or sending.
+        """
         await self._transition(
             session,
             delivery,
@@ -856,6 +1365,19 @@ class PostgresWebhookOutbox:
         status: int | None,
         failure: str | None,
     ) -> None:
+        """Settle a delivery as `failed`: the peer answered and refused. Terminal.
+
+        Reached when the attempt budget is spent, when the status is not
+        retryable, or when the row names a destination this dispatcher does not
+        have. Distinct from `unknown` because here the peer's answer is known.
+
+        Args:
+            status: The refusing status, or None when there was no response to record.
+            failure: A short failure code, truncated to 256 characters.
+
+        Raises:
+            RuntimeError: The fencing token is stale, or the row is not leased or sending.
+        """
         await self._transition(
             session,
             delivery,
@@ -886,6 +1408,23 @@ class PostgresWebhookOutbox:
 
 @dataclass(frozen=True, slots=True)
 class OutboxDelivery:
+    """One leased outbox row, as the dispatcher sees it. Immutable.
+
+    Carries both keys and both is deliberate: `delivery_id` identifies the
+    *attempt record*, `event_id` identifies the event, and a receiver
+    deduplicates on the latter. `fencing_token` is what every later transition
+    is matched on, so passing a stale copy of this object is refused rather than
+    acted on.
+
+    Args:
+        delivery_id: Primary key of the outbox row.
+        event_id: The envelope id, and the receiver's deduplication key.
+        destination: Names the registered `WebhookDestination` to send through.
+        attempts: Attempts made including this one; incremented as the lease was taken.
+        fencing_token: Rises on every claim; every transition is matched on it.
+        key_id: The signing key recorded at enqueue, so rotation cannot orphan the row.
+    """
+
     delivery_id: str
     event_id: str
     destination: str
@@ -951,6 +1490,47 @@ _DEFAULT_WEBHOOK_LIMITS = WebhookLimits()
 
 
 class WebhookSource:
+    """One sender's webhooks: a route, a verifier, and a handler per event type.
+
+    Created through `WebhookHub.source`, which also records the path for
+    CSRF exemption -- constructing one directly registers the route but leaves
+    the hub unaware of it. Construction registers a `POST` route immediately,
+    so it must happen while the application is still accepting routes.
+
+    A request is processed in a fixed order, and the order is the security
+    property: bound the request, verify the signature, bound the event id,
+    resolve the handler, deduplicate, then run. Nothing an unauthenticated caller
+    sends reaches a handler, and nothing expensive happens before the MAC checks
+    out.
+
+    Responses are deliberately terse and carry no detail: `401` for any
+    verification failure, `413` for anything over a limit, `400` for an
+    unregistered event type, an over-long id, or a body that is not JSON,
+    `409` when another worker holds the event, and `204` on success. A sender
+    learns whether to retry and nothing else.
+
+    A body that passes the signature check and then fails to parse is the
+    sender's error, not this service's: the MAC proves they sent exactly those
+    bytes. It answers `400`, so a retry of the same bytes is not invited.
+
+    Deduplication is whichever of the two was configured. With `inbox` and
+    `session_factory` the handler runs *inside* the claim's transaction, so its
+    writes and the "processed" record commit together. Without them the claim is
+    the in-process `LocalReplayStore`, which is a fast path rather than a
+    guarantee behind more than one worker.
+
+    Args:
+        path: Route path for the receiver. Registered on `app` at construction.
+        replay: In-process replay store; one sized to the verifier's window is made if None.
+        inbox: Cross-replica deduplication. Requires `session_factory`.
+        session_factory: Opens the session the claim and handler share. Requires `inbox`.
+        lease_owner: Identifies this worker on an inbox claim. Only used with `inbox`.
+        lease_seconds: Inbox claim lease. Only used with `inbox`.
+
+    Raises:
+        ValueError: `inbox` and `session_factory` were not both given, or the lease is invalid.
+    """
+
     __slots__ = (
         "_handlers",
         "_inbox",
@@ -996,6 +1576,30 @@ class WebhookSource:
             return await self._receive(request)
 
     def event(self, event_type: str, *, payload: Any) -> Callable[[WebhookHandler], WebhookHandler]:
+        """Decorator registering the handler for one event type.
+
+        The handler is called as `handler(context, payload)` with the payload
+        already decoded and validated against `payload`; a request whose body
+        does not fit raises out of the receiver rather than reaching the handler.
+        An event type with no registered handler is answered `400`, so a source
+        never silently ignores an event it was sent.
+
+        The handler's return value is discarded -- success is signalled by
+        returning, failure by raising. Raising on a durable source rolls the
+        inbox claim back with the handler's own writes; on a non-durable source
+        the replay claim stands, so the sender's retry is refused until the TTL
+        passes.
+
+        Args:
+            event_type: Matched against the `wreath-webhook-type` header. Cannot be empty.
+            payload: A validation target; the same shapes a route body annotation accepts.
+
+        Returns:
+            The registering decorator, which returns the handler unchanged.
+
+        Raises:
+            ValueError: `event_type` is empty, or already has a handler.
+        """
         if not event_type:
             raise ValueError("webhook event type cannot be empty")
 
@@ -1031,7 +1635,15 @@ class WebhookSource:
         if registered is None:
             return Response(status=400)
         payload_validator, handler = registered
-        decoded = loads(body)
+        try:
+            decoded = loads(body)
+        except ValueError:
+            # The MAC checked out, so this body is the one the sender meant to
+            # send -- it just is not JSON. That is the sender's mistake, not
+            # ours, and a 500 would tell them to retry something that cannot
+            # start working. `loads` raises ValueError for malformed JSON and
+            # for bytes that are not UTF-8 alike; both mean the same thing here.
+            return Response(status=400)
         payload = payload_validator(decoded, ("body",))
         if self._inbox is not None:
             assert self._session_factory is not None
@@ -1075,6 +1687,33 @@ class WebhookSource:
 
 
 class WebhookDestination:
+    """One receiver: a client, a path on it, a signing key, and optionally an outbox.
+
+    Created through `WebhookHub.destination`. The client is origin-pinned,
+    so the destination owns only the path -- which is why the path must be
+    origin-relative and is refused otherwise.
+
+    Two ways to send, and they are not interchangeable. `send` posts
+    immediately and hands back the outcome, which is right for something that has
+    no durable consequence. `enqueue` writes the intent into the caller's
+    transaction and returns; the delivery then survives a crash and is sent by
+    `WebhookDispatcher` with leases and retries. If losing the webhook
+    would leave the receiver's state wrong, it belongs in the outbox.
+
+    `relay_id` names this service in a relayed envelope's path, and the path is
+    signed. It defaults to the destination name.
+
+    Args:
+        client: An origin-pinned HTTP client, normally a `wreath.http_client.HTTPClient`.
+        path: Origin-relative receiver path on that client. Must start with a single `/`.
+        outbox: Enables `enqueue` and `enqueue_relay`. Without it they raise.
+        relay_id: This service's name in a relay path. Must match the relay-id syntax.
+        max_relay_hops: Hops permitted before a relay is refused. Between 1 and 32.
+
+    Raises:
+        ValueError: The path is not origin-relative, or `relay_id` or the hop limit is invalid.
+    """
+
     __slots__ = (
         "_client",
         "_max_relay_hops",
@@ -1122,6 +1761,31 @@ class WebhookDestination:
         causation_id: str | None = None,
         relay_path: tuple[str, ...] = (),
     ) -> WebhookDeliveryResult:
+        """Sign and post one event now, returning the outcome rather than raising.
+
+        A transport failure is *reported*, not raised: `ClientError` becomes an
+        `unknown` result, because a request that failed without an answer may
+        still have been processed. A non-2xx answer becomes `failed`. Nothing
+        here retries, and nothing here is durable -- if the process dies between
+        the caller's commit and this call, the event is simply gone. Use
+        `enqueue` when that matters.
+
+        The event id doubles as the client's idempotency key, so a receiver that
+        honours `Idempotency-Key` collapses a duplicate on its own.
+
+        Args:
+            payload: Bytes-like is sent verbatim; anything else is JSON-encoded.
+            event_id: Defaults to a fresh UUID4 hex. Supply one to make the send repeatable.
+            version: Payload schema version, signed and sent.
+            timestamp: Defaults to now, UTC. Must be timezone-aware.
+            relay_path: Prior hops. Prefer `relay`, which builds this correctly.
+
+        Returns:
+            The outcome -- `delivered`, `failed`, or `unknown`.
+
+        Raises:
+            ValueError: The envelope fields or the relay path are invalid.
+        """
         body = (
             bytes(payload)
             if isinstance(payload, (bytes, bytearray, memoryview))
@@ -1179,7 +1843,29 @@ class WebhookDestination:
         ordering_key: str | None = None,
         relay_path: tuple[str, ...] = (),
     ) -> str:
-        """Insert durable delivery intent in the caller's transaction."""
+        """Insert durable delivery intent in the caller's transaction.
+
+        Nothing is sent and no connection is opened; this writes a row. The
+        delivery becomes real exactly when the caller's transaction commits and
+        vanishes if it rolls back, so the notification and the change that caused
+        it can never disagree. `WebhookDispatcher` sends it afterwards.
+
+        The signing key id is captured now, from the destination's signer, so a
+        rotation between enqueue and send cannot orphan the row.
+
+        Args:
+            session: An open session inside a transaction. Not committed here.
+            payload: Bytes-like is stored verbatim; anything else is JSON-encoded.
+            event_id: Defaults to a fresh UUID4 hex; also becomes the idempotency key.
+            ordering_key: Stored for grouping. Advisory -- nothing orders delivery by it.
+
+        Returns:
+            The delivery id of the new outbox row.
+
+        Raises:
+            RuntimeError: This destination was configured without an outbox.
+            ValueError: The envelope fields or the relay path are invalid.
+        """
         if self._outbox is None:
             raise RuntimeError("webhook destination has no durable outbox")
         body = (
@@ -1217,7 +1903,24 @@ class WebhookDestination:
         timestamp: datetime | None = None,
         ordering_key: str | None = None,
     ) -> str:
-        """Commit a loop-protected relay intent in the caller transaction."""
+        """Commit a loop-protected relay intent in the caller transaction.
+
+        The durable form of `relay`, and the same lineage rules apply: the
+        outbound event gets a new id, inherits `inbound`'s correlation id (or
+        its id when it starts the chain), records `inbound.id` as its cause,
+        and appends this service to the signed relay path.
+
+        Args:
+            session: An open session inside a transaction. Not committed here.
+            inbound: The verified envelope this event is caused by.
+
+        Returns:
+            The delivery id of the new outbox row.
+
+        Raises:
+            ValueError: This service is already in the relay path, or the hop limit is reached.
+            RuntimeError: This destination was configured without an outbox.
+        """
         return await self.enqueue(
             session,
             event_type,
@@ -1239,7 +1942,26 @@ class WebhookDestination:
         version: str = "1",
         timestamp: datetime | None = None,
     ) -> WebhookDeliveryResult:
-        """Emit a separately identified event caused by an inbound event."""
+        """Emit a separately identified event caused by an inbound event.
+
+        A relay is a *new* event, not a forward: it gets its own id and its own
+        signature, and the receiver deduplicates it independently. What connects
+        it to its cause is the correlation id (inherited, or `inbound.id` when
+        this starts the chain), the causation id, and the relay path.
+
+        The relay path is signed and checked before anything is sent, which is
+        what makes a cycle of services impossible rather than merely unlikely: a
+        service already in the path refuses, and so does a path at the hop limit.
+
+        Args:
+            inbound: The verified envelope this event is caused by.
+
+        Returns:
+            The outcome of the immediate send.
+
+        Raises:
+            ValueError: This service is already in the relay path, or the hop limit is reached.
+        """
         return await self.send(
             event_type,
             payload,
@@ -1260,6 +1982,20 @@ class WebhookDestination:
 
 @dataclass(frozen=True, slots=True)
 class DispatcherReadiness:
+    """A health-endpoint view of one dispatcher.
+
+    `ready` is the composite: running and no recorded error. The parts are kept
+    separate because they fail differently -- a dispatcher that is not running at
+    all is a startup problem, while one running with `last_error` set is a
+    dispatcher that died and was restarted, or is about to stop.
+
+    Args:
+        ready: Running with no recorded error. The single value a probe should read.
+        running: Whether the delivery loop is currently executing.
+        in_flight: Deliveries currently awaiting a peer response.
+        last_error: `"Type: message"` for the failure that ended the last run, or None.
+    """
+
     ready: bool
     running: bool
     in_flight: int
@@ -1267,7 +2003,34 @@ class DispatcherReadiness:
 
 
 class WebhookDispatcher:
-    """Fenced delivery loop with lease renewal and lifespan supervision hooks."""
+    """Fenced delivery loop with lease renewal and lifespan supervision hooks.
+
+    Drains one outbox, routing each row to the destination it names. One
+    dispatcher per worker; several may run against the same table without
+    coordinating, because claiming uses `FOR UPDATE SKIP LOCKED` and every
+    transition is fenced on the row's token.
+
+    The loop is deliberately serial: one delivery at a time, per dispatcher.
+    Throughput comes from running more workers rather than more concurrency
+    inside one, which keeps the ordering and the lease reasoning simple.
+
+    Retries are bounded by `max_attempts` and back off exponentially from
+    `retry_delay`. Only a status in `retry_statuses` is retried; a transport
+    failure with no answer settles as `unknown` and is *not* retried, because
+    the peer may already have processed it.
+
+    Args:
+        outbox: The table to drain.
+        destinations: Name to destination. A row naming an absent one settles as failed.
+        worker_id: Identifies this worker on a lease. Cannot be empty.
+        lease_seconds: Claim length; the lease is renewed at a third of this while sending.
+        max_attempts: Attempts before a retryable failure settles as failed.
+        retry_delay: Base backoff in seconds, doubled per attempt already made.
+        retry_statuses: Response statuses treated as retryable.
+
+    Raises:
+        ValueError: `worker_id` is empty, or a lease, attempt, or delay bound is invalid.
+    """
 
     __slots__ = (
         "_destinations",
@@ -1318,6 +2081,10 @@ class WebhookDispatcher:
 
     @property
     def readiness(self) -> DispatcherReadiness:
+        """A `DispatcherReadiness` snapshot. Synchronous, never blocks.
+
+        `last_error` is not cleared by reading it; a new `run` clears it.
+        """
         return DispatcherReadiness(
             ready=self._running and self._last_error is None,
             running=self._running,
@@ -1332,7 +2099,31 @@ class WebhookDispatcher:
         *,
         idle_delay: float = 0.25,
     ) -> None:
-        """Attach the dispatcher to Wreath lifespan until a full supervisor lands."""
+        """Attach the delivery loop to the application's lifespan.
+
+        Registers a startup hook that spawns `run` and a shutdown hook that
+        signals it and awaits it, so shutdown does not return until the current
+        delivery has settled. A loop that fails immediately at startup is
+        re-awaited on the spot, which turns "the dispatcher never started" into a
+        failed boot instead of a quiet absence.
+
+        The dispatcher is also published on `app.state` as
+        `webhook_dispatcher_<worker_id>` (non-identifier characters replaced
+        with `_`), so a health endpoint can find it without a global.
+
+        This is a lifespan attachment, not supervision: it does not use
+        `wreath.services.Supervisor` and there is no restart or drain
+        budget. A delivery loop that dies stays dead until the process restarts,
+        with `readiness` reporting it. Call it once per dispatcher.
+
+        Args:
+            app: The application whose lifespan and state this binds to.
+            session_factory: Opens a session per loop iteration and per lease renewal.
+            idle_delay: Seconds to wait before re-polling when the outbox is empty.
+
+        Raises:
+            RuntimeError: This dispatcher is already managed.
+        """
         if self._managed:
             raise RuntimeError("webhook dispatcher is already managed")
         self._managed = True
@@ -1367,7 +2158,26 @@ class WebhookDispatcher:
         *,
         idle_delay: float = 0.1,
     ) -> None:
-        """Run until stopped; the application supervisor owns this coroutine."""
+        """Run until stopped; the application supervisor owns this coroutine.
+
+        Each iteration opens a session, attempts one delivery, and closes it. An
+        empty outbox waits on `stopping` for up to `idle_delay` rather than
+        sleeping, so shutdown is prompt instead of costing a poll interval.
+
+        Failures are *not* absorbed. Anything the loop raises is recorded in
+        `readiness` and re-raised unchanged, because a delivery loop that
+        keeps running while silently failing is worse than one that stops
+        visibly. `CancelledError` propagates untouched.
+
+        Args:
+            session_factory: Opens one session per iteration; also used for lease renewal.
+            stopping: Set it to end the loop after the current delivery settles.
+            idle_delay: Seconds to wait before re-polling when the outbox is empty.
+
+        Raises:
+            ValueError: `idle_delay` is not positive.
+            Exception: Whatever a delivery or the database raised, after recording it.
+        """
         if idle_delay <= 0:
             raise ValueError("webhook dispatcher idle_delay must be positive")
         self._running = True
@@ -1402,6 +2212,33 @@ class WebhookDispatcher:
             [], AbstractAsyncContextManager[Any]
         ] | None = None,
     ) -> WebhookDeliveryResult | None:
+        """Claim, send, and settle at most one delivery. The unit `run` repeats.
+
+        Returns None when nothing is due, which is the caller's signal to idle.
+        Otherwise it claims one row, marks it `sending`, posts it, and settles
+        it into exactly one terminal or retry state before returning -- a row is
+        never left leased by a successful call.
+
+        Directly useful in tests and in a one-shot drain: it needs no event loop
+        of its own and no lifespan.
+
+        Lease renewal is opt-in via `renewal_session_factory`. Without it a
+        response slower than `lease_seconds` lets another worker claim the row
+        while this send is still outstanding, and the settle then fails on the
+        fencing token. Pass a factory whenever peers can be slow. The renewal
+        task is cancelled and awaited in a `finally`, so it cannot outlive the
+        send it was protecting.
+
+        Args:
+            session: An open session inside a transaction. Not committed here.
+            renewal_session_factory: Opens a separate session to renew the lease while sending.
+
+        Returns:
+            The attempt's outcome, or None when no delivery was due.
+
+        Raises:
+            RuntimeError: The lease was taken over mid-send, so the settle was refused.
+        """
         delivery = await self._outbox.claim_due(
             session,
             lease_owner=self._worker_id,
@@ -1493,6 +2330,26 @@ class WebhookDispatcher:
 
 
 class WebhookHub:
+    """The registry an application declares its webhook sources and destinations on.
+
+    Reached as `app.webhooks(name)` rather than constructed directly. Its job
+    is to be the one place that knows every receiver route, which is what makes
+    `csrf_exempt` answerable at all: a webhook is authenticated by its
+    signature, not by a browser-origin token, so its route must be exempt from
+    CSRF -- and an exemption is only safe when the set of exempt paths is closed
+    and known.
+
+    Names are unique in both directions and a duplicate raises, so a second
+    registration cannot quietly shadow the first.
+
+    Args:
+        app: The application to register receiver routes on.
+        name: Identifies this hub. Cannot be empty.
+
+    Raises:
+        ValueError: `name` is empty.
+    """
+
     __slots__ = ("_app", "_destinations", "_name", "_source_paths", "_sources")
 
     def __init__(self, app: Any, name: str) -> None:
@@ -1505,7 +2362,17 @@ class WebhookHub:
         self._destinations: dict[str, WebhookDestination] = {}
 
     def csrf_exempt(self, request: Request) -> bool:
-        """Return true only for registered unsafe webhook receiver routes."""
+        """Return true only for registered unsafe webhook receiver routes.
+
+        Pass it to the CSRF middleware as its exemption predicate. It is narrow
+        on purpose: `POST` only, and only for a path this hub registered as a
+        source. A machine sender cannot hold a CSRF token, and the request is
+        already authenticated by its HMAC signature, so the exemption costs
+        nothing -- but it must not extend one path further than that.
+
+        Returns:
+            True only for a `POST` to a registered source path.
+        """
         return request.method == "POST" and request.path in self._source_paths
 
     def source(
@@ -1521,6 +2388,28 @@ class WebhookHub:
         lease_owner: str = "webhook-receiver",
         lease_seconds: float = 30.0,
     ) -> WebhookSource:
+        """Register one sender's receiver route and record it as CSRF-exempt.
+
+        The supported way to build a `WebhookSource`: constructing one
+        directly registers the route but leaves this hub -- and therefore
+        `csrf_exempt` -- unaware of the path.
+
+        Args:
+            name: Unique per hub. Also the deduplication namespace for this sender's ids.
+            path: Route path for the receiver, registered on the application now.
+            verifier: Holds the sender's keys and the replay window.
+            replay: In-process replay store; one sized to the verifier's window is made if None.
+            inbox: Cross-replica deduplication. Requires `session_factory`.
+            session_factory: Opens the session the claim and handler share. Requires `inbox`.
+            lease_owner: Identifies this worker on an inbox claim.
+            lease_seconds: Inbox claim lease length.
+
+        Returns:
+            The registered source, to hang `WebhookSource.event` handlers on.
+
+        Raises:
+            ValueError: The name is already registered, or the source configuration is invalid.
+        """
         if name in self._sources:
             raise ValueError(f"duplicate webhook source: {name}")
         source = WebhookSource(
@@ -1550,6 +2439,27 @@ class WebhookHub:
         relay_id: str | None = None,
         max_relay_hops: int = 8,
     ) -> WebhookDestination:
+        """Register one receiver to send to.
+
+        `name` is what an outbox row stores, so a dispatcher routes on it --
+        renaming a destination orphans the rows already enqueued under the old
+        name, which settle as `failed` with `UnknownDestination`.
+
+        Args:
+            name: Unique per hub. Stored on outbox rows and used as the default relay id.
+            client: An origin-pinned HTTP client for the receiver's origin.
+            path: Origin-relative receiver path. Must start with a single `/`.
+            signer: Holds the signing keys and the default key id.
+            outbox: Enables durable enqueueing. Without it only the immediate `send` works.
+            relay_id: This service's name in a relay path. Defaults to `name`.
+            max_relay_hops: Hops permitted before a relay is refused. Between 1 and 32.
+
+        Returns:
+            The registered destination.
+
+        Raises:
+            ValueError: The name is already registered, or the destination config is invalid.
+        """
         if name in self._destinations:
             raise ValueError(f"duplicate webhook destination: {name}")
         destination = WebhookDestination(

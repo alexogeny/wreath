@@ -1,5 +1,32 @@
 """Lifespan-managed dependency-free outbound HTTP/1.1 client.
 
+One `HTTPClient` is one bounded connection pool for one origin. The
+origin is fixed at construction from `base_url` and never changes: every
+request target is origin-relative, and a redirect that would leave the origin is
+refused rather than followed. Calling a second service means a second client,
+which is what makes each service's limits, timeouts, retries, and destination
+policy separately configurable and separately observable.
+
+```python
+client = HTTPClient("billing", base_url="https://billing.internal/v1")
+async with client:
+    response = await client.get("/invoices/42")
+```
+
+The client must be started before it will serve a request; `async with` does
+that, and an application normally starts and closes it from the lifespan instead.
+A request on a client that is not started raises `ClientClosed` rather
+than starting one implicitly, so a missing lifespan registration fails loudly.
+
+Everything the caller configures is a frozen dataclass validated at construction
+(`ClientLimits`, `ClientTimeout`, `RetryPolicy`,
+`RedirectPolicy`, `DestinationPolicy`, `RatePolicy`), so a
+misconfiguration raises at boot rather than on the first outbound call.
+
+Responses are read fully into memory under `ClientLimits.max_response_bytes`;
+there is no streaming response API. That is a deliberate limitation of this
+client, which exists to call other services, not to download files.
+
 The public policy and pool remain in Python. Byte codecs start with the pure
 reference implementation and are the parity contract for the optional native
 client protocol.
@@ -84,63 +111,138 @@ async def _timed(pending: Any, deadline_seconds: float) -> bytes:
 
 
 class ClientError(Exception):
-    """Base class for outbound client failures."""
+    """Base class for outbound client failures.
+
+    Every failure this module raises derives from it, so `except ClientError`
+    is the one catch that covers the client without also catching bugs in the
+    calling code. `ClientResponse.raise_for_status` raises this base class
+    directly for a >=400 status, which is the only case where the exception type
+    carries no more information than the message.
+    """
 
 
 class ClientClosed(ClientError):
-    pass
+    """The client is not started, or was closed while this request was in flight.
+
+    Raised rather than starting the client implicitly: a client that is not
+    started is almost always one that was never registered with the lifespan,
+    and silently starting it would move the failure to shutdown.
+    """
 
 
 class PoolTimeout(ClientError):
-    pass
+    """No connection became available within `ClientTimeout.pool`.
+
+    Also raised immediately, without waiting, when `ClientLimits.max_waiters`
+    callers are already queued -- shedding at a known bound beats an unbounded
+    queue that turns one slow origin into the whole process's latency.
+    """
 
 
 class ConnectError(ClientError):
-    pass
+    """Every candidate address failed to connect within the connect timeout.
+
+    Carries the last underlying error as its `__cause__`.
+    """
 
 
 class DNSFailure(ConnectError):
-    pass
+    """The origin host did not resolve, resolution timed out, or yielded nothing."""
 
 
 class TLSFailure(ConnectError):
-    pass
+    """The TLS handshake failed. Preferred over `ConnectError` whenever any
+    candidate address raised an `ssl.SSLError`, so a certificate problem is never
+    reported as an unreachable host."""
 
 
 class RequestTimeout(ClientError):
-    pass
+    """The whole request exceeded `ClientTimeout.total`.
+
+    The outermost deadline: it covers pool waiting, DNS, connect, TLS, retries,
+    backoff sleeps, and redirect hops together, so no combination of the inner
+    timeouts can outlast it. `total=None` removes it.
+    """
 
 
 class ResponseTimeout(ClientError):
-    pass
+    """The origin stopped sending mid-response.
+
+    Distinct from `RequestTimeout`: this one is an inner deadline
+    (`ClientTimeout.response_headers` or `response_body`), and it is
+    retryable because it means the connection stalled rather than that the
+    caller's budget ran out.
+    """
 
 
 class ProtocolError(ClientError):
-    pass
+    """The origin's bytes are not a response this client can frame.
+
+    Covers an unparseable head, headers past the configured limit, a malformed
+    chunked body, a `101` (protocol switching is not supported), and bytes
+    still buffered after a fully framed body -- the last being a
+    request-smuggling shape, which is why it is refused rather than ignored.
+    """
 
 
 class _TransportError(ProtocolError):
-    """A transient connection failure during an HTTP exchange."""
+    """A transient connection failure during an HTTP exchange.
+
+    Deliberately a `ProtocolError` subclass and deliberately private: a
+    connection that died mid-exchange is retryable, unlike the framing failures
+    its base class otherwise names, and callers catch the base class.
+    """
 
 
 class ResponseTooLarge(ClientError):
-    pass
+    """The response body exceeded `ClientLimits.max_response_bytes`.
+
+    A declared `Content-Length` over the limit is refused before a byte of body
+    is read; chunked and close-delimited bodies are counted as they arrive. A
+    missing or lying length therefore cannot get past it either.
+    """
 
 
 class RedirectError(ClientError):
-    pass
+    """A redirect could not be followed under `RedirectPolicy`.
+
+    Raised when the hop limit is exhausted, when the `Location` is not ASCII,
+    when it leaves the origin, and when a 301/302 on a non-GET/HEAD method would
+    require rewriting the method -- refused rather than silently turned into a
+    GET, because that would drop the body the caller asked to send.
+    """
 
 
 class DestinationRejected(ClientError):
-    pass
+    """A URL or a resolved address is outside `DestinationPolicy`.
 
-
-class ProxyError(ClientError):
-    pass
+    The SSRF guard. Raised from the constructor for a bad `base_url`, and per
+    request from DNS resolution for an address the policy does not allow.
+    """
 
 
 @dataclass(frozen=True, slots=True)
 class ClientLimits:
+    """Sizes and counts one client will not exceed. Validated at construction.
+
+    These are the client's share of the process, chosen per origin: a slow
+    dependency can only ever hold `max_connections` sockets and
+    `max_waiters` parked callers, whatever the rest of the application does.
+
+    Args:
+        max_connections: Sockets open to the origin at once, idle and in-flight together.
+        max_keepalive_connections: Idle sockets retained for reuse. Cannot exceed `max_connections`.
+        max_waiters: Callers parked on a full pool; the next one gets `PoolTimeout` immediately.
+        max_request_header_bytes: Serialized request head ceiling; over it raises `ClientError`.
+        max_response_header_bytes: Response head ceiling, also applied to chunked trailers.
+        max_response_bytes: Decoded response-body ceiling; over it raises `ResponseTooLarge`.
+        read_high_water: Transport read buffer, in bytes. Not a response-size limit.
+        dns_cache_ttl: Seconds a resolution is reused. 0 re-resolves every connect.
+
+    Raises:
+        ValueError: Any count is non-positive, the TTL is negative, or keepalive exceeds max.
+    """
+
     max_connections: int = 20
     max_keepalive_connections: int = 10
     max_waiters: int = 100
@@ -170,6 +272,26 @@ class ClientLimits:
 
 @dataclass(frozen=True, slots=True)
 class ClientTimeout:
+    """Deadlines for one outbound request, in seconds. Validated at construction.
+
+    `total` is the outer bound and the only one a caller can rely on: it wraps
+    everything, including retry backoff sleeps and redirect hops, so the inner
+    deadlines cannot compose into something longer. The inner ones exist to fail
+    a *stalled* stage early enough to be worth retrying, which the outer one
+    cannot distinguish.
+
+    Args:
+        pool: Waiting for a free connection; over it raises `PoolTimeout`.
+        connect: TCP connect per candidate address; also bounds DNS resolution.
+        tls: Handshake, added to `connect` for the combined per-address deadline.
+        response_headers: Silence before the response head completes.
+        response_body: Silence during the body, re-armed per read rather than total.
+        total: The whole call, retries included. None removes the outer deadline.
+
+    Raises:
+        ValueError: Any value is non-positive (`total` may be None, but not 0).
+    """
+
     pool: float = 1.0
     connect: float = 5.0
     tls: float = 5.0
@@ -185,11 +307,43 @@ class ClientTimeout:
 
 @dataclass(frozen=True, slots=True)
 class RetryPolicy:
+    """When and how often a failed attempt is repeated. Validated at construction.
+
+    **Retries are off by default** (`attempts=1` means one attempt, not one
+    retry). Turning them on requires deciding that repeating the request is safe,
+    which is what `idempotent_only` encodes: with it set, only DELETE, GET,
+    HEAD, OPTIONS, PUT and TRACE are repeated -- plus any request carrying an
+    `idempotency_key`, because that key is the caller's promise that the origin
+    will collapse a duplicate.
+
+    Two kinds of failure are retried: a transport-level one (connect, DNS,
+    response timeout, a connection that died mid-exchange) and a response whose
+    status is in `statuses`. A `ProtocolError`, a `ResponseTooLarge`, or any
+    other `ClientError` is final -- repeating it would fail identically.
+
+    Backoff between attempts is `min(backoff_base * 2**attempt, backoff_cap)`.
+    A `Retry-After` on a retryable response replaces that delay entirely, in
+    either RFC 9110 §10.2.3 form (delta-seconds or an HTTP-date), but is clamped
+    to `backoff_cap * 16` so one absurd header cannot park the caller. Each
+    attempt also spends a token of the client's `RatePolicy`, so a retry
+    storm is throttled by the same bucket as ordinary traffic.
+
+    Args:
+        attempts: Total attempts, not extra ones. 1 disables retrying.
+        idempotent_only: Restrict retries to idempotent methods and keyed requests.
+        statuses: Response statuses treated as retryable.
+        backoff_base: First delay in seconds, doubled per attempt.
+        backoff_cap: Ceiling for the computed delay, in seconds.
+        jitter: Scale each delay by a uniform factor in [0.5, 1.0) to spread a thundering herd.
+        respect_retry_after: Honour a `Retry-After` header in place of the computed delay.
+
+    Raises:
+        ValueError: `attempts` is non-positive, or either backoff value is non-positive.
+    """
+
     attempts: int = 1
     idempotent_only: bool = True
     statuses: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
-    # Exponential backoff between attempts: min(base * 2**attempt, cap), with
-    # optional bounded jitter and Retry-After honouring on 429/503.
     backoff_base: float = 0.05
     backoff_cap: float = 1.0
     jitter: bool = True
@@ -204,14 +358,26 @@ class RetryPolicy:
 
 @dataclass(frozen=True, slots=True)
 class RatePolicy:
-    """Client-side outbound throttle: one continuous token bucket shared by every
-    request from this client (``rate`` tokens/sec, bursting to ``capacity``),
-    reusing the same native ``TokenBucket`` as the inbound rate-limiter. When a
-    token is not yet available the request parks — up to ``max_wait`` — rather
-    than being rejected. ``enabled=False`` (default) skips throttling entirely.
+    """Client-side outbound throttle. Off by default; validated at construction.
 
-    TODO(pure-twin): none needed — TokenBucket already has a native/pure twin
-    selected above; this policy is pure-Python glue.
+    One continuous token bucket shared by every request from this client
+    (`rate` tokens per second, bursting to `capacity`), reusing the same
+    `TokenBucket` primitive as the inbound rate limiter rather than a second
+    implementation. A request that cannot take a token *parks* rather than being
+    rejected, so this shapes traffic to a rate-limited dependency instead of
+    turning its limit into the caller's errors -- but only up to `max_wait`,
+    past which the wait becomes a `ClientError`.
+
+    Retries spend tokens too: each attempt acquires before it is sent.
+
+    Args:
+        enabled: When False every other field is ignored and no bucket exists.
+        capacity: Burst size in tokens. One request costs one token.
+        rate: Sustained refill in tokens per second.
+        max_wait: Seconds a request may park. Exceeding it raises `ClientError`.
+
+    Raises:
+        ValueError: `enabled` with a non-positive `rate`, `capacity`, or `max_wait`.
     """
 
     enabled: bool = False
@@ -231,10 +397,10 @@ _DEFAULT_RATE = RatePolicy()
 
 
 def _parse_retry_after(raw: bytes | None) -> float | None:
-    """Parse a ``Retry-After`` header into seconds-from-now (RFC 9110 §10.2.3).
+    """Parse a `Retry-After` header into seconds-from-now (RFC 9110 §10.2.3).
 
-    Both forms are honoured: delta-seconds (``120``) and an HTTP-date
-    (``Wed, 21 Oct 2026 07:28:00 GMT``), the latter converted to a non-negative
+    Both forms are honoured: delta-seconds (`120`) and an HTTP-date
+    (`Wed, 21 Oct 2026 07:28:00 GMT`), the latter converted to a non-negative
     delay relative to now. Anything unparseable returns None so the caller falls
     back to ordinary backoff.
     """
@@ -265,9 +431,37 @@ def _http_date_delay(text: str) -> float | None:
 
 @dataclass(frozen=True, slots=True)
 class RedirectPolicy:
+    """Whether 3xx responses are followed. Off by default; validated at construction.
+
+    With redirects disabled the 3xx response is returned to the caller as-is,
+    which is a valid way to use this client -- nothing is raised. Enabling them
+    requires a hop limit, because the redirect loop is the client's own and an
+    unbounded one is a hang.
+
+    Method rewriting follows RFC 9110: a 303 becomes a GET with an empty body,
+    while 307 and 308 preserve both. A 301 or 302 on anything other than GET or
+    HEAD raises `RedirectError` instead of being rewritten, because rewriting
+    would silently drop the body the caller asked to send.
+
+    **Cross-origin redirects are never followed, and there is no option to.**
+    The client is pinned to one origin: its pool, its TLS context, its
+    destination policy, and its rate and retry budgets all belong to that
+    origin, and following a hop off it would run the new origin's requests
+    under the old one's everything. A `RedirectPolicy` therefore has no
+    cross-origin flag -- one existed, and both of its values refused the hop,
+    which read as a supported behaviour that was never implemented. Reaching
+    another origin means constructing a client for it.
+
+    Args:
+        enabled: Follow 3xx responses. When False they are returned unchanged.
+        max_hops: Redirects followed before `RedirectError`. Must be positive when enabled.
+
+    Raises:
+        ValueError: `max_hops` is negative, or redirects are enabled with `max_hops=0`.
+    """
+
     enabled: bool = False
     max_hops: int = 0
-    allow_cross_origin: bool = False
 
     def __post_init__(self) -> None:
         if self.max_hops < 0:
@@ -278,6 +472,30 @@ class RedirectPolicy:
 
 @dataclass(frozen=True, slots=True)
 class DestinationPolicy:
+    """Where this client is permitted to connect. The SSRF guard.
+
+    Checked in two places, because a name check alone is not a destination
+    check: `validate_url` runs on the `base_url` at construction and on
+    any absolute redirect target, and `validate_address` runs on *every*
+    address DNS returned, before a connection is attempted. That second check is
+    what a hostname resolving to 127.0.0.1 or 169.254.169.254 has to pass, and
+    it is why a DNS answer is validated in full rather than only the address
+    that happens to win the connection race.
+
+    The defaults deny every non-global address. Loopback is denied too, so a
+    client aimed at `http://localhost` in a test needs
+    `allow_loopback=True` -- the default is chosen for production, and a test
+    opting in is a smaller mistake than a service reaching a metadata endpoint.
+
+    Args:
+        schemes: URL schemes permitted. Anything outside raises `DestinationRejected`.
+        hosts: Allowed hostnames; `*.example.com` matches subdomains, not the apex. Empty: any.
+        ports: Allowed ports, compared after the scheme default is applied. Empty allows any.
+        allow_private: Permit RFC 1918 and other private ranges.
+        allow_loopback: Permit 127.0.0.0/8 and ::1.
+        allow_link_local: Permit 169.254.0.0/16 and fe80::/10, which include cloud metadata.
+    """
+
     schemes: frozenset[str] = frozenset({"http", "https"})
     hosts: tuple[str, ...] = ()
     ports: frozenset[int] = frozenset()
@@ -286,6 +504,22 @@ class DestinationPolicy:
     allow_link_local: bool = False
 
     def validate_url(self, parsed: SplitResult) -> None:
+        """Check a parsed URL's scheme, credentials, host, and port.
+
+        Userinfo (`https://user:pass@host`) is refused outright rather than
+        stripped or forwarded: it would put a credential in a URL that gets
+        logged, and no supported flow needs it.
+
+        Hostnames are IDNA-encoded and lowercased before matching, so a
+        Unicode or mixed-case host cannot slip past an allow-list entry.
+
+        Args:
+            parsed: The result of `urllib.parse.urlsplit`.
+
+        Raises:
+            DestinationRejected: Scheme, credentials, host, or port fail the policy.
+            UnicodeError: The hostname is not encodable as IDNA.
+        """
         if parsed.scheme not in self.schemes:
             raise DestinationRejected(f"scheme {parsed.scheme!r} is not allowed")
         if parsed.username is not None or parsed.password is not None:
@@ -301,6 +535,21 @@ class DestinationPolicy:
             raise DestinationRejected("destination port is not allowed")
 
     def validate_address(self, value: str) -> None:
+        """Check one resolved IP address against the policy.
+
+        Deny-by-default on the last rule: an address that is not global and not
+        covered by an explicit `allow_*` is refused even if it belongs to no
+        named category, so a range this code does not enumerate fails closed.
+        Unspecified (`0.0.0.0`, `::`) and multicast addresses are refused
+        unconditionally -- no flag admits them.
+
+        Args:
+            value: A textual IP address; an IPv6 `%scope` suffix is stripped first.
+
+        Raises:
+            DestinationRejected: The address is outside what the policy permits.
+            ValueError: `value` is not a valid IP address.
+        """
         address = ipaddress.ip_address(value.split("%", 1)[0])
         if address.is_loopback and not self.allow_loopback:
             raise DestinationRejected("loopback destination address is not allowed")
@@ -320,6 +569,21 @@ class DestinationPolicy:
 
 @dataclass(frozen=True, slots=True)
 class ClientSnapshot:
+    """A point-in-time reading of one client's pool. For health and metrics.
+
+    Taken without a lock and without awaiting, so the fields are individually
+    accurate and collectively approximate -- fine for a gauge, not a basis for a
+    decision. `active + idle` is not the pool's open count: a connection being
+    created belongs to neither set yet.
+
+    Args:
+        active: Connections currently carrying a request.
+        idle: Connections held for reuse.
+        waiters: Callers parked waiting for a connection right now.
+        requests: Requests written since construction; monotonic, never reset.
+        reused: Times an idle connection was taken instead of dialling; monotonic.
+    """
+
     active: int
     idle: int
     waiters: int
@@ -329,6 +593,24 @@ class ClientSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class ClientResponse:
+    """One complete outbound response. Immutable, fully buffered.
+
+    `body` holds the decoded body in full -- the client has no streaming
+    response API, and the read is bounded by
+    `ClientLimits.max_response_bytes`. Informational (1xx) responses are
+    consumed and discarded during the read, so `status` is always final.
+
+    Headers stay raw `bytes` pairs in wire order with names lowercased,
+    duplicates included, exactly as the origin sent them. Nothing is combined or
+    decoded, because deciding a charset for someone else's header is how a
+    client starts corrupting values.
+
+    Args:
+        headers: Response headers, lowercased names, in the order received.
+        http_version: `"1.0"` or `"1.1"`, from the status line.
+        reason: The reason phrase. Advisory; never parse it.
+    """
+
     status: int
     headers: tuple[tuple[bytes, bytes], ...]
     body: bytes
@@ -336,6 +618,11 @@ class ClientResponse:
     reason: bytes = b""
 
     def header(self, name: bytes) -> bytes | None:
+        """The first value for `name`, or None. Case-insensitive.
+
+        A header sent more than once resolves to the first occurrence; iterate
+        `headers` for the rest, which matters for `Set-Cookie`.
+        """
         lowered = name.lower()
         for key, value in self.headers:
             if key == lowered:
@@ -343,6 +630,15 @@ class ClientResponse:
         return None
 
     def raise_for_status(self) -> None:
+        """Raise `ClientError` when the status is 400 or above; otherwise return None.
+
+        Opt-in: the client itself never treats a status as an error, because a
+        404 or a 409 is frequently the answer rather than a failure. 3xx does not
+        raise here -- an unfollowed redirect is a response the caller asked for.
+
+        Raises:
+            ClientError: The status is >= 400. The message carries the status.
+        """
         if self.status >= 400:
             raise ClientError(f"HTTP response status {self.status}")
 
@@ -404,7 +700,37 @@ def _host_matches(host: str, pattern: str) -> bool:
 
 
 class HTTPClient:
-    """One bounded pool for a configured HTTP origin."""
+    """One bounded pool for a configured HTTP origin.
+
+    The origin comes from `base_url` and is fixed for the client's life, as is
+    every policy passed here. Any path in `base_url` becomes a prefix on every
+    request target. Requests are origin-relative and validated as such: a target
+    that is not `/`-prefixed, or is protocol-relative (`//host`), or is not
+    ASCII, raises `ValueError` before anything is sent.
+
+    Concurrency is bounded by `ClientLimits`, and connections are reused
+    when the response was framed and the peer did not ask to close. Happy
+    Eyeballs is applied across the addresses DNS returned: attempts are staggered
+    250 ms apart, the first to connect wins, and the losers are closed.
+
+    Not started at construction. `start` admits requests, `close`
+    drains them, and the object is an async context manager over both. Every
+    method is safe to call from many tasks at once.
+
+    Args:
+        name: Identifies this client in errors and diagnostics. Cannot be empty.
+        base_url: Scheme, host, optional port, optional path prefix. No query or fragment.
+        limits: Pool sizes and byte ceilings.
+        timeout: Per-request deadlines.
+        retry: When a failed attempt is repeated. Disabled by default.
+        redirect: Whether 3xx is followed. Disabled by default.
+        destination: Where connecting is permitted. Applied to `base_url` here.
+        rate: Outbound throttle. Disabled by default.
+
+    Raises:
+        ValueError: `name` is empty, or `base_url` carries a query or fragment.
+        DestinationRejected: `base_url` is outside `destination`.
+    """
 
     __slots__ = (
         "_active",
@@ -488,10 +814,12 @@ class HTTPClient:
 
     @property
     def name(self) -> str:
+        """The name this client was constructed with. Appears in its error messages."""
         return self._name
 
     @property
     def started(self) -> bool:
+        """Whether the client is accepting requests. False before `start` and after `close`."""
         return self._started
 
     async def __aenter__(self) -> HTTPClient:
@@ -502,6 +830,16 @@ class HTTPClient:
         await self.close()
 
     async def start(self) -> None:
+        """Admit requests. Idempotent, and cheap enough to call from a lifespan hook.
+
+        Opens no connections and resolves no names -- both happen on the first
+        request. Starting is only a permission, so a client for an origin that is
+        currently down still starts, and the failure surfaces at the call that
+        needs it.
+
+        A closed client can be started again; the pool is empty at that point,
+        since `close` discarded it.
+        """
         async with self._condition:
             if self._started:
                 return
@@ -509,6 +847,19 @@ class HTTPClient:
             self._condition.notify_all()
 
     async def close(self) -> None:
+        """Stop admitting requests, drop idle connections, wait for in-flight ones.
+
+        Refusal is immediate: parked callers are woken with `ClientClosed` and a
+        connect that completes after this point is closed rather than pooled.
+        Idle sockets are closed at once; in-flight requests are then given
+        `timeout.total` (or `timeout.response_body` when total is None) to
+        finish on their own, after which their transports are closed underneath
+        them and they fail rather than hang.
+
+        A socket that errors while closing is ignored rather than propagated --
+        shutting down is not a place to acquire a new failure. Idempotent, and
+        safe on a client that was never started.
+        """
         async with self._condition:
             if not self._started and not self._idle and not self._active:
                 return
@@ -542,6 +893,7 @@ class HTTPClient:
                     pass
 
     def snapshot(self) -> ClientSnapshot:
+        """A `ClientSnapshot` of the pool right now. Synchronous, never blocks."""
         return ClientSnapshot(
             active=len(self._active),
             idle=len(self._idle),
@@ -553,6 +905,7 @@ class HTTPClient:
     async def get(
         self, target: str, *, headers: tuple[tuple[bytes, bytes], ...] = ()
     ) -> ClientResponse:
+        """`GET` through `request`. Retried under an idempotent-only policy."""
         return await self.request("GET", target, headers=headers)
 
     async def post(
@@ -563,6 +916,13 @@ class HTTPClient:
         body: bytes | bytearray | memoryview = b"",
         idempotency_key: str | None = None,
     ) -> ClientResponse:
+        """`POST` through `request`.
+
+        POST is not idempotent, so an `idempotency_key` is what makes this
+        retryable under the default policy: it is sent as an `Idempotency-Key`
+        header and is the caller's assertion that the origin collapses
+        duplicates. Without one, a POST is attempted exactly once.
+        """
         return await self.request(
             "POST", target, headers=headers, body=body, idempotency_key=idempotency_key
         )
@@ -576,6 +936,46 @@ class HTTPClient:
         body: bytes | bytearray | memoryview = b"",
         idempotency_key: str | None = None,
     ) -> ClientResponse:
+        """Send one request to this client's origin and return the full response.
+
+        The whole lifecycle happens here: rate-limit token, pool acquisition,
+        DNS with policy validation, connect, TLS, write, read, retries, and
+        redirects -- all inside `ClientTimeout.total`.
+
+        The response is returned for *any* status. Nothing raises on a 4xx or
+        5xx; call `ClientResponse.raise_for_status` when that is wanted.
+        A 3xx is returned unchanged unless `RedirectPolicy` is enabled.
+
+        The request is recorded as one phase in the flight recorder when the
+        request that triggered it was armed, including when it fails or times
+        out -- the duration of a failed call is precisely what the Inspector
+        needs. An unarmed request pays one ContextVar read.
+
+        Args:
+            method: Case-insensitive; uppercased before it goes on the wire.
+            target: Origin-relative path, `/`-prefixed, ASCII/percent-encoded.
+            headers: Raw byte pairs, sent in order after the client's own head.
+            body: Sent verbatim. Copied to `bytes` once, so a buffer may be reused after.
+            idempotency_key: Sent as `Idempotency-Key`, and makes a non-idempotent method retryable.
+
+        Returns:
+            The response, body included.
+
+        Raises:
+            ClientClosed: The client is not started, or was closed mid-request.
+            ValueError: `target` is not an origin-relative ASCII path.
+            ClientError: The request headers exceed `ClientLimits.max_request_header_bytes`.
+            PoolTimeout: No connection became free within `ClientTimeout.pool`.
+            DNSFailure: The origin did not resolve.
+            DestinationRejected: A resolved address is outside `DestinationPolicy`.
+            TLSFailure: The handshake failed.
+            ConnectError: Every candidate address failed to connect.
+            ResponseTimeout: The origin stalled mid-response.
+            RequestTimeout: The call exceeded `ClientTimeout.total`.
+            ProtocolError: The response could not be framed.
+            ResponseTooLarge: The body exceeded `ClientLimits.max_response_bytes`.
+            RedirectError: A redirect could not be followed under `RedirectPolicy`.
+        """
         # Armed-request outbound phase; every other request pays exactly the
         # ContextVar read. A finally records failed and timed-out calls too —
         # their duration is precisely what the Inspector wants to see.
@@ -695,7 +1095,7 @@ class HTTPClient:
 
     async def _throttle(self) -> None:
         """Park until the outbound token bucket admits this request (bounded by
-        ``RatePolicy.max_wait``). No-op unless rate limiting is enabled."""
+        `RatePolicy.max_wait`). No-op unless rate limiting is enabled."""
         bucket = self._rate_bucket
         if bucket is None:
             return
@@ -781,8 +1181,6 @@ class HTTPClient:
                 and port == self._port
             )
             if not same_origin:
-                if not self._redirect.allow_cross_origin:
-                    raise RedirectError("cross-origin redirect is not allowed")
                 raise RedirectError(
                     "cross-origin redirects require a separately configured client"
                 )
@@ -1194,7 +1592,6 @@ __all__ = [
     "HTTPClient",
     "PoolTimeout",
     "ProtocolError",
-    "ProxyError",
     "RedirectError",
     "RatePolicy",
     "RedirectPolicy",

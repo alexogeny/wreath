@@ -103,7 +103,7 @@ def test_a_store_purge_opts_into_skip_because_it_has_no_terminal_step():
         key = "id"
         index_stamp = True
 
-    walk = keyed_purge_pass(_Declaration(), None, name="session_purge")
+    walk = keyed_purge_pass(_Declaration(), name="session_purge")
 
     # One undeletable row must not stop an expiry purge from keeping the table
     # small forever -- and with no gate, a skip cannot buy anything unsafe.

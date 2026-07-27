@@ -1,9 +1,10 @@
 """Signed-cookie sessions, compiled into the middleware tape.
 
-The session is a plain dict on ``request.state.session``. It is serialized to
+The session is a plain dict on `request.state.session`. It is serialized to
 JSON, signed with HMAC-SHA256, and stored client-side in a cookie — nothing
-is kept on the server. Tampered or expired cookies yield a fresh empty
-session; the cookie is only (re)written when the session content changed::
+is kept on the server unless a `store` is given. Tampered or expired cookies
+yield a fresh empty session; the cookie is only (re)written when the session
+content changed::
 
     app.add_middleware(SessionMiddleware(secret="…"))
 
@@ -11,6 +12,10 @@ session; the cookie is only (re)written when the session content changed::
     async def visit(request):
         request.state.session["count"] = request.state.session.get("count", 0) + 1
         return {"visits": request.state.session["count"]}
+
+Call `rotate_session(request)` whenever the caller's privileges change. This is
+route middleware, not global, so it runs inside a matched route rather than
+around routing.
 """
 
 from __future__ import annotations
@@ -38,8 +43,9 @@ def rotate_session(request: Request) -> None:
     """
     request.state._session_rotate = True
 
-#: Minimum session-secret length, matching `CSRFMiddleware`. 32 bytes is the
-#: HMAC-SHA256 block-equivalent floor below which a secret adds no strength.
+#: Minimum session-secret length, matching `CSRFMiddleware`. 32 bytes is
+#: HMAC-SHA256's digest length -- the point past which a longer key adds no
+#: strength, and so the floor a shorter one falls below.
 MIN_SECRET_BYTES = 32
 
 #: The serialization of an absent/rejected session, so a request that never
@@ -48,7 +54,56 @@ _EMPTY_SESSION = _json_dumps({})
 
 
 class SessionMiddleware:
-    """Hook-based middleware (has ``before``/``after``; tape-fusible)."""
+    """Load and persist a per-caller session held in a signed cookie.
+
+    Route middleware, not global: it is compiled into a route's tape, so it runs
+    for routed requests and not for misses or static files. `before` publishes
+    the session as a plain dict on `request.state.session`; handlers mutate that
+    dict and `after` decides what to write.
+
+    Without a `store` the whole session lives in the cookie. It is serialized to
+    JSON, base64url-encoded, and signed with HMAC-SHA256 over the payload and
+    its issue time; nothing is kept server-side. A cookie whose signature does
+    not verify under any known secret, or whose issue time is more than
+    `max_age` seconds old, yields a fresh empty session rather than an error --
+    tampering is indistinguishable from a very old cookie, and both mean the
+    same thing to the caller. Browsers cap a cookie at about 4 KiB, which is the
+    real bound on how much a cookie session can hold; exceed it and the browser
+    drops the cookie without telling anyone. Give a `store` to move past that.
+
+    With a `store`, the cookie carries only a signed session id and the contents
+    live server-side, which makes a session revocable and unbounded by cookie
+    size. A signed id whose row the store no longer has is treated as no session
+    at all, because a deleted row *is* a revocation.
+
+    The cookie is written only when the serialized session differs from what
+    arrived, so a request that reads without writing sends no `Set-Cookie` and
+    does not defeat downstream caching. The comparison is byte-for-byte against
+    the exact payload decoded from the cookie: a cookie minted by another
+    encoder, or with its keys in another order, reads as changed and is reissued
+    with the same content and a fresh signature. A session emptied to `{}` clears
+    the cookie, and deletes the stored row when there is one. With a store, an
+    unchanged live session has its expiry extended when the store offers a
+    `touch`, so a session in constant use does not die at a fixed age.
+
+    `previous_secrets` are accepted for verification but never used for signing,
+    so a secret can be rotated without invalidating every live session at once.
+    A cookie accepted under a previous secret is always re-signed with the
+    current one, which is what lets the old secret eventually be retired.
+
+    Args:
+        secret: HMAC key, at least 32 bytes as UTF-8.
+        cookie: Cookie name carrying the session or the session id.
+        max_age: Session lifetime in seconds, and the cookie `Max-Age`.
+        same_site: Cookie `SameSite`, one of strict, lax, or none.
+        secure: Mark the cookie `Secure`. Pass False only for local plaintext development.
+        http_only: Mark the cookie `HttpOnly`, keeping scripts out of it.
+        store: A `SessionStore` moving contents server-side. None keeps them in the cookie.
+        previous_secrets: Retired secrets a cookie may still verify under.
+
+    Raises:
+        ValueError: `secret` is shorter than 32 bytes.
+    """
 
     __slots__ = (
         "_cookie", "_http_only", "_max_age", "_previous", "_same_site", "_secret",
@@ -146,6 +201,11 @@ class SessionMiddleware:
     # --- hooks ----------------------------------------------------------------
 
     async def before(self, request: Request) -> None:
+        """Publish `request.state.session` and the baseline `after` diffs against.
+
+        Always returns None; this hook never short-circuits. A missing, tampered,
+        or expired cookie produces an empty session, not an error.
+        """
         if self._store is not None:
             await self._before_stored(request)
             return None
@@ -272,6 +332,13 @@ class SessionMiddleware:
     # --- hooks ----------------------------------------------------------------
 
     async def after(self, request: Request, response: Any) -> Any:
+        """Write, clear, or leave the session cookie, according to what changed.
+
+        Returns the response untouched when the session is byte-identical to
+        what arrived, when `before` did not complete, or when the response type
+        cannot carry a cookie. An emptied session clears the cookie instead of
+        rewriting it.
+        """
         if self._store is not None:
             return await self._after_stored(request, response)
         state = request.state

@@ -139,9 +139,12 @@ live, and an explicit parameter is cheaper to understand than an injection rule.
 the marker and the default. In Wreath the marker goes in `Annotated` metadata
 and the default stays an ordinary Python default — `limit: Annotated[int,
 Query(minimum=1)] = 20`. Your function signature remains callable, and readable,
-as plain Python. Query, header, and cookie values are scalars (`str`, `int`,
-`float`, `bool`, and optional unions of them); structured data belongs in the
-body.
+as plain Python. Writing the FastAPI form is a `TypeError` when routes compile,
+naming the parameter and the form to write instead: it is the mistake this page
+exists to catch, and Wreath would otherwise bind nothing and hand the handler
+the marker object itself. Query, header, and cookie values are scalars (`str`,
+`int`, `float`, `bool`, and optional unions of them); structured data belongs in
+the body.
 
 **There is no `response_model`.** A handler returns a `dict` (sent as JSON), a
 `str`, `bytes`, or a [response object](../guides/requests-responses.md) when it

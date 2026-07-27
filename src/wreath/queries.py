@@ -6,28 +6,30 @@ and no shared name for *the query that fetches a paddock's llamas*. Wreath
 already owns the hard half of doing better -- a plan cache keyed by query shape
 -- and until now used it only internally.
 
-A ``Queries`` class gives those reads names::
+A `Queries` class gives those reads names:
 
-    class Llamas(Queries[Llama]):
-        by_paddock = query(Llama.paddock_id == Param("paddock"))
-        overdue = query(Llama.checked_at < Param("before")).order_by(Llama.checked_at)
+```python
+class Llamas(Queries[Llama]):
+    by_paddock = query(Llama.paddock_id == Param("paddock"))
+    overdue = query(Llama.checked_at < Param("before")).order_by(Llama.checked_at)
 
-    herd = await Llamas(session).by_paddock(paddock=7)
+herd = await Llamas(session).by_paddock(paddock=7)
+```
 
 Two properties follow from declaring rather than building:
 
 * **The shape is fixed at class-definition time and only values vary**, so each
   declaration compiles exactly once through the registry's existing plan cache,
   however many times it runs and whatever it is called with. There is no second
-  cache here; a bound declaration is an ordinary :class:`~wreath.orm.Select`
+  cache here; a bound declaration is an ordinary `Select`
   whose plan-cache key is byte-identical to the hand-written query's.
 * **Mistakes move to import time.** A column that belongs to another model, a
   parameter written somewhere a value cannot be bound -- those fail when the
   class is defined, not on the request that first runs them.
 
-**Reads only, deliberately.** Writes already have an owner: the ``Session``,
+**Reads only, deliberately.** Writes already have an owner: the `Session`,
 whose one-way direction is an ORM invariant. A layer that also wrote would
-duplicate that or quietly work around it, which is why this is ``Queries`` and
+duplicate that or quietly work around it, which is why this is `Queries` and
 not a repository -- the smaller surface is the correct one, not a subset of one.
 """
 
@@ -60,17 +62,17 @@ __all__ = ["BoundQuery", "Param", "Placeholder", "Queries", "QueryDeclaration", 
 class Placeholder(Expression):
     """The gap a declaration leaves in its predicate tree.
 
-    Not a :class:`~wreath.orm.expressions.ValueExpr`: a placeholder must never
+    Not a `ValueExpr`: a placeholder must never
     be mistaken for a bound value. Neither the cache key nor the SQL renderer
     knows this node, so one that reached them by another route fails loudly
     rather than compiling a query with a missing value in it.
 
     Public because it is half of a contract rather than an implementation
-    detail: :func:`~wreath.orm.compiler.compile_rebind` takes the marker class
-    to look for, so any module that lets a caller write :class:`Param` in a
-    predicate and binds it later has to name this type. ``wreath.series`` is the
+    detail: `compile_rebind` takes the marker class
+    to look for, so any module that lets a caller write `Param` in a
+    predicate and binds it later has to name this type. `wreath.series` is the
     second such module. What it is *not* is something to construct — a
-    ``Param`` compared against a column builds one, and that is the only route
+    `Param` compared against a column builds one, and that is the only route
     that gives it a type to coerce with.
     """
 
@@ -98,24 +100,26 @@ class Placeholder(Expression):
 class Param(RelatedColumnExpr):
     """One named value a declared query binds per call.
 
-    ``Param("paddock")`` stands where a literal would::
+    `Param("paddock")` stands where a literal would:
 
-        by_paddock = query(Llama.paddock_id == Param("paddock"))
+    ```python
+    by_paddock = query(Llama.paddock_id == Param("paddock"))
+    ```
 
     It subclasses the column expression rather than the value expression for a
     reason worth knowing: Python gives the *right* operand of a comparison first
     refusal only when its type is a proper subclass of the left operand's, and
-    the left operand here is a column. Inheriting from ``RelatedColumnExpr`` --
+    the left operand here is a column. Inheriting from `RelatedColumnExpr` --
     the deepest column type a declaration can compare against -- is what lets
-    both ``Llama.paddock_id == Param(...)`` and ``Llama.paddock.name ==
-    Param(...)`` build a placeholder instead of trying to coerce one into a
-    ``bigint``. A ``Param`` is bait for an operator, never a node in a tree; the
-    tree gets a ``Placeholder``.
+    both `Llama.paddock_id == Param(...)` and `Llama.paddock.name == Param(...)`
+    build a placeholder instead of trying to coerce one into a
+    `bigint`. A `Param` is bait for an operator, never a node in a tree; the
+    tree gets a `Placeholder`.
 
     Because interception happens in the operator, a parameter works with the six
-    comparisons (``==``, ``!=``, ``<``, ``<=``, ``>``, ``>=``) in either order.
-    Operators spelled as methods -- ``like``, ``in_``, the jsonb and array
-    operators -- bind their operand before a ``Param`` can be seen, so those
+    comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`) in either order.
+    Operators spelled as methods -- `like`, `in_`, the jsonb and array
+    operators -- bind their operand before a `Param` can be seen, so those
     take literals for now.
     """
 
@@ -172,9 +176,9 @@ class Param(RelatedColumnExpr):
 class QueryDeclaration:
     """One named read: a query shape, its parameters, and how to bind them.
 
-    Created by :func:`query` in a class body, where the model is not known yet,
+    Created by `query` in a class body, where the model is not known yet,
     so it starts as a recording of builder calls and becomes a real
-    :class:`~wreath.orm.Select` when :class:`Queries` names its model. Both
+    `Select` when `Queries` names its model. Both
     states are immutable -- a builder method returns a new declaration, and
     resolving one produces a new one -- so a declaration written once at module
     level can be reused by more than one class.
@@ -196,7 +200,7 @@ class QueryDeclaration:
         self._single = single
         self._select = select
         self._binders = binders
-        #: ``Class.attribute``, once a ``Queries`` class has claimed it.
+        #: `Class.attribute`, once a `Queries` class has claimed it.
         self.name = name
         #: Parameter names, in the order they bind.
         self.parameters = parameters
@@ -224,6 +228,15 @@ class QueryDeclaration:
         return self._step("where", predicates)
 
     def order_by(self, *expressions: Any) -> QueryDeclaration:
+        """Order this query's rows. Part of the shape, so no `Param` here.
+
+        A sort column supplied per call would be a different query shape each
+        time, which is the one thing a declared query is not. For request-driven
+        sorting, `wreath.pagination.apply_sort` checks an allow-list instead.
+
+        Raises:
+            DeclarationError: if given a `Param`.
+        """
         _reject_params("order_by", expressions)
         return self._step("order_by", expressions)
 
@@ -232,18 +245,30 @@ class QueryDeclaration:
         return self._step("include", load_options)
 
     def limit(self, value: int) -> QueryDeclaration:
+        """Cap the rows this query returns. Fixed at declaration time.
+
+        A per-call limit belongs to `wreath.pagination.paginate`, which bounds it.
+
+        Raises:
+            DeclarationError: if given a `Param`.
+        """
         _reject_params("limit", (value,))
         return self._step("limit", (value,))
 
     def offset(self, value: int) -> QueryDeclaration:
+        """Skip the first `value` rows. Fixed at declaration time.
+
+        Raises:
+            DeclarationError: if given a `Param`.
+        """
         _reject_params("offset", (value,))
         return self._step("offset", (value,))
 
     def one(self) -> QueryDeclaration:
-        """Return a single object (or ``None``) rather than a list.
+        """Return a single object (or `None`) rather than a list.
 
-        Raises ``MultipleResultsError`` if the query matches more than one row,
-        exactly as ``Session.fetch_one`` does.
+        Raises `MultipleResultsError` if the query matches more than one row,
+        exactly as `Session.fetch_one` does.
         """
         self._check_open()
         return QueryDeclaration(self._steps, single=True)
@@ -279,8 +304,8 @@ class QueryDeclaration:
     def bind(self, **values: Any) -> Select:
         """The query this declaration runs for one set of parameter values.
 
-        The result is an ordinary ``Select``, so anything that takes one --
-        ``Session.fetch``, ``Session.count``, ``wreath.pagination`` -- takes a
+        The result is an ordinary `Select`, so anything that takes one --
+        `Session.fetch`, `Session.count`, `wreath.pagination` -- takes a
         declared query too.
         """
         select = self._select
@@ -347,11 +372,14 @@ class BoundQuery:
 def query(*predicates: Predicate) -> QueryDeclaration:
     """Declare one named read, to be finished by the builder methods.
 
-    Written in the body of a :class:`Queries` subclass, where the model comes
-    from the class rather than from this call::
+    Written in the body of a `Queries` subclass, where the model comes
+    from the class rather than from this call:
 
-        class Llamas(Queries[Llama]):
-            overdue = query(Llama.checked_at < Param("before")).order_by(Llama.checked_at)
+    ```python
+    class Llamas(Queries[Llama]):
+        overdue = query(Llama.checked_at < Param("before")).order_by(Llama.checked_at)
+    ```
+
     """
     return QueryDeclaration((("where", predicates),) if predicates else ())
 
@@ -360,12 +388,14 @@ class Queries[ModelT]:
     """A named set of reads over one model.
 
     Subclass it with the model as its type argument and declare the reads as
-    class attributes; construct it with a session to run them::
+    class attributes; construct it with a session to run them:
 
-        class Llamas(Queries[Llama]):
-            by_paddock = query(Llama.paddock_id == Param("paddock"))
+    ```python
+    class Llamas(Queries[Llama]):
+        by_paddock = query(Llama.paddock_id == Param("paddock"))
 
-        herd = await Llamas(session).by_paddock(paddock=7)
+    herd = await Llamas(session).by_paddock(paddock=7)
+    ```
 
     A subclass with no declarations of its own may leave the model out, so a
     base class can hold whatever a family of query sets shares.
@@ -373,7 +403,7 @@ class Queries[ModelT]:
 
     __slots__ = ("session",)
 
-    #: The model these queries read, filled in from ``Queries[Model]``.
+    #: The model these queries read, filled in from `Queries[Model]`.
     model: Any = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -424,7 +454,7 @@ class Queries[ModelT]:
 
 
 def _declared_model(cls: type) -> Any:
-    """The model named by ``Queries[Model]``, or inherited from a base."""
+    """The model named by `Queries[Model]`, or inherited from a base."""
     for base in getattr(cls, "__orig_bases__", ()):
         origin = get_origin(base)
         if isinstance(origin, type) and issubclass(origin, Queries):
@@ -438,7 +468,7 @@ def _reject_params(method: str, values: tuple[Any, ...]) -> None:
     """A parameter is only ever a *value*, and these positions are not values.
 
     Caught here because it is the last moment the mistake is still local: a
-    ``Param`` in an ORDER BY or a LIMIT could never be supplied by a caller, and
+    `Param` in an ORDER BY or a LIMIT could never be supplied by a caller, and
     a declaration nobody can call should not survive its own class body.
     """
     for value in values:

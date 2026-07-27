@@ -221,8 +221,9 @@ async def test_a_multipart_form_over_the_part_limit_is_refused() -> None:
         RequestLimits(max_parts=2),
         [(b"content-type", b"multipart/form-data; boundary=" + boundary)],
     )
-    with pytest.raises(ValueError, match="more than 2 parts"):
+    with pytest.raises(PayloadTooLarge, match="more than 2 parts") as caught:
         await request.form()
+    assert caught.value.status == 413
 
 
 @pytest.mark.asyncio
@@ -236,8 +237,40 @@ async def test_a_multipart_part_over_the_in_memory_budget_is_refused() -> None:
         RequestLimits(max_part_bytes=128),
         [(b"content-type", b"multipart/form-data; boundary=B")],
     )
-    with pytest.raises(ValueError, match="part exceeds 128 bytes"):
+    with pytest.raises(PayloadTooLarge, match="part exceeds 128 bytes") as caught:
         await request.form()
+    assert caught.value.status == 413
+
+
+@pytest.mark.asyncio
+async def test_a_multipart_part_header_block_over_the_limit_is_refused() -> None:
+    body = (
+        b"--B\r\nContent-Disposition: form-data; name=\"f\"\r\n"
+        b"X-Padding: " + b"p" * 256 + b"\r\n\r\nv\r\n--B--\r\n"
+    )
+    request = _limited_request(
+        [body],
+        RequestLimits(max_part_header_bytes=64),
+        [(b"content-type", b"multipart/form-data; boundary=B")],
+    )
+    with pytest.raises(PayloadTooLarge, match="headers exceed 64 bytes") as caught:
+        await request.form()
+    assert caught.value.status == 413
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_multipart_body_is_not_a_413() -> None:
+    """Only the *limits* became client refusals. A body the parser cannot read
+    is a different failure and keeps raising the documented `ValueError`, so the
+    message-prefix discrimination cannot quietly swallow one as the other."""
+    request = _limited_request(
+        [b"--B\r\nnot-a-header-line\r\n\r\nv\r\n--B--\r\n"],
+        RequestLimits(),
+        [(b"content-type", b"multipart/form-data; boundary=B")],
+    )
+    with pytest.raises(ValueError) as caught:
+        await request.form()
+    assert not isinstance(caught.value, PayloadTooLarge)
 
 
 @pytest.mark.asyncio
@@ -303,13 +336,18 @@ async def test_multipart_at_the_aggregate_limit_is_accepted() -> None:
 
 @pytest.mark.asyncio
 async def test_urlencoded_form_rejects_too_many_fields() -> None:
+    """A 413, not a bare `ValueError`. `max_form_fields` exists to refuse
+    hostile input, so it has to refuse it as a client error; the codec's
+    `ValueError` reached the boundary as an unhandled 500, reporting the
+    caller's fault as the server's."""
     request = _limited_request(
         [b"a=1&b=2&c=3&d=4"],
         RequestLimits(max_form_fields=3),
         [(b"content-type", b"application/x-www-form-urlencoded")],
     )
-    with pytest.raises(ValueError, match="exceeds 3 fields"):
+    with pytest.raises(PayloadTooLarge, match="exceeds 3 fields") as caught:
         await request.form()
+    assert caught.value.status == 413
 
 
 @pytest.mark.asyncio
@@ -321,3 +359,31 @@ async def test_urlencoded_form_at_the_field_limit_is_accepted() -> None:
     )
     form = await request.form()
     assert form["a"] == "1" and form["b"] == "2" and form["c"] == "3"
+
+
+# --- the urlencoded field-count limit refuses as a client error --------------
+
+
+@pytest.mark.asyncio
+async def test_the_field_limit_refusal_reaches_the_client_as_413() -> None:
+    """End to end: the refusal has to survive the dispatch error boundary as a
+    413 problem document, which is the part a bare `ValueError` could not do."""
+    from wreath import Wreath
+    from wreath.testing import TestClient
+
+    app = Wreath(limits=RequestLimits(max_form_fields=2))
+
+    @app.post("/form")
+    async def endpoint(request: Any) -> Any:
+        return dict(await request.form())
+
+    async with TestClient(app) as client:
+        response = await client.post(
+            "/form",
+            headers={"content-type": "application/x-www-form-urlencoded"},
+            content=b"a=1&b=2&c=3",
+        )
+
+    assert response.status == 413
+    assert response.header("content-type") == "application/problem+json"
+    assert response.json()["status"] == 413

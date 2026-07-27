@@ -333,6 +333,43 @@ async def test_inbound_source_rejects_invalid_signature_before_handler() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("body", [b"not json at all", b"", b'{"value":', b"\xff\xfe"])
+async def test_a_correctly_signed_body_that_is_not_json_is_a_400(body: bytes) -> None:
+    """The signature proves the sender; a malformed payload is still theirs."""
+    app = Wreath()
+    source = app.webhooks("partners").source(
+        "sender",
+        path="/hooks/malformed",
+        verifier=HMACWebhookVerifier(KEYS, max_age=300),
+    )
+    called = False
+
+    @source.event("widget.changed", payload=WidgetChanged)
+    async def changed(context: WebhookContext, event: WidgetChanged) -> None:
+        nonlocal called
+        called = True
+
+    envelope = WebhookEnvelope(
+        id="evt-malformed",
+        type="widget.changed",
+        version="1",
+        timestamp=datetime.now(UTC),
+        content_type="application/json",
+        body=body,
+    )
+    headers = {
+        name.decode("ascii"): value.decode("ascii")
+        for name, value in HMACWebhookSigner(KEYS, key_id="current").headers(envelope)
+    }
+
+    async with TestClient(app) as client:
+        response = await client.post("/hooks/malformed", headers=headers, content=body)
+
+    assert response.status == 400
+    assert not called
+
+
+@pytest.mark.asyncio
 async def test_inbound_source_applies_webhook_body_limit_before_dispatch() -> None:
     app = Wreath()
     hooks = app.webhooks("bounded")
@@ -1215,3 +1252,17 @@ async def test_idle_dispatcher_observes_stop_without_leaking_tasks() -> None:
     stopping.set()
     await task
     assert task.done()
+
+
+def test_webhook_purge_pass_builders_take_no_database() -> None:
+    """Both inbox and outbox took a positional database and discarded it."""
+    import inspect
+
+    for owner in (PostgresWebhookInbox, PostgresWebhookOutbox):
+        parameters = inspect.signature(owner.purge_pass).parameters
+        assert "database" not in parameters, owner.__name__
+        assert [
+            name
+            for name, p in parameters.items()
+            if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        ] == ["self"], owner.__name__

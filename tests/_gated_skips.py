@@ -17,8 +17,14 @@ is ambiguous: this tree has eight of them and pytest puts each one's directory o
 
 from __future__ import annotations
 
+import re
 import shutil
 from typing import Any
+
+#: Key under which `deselected_by_mark` stores the number of *tests*, as opposed
+#: to the per-mark tallies alongside it. Empty because no mark name can be, so it
+#: cannot collide with one.
+TOTAL = ""
 
 #: The variable every database-gated test names in its skip reason. Detection
 #: keys on the reason text rather than on a list of files, so a suite added
@@ -37,12 +43,6 @@ _START = (
     "  -c max_connections=200 -c fsync=off -c synchronous_commit=off"
 )
 _EXPORT = f'export {DSN_ENV}="postgresql://wreath:wreath@127.0.0.1:55432/wreath_test"'
-
-#: Skip reports seen this process. A module-level list rather than state on the
-#: config: there is exactly one controller per run, and `pytest_runtest_logreport`
-#: is not handed the config, so threading it through every report would cost more
-#: than it explains.
-_SKIPPED: list[Any] = []
 
 
 def container_runtime(which: Any = None) -> str | None:
@@ -70,6 +70,103 @@ def gated_skip_count(reports: Any) -> int:
         if isinstance(longrepr, tuple) and len(longrepr) == 3 and DSN_ENV in str(longrepr[2]):
             total += 1
     return total
+
+
+#: Words in a ``-m`` expression that are operators rather than mark names.
+_MARKEXPR_KEYWORDS = frozenset({"not", "and", "or"})
+
+
+def marks_in_expression(markexpr: Any) -> tuple[str, ...]:
+    """The mark names named by an active ``-m`` expression.
+
+    Derived from the expression that *causes* the deselection, which is the only
+    honest source. The first attempt read ``config.getini("markers")`` and
+    counted ``asyncio`` -- pytest-asyncio registers that marker and
+    ``asyncio_mode = "auto"`` stamps it on every async test, so a file with three
+    deselected async tests reported "3 asyncio, 3 network". Registered and
+    *excluded* are different sets, and only the second one explains why a test
+    did not run.
+    """
+    names = []
+    for word in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(markexpr or "")):
+        if word not in _MARKEXPR_KEYWORDS and word not in names:
+            names.append(word)
+    return tuple(names)
+
+
+def deselected_by_mark(items: Any, excluded: Any) -> dict[str, int]:
+    """Per-mark counts for *items*, plus a ``""`` key holding the item total.
+
+    An item can carry two excluded marks, so the per-mark numbers do not sum to
+    the number of tests -- reporting their sum as a test count claimed six tests
+    for three. The total is tracked separately under a key no mark can collide
+    with, because a mark name cannot be empty.
+    """
+    counts: dict[str, int] = {}
+    allowed = set(excluded)
+    for item in items:
+        hit = False
+        for mark in getattr(item, "iter_markers", lambda: ())():
+            name = getattr(mark, "name", None)
+            if name in allowed:
+                counts[name] = counts.get(name, 0) + 1
+                hit = True
+        if hit:
+            counts[TOTAL] = counts.get(TOTAL, 0) + 1
+    return counts
+
+
+def merge_worker_counts(controller: Any, worker: Any) -> dict[str, int]:
+    """Fold one worker's per-mark counts into the running total.
+
+    **Max, not sum.** Under xdist every worker collects the whole suite and
+    deselects the same items, so each reports the same number; adding them would
+    report six times reality on ``-n 6``. Verified by probe: two workers each
+    reported the same count for the same two deselected tests.
+    """
+    merged = dict(controller)
+    for name, count in (worker or {}).items():
+        merged[name] = max(merged.get(name, 0), int(count))
+    return merged
+
+
+def deselect_lines(counts: dict[str, int]) -> list[str]:
+    """The deselection half of the banner.
+
+    Deliberately a different instruction from the skip half. A skip collected the
+    test and declined it, usually for want of the DSN -- the fix is to set one. A
+    deselection means the marker expression filtered it out before it ran, and no
+    DSN in the world changes that; the fix is ``-m ''``. Telling someone to start
+    a container when they need a different flag is worse than saying nothing.
+    """
+    total = counts.get(TOTAL, 0)
+    marks = {name: n for name, n in counts.items() if name != TOTAL}
+    ordered = sorted(marks.items(), key=lambda kv: (-kv[1], kv[0]))
+    breakdown = ", ".join(f"{n} {name}" for name, n in ordered)
+    plural = "s" if total != 1 else ""
+    verb = "were" if total != 1 else "was"
+    first = ordered[0][0] if ordered else "network"
+    return [
+        f"{total} test{plural} {verb} not collected at all: the default marker",
+        f"expression filtered them out ({breakdown}).",
+        "",
+        "A deselected run exits 0, so a suite that never executed reads as green.",
+        "Three defects reached the tree behind this exact gap: a permanent hang,",
+        "a first-catalog-read failure, and three tests that had never executed.",
+        "",
+        _commented("uv run pytest -m ''", "everything, including these"),
+        _commented(f"uv run pytest -m {first}", "just one of them"),
+    ]
+
+
+#: Column the trailing ``#`` comments start in, wide enough for the longest mark
+#: name in use. Computed against, not eyeballed -- the first cut hardcoded two
+#: different paddings and the two lines did not line up.
+_COMMENT_COLUMN = 32
+
+
+def _commented(command: str, note: str) -> str:
+    return f"{command.ljust(_COMMENT_COLUMN)}# {note}"
 
 
 def banner_lines(count: int, runtime: str | None) -> list[str]:

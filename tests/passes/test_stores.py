@@ -38,7 +38,7 @@ async def _nap(_seconds):
 def _purge(declaration=REPLAYS, **options):
     from wreath._passes.stores import keyed_purge_pass
 
-    return keyed_purge_pass(declaration, None, name="purge_replays", **options)
+    return keyed_purge_pass(declaration, name="purge_replays", **options)
 
 
 # --- the declaration a store implies ------------------------------------------
@@ -197,3 +197,22 @@ def test_the_unbounded_purge_documents_what_it_costs():
     doc = PostgresIdempotencyStore.purge.__doc__
     assert "one unbounded statement" in doc.lower()
     assert "purge_pass" in doc
+
+
+def test_a_purge_pass_builder_takes_no_database():
+    """A pass is a declaration; it is handed a database when it is driven.
+
+    All three keyed stores passed one and it was discarded, so the signature
+    promised a wiring step that did not exist.
+    """
+    import inspect
+
+    from wreath._passes.stores import keyed_purge_pass
+
+    parameters = inspect.signature(keyed_purge_pass).parameters
+    assert "database" not in parameters
+    assert [
+        name
+        for name, p in parameters.items()
+        if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    ] == ["declaration"]

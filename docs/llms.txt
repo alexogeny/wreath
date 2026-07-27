@@ -11,6 +11,8 @@
 - [Home](index.md): what Wreath is and why.
 - [Getting started](getting-started/index.md): install and first app.
 - [Deployment](getting-started/deployment.md): project layout, running behind ASGI or the native server.
+- [Camera-trap walkthrough](example/walkthrough.md): the canonical example's schema toured in psql — local wall clocks, late data, partial indexes, and the free-text column chapter two recodes.
+- [Camera-trap read API](example/read-api.md): the canonical example's nine read routes -- nested routers, a local-date window bounded at bind time, declared queries, stable paging, and the species list the ORM invalidates.
 
 ## Coming from FastAPI, Pydantic, SQLModel, or Alembic
 

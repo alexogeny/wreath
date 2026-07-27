@@ -45,6 +45,26 @@ async def _connection() -> Any:
     return await connect(_DSN)
 
 
+async def _apply_schema(connection: Any, sql: str) -> None:
+    """Run a multi-statement ``schema_sql()`` one command at a time.
+
+    The driver speaks the extended query protocol exclusively, so it prepares
+    every statement and PostgreSQL refuses `cannot insert multiple commands into
+    a prepared statement`. Passing `schema_sql()` straight to `execute` therefore
+    cannot work, and these three tests did it -- they had simply never run,
+    because `network` deselects them and a deselection exits 0.
+
+    Splitting on `";\\n"` is what `tests/jobs/test_integration.py`,
+    `tests/postgres/test_passes_integration.py` and
+    `tests/postgres/test_series_integration.py` already do. That four call sites
+    need the same workaround is tracked separately as a question about the shape
+    `schema_sql()` should emit.
+    """
+    for statement in (part.strip() for part in sql.split(";\n")):
+        if statement:
+            await connection.execute(statement)
+
+
 def _envelope(event_id: str) -> WebhookEnvelope:
     return WebhookEnvelope(
         id=event_id,
@@ -63,7 +83,7 @@ async def test_inbox_claim_handler_effect_and_completion_commit_atomically() -> 
     connection = await _connection()
     session = _Session(connection)
     try:
-        await connection.execute(inbox.schema_sql())
+        await _apply_schema(connection, inbox.schema_sql())
         await connection.execute(
             f"CREATE TABLE {effects} (event_id text PRIMARY KEY, value integer NOT NULL)"
         )
@@ -109,7 +129,7 @@ async def test_multi_replica_skip_locked_claims_each_intent_once() -> None:
     outbox = PostgresWebhookOutbox(f"webhook_outbox_{uuid.uuid4().hex}")
     seed = await _connection()
     try:
-        await seed.execute(outbox.schema_sql())
+        await _apply_schema(seed, outbox.schema_sql())
         for index in range(24):
             await outbox.enqueue(
                 _Session(seed),
@@ -154,7 +174,7 @@ async def test_process_loss_and_ack_rollback_reclaim_with_new_fence() -> None:
     first = await _connection()
     observer = await _connection()
     try:
-        await first.execute(outbox.schema_sql())
+        await _apply_schema(first, outbox.schema_sql())
         await outbox.enqueue(
             _Session(first),
             destination="receiver",
@@ -193,3 +213,53 @@ async def test_process_loss_and_ack_rollback_reclaim_with_new_fence() -> None:
         if not getattr(first, "closed", False):
             await first.close()
         await observer.close()
+
+
+async def test_outbox_purge_pass_runs_against_a_real_database() -> None:
+    """`purge_pass()` builds and drives with no database argument.
+
+    The builder used to take one positionally and discard it, which read as a
+    wiring step that existed. A pass is handed the database when it is *driven*,
+    and this is that, end to end on PostgreSQL.
+    """
+    if _DSN is None:
+        pytest.skip("set WREATH_TEST_POSTGRES_DSN for real PostgreSQL webhook tests")
+
+    import datetime
+
+    from wreath.passes import schema_sql
+    from wreath.postgres import Database
+
+    schema = f"wreath_hooks_{uuid.uuid4().hex[:8]}"
+    outbox = PostgresWebhookOutbox(f"webhook_outbox_{uuid.uuid4().hex}")
+    database = Database("main", _DSN, pools={"write": {"min_size": 1, "max_size": 2}})
+    await database.start()
+    connection = await database.acquire("write")
+    try:
+        await connection.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+        await _apply_schema(connection, schema_sql(schema))
+        await _apply_schema(connection, outbox.schema_sql())
+        past = datetime.datetime.now(UTC) - datetime.timedelta(days=1)
+        for index in range(5):
+            await outbox.enqueue(
+                _Session(connection),
+                destination="receiver",
+                envelope=_envelope(f"evt-purge-{index}"),
+                key_id="current",
+            )
+        await connection.execute(
+            f"UPDATE {outbox.table} SET state='delivered', retention_until=$1", past
+        )
+
+        walk = outbox.purge_pass(chunk=2, schema=schema)
+        result = await walk.run(database, sleep=lambda _s: asyncio.sleep(0))
+
+        assert result.rows == 5
+        assert await connection.fetchval(
+            f"SELECT count(*) FROM {outbox.table}"
+        ) == 0
+    finally:
+        await connection.execute(f"DROP TABLE IF EXISTS {outbox.table}")
+        await connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await database.release("write", connection)
+        await database.stop()

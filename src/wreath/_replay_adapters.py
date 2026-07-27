@@ -24,6 +24,7 @@ they are installed only for the duration of a replay:
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import decimal
 import re
@@ -87,6 +88,28 @@ class AdapterFault(StrEnum):
     # the shape every `INSERT ... ON CONFLICT ... RETURNING` claim degrades to
     # when the row it expected has been purged underneath it.
     CLAIM_LOST = "claim_lost"
+    # Connection seam: the connection itself is gone, not one statement on it.
+    # Distinct from CONNECTION_DROP, which fails the Nth statement and leaves
+    # the connection usable: this *latches*, so every later operation on the
+    # same lease raises the identical error object. A caller may retry a
+    # dropped statement on the connection it already holds; it must take a new
+    # connection after this one. Code that cannot tell them apart retries into
+    # the same failure until its attempt budget runs out.
+    CONNECTION_FAILED = "connection_failed"
+    # Decode seam: the statement succeeded on the wire and the *result* could
+    # not be read back. Deliberately not a `PostgresError` -- the live defect
+    # was `ValueError: text-format array decoding is not supported`, raised by
+    # the driver on a cold catalog path, and every `except PostgresError` in
+    # this tree steps straight around it. Modelling it as a server error would
+    # prove the wrong thing.
+    DECODE_ERROR = "decode_error"
+    # Inference seam: the statement works once and fails forever after.
+    # PostgreSQL infers a parameter's type on first execution and the prepared
+    # statement carries the inference, so the second execution binds by an OID
+    # nothing can encode. Nothing else in the corpus models a failure that only
+    # appears on the *second* call, and a smoke test that runs each statement
+    # once cannot see it at all.
+    PREPARED_POISON = "prepared_poison"
     # Object store seam
     OBJECT_UNREACHABLE = "object_unreachable"  # the store cannot be reached
     OBJECT_WRITE_TORN = "object_write_torn"  # a write fails part-way through
@@ -102,6 +125,15 @@ SILENT_FAULTS = frozenset(
 
 
 def _db_error(fault: AdapterFault) -> Exception:
+    if fault is AdapterFault.DECODE_ERROR:
+        # Not a PostgresError, on purpose. See the enum member's comment: the
+        # statement succeeded and the driver could not read the answer, which is
+        # a different class of failure from anything the server reported.
+        return ValueError("text-format array decoding is not supported")
+    if fault is AdapterFault.CONNECTION_FAILED:
+        return InterfaceError("PostgreSQL connection failed; every operation on it")
+    if fault is AdapterFault.PREPARED_POISON:
+        return TypeError("no binary encoder for PostgreSQL OID (inferred parameter type)")
     if fault is AdapterFault.POOL_TIMEOUT:
         return TimeoutError("timed out acquiring PostgreSQL connection")
     if fault is AdapterFault.POOL_EXHAUSTED:
@@ -225,26 +257,55 @@ class _ConnectionDouble:
     boundary, it is hiding one.
     """
 
-    __slots__ = ("_double", "_query", "_txn", "_prepared")
+    __slots__ = ("_double", "_query", "_txn", "_prepared", "_failure")
 
     def __init__(self, double: DatabaseDouble) -> None:
         self._double = double
         self._query = 0
         self._txn = 0
         self._prepared: set[str] = set()
+        #: Set once a ``CONNECTION_FAILED`` fault fires. It latches: the lease is
+        #: over, and every later operation on it raises the *same* error object,
+        #: which is what makes "retry on this connection" visibly wrong.
+        self._failure: Exception | None = None
 
-    def _next(self, default: Any) -> Any:
+    @property
+    def failed(self) -> bool:
+        """Whether this lease has been failed by a connection-level fault."""
+        return self._failure is not None
+
+    def _next(self, default: Any, sql: object = None) -> Any:
+        if self._failure is not None:
+            raise self._failure
         index = self._query
         self._query += 1
-        fault = self._double.query_faults.get(index)
+        double = self._double
+        text = " ".join(sql.split()) if isinstance(sql, str) else None
+        if text is not None and text in double.poisoned:
+            # Second and every subsequent execution of a statement whose
+            # parameter type was inferred once and cannot be encoded again.
+            raise _db_error(AdapterFault.PREPARED_POISON)
+        connection_fault = double.connection_faults.get(index)
+        if connection_fault is not None:
+            self._failure = _db_error(connection_fault)
+            raise self._failure
+        fault = double.query_faults.get(index)
         if fault is AdapterFault.CLAIM_LOST:
             # The statement ran. It simply returned no row -- which for a
             # `RETURNING` claim means somebody else holds it, or it is gone.
             # Returning the empty shape rather than raising is the whole point.
             return None if default is None else type(default)()
+        if fault is AdapterFault.PREPARED_POISON:
+            # *This* execution succeeds. The inference it left behind is what
+            # fails, so the poison is recorded on the double rather than on this
+            # lease: a caller that reconnects and runs the same SQL still gets
+            # it, which is precisely why "it worked when I tried it" holds.
+            if text is not None:
+                double.poisoned.add(text)
+            fault = None
         if fault is not None:
             raise _db_error(fault)
-        results = self._double.results
+        results = double.results
         return results[index] if index < len(results) else default
 
     # --- LISTEN/NOTIFY doorbell seam -----------------------------------------
@@ -271,6 +332,13 @@ class _ConnectionDouble:
         ``NOTIFY_STREAM_END`` returns without raising, mirroring the real
         connection closing; ``NOTIFY_STREAM_ERROR`` raises. A supervisor that
         only handles the second is the bug this seam exists to catch.
+
+        With **no** fault the stream *stays open*, which is what a real one does
+        when there is simply nothing to deliver. It used to return, so an
+        un-faulted double made the doorbell churn exactly as hard as
+        ``NOTIFY_STREAM_END`` did -- and a region whose behaviour is
+        indistinguishable from the control is a region that proves nothing. Held
+        open, the reconnect counter is a signal again.
         """
         self._double.streams += 1
         fault = self._double.stream_fault
@@ -278,7 +346,12 @@ class _ConnectionDouble:
             yield notification
         if fault is AdapterFault.NOTIFY_STREAM_ERROR:
             raise _db_error(AdapterFault.NOTIFY_STREAM_ERROR)
-        return  # NOTIFY_STREAM_END, and the un-faulted case, both land here
+        if fault is None and self._double.hold_stream:
+            # Park until cancelled. Not a sleep loop: a supervised doorbell is
+            # meant to sit here for the process's lifetime, and anything that
+            # wakes on a timer would model a connection that keeps dropping.
+            await asyncio.Event().wait()
+        return  # NOTIFY_STREAM_END lands here
 
     # --- transaction seam -----------------------------------------------------
 
@@ -289,22 +362,22 @@ class _ConnectionDouble:
 
     async def execute(self, sql: object, *args: object) -> str:
         refuse_what_postgres_refuses(sql, args, self._prepared)
-        return self._next("OK")
+        return self._next("OK", sql)
 
     async def fetch(self, sql: object, *args: object) -> list[Any]:
         refuse_what_postgres_refuses(sql, args, self._prepared)
-        return self._next([])
+        return self._next([], sql)
 
     async def fetchrow(self, sql: object, *args: object) -> Any:
         refuse_what_postgres_refuses(sql, args, self._prepared)
-        return self._next(None)
+        return self._next(None, sql)
 
     async def fetchval(self, sql: object, *args: object) -> Any:
         refuse_what_postgres_refuses(sql, args, self._prepared)
-        return self._next(None)
+        return self._next(None, sql)
 
     async def map(self, method: str, sql: object, argument_sets: Any, *, max_in_flight: int = 32):
-        return self._next([])
+        return self._next([], sql)
 
     async def close(self) -> None:
         return None
@@ -344,19 +417,19 @@ class _TransactionDouble:
 
     async def execute(self, sql: object, *args: object) -> str:
         self._maybe_timeout()
-        return self._connection._next("OK")
+        return self._connection._next("OK", sql)
 
     async def fetch(self, sql: object, *args: object) -> list[Any]:
         self._maybe_timeout()
-        return self._connection._next([])
+        return self._connection._next([], sql)
 
     async def fetchrow(self, sql: object, *args: object) -> Any:
         self._maybe_timeout()
-        return self._connection._next(None)
+        return self._connection._next(None, sql)
 
     async def fetchval(self, sql: object, *args: object) -> Any:
         self._maybe_timeout()
-        return self._connection._next(None)
+        return self._connection._next(None, sql)
 
     def _maybe_timeout(self) -> None:
         if self._fault is AdapterFault.STATEMENT_TIMEOUT:
@@ -447,6 +520,7 @@ class DatabaseDouble:
         "acquired", "released", "_flight_dep_id",
         "listen_faults", "stream_fault", "transaction_faults",
         "notifications", "listened", "streams", "listens",
+        "connection_faults", "poisoned", "_statements", "hold_stream",
     )
 
     def __init__(
@@ -460,7 +534,9 @@ class DatabaseDouble:
         listen_faults: dict[int, AdapterFault] | None = None,
         stream_fault: AdapterFault | None = None,
         transaction_faults: dict[int, AdapterFault] | None = None,
+        connection_faults: dict[int, AdapterFault] | None = None,
         notifications: tuple[Any, ...] = (),
+        hold_stream: bool = True,
     ) -> None:
         self.name = name
         self.results = results
@@ -473,6 +549,17 @@ class DatabaseDouble:
         self.listen_faults = listen_faults or {}
         self.stream_fault = stream_fault
         self.transaction_faults = transaction_faults or {}
+        #: Faults that end the *lease* rather than one statement, keyed to the
+        #: Nth operation on it. See `AdapterFault.CONNECTION_FAILED`.
+        self.connection_faults = connection_faults or {}
+        #: SQL texts whose parameter inference has been poisoned. Held on the
+        #: double, not on a lease, because that is where the real hazard lives:
+        #: reconnecting does not un-poison a statement.
+        self.poisoned: set[str] = set()
+        self._statements: dict[str, Any] = {}
+        #: Whether an un-faulted notification stream stays open rather than
+        #: returning. See `_ConnectionDouble.notifications`.
+        self.hold_stream = hold_stream
         #: Notifications the doorbell stream yields before it ends.
         self.notifications = notifications
         #: Channels a caller asked to LISTEN on, in order -- a reconnect is
@@ -484,6 +571,28 @@ class DatabaseDouble:
         #: LISTEN attempts across every connection this double has handed out --
         #: the coordinate a listen fault is keyed to.
         self.listens = 0
+
+    def statement(self, name: str, sql: str, *, workload: str = "read") -> Any:
+        """Register a prepared statement, exactly as ``Database`` does.
+
+        Present so the stores built on :class:`wreath.store.PostgresStore` --
+        the idempotency replay table, the session store, the cache -- replay
+        against a double at all. They reach the database only through a
+        ``Statement``, which leases and releases a connection per call, so
+        without this seam their claim/read/purge paths were the one family of
+        owned PostgreSQL code a fault schedule could not touch.
+
+        The real :class:`~wreath.postgres.Statement` is used rather than a
+        double of it: it is the code that acquires, calls, and releases, and
+        replacing it would replace the behaviour under test with a copy of it.
+        """
+        from .postgres import Statement
+
+        if name in self._statements:
+            raise ValueError(f"duplicate PostgreSQL statement: {name}")
+        statement = Statement(self, name, sql, workload)  # type: ignore[arg-type]
+        self._statements[name] = statement
+        return statement
 
     async def acquire(self, workload: str = "read") -> _ConnectionDouble:
         self.acquired += 1
@@ -559,6 +668,7 @@ class ReplayAdapters:
         db_listen: dict[str, dict[int, AdapterFault]] = {}
         db_stream: dict[str, AdapterFault] = {}
         db_txn: dict[str, dict[int, AdapterFault]] = {}
+        db_connection: dict[str, dict[int, AdapterFault]] = {}
         http_request: dict[str, dict[int, AdapterFault]] = {}
         object_op: dict[str, dict[int, AdapterFault]] = {}
         for fault in adapter_faults:
@@ -578,6 +688,8 @@ class ReplayAdapters:
                     db_stream[fault.target] = kind
             elif fault.seam == int(AdapterSeam.DB_TRANSACTION):
                 db_txn.setdefault(fault.target, {})[fault.coordinate] = kind
+            elif fault.seam == int(AdapterSeam.DB_CONNECTION):
+                db_connection.setdefault(fault.target, {})[fault.coordinate] = kind
             elif fault.seam == int(AdapterSeam.HTTP_REQUEST):
                 http_request.setdefault(fault.target, {})[fault.coordinate] = kind
             elif fault.seam == int(AdapterSeam.OBJECT_STORE):
@@ -586,6 +698,7 @@ class ReplayAdapters:
         named = (
             db_query.keys() | db_acquire.keys() | db_release.keys()
             | db_listen.keys() | db_stream.keys() | db_txn.keys()
+            | db_connection.keys()
         )
         for name in named:
             databases[name] = DatabaseDouble(
@@ -596,6 +709,7 @@ class ReplayAdapters:
                 listen_faults=db_listen.get(name),
                 stream_fault=db_stream.get(name),
                 transaction_faults=db_txn.get(name),
+                connection_faults=db_connection.get(name),
             )
         clients = {
             name: FaultyHttpClient(name, request_faults=faults)

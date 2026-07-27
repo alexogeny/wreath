@@ -507,14 +507,22 @@ async def _drive_connection(
         clock.advance_to(segment.offset_us)
         if segment.kind == int(SegmentKind.DATA):
             data_index += 1
-            data = segment.data
+            reads: tuple[bytes, ...] = (segment.data,)
             forced_close: int | None = None
             if plan is not None:
-                data, forced_close = plan.rewrite(data_index, clock, data)
-            if data:
-                _feed(protocol, data)
-                segments_fed += 1
+                reads, forced_close = plan.rewrite(data_index, clock, segment.data)
+            fed_any = False
+            for read in reads:
+                if not read:
+                    continue
+                _feed(protocol, read)
+                fed_any = True
                 await _pump_after_feed(transport)
+            if fed_any:
+                # One recorded segment, one count, however many reads it became:
+                # the counter names what the *recording* delivered, so a SPLIT
+                # schedule stays comparable with the unfaulted replay it must equal.
+                segments_fed += 1
             if forced_close == _FIRE_TIMEOUT:
                 # A virtual-clock timeout: let the fed bytes settle, then fire the
                 # driver's owned timeout enforcement (close / abort / 408). The
@@ -691,6 +699,7 @@ class FaultKind(IntEnum):
     CLOCK_JUMP = 4  # advance the virtual clock by ``value`` us before this segment
     DUPLICATE = 5  # feed this segment's bytes twice (peer retransmission)
     TIMEOUT = 6  # fire the driver's owned request/keep-alive timeout after this segment
+    SPLIT = 7  # deliver this segment as two reads, split at ``value``
 
 
 @dataclass(frozen=True, slots=True)
@@ -718,6 +727,7 @@ class AdapterSeam(IntEnum):
     DB_LISTEN = 4  # LISTEN, or the notification stream, on a held connection
     DB_TRANSACTION = 5  # the Nth transaction scope on a leased connection
     OBJECT_STORE = 6  # the Nth operation on a named object store (coordinate = index)
+    DB_CONNECTION = 7  # the lease itself fails at the Nth operation, and latches
 
 
 @dataclass(frozen=True, slots=True)
@@ -801,9 +811,15 @@ class FaultSchedule:
 class _TransportFaultPlan:
     """Applies a fault schedule to the inbound DATA segments during replay.
 
-    Keyed to the DATA-segment index (the trigger). ``rewrite`` returns the bytes
-    to actually feed and, when a lifecycle fault fires, the close kind to deliver
-    after them. TRUNCATE latches so every later segment is suppressed too.
+    Keyed to the DATA-segment index (the trigger). ``rewrite`` returns the reads
+    to actually feed -- one per ``data_received`` the protocol will see -- and,
+    when a lifecycle fault fires, the close kind to deliver after them. TRUNCATE
+    latches so every later segment is suppressed too.
+
+    A *tuple* of reads rather than one buffer, because a read boundary is
+    itself a seam: SPLIT delivers one recorded segment as two reads so an
+    incremental parser is made to resume mid-frame, which is where an
+    incremental parser is wrong if it is wrong anywhere.
     """
 
     __slots__ = ("_by_index", "_truncated_from")
@@ -815,35 +831,48 @@ class _TransportFaultPlan:
             # Last descriptor for an index wins; a schedule is explicit anyway.
             self._by_index[fault.segment_index] = fault
 
-    def rewrite(self, index: int, clock: VirtualClock, data: bytes) -> tuple[bytes, int | None]:
+    def rewrite(
+        self, index: int, clock: VirtualClock, data: bytes
+    ) -> tuple[tuple[bytes, ...], int | None]:
         if self._truncated_from is not None and index >= self._truncated_from:
-            return b"", None
+            return (), None
         fault = self._by_index.get(index)
         if fault is None:
-            return data, None
+            return (data,), None
         kind = fault.kind
         if kind == int(FaultKind.SHORT_READ):
-            return data[: fault.value], None
+            return (data[: fault.value],), None
         if kind == int(FaultKind.TRUNCATE):
             self._truncated_from = index + 1
-            return data[: fault.value], None
+            return (data[: fault.value],), None
         if kind == int(FaultKind.RESET):
-            return data, int(SegmentKind.RESET)
+            return (data,), int(SegmentKind.RESET)
         if kind == int(FaultKind.HALF_CLOSE):
-            return data, int(SegmentKind.EOF)
+            return (data,), int(SegmentKind.EOF)
         if kind == int(FaultKind.CLOCK_JUMP):
             # A scheduling perturbation: jump the virtual clock before this
             # segment (keyed to an owned coordinate, so it stays reproducible).
             clock.advance_to(clock.now_us + fault.value)
-            return data, None
+            return (data,), None
         if kind == int(FaultKind.DUPLICATE):
-            # Model a peer retransmission: feed the same bytes twice.
-            return data + data, None
+            # Model a peer retransmission: feed the same bytes twice. One read,
+            # not two, so this stays bit-for-bit what it was before reads became
+            # a tuple -- the retransmission is the subject here, not the boundary.
+            return (data + data,), None
         if kind == int(FaultKind.TIMEOUT):
             # Fire the driver's owned request/keep-alive timeout after this
             # segment -- a real virtual-clock timeout, not an adapter outcome.
-            return data, _FIRE_TIMEOUT
-        return data, None
+            return (data,), _FIRE_TIMEOUT
+        if kind == int(FaultKind.SPLIT):
+            # The same bytes, across a read boundary. Nothing is lost, so the
+            # owned outcome must be *identical* to the unfaulted replay -- the
+            # only fault in the corpus whose assertion is equality rather than
+            # degradation.
+            cut = max(0, min(fault.value, len(data)))
+            if cut == 0 or cut == len(data):
+                return (data,), None
+            return (data[:cut], data[cut:]), None
+        return (data,), None
 
 
 # --- curated fault corpus ----------------------------------------------------
@@ -866,6 +895,14 @@ def fault_corpus() -> dict[str, FaultSchedule]:
     ``transport-*`` / ``schedule-*``
         The inbound byte stream and the virtual clock: short reads, truncation,
         peer reset, half-close, retransmission, and the driver's own timeout.
+
+    ``transport-split-*``
+        The odd one out, and deliberately so. Every other transport region
+        removes or reorders bytes, and its assertion is that the degradation is
+        handled. ``SPLIT`` removes nothing -- it moves the *read boundary* into
+        the middle of a frame -- so its assertion is **equality** with the
+        unfaulted replay. That is the property an incremental parser breaks
+        first, and no "handled it gracefully" outcome can hide a violation of it.
 
     ``adapter-pool_*`` / ``adapter-server_error`` / ``adapter-connection_drop``
     ``adapter-lost_commit`` / ``adapter-release_error``
@@ -898,6 +935,34 @@ def fault_corpus() -> dict[str, FaultSchedule]:
         returns *no row*. Not an error, which is the entire hazard: the caller
         sees a successful statement with an empty result and carries on.
 
+    ``adapter-connection_failed``
+        The *lease* ends, not one statement on it. Separate from
+        ``connection_drop`` because the two want opposite recoveries: a dropped
+        statement may be retried on the connection already held, and this one
+        never may -- it latches, so every later operation raises the identical
+        error. A caller that cannot tell them apart spends its whole attempt
+        budget re-issuing into a connection that is gone.
+
+    ``adapter-decode_error``
+        The statement succeeded and the *answer* could not be read. Modelled as
+        a ``ValueError``, not a ``PostgresError``, because that is what it was:
+        ``text-format array decoding is not supported``, raised by the driver on
+        a cold catalog path in a default configuration. Every ``except
+        PostgresError`` in this tree steps around it, so a region that raised a
+        server error would have proved a recovery that does not exist. This is
+        also the region that pairs with the no-hang property: the failure is in
+        the code that *resolves* a caller's future, which is exactly how a
+        printed error and a permanent wait can coexist.
+
+    ``adapter-prepared_poison``
+        Works once, fails forever after. PostgreSQL infers a parameter's type on
+        the first execution and the prepared statement carries the inference, so
+        the second execution binds by an OID nothing can encode. It is the only
+        region whose failure does not exist on the first call, which makes it
+        the only one a smoke test that runs each statement once cannot see --
+        and reconnecting does not clear it, so "it worked when I tried it" is
+        true and useless.
+
     ``adapter-object_*``
         Object storage: unreachable, a write torn part-way (the key exists and
         the bytes are wrong), and a read shorter than ``stat`` promised -- the
@@ -913,7 +978,12 @@ def fault_corpus() -> dict[str, FaultSchedule]:
 
     corpus: dict[str, FaultSchedule] = {}
     # Transport seam: each kind at the head and at a mid-stream segment.
-    byte_kinds = {int(FaultKind.SHORT_READ), int(FaultKind.TRUNCATE), int(FaultKind.CLOCK_JUMP)}
+    byte_kinds = {
+        int(FaultKind.SHORT_READ),
+        int(FaultKind.TRUNCATE),
+        int(FaultKind.CLOCK_JUMP),
+        int(FaultKind.SPLIT),
+    }
     for kind in FaultKind:
         for index in (0, 1):
             value = 8 if int(kind) in byte_kinds else 0
@@ -948,8 +1018,11 @@ def fault_corpus() -> dict[str, FaultSchedule]:
         AdapterFault.OBJECT_WRITE_TORN,
         AdapterFault.OBJECT_READ_SHORT,
     }
+    connection = {AdapterFault.CONNECTION_FAILED}
     for fault in AdapterFault:
-        if fault in db_acquire:
+        if fault in connection:
+            seam, target, coord = AdapterSeam.DB_CONNECTION, "main", 0
+        elif fault in db_acquire:
             seam, target, coord = AdapterSeam.DB_ACQUIRE, "main", 0
         elif fault in db_release:
             seam, target, coord = AdapterSeam.DB_RELEASE, "main", 0

@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 
-from wreath.storage import ObjectPath, ObjectStat, S3ObjectStore, file_chunks
+import pytest
+
+from wreath.objects import ObjectError, ObjectPath, ObjectStat, S3ObjectStore, file_chunks
 
 
 class FakeResp:
@@ -208,7 +210,7 @@ def test_path_ergonomics():
 # -- app.objects wiring -------------------------------------------------------
 def test_app_objects_local_roundtrip(tmp_path):
     from wreath import Wreath
-    from wreath.storage import LocalObjectStore
+    from wreath.objects import LocalObjectStore
 
     app = Wreath()
     store = app.objects("blobs", backend="local", root=str(tmp_path))
@@ -266,10 +268,7 @@ def test_a_failed_abort_is_counted_not_swallowed():
     They accrue storage charges until a lifecycle rule reaps them, and the only
     signal was the bill.
     """
-    import pytest as _pytest
-
     from wreath.http_client import ConnectError
-    from wreath.objects import ObjectError
 
     def handler(method, target, body):
         if method == "POST" and "uploads" in target:
@@ -289,15 +288,13 @@ def test_a_failed_abort_is_counted_not_swallowed():
         yield b"y" * 16
 
     assert store.orphaned_uploads == 0
-    with _pytest.raises(ObjectError):
+    with pytest.raises(ObjectError):
         asyncio.run(store.write_stream("k", chunks()))
     assert store.orphaned_uploads == 1, "a failed abort must leave a countable trace"
 
 
 def test_a_bug_in_abort_is_not_hidden_behind_a_transport_failure():
     """Only transport errors are absorbed; a programming error still surfaces."""
-    import pytest as _pytest
-
     def handler(method, target, body):
         if method == "POST" and "uploads" in target:
             return FakeResp(200, [], b"<x><UploadId>u1</UploadId></x>")
@@ -315,6 +312,179 @@ def test_a_bug_in_abort_is_not_hidden_behind_a_transport_failure():
         yield b"x" * (5 * 1024 * 1024)
         yield b"y" * 16
 
-    with _pytest.raises(TypeError, match="bug in _abort"):
+    with pytest.raises(TypeError, match="bug in _abort"):
         asyncio.run(store.write_stream("k", chunks()))
+    assert store.orphaned_uploads == 0
+
+
+# -- multipart failure handling ----------------------------------------------
+def _multipart_body():
+    """5 MiB + a tail: enough to force an initiate, a part, and a final part."""
+    async def chunks():
+        yield b"x" * (5 * 1024 * 1024)
+        yield b"y" * 16
+
+    return chunks()
+
+
+def test_a_failed_part_aborts_the_upload():
+    """A part S3 rejects leaves an open upload unless the abort covers the whole window.
+
+    Only `_complete` used to be wrapped, so a `_put_part` failure propagated with
+    the upload still open in the bucket -- billable parts belonging to no object,
+    and `orphaned_uploads` not incremented either, so the only signal was the
+    invoice.
+    """
+    seen = {"aborted": False}
+
+    def handler(method, target, body):
+        if method == "POST" and "uploads" in target:
+            return FakeResp(200, [], b"<x><UploadId>u1</UploadId></x>")
+        if method == "PUT":
+            return FakeResp(500, [], b"part rejected")
+        if method == "DELETE":
+            seen["aborted"] = True
+            return FakeResp(204)
+        raise AssertionError(method)
+
+    store, client = _store(handler, part_size=5 * 1024 * 1024)
+    with pytest.raises(ObjectError):
+        asyncio.run(store.write_stream("k", _multipart_body()))
+    assert seen["aborted"], "a part that fails must abort the multipart upload"
+    assert any(m == "DELETE" and "uploadId=u1" in t for m, t, _h, _b in client.calls)
+    assert store.orphaned_uploads == 0  # the abort worked, so nothing was orphaned
+
+
+def test_a_failed_part_whose_abort_also_fails_is_counted():
+    from wreath.http_client import ConnectError
+
+    attempts = {"delete": 0}
+
+    def handler(method, target, body):
+        if method == "POST" and "uploads" in target:
+            return FakeResp(200, [], b"<x><UploadId>u1</UploadId></x>")
+        if method == "PUT":
+            return FakeResp(500, [], b"part rejected")
+        if method == "DELETE":
+            attempts["delete"] += 1
+            raise ConnectError("connection refused")
+        raise AssertionError(method)
+
+    store, _ = _store(handler, part_size=5 * 1024 * 1024)
+    with pytest.raises(ObjectError):
+        asyncio.run(store.write_stream("k", _multipart_body()))
+    assert attempts["delete"] == 1
+    assert store.orphaned_uploads == 1
+
+
+def test_a_chunk_iterator_that_raises_aborts_the_upload():
+    """The bytes can fail before S3 does; the upload is open either way."""
+    seen = {"aborted": False}
+
+    def handler(method, target, body):
+        if method == "POST" and "uploads" in target:
+            return FakeResp(200, [], b"<x><UploadId>u1</UploadId></x>")
+        if method == "PUT":
+            return FakeResp(200, [(b"etag", b'"p"')])
+        if method == "DELETE":
+            seen["aborted"] = True
+            return FakeResp(204)
+        raise AssertionError(method)
+
+    store, _ = _store(handler, part_size=5 * 1024 * 1024)
+
+    async def chunks():
+        yield b"x" * (5 * 1024 * 1024)
+        raise ZeroDivisionError("the producer blew up")
+
+    with pytest.raises(ZeroDivisionError):
+        asyncio.run(store.write_stream("k", chunks()))
+    assert seen["aborted"]
+
+
+def test_an_abort_s3_refuses_is_counted_too():
+    """A 403 on the abort orphans exactly as much as a dropped connection does."""
+    def handler(method, target, body):
+        if method == "POST" and "uploads" in target:
+            return FakeResp(200, [], b"<x><UploadId>u1</UploadId></x>")
+        if method == "PUT":
+            return FakeResp(200, [(b"etag", b'"p"')])
+        if method == "POST":
+            return FakeResp(500, [], b"nope")
+        if method == "DELETE":
+            return FakeResp(403, [], b"<Error>AccessDenied</Error>")
+        raise AssertionError(method)
+
+    store, _ = _store(handler, part_size=5 * 1024 * 1024)
+    with pytest.raises(ObjectError):
+        asyncio.run(store.write_stream("k", _multipart_body()))
+    assert store.orphaned_uploads == 1
+
+
+# -- content type -------------------------------------------------------------
+def test_write_sends_and_signs_the_content_type():
+    """The stat used to claim a media type the bucket was never told about."""
+    store, client = _store(lambda *a: FakeResp(200, [(b"etag", b'"abc"')]))
+    stat = asyncio.run(store.write("a.csv", b"x,y", content_type="text/csv"))
+    assert stat.content_type == "text/csv"
+    _m, _t, hdrs, _b = client.calls[0]
+    assert hdrs.get("content-type") == "text/csv"
+    assert "SignedHeaders=content-type;host" in hdrs["authorization"]
+
+
+def test_write_without_a_content_type_sends_no_header():
+    store, client = _store(lambda *a: FakeResp(200, [(b"etag", b'"abc"')]))
+    asyncio.run(store.write("a.bin", b"x"))
+    assert "content-type" not in client.calls[0][2]
+
+
+def test_multipart_initiate_sends_the_content_type():
+    def handler(method, target, body):
+        if method == "POST" and "uploads" in target:
+            return FakeResp(200, [], b"<x><UploadId>u1</UploadId></x>")
+        if method == "PUT":
+            return FakeResp(200, [(b"etag", b'"p"')])
+        if method == "POST":
+            return FakeResp(200, [], b"<ok/>")
+        if method == "HEAD":
+            return FakeResp(200, [(b"content-length", b"16"), (b"etag", b'"f"')])
+        raise AssertionError(method)
+
+    store, client = _store(handler, part_size=5 * 1024 * 1024)
+    asyncio.run(store.write_stream("k.zip", _multipart_body(), content_type="application/zip"))
+    initiate = next(c for c in client.calls if c[0] == "POST" and "uploads" in c[1])
+    assert initiate[2].get("content-type") == "application/zip"
+
+
+def test_stat_survives_a_non_ascii_content_type():
+    headers = [(b"content-length", b"1"), (b"etag", b'"e"'),
+               (b"content-type", b'text/plain; name="caf\xe9.txt"')]
+    store, _ = _store(lambda *a: FakeResp(200, headers))
+    st = asyncio.run(store.stat("a.txt"))
+    assert st.content_type is not None and "caf" in st.content_type
+
+
+# -- constructor --------------------------------------------------------------
+def test_url_secret_is_refused_rather_than_ignored():
+    """It was accepted and never assigned: configuration that silently did nothing."""
+    with pytest.raises(TypeError, match="url_secret"):
+        _store(lambda *a: FakeResp(200), url_secret=b"x" * 32)
+
+
+def test_an_abort_answered_404_is_not_an_orphan():
+    """`NoSuchUpload` means there is nothing left to reclaim, so nothing to alarm about."""
+    def handler(method, target, body):
+        if method == "POST" and "uploads" in target:
+            return FakeResp(200, [], b"<x><UploadId>u1</UploadId></x>")
+        if method == "PUT":
+            return FakeResp(200, [(b"etag", b'"p"')])
+        if method == "POST":
+            return FakeResp(500, [], b"nope")
+        if method == "DELETE":
+            return FakeResp(404, [], b"<Error>NoSuchUpload</Error>")
+        raise AssertionError(method)
+
+    store, _ = _store(handler, part_size=5 * 1024 * 1024)
+    with pytest.raises(ObjectError):
+        asyncio.run(store.write_stream("k", _multipart_body()))
     assert store.orphaned_uploads == 0

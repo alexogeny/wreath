@@ -1,8 +1,17 @@
 """HTTP/1.x request head parsing.
 
-``parse_request(data)`` returns ``None`` while the head is incomplete, raises
-``ValueError`` on malformed input, and otherwise returns a ``RequestHead``
+`parse_request(data)` returns `None` while the head is incomplete, raises
+`ValueError` on malformed input, and otherwise returns a `RequestHead`
 with the header names already lowercased for ASGI.
+
+Both tiers return a plain 5-tuple, and this wraps it in the `NamedTuple` so
+callers read fields by name rather than by index. That is the only reason the
+wrapper exists, and being a `NamedTuple` it is still an ordinary tuple, so the
+two implementations stay interchangeable and index access keeps working.
+
+`None` and `ValueError` mean different things and the caller must keep them
+apart -- "not yet" versus "never". Collapsing them would either stall a
+connection on garbage or reject a head that had merely not finished arriving.
 """
 
 from __future__ import annotations

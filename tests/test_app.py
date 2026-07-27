@@ -174,6 +174,144 @@ async def test_head_uses_get_headers_without_body() -> None:
     assert sent[1]["body"] == b""
 
 
+@pytest.mark.asyncio
+async def test_a_raising_exception_handler_still_answers_the_client() -> None:
+    """A handler that raises used to escape `Wreath.__call__` entirely.
+
+    The client got no response at all -- a hung request rather than a 500 --
+    and the ASGI server saw an application that never started a response. The
+    handler's failure is a bug in user code, so it has to surface loudly *and*
+    the client still has to get an answer.
+    """
+    app = Wreath()
+
+    @app.get("/boom")
+    async def endpoint(request):
+        raise RuntimeError("handler failed")
+
+    @app.exception_handler(RuntimeError)
+    async def broken(request, error):
+        raise ValueError("the handler itself is broken")
+
+    sent = await invoke(app, "/boom")
+
+    assert sent[0]["status"] == 500
+    assert (b"content-type", b"application/problem+json") in sent[0]["headers"]
+    assert app.exception_handler_errors == 1
+
+
+@pytest.mark.asyncio
+async def test_a_raising_exception_handler_reports_its_own_error_in_debug() -> None:
+    app = Wreath(debug=True)
+
+    @app.get("/boom")
+    async def endpoint(request):
+        raise RuntimeError("handler failed")
+
+    @app.exception_handler(RuntimeError)
+    async def broken(request, error):
+        raise ValueError("the handler itself is broken")
+
+    sent = await invoke(app, "/boom")
+
+    assert sent[0]["status"] == 500
+    # The *handler's* failure is the actionable one; naming the original error
+    # would send the reader looking at code that is working as intended.
+    assert b"the handler itself is broken" in sent[1]["body"]
+
+
+@pytest.mark.asyncio
+async def test_a_raising_status_handler_still_answers_the_client() -> None:
+    from wreath.exceptions import NotFound
+
+    app = Wreath()
+
+    @app.get("/boom")
+    async def endpoint(request):
+        raise NotFound()
+
+    async def broken(request, error):
+        raise ValueError("the status handler is broken")
+
+    app.add_status_handler(404, broken)
+
+    sent = await invoke(app, "/boom")
+
+    assert sent[0]["status"] == 500
+    assert app.exception_handler_errors == 1
+
+
+@pytest.mark.asyncio
+async def test_wrong_method_on_a_matching_path_is_405_with_allow() -> None:
+    """`MethodNotAllowed` was defined and raised nowhere: the router answered a
+    method miss with a 404, so a defined exception guarded nothing."""
+    app = Wreath()
+
+    @app.get("/items")
+    async def read(request):
+        return "read"
+
+    @app.route("/items", methods=("DELETE",))
+    async def remove(request):
+        return "removed"
+
+    @app.post("/other")
+    async def other(request):
+        return "other"
+
+    sent = await invoke(app, "/items", method="POST")
+
+    assert sent[0]["status"] == 405
+    allow = dict(sent[0]["headers"])[b"allow"]
+    assert set(allow.split(b", ")) == {b"GET", b"HEAD", b"DELETE"}
+
+
+@pytest.mark.asyncio
+async def test_an_unmatched_path_is_still_404() -> None:
+    app = Wreath()
+
+    @app.get("/items")
+    async def read(request):
+        return "read"
+
+    sent = await invoke(app, "/nowhere", method="POST")
+    assert sent[0]["status"] == 404
+
+
+@pytest.mark.asyncio
+async def test_a_405_is_shaped_by_a_registered_status_handler() -> None:
+    app = Wreath()
+
+    @app.get("/items")
+    async def read(request):
+        return "read"
+
+    async def shaped(request, error):
+        return JSONResponse(
+            {"allow": [value.decode() for _name, value in error.headers]}, status=405
+        )
+
+    app.add_status_handler(405, shaped)
+
+    sent = await invoke(app, "/items", method="PUT")
+    assert sent[0]["status"] == 405
+    assert sent[1]["body"] == b'{"allow":["GET, HEAD"]}'
+    assert app.exception_handler_errors == 0
+
+
+@pytest.mark.asyncio
+async def test_a_method_miss_on_a_parameterised_path_is_405() -> None:
+    app = Wreath()
+
+    @app.get("/items/{item_id}")
+    async def read(request):
+        return "read"
+
+    sent = await invoke(app, "/items/7", method="DELETE")
+    assert sent[0]["status"] == 405
+    assert dict(sent[0]["headers"])[b"allow"] == b"GET, HEAD"
+
+
 def test_rejects_duplicate_static_routes() -> None:
     app = Wreath()
 

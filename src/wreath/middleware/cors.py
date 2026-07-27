@@ -1,7 +1,7 @@
 """CORS middleware compiled into Wreath's hook-based middleware tape.
 
-Preflight ``OPTIONS`` requests short-circuit from the ``before`` hook; simple
-requests get their response headers appended by the ``after`` hook. All
+Preflight `OPTIONS` requests short-circuit from the `before` hook; simple
+requests get their response headers appended by the `after` hook. All
 allow-list computation happens once at construction, so the per-request work
 is a header lookup and, for hits, a few list appends::
 
@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from .._webpolicy import find_response_header
+from .._webpolicy import append_vary, find_response_header
 from ..request import Request
 from ..response import Response
 
@@ -35,7 +35,43 @@ def _normalize_origin(value: str) -> str:
 
 
 class CORSMiddleware:
-    """Global CORS hooks covering preflight, routes, and early responses."""
+    """Answer CORS preflights and add CORS headers to cross-origin responses.
+
+    Global middleware, so it covers routed responses, route misses, static
+    files, and error responses alike. Every allow-list is computed once in the
+    constructor; per request the work is a header lookup and, on a hit, a few
+    list appends.
+
+    A preflight -- `OPTIONS` carrying both `Origin` and
+    `Access-Control-Request-Method` -- is answered from `before` and never
+    reaches a route. An `OPTIONS` request missing either header is not a
+    preflight and falls through to the route as normal. Because preflights
+    target paths whose routes rarely declare an `OPTIONS` method, this class
+    also exposes `handle_preflight`, which the application consults for
+    unmatched `OPTIONS` requests. Only one global CORS preflight handler may be
+    registered per application.
+
+    A simple cross-origin request from an origin that is *not* allowed is passed
+    through untouched apart from `Vary: Origin`. Wreath does not refuse it; the
+    absent `Access-Control-Allow-Origin` is what makes the browser withhold the
+    response from the caller's JavaScript. Only preflights are refused outright.
+
+    `Vary: Origin` is added whenever the answer depends on the request's origin,
+    including when the origin is rejected, so a shared cache cannot replay one
+    origin's answer to another. It is omitted only when every origin is allowed
+    without credentials, where the answer is the same for all of them.
+
+    Args:
+        allow_origins: Permitted origins, or `*` for any. Case-insensitive on scheme and host.
+        allow_methods: Methods a preflight may ask for. Defaults to GET, HEAD, POST, OPTIONS.
+        allow_headers: Request headers a preflight may ask for. Empty sends no header.
+        allow_credentials: Permit credentialed requests. Refused together with `*`.
+        expose_headers: Response headers the caller's JavaScript may read.
+        max_age: Seconds a browser may cache a preflight result.
+
+    Raises:
+        ValueError: `allow_origins` contains `*` and `allow_credentials` is True.
+    """
 
     global_scope = True
     __slots__ = (
@@ -112,6 +148,23 @@ class CORSMiddleware:
         return None
 
     async def before(self, request: Request) -> Any | None:
+        """Answer a CORS preflight, or return None to let the request proceed.
+
+        Returns None for anything that is not a preflight: a non-`OPTIONS`
+        method, or an `OPTIONS` request without both `Origin` and
+        `Access-Control-Request-Method`.
+
+        A preflight asking for a method outside `allow_methods` is answered
+        403 `disallowed method`; one from an origin outside `allow_origins` is
+        answered 403 `disallowed origin`. Both carry `Vary: Origin`. These two
+        are plain text rather than the RFC 9457 problem document the rest of the
+        framework returns, because the caller is a browser's preflight machinery,
+        which reads the status and discards the body.
+
+        An accepted preflight is answered 204 with `Access-Control-Allow-Origin`,
+        `Access-Control-Allow-Methods`, `Access-Control-Max-Age`, and the
+        configured allow-headers and credentials headers.
+        """
         # `request.method`, not `request.scope["method"]`: on the native server
         # the scope is a lazily materialized dict over `_RequestContext`, so
         # reading it here built the whole thing on every request purely to
@@ -149,6 +202,25 @@ class CORSMiddleware:
     handle_preflight = before
 
     async def after(self, request: Request, response: Any) -> Any:
+        """Add the simple-request CORS headers to a cross-origin response.
+
+        A request with no `Origin` header is left exactly as it is. An origin
+        that is not allowed gets `Vary: Origin` and nothing else, so the browser
+        withholds the response from the caller and no cache confuses the two
+        answers.
+
+        For an allowed origin this appends `Access-Control-Allow-Origin`, the
+        configured expose-headers and credentials headers, and `Vary: Origin`.
+        A response that already carries an `Access-Control-Allow-Origin` -- the
+        preflight answered by `before`, or a handler that set its own -- is left
+        alone rather than having a second one appended.
+
+        `origin` is *merged* into whatever `Vary` the response already carries
+        rather than appended only when there is none. Compression adds
+        `accept-encoding` and content negotiation adds `accept`, so "no Vary at
+        all" is the uncommon case; keying on it meant the responses most likely
+        to be cached were exactly the ones that never gained `origin`.
+        """
         origin = request.header("origin")
         if origin is None:
             return response
@@ -158,9 +230,11 @@ class CORSMiddleware:
             # No ACAO for this origin -- but the *absence* is still a function of
             # the Origin header, so the response has to say so or a shared cache
             # will hand this bodyless-to-JavaScript answer to an allowed origin
-            # (and the reverse).
-            if headers is not None and find_response_header(headers, b"vary") is None:
-                headers.append((b"vary", b"origin"))
+            # (and the reverse). `append_vary` merges into an existing header
+            # (in C where the extension is built) instead of adding a second
+            # one, and is a no-op when `origin` is already listed.
+            if headers is not None:
+                append_vary(headers, b"origin")
             return response
         if (
             headers is not None
@@ -174,7 +248,7 @@ class CORSMiddleware:
             headers.append(allowed)
             headers.extend(self._simple_headers)
             if not self._allow_all_origins or self._allow_credentials:
-                headers.append((b"vary", b"origin"))
+                append_vary(headers, b"origin")
         return response
 
 

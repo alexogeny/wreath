@@ -636,6 +636,8 @@
       "tests": [
         "tests/test_server.py",
         "tests/test_server_protocol.py",
+        "tests/test_server_protocols.py",
+        "tests/test_server_env.py",
         "tests/test_server_fuzz.py",
         "tests/test_server_websocket.py",
         "tests/test_server_tls_ingress.py",
@@ -756,6 +758,7 @@
         "src/wreath/_fsguard.py"
       ],
       "tests": [
+        "tests/test_staticfiles.py",
         "tests/test_fsguard.py"
       ]
     },
@@ -882,6 +885,22 @@
         "tests/test_docs_ssg.py"
       ],
       "policy": "Markdown to a self-contained HTML tree with no third-party dependency, no YAML, and no network at runtime -- `wreath docs` renders a `Site` declared in a `wreath_docs.py`. `markdown.render()` is the seam the native `_docs` extension replaces (full CommonMark via a versioned WDT1 tape); everything else -- page collection, output paths, relative links, nav/TOC assembly, strict orphan and dead-link checks, all file I/O -- stays in the Python facade. Every text and attribute span is escaped and every href is scheme-checked at the parser, because a docs generator's input is somebody else's markdown. Theme rules: the design tokens are declared once in `theme.critical_css` and inlined per page (16 KiB budget -- `wreath audit`'s contrast, non-text-contrast, and focus rules only read inline `<style>`, so an external-only theme silently skips all three), components live in the cached `assets/docs.css`, and no rule may invent a size or a space outside the scales. Every theme is contrast-tested in both modes (AA for text, 3:1 for control boundaries and syntax tokens) -- add a palette and the test covers it. `scripts.py` is enhancement only: search, instant navigation, copy buttons, and the scroll-spy may not carry content, and nav sections, content tabs, and the whole TOC must work with JavaScript off. Build-time blocks (`chart`, `figure`, `hero`) are read out of the markdown before it is parsed, all through `_fenced.extract`, which skips anything inside an enclosing fence -- a line-by-line scan rendered the guide's own examples for real and failed the build. `figures.py` is a closed registry of specific arguments, not a diagram language: draw the operation rather than the state, label every symbol, and name the resting state in the `prefers-reduced-motion` block, because every reveal keyframe ends hidden and the global rule would otherwise leave the figure blank. There is no mkdocs: `wreath docs check` is the gate, in CI and locally, and no dependency group is needed to build the site."
+    },
+    {
+      "name": "example",
+      "guides": [
+        "docs/example/walkthrough.md",
+        "docs/example/read-api.md"
+      ],
+      "reference": [],
+      "sources": [
+        "example/camera_trap/",
+        "example/migrations/"
+      ],
+      "tests": [
+        "tests/example/"
+      ],
+      "policy": "An application built on wreath, never part of it: nothing in src/wreath may import from example/, and the package must not ship on pip install wreath. The seed is deterministic -- no clock reads, one seeded Random -- because docs/example/walkthrough.md quotes its exact row counts and tests/example/ asserts them. The read API's handlers bind page/size/sort directly instead of Depends(page_params), and pass validate_schema=\"off\" in tests; both are workarounds for framework defects and carry a written reason at the site."
     }
   ],
   "invariants": "AGENTS.md",
