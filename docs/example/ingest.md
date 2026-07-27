@@ -169,21 +169,29 @@ the expansion ratio. Minting requires a ranger and `MAX_CARD_BYTES` caps what
 even a ranger can make a worker allocate — those two together are what make "an
 operator's archive" true here rather than aspirational.
 
-## The queue's tables are not in the migration artifact
+## The queue's tables are not in the migration artifact, and you do not apply them
 
 Worth knowing before you build a database for this by hand.
 `wreath migrations generate` derives its artifact from the ORM models, and the
-job queue is not an ORM model — it is infrastructure the runner owns and
-describes with `JobRunner.schema_sql()`. A database built purely from
-`example/migrations/` has every table the application declares and none of the
-tables its runner needs, and the failure arrives at the first launch as
+job queue is not an ORM model — it is infrastructure the runner owns. So a
+database built purely from `example/migrations/` has every table the
+application declares and none of the tables its runner needs.
+
+**Wreath creates them itself.** `app.jobs(...)` registers the runner as a schema
+component, and startup applies its DDL before any handler runs — see
+[`wreath.schema`](../reference/schema.md). The two mechanisms stay separate on
+purpose: your artifact describes *your* models, and wreath owns its own
+furniture, so neither has to know about the other.
+
+If your database role cannot create relations, that is a first-class path rather
+than a wall: `wreath schema sql` prints exactly what a DBA needs to apply, and
+`wreath schema check` verifies it landed. Startup then refuses with the missing
+relation named, instead of failing at the first launch with
 `relation "…jobs" does not exist`.
 
-`camera_trap.tasks.queue_schema_sql` is the single name for that DDL, so the
-quickstart, the seeder and the test fixtures apply the same thing. It is a seam
-in wreath rather than a quirk of this example: several subsystems produce a
-`schema_sql()` the migration system does not consume, and until that is settled
-an application carries the join itself.
+This example used to export a `queue_schema_sql` so the quickstart, the seeder
+and the test fixtures could apply the same statements by hand. That join was a
+workaround for a gap in wreath, and it is gone.
 
 ## Where to look
 

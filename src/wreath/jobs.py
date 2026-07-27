@@ -602,37 +602,70 @@ class JobRunner:
 
     # -- schema --------------------------------------------------------------
 
-    def schema_sql(self) -> str:
-        """DDL for the jobs table + indexes. Never auto-applied — run it through
-        migrations, consistent with the driver's no-implicit-DDL stance."""
+    def component(self) -> Any:
+        """This runner's claim on the wreath schema.
+
+        The queue's tables are wreath's furniture, not the application's data
+        model, so they live in the `wreath` schema and never appear in the
+        application's migration artifact -- nobody declared a job queue. `Wreath`
+        collects this during lifespan and brings it up to date before any worker
+        starts; a deployment that cannot grant `CREATE SCHEMA` applies the same
+        statements by hand and is refused at startup, by name, if it has not.
+
+        Statements are individual rather than semicolon-joined because the driver
+        prepares every statement and PostgreSQL refuses `cannot insert multiple
+        commands into a prepared statement`. See `wreath.schema`.
+        """
+        from .schema import Component, Step
+
         t = self._table
-        return (
-            f'CREATE SCHEMA IF NOT EXISTS "{self._schema}";\n'
-            f"CREATE TABLE IF NOT EXISTS {t} (\n"
-            "  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n"
-            "  queue text NOT NULL,\n"
-            "  task text NOT NULL,\n"
-            "  args jsonb NOT NULL DEFAULT '[]'::jsonb,\n"
-            "  tenant text NOT NULL DEFAULT '',\n"
-            "  state text NOT NULL DEFAULT 'ready',\n"
-            "  run_at timestamptz NOT NULL DEFAULT now(),\n"
-            "  attempts int NOT NULL DEFAULT 0,\n"
-            "  max_attempts int NOT NULL DEFAULT 5,\n"
-            "  lease_expiry timestamptz,\n"
-            "  owner text,\n"
-            "  fence bigint NOT NULL DEFAULT 0,\n"
-            "  dedup_key text,\n"
-            "  last_error text,\n"
-            "  created_at timestamptz NOT NULL DEFAULT now(),\n"
-            "  updated_at timestamptz NOT NULL DEFAULT now()\n"
-            ");\n"
-            f"CREATE INDEX IF NOT EXISTS jobs_claim_idx ON {t} (queue, run_at) "
-            "WHERE state = 'ready';\n"
-            f"CREATE INDEX IF NOT EXISTS jobs_lease_idx ON {t} (lease_expiry) "
-            "WHERE state = 'leased';\n"
-            f"CREATE UNIQUE INDEX IF NOT EXISTS jobs_dedup_idx ON {t} (queue, dedup_key) "
-            "WHERE dedup_key IS NOT NULL;\n"
+        return Component(
+            name="jobs",
+            schema=self._schema,
+            relations=("jobs",),
+            steps=(
+                Step(
+                    version=1,
+                    statements=(
+                        f"CREATE TABLE IF NOT EXISTS {t} (\n"
+                        "  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n"
+                        "  queue text NOT NULL,\n"
+                        "  task text NOT NULL,\n"
+                        "  args jsonb NOT NULL DEFAULT '[]'::jsonb,\n"
+                        "  tenant text NOT NULL DEFAULT '',\n"
+                        "  state text NOT NULL DEFAULT 'ready',\n"
+                        "  run_at timestamptz NOT NULL DEFAULT now(),\n"
+                        "  attempts int NOT NULL DEFAULT 0,\n"
+                        "  max_attempts int NOT NULL DEFAULT 5,\n"
+                        "  lease_expiry timestamptz,\n"
+                        "  owner text,\n"
+                        "  fence bigint NOT NULL DEFAULT 0,\n"
+                        "  dedup_key text,\n"
+                        "  last_error text,\n"
+                        "  created_at timestamptz NOT NULL DEFAULT now(),\n"
+                        "  updated_at timestamptz NOT NULL DEFAULT now()\n"
+                        ")",
+                        f"CREATE INDEX IF NOT EXISTS jobs_claim_idx ON {t} "
+                        "(queue, run_at) WHERE state = 'ready'",
+                        f"CREATE INDEX IF NOT EXISTS jobs_lease_idx ON {t} "
+                        "(lease_expiry) WHERE state = 'leased'",
+                        f"CREATE UNIQUE INDEX IF NOT EXISTS jobs_dedup_idx ON {t} "
+                        "(queue, dedup_key) WHERE dedup_key IS NOT NULL",
+                    ),
+                ),
+            ),
         )
+
+    def schema_sql(self) -> str:
+        """DDL for the jobs table + indexes, semicolon-joined.
+
+        A derivation of `component()`, not a second copy. It was both for one
+        stage of this work -- the same sixteen columns written out twice -- which
+        is two spellings of one truth and exactly the shape this repository
+        treats as a defect. Retained for a caller applying the DDL itself;
+        `wreath schema sql` is the supported spelling.
+        """
+        return self.component().sql()
 
     # -- supervised service protocol ----------------------------------------
 

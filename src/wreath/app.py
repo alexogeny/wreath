@@ -319,6 +319,7 @@ class Wreath:
         "lifespan_teardown_errors",
         "_dirty",
         "_databases",
+        "_manage_schema",
         "_exception_handlers",
         "_flight_route_ids",
         "_flight_route_keys",
@@ -442,6 +443,11 @@ class Wreath:
         #: record that a close refused.
         self.lifespan_teardown_errors = 0
         self._databases: dict[str, Any] = {}
+        #: Whether wreath creates and upgrades its own tables. False for a
+        #: deployment whose role cannot CREATE SCHEMA -- the common enterprise
+        #: case -- which then gets a startup refusal naming what is missing
+        #: rather than a runtime error at the first enqueue.
+        self._manage_schema = True
         self._http_clients: dict[str, Any] = {}
         self._orm_registries: dict[str, Any] = {}
         self._oidc_providers: dict[str, Any] = {}
@@ -452,6 +458,134 @@ class Wreath:
         # Built at lifespan startup from the registered runners/buses; owns their
         # process-lifetime worker/consumer/sweeper tasks.
         self._supervisor: Any = None
+
+    def schema_components(self) -> tuple[Any, ...]:
+        """Every registered subsystem's claim on the wreath schema.
+
+        Collected by *asking*, not from a list kept in step with the registries:
+        anything the application holds that offers `component()` contributes one.
+        A hand-maintained list would be one more place to forget a new
+        subsystem, and forgetting is exactly the defect this mechanism exists to
+        remove -- fourteen subsystems each emitted DDL and nothing ever applied
+        any of it, because emitting and applying were never connected.
+
+        Middleware is walked as well as the registries, because the session,
+        rate-limit and idempotency stores reach an application that way rather
+        than through a registry of their own.
+
+        Returns:
+            One `wreath.schema.Component` per registered subsystem that owns
+            tables, in registration order, deduplicated by name.
+        """
+        holders: list[Any] = [
+            *self._job_runners.values(),
+            *self._message_buses.values(),
+            *self._webhook_hubs.values(),
+            *self._global_middleware,
+            *self._middleware,
+        ]
+        seen: dict[str, Any] = {}
+        for holder in holders:
+            for candidate in (holder, *getattr(holder, "schema_owners", ())):
+                claim = getattr(candidate, "component", None)
+                if claim is None or not callable(claim):
+                    continue
+                found = claim()
+                seen.setdefault(found.name, found)
+        return tuple(seen.values())
+
+    def manage_schema(self, manage: bool) -> None:
+        """Whether wreath creates and upgrades its own tables. Default True.
+
+        Pass False when the application's database role cannot `CREATE SCHEMA` --
+        common in enterprise deployments, and a supported configuration rather
+        than an error. Wreath then creates nothing, and instead **refuses at
+        startup** if a registered subsystem's tables are absent, naming the
+        subsystem, the relation, and the command that emits the DDL for a DBA:
+
+            wreath schema sql --component jobs
+
+        The refusal is at startup rather than at first use deliberately: a
+        subsystem that registers is a subsystem that will be used, so checking
+        lazily reproduces the exact failure this exists to remove.
+        """
+        self._manage_schema = bool(manage)
+        self._dirty = True
+
+    async def _bootstrap_schema(self) -> None:
+        """Bring the wreath schema up to date on every registered database.
+
+        A component names the database it belongs to only indirectly -- through
+        the subsystem that declared it -- so the components are grouped by the
+        database object each subsystem holds. An application with two databases
+        and a job runner on one of them bootstraps that one and leaves the other
+        untouched, rather than creating an unused `wreath` schema beside it.
+        """
+        components = self.schema_components()
+        if not components:
+            return
+        from .schema import bootstrap
+
+        for database, claims in self._components_by_database(components).items():
+            await bootstrap(database, claims, manage=self._manage_schema)
+
+    def _components_by_database(self, components: tuple[Any, ...]) -> dict[Any, list[Any]]:
+        """Group each claim under the database whose subsystem declared it.
+
+        Some subsystems hold their database; others -- the webhook inbox and
+        outbox -- are handed a *session* per call and never see one, so their
+        database has to be inferred from the application. Three cases, and the
+        middle one is the only judgement call:
+
+        * **No database registered at all**: nothing to bootstrap against, so the
+          claim is skipped. That is vacuous rather than degraded -- there is no
+          database in which the table could be missing.
+        * **Exactly one**: use it. Unambiguous, and the overwhelmingly common
+          shape.
+        * **More than one**: refuse, naming the component. Guessing would create
+          wreath's tables in whichever database happened to be registered first
+          and leave the subsystem reading a different one -- a wrong answer
+          delivered silently, which is worse than a startup error someone can act
+          on.
+        """
+        owners: dict[int, tuple[Any, list[Any]]] = {}
+        for holder, claim in self._schema_owners(components):
+            database = getattr(holder, "_database", None) or getattr(holder, "database", None)
+            if database is None:
+                if not self._databases:
+                    continue
+                if len(self._databases) > 1:
+                    known = ", ".join(sorted(self._databases))
+                    raise ValueError(
+                        f"cannot tell which database the {claim.name!r} tables belong "
+                        f"to: it is handed a session per call rather than a database, "
+                        f"and this application registers {len(self._databases)} "
+                        f"({known}). Create its tables with `wreath schema sql "
+                        f"--component {claim.name}` and set manage_schema(False)."
+                    )
+                database = next(iter(self._databases.values()))
+            owners.setdefault(id(database), (database, []))[1].append(claim)
+        return {database: claims for database, claims in owners.values()}
+
+    def _schema_owners(self, components: tuple[Any, ...]) -> list[tuple[Any, Any]]:
+        wanted = {claim.name: claim for claim in components}
+        pairs: list[tuple[Any, Any]] = []
+        holders: list[Any] = [
+            *self._job_runners.values(),
+            *self._message_buses.values(),
+            *self._webhook_hubs.values(),
+            *self._global_middleware,
+            *self._middleware,
+        ]
+        for holder in holders:
+            for candidate in (holder, *getattr(holder, "schema_owners", ())):
+                claim = getattr(candidate, "component", None)
+                if claim is None or not callable(claim):
+                    continue
+                found = claim()
+                if wanted.pop(found.name, None) is not None:
+                    pairs.append((candidate, found))
+        return pairs
 
     def webhooks(self, name: str) -> Any:
         """Register one named inbound/outbound webhook hub."""
@@ -2524,6 +2658,13 @@ class Wreath:
                     for name, database in self._databases.items():
                         await database.start()
                         started_databases.append((name, database))
+                    # Wreath's own tables, before anything that uses them. The
+                    # job queue's first enqueue must not be where a missing
+                    # `wreath.jobs` is discovered, and a deployment that opted
+                    # out must be refused here rather than at 3am -- so this
+                    # runs ahead of the ORM check, the clients, the supervisor
+                    # and every user startup handler.
+                    await self._bootstrap_schema()
                     if self._orm_registries:
                         # Ordered explicitly rather than through a synthetic
                         # startup handler: the schema must be checked once the

@@ -1,19 +1,47 @@
 /* wreath._native._reactor — native primitives for the reactor event loop.
  *
- * Stage-0 component: a hashed timing wheel for per-connection deadlines.
+ * Stage-0 component: a slotted deadline index for per-connection deadlines.
  *
- * asyncio keeps timers in a binary heap: O(log n) insert and cancel, and it
- * pays a cancellation-compaction pass. A server at high RPS churns two timers
- * per request (keep-alive + request deadline), almost always cancelling them
- * before they fire. A hashed timing wheel makes insert and cancel O(1) with a
- * fixed, tiny memory footprint (one slot array + intrusive nodes), which is
- * exactly the shape of that workload.
+ * asyncio keeps timers in one binary heap: O(log n) insert and cancel over
+ * *every* timer in the process, plus a cancellation-compaction pass. A server
+ * at high RPS churns two timers per request (keep-alive + request deadline) and
+ * almost always cancels them before they fire, so that global heap is both the
+ * hot path and the wrong shape for it.
  *
- * Design: `slots` buckets at `resolution` seconds each. A timer due in `d`
- * ticks lands in bucket `(cur + d) % slots` carrying `rounds = d / slots`; each
- * time the cursor sweeps a bucket, a node with rounds>0 is decremented,
- * otherwise it fires. Insert/cancel are pointer splices on an intrusive doubly
- * linked list — no reallocation, no heapify, no compaction.
+ * Design, in three parts. Each is answering a different question, and reading
+ * any one of them as the whole structure will mislead you:
+ *
+ * 1. `slots` buckets at `resolution` seconds each. A deadline maps to exactly
+ *    one bucket by `deadline & slot_mask`, so a timer never migrates and there
+ *    is no rounds counter and no overflow list. **This is not a Varghese-Lauck
+ *    hashed wheel** -- nothing here ticks per bucket or decrements a rounds
+ *    field, and an earlier version of this comment said otherwise and misled
+ *    two separate readers into reasoning about a structure that is not here.
+ *
+ * 2. A tournament tree over the per-slot minima, so "when is the next deadline
+ *    anywhere" is `deadline_tree[1]` in O(1) and the cursor **jumps** straight
+ *    to the next due tick. The wheel is therefore already tickless: an idle
+ *    advance is O(1) in elapsed ticks however long the gap, which is what the
+ *    tree was added for -- sweeping every intervening bucket was the original
+ *    cost and this replaced it.
+ *
+ * 3. Each slot is an intrusive **pairing heap** ordered by deadline, not a
+ *    list. That is what keeps the structure honest when deadlines collide.
+ *    Slots are a hash, so any deadlines congruent modulo `nslots` share one --
+ *    reachable from a periodic workload whose period is a multiple of
+ *    `nslots * resolution`, or a client opening connections on that cadence.
+ *    With an unordered chain, both "which nodes are due" and "what is this
+ *    slot's new minimum" needed a full walk, and each was quadratic in the
+ *    chain: 4000 colliding deadlines cost 3549 ns each to cancel and 6658 ns
+ *    each to fire, against 34 ns and 43 ns spread. The heap makes insert O(1),
+ *    cancel and fire O(log c) in the chain, and leaves the arrangement
+ *    penalty at the constant factor rather than the exponent.
+ *
+ * Nothing reallocates: the heap is intrusive, the slot array and tournament
+ * tree are sized once at construction, and a node costs one pointer more than
+ * a doubly linked list node. Cancel is the dominant operation, so that pointer
+ * -- which is what makes arbitrary removal O(log c) rather than a walk -- is
+ * bought for the operation that actually happens.
  */
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
@@ -40,29 +68,119 @@ static PyTypeObject WheelTimerType;
 PyTypeObject TimingWheelType;
 static PyObject *g_s_context_run;
 
-/* Recompute a slot's minimum deadline (and how many live nodes tie it) by
- * walking the chain. This is the only O(chain) tree operation; unlink calls
- * it only when the last node tying the minimum leaves the slot, so a batch of
- * k same-deadline fires/cancels pays one rescan total, not k. */
-static void
-wheel_update_slot_minimum(TimingWheel *w, int slot)
+/* --- the per-slot pairing heap ------------------------------------------- */
+
+/* Link two heaps so the smaller deadline wins. Ties keep `a` on top, which
+ * makes a same-deadline cohort behave like a stack -- the previous chain was
+ * head-inserted and drained the same way, so a batch of identical deadlines
+ * still fires in the order it did before. */
+static WheelTimer *
+heap_meld(WheelTimer *a, WheelTimer *b)
 {
-    w->slot_rescans++;
-    int64_t minimum = INT64_MAX;
-    uint32_t ties = 0;
-    for (WheelTimer *t = w->slots[slot]; t != NULL; t = t->next) {
-        if (t->callback == NULL) {
-            continue;
-        }
-        if (t->deadline < minimum) {
-            minimum = t->deadline;
-            ties = 1;
-        } else if (t->deadline == minimum) {
-            ties++;
-        }
+    if (a == NULL) {
+        return b;
     }
-    w->min_ties[slot] = ties;
+    if (b == NULL) {
+        return a;
+    }
+    if (b->deadline < a->deadline) {
+        WheelTimer *swap = a;
+        a = b;
+        b = swap;
+    }
+    b->next = a->child;
+    if (a->child != NULL) {
+        a->child->prev = b;
+    }
+    b->prev = a;
+    a->child = b;
+    return a;
+}
+
+/* The two-pass merge that gives a pairing heap its amortized O(log n) delete:
+ * meld adjacent siblings left to right, then fold the results right to left.
+ *
+ * Iterative rather than recursive on purpose. The sibling list is as long as
+ * the slot's chain, and the arrangement this whole structure exists to survive
+ * is thousands of deadlines in one slot -- recursion there would trade a
+ * quadratic for a stack overflow. */
+static WheelTimer *
+heap_merge_pairs(WheelTimer *first)
+{
+    WheelTimer *stack = NULL;
+    while (first != NULL) {
+        WheelTimer *a = first;
+        WheelTimer *b = a->next;
+        if (b == NULL) {
+            a->prev = NULL;
+            a->next = stack;   /* `next` doubles as the pass-one stack link */
+            stack = a;
+            break;
+        }
+        first = b->next;
+        a->prev = a->next = NULL;
+        b->prev = b->next = NULL;
+        WheelTimer *merged = heap_meld(a, b);
+        merged->next = stack;
+        stack = merged;
+    }
+    WheelTimer *result = NULL;
+    while (stack != NULL) {
+        WheelTimer *nxt = stack->next;
+        stack->next = NULL;
+        result = heap_meld(result, stack);
+        stack = nxt;
+    }
+    if (result != NULL) {
+        result->prev = result->next = NULL;
+    }
+    return result;
+}
+
+/* Remove `node` from the heap rooted at `root` and return the new root.
+ *
+ * `node == root` is the pop the fire loop takes; anything else is a cancel,
+ * which is why the parent pointer exists -- the node is spliced out of its
+ * sibling list in O(1) and only its own children are re-merged. */
+static WheelTimer *
+heap_delete(WheelTimer *root, WheelTimer *node)
+{
+    if (node != root) {
+        if (node->prev->child == node) {
+            node->prev->child = node->next;
+        } else {
+            node->prev->next = node->next;
+        }
+        if (node->next != NULL) {
+            node->next->prev = node->prev;
+        }
+        node->prev = node->next = NULL;
+    }
+    WheelTimer *orphans = heap_merge_pairs(node->child);
+    node->child = NULL;
+    return node == root ? orphans : heap_meld(root, orphans);
+}
+
+/* Publish a slot's current minimum into the tournament tree.
+ *
+ * The minimum is the heap root, read in O(1) -- the walk this replaces was the
+ * quadratic. The early return matters: most operations leave a slot's minimum
+ * where it was, and skipping the sift keeps the tree cost off that path.
+ *
+ * `slot_rescans` counts the times a slot's published minimum actually moved.
+ * It used to count chain walks; there are none now, and a counter that always
+ * reads `k` regardless of arrangement was exactly why this defect was invisible
+ * to the probe that watched it. */
+static void
+wheel_publish_slot_minimum(TimingWheel *w, int slot)
+{
+    WheelTimer *root = w->slots[slot];
+    int64_t minimum = root != NULL ? root->deadline : INT64_MAX;
     int node = w->tree_base + slot;
+    if (w->deadline_tree[node] == minimum) {
+        return;
+    }
+    w->slot_rescans++;
     w->deadline_tree[node] = minimum;
     w->tree_node_updates++;
     while (node > 1) {
@@ -75,28 +193,46 @@ wheel_update_slot_minimum(TimingWheel *w, int slot)
     w->next_deadline = w->deadline_tree[1];
 }
 
+/* Push an already-initialised node into its slot and republish the minimum.
+ * O(1) meld plus, only when this node is the new slot minimum, one O(log
+ * nslots) sift. */
 static void
-wheel_note_deadline(TimingWheel *w, int slot, int64_t deadline)
+wheel_insert(TimingWheel *w, WheelTimer *t, int slot)
 {
-    int node = w->tree_base + slot;
-    if (deadline > w->deadline_tree[node]) {
-        return;
+    t->prev = t->next = t->child = NULL;
+    w->slots[slot] = heap_meld(w->slots[slot], t);
+    w->count++;
+    wheel_publish_slot_minimum(w, slot);
+}
+
+/* Drop the wheel's reference to every node in one slot, for teardown.
+ *
+ * The traversal threads its own stack through the sibling links rather than
+ * recursing, because a slot's heap is as deep as its chain is long and the
+ * arrangement worth surviving puts thousands of nodes in one slot. Each child
+ * list is walked exactly once to find its tail, so the whole release is linear
+ * in the node count. */
+static void
+heap_release(WheelTimer *root)
+{
+    WheelTimer *stack = root;
+    while (stack != NULL) {
+        WheelTimer *node = stack;
+        stack = node->next;
+        WheelTimer *child = node->child;
+        if (child != NULL) {
+            WheelTimer *tail = child;
+            while (tail->next != NULL) {
+                tail = tail->next;
+            }
+            tail->next = stack;
+            stack = child;
+        }
+        node->slot = -1;
+        node->prev = node->next = node->child = NULL;
+        Py_CLEAR(node->callback);
+        Py_DECREF(node);  /* drop the wheel's reference */
     }
-    if (deadline == w->deadline_tree[node]) {
-        w->min_ties[slot]++;
-        return;
-    }
-    w->min_ties[slot] = 1;
-    w->deadline_tree[node] = deadline;
-    w->tree_node_updates++;
-    while (node > 1) {
-        node >>= 1;
-        int64_t left = w->deadline_tree[node << 1];
-        int64_t right = w->deadline_tree[(node << 1) | 1];
-        w->deadline_tree[node] = left < right ? left : right;
-        w->tree_node_updates++;
-    }
-    w->next_deadline = w->deadline_tree[1];
 }
 
 static int
@@ -118,36 +254,23 @@ wreath_wheel_next_when(TimingWheel *w)
 
 /* --- WheelTimer ---------------------------------------------------------- */
 
+/* Remove a timer from its slot heap, whether it is the root the fire loop is
+ * popping or a node in the middle that a caller cancelled. Both are O(log c)
+ * amortized in the slot's chain length, and the arrangement of the deadlines
+ * around it does not enter into the cost. */
 static void
 timer_unlink(WheelTimer *t)
 {
     if (t->slot < 0) {
         return;  /* already out of the wheel */
     }
-    if (t->prev != NULL) {
-        t->prev->next = t->next;
-    } else {
-        t->wheel->slots[t->slot] = t->next;  /* was the head */
-    }
-    if (t->next != NULL) {
-        t->next->prev = t->prev;
-    }
     TimingWheel *w = t->wheel;
     int slot = t->slot;
-    int removed_slot_minimum =
-        t->deadline == w->deadline_tree[w->tree_base + slot];
-    t->prev = t->next = NULL;
+    w->slots[slot] = heap_delete(w->slots[slot], t);
+    t->prev = t->next = t->child = NULL;
     t->slot = -1;
     w->count--;
-    if (removed_slot_minimum) {
-        /* Only the last node tying the minimum forces the O(chain) rescan;
-         * same-deadline cohorts (per-tick timeout batches) leave in O(1). */
-        if (w->min_ties[slot] > 1) {
-            w->min_ties[slot]--;
-        } else {
-            wheel_update_slot_minimum(w, slot);
-        }
-    }
+    wheel_publish_slot_minimum(w, slot);
 }
 
 static PyObject *
@@ -244,15 +367,6 @@ wheel_init(PyObject *op, PyObject *args, PyObject *kwds)
         PyErr_NoMemory();
         return -1;
     }
-    w->min_ties = PyMem_Calloc((size_t)nslots, sizeof(uint32_t));
-    if (w->min_ties == NULL) {
-        PyMem_Free(w->deadline_tree);
-        w->deadline_tree = NULL;
-        PyMem_Free(w->slots);
-        w->slots = NULL;
-        PyErr_NoMemory();
-        return -1;
-    }
     for (int node = 0; node < tree_base * 2; node++) {
         w->deadline_tree[node] = INT64_MAX;
     }
@@ -274,20 +388,12 @@ wheel_dealloc(PyObject *op)
     TimingWheel *w = (TimingWheel *)op;
     if (w->slots != NULL) {
         for (int i = 0; i < w->nslots; i++) {
-            WheelTimer *t = w->slots[i];
-            while (t != NULL) {
-                WheelTimer *nxt = t->next;
-                t->slot = -1;
-                t->prev = t->next = NULL;
-                Py_CLEAR(t->callback);
-                Py_DECREF(t);  /* drop the wheel's reference */
-                t = nxt;
-            }
+            heap_release(w->slots[i]);
+            w->slots[i] = NULL;
         }
         PyMem_Free(w->slots);
     }
     PyMem_Free(w->deadline_tree);
-    PyMem_Free(w->min_ties);
     Py_TYPE(op)->tp_free(op);
 }
 
@@ -321,14 +427,7 @@ wheel_schedule(PyObject *op, PyObject *args)
     t->deadline = deadline;
     t->slot = slot;
     t->wheel = w;
-    t->prev = NULL;
-    t->next = w->slots[slot];
-    if (t->next != NULL) {
-        t->next->prev = t;
-    }
-    w->slots[slot] = t;
-    w->count++;
-    wheel_note_deadline(w, slot, deadline);
+    wheel_insert(w, t, slot);
     return Py_NewRef((PyObject *)t);  /* caller holds a ref; wheel holds one */
 }
 
@@ -372,14 +471,7 @@ wheel_schedule_call(PyObject *op, PyObject *const *fastargs, Py_ssize_t nargs)
     t->deadline = deadline;
     t->slot = slot;
     t->wheel = w;
-    t->prev = NULL;
-    t->next = w->slots[slot];
-    if (t->next != NULL) {
-        t->next->prev = t;
-    }
-    w->slots[slot] = t;
-    w->count++;
-    wheel_note_deadline(w, slot, deadline);
+    wheel_insert(w, t, slot);
     return Py_NewRef((PyObject *)t);
 }
 
@@ -415,23 +507,22 @@ wheel_advance(PyObject *op, PyObject *arg)
          * the +1 arm only guards termination against a corrupted tree. */
         w->cursor = next > w->cursor ? next : w->cursor + 1;
         int slot = wheel_slot(w, w->cursor);
-        WheelTimer *t = w->slots[slot];
-        while (t != NULL) {
-            WheelTimer *nxt = t->next;
-            if (t->deadline <= w->cursor) {
-                /* fire: unlink, hand the callback to the result list */
-                timer_unlink(t);
-                if (t->callback != NULL) {
-                    if (PyList_Append(due, t->callback) < 0) {
-                        Py_DECREF(due);
-                        Py_DECREF(t);
-                        return NULL;
-                    }
-                    Py_CLEAR(t->callback);
+        /* Pop while the slot's minimum is due. The heap root *is* the earliest
+         * deadline, so a slot holding a thousand later deadlines costs nothing
+         * to skip -- which is the whole difference from the chain this
+         * replaced, where every sweep walked every node to find the few due. */
+        WheelTimer *t;
+        while ((t = w->slots[slot]) != NULL && t->deadline <= w->cursor) {
+            timer_unlink(t);
+            if (t->callback != NULL) {
+                if (PyList_Append(due, t->callback) < 0) {
+                    Py_DECREF(due);
+                    Py_DECREF(t);
+                    return NULL;
                 }
-                Py_DECREF(t);  /* drop the wheel's reference */
+                Py_CLEAR(t->callback);
             }
-            t = nxt;
+            Py_DECREF(t);  /* drop the wheel's reference */
         }
     }
     return due;
@@ -506,17 +597,17 @@ wreath_wheel_run_due(TimingWheel *w, double now)
         }
         w->cursor = next > w->cursor ? next : w->cursor + 1;
         int slot = wheel_slot(w, w->cursor);
-        WheelTimer *t = w->slots[slot];
         WheelTimer *pending = NULL;
         WheelTimer **pending_tail = &pending;
-        while (t != NULL) {
-            WheelTimer *nxt = t->next;
-            if (t->deadline <= w->cursor) {
-                timer_unlink(t);       /* clears t->next */
-                *pending_tail = t;     /* reuse the link as the dispatch list */
-                pending_tail = &t->next;
-            }
-            t = nxt;
+        /* Drain the slot's due prefix. Popping the root repeatedly yields the
+         * due nodes in deadline order and never touches the ones that are not
+         * due, so a crowded slot costs the same as an empty one plus the work
+         * actually dispatched. */
+        WheelTimer *t;
+        while ((t = w->slots[slot]) != NULL && t->deadline <= w->cursor) {
+            timer_unlink(t);       /* clears t->next */
+            *pending_tail = t;     /* reuse the link as the dispatch list */
+            pending_tail = &t->next;
         }
         while (pending != NULL) {
             WheelTimer *nxt = pending->next;

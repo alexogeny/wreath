@@ -559,58 +559,81 @@ class MessageBus:
 
     # -- schema --------------------------------------------------------------
 
-    def schema_sql(self) -> str:
-        """DDL for the durable messages and group-registry tables.
+    def component(self) -> Any:
+        """This bus's claim on the wreath schema.
 
-        Never auto-applied — run it through migrations, consistent with the
-        driver's no-implicit-DDL stance. Until it is, a bus falls back to the
-        durable groups registered in its own process, which is how this module
-        behaved before the registry existed.
+        The durable queue and the group registry are wreath's furniture, not the
+        application's data model, so they live in the `wreath` schema and never
+        appear in the application's migration artifact. `Wreath` collects this
+        during lifespan and brings it up to date before the bus starts, so the
+        group registry the fan-out depends on is there rather than absent.
         """
+        from .schema import Component, Step
+
         t = self._table
         g = self._groups_table
-        return (
-            f'CREATE SCHEMA IF NOT EXISTS "{self._schema}";\n'
-            f"CREATE TABLE IF NOT EXISTS {t} (\n"
-            "  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n"
-            "  channel text NOT NULL,\n"
-            '  "group" text NOT NULL,\n'
-            "  payload jsonb NOT NULL,\n"
-            "  tenant text NOT NULL DEFAULT '',\n"
-            "  state text NOT NULL DEFAULT 'ready',\n"
-            "  run_at timestamptz NOT NULL DEFAULT now(),\n"
-            "  attempts int NOT NULL DEFAULT 0,\n"
-            "  max_attempts int NOT NULL DEFAULT 6,\n"
-            "  lease_expiry timestamptz,\n"
-            "  owner text,\n"
-            "  fence bigint NOT NULL DEFAULT 0,\n"
-            "  dedup_key text,\n"
-            "  last_error text,\n"
-            "  created_at timestamptz NOT NULL DEFAULT now(),\n"
-            "  updated_at timestamptz NOT NULL DEFAULT now()\n"
-            ");\n"
-            f"CREATE INDEX IF NOT EXISTS messages_claim_idx ON {t} "
-            '(channel, "group", run_at) WHERE state = \'ready\';\n'
-            f"CREATE INDEX IF NOT EXISTS messages_lease_idx ON {t} (lease_expiry) "
-            "WHERE state = 'leased';\n"
-            f"CREATE UNIQUE INDEX IF NOT EXISTS messages_dedup_idx ON {t} "
-            '(channel, "group", dedup_key) WHERE dedup_key IS NOT NULL;\n'
-            # Keyed on (channel, group) and not on the bus name, because that is
-            # what identifies a competing-consumer set everywhere else here --
-            # `messages_claim_idx` and `messages_dedup_idx` use the same pair,
-            # and `_claim` filters on it. `bus` records which named bus most
-            # recently registered the group; `seen_at` is when, so a long-dead
-            # consumer is visible in a SELECT rather than only in a growing
-            # queue.
-            f"CREATE TABLE IF NOT EXISTS {g} (\n"
-            "  channel text NOT NULL,\n"
-            '  "group" text NOT NULL,\n'
-            "  bus text NOT NULL,\n"
-            "  registered_at timestamptz NOT NULL DEFAULT now(),\n"
-            "  seen_at timestamptz NOT NULL DEFAULT now(),\n"
-            '  PRIMARY KEY (channel, "group")\n'
-            ");\n"
+        return Component(
+            name="messaging",
+            schema=self._schema,
+            relations=("messages", "message_groups"),
+            steps=(
+                Step(
+                    version=1,
+                    statements=(
+                        f"CREATE TABLE IF NOT EXISTS {t} (\n"
+                        "  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n"
+                        "  channel text NOT NULL,\n"
+                        '  "group" text NOT NULL,\n'
+                        "  payload jsonb NOT NULL,\n"
+                        "  tenant text NOT NULL DEFAULT '',\n"
+                        "  state text NOT NULL DEFAULT 'ready',\n"
+                        "  run_at timestamptz NOT NULL DEFAULT now(),\n"
+                        "  attempts int NOT NULL DEFAULT 0,\n"
+                        "  max_attempts int NOT NULL DEFAULT 6,\n"
+                        "  lease_expiry timestamptz,\n"
+                        "  owner text,\n"
+                        "  fence bigint NOT NULL DEFAULT 0,\n"
+                        "  dedup_key text,\n"
+                        "  last_error text,\n"
+                        "  created_at timestamptz NOT NULL DEFAULT now(),\n"
+                        "  updated_at timestamptz NOT NULL DEFAULT now()\n"
+                        ")",
+                        f"CREATE INDEX IF NOT EXISTS messages_claim_idx ON {t} "
+                        '(channel, "group", run_at) WHERE state = \'ready\'',
+                        f"CREATE INDEX IF NOT EXISTS messages_lease_idx ON {t} "
+                        "(lease_expiry) WHERE state = 'leased'",
+                        f"CREATE UNIQUE INDEX IF NOT EXISTS messages_dedup_idx ON {t} "
+                        '(channel, "group", dedup_key) WHERE dedup_key IS NOT NULL',
+                        # Keyed on (channel, group) and not on the bus name,
+                        # because that is what identifies a competing-consumer
+                        # set everywhere else here -- `messages_claim_idx` and
+                        # `messages_dedup_idx` use the same pair, and `_claim`
+                        # filters on it. `bus` records which named bus most
+                        # recently registered the group; `seen_at` is when, so a
+                        # long-dead consumer is visible in a SELECT rather than
+                        # only in a growing queue.
+                        f"CREATE TABLE IF NOT EXISTS {g} (\n"
+                        "  channel text NOT NULL,\n"
+                        '  "group" text NOT NULL,\n'
+                        "  bus text NOT NULL,\n"
+                        "  registered_at timestamptz NOT NULL DEFAULT now(),\n"
+                        "  seen_at timestamptz NOT NULL DEFAULT now(),\n"
+                        '  PRIMARY KEY (channel, "group")\n'
+                        ")",
+                    ),
+                ),
+            ),
         )
+
+    def schema_sql(self) -> str:
+        """DDL for the durable messages and group-registry tables, joined.
+
+        A derivation of `component()`, not a second copy: the statements live
+        there and this joins them, so the tuple and the script cannot disagree.
+        Retained for a caller applying the DDL itself; `wreath schema sql` is the
+        supported spelling and `component()` is what wreath applies.
+        """
+        return self.component().sql()
 
     # -- supervised service protocol ----------------------------------------
 

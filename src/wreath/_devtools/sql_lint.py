@@ -246,14 +246,134 @@ def _scan_text(where: str, line: int, sql: str, encodable: frozenset[str]) -> li
     return findings
 
 
+#: Matches the relation named by a `FROM`/`JOIN`/`INTO`/`UPDATE` clause.
+_RELATION_REFERENCE = re.compile(
+    r'(?:FROM|JOIN|INTO|UPDATE)\s+(?P<ref>"?[A-Za-z_][\w.$"]*)', re.IGNORECASE
+)
+
+
+def owned_relations(root: Path) -> frozenset[str]:
+    """Every relation wreath creates *in its own schema*, by unqualified name.
+
+    Read out of the `Component(...)` declarations themselves rather than
+    restated here: registering a new component extends this rule automatically,
+    which is the discipline `encodable_types` already follows for the driver's
+    codecs. A hand-kept list is the next thing to drift, and this rule exists
+    precisely because a reference drifting from its schema stays invisible until
+    it resolves somewhere wrong.
+
+    Only *qualified* components contribute. Five predate the `wreath` schema and
+    use an unqualified `wreath_`-prefixed name deliberately, so demanding a
+    schema on those would flag every correct reference in the tree.
+    """
+    schema_module = root / "src" / "wreath" / "schema.py"
+    if "class Component" not in schema_module.read_text(encoding="utf-8"):
+        raise SystemExit(
+            "sql-lint: wreath/schema.py no longer declares Component, so the "
+            "owned-relation set would be empty and SQL003 would check nothing"
+        )
+    names: set[str] = set()
+    for path in sorted((root / "src" / "wreath").rglob("*.py")):
+        module = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(module):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (isinstance(node.func, ast.Name) and node.func.id == "Component"):
+                continue
+            qualified, relations = True, ()
+            for keyword in node.keywords:
+                if keyword.arg == "schema" and isinstance(keyword.value, ast.Constant):
+                    qualified = bool(keyword.value.value)
+                elif keyword.arg == "relations" and isinstance(
+                    keyword.value, (ast.Tuple, ast.List)
+                ):
+                    relations = tuple(
+                        element.value
+                        for element in keyword.value.elts
+                        if isinstance(element, ast.Constant)
+                        and isinstance(element.value, str)
+                    )
+            if qualified:
+                names.update(relations)
+    return frozenset(names)
+
+
+def _sql_statements(source: str) -> list[tuple[int, str]]:
+    """Every string constant that reads like SQL, placeholder or not.
+
+    The same docstring exclusion as `_sql_literals` -- prose about SQL is not
+    SQL -- without the `$` requirement, because a statement's table reference is
+    there whether or not it binds a parameter.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    documentation = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    }
+    return [
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in documentation
+        and _SQL_HINT.search(node.value)
+    ]
+
+
+def _scan_qualification(
+    where: str, line: int, sql: str, owned: frozenset[str]
+) -> list[Finding]:
+    """SQL003 -- an unqualified reference to a table wreath owns.
+
+    Wreath's own tables are always written `"wreath"."jobs"` and never resolved
+    through `search_path`. That is what lets them compose with an isolated
+    tenant session, which binds `search_path` to the tenant's schema alone: an
+    unqualified `jobs` there resolves to the tenant's schema, or to nothing,
+    rather than to wreath's table.
+    """
+    findings: list[Finding] = []
+    for match in _RELATION_REFERENCE.finditer(sql):
+        reference = match.group("ref").strip('"')
+        if "." in reference or reference not in owned:
+            continue
+        findings.append(
+            Finding(
+                "SQL003", f"{where}:{line}",
+                f"{reference!r} is a wreath-owned table referenced without its "
+                f'schema; write \'"wreath"."{reference}"\' so it resolves '
+                "regardless of search_path, which a tenant session rebinds",
+            )
+        )
+    return findings
+
+
 def scan(root: Path) -> list[Finding]:
     encodable = encodable_types(root)
+    owned = owned_relations(root)
     findings: list[Finding] = []
     package = root / "src" / "wreath"
     for path in sorted(package.rglob("*.py")):
         relative = path.relative_to(root).as_posix()
-        for line, sql in _sql_literals(path.read_text(encoding="utf-8")):
+        source = path.read_text(encoding="utf-8")
+        for line, sql in _sql_literals(source):
             findings += _scan_text(relative, line, sql, encodable)
+        # SQL003 reads a *wider* set than SQL001/SQL002 deliberately. Those two
+        # are about placeholders, so `_sql_literals` is right to require a `$`.
+        # This one is about table references, which a statement with no
+        # parameters has just as much -- `SELECT count(*) FROM jobs` carries no
+        # `$` and is exactly the reference the rule exists to catch. Sharing the
+        # narrower collector would have made SQL003 quietly check a subset of
+        # what it claims to.
+        for line, sql in _sql_statements(source):
+            findings += _scan_qualification(relative, line, sql, owned)
     return findings
 
 

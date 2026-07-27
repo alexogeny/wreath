@@ -47,6 +47,12 @@ class TestCsrfHostileCookie:
             scheme = "http"
             cookies = {"wreath_csrf": "café"}
 
+            def header(self, name, default=None):
+                # The real `Request` has this; these doubles did not, which is
+                # the only reason they broke. Absent = legacy client = the
+                # token path this test exercises.
+                return default
+
             def _index_headers(self):
                 return {b"host": b"example.com", b"x-csrf-token": "café".encode()}
 
@@ -65,6 +71,12 @@ class TestCsrfMissingOrigin:
             method = "POST"
             scheme = "http"
             cookies: dict[str, str] = {}
+
+            def header(self, name, default=None):
+                # The real `Request` has this; these doubles did not, which is
+                # the only reason they broke. Absent = legacy client = the
+                # token path this test exercises.
+                return default
 
             def _index_headers(self):
                 return {b"host": b"example.com"}

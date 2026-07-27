@@ -378,8 +378,15 @@ async def test_raw_models_rejects_a_type_mismatch(
 ) -> None:
     sql = "SELECT id, email, name, created_at FROM users"
     database.connection.script("users", [user_row(1)])
+    # `checked=False`: the plan disagreeing with the model *is* the subject
+    # here -- `id` is declared `Text` against an `Int64` column so `models()`
+    # has an OID mismatch to reject. The fake's row-fidelity guard would
+    # otherwise refuse the scripted `int` before the code under test ran.
     database.connection.describe(
-        sql, ("id", "email", "name", "created_at"), (Text.oid, Text.oid, Text.oid, Timestamp.oid)
+        sql,
+        ("id", "email", "name", "created_at"),
+        (Text.oid, Text.oid, Text.oid, Timestamp.oid),
+        checked=False,
     )
     with pytest.raises(MappingError, match="OID"):
         await session.raw(sql).models(User)

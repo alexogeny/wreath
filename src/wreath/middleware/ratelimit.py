@@ -234,8 +234,18 @@ class PostgresRateLimitStore:
         self._rate = 0.0
         self._policy: tuple[float, float] | None = None
 
+    def component(self) -> Any:
+        """This store's claim on the wreath schema.
+
+        The table is **unqualified** and stays that way: moving it into the
+        `wreath` schema is not additive, so a worker on the previous version
+        would look for a name that had gone. Registered where the rows are.
+        """
+        return self._store.component(name="ratelimit")
+
     def schema_sql(self) -> str:
-        """DDL for the backing table. Apply it as a migration."""
+        """DDL for the backing table, semicolon-joined. A derivation of
+        `component()`."""
         return self._store.schema_sql()
 
     def configure(self, capacity: float, rate: float) -> None:

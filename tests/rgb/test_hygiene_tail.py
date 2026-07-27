@@ -198,6 +198,12 @@ class TestCsrfTokenLifetime:
             def __init__(self):
                 self.state = state
 
+            def header(self, name, default=None):
+                # The real `Request` has this; these doubles did not, which is
+                # the only reason they broke. Absent = legacy client = the
+                # token path this test exercises.
+                return default
+
             def _index_headers(self):
                 return {
                     b"host": b"example.com",

@@ -344,11 +344,13 @@
       ],
       "sources": [
         "src/wreath/postgres.py",
+        "src/wreath/schema.py",
         "src/wreath/_pure/postgres.py",
         "src/wreath/_native/postgres/"
       ],
       "tests": [
-        "tests/postgres/"
+        "tests/postgres/",
+        "tests/test_wreath_schema.py"
       ],
       "policy": "Connection.map/Statement.map run one Sync-delimited operation per input in input order (no coalescing/dedup); Connection.transaction() orders reads before dependent writes and discards a connection whose synchronization cannot be proven.",
       "decisions": [

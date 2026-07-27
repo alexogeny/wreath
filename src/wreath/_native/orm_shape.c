@@ -20,6 +20,7 @@ static PyObject *T_Related = NULL;
 static PyObject *T_Value = NULL;
 static PyObject *T_Binary = NULL;
 static PyObject *T_In = NULL;
+static PyObject *T_InSubquery = NULL;
 static PyObject *T_Boolean = NULL;
 static PyObject *T_Unary = NULL;
 static PyObject *ORMError = NULL;
@@ -29,6 +30,7 @@ static PyObject *A_column, *A_shape_ref, *A_shape_projection, *A_shape_value;
 static PyObject *A_pg_type, *A_operator, *A_left, *A_right, *A_values;
 static PyObject *A_operands, *A_operand, *A_path, *A_expression, *A_direction;
 static PyObject *A_projection, *A_predicates, *A_orderings, *A_includes;
+static PyObject *A_select;
 static PyObject *A_model, *A_for_update, *A_limit, *A_offset, *A_fingerprint;
 static PyObject *A_relationship, *A_strategy, *A_nested, *A_python_name, *A_qualname;
 
@@ -287,6 +289,107 @@ shape_expr(Buf *b, PyObject *node)
         }
         int rc = shape_expr(b, operand);
         Py_DECREF(operand);
+        return rc;
+    }
+
+    if (type == T_InSubquery) {
+        /* Mirrors compiler._shape_expression's InSubqueryExpr branch exactly:
+         * everything that changes the subquery's SQL text, and nothing that
+         * changes only its bound values. Two subqueries over the same table
+         * filtering the same columns share a plan; two over different tables
+         * must not, and this is the only place that distinguishes them.
+         *
+         *   "q" operator len(predicates) | left | model | projection | predicates
+         */
+        PyObject *select = PyObject_GetAttr(node, A_select);
+        if (select == NULL) {
+            return -1;
+        }
+        PyObject *predicates = PyObject_GetAttr(select, A_predicates);
+        if (predicates == NULL) {
+            Py_DECREF(select);
+            return -1;
+        }
+        Py_ssize_t count = PySequence_Size(predicates);
+        if (count < 0
+            || buf_sep(b) < 0 || buf_raw(b, "q", 1) < 0
+            || buf_str_attr(b, node, A_operator) < 0 || buf_ssize(b, count) < 0) {
+            Py_DECREF(predicates);
+            Py_DECREF(select);
+            return -1;
+        }
+
+        PyObject *left = PyObject_GetAttr(node, A_left);
+        if (left == NULL) {
+            Py_DECREF(predicates);
+            Py_DECREF(select);
+            return -1;
+        }
+        int rc = shape_expr(b, left);
+        Py_DECREF(left);
+
+        if (rc == 0) {
+            PyObject *model = PyObject_GetAttr(select, A_model);
+            if (model == NULL) {
+                rc = -1;
+            }
+            else {
+                rc = (buf_sep(b) < 0 || buf_str_attr(b, model, A_qualname) < 0) ? -1 : 0;
+                Py_DECREF(model);
+            }
+        }
+
+        if (rc == 0) {
+            /* `_check_subquery` refuses a projection that is not exactly one
+             * column at construction, so index 0 exists for any node that was
+             * built -- but read it through the sequence API rather than trusting
+             * an invariant enforced in a different module. */
+            PyObject *projection = PyObject_GetAttr(select, A_projection);
+            if (projection == NULL) {
+                rc = -1;
+            }
+            else {
+                PyObject *item = PySequence_GetItem(projection, 0);
+                Py_DECREF(projection);
+                if (item == NULL) {
+                    rc = -1;
+                }
+                else {
+                    PyObject *column = PyObject_GetAttr(item, A_column);
+                    Py_DECREF(item);
+                    if (column == NULL) {
+                        rc = -1;
+                    }
+                    else {
+                        rc = (buf_sep(b) < 0
+                              || buf_bytes_attr(b, column, A_shape_projection) < 0)
+                                 ? -1
+                                 : 0;
+                        Py_DECREF(column);
+                    }
+                }
+            }
+        }
+
+        if (rc == 0) {
+            PyObject *fast = PySequence_Fast(predicates, "predicates is not a sequence");
+            if (fast == NULL) {
+                rc = -1;
+            }
+            else {
+                Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
+                for (Py_ssize_t i = 0; i < n; i++) {
+                    if (shape_expr(b, PySequence_Fast_GET_ITEM(fast, i)) < 0) {
+                        rc = -1;
+                        break;
+                    }
+                }
+                Py_DECREF(fast);
+            }
+        }
+
+        Py_DECREF(predicates);
+        Py_DECREF(select);
         return rc;
     }
 
@@ -639,14 +742,15 @@ intern(const char *name)
 }
 
 /* orm_shape_configure(ColumnExpr, RelatedColumnExpr, ValueExpr, BinaryExpr,
- *                     InExpr, BooleanExpr, UnaryExpr, ORMError) -> None */
+ *                     InExpr, InSubqueryExpr, BooleanExpr, UnaryExpr,
+ *                     ORMError) -> None */
 PyObject *
 wreath_orm_shape_configure(PyObject *self, PyObject *args)
 {
     (void)self;
-    PyObject *col, *rel, *val, *bin, *in_, *boolean, *unary, *err;
-    if (!PyArg_ParseTuple(args, "OOOOOOOO", &col, &rel, &val, &bin, &in_,
-                          &boolean, &unary, &err)) {
+    PyObject *col, *rel, *val, *bin, *in_, *insub, *boolean, *unary, *err;
+    if (!PyArg_ParseTuple(args, "OOOOOOOOO", &col, &rel, &val, &bin, &in_,
+                          &insub, &boolean, &unary, &err)) {
         return NULL;
     }
     Py_XSETREF(T_Column, Py_NewRef(col));
@@ -654,6 +758,7 @@ wreath_orm_shape_configure(PyObject *self, PyObject *args)
     Py_XSETREF(T_Value, Py_NewRef(val));
     Py_XSETREF(T_Binary, Py_NewRef(bin));
     Py_XSETREF(T_In, Py_NewRef(in_));
+    Py_XSETREF(T_InSubquery, Py_NewRef(insub));
     Py_XSETREF(T_Boolean, Py_NewRef(boolean));
     Py_XSETREF(T_Unary, Py_NewRef(unary));
     Py_XSETREF(ORMError, Py_NewRef(err));
@@ -674,6 +779,7 @@ wreath_orm_shape_configure(PyObject *self, PyObject *args)
     A_direction = intern("direction");
     A_projection = intern("projection");
     A_predicates = intern("predicates");
+    A_select = intern("select");
     A_orderings = intern("orderings");
     A_includes = intern("includes");
     A_model = intern("model");

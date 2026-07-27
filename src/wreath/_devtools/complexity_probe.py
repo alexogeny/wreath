@@ -55,8 +55,69 @@ ProbeFn = Callable[[int], "float | tuple[float, dict[str, int]]"]
 BASELINE_PATH = Path("docs/agents/complexity-baseline.json")
 BASELINE_VERSION = 1
 
-#: exponent -> printable class, in fit order
-_CLASSES = ((0.0, "O(1)"), (1.0, "O(n)"), (2.0, "O(n^2)"), (3.0, "O(n^3)"))
+#: exponent -> printable class, in fit order. Past cubic the names exist so a
+#: scan can *report* what it measured; nothing in this tree is expected to be
+#: quartic or worse, and a probe declaring one should be read as a defect.
+_CLASSES = (
+    (0.0, "O(1)"), (1.0, "O(n)"), (2.0, "O(n^2)"), (3.0, "O(n^3)"),
+    (4.0, "O(n^4)"), (5.0, "O(n^5)"), (6.0, "O(n^6)"),
+)
+
+#: Plain-English degree names, so a report can say "quartic" rather than making
+#: the reader count carets.
+_DEGREE_NAMES = {
+    0.0: "constant", 1.0: "linear", 2.0: "quadratic", 3.0: "cubic",
+    4.0: "quartic", 5.0: "quintic", 6.0: "sextic",
+}
+
+
+def degree_name(exponent: float) -> str:
+    """The nearest plain-English degree name for a fitted exponent."""
+    nearest = min(_DEGREE_NAMES, key=lambda d: abs(d - exponent))
+    return _DEGREE_NAMES[nearest]
+
+
+@dataclass(frozen=True)
+class Todo:
+    """A probe that records a **defect** rather than a contract.
+
+    An ordinary probe declares an upper bound and is content with anything
+    faster. That is the right rule for a contract and the wrong one for a known
+    defect: it would let the defect be fixed without anybody noticing, leaving a
+    stale claim in the file that reads as though it were still true.
+
+    So a marked probe is checked from *both* sides. Growing past
+    ``degree + tolerance`` is a regression, exactly as before. Falling below
+    ``degree - tolerance`` means the subject improved and this mark is now a
+    lie -- the run goes red and asks for the mark to be retargeted or deleted.
+    That second rule is the whole point: without it a mark decays into
+    permission, which is how a backlog entry outlives the bug it describes.
+
+    ``target`` is the degree the fix should reach; it is documentation, not an
+    assertion. ``owner`` names the task or design that carries the fix, so the
+    mark cannot become an orphan nobody recognises.
+    """
+
+    degree: float
+    target: float
+    reason: str
+    owner: str
+
+    def __post_init__(self) -> None:
+        if self.target >= self.degree:
+            raise ValueError(
+                f"a fix-later mark must aim below what it records: "
+                f"target n^{self.target} is not better than degree n^{self.degree}"
+            )
+        if not self.reason.strip() or not self.owner.strip():
+            raise ValueError("a fix-later mark needs both a reason and an owner")
+
+    def describe(self) -> str:
+        return (
+            f"FIX LATER: {degree_name(self.degree)} today (n^{self.degree:g}), "
+            f"target {degree_name(self.target)} (n^{self.target:g}) -- "
+            f"{self.reason} [{self.owner}]"
+        )
 
 
 @dataclass
@@ -68,7 +129,8 @@ class Probe:
     doc: str = ""
     repeats: int = 3
     #: Growth above expect+tolerance fails. Faster growth is an improvement or
-    #: fixed-cost domination, not a complexity regression.
+    #: fixed-cost domination, not a complexity regression -- unless `todo` is
+    #: set, which makes the bound two-sided. See `Todo`.
     tolerance: float = 0.5
     #: Timed probes whose largest sample does not clear this are UNRESOLVED,
     #: never silently successful. Probe bodies should batch tiny operations.
@@ -80,24 +142,44 @@ class Probe:
     assumption: str = ""
     stage: str = "component"
     group: str = "extended"
+    #: Set when this probe pins a known defect rather than a contract.
+    todo: Todo | None = None
 
 
 _REGISTRY: dict[str, Probe] = {}
 
 
-def probe(name: str, *, expect: float, sizes: tuple[int, ...],
+def probe(name: str, *, expect: float | None = None, sizes: tuple[int, ...],
           repeats: int = 3, tolerance: float = 0.5,
           metric: str | None = None, noise_floor: float = 1e-6,
           axis: str = "input size", assumption: str = "",
           stage: str = "component", group: str = "extended",
+          todo: Todo | None = None,
           ) -> Callable[[ProbeFn], ProbeFn]:
-    """Register `fn(size)` as a named complexity assumption."""
+    """Register `fn(size)` as a named complexity assumption.
+
+    Pass `expect` for a contract, or `todo` for a known defect -- one or the
+    other, never both. A marked probe takes its bound from `todo.degree`, so the
+    recorded degree is written once and cannot drift from the bound enforcing
+    it. That duplication is what the first hand-rolled mark had to keep in sync
+    by comment.
+    """
+    if (expect is None) == (todo is None):
+        raise ValueError(
+            f"{name}: pass exactly one of expect= (a contract) or "
+            f"todo= (a recorded defect)"
+        )
+    bound = todo.degree if todo is not None else expect
+    assert bound is not None
+
     def register(fn: ProbeFn) -> ProbeFn:
         doc = (fn.__doc__ or "").strip()
         _REGISTRY[name] = Probe(
-            name, fn, expect, sizes, doc, repeats, tolerance, noise_floor,
-            metric, axis, assumption or (doc.splitlines()[0] if doc else ""),
-            stage, group,
+            name=name, fn=fn, expect=bound, sizes=sizes, doc=doc,
+            repeats=repeats, tolerance=tolerance, noise_floor=noise_floor,
+            metric=metric, axis=axis,
+            assumption=assumption or (doc.splitlines()[0] if doc else ""),
+            stage=stage, group=group, todo=todo,
         )
         return fn
     return register
@@ -176,10 +258,17 @@ class Result:
                 p.sizes, p.sizes[1:], values, values[1:], strict=False
             )
         ]
+        observed = max(self.exponent, self.tail_exponent)
         if below_floor:
             self.status = "UNRESOLVED"
-        elif max(self.exponent, self.tail_exponent) >= p.expect + p.tolerance:
+        elif observed >= p.expect + p.tolerance:
             self.status = "FAIL"
+        elif p.todo is not None and observed <= p.todo.degree - p.tolerance:
+            # The recorded defect is gone. Both fits are used via `observed`
+            # (the max), so a single noisy tail cannot declare a fix that the
+            # global slope does not agree with -- staleness has to be the
+            # honest reading of the whole curve, not the flattering half.
+            self.status = "STALE"
         else:
             self.status = "PASS"
         self.ok = self.status == "PASS"
@@ -204,8 +293,19 @@ def _print_result(r: Result) -> None:
         f"global n^{r.exponent:.2f}, tail n^{r.tail_exponent:.2f}{on} "
         f"({_classify(r.tail_exponent)})"
     )
-    print(f"\n== {p.name} — at most {_classify(p.expect)}, {fitted} [{r.status}]")
+    bound = (f"pinned at {_classify(p.expect)}" if p.todo
+             else f"at most {_classify(p.expect)}")
+    print(f"\n== {p.name} — {bound}, {fitted} [{r.status}]")
+    if p.todo is not None:
+        print(f"   {p.todo.describe()}")
     print(f"   axis: {p.axis}; stage: {p.stage}; assumption: {p.assumption}")
+    if r.status == "STALE" and p.todo is not None:
+        print(f"   STALE MARK: measured {degree_name(max(r.exponent, r.tail_exponent))} "
+              f"(n^{max(r.exponent, r.tail_exponent):.2f}), below the recorded "
+              f"n^{p.todo.degree:g}.\n"
+              f"   The defect this mark records appears to be fixed. Retarget the "
+              f"mark to what\n   the code does now, or delete it and give the probe a "
+              f"real expect= contract.")
     counter_names = sorted({k for c in r.counters for k in c})
     header = f"{'size':>10} {'time':>12} {'ratio':>7}"
     header += "".join(f" {name:>14}" for name in counter_names)
@@ -576,6 +676,206 @@ def _http1_response_headers(n: int):
     )
     assert written > n * 16
     return elapsed
+
+
+@probe(
+    "http1-chunked-body-frames", expect=1.0,
+    sizes=(2000, 4000, 8000, 16000),
+    axis="chunk frames in one chunked request body, one read per frame",
+    assumption="per-frame size-line scan and buffer consumption are O(frames)",
+    stage="ingress", group="metal-http1",
+)
+def _http1_chunked_body_frames(n: int):
+    """Decoding an n-frame chunked body is O(n), one read per frame.
+
+    `http1-fragmented-head` guards the request head; the chunked body is a
+    separate axis with its own resumable scan cursor (`chunk_line_scan`) and
+    its own consumption. A per-frame rescan of the buffered remainder, or a
+    front-shift per frame rather than on the amortized gate, would make a
+    slow-trickling upload quadratic in the frames it was split into."""
+    import asyncio
+
+    from wreath import Response, Wreath
+    from wreath.server import ServerConfig
+
+    _server: Any = importlib.import_module("wreath._native._server")
+
+    payload = b"abcdefgh"
+    head = (b"POST / HTTP/1.1\r\nHost: x\r\n"
+            b"transfer-encoding: chunked\r\n\r\n")
+    frame = b"%x\r\n%s\r\n" % (len(payload), payload)
+
+    async def run() -> tuple[float, dict[str, int]]:
+        app = Wreath()
+        done = asyncio.Event()
+        received = 0
+
+        @app.post("/")
+        async def endpoint(request):
+            nonlocal received
+            received = len(await request.body())
+            done.set()
+            return Response(b"x")
+
+        loop = asyncio.get_running_loop()
+        protocol = _server.HttpProtocol(app, ServerConfig(), loop, set())
+        transport = _SinkTransport()
+        protocol.connection_made(transport)
+        start = time.perf_counter()
+        protocol.data_received(head)
+        for _ in range(n):
+            protocol.data_received(frame)
+        protocol.data_received(b"0\r\n\r\n")
+        await done.wait()
+        elapsed = time.perf_counter() - start
+        protocol.connection_lost(None)
+        await asyncio.sleep(0)
+        assert received == n * len(payload)
+        return elapsed, {"body_bytes": received}
+
+    return asyncio.run(run())
+
+
+@probe(
+    "wheel-colliding-slot-chain", tolerance=0.6,
+    sizes=(500, 1000, 2000, 4000),
+    axis="timers sharing one slot at distinct deadlines",
+    assumption="KNOWN DEFECT: the fire loop walks the whole slot chain per sweep",
+    stage="timers", group="metal-host",
+    todo=Todo(
+        degree=2.0, target=1.0,
+        reason="the fire loop walks the entire slot chain on every sweep; the fix "
+               "is structural (a per-slot ordered structure, or the far-future "
+               "overflow list this hybrid lacks), so it is recorded rather than "
+               "patched",
+        owner="#124",
+    ),
+)
+def _wheel_colliding_slot_chain(k: int):
+    """k timers in ONE slot at k distinct deadlines: currently O(k**2).
+
+    `wheel_slot()` masks the deadline, so deadlines congruent modulo `nslots`
+    share a slot. The fire loop (`reactor_wheel.c:510`) then walks that slot's
+    entire chain on every sweep to find the entries whose deadline has actually
+    come due -- one or two of them -- so a slot holding k timers across k
+    rotations costs k + (k-1) + ... to drain.
+
+    No existing probe builds this arrangement: `wheel-parked-rotation` spreads
+    parked timers one per slot, and `wheel-fire-batch`/`wheel-cancel-cohort`
+    use same-deadline cohorts where walking the chain *is* the work rather than
+    overhead. Measured against a spread control of identical size, k=4000 drains
+    in ~27ms versus ~0.36ms -- the same timers, ~75x apart on arrangement alone.
+
+    Reachable two ways: a periodic workload whose period is a multiple of
+    `nslots * resolution`, and a caller that opens connections on that cadence
+    so their keep-alive deadlines collide. Both degrade every later sweep, not
+    just the offender's.
+
+    The fix is structural -- a per-slot ordered structure, or the far-future
+    overflow list a classic hashed wheel carries and this hybrid does not --
+    so it is tracked rather than patched here."""
+    import contextvars
+
+    _reactor: Any = importlib.import_module("wreath._native._reactor")
+
+    resolution = 0.001
+    nslots = 512
+
+    def noop() -> None:
+        pass
+
+    wheel = _reactor.TimingWheel(resolution=resolution, slots=nslots, base=0.0)
+    context = contextvars.copy_context()
+    # ticks = nslots * i for every i, so `deadline & (nslots - 1)` is 0 for all
+    # of them: one slot, k distinct deadlines, k rotations apart.
+    for index in range(1, k + 1):
+        wheel.schedule_call(nslots * index * resolution, noop, (), context)
+    assert wheel.count == k
+    start = time.perf_counter()
+    fired = wheel.advance_run(nslots * (k + 1) * resolution)
+    elapsed = time.perf_counter() - start
+    assert fired == k
+    return elapsed, {"slot_rescans": wheel.slot_rescans}
+
+
+@probe(
+    "wheel-spread-slot-chain", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="timers spread one per slot at consecutive deadlines",
+    assumption="draining k timers that do not share a slot is O(k)",
+    stage="timers", group="metal-host",
+)
+def _wheel_spread_slot_chain(k: int):
+    """The control for `wheel-colliding-slot-chain`: same k, no collisions.
+
+    Draining k timers costs O(k) when consecutive deadlines land in distinct
+    slots. Without this control the colliding probe proves only that the wheel
+    is slow at some size, not that *arrangement* is what costs -- and the two
+    differ by ~75x at k=4000 on identical work."""
+    import contextvars
+
+    _reactor: Any = importlib.import_module("wreath._native._reactor")
+
+    resolution = 0.001
+
+    def noop() -> None:
+        pass
+
+    wheel = _reactor.TimingWheel(resolution=resolution, slots=512, base=0.0)
+    context = contextvars.copy_context()
+    for index in range(1, k + 1):
+        wheel.schedule_call(index * resolution, noop, (), context)
+    assert wheel.count == k
+    start = time.perf_counter()
+    fired = wheel.advance_run((k + 2) * resolution)
+    elapsed = time.perf_counter() - start
+    assert fired == k
+    return elapsed, {"slot_rescans": wheel.slot_rescans}
+
+
+@probe(
+    "metal-egress-writelines-chunks", expect=1.0,
+    sizes=(2000, 4000, 8000, 16000),
+    axis="chunks in one writelines() behind a blocked metal socket",
+    assumption="gathered-write buffering is O(chunks), not O(chunks * buffered)",
+    stage="egress", group="metal-host",
+)
+def _metal_egress_writelines_chunks(n: int):
+    """One writelines() of n chunks onto a blocked socket is O(n).
+
+    `metal-egress-backpressure` guards repeated single writes; this guards the
+    gathered form, which is the shape a streaming response emits. Appending
+    each chunk by rebuilding the retained write buffer would be quadratic in
+    the chunk count for exactly the response that fragments most."""
+    import asyncio
+    import socket
+
+    from wreath.reactor import metal_event_loop
+
+    class Protocol(asyncio.Protocol):
+        pass
+
+    loop = metal_event_loop(diagnostics=True)
+    client, server = socket.socketpair()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+    chunks = [b"y" * 64] * n
+    try:
+        transport = loop._make_socket_transport(server, Protocol())
+        loop.run_until_complete(asyncio.sleep(0))
+        # Block the peer first, so every chunk lands in the retained buffer
+        # rather than going straight out to the socket.
+        transport.write(b"x" * 65536)
+        start = time.perf_counter()
+        transport.writelines(chunks)
+        elapsed = time.perf_counter() - start
+        queued = transport.get_write_buffer_size()
+        assert queued > 0
+        transport.abort()
+        loop.run_until_complete(asyncio.sleep(0))
+        return elapsed, {"queued_bytes": queued}
+    finally:
+        client.close()
+        loop.close()
 
 
 @probe(
@@ -1361,6 +1661,8 @@ def _result_document(result: Result) -> dict[str, Any]:
         "tail_exponent": round(result.tail_exponent, 3),
         "local_exponents": [round(value, 3) for value in result.local_exponents],
         "class": _classify(result.tail_exponent),
+        "degree_name": degree_name(result.tail_exponent),
+        "todo": _todo_document(p.todo),
         "status": result.status,
         "sizes": list(p.sizes),
         "seconds": result.times,
@@ -1542,7 +1844,168 @@ def _orm_write_plan_cache(n: int):
     return elapsed, {"compiles": compiles}
 
 
+# --- probes: the pure twins ------------------------------------------------
+#
+# Every router probe above drives the native table. Under the parity contract
+# the pure twin is the *reference*, not a fallback -- it is what runs under
+# `WREATH_PURE=1` and on any build without the extension -- so a pure twin that
+# is quadratic where the native one is O(1) is a defect in its own right, and
+# one nothing in this tree was measuring: before these, no probe in any group
+# drove a single pure implementation.
+
+@probe("pure-bitset-router-static-scale", expect=0.0,
+       sizes=(200, 400, 800, 1600),
+       axis="unrelated static route count",
+       assumption="pure static route activation is O(1) in total route count",
+       stage="routing", group="pure")
+def _pure_bitset_router_static_scale(n: int):
+    """The pure twin of `bitset-router-static-scale`: O(1) in route count.
+
+    The native table resolves a distinct static path through a dict -- one hash
+    lookup, flat in table size. The pure twin must do the same, or `WREATH_PURE=1`
+    is a differently-shaped application rather than a slower one."""
+    from wreath._pure.dtbitset import BitsetRouteTable
+
+    table = BitsetRouteTable()
+    for i in range(n):
+        table.add(f"/route{i}", "GET", object())
+    path = f"/route{n // 2}"
+    start = time.perf_counter()
+    for _ in range(_MATCH_LOOPS):
+        table.match("GET", path)
+    return time.perf_counter() - start
+
+
+@probe("pure-bitset-router-same-group-scale", expect=1.0,
+       sizes=(64, 128, 256, 512),
+       axis="same-shape parameter route group size",
+       assumption="pure parameter matching is at worst linear in group size",
+       stage="routing", group="pure")
+def _pure_bitset_router_same_group_scale(n: int):
+    """The pure twin of `bitset-router-same-group-scale`.
+
+    Every route here shares one (method, segment-count) group and carries a
+    parameter -- the arrangement the bitset design exists to keep linear, and
+    precisely where the decision tree grew super-linearly and lost. A pure twin
+    that folded parameters the way the tree did would reintroduce the defeated
+    design silently, on the path taken whenever the extension is absent."""
+    from wreath._pure.dtbitset import BitsetRouteTable
+
+    table = BitsetRouteTable()
+    for i in range(n):
+        table.add(f"/g{i}/{{id}}", "GET", object())
+    path = f"/g{n // 2}/42"
+    start = time.perf_counter()
+    for _ in range(_MATCH_LOOPS):
+        table.match("GET", path)
+    return time.perf_counter() - start
+
+
+def _pure_cancel_harness(k: int, order: str):
+    """Queue k operations on a real Connection and cancel them in `order`.
+
+    Only `_cancel_operation` is timed. The connection is built field-by-field
+    rather than connected, because the method under test touches five attributes
+    and none of them require a socket -- driving a real server here would
+    measure the server."""
+    import asyncio
+    import collections
+
+    from wreath._pure.postgres import Connection, Operation
+
+    async def run() -> tuple[float, dict[str, int]]:
+        loop = asyncio.get_running_loop()
+        connection = object.__new__(Connection)
+        connection._waiting = collections.deque()
+        connection._transaction_barrier = False
+        connection._current = None
+        connection._backend_pid = 0
+        connection._backend_key = 0
+        operations = []
+        for index in range(k):
+            operation = Operation(
+                index, "SELECT 1", (), "fetch", loop.create_future(), None)
+            connection._waiting.append(operation)
+            operations.append(operation)
+        victims = operations if order == "front" else list(reversed(operations))
+        start = time.perf_counter()
+        for operation in victims:
+            connection._cancel_operation(operation)
+        elapsed = time.perf_counter() - start
+        assert not connection._waiting
+        for operation in operations:
+            operation.future.cancel()
+        return elapsed, {"cancelled": len(operations)}
+
+    return asyncio.run(run())
+
+
+@probe(
+    "pure-pipeline-cancel-back-to-front", tolerance=0.6,
+    sizes=(500, 1000, 2000, 4000),
+    axis="queued operations cancelled newest-first",
+    assumption="KNOWN DEFECT: deque.remove rescans the queue per cancellation",
+    stage="database", group="pure",
+    todo=Todo(
+        degree=2.0, target=1.0,
+        reason="`_cancel_operation` removes by value from a deque, which scans "
+               "from the left, so cancelling the newest of k queued operations "
+               "walks all k; the fix is an index or a tombstone flag rather than "
+               "a positional removal",
+        owner="#135",
+    ),
+)
+def _pure_pipeline_cancel_back_to_front(k: int):
+    """Cancelling k queued operations newest-first is O(k**2).
+
+    `_pure/postgres.py:1718` calls `self._waiting.remove(operation)`. `_waiting`
+    is a `deque`, whose `remove` scans from the left, so removing the *last*
+    element costs the whole queue -- and unwinding k of them costs
+    k + (k-1) + ...
+
+    Newest-first is not a contrived order: it is what a stack of nested `async
+    with` scopes produces when the innermost is cancelled first, and what a
+    `TaskGroup` unwinding on error tends toward. The queue is the operations
+    sitting *behind* the pipeline depth, so it is bounded by concurrent callers
+    rather than by `max_emitted_operations`.
+
+    `pure-pipeline-cancel-front-to-back` is the control: identical k, identical
+    operations, opposite order, linear."""
+    return _pure_cancel_harness(k, "back")
+
+
+@probe(
+    "pure-pipeline-cancel-front-to-back", expect=1.0,
+    sizes=(500, 1000, 2000, 4000),
+    axis="queued operations cancelled oldest-first",
+    assumption="cancelling the head of the queue is O(1) per operation",
+    stage="database", group="pure",
+)
+def _pure_pipeline_cancel_front_to_back(k: int):
+    """The control for `pure-pipeline-cancel-back-to-front`: same k, same work.
+
+    `deque.remove` scans from the left, so cancelling the oldest operation finds
+    it immediately. Without this control the other probe would only show that
+    cancelling many operations is slow, not that the *order* is what costs."""
+    return _pure_cancel_harness(k, "front")
+
+
+def _todo_document(todo: Todo | None) -> dict[str, Any] | None:
+    if todo is None:
+        return None
+    return {
+        "degree": todo.degree,
+        "target": todo.target,
+        "reason": todo.reason,
+        "owner": todo.owner,
+    }
+
+
 def _contract(p: Probe) -> dict[str, Any]:
+    # `todo` rides in the contract, not the observation, so retargeting or
+    # removing a mark is an assumption change that `--check` refuses until the
+    # baseline is refreshed deliberately. A mark that could be edited without
+    # the gate noticing would be a note, not a record.
     return {
         "group": p.group,
         "stage": p.stage,
@@ -1552,6 +2015,7 @@ def _contract(p: Probe) -> dict[str, Any]:
         "tolerance": p.tolerance,
         "metric": p.metric,
         "sizes": list(p.sizes),
+        "todo": _todo_document(p.todo),
     }
 
 
@@ -1590,6 +2054,32 @@ def _write_baseline(names: list[str]) -> int:
     return 0
 
 
+def _print_todo_summary(names: list[str]) -> None:
+    """The marked-defect roll call, printed loudly enough that it cannot grow quietly.
+
+    A backlog nobody reads is a backlog that only grows, so this is a header
+    line with a count -- not a footnote after the results.
+    """
+    marked = [_REGISTRY[name] for name in names if _REGISTRY[name].todo is not None]
+    if not marked:
+        print("\nfix-later marks: none")
+        return
+    by_degree: dict[float, int] = {}
+    for p in marked:
+        assert p.todo is not None
+        by_degree[p.todo.degree] = by_degree.get(p.todo.degree, 0) + 1
+    tally = ", ".join(
+        f"{count} {degree_name(degree)}"
+        for degree, count in sorted(by_degree.items(), reverse=True)
+    )
+    print(f"\n=== fix-later marks: {len(marked)} ({tally}) ===")
+    for p in sorted(marked, key=lambda q: (-(q.todo.degree if q.todo else 0), q.name)):
+        assert p.todo is not None
+        print(f"  {p.name:<36} n^{p.todo.degree:g} -> n^{p.todo.target:g}  "
+              f"[{p.todo.owner}]")
+        print(f"  {'':<36} {p.todo.reason}")
+
+
 def _check_baseline(names: list[str]) -> int:
     path = _baseline_path()
     if not path.exists():
@@ -1612,6 +2102,7 @@ def _check_baseline(names: list[str]) -> int:
         result = run_probe(p)
         _print_result(result)
         failures += 0 if result.ok else 1
+    _print_todo_summary(names)
     if failures:
         print(f"wreath-complexity-probe: {failures} contract failure(s)", file=sys.stderr)
         return 1
@@ -1631,6 +2122,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="probe names to run (default: all)")
     parser.add_argument("--list", action="store_true", dest="list_probes",
                         help="list registered probes and exit")
+    parser.add_argument("--todos", action="store_true",
+                        help="list probes marked as recorded defects and exit")
     parser.add_argument("--sizes", type=str, default=None,
                         help="comma-separated size override for every probe")
     parser.add_argument("--repeats", type=int, default=None,
@@ -1647,8 +2140,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--check and --update-baseline are exclusive")
     if options.list_probes:
         for p in _REGISTRY.values():
-            print(f"{p.name:<34} {p.group:<12} at most {_classify(p.expect):<7} "
+            bound = ("PINNED " if p.todo else "at most") + f" {_classify(p.expect):<7}"
+            print(f"{p.name:<34} {p.group:<12} {bound} "
                   f"{p.axis}: {p.assumption}")
+        return 0
+    if options.todos:
+        _print_todo_summary(list(_REGISTRY))
         return 0
 
     if options.probes and options.group:

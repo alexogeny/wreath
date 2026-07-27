@@ -207,10 +207,19 @@ CONST_TABLE_FROMSTRING = re.compile(
 # Functions where a one-off import is fine: module setup, not a per-item path.
 # Matched on underscore-separated tokens -- `\binit\b` never fires inside
 # `wreath_pg_codec_init`, because `_` is a word character.
+#
+# `static` is here for `build_static_table`/`free_static_table` -- the HPACK
+# constant-header cache, built once for the life of the process and already
+# carrying `native-lint: allow NC007` waivers saying so. The obvious token to add
+# was `build`, and it is wrong: it would also excuse `wreath_build_header_map`,
+# `wreath_ws_build_frame`, `build_match`, `brt_group_build`, `dnode_build` and
+# thirteen more, several of which run per request. `static` matches exactly the
+# two functions that operate on a static table. A token that excuses a hot path
+# costs more than the finding it silences.
 INIT_TOKENS = frozenset(
     {
         "init", "ready", "setup", "module", "exec", "new", "main", "register",
-        "fini", "make", "create", "type", "types", "import",
+        "fini", "make", "create", "type", "types", "import", "static",
     }
 )
 

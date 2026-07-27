@@ -97,8 +97,21 @@ class PostgresSessionStore:
             ),
         )
 
+    def component(self) -> Any:
+        """This store's claim on the wreath schema.
+
+        The session table is **unqualified** -- `wreath_session`, resolved
+        through `search_path` -- and it stays that way. Moving it into the
+        `wreath` schema is not additive: a worker still on the previous version
+        looks for the unqualified name and would not find it, which is precisely
+        what the additive rule exists to prevent. So the component is registered
+        where the rows actually are, and a move is a later, staged concern.
+        """
+        return self._store.component(name="session")
+
     def schema_sql(self) -> str:
-        """DDL for the backing table. Apply it as a migration."""
+        """DDL for the backing table, semicolon-joined. A derivation of
+        `component()`."""
         return self._store.schema_sql()
 
     async def load(self, sid: str) -> dict[str, Any] | None:

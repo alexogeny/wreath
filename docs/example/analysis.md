@@ -117,29 +117,54 @@ with its own cache; repeating forty names inside every chart response would be
 the same rows travelling twice, and a client that has read `/species` once holds
 the labels already.
 
-## What this stage does not do yet
+## The card that comes back late
 
-The design for this stage is the late-SD-card story: a card collected on the 20th
-carries images from the 1st, so a bucket that looked finished acquires rows weeks
-later. Sealing plus corrections is how that is meant to be *reported* rather than
-discovered in a spreadsheet three weeks on.
+A card collected on the 20th carries images from the 1st, so a bucket that looked
+finished acquires rows weeks later. Sealing plus corrections is how that is
+*reported* rather than discovered in a spreadsheet three weeks on.
 
-**That story is blocked on a driver defect, and the example says so rather than
-telling a smaller story as though it were the whole one.**
-`wreath._series.settle.insert_settled` binds a bucket's measures as a Python
-`dict` into a `jsonb` parameter. The driver infers a parameter's type from the
-value it is given and has no `dict` case, so the first bucket that seals raises
-`TypeError: unsupported PostgreSQL value type: dict` on the write. No sealed
-series has ever stored a bucket against a real PostgreSQL.
+Past its lateness allowance a day stops being a question and becomes an answer:
+the value is stored, and the next read comes from storage rather than from the
+rows it was computed from. `camera_trap.views` declares that as
 
-`test_sealing_is_blocked_on_a_driver_defect` pins that. When the driver learns to
-bind a mapping, that test fails — and the failure is the reminder to come back
-and write this section properly.
+```python
+CARD_COLLECTION_LATENESS = "14d"
+```
 
-A second, smaller one is worked around rather than blocked: `avg()` over an
-integer column returns a `decimal.Decimal`, which the JSON encoder cannot
-serialise, so a `Series` carrying an average cannot be returned from a handler
-untouched. `camera_trap.wire.chart_json` rounds it, and explains why the
+— roughly how often somebody walks out to a camera. It is a claim about *this*
+network's field logistics, not a framework default, which is why the example
+states it rather than inheriting one.
+
+When the card finally arrives, the settled number is **not** rewritten. The
+difference is recorded beside it and folded in on read, and the envelope names
+the bucket that carries one — so late data looks like late data arriving rather
+than like a number that changed on its own while nobody was watching.
+
+**Sealing takes the zone into the declaration, and that is the design showing
+through rather than an inconsistency.** `station_activity` is a constant that
+takes its zone per request, because a day is only a day once you say whose.
+`sealed_activity(timezone)` is a *function*, because a materialised Nairobi day
+cannot be re-cut into an Adelaide day afterwards: the zone a bucket was settled
+in is part of what that bucket is. A deployment spanning timezones therefore
+declares one sealed view per zone. That costs nothing — the stored zone is part
+of the view's identity, so the two sets of rows cannot collide — but it has to be
+a choice the application makes rather than a default it inherits.
+
+`sealed_activity` measures only `sightings`. Sealing an *average* would fail on
+the write for the reason below, and a settled row is stored rather than rendered,
+so there is no edge to round at. Sealing the count and recomputing the confidence
+is the honest split until the encoder learns `Decimal`.
+
+`test_a_card_pulled_late_records_a_correction` drives exactly that against a
+seeded database: seal a day, insert a sighting for it a year later, reconcile,
+and read the corrected total back.
+
+## One defect worked around
+
+`avg()` over an integer column returns a `decimal.Decimal`, which the JSON
+encoder cannot serialise, so a `Series` carrying an average cannot be returned
+from a handler untouched. `camera_trap.wire.chart_json` rounds it, and explains
+why the
 conversion is forced and why it belongs in an application's wire layer rather
 than in a framework-wide rule — a percentage wants rounding, a money column
 would want the `Decimal` kept.
@@ -155,4 +180,5 @@ bucket serialises cleanly and the defect stays invisible.
   authorization rules they inherit.
 - [Ingest](ingest.md) — where the late data comes from.
 - [Calculated views](../guides/calculated-views.md) — the full `Series` and
-  `Aggregate` surface, including the sealing this page cannot yet demonstrate.
+  `Aggregate` surface — sealing's full vocabulary, rollup tiers, and the
+  `on_late="reopen"` alternative this page does not use.

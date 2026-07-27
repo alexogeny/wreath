@@ -81,6 +81,36 @@ FICTIONS = [
 ]
 
 
+#: What each fiction depends on *staying absent* from the live API. The source
+#: above is frozen, but three of these cases are fictions only because the
+#: attribute does not exist -- add `Pool.fetchval` and `pool-fetchval` keeps
+#: passing while proving nothing, exactly the way the `page_params` case rotted
+#: when the defect it pointed at was fixed. A frozen specimen is not enough on
+#: its own when the specimen's *falseness* is a property of live code.
+ABSENT_BY_ASSUMPTION = [
+    ("wreath.postgres", "Pool", "fetchval"),
+    ("wreath.postgres", "Database", "ping"),
+]
+
+
+@pytest.mark.parametrize(("module", "cls", "attribute"), ABSENT_BY_ASSUMPTION)
+def test_the_fictions_are_still_fictions(module: str, cls: str, attribute: str) -> None:
+    """The absence each specimen relies on is asserted, not assumed.
+
+    If wreath ever grows one of these, this fails first and names it -- rather
+    than the corresponding case in `FICTIONS` quietly becoming a test that the
+    floor accepts correct code.
+    """
+    import importlib
+
+    owner = getattr(importlib.import_module(module), cls)
+    assert not hasattr(owner, attribute), (
+        f"{cls}.{attribute} now exists, so the {cls.lower()}-{attribute} case in "
+        "FICTIONS is no longer a fiction and proves nothing. Replace it with a "
+        "spelling that is still wrong, or drop it."
+    )
+
+
 @pytest.mark.parametrize(("source", "expected"), FICTIONS)
 def test_the_floor_catches_every_fiction_that_shipped(source: str, expected: str) -> None:
     found = messages(page(source))

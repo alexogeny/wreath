@@ -297,10 +297,18 @@ async def test_a_card_pulled_late_records_a_correction() -> None:
         for part in schema_sql().split(";\n"):
             if part.strip():
                 await connection.execute(part.strip())
-        station = await connection.fetchval(
-            f'SELECT station_id FROM "{SCHEMA}"."sightings" '
-            "GROUP BY station_id ORDER BY count(*) DESC LIMIT 1"
+        # Station and day are read out of the data, not written in. The seed is
+        # sparse per station -- the busiest local day at the busiest station has
+        # a handful of sightings -- so a hard-coded date makes this fail for a
+        # reason that has nothing to do with sealing the day the seed shifts.
+        busiest = await connection.fetch(
+            f'SELECT station_id, date_trunc(\'day\', captured_at AT TIME ZONE $1) '
+            f'FROM "{SCHEMA}"."sightings" GROUP BY 1, 2 '
+            "ORDER BY count(*) DESC, 1, 2 LIMIT 1",
+            ZONE,
         )
+        assert busiest, "the seed produced no sightings; the fixture is wrong"
+        station, local_midnight = busiest[0]
     finally:
         await connection.close()
 
@@ -312,11 +320,38 @@ async def test_a_card_pulled_late_records_a_correction() -> None:
         )
         view = sealed_activity(ZONE)
 
-        # A local day well inside the seed, and a `now` a year later so the
-        # fortnight of lateness has long since elapsed.
-        day = datetime.datetime(2025, 6, 2, tzinfo=tz(ZONE))
+        # `local_midnight` comes back naive -- it is a wall clock, which is what
+        # a bucket boundary is -- so the zone is attached here rather than
+        # assumed. `now` is past the end of the seed, so the fortnight of
+        # lateness has elapsed for every day in it.
+        day = local_midnight.replace(tzinfo=tz(ZONE))
         window = Range(day, day + datetime.timedelta(days=1))
-        now = datetime.datetime(2026, 6, 2, tzinfo=datetime.UTC)
+        now = datetime.datetime(2027, 1, 1, tzinfo=datetime.UTC)
+
+        # Settled rows outlive the example's schema: they live in wreath's own
+        # `wreath` schema, which `drop_schema` correctly does not touch. A
+        # previous run of this test therefore leaves a settled bucket and a
+        # correction behind, and the first read below would fold them in and
+        # measure the wrong thing. Cleared by this view's own identity so a
+        # sibling suite's settled rows are left alone.
+        #
+        # That identity is *schema-blind*: `view_key` digests the model's module
+        # and qualname, not the schema it resolves to, so two deployments of this
+        # application against different schemas file their settled rows under the
+        # same key. This test is safe because xdist gives one test to one worker,
+        # but a second example test sealing the same view would collide with it.
+        # Tracked with the `wreath`-schema design; do not add one until it lands.
+        view_id, params_id = view._identity(ZONE, {"station": station})
+        connection = await database.acquire("write")
+        try:
+            for table in ("series_buckets", "series_corrections"):
+                await connection.execute(
+                    f'DELETE FROM "wreath"."{table}" WHERE view = $1 AND params = $2',
+                    view_id,
+                    params_id,
+                )
+        finally:
+            await database.release("write", connection)
 
         first = await view.run(session, range=window, now=now, station=station)
         settled = first.series[0].values[0]
@@ -329,9 +364,10 @@ async def test_a_card_pulled_late_records_a_correction() -> None:
         try:
             await connection.execute(
                 f'INSERT INTO "{SCHEMA}"."sightings" '
-                "(station_id, camera_id, species_id, captured_at, uploaded_at, "
+                "(id, station_id, camera_id, species_id, captured_at, uploaded_at, "
                 " confidence, image_key, review_state, tags) "
-                "SELECT station_id, camera_id, species_id, captured_at, now(), "
+                f'SELECT (SELECT max(id) + 1 FROM "{SCHEMA}"."sightings"), '
+                " station_id, camera_id, species_id, captured_at, now(), "
                 " confidence, image_key || '-late', review_state, tags "
                 f'FROM "{SCHEMA}"."sightings" '
                 "WHERE station_id = $1 AND captured_at >= $2 AND captured_at < $3 "

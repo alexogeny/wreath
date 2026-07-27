@@ -275,19 +275,40 @@ def bench(argv: list[str] | None = None) -> int:
                              "print a plan and refuse unless --quiet-apply is given.")
     parser.add_argument("--quiet-apply", action="store_true",
                         help="actually apply --quiet (without this, tiers 1 and 2 dry-run)")
+    parser.add_argument("--allow-competing", action="store_true",
+                        help="benchmark even though other tests, agents or load "
+                             "generators are running (the result measures them too)")
     args, forwarded = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
+
+    # The competing-workload check runs at every tier, including 0, because it
+    # guards the *measurement* rather than the machine: tier 0 changes nothing,
+    # and a number taken beside four agents is still worthless.
+    from . import quiet as _quiet
+
+    if not args.allow_competing:
+        competing = _quiet.competing_workloads()
+        if competing:
+            print(f"wreath-bench: REFUSED -- {len(competing)} competing workload(s) "
+                  "would be measured alongside the benchmark:")
+            for workload in competing[:12]:
+                print(f"    pid {workload.pid:>7}  {workload.why}")
+                print(f"              {workload.command}")
+            if len(competing) > 12:
+                print(f"    ... and {len(competing) - 12} more")
+            print("  Stop them, or pass --allow-competing and label the result.")
+            return 2
 
     quiet_journal = None
     if args.quiet >= 1:
-        from . import quiet as _quiet
-
         if not args.quiet_apply:
             _quiet._print_plan(_quiet.plan(args.quiet), args.quiet)
             print("\nwreath-bench: dry run -- nothing was changed and no benchmark ran. "
                   "Add --quiet-apply to proceed.")
             return 0
         try:
-            quiet_journal = _quiet.apply(args.quiet)
+            quiet_journal = _quiet.apply(
+                args.quiet, allow_competing=args.allow_competing
+            )
         except _quiet.QuietRefused as error:
             print(f"wreath-bench: REFUSED to quiet the machine -- {error}")
             return 2

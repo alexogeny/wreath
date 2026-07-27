@@ -453,7 +453,44 @@ def build_parser() -> argparse.ArgumentParser:
     _add_capture_parser(commands)
     _add_replay_parser(commands)
     _add_passes_parser(commands)
+    _add_schema_parser(commands)
     return parser
+
+
+def _add_schema_parser(commands: Any) -> None:
+    """`wreath schema sql` / `check` -- the DBA path, made first-class.
+
+    A deployment whose application role cannot `CREATE SCHEMA` is common and
+    supported rather than an error. `sql` emits exactly what wreath would have
+    applied, for a DBA to run; `check` reads the catalog and reports what is
+    missing. Both exist so "apply this by hand" is a command rather than a
+    paragraph in a guide.
+    """
+    schema_parser = commands.add_parser(
+        "schema", help="wreath's own tables: emit their DDL, or check they exist"
+    )
+    actions = schema_parser.add_subparsers(dest="schema_action", required=True)
+
+    emit = actions.add_parser(
+        "sql", help="print the DDL for wreath's own tables, for a DBA to apply"
+    )
+    emit.add_argument("target", help="application target as module:attribute")
+    emit.add_argument("--factory", action="store_true")
+    emit.add_argument(
+        "--component", default=None,
+        help="one component by name (default: every registered one)",
+    )
+    emit.add_argument(
+        "--from-version", type=int, default=0, dest="from_version",
+        help="emit only the steps a database at this version still needs",
+    )
+
+    check = actions.add_parser(
+        "check", help="report each component's version and any missing relation"
+    )
+    check.add_argument("target", help="application target as module:attribute")
+    check.add_argument("--factory", action="store_true")
+    check.add_argument("--json", action="store_true", dest="as_json")
 
 
 def _add_passes_parser(commands: Any) -> None:
@@ -1077,6 +1114,65 @@ def execute_typegen(namespace: argparse.Namespace) -> int:
     except TypegenCliError as error:
         print(f"wreath typegen: error: {error}", file=sys.stderr)
         return error.exit_code
+
+
+def execute_schema(namespace: argparse.Namespace) -> int:
+    """Emit the DDL for wreath's own tables, or check the catalog against it."""
+    import asyncio
+    import json as _json
+
+    # `load_application` is typed as an ASGI callable; the schema surface lives
+    # on `Wreath`, and the same widening `_pass_ledgers` uses applies here.
+    application: Any = load_application(namespace.target, factory=namespace.factory)
+    components = application.schema_components()
+    if not components:
+        raise CliError(
+            "this application registers no subsystem that owns tables, so wreath "
+            "has no schema to emit or check",
+            exit_code=2,
+        )
+
+    if namespace.schema_action == "sql":
+        from .schema import emit_sql
+
+        if namespace.component is not None:
+            components = tuple(c for c in components if c.name == namespace.component)
+            if not components:
+                known = ", ".join(sorted(c.name for c in application.schema_components()))
+                raise CliError(
+                    f"no component named {namespace.component!r}; "
+                    f"this application registers: {known}",
+                    exit_code=2,
+                )
+        print(emit_sql(components, from_version=namespace.from_version), end="")
+        return 0
+
+    from .schema import inspect_components
+
+    databases = application._components_by_database(components)
+
+    async def _run() -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for database, claims in databases.items():
+            await database.start()
+            try:
+                rows += await inspect_components(database, claims)
+            finally:
+                await database.stop()
+        return rows
+
+    reports = asyncio.run(_run())
+    if namespace.as_json:
+        print(_json.dumps({"components": reports}, indent=2))
+    else:
+        for row in reports:
+            state = "ok" if not row["missing"] else "MISSING " + ", ".join(row["missing"])
+            print(
+                f"{row['component']:16} recorded={row['recorded']:<4} "
+                f"expected={row['expected']:<4} {state}"
+            )
+    # Non-zero when the catalog disagrees, so this can gate a deploy.
+    return 1 if any(r["missing"] or r["recorded"] != r["expected"] for r in reports) else 0
 
 
 def execute_passes(namespace: argparse.Namespace) -> int:
@@ -1718,6 +1814,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if namespace.command == "passes":
             try:
                 return execute_passes(namespace)
+            except (OSError, KeyError, ValueError) as error:
+                raise CliError(str(error), exit_code=2) from error
+        if namespace.command == "schema":
+            try:
+                return execute_schema(namespace)
             except (OSError, KeyError, ValueError) as error:
                 raise CliError(str(error), exit_code=2) from error
         if namespace.command == "migrations":

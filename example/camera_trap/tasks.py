@@ -46,47 +46,24 @@ INGEST_CARD = "ingest_card"
 #: up the first one's jobs.
 QUEUE = "ingest"
 
-#: The tables `queue_schema_sql` creates, for anyone who needs to tell the
-#: application's own tables from its queue's.
+#: The tables the runner owns, for anyone who needs to tell the application's
+#: own tables from its queue's.
 #:
 #: **The table is `jobs`, not `ingest_jobs`** — `JobRunner` names it from the
 #: schema and not from the queue name, so two runners sharing a schema share a
-#: table. That is fine here (there is one runner) and it is the reason the
-#: queue gets the application's schema rather than the `wreath` default: a
-#: second copy of this example on the same database would otherwise pick up the
-#: first one's jobs.
+#: table. Rows carry a `queue` column and the indexes are `(queue, run_at)` and
+#: `(queue, dedup_key)`, so sharing is by design rather than by accident. It is
+#: still the reason the queue gets the application's schema rather than the
+#: `wreath` default: a second copy of this example on the same database would
+#: otherwise pick up the first one's jobs.
+#:
+#: **Nobody applies this DDL by hand any more.** `app.jobs(...)` registers the
+#: runner as a schema component, and wreath creates its tables during lifespan
+#: startup before any handler runs — see `wreath.schema`. The example used to
+#: export a `queue_schema_sql` so the quickstart, the seeder and the test
+#: fixtures could apply the same statements; that join is the framework's job
+#: now, and `wreath schema sql` prints it for a DBA who needs it.
 QUEUE_TABLES = ("jobs",)
-
-
-def queue_schema_sql(schema: str) -> str:
-    """The durable-queue DDL, for whoever is building the database.
-
-    **This is not in `example/migrations/`, and that is a real seam rather than
-    an oversight.** `wreath migrations generate` derives its artifact from the
-    ORM models, and the job queue is not an ORM model — it is infrastructure
-    the runner owns and describes with `JobRunner.schema_sql()`. So a database
-    built purely from the migration artifact has every table the application
-    declares and none of the tables its runner needs, and the failure arrives
-    at the first `launch` as `relation "…jobs" does not exist`.
-
-    Ten subsystems in wreath produce a `schema_sql()` the migration system does
-    not consume. Until that is settled, an application carries the join itself,
-    which is what this function is: one name for the DDL so the quickstart, the
-    seeder and the test fixtures apply the same thing.
-
-    Args:
-        schema: the namespace the queue tables are created in.
-
-    Returns:
-        `CREATE TABLE IF NOT EXISTS` statements, semicolon-separated.
-    """
-    from wreath.jobs import JobRunner
-
-    # A runner built only to be asked what its tables look like. `schema_sql`
-    # reads the name and the schema and touches no database, so the argument is
-    # never used -- but passing `None` for it is a claim about the internals,
-    # so the real object is constructed and thrown away instead.
-    return JobRunner(None, name=QUEUE, schema=schema).schema_sql()
 
 
 class IngestRefused(Exception):

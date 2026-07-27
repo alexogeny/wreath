@@ -18,6 +18,103 @@ different template engine, an ORM that lacks a feature, a WSGI adapter in the
 path — the report says so, rather than letting a green cell imply more than it
 should.
 
+## Quieting the machine first (`--quiet`, Linux only)
+
+A desktop is a hostile place to measure. `wreath-bench --quiet=TIER` removes the
+noise in tiers, and **the tier you want is the lowest one that gets the spread
+you need** — which is a measurement, not a preference. `wreath-bench-quiet
+--measure-noise` reports the machine's current A/A spread so you can decide with
+evidence.
+
+| Tier | Needs | What it does |
+| --- | --- | --- |
+| **0** (default) | nothing | Whole-physical-core split between server and generator, niceness, ASLR off for the children. |
+| **1** | root | CPU governor to `performance`, turbo off, transparent huge pages to `madvise`, `perf_event_paranoid`, a *named* list of background services stopped, *named* heavy applications frozen, and running containers paused. |
+| **2** | root, opt-in | Also freezes every *other* transient application scope, named or not. |
+
+Tier 1 carries the named lists and tier 2 carries the sweep. That split is what
+lets an operator audit the plan before granting root: a browser and an idle
+Postgres container are exactly as noisy as a file indexer, so they belong beside
+the named service list rather than behind a broad freeze that the measurements
+say nobody needs.
+
+### Containers
+
+Running containers are **paused**, not stopped. A paused container burns no CPU,
+unpauses in milliseconds, cannot lose data, and — unlike stopping — does not
+destroy a container started with `--rm`. The plan names the action it is about to
+take, and the `--rm` guard stays on the stop path so selecting
+`WREATH_QUIET_CONTAINER_ACTION=stop` cannot reintroduce that hazard: a container
+whose `--rm` flag is set, *or cannot be determined*, is skipped with its reason
+printed.
+
+### Competing workloads
+
+Before any tier — including tier 0, which changes nothing — the tool looks for
+other test runs, load generators, benchmark invocations, and processes running out
+of this repository or a sibling worktree, and **refuses** if it finds any.
+
+```bash
+wreath-bench-quiet --check-competing    # list them and exit 1, or report idle
+wreath-bench --allow-competing ...      # measure anyway, and label the result
+```
+
+A number taken alongside four agents measures the agents too. Association with
+the repository is decided from `/proc/<pid>/exe` and `/proc/<pid>/cwd`, never
+from a command-line match — a process launched as `.venv/bin/python` from the
+repository root has no absolute path in its command line at all, so a substring
+check reports an idle machine while an agent is running. Idle shells are ignored:
+being *in* the repository is not the same as *working*, and a check that fires on
+every terminal gets overridden by habit.
+
+Measured on a 6-core SMT machine at `powersave`, five runs per arm:
+
+| arrangement | A/A spread |
+| --- | --- |
+| unpinned, all 12 CPUs | 4.43 – 14.46 % |
+| **pinned to one whole core** | **2.70 – 5.46 %** |
+| pinned to one SMT thread | 4.26 – 19.18 % |
+
+Two things fall out of that. Tier 0's whole-core split cuts the worst case by
+roughly 2.6×, so most of the available quiet is free. And pinning to a single
+SMT *thread* is **worse than not pinning at all** — the sibling thread stays
+available to everything else on the machine, so the benchmark ends up sharing a
+core's execution resources with whatever is running. Disjoint *logical CPUs* is
+not the property you want; disjoint *physical cores* is.
+
+### Safety
+
+Tier 2 suspends processes rather than killing them, so a thaw restores the
+desktop exactly as it was. Three properties make it safe to run on a machine you
+are sitting in front of:
+
+* **The restorer is armed before the first change.** A detached systemd timer
+  restores everything after a deadline whether or not the benchmark survives.
+  `--quiet` *refuses to change anything* if that timer cannot be armed and
+  verified — a change the tool cannot guarantee to undo is one it will not make.
+* **The benchmark's own ancestry is exempt.** On GNOME the benchmark runs inside
+  the terminal's own `app.slice`, so a naive "freeze the user session" takes the
+  operator's shell with it. Every ancestor cgroup is excluded by walking up from
+  `/proc/self/cgroup`.
+* **Session infrastructure is excluded too**, which ancestry alone does not
+  cover: the terminal survives a frozen `dbus.socket` for exactly as long as it
+  takes to make its next D-Bus call. Only transient *application* scopes are
+  ever frozen, never services, sockets, the session manager, the keyring, or the
+  ssh-agent.
+
+Tiers 1 and 2 **dry-run by default**: they print every change with its current
+value and the shell command that would make it, and do nothing. Add
+`--quiet-apply` once you have read the plan.
+
+```bash
+wreath-bench --quiet=1                  # print the plan, change nothing
+wreath-bench --quiet=1 --quiet-apply    # apply it, benchmark, restore
+wreath-bench-quiet --restore            # undo, from any shell, after a crash
+```
+
+Every change is journalled to `/tmp/wreath-quiet.json` before it is applied, so
+`--restore` works from a fresh shell. A reboot restores all of it anyway.
+
 ## Development comparison
 
 The canonical command is **`uv run wreath-bench`**. With no arguments it pins the

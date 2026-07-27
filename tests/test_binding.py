@@ -445,3 +445,10 @@ async def test_the_real_422_path_keeps_every_field_error() -> None:
     # exactly what `validation_error_response()` threw away.
     assert body["errors"][0]["loc"] == ["query", "limit"]
     assert body["errors"][0]["type"] == "int"
+    # And *both* bad parameters are reported, not just the first. Scalar
+    # binding is fail-complete, like the body validator -- this assertion is
+    # what pins that, and it read `>= 1` before the two paths agreed.
+    assert [error["loc"] for error in body["errors"]] == [
+        ["query", "limit"],
+        ["query", "offset"],
+    ]

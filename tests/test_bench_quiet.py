@@ -9,12 +9,12 @@ against synthetic cgroup trees under `tmp_path`.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from wreath._devtools import quiet
-
 
 # --- the ancestry exemption, which is the property that matters most ---------
 
@@ -218,7 +218,7 @@ def test_apply_refuses_when_the_watchdog_cannot_be_armed(
     monkeypatch.setattr(quiet, "arm_watchdog", lambda *a, **k: "")
     journal = tmp_path / "journal.json"
     with pytest.raises(quiet.QuietRefused, match="watchdog"):
-        quiet.apply(1, journal_path=journal)
+        quiet.apply(1, journal_path=journal, allow_competing=True)
     assert not journal.exists(), "a journal was written before the refusal"
 
 
@@ -229,13 +229,13 @@ def test_apply_refuses_when_the_armed_watchdog_is_not_active(
     monkeypatch.setattr(quiet, "arm_watchdog", lambda *a, **k: "phantom-unit")
     monkeypatch.setattr(quiet, "watchdog_armed", lambda *a, **k: False)
     with pytest.raises(quiet.QuietRefused, match="does not report it active"):
-        quiet.apply(1, journal_path=tmp_path / "journal.json")
+        quiet.apply(1, journal_path=tmp_path / "journal.json", allow_competing=True)
 
 
 def test_tier_zero_needs_no_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tier 0 changes nothing that needs undoing, so it must not demand one."""
     monkeypatch.setattr(quiet, "arm_watchdog", lambda *a, **k: "")
-    journal = quiet.apply(0)
+    journal = quiet.apply(0, allow_competing=True)
     assert journal.changes == []
 
 
@@ -267,3 +267,230 @@ def test_the_service_list_is_named_not_inferred() -> None:
     assert quiet.NOISY_SERVICES, "the service list is empty"
     for service in quiet.NOISY_SERVICES:
         assert service.endswith((".service", ".timer"))
+
+
+# --- named applications -----------------------------------------------------
+
+
+def test_no_named_application_can_match_session_infrastructure() -> None:
+    """`HEAVY_APPS` must not be able to reach anything `_NEVER_FREEZE` bans.
+
+    The two lists are matched against the same scope names, so an entry like
+    "dbus" in the app list would collide with the denylist and the outcome would
+    depend on which check ran first. Keeping them provably disjoint means a
+    careless addition to the app list cannot take out the desktop even if the
+    ordering is later changed.
+    """
+    for app in quiet.HEAVY_APPS:
+        for banned in _MUST_NEVER_FREEZE:
+            assert banned not in app and app not in banned, (
+                f"named app {app!r} overlaps banned infrastructure {banned!r}"
+            )
+
+
+def test_named_app_targets_are_a_subset_of_freezable_targets() -> None:
+    """Named targeting must inherit every safety filter, not re-derive them.
+
+    `named_app_targets` is a filter over `freezable_targets`, so the ancestry
+    exemption and the denylist apply unchanged.
+
+    The subset assertion alone is **not enough**, and finding that out is why
+    this test has two halves. A mutation that made `named_app_targets` walk the
+    whole cgroup tree itself still satisfied the subset on this machine, purely
+    because the paths it found happened to coincide -- a machine with a banned
+    scope under a different parent would have been silently unprotected. So the
+    delegation itself is asserted, not just its observable result on whatever
+    machine the suite happens to run on.
+    """
+    named = set(quiet.named_app_targets())
+    every = set(quiet.freezable_targets())
+    assert named <= every, f"named targeting escaped the safety filter: {named - every}"
+
+    source = Path(quiet.__file__).read_text()
+    body = source.split("def named_app_targets")[1].split("\ndef ")[0]
+    assert "freezable_targets(pid)" in body, (
+        "named_app_targets no longer delegates to freezable_targets; the ancestry "
+        "exemption and _NEVER_FREEZE denylist are no longer guaranteed to apply"
+    )
+    assert "_CGROUP_ROOT" not in body, (
+        "named_app_targets walks the cgroup tree itself, which is a second place "
+        "for the safety filters to be got wrong"
+    )
+
+
+def test_a_named_app_is_frozen_at_tier_one_not_only_at_tier_two() -> None:
+    """The measured advice is to stop at tier 1, so tier 1 must cover browsers.
+
+    Before this, `--quiet=1` left a browser running -- the noisiest thing on a
+    developer desktop -- because freezing lived only in the tier nobody was
+    told to use.
+    """
+    if not quiet.named_app_targets():  # pragma: no cover - no heavy app running
+        pytest.skip("no named application is running on this machine")
+    tiers = {step.tier for step in quiet.plan(1) if "freeze application" in step.description}
+    assert tiers == {1}, "named applications are not frozen at tier 1"
+
+
+def test_tier_two_does_not_refreeze_what_tier_one_named() -> None:
+    """A cgroup journalled twice would be thawed twice, and read as two changes."""
+    targets = [
+        step.change.target
+        for step in quiet.plan(2)
+        if step.change is not None and step.change.kind == "freeze"
+    ]
+    assert len(targets) == len(set(targets)), "a cgroup appears twice in the plan"
+
+
+# --- containers -------------------------------------------------------------
+
+
+def _container(name: str, *, auto: bool = False, unknown: bool = False) -> quiet.Container:
+    return quiet.Container("docker", f"id-{name}", name, "img", auto, unknown)
+
+
+def test_an_auto_remove_container_is_destructive_to_stop() -> None:
+    """`--rm` means stopping DELETES it, which is data loss, not a quiet-down."""
+    assert _container("rm", auto=True).destructive_to_stop
+    assert not _container("keep").destructive_to_stop
+
+
+def test_an_undeterminable_container_is_assumed_destructive() -> None:
+    """When the inspect fails, the safe answer is to leave the container alone.
+
+    Defaulting the other way means one flaky `docker inspect` is enough to
+    delete somebody's database.
+    """
+    assert _container("mystery", unknown=True).destructive_to_stop
+
+
+def test_the_stop_path_skips_a_container_it_would_destroy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `--rm` guard lives on the stop path and is proved there, not assumed."""
+    monkeypatch.setattr(quiet, "CONTAINER_ACTION", "stop")
+    monkeypatch.setattr(
+        quiet,
+        "running_containers",
+        lambda **_: (_container("doomed", auto=True), _container("safe")),
+    )
+    steps = quiet._container_steps()
+    doomed = [s for s in steps if "doomed" in s.description]
+    safe = [s for s in steps if "safe" in s.description]
+    assert doomed and doomed[0].change is None, "a --rm container was scheduled for stop"
+    assert "DESTROYS" in doomed[0].description
+    assert safe and safe[0].change is not None, "a safe container was not stopped"
+
+
+def test_the_default_action_never_destroys_a_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pause is the default *because* it makes the `--rm` hazard unreachable."""
+    monkeypatch.setattr(quiet, "CONTAINER_ACTION", "pause")
+    monkeypatch.setattr(
+        quiet, "running_containers", lambda **_: (_container("rm-one", auto=True),)
+    )
+    changes = [s.change for s in quiet._container_steps() if s.change is not None]
+    assert len(changes) == 1, "pause skipped a container it did not need to skip"
+    assert changes[0].kind == "container-pause"
+
+
+def test_a_paused_container_is_unpaused_and_a_stopped_one_started(
+    tmp_path: Path,
+) -> None:
+    """Each container action has its own inverse; using one for both wedges it."""
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_: object) -> object:
+        calls.append(command)
+        return type("R", (), {"returncode": 0, "stdout": ""})()
+
+    journal = tmp_path / "journal.json"
+    quiet.Journal(
+        changes=[
+            quiet.Change("container-pause", "docker\tabc\tpaused-one", "running", "pause"),
+            quiet.Change("container-stop", "docker\tdef\tstopped-one", "running", "stop"),
+        ]
+    ).write(journal)
+    quiet.restore(journal, run=fake_run)
+    assert ["docker", "start", "def"] in calls
+    assert ["docker", "unpause", "abc"] in calls
+
+
+def test_a_container_change_carries_its_name_for_a_human(tmp_path: Path) -> None:
+    """A bare hex id in a journal tells an operator nothing at 3am."""
+    monkey = quiet.Change("container-pause", "docker\tdeadbeef\twreath-test-pg", "running",
+                          "pause")
+    path = tmp_path / "journal.json"
+    quiet.Journal(changes=[monkey]).write(path)
+    assert "wreath-test-pg" in path.read_text()
+
+
+# --- competing workloads ----------------------------------------------------
+
+
+def test_the_competing_check_never_finds_itself() -> None:
+    """A check that always fires gets overridden by habit, and then it is not one.
+
+    This process is a Python interpreter running out of this repository, which
+    is exactly the pattern the check looks for. Excluding the caller's whole
+    ancestry is what stops it reporting the benchmark as its own competitor.
+    """
+    own = quiet._own_process_tree()
+    assert os.getpid() in own, "the checker does not exempt itself"
+    for workload in quiet.competing_workloads():
+        assert workload.pid not in own, f"pid {workload.pid} is our own ancestry"
+
+
+def test_an_idle_shell_in_the_repository_is_not_a_competing_workload() -> None:
+    """Being *in* the repo is not the same as *working*.
+
+    The first version matched any process whose cwd was the repository, which
+    caught every idle shell and pipeline member. Reporting those trains the
+    operator to pass `--allow-competing` reflexively.
+    """
+    assert not quiet._is_workload("/usr/bin/bash")
+    assert not quiet._is_workload("/usr/bin/head")
+    assert not quiet._is_workload("/usr/bin/less")
+    assert quiet._is_workload("/home/alex/private/neo/.venv/bin/python")
+    assert quiet._is_workload("/usr/bin/python3.14")
+    assert quiet._is_workload("/usr/bin/cc1")
+
+
+def test_the_competing_check_reads_proc_not_the_command_line() -> None:
+    """Association with the repo comes from `exe`/`cwd`, never a cmdline match.
+
+    A process launched as `.venv/bin/python` from the repository root has no
+    absolute path in its command line at all, so a substring match reports an
+    idle machine while an agent is running -- the exact failure the check exists
+    to prevent. This pins the resolution to `/proc`.
+    """
+    source = Path(quiet.__file__).read_text()
+    body = source.split("def competing_workloads")[1].split("\ndef ")[0]
+    assert "_proc_link(entry, \"exe\")" in body
+    assert "_proc_link(entry, \"cwd\")" in body
+
+
+def test_apply_refuses_while_another_workload_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The measurement is guarded as well as the machine, at every tier."""
+    monkeypatch.setattr(
+        quiet,
+        "competing_workloads",
+        lambda **_: (quiet.Workload(4242, "pytest -x", "a test run"),),
+    )
+    with pytest.raises(quiet.QuietRefused, match="competing workload"):
+        quiet.apply(0, journal_path=tmp_path / "journal.json")
+
+
+def test_the_competing_refusal_can_be_overridden_deliberately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An override must exist, or the check blocks a legitimate measurement."""
+    monkeypatch.setattr(
+        quiet,
+        "competing_workloads",
+        lambda **_: (quiet.Workload(4242, "pytest -x", "a test run"),),
+    )
+    journal = quiet.apply(0, journal_path=tmp_path / "j.json", allow_competing=True)
+    assert journal.changes == []

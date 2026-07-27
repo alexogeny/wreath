@@ -208,12 +208,21 @@ wreath_http_parse_request_parts(
             }
             name = header_name_object(lowered, name_len);
         } else {
-            name = PyBytes_FromStringAndSize((const char *)name_start, name_len);
+            /* Allocate uninitialised and fill. Copying the source in and
+             * lowercasing in place is only safe while `name_len > 64` holds:
+             * `PyBytes_FromStringAndSize` with a non-NULL source returns the
+             * interpreter's immortal singleton for a length-1 string, and
+             * writing through it corrupts `b"A"` process-wide. That is a live
+             * defect elsewhere in this tree, reached through multipart. Passing
+             * NULL always allocates, so this branch stays correct on its own
+             * terms rather than on the guard above it. */
+            name = PyBytes_FromStringAndSize(NULL, name_len);
             if (name != NULL) {
                 uint8_t *name_buf = (uint8_t *)PyBytes_AS_STRING(name);
                 for (Py_ssize_t i = 0; i < name_len; i++) {
-                    if (name_buf[i] >= 'A' && name_buf[i] <= 'Z')
-                        name_buf[i] += 'a' - 'A';
+                    uint8_t c = name_start[i];
+                    name_buf[i] = (c >= 'A' && c <= 'Z')
+                        ? (uint8_t)(c + ('a' - 'A')) : c;
                 }
             }
         }
@@ -407,12 +416,21 @@ wreath_http_parse_response(PyObject *Py_UNUSED(self), PyObject *arg)
             }
             name = header_name_object(lowered, name_len);
         } else {
-            name = PyBytes_FromStringAndSize((const char *)name_start, name_len);
+            /* Allocate uninitialised and fill. Copying the source in and
+             * lowercasing in place is only safe while `name_len > 64` holds:
+             * `PyBytes_FromStringAndSize` with a non-NULL source returns the
+             * interpreter's immortal singleton for a length-1 string, and
+             * writing through it corrupts `b"A"` process-wide. That is a live
+             * defect elsewhere in this tree, reached through multipart. Passing
+             * NULL always allocates, so this branch stays correct on its own
+             * terms rather than on the guard above it. */
+            name = PyBytes_FromStringAndSize(NULL, name_len);
             if (name != NULL) {
                 uint8_t *name_buf = (uint8_t *)PyBytes_AS_STRING(name);
                 for (Py_ssize_t i = 0; i < name_len; i++) {
-                    if (name_buf[i] >= 'A' && name_buf[i] <= 'Z')
-                        name_buf[i] += 'a' - 'A';
+                    uint8_t c = name_start[i];
+                    name_buf[i] = (c >= 'A' && c <= 'Z')
+                        ? (uint8_t)(c + ('a' - 'A')) : c;
                 }
             }
         }

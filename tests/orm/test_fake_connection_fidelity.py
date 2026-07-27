@@ -100,3 +100,68 @@ async def test_a_scripted_mapping_keeps_its_column_names() -> None:
     assert row["email"] == "a@b.c"
     assert row[0] == 1
     assert not hasattr(row, "values")
+
+
+async def test_a_declared_oid_refuses_a_value_the_driver_would_not_return() -> None:
+    """The guard that would have caught the introspection defect on day one.
+
+    `pg_attribute.attname` is `name`, an OID the driver has no codec for, so a
+    real connection hands back `b"id"` and never `"id"`. Thirteen tests once
+    scripted the `str`, and `validate_schema="error"` -- the framework default
+    -- had never once completed lifespan startup against a real PostgreSQL.
+
+    Declaring the result OIDs is what makes the fake able to know that, and
+    from that moment it enforces it: the expected value comes from the driver's
+    own `_decode_value`, so there is no second table to keep in step.
+    """
+    connection = FakeConnection()
+    sql = "SELECT attname FROM pg_attribute"
+    connection.script("pg_attribute", [{"attname": "id"}])
+    connection.describe(sql, ("attname",), (19,))  # 19 = name
+
+    with pytest.raises(AssertionError, match="Script what the driver returns"):
+        await connection.fetch(sql)
+
+
+async def test_the_driver_shaped_value_is_accepted() -> None:
+    """The other half: the guard must admit what a real connection returns.
+
+    Without this, the refusal above would also pass against a fake that refused
+    everything, which proves nothing about fidelity.
+    """
+    connection = FakeConnection()
+    sql = "SELECT attname FROM pg_attribute"
+    connection.script("pg_attribute", [{"attname": b"id"}])
+    connection.describe(sql, ("attname",), (19,))
+
+    rows = await connection.fetch(sql)
+    assert rows[0]["attname"] == b"id"
+
+
+async def test_an_undeclared_result_is_positional_and_unchecked() -> None:
+    """No `describe()` means the fake was never told the types.
+
+    Enforcing an OID it does not have would be inventing one. The row stays
+    positional-only, which is honest, and the 169 scripted responses that never
+    declare a plan keep working.
+    """
+    connection = FakeConnection()
+    connection.script("users", [[1, "a@b.c"]])
+    rows = await connection.fetch("SELECT id, email FROM users")
+    assert rows[0][0] == 1
+
+
+async def test_the_deliberate_mismatch_opt_out_has_to_be_written() -> None:
+    """`checked=False` is a decision; the default is enforcement.
+
+    A handful of tests describe a plan that disagrees with the model on
+    purpose. That is legitimate, and it has to be said out loud -- a silent
+    exemption is the hole this guard exists to close.
+    """
+    connection = FakeConnection()
+    sql = "SELECT attname FROM pg_attribute"
+    connection.script("pg_attribute", [{"attname": "id"}])
+    connection.describe(sql, ("attname",), (19,), checked=False)
+
+    rows = await connection.fetch(sql)
+    assert rows[0]["attname"] == "id"

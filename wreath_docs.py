@@ -200,6 +200,7 @@ nav = Nav(
         Page("PostgreSQL", "reference/postgres.md"),
         Page("ORM", "reference/orm.md"),
         Page("Migrations", "reference/migrations.md"),
+        Page("Wreath's own schema", "reference/schema.md"),
         Page("Outbound HTTP client", "reference/http_client.md"),
         Page("Webhooks", "reference/webhooks.md"),
         Page("Templates", "reference/templates.md"),

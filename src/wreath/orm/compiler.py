@@ -1277,6 +1277,7 @@ if _core is not None and hasattr(_core, "orm_shape"):
         ValueExpr,
         BinaryExpr,
         InExpr,
+        InSubqueryExpr,
         BooleanExpr,
         UnaryExpr,
         ORMError,
@@ -1294,12 +1295,14 @@ if _core is not None and hasattr(_core, "orm_shape"):
         unkeyable, so catching it either recovers a node the C does not know yet
         or re-raises exactly what the caller would have seen.
 
-        `InSubqueryExpr` is that node today. The cost is one raised-and-caught
-        exception per compile of a query holding a subquery -- paid only by those
-        queries, never on the ordinary path, where the try costs nothing. Teaching
-        `orm_shape.c` the node would remove it; until then this is correct, and
-        correct-and-slower beats a plan cache that cannot tell two subqueries
-        apart.
+        **No shipped node takes this path.** `InSubqueryExpr` used to, at the
+        cost of one raised-and-caught exception per compile of a subquery-bearing
+        query; `orm_shape.c` now keys it directly. The fallback stays because its
+        value is prospective -- it is what lets a node be added to Python without
+        the extension being rebuilt in the same change, and without a stale
+        extension silently keying two different queries the same way. A
+        rebuild-order hazard that degrades to "slower" is worth keeping; the
+        alternative degrades to a wrong plan.
         """
         try:
             return _shape_of_native(registry, select)

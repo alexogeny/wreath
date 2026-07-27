@@ -30,7 +30,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .._native import _core
-from .._webpolicy import origin_matches
+from .._webpolicy import append_vary, origin_matches
 from ..request import Request
 from ..response import ProblemResponse
 
@@ -58,6 +58,20 @@ _TOKEN_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _STATE_TOKEN = "_wreath_csrf_token"
 _STATE_ISSUE = "_wreath_csrf_issue"
+#: Recorded when Fetch Metadata answered a safe request and no token was minted,
+#: so `csrf_token` can still mint one for a caller that asks for it.
+_STATE_MINTER = "_wreath_csrf_minter"
+
+# Bytes, already lowercased: `Request.header` encodes a `str` argument on every
+# call, and this one is on the request path for every request.
+_SEC_FETCH_SITE = b"sec-fetch-site"
+#: The `Sec-Fetch-Site` values that mean "this request did not come from another
+#: site". `same-site` is deliberately absent: it means a *different subdomain*,
+#: which is a different security origin and is precisely what a sibling-subdomain
+#: takeover abuses. Go's `net/http.CrossOriginProtection` draws the line in the
+#: same place, and drawing it anywhere looser would make the header check weaker
+#: than the token check it fronts.
+_TRUSTED_SITES = frozenset({"same-origin", "none"})
 
 
 def _normalize_origin(value: str) -> bytes:
@@ -124,32 +138,60 @@ def csrf_token(request: Request) -> str:
     `x-csrf-token` by default. It is the same value that goes into the cookie,
     which is what makes the pair a double submit.
 
-    A token is prepared for every safe-method request and for every unsafe one
-    that passed validation. It is *not* prepared for a request the `exempt`
-    predicate excused, which never ran validation and has nothing to hand back.
+    A token is prepared for every safe-method request from a client that did not
+    send `Sec-Fetch-Site`, and for every unsafe one that passed the token check.
+    It is *not* prepared for a request the `exempt` predicate excused, which
+    never ran validation and has nothing to hand back.
+
+    When Fetch Metadata answered the request, no token was minted -- that is the
+    whole saving -- so one is minted here, on demand, for the caller that asked.
+    `after` still writes the cookie, because minting sets the same flag the
+    eager path does. A handler that hands tokens to a client therefore behaves
+    exactly as it did before; the cost simply moved to the request that wanted
+    one instead of being paid by every request that did not.
 
     Returns:
         The signed token string, shaped `v1.issued.nonce.mac`.
 
     Raises:
-        RuntimeError: No token was prepared for this request.
+        RuntimeError: No token was prepared for this request, and no middleware
+            was recorded that could mint one -- the middleware is not installed,
+            or the `exempt` predicate excused this request.
     """
 
     token = request.state.get(_STATE_TOKEN)
-    if token is None:
+    if token is not None:
+        return token
+    middleware = request.state.get(_STATE_MINTER)
+    if middleware is None:
         raise RuntimeError("CSRFMiddleware has not prepared a token for this request")
-    return token
+    return middleware._mint_for(request)
 
 
 class CSRFMiddleware:
     """Protect unsafe browser requests with a signed double-submit token.
 
-    Global middleware. `GET`, `HEAD`, and `OPTIONS` are treated as safe and only
-    have a token prepared for them; every other method is validated, including
-    ones a route does not implement.
+    Global middleware. `GET`, `HEAD`, and `OPTIONS` are treated as safe; every
+    other method is checked, including ones a route does not implement.
 
-    Validation is two independent checks, and both must pass. The double submit:
-    the request carries the token in the configured header -- a header, never a
+    **`Sec-Fetch-Site` is consulted first, and settles the request when present.**
+    The browser sets it and the page making the request cannot forge it, so an
+    unsafe request is refused unless the value is `same-origin` or `none`, and a
+    safe one needs no token at all. `same-site` is refused: it means a different
+    subdomain, which is a different security origin, and is what a
+    sibling-subdomain takeover abuses. Go's `net/http.CrossOriginProtection`
+    draws the line in the same place. Browsers have sent this header since 2023
+    and OWASP accepted Fetch Metadata as a complete alternative to tokens in
+    December 2025.
+
+    **The token below is the fallback**, for a client that sent no
+    `Sec-Fetch-Site`: a pre-2023 browser, a proxy that strips it, or a
+    non-browser caller. It is unchanged, and it is why this is a reordering
+    rather than a replacement — a deployment that loses the header falls back to
+    exactly the check it had before, rather than to nothing.
+
+    Token validation is two independent checks, and both must pass. The double
+    submit: the request carries the token in the configured header -- a header, never a
     form field, so a classic HTML form post cannot satisfy it -- and in the cookie,
     the two are byte-equal under a constant-time compare, and the cookie's own
     HMAC signature verifies and is within `max_age`. The origin check: the
@@ -168,6 +210,12 @@ class CSRFMiddleware:
     through `max_age`, on unsafe methods as well as safe ones -- a client that
     only ever POSTs never takes the safe path, and would otherwise watch its
     token expire with nothing to refresh it.
+
+    On a request Fetch Metadata answered, no token is minted until a handler
+    calls `csrf_token`, which mints one then and leaves `after` to write the
+    cookie exactly as it would have. That is where the saving is: minting is
+    paid by the request that wanted a token rather than by every request that
+    did not. `cross_site_refusals` counts what the header check refused.
 
     The cookie is written with `Path=/`, `Max-Age`, `SameSite`, and `Secure`
     when configured. It is deliberately **not** `HttpOnly`, because a script
@@ -222,6 +270,7 @@ class CSRFMiddleware:
         "_trusted_hosts",
         "_trusted_origins",
         "_allow_missing_origin",
+        "cross_site_refusals",
     )
 
     def __init__(
@@ -271,6 +320,13 @@ class CSRFMiddleware:
         #: broken, which otherwise looks exactly like traffic that deserved a
         #: 403 and is indistinguishable from working correctly.
         self.exempt_errors = 0
+        #: Unsafe requests refused because `Sec-Fetch-Site` named another site.
+        #: These are the attacks the token check would otherwise have caught, so
+        #: the count moving is the header check doing its job -- and it staying
+        #: at zero on a browser-facing deployment means the header is not
+        #: arriving, which is worth knowing before the fallback quietly becomes
+        #: the only check running.
+        self.cross_site_refusals = 0
         self._allow_missing_origin = allow_missing_origin
         # The expected origin is built from the `Host` header, which is the
         # client's to set. That is safe only if something validates it, and the
@@ -321,15 +377,52 @@ class CSRFMiddleware:
         # effect of an unrelated flag it never connected to CSRF.
         return self._allow_missing_origin
 
-    async def before(self, request: Request):
-        """Prepare a token on a safe method, or validate one on an unsafe method.
+    def _mint_for(self, request: Request) -> str:
+        """Mint a token for a request Fetch Metadata already answered.
 
-        Returns None to let the request proceed, or a 403 problem+json response
-        when the double-submit or origin check fails. On a safe method it always
-        returns None, having recorded the token -- reused, or freshly minted when
-        the cookie is absent, invalid, or three quarters expired -- for
-        `csrf_token` and for `after` to write out.
+        Only reached through `csrf_token`, on the path where `before` skipped
+        minting. Sets the same state `after` reads, so the cookie is written
+        exactly as it would have been had the token been minted eagerly.
         """
+        token = self._new_token(int(time.time()))
+        request.state.__setattr__(_STATE_TOKEN, token)
+        request.state.__setattr__(_STATE_ISSUE, True)
+        return token
+
+    async def before(self, request: Request):
+        """Answer from `Sec-Fetch-Site` when the browser sent it; else the token.
+
+        Two checks, in cost order, and the cheap one is also the stronger one.
+
+        **`Sec-Fetch-Site`** is set by the browser and cannot be forged by the
+        page making the request, so when it is present it settles the question
+        outright: an unsafe request is refused unless the value is `same-origin`
+        or `none`, and a safe one needs no token at all. Every browser has sent
+        it since 2023, and OWASP accepted Fetch Metadata as a complete
+        alternative to tokens in December 2025.
+
+        **The signed double-submit token** remains the fallback, unchanged, for
+        a client that sent no `Sec-Fetch-Site`: a pre-2023 browser, a proxy that
+        strips it, or a non-browser caller. Nothing was removed, so nothing that
+        worked stops working.
+
+        Returns None to let the request proceed, or a 403 problem+json response.
+        A safe request answered by Fetch Metadata records nothing except how to
+        mint on demand, which is where the saving comes from -- see `csrf_token`.
+        """
+        site = request.header(_SEC_FETCH_SITE)
+        if site is not None:
+            if request.method in _SAFE_METHODS:
+                # Nothing to validate and nothing to mint: this client will send
+                # the header on its unsafe requests too, so it never reaches the
+                # token fallback. `csrf_token` can still mint if a handler asks.
+                request.state.__setattr__(_STATE_MINTER, self)
+                return None
+            if site in _TRUSTED_SITES:
+                return None
+            self.cross_site_refusals += 1
+            return ProblemResponse(status=403, title="Forbidden", detail="CSRF validation failed")
+
         now = int(time.time())
         if request.method in _SAFE_METHODS:
             token = request.cookies.get(self._cookie_name)
@@ -387,7 +480,17 @@ class CSRFMiddleware:
 
         A request that reused a still-fresh token gets no `Set-Cookie` at all,
         so an unchanged token does not defeat downstream response caching.
+
+        `Vary: Sec-Fetch-Site` goes on a response whose cookie behaviour turned
+        on that header, because whether a `Set-Cookie` is present now depends on
+        it: a shared cache that stored the header-carrying response and replayed
+        it to a client without the header would hand back a page with no token,
+        and that client's next write would be refused. It fails closed, which is
+        the right direction, but it fails. Merged rather than assigned, so a
+        `Vary` another middleware already set is not overwritten.
         """
+        if request.state.get(_STATE_MINTER) is not None:
+            append_vary(response.headers, _SEC_FETCH_SITE)
         if not request.state.get(_STATE_ISSUE, False):
             return response
         token = request.state.get(_STATE_TOKEN)

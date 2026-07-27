@@ -10,9 +10,18 @@ the A/A spread at each tier so the answer is evidence rather than habit.
     Tier 0  no privileges, always safe. SMT-aware core allocation, niceness,
             and ASLR disabled for the benchmark children.
     Tier 1  sudo, fully reversible, every prior value recorded. CPU governor,
-            turbo, transparent huge pages, and a *named* list of background
-            services stopped.
-    Tier 2  opt-in, last resort. Freezes the graphical session's cgroups.
+            turbo, transparent huge pages, a *named* list of background
+            services stopped, *named* heavy applications frozen, and running
+            containers paused.
+    Tier 2  opt-in, last resort. Freezes every transient application scope,
+            named or not.
+
+Tier 1 carries the named lists and tier 2 carries the sweep, because that is the
+distinction that decides whether an operator can audit what is about to happen.
+A browser and a Postgres container are exactly as noisy as a file indexer, and
+`NOISY_SERVICES` already established that a *named* list is the safe way to stop
+background work -- so containers and heavy applications belong beside it rather
+than behind the broad freeze nobody should need.
 
 **Nothing here kills anything.** Tier 2 uses cgroup v2 `cgroup.freeze`, which
 suspends a process tree and resumes it exactly as it was; a killed desktop has
@@ -32,6 +41,11 @@ Three properties make this safe to hand a machine you are sitting in front of:
 * **Every change is journalled to disk** before it is applied, so `--restore`
   works from a fresh shell after any failure short of a reboot -- and a reboot
   restores all of this anyway.
+
+A fourth property guards the *result* rather than the machine: `apply()` refuses
+to quiet anything while another benchmark, test run or agent is executing, because
+a number measured alongside four other processes is not a number. See
+`competing_workloads()`.
 """
 
 from __future__ import annotations
@@ -75,6 +89,55 @@ NOISY_SERVICES: tuple[str, ...] = (
     "tracker-extract-3.service",
     "baloo_file.service",
 )
+
+#: Heavy desktop applications frozen at tier 1, matched as substrings against a
+#: transient scope's name. **Named for the same reason `NOISY_SERVICES` is.**
+#: Tier 2 already freezes every application scope, but the measured advice is to
+#: stop at tier 1 -- so a browser, which is the single noisiest thing on a
+#: developer desktop, was not being quieted in the tier anyone actually runs.
+#:
+#: Every entry is something a person launched and can see is paused. Nothing here
+#: is session plumbing, and `_NEVER_FREEZE` is applied on top regardless, so a
+#: careless addition here still cannot take out the desktop.
+HEAVY_APPS: tuple[str, ...] = (
+    # Browsers -- the usual worst offender, and the reason this list exists.
+    "firefox", "chrome", "chromium", "brave", "vivaldi", "opera", "epiphany",
+    "microsoft-edge", "zen-browser", "librewolf", "waterfox", "tor-browser",
+    # Electron and chat, which idle at a few percent forever.
+    "slack", "discord", "element", "signal", "telegram", "whatsapp",
+    "teams", "thunderbird", "spotify", "zoom", "skype",
+    # Editors and IDEs. Language servers and file watchers are the cost here,
+    # not the editor.
+    "code", "vscodium", "sublime", "jetbrains", "idea", "pycharm", "webstorm",
+    "goland", "clion", "rubymine", "phpstorm", "datagrip", "zed", "cursor",
+    # Games and launchers.
+    "steam", "lutris", "heroic", "bottles",
+    # Sync daemons: periodic, bursty, and invisible in a short run until they
+    # land in the middle of one.
+    "dropbox", "nextcloud", "syncthing", "insync", "megasync", "onedrive",
+    # Update checkers and stores, which wake on a timer. Both spellings: systemd
+    # names a GNOME scope from its D-Bus name (`app-gnome-org.gnome.Software-N`),
+    # so the hyphenated form alone silently matches nothing.
+    "gnome-software", "gnome.software", "discover", "snap-store", "packagekit",
+    # Miscellaneous heavyweights.
+    "obs", "gimp", "blender", "kdenlive", "darktable", "virtualbox", "virt-manager",
+)
+
+#: How a running container is quieted. **`pause`, not `stop`, and the choice is
+#: load-bearing** -- see `_CONTAINER_ACTION_REASON`.
+CONTAINER_ACTION = os.environ.get("WREATH_QUIET_CONTAINER_ACTION", "pause")
+
+_CONTAINER_ACTION_REASON = {
+    "pause": (
+        "pause (SIGSTOP via the freezer cgroup): the container burns no CPU while "
+        "paused, unpauses in milliseconds, cannot lose data, and -- unlike stop -- "
+        "does not destroy a `--rm` container"
+    ),
+    "stop": (
+        "stop (SIGTERM, then SIGKILL): a clean shutdown, but slower to restore and "
+        "DESTRUCTIVE for a `--rm` container, which is why those are skipped"
+    ),
+}
 
 _CPU_ROOT = Path("/sys/devices/system/cpu")
 _CGROUP_ROOT = Path("/sys/fs/cgroup")
@@ -169,6 +232,241 @@ def split_cores(server_cores: int = 1) -> CoreSplit:
     )
 
 
+# --- containers -------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Container:
+    """One running container, and whether stopping it would destroy it.
+
+    `auto_remove` is the `--rm` flag. A `--rm` container is *deleted* when it
+    stops, so `docker stop` on one is data loss wearing a quiet-down's clothes.
+    It is carried here explicitly rather than inferred at the point of use,
+    because the whole reason it matters is that the destructive case looks
+    identical to the safe one from the outside.
+
+    `unknown_auto_remove` records that the inspect failed. It is treated exactly
+    like `auto_remove=True`: when this module cannot tell whether stopping a
+    container destroys it, it does not stop it.
+    """
+
+    runtime: str
+    id: str
+    name: str
+    image: str
+    auto_remove: bool
+    unknown_auto_remove: bool = False
+
+    @property
+    def destructive_to_stop(self) -> bool:
+        return self.auto_remove or self.unknown_auto_remove
+
+
+def container_runtimes() -> tuple[str, ...]:
+    """Which container runtimes are installed. Both may be, and both are used."""
+    return tuple(name for name in ("docker", "podman") if shutil.which(name))
+
+
+def running_containers(*, run: Any = subprocess.run) -> tuple[Container, ...]:
+    """Every running container across every installed runtime.
+
+    A failure to enumerate returns nothing rather than raising: a machine with a
+    docker binary but no running daemon is the common case, not an error, and a
+    benchmark should not refuse to start over it.
+    """
+    found: list[Container] = []
+    for runtime in container_runtimes():
+        result = run(
+            [runtime, "ps", "--format", "{{.ID}}\t{{.Names}}\t{{.Image}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if getattr(result, "returncode", 1) != 0:
+            continue
+        for line in getattr(result, "stdout", "").splitlines():
+            parts = line.split("\t")
+            if len(parts) != 3 or not parts[0].strip():
+                continue
+            cid, name, image = (part.strip() for part in parts)
+            auto, unknown = _auto_remove(runtime, cid, run=run)
+            found.append(Container(runtime, cid, name, image, auto, unknown))
+    return tuple(found)
+
+
+def _auto_remove(runtime: str, cid: str, *, run: Any = subprocess.run) -> tuple[bool, bool]:
+    """Whether this container is `--rm`, and whether that could be determined.
+
+    Returns `(auto_remove, unknown)`. When the inspect fails the answer is
+    `(False, True)`, and every caller must read `unknown` as "assume the worst":
+    the default for an undeterminable container is to leave it alone.
+    """
+    result = run(
+        [runtime, "inspect", "--format", "{{.HostConfig.AutoRemove}}", cid],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if getattr(result, "returncode", 1) != 0:
+        return False, True
+    answer = getattr(result, "stdout", "").strip().lower()
+    if answer in {"true", "false"}:
+        return answer == "true", False
+    return False, True
+
+
+# --- competing workloads, which invalidate the measurement rather than the machine
+
+
+@dataclass(frozen=True, slots=True)
+class Workload:
+    """Another process whose presence makes the benchmark's number meaningless."""
+
+    pid: int
+    command: str
+    why: str
+
+
+#: Command-line markers for work that contends with a benchmark. Matched against
+#: `/proc/<pid>/cmdline`, never against a `pgrep -f` pattern -- `pgrep -f` also
+#: matches the shell running the check, so a naive version of this reports a hit
+#: every single time and is worse than no check at all.
+_COMPETING = (
+    ("pytest", "a test run"),
+    ("h2load", "another load generator"),
+    ("wreath-bench", "another benchmark"),
+    ("_devtools.tasks", "another wreath task runner"),
+    ("wrk", "another load generator"),
+    ("ab ", "another load generator"),
+)
+
+
+def _own_process_tree(pid: int | None = None) -> set[int]:
+    """This process and every ancestor, so the check cannot detect itself.
+
+    Without this the checker finds its own Python interpreter under the repo
+    path, reports itself as a competing workload, and refuses to run forever.
+    """
+    tree: set[int] = set()
+    current = pid or os.getpid()
+    for _ in range(64):  # bounded: a cycle in /proc would otherwise hang us
+        if current <= 0 or current in tree:
+            break
+        tree.add(current)
+        try:
+            stat = Path(f"/proc/{current}/stat").read_text()
+        except OSError:
+            break
+        # The comm field may contain spaces and parentheses, so parse after the
+        # final ')' rather than splitting the whole line.
+        tail = stat.rsplit(")", 1)[-1].split()
+        if len(tail) < 2:
+            break
+        try:
+            current = int(tail[1])
+        except ValueError:
+            break
+    return tree
+
+
+#: Executables that constitute *work*. A shell whose working directory happens to
+#: be the repository is not a competing workload -- it is an idle prompt, and
+#: reporting it teaches the operator to ignore this check. Being in the repo is
+#: only interesting when the process is something that burns CPU.
+_WORKLOAD_BINARIES = frozenset(
+    {
+        "python", "python3", "python3.14", "pypy", "pypy3",
+        "node", "deno", "bun",
+        "cc", "cc1", "cc1plus", "gcc", "g++", "clang", "clang++", "ld", "lto1",
+        "make", "ninja", "cmake", "cargo", "rustc", "go", "java", "javac",
+        "ruff", "ty", "mypy", "pyright",
+    }
+)
+
+
+def _proc_link(entry: Path, name: str) -> str:
+    """Resolve `/proc/<pid>/exe` or `/proc/<pid>/cwd`, or "" if unreadable."""
+    try:
+        return os.readlink(entry / name)
+    except OSError:
+        return ""
+
+
+def _is_workload(exe: str) -> bool:
+    """Whether this executable is the kind of thing that competes for a core."""
+    name = exe.rsplit("/", 1)[-1]
+    if name in _WORKLOAD_BINARIES:
+        return True
+    # `python3.14`, `python3.14t` (free-threaded) and friends: version-suffixed
+    # names are matched by prefix so a new point release is not a blind spot.
+    return name.startswith(("python", "pypy"))
+
+
+def competing_workloads(
+    *, pid: int | None = None, repo: Path | None = None
+) -> tuple[Workload, ...]:
+    """Processes that would contaminate a measurement taken right now.
+
+    Finds other test runs, load generators and benchmark invocations, plus any
+    other process whose executable or working directory is inside this
+    repository -- which is how an agent, a worktree build or a stray script
+    shows up. Excludes this process and its whole ancestry, so it can never
+    find itself.
+
+    **Association with the repository is decided from `/proc/<pid>/exe` and
+    `/proc/<pid>/cwd`, never from the command line.** The first version matched
+    the repo path as a substring of the command line and missed a process
+    launched as `.venv/bin/python` from the repo root, because that command line
+    contains no absolute path at all. A check with a hole that shape reports an
+    idle machine while an agent is running, which is the exact failure it exists
+    to prevent.
+
+    Returning nothing is what lets a benchmark proceed, so the self-exclusion is
+    equally load-bearing in the other direction: a check that always fires gets
+    overridden by habit, and then it is not a check.
+    """
+    exempt = _own_process_tree(pid)
+    root = str(repo or Path(__file__).resolve().parents[3])
+    # A sibling worktree is a different checkout of the same project and its
+    # builds contend just as hard, so match the family rather than one path.
+    family = root.rsplit("/", 1)[-1].split("-")[0]
+    parent_dir = root.rsplit("/", 1)[0]
+    found: list[Workload] = []
+    for entry in sorted(Path("/proc").iterdir()):
+        if not entry.name.isdigit():
+            continue
+        candidate = int(entry.name)
+        if candidate in exempt:
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        command = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+        if not command:
+            continue  # a kernel thread
+        why = ""
+        for marker, reason in _COMPETING:
+            if marker in command:
+                why = reason
+                break
+        if not why:
+            exe = _proc_link(entry, "exe")
+            if _is_workload(exe):
+                cwd = _proc_link(entry, "cwd")
+                here = exe.startswith(root + "/") or cwd == root or cwd.startswith(root + "/")
+                sibling = exe.startswith(f"{parent_dir}/{family}-") or cwd.startswith(
+                    f"{parent_dir}/{family}-"
+                )
+                if here:
+                    why = "another process running out of this repository"
+                elif sibling:
+                    why = "a process running out of a sibling worktree"
+        if why:
+            found.append(Workload(candidate, command[:160], why))
+    return tuple(found)
+
+
 # --- the benchmark's own ancestry, which must never be frozen ----------------
 
 
@@ -259,6 +557,22 @@ def freezable_targets(pid: int | None = None) -> tuple[Path, ...]:
         if (child / "cgroup.freeze").exists():
             targets.append(child)
     return tuple(targets)
+
+
+def named_app_targets(pid: int | None = None) -> tuple[Path, ...]:
+    """The subset of `freezable_targets()` matching a name in `HEAVY_APPS`.
+
+    Deliberately a *filter over* `freezable_targets()` rather than its own walk
+    of the cgroup tree. Every safety property -- the ancestry exemption, the
+    `_NEVER_FREEZE` denylist, the transient-scope-only shape check -- is applied
+    first and applies here unchanged. A second enumeration would be a second
+    place for those to be got wrong, and only one of them would have the tests.
+    """
+    return tuple(
+        target
+        for target in freezable_targets(pid)
+        if any(app in target.name.lower() for app in HEAVY_APPS)
+    )
 
 
 # --- changes and the journal ------------------------------------------------
@@ -363,6 +677,14 @@ def _restore_one(change: Change, run: Any) -> None:
     elif change.kind == "governor":
         for policy in _CPU_ROOT.glob("cpu[0-9]*/cpufreq/scaling_governor"):
             policy.write_text(change.previous)
+    elif change.kind in {"container-pause", "container-stop"}:
+        # `target` is "<runtime>\t<id>\t<name>". The id is what the runtime is
+        # asked about, and the name is carried so a human reading the journal
+        # can tell what a bare hex id was.
+        runtime, _, rest = change.target.partition("\t")
+        cid = rest.partition("\t")[0]
+        verb = "unpause" if change.kind == "container-pause" else "start"
+        run([runtime, verb, cid], check=False, capture_output=True)
 
 
 # --- the plan ---------------------------------------------------------------
@@ -456,6 +778,18 @@ def plan(tier: int, *, pid: int | None = None) -> list[Step]:
                         Change("service", service, "active", "stopped"),
                     )
                 )
+        steps.extend(_container_steps())
+        for target in named_app_targets(pid):
+            node = target / "cgroup.freeze"
+            current = _read(node) or "0"
+            steps.append(
+                Step(
+                    1,
+                    f"freeze application {_scope_label(target.name)}",
+                    f"echo 1 > {node}",
+                    Change("freeze", str(node), current, "1"),
+                )
+            )
     if tier >= 2:
         targets = freezable_targets(pid)
         exempt = session_ancestry(pid)
@@ -467,17 +801,82 @@ def plan(tier: int, *, pid: int | None = None) -> list[Step]:
                 "# no command -- this is the safety check, not an action",
             )
         )
+        already = set(named_app_targets(pid))
         for target in targets:
+            if target in already:
+                continue  # tier 1 froze this one by name; do not journal it twice
             node = target / "cgroup.freeze"
             current = _read(node) or "0"
             steps.append(
                 Step(
                     2,
-                    f"freeze {target.name}",
+                    f"freeze {_scope_label(target.name)} (unnamed application)",
                     f"echo 1 > {node}",
                     Change("freeze", str(node), current, "1"),
                 )
             )
+    return steps
+
+
+def _scope_label(name: str) -> str:
+    """A cgroup scope name a person can read.
+
+    systemd escapes characters in unit names (`at\\x2dspi` for `at-spi`), which
+    makes an unprocessed plan harder to audit than it needs to be.
+    """
+    readable = name.removesuffix(".scope").removeprefix("app-")
+    return readable.replace("\\x2d", "-")
+
+
+def _container_steps(*, run: Any = subprocess.run) -> list[Step]:
+    """Pause (or stop) every running container, skipping the ones that would die.
+
+    The `--rm` skip is the reason this is not a one-liner. `docker stop` on a
+    container started with `--rm` *deletes* it, so a harness that stops
+    everything to get a quiet machine can silently destroy a database someone
+    was using. `pause` does not trigger that removal at all, which is the main
+    reason it is the default -- but the guard stays on the stop path so choosing
+    `stop` cannot reintroduce the hazard.
+    """
+    action = CONTAINER_ACTION if CONTAINER_ACTION in _CONTAINER_ACTION_REASON else "pause"
+    steps: list[Step] = []
+    containers = running_containers(run=run)
+    if not containers:
+        return steps
+    steps.append(
+        Step(
+            1,
+            f"{len(containers)} running container(s); action is "
+            f"{_CONTAINER_ACTION_REASON[action]}",
+            "# no command -- this line explains the container steps that follow",
+        )
+    )
+    for container in containers:
+        label = f"{container.name} ({container.runtime}, {container.image})"
+        if action == "stop" and container.destructive_to_stop:
+            why = (
+                "started with --rm, so stopping it DESTROYS it"
+                if container.auto_remove
+                else "its --rm flag could not be determined, so it is assumed unsafe"
+            )
+            steps.append(
+                Step(
+                    1,
+                    f"SKIP {label}: {why}",
+                    f"# deliberately not run: {container.runtime} stop {container.id}",
+                )
+            )
+            continue
+        kind = "container-pause" if action == "pause" else "container-stop"
+        target = f"{container.runtime}\t{container.id}\t{container.name}"
+        steps.append(
+            Step(
+                1,
+                f"{action} {label}",
+                f"{container.runtime} {action} {container.id}",
+                Change(kind, target, "running", action),
+            )
+        )
     return steps
 
 
@@ -570,13 +969,34 @@ def apply(
     deadline_seconds: int = DEFAULT_DEADLINE_SECONDS,
     journal_path: Path = JOURNAL,
     pid: int | None = None,
+    allow_competing: bool = False,
 ) -> Journal:
     """Quiet the machine to `tier`, refusing outright if restore is not proven.
 
     The ordering is the safety property: arm, verify armed, journal, *then*
     change. Any other order has a window where a crash leaves the machine
     quieted with nothing scheduled to undo it.
+
+    Refuses first on a *different* ground: another benchmark, test run or agent
+    executing right now. Quieting the machine around a competing workload
+    produces a number that looks careful and is not, which is worse than an
+    obviously noisy one -- so this refuses at every tier, including tier 0 where
+    nothing would have been changed anyway.
     """
+    if not allow_competing:
+        competing = competing_workloads(pid=pid)
+        if competing:
+            listed = "\n".join(
+                f"    pid {w.pid:>7}  {w.why}\n              {w.command}"
+                for w in competing[:12]
+            )
+            more = f"\n    ... and {len(competing) - 12} more" if len(competing) > 12 else ""
+            raise QuietRefused(
+                f"{len(competing)} competing workload(s) are running; a benchmark "
+                f"taken alongside them measures them too:\n{listed}{more}\n"
+                "  Stop them, or pass --allow-competing to measure anyway and "
+                "label the result accordingly."
+            )
     steps = [step for step in plan(tier, pid=pid) if step.change is not None]
     journal = Journal(deadline=time.time() + deadline_seconds, armed_at=time.time())
     if tier >= 1 and steps:
@@ -608,6 +1028,11 @@ def _apply_one(change: Change) -> None:
         Path(change.target).write_text(change.desired)
     elif change.kind == "service":
         subprocess.run(["systemctl", "stop", change.target], check=False)
+    elif change.kind in {"container-pause", "container-stop"}:
+        runtime, _, rest = change.target.partition("\t")
+        cid = rest.partition("\t")[0]
+        verb = "pause" if change.kind == "container-pause" else "stop"
+        subprocess.run([runtime, verb, cid], check=False, capture_output=True)
 
 
 # --- variance measurement ---------------------------------------------------
@@ -675,7 +1100,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="seconds before the watchdog restores unconditionally")
     parser.add_argument("--measure-noise", action="store_true",
                         help="report this machine's current A/A spread and exit")
+    parser.add_argument("--check-competing", action="store_true",
+                        help="list processes that would contaminate a run, and exit")
+    parser.add_argument("--allow-competing", action="store_true",
+                        help="quiet the machine even though other work is running")
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.check_competing:
+        competing = competing_workloads()
+        if not competing:
+            print("wreath-bench-quiet: no competing workloads; the machine is idle.")
+            return 0
+        print(f"wreath-bench-quiet: {len(competing)} competing workload(s):")
+        for workload in competing:
+            print(f"  pid {workload.pid:>7}  {workload.why}")
+            print(f"            {workload.command}")
+        return 1
 
     if args.restore:
         lines = restore(args.journal)
@@ -695,7 +1135,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     try:
         journal = apply(args.tier, deadline_seconds=args.deadline,
-                        journal_path=args.journal)
+                        journal_path=args.journal,
+                        allow_competing=args.allow_competing)
     except QuietRefused as error:
         print(f"wreath-bench-quiet: REFUSED -- {error}")
         return 2

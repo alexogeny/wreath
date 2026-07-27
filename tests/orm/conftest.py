@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _pgfidelity import (
     PreparedStatements,
     check_statement,
+    driver_row_value,
     record,
 )
 
@@ -84,11 +85,18 @@ def _row(scripted: Any) -> Any:
 
 
 class FakePlan:
-    __slots__ = ("result_names", "result_oids")
+    __slots__ = ("checked", "result_names", "result_oids")
 
-    def __init__(self, names: tuple[str, ...], oids: tuple[int, ...]) -> None:
+    def __init__(
+        self, names: tuple[str, ...], oids: tuple[int, ...], checked: bool = True
+    ) -> None:
         self.result_names = names
         self.result_oids = oids
+        #: False when the plan deliberately disagrees with the scripted rows --
+        #: the handful of tests whose subject *is* a plan/model mismatch. An
+        #: opt-out that has to be written is a decision; a silent exemption is
+        #: the hole this guard exists to close.
+        self.checked = checked
 
 
 class FakeConnection:
@@ -117,12 +125,71 @@ class FakeConnection:
         """
         self.responses.append((fragment, [_row(r) for r in rows]))
 
-    def describe(self, sql: str, names: tuple[str, ...], oids: tuple[int, ...]) -> None:
-        self._plans[sql] = FakePlan(names, oids)
+    def describe(
+        self,
+        sql: str,
+        names: tuple[str, ...],
+        oids: tuple[int, ...],
+        *,
+        checked: bool = True,
+    ) -> None:
+        """Declare the result shape. `checked=False` only when the plan is the lie.
+
+        Pass `checked=False` when the test's subject is a plan that disagrees
+        with the model or the rows -- proving `MappingError` fires, for
+        instance. Everywhere else the declared OIDs are enforced against the
+        scripted values, so a fake cannot claim a type the driver would not
+        return.
+        """
+        self._plans[sql] = FakePlan(names, oids, checked)
+
+    def _check_against_plan(self, sql: str, rows: list[Any]) -> None:
+        """Refuse a scripted value the driver could not have produced.
+
+        A `describe()` call declares the result OIDs, and from that moment the
+        fake knows exactly what a real connection would hand back for each
+        column: `driver_row_value` runs the driver's own `_decode_value`, so the
+        answer comes from the shipped codec table rather than from a wish.
+
+        Checked here rather than in `script()` because a test may script before
+        it describes, and a rule that depends on call order is a rule that gets
+        worked around. Untyped rows -- no `describe()` for this statement --
+        stay positional-only and unchecked, which is honest: the fake was never
+        told what they are.
+
+        This is the guard that was missing when thirteen introspection tests
+        scripted `str` for a `name` column and `validate_schema="error"`, the
+        framework default, had never once worked against a real PostgreSQL.
+        """
+        plan = next((p for stmt, p in self._plans.items() if stmt in sql), None)
+        if plan is None or not plan.checked or not plan.result_oids:
+            return
+        for index, row in enumerate(rows):
+            if not isinstance(row, ScriptedRecord):
+                continue
+            for position, oid in enumerate(plan.result_oids):
+                if position >= len(row):
+                    break
+                scripted = row[position]
+                expected = driver_row_value(oid, scripted)
+                if type(scripted) is not type(expected):
+                    column_name = (
+                        plan.result_names[position]
+                        if position < len(plan.result_names)
+                        else f"column {position}"
+                    )
+                    raise AssertionError(
+                        f"row {index} scripts {scripted!r} ({type(scripted).__name__}) "
+                        f"for {column_name!r}, but oid {oid} decodes to "
+                        f"{expected!r} ({type(expected).__name__}). Script what the "
+                        f"driver returns, not what the test wishes it returned -- "
+                        f"see docs/decisions/0020-a-double-is-never-more-capable.md"
+                    )
 
     def _result(self, sql: str) -> Any:
         for fragment, rows in self.responses:
             if fragment in sql:
+                self._check_against_plan(sql, rows)
                 return rows
         return []
 

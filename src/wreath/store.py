@@ -198,12 +198,14 @@ class Keyed:
                 "a claim resets the payload, so every payload column must be nullable"
             )
 
-    def schema_sql(self) -> str:
-        """DDL for the backing table. Apply it as a migration.
+    def statements(self) -> tuple[str, ...]:
+        """DDL for the backing table, one statement per element.
 
-        Nothing in Wreath runs this. A table that appears because a process
-        started is a schema change with no history and no review; this way the
-        change lands where the rest of the schema's changes land.
+        The table name is **unqualified**, so it lands in whatever `search_path`
+        resolves to. That is where every deployment's rows already are, and
+        moving them into the `wreath` schema would not be additive -- a worker on
+        the previous version would look for the old name. See
+        `wreath.schema.Component.qualified`.
         """
         lines = [f"    {self.key} text PRIMARY KEY"]
         lines += [
@@ -212,13 +214,39 @@ class Keyed:
         ]
         lines.append(f"    {self.stamp} timestamptz NOT NULL")
         body = ",\n".join(lines)
-        schema = f"CREATE TABLE IF NOT EXISTS {self.table} (\n{body}\n)"
+        parts = [f"CREATE TABLE IF NOT EXISTS {self.table} (\n{body}\n)"]
         if self.index_stamp:
-            schema += (
-                f";\nCREATE INDEX IF NOT EXISTS {self.table}_{self.stamp}_idx\n"
+            parts.append(
+                f"CREATE INDEX IF NOT EXISTS {self.table}_{self.stamp}_idx\n"
                 f"    ON {self.table} ({self.stamp})"
             )
-        return schema
+        return tuple(parts)
+
+    def component(self, *, name: str) -> Any:
+        """This declaration's claim on the wreath schema, under `name`.
+
+        `name` is the caller's because one `Keyed` shape backs three different
+        subsystems -- sessions, rate limits, idempotency -- and each needs its own
+        version marker and its own advisory lock. Sharing one would make an
+        upgrade to sessions block a worker that only uses rate limits.
+        """
+        from .schema import Component, Step
+
+        return Component(
+            name=name,
+            schema="",
+            relations=(self.table,),
+            steps=(Step(version=1, statements=self.statements()),),
+        )
+
+    def schema_sql(self) -> str:
+        """DDL for the backing table, semicolon-joined.
+
+        A derivation of `statements()`. Wreath applies these itself during
+        lifespan now; this is retained for a caller applying the DDL by hand,
+        and `wreath schema sql` is the supported spelling.
+        """
+        return ";\n".join(self.statements())
 
 
 #: PostgreSQL truncates an identifier at NAMEDATALEN-1 bytes, silently.
@@ -468,8 +496,12 @@ class PostgresStore:
             raise ValueError(f"no SQL named {name!r} on this store")
         return entry
 
+    def component(self, *, name: str) -> Any:
+        """This store's claim on the wreath schema, under `name`."""
+        return self._declaration.component(name=name)
+
     def schema_sql(self) -> str:
-        """DDL for the backing table. Apply it as a migration."""
+        """DDL for the backing table, semicolon-joined."""
         return self._declaration.schema_sql()
 
     async def claim(self, key: str) -> bool:

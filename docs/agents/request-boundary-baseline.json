@@ -4,11 +4,11 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 128,
+        "c": 131,
         "python": 2
       },
       "pre_activation": {
-        "c": 37,
+        "c": 40,
         "python": 1
       },
       "phases": {
@@ -17,7 +17,7 @@
           "python": 1
         },
         "middleware": {
-          "c": 24,
+          "c": 27,
           "python": 0
         },
         "routing": {
@@ -29,27 +29,26 @@
           "python": 0
         },
         "handler": {
-          "c": 59,
+          "c": 58,
           "python": 1
         },
         "egress": {
-          "c": 32,
+          "c": 33,
           "python": 0
         }
       },
       "c_calls": {
-        "dict.get": 37,
-        "builtins.isinstance": 12,
-        "list.append": 8,
+        "dict.get": 39,
+        "builtins.isinstance": 13,
+        "list.append": 7,
         "str.encode": 5,
         "builtins.getattr": 5,
         "builtins.len": 4,
         "TracedUser._orm_is_dirty": 4,
         "TracedUser._orm_set_loaded": 4,
         "bytes.decode": 3,
+        "bytes.lower": 3,
         "time.perf_counter": 2,
-        "bytes.lower": 2,
-        "str.rpartition": 2,
         "builtins.id": 2,
         "dict.clear": 2,
         "TrustedNetworks.contains": 1,
@@ -74,6 +73,7 @@
         "OrderedDict.get": 1,
         "OrderedDict.move_to_end": 1,
         "lock.__exit__": 1,
+        "str.rpartition": 1,
         "builtins.hasattr": 1,
         "TracedUser._orm_new": 1,
         "set.add": 1,
@@ -87,7 +87,8 @@
         "str.capitalize": 1,
         "str.join": 1,
         "wreath._native._core.find_response_header": 1,
-        "list.extend": 1
+        "list.extend": 1,
+        "wreath._native._core.append_vary": 1
       },
       "python_frames": {
         "src/wreath/app.py:__call__": 1,

@@ -46,11 +46,44 @@ a socket or an unusual server — lands in one shared bucket rather than skippin
 the limiter. A limiter that lets a request past because it could not identify it
 is not a limiter; use `exempt=` to allow one deliberately.
 
+`CSRFMiddleware` runs two checks, and which one answers depends on the client.
+
+**`Sec-Fetch-Site` decides when the browser sent it.** The browser sets this
+header itself and the page making the request cannot forge it, so it settles the
+question outright: an unsafe request is refused unless the value is `same-origin`
+or `none`, and a safe request needs no token at all. Every browser has sent it
+since 2023, OWASP accepted Fetch Metadata as a complete alternative to tokens in
+December 2025, and Go ships the same check in its standard library as
+`net/http.CrossOriginProtection`.
+
+`same-site` is refused. It means a *different subdomain*, which is a different
+security origin, and treating it as trusted is what a sibling-subdomain takeover
+abuses.
+
+**The signed double-submit token is the fallback**, unchanged, for a client that
+sent no `Sec-Fetch-Site`: a pre-2023 browser, a proxy that strips it, or a
+non-browser caller. Nothing was removed — the header check sits in front of the
+token check rather than replacing it — so nothing that worked stops working.
+
+`csrf_token(request)` still returns a token to any handler that asks. When Fetch
+Metadata answered the request no token was minted eagerly, so one is minted at
+that call and the cookie is written as before; the cost moved to the request that
+wanted a token instead of being paid by every request that did not.
+
+`cross_site_refusals` counts unsafe requests the header check refused. On a
+browser-facing deployment a counter that never moves means the header is not
+arriving — worth knowing before the fallback quietly becomes the only check
+running.
+
+A response whose cookie behaviour turned on the header carries
+`Vary: Sec-Fetch-Site`, so a shared cache cannot hand a header-carrying client's
+response to one without it.
+
 `CSRFMiddleware(trusted_hosts=[...])` bounds the `Host` header the expected
-origin is derived from. Without it the Host is trusted, so the origin check
-depends on `TrustedHostMiddleware` being separately mounted — a dependency
-between two middlewares that nothing used to state. Naming the hosts here makes
-the CSRF check self-contained.
+origin is derived from, which the token fallback's origin check uses. Without it
+the Host is trusted, so that check depends on `TrustedHostMiddleware` being
+separately mounted — a dependency between two middlewares that nothing used to
+state. Naming the hosts here makes the CSRF check self-contained.
 
 A preflight is checked against `allow_methods` rather than echoing it: asking
 whether `DELETE` is allowed now gets an answer about `DELETE`. Origins compare

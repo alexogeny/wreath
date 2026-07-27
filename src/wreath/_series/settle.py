@@ -67,18 +67,18 @@ from typing import Any
 
 from ..temporal import Bucket, wall_clock, zone
 
-#: Tables are created by a migration, never auto-applied -- the same rule the
-#: job ledger and the pass ledger follow. A chart declaration is a poor place to
-#: acquire DDL rights.
+#: These tables are wreath's own, so they live in the `wreath` schema and wreath
+#: creates them itself during lifespan -- the same rule the job ledger and the
+#: pass ledger follow. They are deliberately *not* in the application's
+#: migration artifact: nobody declared a settled-bucket store, and the artifact
+#: describes what the author declared.
 SCHEMA = "wreath"
 BUCKET_TABLE = "series_buckets"
 CORRECTION_TABLE = "series_corrections"
 
 
-def schema_sql(*, schema: str = SCHEMA) -> str:
-    """DDL for the settled-bucket and correction tables.
-
-    Emitted for a migration to apply. Nothing in Wreath runs this for you.
+def statements(*, schema: str = SCHEMA) -> tuple[str, ...]:
+    """DDL for the settled-bucket and correction tables, one per element.
 
     The primary key is `(view, params, bucket)`: one settled value per
     declaration, per set of bound parameters, per bucket. `params` is present
@@ -91,7 +91,6 @@ def schema_sql(*, schema: str = SCHEMA) -> str:
     migration -- the table has to hold whatever they chose.
     """
     return (
-        f'CREATE SCHEMA IF NOT EXISTS "{schema}";\n'
         f'CREATE TABLE IF NOT EXISTS "{schema}"."{BUCKET_TABLE}" (\n'
         "  view text NOT NULL,\n"
         "  params text NOT NULL,\n"
@@ -99,7 +98,7 @@ def schema_sql(*, schema: str = SCHEMA) -> str:
         "  measures jsonb NOT NULL,\n"
         "  settled_at timestamptz NOT NULL DEFAULT now(),\n"
         "  PRIMARY KEY (view, params, bucket)\n"
-        ");\n"
+        ")",
         f'CREATE TABLE IF NOT EXISTS "{schema}"."{CORRECTION_TABLE}" (\n'
         "  view text NOT NULL,\n"
         "  params text NOT NULL,\n"
@@ -107,8 +106,30 @@ def schema_sql(*, schema: str = SCHEMA) -> str:
         "  delta jsonb NOT NULL,\n"
         "  noticed_at timestamptz NOT NULL DEFAULT now(),\n"
         "  PRIMARY KEY (view, params, bucket)\n"
-        ");\n"
+        ")",
     )
+
+
+def component(*, schema: str = SCHEMA) -> Any:
+    """The settled-bucket store's claim on the wreath schema.
+
+    Sealing writes here, so without these tables a sealed series cannot store a
+    bucket at all -- which is exactly how it stood while nothing applied the
+    DDL: the statements existed and no code path ran them.
+    """
+    from ..schema import Component, Step
+
+    return Component(
+        name="series",
+        schema=schema,
+        relations=(BUCKET_TABLE, CORRECTION_TABLE),
+        steps=(Step(version=1, statements=statements(schema=schema)),),
+    )
+
+
+def schema_sql(*, schema: str = SCHEMA) -> str:
+    """The settled-bucket DDL, semicolon-joined. A derivation of `statements`."""
+    return component(schema=schema).sql()
 
 
 @dataclass(frozen=True, slots=True)

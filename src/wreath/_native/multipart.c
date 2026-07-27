@@ -28,16 +28,26 @@ parse_part_headers(const uint8_t *p, const uint8_t *headers_end)
             Py_DECREF(headers);
             return NULL;
         }
-        PyObject *name = PyBytes_FromStringAndSize((const char *)p, colon - p);
+        /* Allocate uninitialised and fill, rather than copying the source in and
+         * lowercasing in place. `PyBytes_FromStringAndSize` with a *non-NULL*
+         * source does not always allocate: for a length-1 string it returns the
+         * interpreter's immortal single-character singleton, so writing through
+         * the result rewrites `b"A"` to `b"a"` for every user of that object in
+         * the process, permanently. A one-letter part-header name was enough to
+         * do it, and the request still returned 200. Passing NULL always
+         * allocates, so this idiom cannot regress into that bug if the length
+         * bound ever changes -- unlike a guarded in-place lowercase, which is
+         * only correct for as long as the guard holds. */
+        Py_ssize_t name_len = colon - p;
+        PyObject *name = PyBytes_FromStringAndSize(NULL, name_len);
         if (name == NULL) {
             Py_DECREF(headers);
             return NULL;
         }
         uint8_t *name_buf = (uint8_t *)PyBytes_AS_STRING(name);
-        for (Py_ssize_t i = 0; i < PyBytes_GET_SIZE(name); i++) {
-            if (name_buf[i] >= 'A' && name_buf[i] <= 'Z') {
-                name_buf[i] += 'a' - 'A';
-            }
+        for (Py_ssize_t i = 0; i < name_len; i++) {
+            uint8_t c = p[i];
+            name_buf[i] = (c >= 'A' && c <= 'Z') ? (uint8_t)(c + ('a' - 'A')) : c;
         }
         const uint8_t *value_start = colon + 1;
         while (value_start < eol && (*value_start == ' ' || *value_start == '\t')) {

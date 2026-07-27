@@ -739,16 +739,19 @@ class PostgresWebhookInbox:
             raise ValueError("webhook inbox table must be a plain SQL identifier")
         self.table = table
 
-    def schema_sql(self) -> str:
+    def statements(self) -> tuple[str, ...]:
         """DDL creating the inbox table and its retention index. Idempotent.
 
-        `IF NOT EXISTS` throughout, so it is safe to run at every boot. It is
-        plain SQL rather than a migration because the table belongs to whoever
-        deploys the receiver; feed it to a migration if that is how the
-        application manages its schema.
+        `IF NOT EXISTS` throughout, so it is safe to run at every boot -- which
+        is what wreath now does, during lifespan, before the receiver starts.
+
+        The table name is **unqualified**, so it lands in whatever `search_path`
+        resolves to rather than in the `wreath` schema. That is where every
+        existing deployment's rows already are, and moving them would not be
+        additive. See `wreath.schema.Component.qualified`.
 
         Returns:
-            One SQL script; may contain several statements.
+            One statement per element, in order.
         """
         table = self.table
         return (
@@ -769,7 +772,7 @@ class PostgresWebhookInbox:
             "    failure_summary text,\n"
             "    retention_until timestamptz,\n"
             "    PRIMARY KEY (source, message_id)\n"
-            ");\n"
+            ")",
             # Leads with the retention stamp and carries the whole primary key,
             # because that tuple is the purge pass's boundary -- a stamp-only
             # index leaves the walk's tiebreaker columns off the scan. Deployed
@@ -778,8 +781,23 @@ class PostgresWebhookInbox:
             # which is why this one has its own name.
             f"CREATE INDEX IF NOT EXISTS {table}_retention_walk_idx ON {table} "
             "(retention_until, source, message_id) "
-            "WHERE retention_until IS NOT NULL;"
+            "WHERE retention_until IS NOT NULL",
         )
+
+    def component(self) -> Any:
+        """The inbox's claim on the wreath schema."""
+        from .schema import Component, Step
+
+        return Component(
+            name="webhook-inbox",
+            schema="",
+            relations=(self.table,),
+            steps=(Step(version=1, statements=self.statements()),),
+        )
+
+    def schema_sql(self) -> str:
+        """The inbox DDL, semicolon-joined. A derivation of `component()`."""
+        return self.component().sql()
 
     async def claim(
         self,
@@ -1007,7 +1025,7 @@ class PostgresWebhookOutbox:
             raise ValueError("webhook outbox table must be a plain SQL identifier")
         self.table = table
 
-    def schema_sql(self) -> str:
+    def statements(self) -> tuple[str, ...]:
         """DDL creating the outbox table and its two indexes. Idempotent.
 
         `IF NOT EXISTS` throughout, plus an `ADD COLUMN IF NOT EXISTS` for
@@ -1017,8 +1035,12 @@ class PostgresWebhookOutbox:
         refuses to walk an unindexed key, which is how a purge that had always
         been a sequential scan came to light.
 
+        The table name is **unqualified**, so it lands in whatever `search_path`
+        resolves to rather than in the `wreath` schema -- where existing rows
+        already are. See `wreath.schema.Component.qualified`.
+
         Returns:
-            One SQL script; may contain several statements.
+            One statement per element, in order.
         """
         table = self.table
         return (
@@ -1053,18 +1075,33 @@ class PostgresWebhookOutbox:
             "    last_attempt_at timestamptz,\n"
             "    completed_at timestamptz,\n"
             "    retention_until timestamptz\n"
-            ");\n"
+            ")",
             f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS relay_path "
-            "text NOT NULL DEFAULT '';\n"
+            "text NOT NULL DEFAULT ''",
             f"CREATE INDEX IF NOT EXISTS {table}_ready_idx ON {table} "
-            "(next_attempt_at, created_at) WHERE state IN ('pending','retry_wait');\n"
+            "(next_attempt_at, created_at) WHERE state IN ('pending','retry_wait')",
             # Retention has always been read by both purges and never had an
             # index under it, so every purge was a sequential scan and a sort.
             # The chunked pass refuses to walk an unindexed key, which is how
             # this surfaced.
             f"CREATE INDEX IF NOT EXISTS {table}_retention_idx ON {table} "
-            "(retention_until) WHERE retention_until IS NOT NULL;"
+            "(retention_until) WHERE retention_until IS NOT NULL",
         )
+
+    def component(self) -> Any:
+        """The outbox's claim on the wreath schema."""
+        from .schema import Component, Step
+
+        return Component(
+            name="webhook-outbox",
+            schema="",
+            relations=(self.table,),
+            steps=(Step(version=1, statements=self.statements()),),
+        )
+
+    def schema_sql(self) -> str:
+        """The outbox DDL, semicolon-joined. A derivation of `component()`."""
+        return self.component().sql()
 
     async def enqueue(
         self,
@@ -2385,6 +2422,27 @@ class WebhookHub:
         self._sources: dict[str, WebhookSource] = {}
         self._source_paths: set[str] = set()
         self._destinations: dict[str, WebhookDestination] = {}
+
+    @property
+    def schema_owners(self) -> tuple[Any, ...]:
+        """The inbox and outbox stores this hub's sources and destinations hold.
+
+        A hub owns no tables itself; its stores do, and they are optional -- a
+        hub with only a signing destination and no durable outbox has none. So
+        the application asks the hub which of its parts have a claim rather than
+        assuming a fixed pair, and a source registered without an inbox
+        contributes nothing to bootstrap.
+        """
+        owners: list[Any] = []
+        for source in self._sources.values():
+            inbox = getattr(source, "_inbox", None)
+            if inbox is not None:
+                owners.append(inbox)
+        for destination in self._destinations.values():
+            outbox = getattr(destination, "_outbox", None)
+            if outbox is not None:
+                owners.append(outbox)
+        return tuple(owners)
 
     def csrf_exempt(self, request: Request) -> bool:
         """Return true only for registered unsafe webhook receiver routes.

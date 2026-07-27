@@ -110,6 +110,9 @@ wreath-decomp = "wreath._devtools.decomp:main"
 wreath-check = "wreath._devtools.tasks:check"
 wreath-docs = "wreath._devtools.tasks:docs"
 wreath-bench = "wreath._devtools.tasks:bench"
+# Quiet the machine for benchmarking, reversibly. Separate from `wreath-bench`
+# so `--restore` is reachable from a fresh shell after a crash.
+wreath-bench-quiet = "wreath._devtools.quiet:main"
 # Renders benchmark result JSON to a local HTML file; see benchmarks/README.md.
 wreath-bench-report = "wreath._devtools.bench_report:main"
 

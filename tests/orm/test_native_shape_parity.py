@@ -104,21 +104,88 @@ def test_facade_selects_native_when_available(registry: Any) -> None:
 
 
 @native_only
-def test_the_pure_fallback_is_reached_only_for_a_node_c_cannot_key(registry: Any) -> None:
-    """`InSubqueryExpr` postdates the extension, so C refuses and Python answers.
+def test_the_native_builder_keys_a_subquery_identically_to_pure(registry: Any) -> None:
+    """`orm_shape.c` keys `InSubqueryExpr` rather than refusing it.
 
-    Both halves matter. The refusal is what makes the fallback safe -- a builder
-    that dispatched by a *base* class would key a subquery predicate as though
-    the subquery were not there, and two different subqueries would collide in
-    the plan cache. This pins the refusal, so a future C change that starts
-    silently accepting the node fails here rather than in production.
+    This test used to pin the *refusal*: the node postdated the extension, so C
+    raised `cannot key` and `shape_of` fell back to Python at the cost of one
+    raised-and-caught exception per compile of a subquery-bearing query.
+    Teaching C the node is what removes that cost, so the assertion moves from
+    "C refuses" to "C agrees" -- which was always the property that mattered.
+    """
+    query = Post.select(Post.id).where(
+        Post.author_id.in_(User.select(User.id).where(User.email == "a@b.c"))
+    )
+    assert _core.orm_shape(registry, query) == _shape_of_pure(registry, query)
+
+
+@native_only
+@pytest.mark.parametrize(
+    ("label", "build_other"),
+    [
+        (
+            "a different predicate column",
+            lambda: User.select(User.id).where(User.name == "a@b.c"),
+        ),
+        (
+            "a different projected column",
+            lambda: User.select(User.email).where(User.email == "a@b.c"),
+        ),
+    ],
+)
+def test_two_subqueries_of_different_shape_do_not_share_a_key(
+    registry: Any, label: str, build_other: Any
+) -> None:
+    """The collision the old refusal existed to prevent, asserted directly.
+
+    A builder that dispatched by a *base* class -- or that keyed the operator and
+    forgot the subquery -- would key these identically and serve one query's
+    compiled SQL for the other. The bound value is deliberately the same in both,
+    so only the subquery's shape can tell them apart.
+    """
+    base = Post.select(Post.id).where(
+        Post.author_id.in_(User.select(User.id).where(User.email == "a@b.c"))
+    )
+    variant = Post.select(Post.id).where(Post.author_id.in_(build_other()))
+    assert _core.orm_shape(registry, base) != _core.orm_shape(registry, variant), label
+    assert _core.orm_shape(registry, variant) == _shape_of_pure(registry, variant)
+
+
+@native_only
+def test_two_subqueries_differing_only_in_bound_values_share_a_key(registry: Any) -> None:
+    """The other half, without which the collision tests above are satisfiable
+    by a key that simply hashed everything and defeated the cache entirely."""
+    one = Post.select(Post.id).where(
+        Post.author_id.in_(User.select(User.id).where(User.email == "a@b.c"))
+    )
+    two = Post.select(Post.id).where(
+        Post.author_id.in_(User.select(User.id).where(User.email == "someone@else"))
+    )
+    assert _core.orm_shape(registry, one) == _core.orm_shape(registry, two)
+
+
+@native_only
+def test_a_subquery_no_longer_falls_back_to_pure(registry: Any) -> None:
+    """The point of teaching C the node: no raised-and-caught exception per compile.
+
+    Parity alone cannot show this -- the fallback produced a correct key too, just
+    by way of an exception. Observing that `_shape_of_pure` is never reached is
+    the only assertion that distinguishes "C keys it" from "C refuses and Python
+    rescues it", which is the whole difference this change makes.
     """
     from wreath.orm import compiler
-    from wreath.orm.errors import ORMError
 
     query = Post.select(Post.id).where(
         Post.author_id.in_(User.select(User.id).where(User.email == "a@b.c"))
     )
-    with pytest.raises(ORMError, match="cannot key"):
-        _core.orm_shape(registry, query)
-    assert compiler.shape_of(registry, query) == _shape_of_pure(registry, query)
+    native: list[int] = []
+    pure: list[int] = []
+    original_native, original_pure = compiler._shape_of_native, compiler._shape_of_pure
+    compiler._shape_of_native = lambda *a: (native.append(1), original_native(*a))[1]
+    compiler._shape_of_pure = lambda *a: (pure.append(1), original_pure(*a))[1]
+    try:
+        compiler.shape_of(registry, query)
+    finally:
+        compiler._shape_of_native, compiler._shape_of_pure = original_native, original_pure
+    assert native == [1], "the subquery must be keyed by the native builder"
+    assert pure == [], "and must not fall back -- that fallback was the cost"

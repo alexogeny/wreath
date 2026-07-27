@@ -1943,6 +1943,13 @@ rp_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwds))
     ReactorPoller *p = (ReactorPoller *)op;
     p->wake_fd = -1;
     p->signal_fd = -1;
+    /* The ring's "no descriptor" sentinel belongs here, beside the other two,
+     * not after the capacity checks below. Every early return between this
+     * point and `metal_uring_init` still leaves the struct for `rp_dealloc`,
+     * and `metal_uring_clear` closes anything `>= 0` -- so a zero here is
+     * indistinguishable from a valid stdin and gets closed. */
+    p->metal.uring.fd = -1;
+    p->metal.uring.enter_fd = -1;
     PyObject *loop, *wheel = Py_None;
     int direct_task_steps = 1;
     unsigned int worker_id = 0;
@@ -1980,6 +1987,10 @@ rp_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwds))
     p->closed = 0;
     p->generation_wraps = 0;
     memset(&p->metal, 0, sizeof(p->metal));
+    /* Restore the sentinel the memset just wiped, before the trace allocation
+     * and the three slab inits below can return early. */
+    p->metal.uring.fd = -1;
+    p->metal.uring.enter_fd = -1;
     const char *trace_mode = getenv("WREATH_METAL_TRACE");
     if (trace_mode != NULL && strcmp(trace_mode, "0") != 0) {
         if (strcmp(trace_mode, "1") != 0) {
@@ -2683,6 +2694,26 @@ static PyMethodDef rp_methods[] = {
     {NULL, NULL, 0, NULL},
 };
 
+/* `PyType_GenericAlloc` zero-fills the object, and zero is a valid descriptor.
+ * A poller built with `__new__` and never initialised would therefore reach
+ * `rp_dealloc` carrying `metal.uring.fd == 0` and close the process's stdin.
+ * Stamping the sentinels here makes "no descriptor" mean -1 from the moment the
+ * object exists, so `rp_init` is the only thing that can install a real one. */
+static PyObject *
+rp_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *self = PyType_GenericNew(type, args, kwds);
+    if (self == NULL) {
+        return NULL;
+    }
+    ReactorPoller *p = (ReactorPoller *)self;
+    p->wake_fd = -1;
+    p->signal_fd = -1;
+    p->metal.uring.fd = -1;
+    p->metal.uring.enter_fd = -1;
+    return self;
+}
+
 static PyTypeObject ReactorPollerType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "wreath._native._reactor.ReactorPoller",
@@ -2694,7 +2725,7 @@ static PyTypeObject ReactorPollerType = {
     .tp_methods = rp_methods,
     .tp_getset = rp_getset,
     .tp_init = rp_init,
-    .tp_new = PyType_GenericNew,
+    .tp_new = rp_new,
 };
 
 static WreathTransportCAPI transport_capi = {

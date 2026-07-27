@@ -90,23 +90,23 @@ def _placeholders(values: tuple[str, ...]) -> str:
     return ", ".join(f"${index}" for index in range(1, len(values) + 1))
 
 
-def schema_sql(schema: str) -> str:
+def statements(schema: str) -> tuple[str, ...]:
     """DDL for the ledger, its dead-letter table, and the rewrite record.
 
-    Never auto-applied. A table that appears because a process started is a
-    schema change with no history and no review, which is the same stance
-    `JobRunner.schema_sql` and every `wreath.store` declaration take.
-
-    Every statement here is separated by `;\\n` and contains no `;\\n` of
-    its own, because every caller splits on exactly that -- the trigger function
-    below is written on one line for no other reason.
+    One statement per element, which is what the driver wants: it speaks the
+    extended query protocol exclusively, so it prepares each statement and
+    PostgreSQL refuses `cannot insert multiple commands into a prepared
+    statement`. This used to be one `;\\n`-joined blob that five call sites each
+    split back apart, and the trigger function below was written on a single
+    line for no reason other than to survive that split. It no longer has to be,
+    though it is left as it was: reflowing SQL that guards against silent data
+    loss, in the same change that moves it, would make the diff unreviewable.
     """
     table = table_name(schema)
     holes = holes_table_name(schema)
     rewrites = rewrites_table_name(schema)
     guard = f'"{schema}".pass_rewrites_is_append_only'
     return (
-        f'CREATE SCHEMA IF NOT EXISTS "{schema}";\n'
         f"CREATE TABLE IF NOT EXISTS {table} (\n"
         "  name text NOT NULL,\n"
         "  tenant text NOT NULL DEFAULT '',\n"
@@ -135,7 +135,7 @@ def schema_sql(schema: str) -> str:
         "  verified_fact text,\n"
         "  last_error text,\n"
         "  PRIMARY KEY (name, tenant)\n"
-        ");\n"
+        ")",
         f"CREATE TABLE IF NOT EXISTS {holes} (\n"
         "  name text NOT NULL,\n"
         "  tenant text NOT NULL DEFAULT '',\n"
@@ -146,7 +146,7 @@ def schema_sql(schema: str) -> str:
         "  predicate text NOT NULL,\n"
         "  failed_at timestamptz NOT NULL DEFAULT clock_timestamp(),\n"
         "  PRIMARY KEY (name, tenant, cursor_to)\n"
-        ");\n"
+        ")",
         # The rewrite record. Separate from the ledger row on purpose: the
         # ledger is working state that a pass rewrites on every claim, and a
         # future "tidy up finished passes" job would be entirely reasonable to
@@ -161,22 +161,45 @@ def schema_sql(schema: str) -> str:
         "  tenant text NOT NULL DEFAULT '',\n"
         "  recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),\n"
         "  PRIMARY KEY (fact, pass_name, tenant)\n"
-        ");\n"
+        ")",
         f"CREATE OR REPLACE FUNCTION {guard}() RETURNS trigger AS "
         "$$ BEGIN RAISE EXCEPTION 'wreath: %.pass_rewrites is append-only; "
         "a row here records that a column''s values were overwritten in place, "
         "and a downgrade reads it to refuse restoring the old schema over the "
         "new data. Removing it does not make the downgrade safe, only silent.', "
-        f"TG_TABLE_SCHEMA; END $$ LANGUAGE plpgsql;\n"
-        f"DROP TRIGGER IF EXISTS pass_rewrites_no_change ON {rewrites};\n"
+        f"TG_TABLE_SCHEMA; END $$ LANGUAGE plpgsql",
+        f"DROP TRIGGER IF EXISTS pass_rewrites_no_change ON {rewrites}",
         f"CREATE TRIGGER pass_rewrites_no_change BEFORE DELETE OR UPDATE ON {rewrites} "
-        f"FOR EACH ROW EXECUTE FUNCTION {guard}();\n"
+        f"FOR EACH ROW EXECUTE FUNCTION {guard}()",
         # TRUNCATE does not fire row-level triggers, so it needs its own. Without
         # this the whole guard is one `TRUNCATE` away from doing nothing.
-        f"DROP TRIGGER IF EXISTS pass_rewrites_no_truncate ON {rewrites};\n"
+        f"DROP TRIGGER IF EXISTS pass_rewrites_no_truncate ON {rewrites}",
         f"CREATE TRIGGER pass_rewrites_no_truncate BEFORE TRUNCATE ON {rewrites} "
-        f"FOR EACH STATEMENT EXECUTE FUNCTION {guard}();\n"
+        f"FOR EACH STATEMENT EXECUTE FUNCTION {guard}()",
     )
+
+
+def component(schema: str) -> Any:
+    """The pass ledger's claim on the wreath schema.
+
+    The ledger, its dead-letter table, and the append-only rewrite record are
+    fleet machinery -- they record what a *deployment* did, not what a tenant's
+    data is -- so they live in the `wreath` schema and never appear in the
+    application's migration artifact.
+    """
+    from ..schema import Component, Step
+
+    return Component(
+        name="passes",
+        schema=schema,
+        relations=("passes", "pass_holes", "pass_rewrites"),
+        steps=(Step(version=1, statements=statements(schema)),),
+    )
+
+
+def schema_sql(schema: str) -> str:
+    """The ledger DDL, semicolon-joined. A derivation of `statements`."""
+    return component(schema).sql()
 
 
 _COLUMNS = (
