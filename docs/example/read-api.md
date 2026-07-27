@@ -25,8 +25,21 @@ PYTHONPATH=example wreath migrations apply camera_trap.app:app example/migration
 PYTHONPATH=example wreath run camera_trap.app:app --port 8000
 ```
 
-Seeding is a separate step; `example/README.md` has it, along with the one
-start-up defect that currently stands between `wreath run` and this application.
+Seeding is a separate step, and [the quickstart](quickstart.md) walks the whole
+sequence — container, schema, artifact, seed, server — with the output each
+command actually prints.
+
+The observations are not public, so every request below carries a session. This
+page signs in as a **ranger**, the role that is refused nothing, so that what you
+see is the routing and the binding rather than the authorization:
+
+```bash
+curl -s -c jar.txt -X POST 'localhost:8000/session?email=ranger1@example.org'
+```
+
+That choice is load-bearing and this page says so twice: a volunteer's totals
+are smaller, because the species a volunteer may see are a subset. The one place
+below where the role changes the answer is called out where it happens.
 
 ## The URL is the domain's hierarchy
 
@@ -65,7 +78,7 @@ The whole surface:
 ## The timezone is on the wire because it has to be
 
 ```bash
-curl -s localhost:8000/reserves
+curl -s -b jar.txt localhost:8000/reserves
 ```
 
 ```json
@@ -84,7 +97,7 @@ is a field, not an assumption.
 ## A station outlives its cameras
 
 ```bash
-curl -s localhost:8000/reserves/olkiramatian/stations/3
+curl -s -b jar.txt localhost:8000/reserves/olkiramatian/stations/3
 ```
 
 ```json
@@ -113,7 +126,22 @@ slow page.
 ### Where a rhino is, is not published
 
 ```bash
-curl -s localhost:8000/reserves/nullarbor/stations/25
+curl -s -b jar.txt localhost:8000/reserves/nullarbor/stations/25
+```
+
+```json
+{"id":25,"reserve_id":3,"name":"Nullarbor 01","habitat":"riverine forest","sensitive":true,
+ "latitude":0.6,"longitude":40.1,
+ "cameras":[{"id":25,"serial":"CT-00025","model":"Bushnell Core DS","firmware":"3.2.1",
+             "battery_pct":58,"deployed_at":"2025-01-03T10:00:00+00:00","retired_at":null}]}
+```
+
+**This is the one request on the page where the signed-in role changes the
+answer.** Sign in as a volunteer and ask for the same station:
+
+```bash
+curl -s -c volunteer.txt -X POST 'localhost:8000/session?email=volunteer1@example.org'
+curl -s -b volunteer.txt localhost:8000/reserves/nullarbor/stations/25
 ```
 
 ```json
@@ -123,17 +151,28 @@ curl -s localhost:8000/reserves/nullarbor/stations/25
 ```
 
 No `latitude`, no `longitude`. A station marked `sensitive` is a rhino midden or
-a raptor nest, and publishing where it is assists poachers. The `sensitive` flag
-stays on the wire, so a client can say *withheld* rather than *unknown*.
+a raptor nest, and publishing where it is assists poachers.
 
-At this stage the rule is flat — nobody sees them, because nobody is
-authenticated yet. The authorization stage replaces it with the real rule in the
-same place: rangers get the coordinates, volunteers do not.
+Two details in that difference are deliberate. The `sensitive` flag **stays on
+the wire for both**, so a client can render *withheld* rather than *unknown*.
+And the coordinate keys are *absent* rather than `null`, because `"latitude":
+null` is a different claim — it says this station has no coordinates, which is
+false, and a map would plot it off the west coast of Africa.
+
+The rule itself is a Cedar policy, not a branch in this handler:
+
+```
+permit(principal, action == Action::"Station::locate", resource)
+  when { resource.sensitive == false };
+
+permit(principal in Role::"ranger", action == Action::"Station::locate", resource)
+  when { resource.sensitive == true };
+```
 
 ## The reserve segment is enforced, not decorative
 
 ```bash
-curl -s localhost:8000/reserves/olkiramatian/stations/27
+curl -s -b jar.txt localhost:8000/reserves/olkiramatian/stations/27
 ```
 
 ```json
@@ -144,14 +183,14 @@ curl -s localhost:8000/reserves/olkiramatian/stations/27
 Station 27 is Nullarbor's. Every handler that names a station resolves the
 reserve first and then the station *within it* — one extra query, and the reason
 the URL hierarchy means something. Without it, the reserve-scoped authorization
-the next stage adds would have nothing to hold on to.
+rules would have nothing to hold on to.
 
 ## A date is a local date
 
 This is the request the example was built around.
 
 ```bash
-curl -s 'localhost:8000/reserves/nullarbor/stations/27/sightings?since=2026-01-01&days=30&size=2'
+curl -s -b jar.txt 'localhost:8000/reserves/nullarbor/stations/27/sightings?since=2026-01-01&days=30&size=2'
 ```
 
 ```json
@@ -205,7 +244,7 @@ survive.
 ## Bad input is refused before a query exists
 
 ```bash
-curl -s 'localhost:8000/reserves/nullarbor/stations/27/sightings?since=2026-01-01&days=4000'
+curl -s -b jar.txt 'localhost:8000/reserves/nullarbor/stations/27/sightings?since=2026-01-01&days=4000'
 ```
 
 ```json
@@ -232,7 +271,7 @@ after it was written.
 Sorting is an allow-list, and a name outside it is a 422 rather than a 500:
 
 ```bash
-curl -s 'localhost:8000/reserves/nullarbor/stations/27/sightings?since=2026-01-01&days=30&sort=notes'
+curl -s -b jar.txt 'localhost:8000/reserves/nullarbor/stations/27/sightings?since=2026-01-01&days=30&sort=notes'
 ```
 
 ```json
@@ -257,8 +296,8 @@ sort: str = "",
 
 ```bash
 BASE='localhost:8000/reserves/nullarbor/stations/27/sightings?since=2026-01-01&days=30'
-curl -s "$BASE&size=2&page=2"            # ids 93454, 11076
-curl -s "$BASE&size=2&sort=-confidence"  # ids 48994, 93454 — both confidence 99
+curl -s -b jar.txt "$BASE&size=2&page=2"            # ids 93454, 11076
+curl -s -b jar.txt "$BASE&size=2&sort=-confidence"  # ids 48994, 93454 — both confidence 99
 ```
 
 The default sort is `-captured_at,-id`. The primary key is in there as a
@@ -322,7 +361,7 @@ A sighting is a row of foreign keys. On its own it says species 38 walked past
 station 27 in front of camera 27.
 
 ```bash
-curl -s localhost:8000/sightings/62285
+curl -s -b jar.txt localhost:8000/sightings/62285
 ```
 
 ```json

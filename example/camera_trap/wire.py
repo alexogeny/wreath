@@ -5,12 +5,20 @@ column added for the ingest worker ends up in a public payload. These functions
 are the one place the API's vocabulary is decided, which is also the one place
 to change when it has to change.
 
-**Coordinates are withheld for a sensitive station.** A station marked
-``sensitive`` is a rhino midden or a raptor nest, and publishing where it is
-assists poachers. In this stage that is a flat rule with no notion of who is
-asking, so nobody sees those coordinates. The stage that adds authorization
-replaces it with the real one — the rangers who need them get them — and the
-seam is deliberately here rather than spread through the handlers.
+**Coordinates are withheld for a sensitive station unless the caller may
+locate it.** A station marked `sensitive` is a rhino midden or a raptor nest,
+and publishing where it is assists poachers. Whether *this* caller may be told
+is a policy question, and it is answered in `camera_trap.policies` by the same
+Cedar engine that guards the routes — `station_json` takes the answer as a
+parameter rather than working it out, so there is exactly one place the rule
+lives and this file stays a serializer.
+
+**The redaction is a missing key, not a null.** A `latitude: null` says "this
+station has no coordinates", which is false and would be charted as the Gulf of
+Guinea by a client that trusted it. An absent key says "you were not given
+this", which is what happened. The `sensitive` flag stays on the wire either
+way, so a client can tell the difference between a station it cannot locate and
+one whose coordinates it forgot to ask for.
 """
 
 from __future__ import annotations
@@ -61,7 +69,18 @@ def reserve_json(reserve: Reserve) -> dict[str, Any]:
     }
 
 
-def station_json(station: Station, *, cameras: list[Camera] | None = None) -> dict[str, Any]:
+def station_json(
+    station: Station,
+    *,
+    cameras: list[Camera] | None = None,
+    locate: bool = False,
+) -> dict[str, Any]:
+    """One station, with its coordinates only if `locate` says so.
+
+    `locate` defaults to `False` so that a call site which forgets the
+    authorization question withholds the coordinates rather than publishing
+    them. A default that leaks is a default that will eventually leak.
+    """
     payload: dict[str, Any] = {
         "id": station.id,
         "reserve_id": station.reserve_id,
@@ -69,7 +88,7 @@ def station_json(station: Station, *, cameras: list[Camera] | None = None) -> di
         "habitat": station.habitat,
         "sensitive": station.sensitive,
     }
-    if not station.sensitive:
+    if locate:
         payload["latitude"] = _degrees(station.latitude)
         payload["longitude"] = _degrees(station.longitude)
     if cameras is not None:
@@ -115,7 +134,9 @@ def deployment_json(deployment: Deployment) -> dict[str, Any]:
     }
 
 
-def sighting_json(sighting: Sighting, *, related: bool = False) -> dict[str, Any]:
+def sighting_json(
+    sighting: Sighting, *, related: bool = False, locate: bool = False
+) -> dict[str, Any]:
     """One sighting.
 
     ``captured_at`` and ``uploaded_at`` are both here and are routinely weeks
@@ -143,7 +164,7 @@ def sighting_json(sighting: Sighting, *, related: bool = False) -> dict[str, Any
         "notes": sighting.notes,
     }
     if related:
-        payload["station"] = station_json(sighting.station)
+        payload["station"] = station_json(sighting.station, locate=locate)
         payload["camera"] = camera_json(sighting.camera)
         payload["species"] = species_json(sighting.species)
     return payload

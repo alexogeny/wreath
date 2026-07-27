@@ -75,10 +75,50 @@ def test_native_keys_are_distinct_across_shapes(registry: Any) -> None:
     assert len(set(keys)) == len(keys)
 
 
-def test_facade_selects_native_when_available() -> None:
+def test_facade_selects_native_when_available(registry: Any) -> None:
+    """The native builder is what actually runs, not merely what is installed.
+
+    This used to assert `shape_of is _core.orm_shape`. Identity stopped being
+    available once `shape_of` gained a fallback for nodes the extension cannot
+    key, but the property the test existed for -- that an ordinary query is not
+    quietly keyed in Python -- is unchanged, so it is asserted by observing the
+    call instead of by comparing objects.
+    """
     from wreath.orm import compiler
 
-    if _core is not None and hasattr(_core, "orm_shape"):
-        assert compiler.shape_of is _core.orm_shape
-    else:
+    if _core is None or not hasattr(_core, "orm_shape"):
         assert compiler.shape_of is compiler._shape_of_pure
+        return
+
+    native: list[int] = []
+    pure: list[int] = []
+    original_native, original_pure = compiler._shape_of_native, compiler._shape_of_pure
+    compiler._shape_of_native = lambda *a: (native.append(1), original_native(*a))[1]
+    compiler._shape_of_pure = lambda *a: (pure.append(1), original_pure(*a))[1]
+    try:
+        compiler.shape_of(registry, User.select().where(User.id == 5))
+    finally:
+        compiler._shape_of_native, compiler._shape_of_pure = original_native, original_pure
+    assert native == [1], "an ordinary query must be keyed by the native builder"
+    assert pure == [], "and must not fall back to the pure builder"
+
+
+@native_only
+def test_the_pure_fallback_is_reached_only_for_a_node_c_cannot_key(registry: Any) -> None:
+    """`InSubqueryExpr` postdates the extension, so C refuses and Python answers.
+
+    Both halves matter. The refusal is what makes the fallback safe -- a builder
+    that dispatched by a *base* class would key a subquery predicate as though
+    the subquery were not there, and two different subqueries would collide in
+    the plan cache. This pins the refusal, so a future C change that starts
+    silently accepting the node fails here rather than in production.
+    """
+    from wreath.orm import compiler
+    from wreath.orm.errors import ORMError
+
+    query = Post.select(Post.id).where(
+        Post.author_id.in_(User.select(User.id).where(User.email == "a@b.c"))
+    )
+    with pytest.raises(ORMError, match="cannot key"):
+        _core.orm_shape(registry, query)
+    assert compiler.shape_of(registry, query) == _shape_of_pure(registry, query)

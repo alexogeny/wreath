@@ -33,9 +33,48 @@ from typing import Any
 
 __all__ = ["ServiceClient"]
 
-# The bearer-token source may be a static ``str``, an async ``() -> str`` callable,
-# or anything with an awaitable ``.token()`` (e.g. ClientCredentials).
+# The bearer-token source may be a static `str`, an async `() -> str` callable,
+# or anything with an awaitable `.token()` (e.g. ClientCredentials).
 _Headers = tuple[tuple[bytes, bytes], ...]
+
+
+def _check_token(value: str, source: str) -> str:
+    """Refuse a token that cannot be a header value, naming what is wrong.
+
+    RFC 6750's `b64token` is ASCII, and RFC 9110 field values are printable
+    ASCII, so a token outside that range is not a bearer token -- there is no
+    encoding that makes it one. Guarding here rather than at the `encode` call
+    is what makes the three failures distinguishable:
+
+    * `\\r` or `\\n` in a token spliced whatever followed it into the request as
+      a *separate header*. Nothing downstream validated it. That is header
+      injection, and silently encoding it would have shipped the attack.
+    * U+0080-U+00FF encoded to single bytes no peer decodes back, so the request
+      failed as a 401 that reads like bad credentials rather than bad bytes.
+    * Anything above U+00FF raised `UnicodeEncodeError` from inside `encode`,
+      undocumented and pointing at the wrong layer.
+
+    Args:
+        value: The resolved token text.
+        source: How it was obtained, for the message -- callers name themselves
+            because a refreshing provider's token has no other traceable origin.
+
+    Returns:
+        `value` unchanged, so this reads as a guard at the point of use.
+
+    Raises:
+        ValueError: The token holds a character no header value may carry.
+    """
+    for index, char in enumerate(value):
+        if char.isascii() and char.isprintable():
+            continue
+        raise ValueError(
+            f"bearer token from {source} contains {char!r} at position {index}, "
+            "which cannot appear in an Authorization header -- RFC 6750 tokens "
+            "are printable ASCII. A carriage return or newline here would splice "
+            "a second header into the request"
+        )
+    return value
 
 
 class ServiceClient:
@@ -51,7 +90,10 @@ class ServiceClient:
     (static), any object with an awaitable `.token()` (a
     `wreath._auth.oauth2.ClientCredentials`, which caches and renews),
     and a zero-argument async callable. Anything else raises `TypeError` on
-    the first request rather than at construction.
+    the first request rather than at construction. A resolved token that is not
+    printable ASCII is refused with `ValueError` naming the character and its
+    position -- a token carrying `\\r` or `\\n` would otherwise splice a second
+    header into the request.
 
     Args:
         client: An origin-pinned client, normally a `wreath.http_client.HTTPClient`.
@@ -80,14 +122,14 @@ class ServiceClient:
         if token is None:
             return ()
         if isinstance(token, str):
-            value = token
+            value = _check_token(token, "the configured string")
         elif hasattr(token, "token"):
-            value = await token.token()          # e.g. ClientCredentials
+            value = _check_token(await token.token(), f"{type(token).__name__}.token()")
         elif callable(token):
-            value = await token()                # a custom async provider
+            value = _check_token(await token(), "the configured callable")
         else:
             raise TypeError(f"unusable token source: {type(token)!r}")
-        return ((b"authorization", f"Bearer {value}".encode("latin-1")),)
+        return ((b"authorization", f"Bearer {value}".encode("ascii")),)
 
     async def request(
         self,
@@ -114,6 +156,8 @@ class ServiceClient:
 
         Raises:
             TypeError: The configured token source is none of the three supported shapes.
+            ValueError: The resolved token is not printable ASCII, so it cannot be
+                carried in an `Authorization` header.
         """
         target = self._base_path + path if path.startswith("/") else f"{self._base_path}/{path}"
         merged = await self._bearer() + self._default_headers + tuple(headers)

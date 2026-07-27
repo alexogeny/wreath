@@ -30,7 +30,15 @@ pytestmark = pytest.mark.skipif(
     reason="set WREATH_TEST_POSTGRES_DSN to run live chunked-pass integration tests",
 )
 
-_SCHEMA = "wreath_test_passes"
+#: One schema per xdist worker. Six workers sharing one schema race on
+#: `CREATE SCHEMA IF NOT EXISTS` and `DROP SCHEMA CASCADE` -- `IF NOT EXISTS` is
+#: not atomic against a concurrent creator -- and PostgreSQL reports the race as
+#: `duplicate key value violates unique constraint "pg_type_typname_nsp_index"`,
+#: a catalog error nobody would read as a test-isolation problem. Measured:
+#: green serially, failing under `-n 6`. Same shape and same fix as
+#: `tests/test_replay_live_faults.py`.
+_WORKER = os.environ.get("PYTEST_XDIST_WORKER", "main")
+_SCHEMA = f"wreath_test_passes_{_WORKER}"
 _TABLE = f'"{_SCHEMA}".replays'
 
 
@@ -558,7 +566,7 @@ async def test_every_schema_sql_statement_runs_on_its_own(database) -> None:
     """
     from wreath.passes import schema_sql
 
-    schema = "wreath_test_split_probe"
+    schema = f"wreath_test_split_probe_{_WORKER}"
     statements = [
         part.strip() for part in schema_sql(schema).split(";\n") if part.strip()
     ]

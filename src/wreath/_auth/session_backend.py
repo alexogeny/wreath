@@ -19,7 +19,17 @@ __all__ = ["CompositeBackend", "SessionIdentityBackend"]
 
 
 class SessionIdentityBackend:
-    """Yield an Identity from a principal previously stored in the session."""
+    """Yield an Identity from a principal previously stored in the session.
+
+    Reading the session during authentication means the session has to exist by
+    then, which route middleware cannot promise. `Wreath` refuses the
+    combination at route-compile time rather than answering 401 to a caller
+    holding a valid cookie; `requires_session` is what it keys that refusal on.
+    """
+
+    #: This backend cannot authenticate until something has published
+    #: `request.state.session`, so the session middleware must be global.
+    requires_session = True
 
     __slots__ = ("_session_key",)
 
@@ -75,6 +85,16 @@ class CompositeBackend:
         if not backends:
             raise ValueError("CompositeBackend requires at least one backend")
         self._backends = backends
+
+    @property
+    def requires_session(self) -> bool:
+        """True when any wrapped backend needs the session to be published.
+
+        A composite is usually bearer-then-session, and the session half is just
+        as unable to run before the session exists as it would be alone -- so the
+        requirement propagates rather than being hidden by the wrapper.
+        """
+        return any(getattr(item, "requires_session", False) for item in self._backends)
 
     async def authenticate(self, request: Request) -> Identity | None:
         for backend in self._backends:

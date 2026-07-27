@@ -57,10 +57,19 @@ _EMPTY_SESSION = _json_dumps({})
 class SessionMiddleware:
     """Load and persist a per-caller session held in a signed cookie.
 
-    Route middleware, not global: it is compiled into a route's tape, so it runs
-    for routed requests and not for misses or static files. `before` publishes
-    the session as a plain dict on `request.state.session`; handlers mutate that
-    dict and `after` decides what to write.
+    Route middleware by default, not global: it is compiled into a route's tape,
+    so it runs for routed requests and not for misses or static files. `before`
+    publishes the session as a plain dict on `request.state.session`; handlers
+    mutate that dict and `after` decides what to write.
+
+    Register it with `add_global_middleware()` instead when authentication reads
+    the session -- `SessionIdentityBackend` does -- because route middleware runs
+    *after* authorization, so the session would be published after the backend
+    had already been asked for an identity and every protected route would answer
+    401 to a valid cookie. `Wreath` refuses that pairing when the routes compile
+    rather than letting it ship. Sessions used only by handlers, for a flash
+    message or a wizard step, have no such ordering requirement and route scope
+    is the cheaper registration.
 
     Without a `store` the whole session lives in the cookie. It is serialized to
     JSON, base64url-encoded, and signed with HMAC-SHA256 over the payload and
@@ -105,6 +114,13 @@ class SessionMiddleware:
     Raises:
         ValueError: `secret` is shorter than 32 bytes.
     """
+
+    #: This middleware is what puts `request.state.session` there, so an
+    #: authentication backend that reads the session cannot run before it.
+    #: `Wreath` refuses that combination at route-compile time and keys the
+    #: refusal on this attribute rather than on the class, so a replacement
+    #: session middleware is covered by the same check.
+    publishes_session = True
 
     __slots__ = (
         "_cookie", "_http_only", "_max_age", "_previous", "_same_site", "_secret",

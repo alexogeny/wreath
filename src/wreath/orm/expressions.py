@@ -141,10 +141,64 @@ class ColumnExpr(Expression):
     def is_not_null(self) -> UnaryExpr:
         return UnaryExpr(IS_NOT_NULL, self)
 
-    def in_(self, values: Any) -> InExpr:
+    def in_(self, values: Any) -> InExpr | InSubqueryExpr:
+        """`self IN (...)` against a list of values or a one-column `Select`.
+
+        Args:
+            values: An iterable of values, rendered as `IN ($1, $2, ...)`; or a
+                `Select` projecting exactly one column, rendered as
+                `IN (SELECT ...)` so the filter stays in the database.
+
+        Returns:
+            The membership predicate, ready to pass to `.where()`.
+
+        Raises:
+            TypeError: `values` is neither an iterable nor a `Select`.
+            ValueError: `values` is an empty list. A subquery may legitimately
+                return no rows, so this applies to the list form only.
+            DeclarationError: The subquery is not a shape `IN` accepts -- see
+                `_check_subquery` for the four refusals and why each exists.
+        """
+        subquery = _as_subquery(values)
+        if subquery is not None:
+            return InSubqueryExpr(IN, self, _check_subquery(self.column, subquery, "in_"))
         return InExpr(IN, self, _bind_many(self.column, values))
 
-    def not_in(self, values: Any) -> InExpr:
+    def not_in(self, values: Any) -> InExpr | InSubqueryExpr:
+        """`self NOT IN (...)` against a list of values or a one-column `Select`.
+
+        Takes the same operands as `in_`, with one extra refusal: a subquery
+        projecting a *nullable* column. SQL's three-valued logic makes
+        `NOT IN (SELECT ...)` return **no rows at all** the moment the subquery
+        yields a single NULL, because `x <> NULL` is unknown rather than true.
+        That passes every test written against data without NULLs and empties a
+        page in production, so it is refused at the call site instead.
+
+        Args:
+            values: An iterable of values, or a `Select` projecting exactly one
+                NOT NULL column.
+
+        Returns:
+            The negated membership predicate.
+
+        Raises:
+            DeclarationError: The subquery projects a nullable column, or any of
+                the refusals `in_` also makes.
+        """
+        subquery = _as_subquery(values)
+        if subquery is not None:
+            checked = _check_subquery(self.column, subquery, "not_in")
+            projected = checked.projection[0].column
+            if projected.nullable:
+                raise DeclarationError(
+                    f"not_in() refuses a subquery projecting the nullable column "
+                    f"{projected.owner.__name__}.{projected.python_name}: in SQL, "
+                    "NOT IN (SELECT ...) matches nothing at all once the subquery "
+                    "yields one NULL, so this would silently return an empty result "
+                    "rather than an error -- add .where(column.is_not_null()) to the "
+                    "subquery, or project a NOT NULL column"
+                )
+            return InSubqueryExpr(NOT_IN, self, checked)
         return InExpr(NOT_IN, self, _bind_many(self.column, values))
 
     # -- JSONB and array operators ----------------------------------------
@@ -306,6 +360,33 @@ class InExpr(Predicate):
         return f"<InExpr {self.left!r} {self.operator} {len(self.values)} values>"
 
 
+class InSubqueryExpr(Predicate):
+    """Membership against a one-column subquery: `left IN (SELECT ...)`.
+
+    Distinct from `InExpr` rather than a mode of it, because the two differ in
+    every respect the compiler cares about: the operand count is not part of the
+    query shape (the subquery's own shape is), the bound values live inside a
+    nested `Select` rather than beside the operator, and the rendered text is a
+    statement rather than a parenthesised list. Sharing one class would mean a
+    branch at each of those points and an attribute that is meaningless in one
+    of the two states.
+
+    `select` is validated at construction by `_check_subquery`, so a node that
+    exists is one the compiler can render.
+    """
+
+    __slots__ = ("left", "operator", "select")
+
+    def __init__(self, operator: str, left: Expression, select: Any) -> None:
+        self.operator = operator
+        self.left = left
+        self.select = select
+
+    def __repr__(self) -> str:
+        model = getattr(self.select.model, "__name__", "?")
+        return f"<InSubqueryExpr {self.left!r} {self.operator} (SELECT ... FROM {model})>"
+
+
 class BooleanExpr(Predicate):
     __slots__ = ("operands", "operator")
 
@@ -351,11 +432,106 @@ def _bind(column: Any, value: Any) -> ValueExpr:
 
 def _bind_many(column: Any, values: Any) -> tuple[ValueExpr, ...]:
     if isinstance(values, (str, bytes)) or not hasattr(values, "__iter__"):
-        raise TypeError("in_() requires an iterable of values")
+        raise TypeError("in_() requires an iterable of values, or a Select")
     bound = tuple(_bind(column, item) for item in values)
     if not bound:
         raise ValueError("in_() requires at least one value")
     return bound
+
+
+def _as_subquery(values: Any) -> Any:
+    """`values` if it is a `Select`, else None.
+
+    Imported here rather than at module scope because `wreath.orm.query` imports
+    this module; the import is resolved once and cached by `sys.modules`.
+    """
+    from .query import Select
+
+    return values if isinstance(values, Select) else None
+
+
+def _check_subquery(column: Any, select: Any, method: str) -> Any:
+    """Refuse every subquery shape `IN (SELECT ...)` cannot render correctly.
+
+    Four refusals, each for a failure that would otherwise surface far from its
+    cause -- as a driver error at prepare time, or as a wrong answer:
+
+    * **Not exactly one projected column.** `IN` compares one value against one
+      column. A bare `Model.select()` projects every column, which is the easy
+      mistake to make, so it is named separately from a multi-column projection.
+    * **Ordering, paging, or row locking.** They change which rows the subquery
+      yields without changing the *set* `IN` tests against, except for `limit`,
+      which does -- and whose bound value cannot be threaded into the outer
+      statement's placeholder sequence at the position `IN` needs it. Refusing
+      the whole group keeps the rule one sentence long instead of three.
+    * **Eager loads.** A subquery projects one column; there is nothing for a
+      load to attach to.
+    * **Relationship traversal in the subquery's predicates.** Filtering through
+      a relationship needs a JOIN planned against the registry, which is not
+      available where the subquery renders.
+
+    Args:
+        column: The outer column being compared, used only in messages.
+        select: The candidate subquery.
+        method: `"in_"` or `"not_in"`, so the message names what the caller wrote.
+
+    Returns:
+        `select`, unchanged, once every refusal has passed.
+
+    Raises:
+        DeclarationError: The subquery is one of the four shapes above.
+    """
+    model = getattr(select.model, "__name__", "?")
+    if not select.projection:
+        raise DeclarationError(
+            f"{method}() needs a subquery projecting exactly one column, but "
+            f"{model}.select() projects every column -- name the one to compare "
+            f"against, e.g. {model}.select({model}.id)"
+        )
+    if len(select.projection) != 1:
+        names = ", ".join(item.column.python_name for item in select.projection)
+        raise DeclarationError(
+            f"{method}() needs a subquery projecting exactly one column, but this "
+            f"one projects {len(select.projection)} ({names})"
+        )
+    if select.orderings or select.limit_ is not None or select.offset_ is not None:
+        raise DeclarationError(
+            f"{method}() refuses a subquery with order_by/limit/offset: `IN` tests "
+            "set membership, so ordering and offset cannot change the answer, and a "
+            "subquery LIMIT cannot bind its value at the position the outer "
+            "statement needs it -- resolve the rows first and pass a list"
+        )
+    if select.for_update_:
+        raise DeclarationError(
+            f"{method}() refuses a subquery with for_update(): a row lock inside a "
+            "membership test locks rows the outer query never returns"
+        )
+    if select.includes:
+        raise DeclarationError(
+            f"{method}() refuses a subquery with include(): it projects one column, "
+            "so there is nothing for an eager load to attach to"
+        )
+    for predicate in select.predicates:
+        _refuse_related(predicate, method)
+    return select
+
+
+def _refuse_related(node: Any, method: str) -> None:
+    """Raise if `node` filters through a relationship. See `_check_subquery`."""
+    if isinstance(node, RelatedColumnExpr):
+        raise DeclarationError(
+            f"{method}() refuses a subquery filtering through a relationship "
+            f"({node.column.python_name}): that needs a JOIN planned against the "
+            "registry, which a subquery predicate cannot reach -- filter on the "
+            "subquery model's own columns, or resolve the rows first"
+        )
+    for slot in ("left", "right", "operand"):
+        child = getattr(node, slot, None)
+        if child is not None:
+            _refuse_related(child, method)
+    for slot in ("operands", "values"):
+        for child in getattr(node, slot, ()) or ():
+            _refuse_related(child, method)
 
 
 def _bind_as(value: Any, pg_type: Any) -> ValueExpr:
@@ -511,6 +687,7 @@ __all__ = [
     "ColumnExpr",
     "Expression",
     "InExpr",
+    "InSubqueryExpr",
     "OrderExpr",
     "Predicate",
     "UnaryExpr",

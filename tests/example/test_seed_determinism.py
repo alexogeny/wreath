@@ -12,7 +12,7 @@ from __future__ import annotations
 import datetime
 
 import pytest
-from camera_trap.models import MODELS, SCHEMA, Sighting, Station
+from camera_trap.models import DEFAULT_SCHEMA, MODELS, SCHEMA, Sighting, Station
 from camera_trap.seed import COLUMNS, ORDER, build_rows
 
 #: Small enough to build twice per test, large enough that a leaked source of
@@ -145,6 +145,13 @@ def test_some_cards_are_collected_long_after_their_last_image() -> None:
     [(Station, "stations"), (Sighting, "sightings")],
 )
 def test_models_live_in_the_example_schema(model: type, expected: str) -> None:
-    """One namespace, so `\\dt camera_trap.*` shows the domain and nothing else."""
+    """One namespace, so `\\dt camera_trap.*` shows the domain and nothing else.
+
+    The live `SCHEMA` is not asserted: this suite overrides it per xdist worker
+    so parallel runs do not drop each other's tables. What matters — and what is
+    checked — is that every model lands in *one* namespace and that the shipped
+    default is the one the walkthrough and the guides name.
+    """
     assert model.__wreath_table__ == expected
-    assert SCHEMA == "camera_trap"
+    assert DEFAULT_SCHEMA == "camera_trap"
+    assert model.__wreath_schema__ == SCHEMA

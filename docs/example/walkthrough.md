@@ -8,7 +8,7 @@ data before you read a line of application code.
 Every query below was run against the seeded database and the output is what it
 printed. If yours differs, something is wrong: the seed is deterministic.
 
-Set up the database and seed it first — the quickstart (stage 4, not yet written) has the
+Set up the database and seed it first — [the quickstart](quickstart.md) has the
 container command — then:
 
 ```bash

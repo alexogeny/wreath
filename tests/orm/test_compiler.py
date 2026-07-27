@@ -394,3 +394,178 @@ def test_count_ignores_a_projected_count_query_never_returns_star(registry: Regi
         Post.select().where((Post.author.email == "x") & (Post.author.name == "y")),
     )
     assert sql.count("JOIN") == 1
+
+
+# -- IN (SELECT ...) ----------------------------------------------------------
+#
+# `in_` used to take a list and nothing else, so filtering by "the rows some
+# other table names" meant two round trips and a list of ids on the wire. That
+# is correct at forty rows and wrong at a million, and the canonical example was
+# written around the limitation rather than the shape it wanted.
+
+
+def test_in_with_a_subquery_renders_one_statement(registry: Registry) -> None:
+    compiled = compile_select(
+        registry,
+        Post.select(Post.id, Post.title).where(
+            Post.title == "hi",
+            Post.author_id.in_(User.select(User.id).where(User.email == "a@b.c")),
+        ),
+    )
+    assert compiled.sql == (
+        'SELECT "t0"."id", "t0"."title" FROM "public"."posts" AS "t0" '
+        'WHERE ("t0"."title" = $1 AND "t0"."author_id" IN '
+        '(SELECT "t0s"."id" FROM "public"."users" AS "t0s" WHERE "t0s"."email" = $2))'
+    )
+    # Positional, and in render order: the outer predicate binds before the
+    # subquery's because that is the order the text emits them.
+    assert compiled.bind_values == ("hi", "a@b.c")
+
+
+def test_not_in_with_a_subquery_renders_the_negated_form(registry: Registry) -> None:
+    compiled = compile_select(
+        registry,
+        Post.select(Post.id).where(
+            Post.author_id.not_in(User.select(User.id).where(User.name == "spam"))
+        ),
+    )
+    assert compiled.sql == (
+        'SELECT "t0"."id" FROM "public"."posts" AS "t0" '
+        'WHERE "t0"."author_id" NOT IN '
+        '(SELECT "t0s"."id" FROM "public"."users" AS "t0s" WHERE "t0s"."name" = $1)'
+    )
+    assert compiled.bind_values == ("spam",)
+
+
+def test_a_nested_subquery_gets_its_own_alias(registry: Registry) -> None:
+    """Aliases derive from the enclosing one, so depth cannot collide."""
+    compiled = compile_select(
+        registry,
+        Post.select(Post.id).where(
+            Post.author_id.in_(
+                User.select(User.id).where(
+                    User.id.in_(User.select(User.id).where(User.name == "x"))
+                )
+            )
+        ),
+    )
+    assert '"t0s"' in compiled.sql
+    assert '"t0ss"' in compiled.sql
+    assert compiled.bind_values == ("x",)
+
+
+def test_count_renders_the_subquery_too(registry: Registry) -> None:
+    """A page's total must be filtered identically to the page itself.
+
+    Filtering after the fetch is what the subquery exists to avoid; a `COUNT(*)`
+    that skipped the subquery would make `total` a number no page matches.
+    """
+    query = Post.select(Post.id).where(
+        Post.author_id.in_(User.select(User.id).where(User.email == "a@b.c"))
+    )
+    sql, values, _ = compile_count(registry, query)
+    assert sql == (
+        'SELECT COUNT(*) FROM "public"."posts" AS "t0" '
+        'WHERE "t0"."author_id" IN '
+        '(SELECT "t0s"."id" FROM "public"."users" AS "t0s" WHERE "t0s"."email" = $1)'
+    )
+    assert values == ("a@b.c",)
+
+
+def test_the_subquerys_values_stay_out_of_the_shape_key(registry: Registry) -> None:
+    """The plan cache keys on shape. Two values, one plan; two shapes, two plans."""
+    def key(email_column: object, operator: str = "in") -> bytes:
+        subquery = User.select(User.id).where(email_column)
+        predicate = (
+            Post.author_id.in_(subquery)
+            if operator == "in"
+            else Post.author_id.not_in(subquery)
+        )
+        return shape_of(registry, Post.select(Post.id).where(predicate))
+
+    assert key(User.email == "one") == key(User.email == "two")
+    assert key(User.email == "one") != key(User.name == "one")
+    assert key(User.email == "one") != key(User.email == "one", "not_in")
+
+
+def test_a_subquery_over_a_different_model_keys_differently(registry: Registry) -> None:
+    """The model is in the key, so two same-shaped subqueries cannot collide."""
+    from .conftest import Membership
+
+    first = shape_of(
+        registry,
+        Post.select(Post.id).where(Post.author_id.in_(User.select(User.id))),
+    )
+    second = shape_of(
+        registry,
+        Post.select(Post.id).where(Post.author_id.in_(Membership.select(Membership.org_id))),
+    )
+    assert first != second
+
+
+def test_a_subquery_must_project_exactly_one_column() -> None:
+    with pytest.raises(DeclarationError, match="projects every column"):
+        Post.author_id.in_(User.select())
+    with pytest.raises(DeclarationError, match=r"projects 2 \(id, email\)"):
+        Post.author_id.in_(User.select(User.id, User.email))
+
+
+def test_a_subquery_refuses_ordering_paging_locking_and_loads() -> None:
+    with pytest.raises(DeclarationError, match="order_by/limit/offset"):
+        Post.author_id.in_(User.select(User.id).limit(5))
+    with pytest.raises(DeclarationError, match="order_by/limit/offset"):
+        Post.author_id.in_(User.select(User.id).offset(5))
+    with pytest.raises(DeclarationError, match="order_by/limit/offset"):
+        Post.author_id.in_(User.select(User.id).order_by(User.id))
+    with pytest.raises(DeclarationError, match="for_update"):
+        Post.author_id.in_(User.select(User.id).for_update())
+
+
+def test_a_subquery_refuses_a_relationship_traversal() -> None:
+    with pytest.raises(DeclarationError, match="through a relationship"):
+        User.id.in_(Post.select(Post.author_id).where(Post.author.name == "x"))
+
+
+def test_not_in_refuses_a_nullable_subquery_column() -> None:
+    """SQL's three-valued logic, caught at the call site instead of in production.
+
+    `NOT IN (SELECT ...)` returns *no rows at all* once the subquery yields one
+    NULL. It passes every test written against data without NULLs, so the only
+    place to catch it is before the query exists.
+    """
+    with pytest.raises(DeclarationError, match="matches nothing at all"):
+        Post.author_id.not_in(User.select(User.created_at))
+    # `IN` has no such hazard: a NULL simply never matches.
+    Post.author_id.in_(User.select(User.created_at))
+
+
+def test_the_list_form_is_unchanged(registry: Registry) -> None:
+    """The refusals above are new; none of them may reach the existing form."""
+    compiled = compile_select(
+        registry, Post.select(Post.id).where(Post.author_id.in_([1, 2, 3]))
+    )
+    assert compiled.sql.endswith('WHERE "t0"."author_id" IN ($1, $2, $3)')
+    assert compiled.bind_values == (1, 2, 3)
+    with pytest.raises(ValueError, match="at least one value"):
+        Post.author_id.in_([])
+    with pytest.raises(TypeError, match="iterable of values, or a Select"):
+        Post.author_id.in_(3)
+
+
+def test_a_predicate_naming_another_models_column_is_still_caught() -> None:
+    """`check_predicate_columns` must see through the subquery, not around it.
+
+    The outer operand belongs to the outer model and the subquery's predicates
+    to its own; checking either against the wrong one is a bug in both
+    directions, so both are asserted.
+    """
+    from wreath.orm.compiler import check_predicate_columns
+
+    good = Post.author_id.in_(User.select(User.id).where(User.email == "a"))
+    check_predicate_columns(Post, good)
+    with pytest.raises(DeclarationError, match="not a column of User"):
+        check_predicate_columns(User, good)
+    with pytest.raises(DeclarationError, match="not a column of User"):
+        check_predicate_columns(
+            Post, Post.author_id.in_(User.select(User.id).where(Post.title == "x"))
+        )

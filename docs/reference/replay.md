@@ -106,13 +106,83 @@ operation index), and round-trips through a checksummed `WFS1` container.
 [`fault_corpus`](#wreath.replay.fault_corpus) returns a curated schedule per
 taxonomy region — the artifact the sanitizer/fuzz gate re-runs.
 
-The boundaries a fault can reach are the pool, the outbound HTTP client, the
-LISTEN/NOTIFY doorbell, the transaction scope, a `RETURNING` claim, and object
-storage. Two of those regions exist because of failures that shipped: a
-notification stream *ends* rather than raising when its connection closes, and a
-`RETURNING` claim can come back with no row — both are quiet successes, and code
-written to catch exceptions sees neither. `fault_corpus`'s own docstring lists
-every region and says what makes it one.
+The boundaries a fault can reach are the pool, a single lease, the outbound HTTP
+client, the LISTEN/NOTIFY doorbell, the transaction scope, a `RETURNING` claim,
+and object storage. `fault_corpus`'s own docstring lists every region and says
+what makes it one; the paragraphs below say why the less obvious ones are
+separate regions rather than variations on their neighbours.
+
+**A region has to name a failure the owned code answers differently.** That is
+the bar, and most of these exist because two failures that look alike want
+opposite recoveries:
+
+- `connection_drop` fails one statement and leaves the lease usable, so a caller
+  may retry on the connection it already holds. `connection_failed` ends the
+  lease and *latches* — every later operation on it raises the identical error
+  object, and retrying can only produce the answer it already has. Code that
+  cannot tell them apart spends its whole attempt budget re-issuing into a
+  connection that is gone.
+- `server_error` is something PostgreSQL reported. `decode_error` is the
+  statement succeeding and the *answer* being unreadable, and it is modelled as
+  a `ValueError` rather than a `PostgresError` because that is what it was:
+  `text-format array decoding is not supported`, raised by the driver on a cold
+  catalog path in a default configuration. Every `except PostgresError` in this
+  tree steps around it. It is also the region that pairs with the no-hang
+  property — the failure is in the code that resolves a caller's future, which
+  is exactly how a printed error and a permanent wait coexist.
+- `prepared_poison` is the only region whose failure does not exist on the first
+  call. PostgreSQL infers a parameter's type on first execution and the prepared
+  statement carries the inference, so the second execution binds by an OID
+  nothing can encode. A smoke test that runs each statement once cannot see it,
+  and reconnecting does not clear it, so "it worked when I tried it" is true and
+  useless.
+- `notify_stream_end` and `notify_stream_error` are separate because
+  `Connection.notifications()` *returns* when its connection closes rather than
+  raising, so a supervisor written around `except` sees nothing at all.
+- `claim_lost` is a quiet success: an `INSERT ... ON CONFLICT ... RETURNING`
+  that returns no row. Nothing fails, and a caller that reads "no error" as "I
+  hold the claim" runs its critical section twice.
+
+On the transport side, `SPLIT` is the odd one out and deliberately so. Every
+other transport region removes or reorders bytes and asserts the degradation is
+handled; `SPLIT` removes nothing — it moves the *read boundary* into the middle
+of a frame — so its assertion is **equality** with the unfaulted replay. That is
+the property an incremental parser breaks first, and no "handled it gracefully"
+outcome can hide a violation of it.
+
+### Two properties the whole corpus is held to
+
+Every schedule is driven against every subsystem that can reach its seams, and
+both of these are checked for all of them (`tests/test_replay_corpus_properties.py`,
+with the drivers in `tests/_replaydrive.py`):
+
+- **No fault may produce a hang.** Every drive runs under a wall-clock bound and
+  the failure names the schedule *and* the driver. A fault may fail, degrade, or
+  be handled; it may never leave a caller waiting.
+- **No fault may produce silence.** At least one driver's observation must
+  differ from that driver's own no-fault control — an exception, a counter that
+  moved, a status that changed. Not *every* driver: a silent fault is
+  legitimately silent at a seam with nothing to observe it with. What is never
+  legitimate is a fault no owned code anywhere reacts to.
+
+### The containers are untrusted input
+
+Both `WTR1` and `WFS1` recover a torn tail by design, and both refuse a chunk
+tag that appears twice — a second copy would silently replace the first while
+every checksum still verified, so a recording could be made to replay bytes
+nobody recorded.
+
+Beyond that the two deliberately part company, because they are for different
+things. A **recording** recovers a truncated tail: the writer appends, a capture
+cut short by a crash still holds the forensic material before the tear, and
+throwing that away to punish the tear helps nobody. A **schedule** refuses one.
+Its whole promise is that two runs got the same injection, and a torn `ADPT`
+chunk would drop every adapter fault while the transport half still decoded —
+a weaker schedule running under a stronger one's name, in a run that stays
+green. For the same reason a schedule names its chunk vocabulary and refuses a
+tag outside it: a chunk's tag is not covered by its CRC, so one flipped bit
+turns the optional `ADPT` chunk into one the reader has never heard of, and the
+adapter faults vanish without a word.
 
 ::: wreath.replay.FaultSchedule
 

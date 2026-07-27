@@ -18,6 +18,7 @@ import datetime
 from typing import Annotated
 
 from wreath import Request, Router
+from wreath.auth import authenticated
 from wreath.binding import Query
 from wreath.exceptions import NotFound, UnprocessableEntity
 from wreath.orm import FromORM, Session
@@ -25,7 +26,8 @@ from wreath.pagination import MAX_PAGE, MAX_SIZE, PageParams, paginate, parse_so
 from wreath.temporal import from_wall_clock, zone
 
 from ..config import SETTINGS
-from ..models import Reserve, Sighting, Station
+from ..models import Reserve, Sighting, Species, Station
+from ..policies import may_locate, visible_protections
 from ..queries import RecentDeployments, Reserves, SightingsByStation, Stations
 from ..wire import deployment_json, reserve_json, sighting_json, station_json
 
@@ -84,24 +86,40 @@ def _window(
 
 
 @reserves.get("/", summary="Every reserve")
+@authenticated()
 async def list_reserves(request: Request, session: ReadSession) -> dict:
     found = await Reserves(session).all_reserves()
     return {"items": [reserve_json(item) for item in found]}
 
 
 @reserves.get("/{slug}", summary="One reserve")
+@authenticated()
 async def read_reserve(request: Request, slug: str, session: ReadSession) -> dict:
     return reserve_json(await _reserve(session, slug))
 
 
 @stations.get("/", summary="The stations in a reserve")
+@authenticated()
 async def list_stations(request: Request, slug: str, session: ReadSession) -> dict:
     reserve = await _reserve(session, slug)
     found = await Stations(session).in_reserve(reserve=reserve.id)
-    return {"items": [station_json(item) for item in sorted(found, key=lambda s: s.id)]}
+    # One policy question per *sensitivity*, not per station: the answer depends
+    # only on the flag and the identity, so asking it 48 times would be 48
+    # evaluations of one decision.
+    locate = {
+        sensitive: may_locate(request.identity, sensitive=sensitive)
+        for sensitive in (False, True)
+    }
+    return {
+        "items": [
+            station_json(item, locate=locate[bool(item.sensitive)])
+            for item in sorted(found, key=lambda s: s.id)
+        ]
+    }
 
 
 @stations.get("/{station_id}", summary="One station and every camera it has held")
+@authenticated()
 async def read_station(
     request: Request, slug: str, station_id: int, session: ReadSession
 ) -> dict:
@@ -113,10 +131,15 @@ async def read_station(
     # handler in this file leaves the relationship alone and pays nothing.
     await session.load(station, Station.cameras)
     history = sorted(station.cameras, key=lambda camera: camera.deployed_at)
-    return station_json(station, cameras=history)
+    return station_json(
+        station,
+        cameras=history,
+        locate=may_locate(request.identity, sensitive=bool(station.sensitive)),
+    )
 
 
 @stations.get("/{station_id}/sightings", summary="What a station recorded, by page")
+@authenticated()
 async def list_sightings(
     request: Request,
     slug: str,
@@ -157,6 +180,30 @@ async def list_sightings(
     # what `paginate` needs. Calling the declaration would run it and fetch
     # every row in the window.
     query = SightingsByStation.in_window.bind(station=station.id, since=start, until=end)
+
+    # The sensitive-species rule, applied *in the query* rather than to the page
+    # it returns. Filtering after the fetch would make `total` a lie and hand a
+    # volunteer a 20-row page with four rows in it — and, worse, would have
+    # loaded the withheld rows onto this machine before discarding them.
+    #
+    # One statement: the species this caller may see are named by a subquery, so
+    # the vocabulary is never carried to the application and back. `total` and
+    # the page are then filtered by construction, because `paginate` counts the
+    # same query it fetches. A list of ids would have worked at forty species
+    # and become a wire-sized problem at a million; this shape does not change.
+    allowed = visible_protections(request.identity)
+    if not allowed:
+        # Anonymous, or suspended. A 404 rather than a 403: telling an
+        # unauthenticated caller that this station has sightings they may not
+        # see is itself a disclosure, and the station is reachable only through
+        # a reserve they are not signed in to browse.
+        raise NotFound(f"no station {station_id} in reserve {slug!r}")
+    query = query.where(
+        Sighting.species_id.in_(
+            Species.select(Species.id).where(Species.protection.in_(list(allowed)))
+        )
+    )
+
     if min_confidence:
         # Added here rather than declared: the filter is optional, and a
         # parameter in the declared shape would have to be supplied by every
@@ -190,6 +237,7 @@ async def list_sightings(
 
 
 @stations.get("/{station_id}/deployments", summary="The last few SD cards from a station")
+@authenticated()
 async def list_deployments(
     request: Request, slug: str, station_id: int, session: ReadSession
 ) -> dict:

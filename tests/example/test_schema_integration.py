@@ -19,16 +19,20 @@ of it, so a regression is a failing test rather than a rediscovered workaround.
 from __future__ import annotations
 
 import os
-import pathlib
 
 import pytest
+from _camera_trap import build_schema, drop_schema, statements
 from camera_trap.models import SCHEMA
 from camera_trap.seed import build_rows, seed
 
-pytestmark = pytest.mark.asyncio
+#: No ``pytest.mark.asyncio`` here: ``asyncio_mode = "auto"`` already marks the
+#: async tests, and a module-level mark also lands on the two synchronous ones,
+#: where pytest-asyncio warns that it cannot apply it. A marker that does
+#: nothing reads exactly like a marker that is silently not being applied, which
+#: is the more expensive of the two to discover. ``test_read_api.py`` carries the
+#: same note for the same reason.
 
 _DSN = os.environ.get("WREATH_TEST_POSTGRES_DSN")
-_ARTIFACT = pathlib.Path(__file__).resolve().parents[2] / "example" / "migrations" / "migration.sql"
 
 skip_without_database = pytest.mark.skipif(
     _DSN is None,
@@ -42,29 +46,23 @@ skip_without_database = pytest.mark.skipif(
 SAMPLE = 5_000
 
 
-def _statements() -> list[str]:
-    """The artifact's DDL, in the order the artifact emits it."""
-    return [line for line in _ARTIFACT.read_text().splitlines() if line.strip()]
-
-
 @pytest.fixture
 async def seeded():
-    """A freshly built schema with a sample of the seed in it."""
+    """A freshly built schema with a sample of the seed in it.
+
+    The artifact does not create its own namespace -- a migration describes
+    tables, and which schema they land in is the application's decision, made by
+    `schema=SCHEMA` on the models. `build_schema` creates it first for that
+    reason.
+    """
     from wreath.postgres import connect
 
     connection = await connect(_DSN)
     try:
-        await connection.execute(f'DROP SCHEMA IF EXISTS "{SCHEMA}" CASCADE')
-        # The artifact does not create its own namespace -- a migration
-        # describes tables, and which schema they land in is the application's
-        # decision, made by `schema=SCHEMA` on the models.
-        await connection.execute(f'CREATE SCHEMA "{SCHEMA}"')
-        for statement in _statements():
-            await connection.execute(statement.rstrip(";"))
-        await seed(connection, sightings=SAMPLE)
+        await build_schema(connection, seed_rows=SAMPLE)
         yield connection
     finally:
-        await connection.execute(f'DROP SCHEMA IF EXISTS "{SCHEMA}" CASCADE')
+        await drop_schema(connection)
         await connection.close()
 
 
@@ -89,7 +87,7 @@ def test_the_artifact_emits_its_statements_in_a_usable_order() -> None:
             return ranks["foreign key"]
         return 2  # primary/unique constraints and indexes
 
-    seen = [rank(statement) for statement in _statements()]
+    seen = [rank(statement) for statement in statements()]
     assert seen == sorted(seen), "the artifact's statements are not in dependency order"
 
 

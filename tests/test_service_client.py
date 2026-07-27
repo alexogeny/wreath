@@ -86,3 +86,60 @@ async def test_verb_helpers_route_to_the_right_method() -> None:
     await svc.patch("/x", body=b"2")
     await svc.delete("/x")
     assert [c["method"] for c in client.calls] == ["PUT", "PATCH", "DELETE"]
+
+
+# --- token refusals -----------------------------------------------------------
+#
+# `f"Bearer {value}".encode("latin-1")` had three distinct wrong answers, and
+# the docstring named none of them: CRLF spliced a second header into the
+# request, U+0080-U+00FF encoded to bytes no peer decodes back, and anything
+# above U+00FF raised UnicodeEncodeError from inside `encode`. A bearer token is
+# printable ASCII (RFC 6750), so all three are the same precondition.
+
+
+async def test_a_token_carrying_crlf_is_refused_not_spliced() -> None:
+    """The one that matters: header injection through the token source."""
+    client = _FakeClient()
+    svc = ServiceClient(client, token="abc\r\nX-Admin: true")
+    with pytest.raises(ValueError, match=r"splice a second header"):
+        await svc.get("/x")
+    assert client.calls == [], "the request went out despite an unusable token"
+
+
+@pytest.mark.parametrize(
+    ("token", "shown"),
+    [
+        ("tökén", "'ö'"),          # latin-1 encoded this silently, and wrongly
+        ("токен", "'т'"),          # this raised UnicodeEncodeError from `encode`
+        ("abc\tdef", "'\\t'"),     # a tab is ASCII but not printable
+        ("abc\x7f", "'\\x7f'"),    # DEL
+    ],
+)
+async def test_a_non_ascii_or_unprintable_token_is_refused(token, shown) -> None:
+    client = _FakeClient()
+    svc = ServiceClient(client, token=token)
+    with pytest.raises(ValueError, match="printable ASCII") as caught:
+        await svc.get("/x")
+    assert shown in str(caught.value), "the message must name the offending character"
+    assert "position" in str(caught.value)
+    assert client.calls == []
+
+
+async def test_the_refusal_names_a_refreshing_provider_as_the_source() -> None:
+    """A provider's token has no other traceable origin, so the message carries it."""
+    class _Creds:
+        async def token(self) -> str:
+            return "bad\nvalue"
+
+    svc = ServiceClient(_FakeClient(), token=_Creds())
+    with pytest.raises(ValueError, match=r"_Creds\.token\(\)"):
+        await svc.get("/x")
+
+
+async def test_an_ordinary_token_is_unaffected() -> None:
+    """The control: the guard must not reject what bearer tokens actually look like."""
+    client = _FakeClient()
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.-_~+/=abcDEF123"
+    svc = ServiceClient(client, token=jwt)
+    await svc.get("/x")
+    assert _auth(client.calls[-1]["headers"]) == f"Bearer {jwt}".encode("ascii")

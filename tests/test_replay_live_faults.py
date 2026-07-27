@@ -45,7 +45,13 @@ TRANSACTION_SCHEDULES = frozenset(
     {"adapter-begin_error", "adapter-commit_error", "adapter-statement_timeout"}
 )
 
-_SCHEMA = "wreath_replay_faults"
+#: One schema per xdist worker. Six workers sharing one schema race on
+#: `CREATE SCHEMA IF NOT EXISTS` and `DROP SCHEMA CASCADE`, and PostgreSQL
+#: reports that as `duplicate key value violates unique constraint
+#: "pg_namespace_nspname_index"` -- a catalog error nobody would read as a test
+#: isolation problem. Measured: green serially, six errors under `-n 6`.
+_WORKER = os.environ.get("PYTEST_XDIST_WORKER", "main")
+_SCHEMA = f"wreath_replay_faults_{_WORKER}"
 _TABLE = f'"{_SCHEMA}".rows_to_purge'
 
 

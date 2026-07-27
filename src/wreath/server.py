@@ -969,7 +969,7 @@ class Server:
                     projector=self._projector,
                     arm_registry=self._arm_registry,
                 )
-        except BaseException:  # noqa: BLE001 -- re-raised; cleanup must be total
+        except BaseException:  # re-raised; cleanup must be total
             # Broad *and* re-raised. A half-bound server -- listener up, lifespan
             # not, or an inspector serving against a recorder that never started
             # -- is worse than a failed start, and a start cancelled partway
@@ -1353,7 +1353,7 @@ class _LifespanManager:
         await self._receive_queue.put({"type": "lifespan.startup"})
         try:
             await self._startup_event
-        except Exception:  # noqa: BLE001 -- conditionally re-raised just below
+        except Exception:  # conditionally re-raised just below
             # Not a swallow: the whole body is a decision about whether to
             # re-raise, and the failing case does. Broad because `_main` puts
             # whatever the app raised onto this future, and any of it means the

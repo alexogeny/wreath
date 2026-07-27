@@ -255,19 +255,36 @@ def _waivers(
 # make the rules silently do nothing the moment someone writes the other.
 FUNC_AT_LINE_START = re.compile(r"^([A-Za-z_]\w*)\s*\(")
 FUNC_ONE_LINE = re.compile(
-    r"^\s*(?:static\s+|inline\s+|const\s+)*[A-Za-z_][\w\s*]*?\b([A-Za-z_]\w*)\s*\([^;]*$"
+    r"^\s*(?P<prefix>(?:static\s+|inline\s+|const\s+)*[A-Za-z_][\w\s*]*?)\b"
+    r"(?P<name>[A-Za-z_]\w*)\s*\([^;]*$"
 )
 NOT_A_FUNCTION = frozenset({"if", "for", "while", "switch", "return", "sizeof", "else"})
+#: Words that can precede a call but never a definition's name. Without this,
+#: a *wrapped call statement* -- `return PyLong_FromUnsignedLongLong(` with its
+#: arguments on the following line -- matches `FUNC_ONE_LINE` exactly: the
+#: keyword is absorbed by the type pattern, the callee is captured as the name,
+#: and the line has no semicolon because the statement is not finished. Every
+#: rule that attributes a finding to "the enclosing function" then names a
+#: CPython API call, and the function's extent is measured from the wrong line,
+#: so aggregate scores are computed over a window that spans unrelated
+#: functions. That is how NB004 reported a score for `PyLong_FromUnsignedLongLong`.
+NOT_A_RETURN_TYPE = frozenset(
+    {"return", "goto", "case", "do", "else", "break", "continue", "typedef"}
+)
 
 
 def _enclosing_function(code_lines: list[str], index: int) -> str:
     """Best-effort name of the function containing `index` (0-based)."""
     for i in range(index, max(-1, index - 400), -1):
         line = code_lines[i]
-        for pattern in (FUNC_AT_LINE_START, FUNC_ONE_LINE):
-            match = pattern.match(line)
-            if match and match.group(1) not in NOT_A_FUNCTION:
-                return match.group(1)
+        match = FUNC_AT_LINE_START.match(line)
+        if match and match.group(1) not in NOT_A_FUNCTION:
+            return match.group(1)
+        match = FUNC_ONE_LINE.match(line)
+        if match is None or match.group("name") in NOT_A_FUNCTION:
+            continue
+        if NOT_A_RETURN_TYPE.isdisjoint(match.group("prefix").split()):
+            return match.group("name")
     return ""
 
 

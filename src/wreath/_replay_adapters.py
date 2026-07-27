@@ -4,8 +4,8 @@ Endpoint-plan replay can run a *real* handler (INVOKE) that reaches out to the
 PostgreSQL driver or an outbound HTTP client. To replay that deterministically —
 and, more valuably, to *red-team the owned handling of a boundary failure* — we
 substitute injected doubles for those boundaries. A double either returns a
-scripted result or raises a modeled fault (`pool-acquire timeout`, ``server
-error after the round trip`, `connection drop mid-result``, ...), and the
+scripted result or raises a modeled fault (`pool-acquire timeout`,
+`server error after the round trip`, `connection drop mid-result`, ...), and the
 framework's owned recovery — error mapping, connection release, transaction
 outcome — runs for real.
 
@@ -377,6 +377,16 @@ class _ConnectionDouble:
         return self._next(None, sql)
 
     async def map(self, method: str, sql: object, argument_sets: Any, *, max_in_flight: int = 32):
+        # Each argument set is bound separately, so each is refused separately.
+        # This path accepted anything: a fan-out carrying a `list` -- the value
+        # that makes `= ANY($1)` raise before PostgreSQL is reached -- ran
+        # cleanly against the double and failed against the driver, which is the
+        # precise shape of a fake that hides the defect it exists to catch.
+        if isinstance(sql, str):
+            refuse_multiple_commands(sql)
+            for arguments in argument_sets or ():
+                refuse_unbindable(tuple(arguments))
+            refuse_uninferable_cast(sql, (), self._prepared)
         return self._next([], sql)
 
     async def close(self) -> None:
@@ -416,20 +426,37 @@ class _TransactionDouble:
         return False
 
     async def execute(self, sql: object, *args: object) -> str:
+        self._refuse(sql, args)
         self._maybe_timeout()
         return self._connection._next("OK", sql)
 
     async def fetch(self, sql: object, *args: object) -> list[Any]:
+        self._refuse(sql, args)
         self._maybe_timeout()
         return self._connection._next([], sql)
 
     async def fetchrow(self, sql: object, *args: object) -> Any:
+        self._refuse(sql, args)
         self._maybe_timeout()
         return self._connection._next(None, sql)
 
     async def fetchval(self, sql: object, *args: object) -> Any:
+        self._refuse(sql, args)
         self._maybe_timeout()
         return self._connection._next(None, sql)
+
+    def _refuse(self, sql: object, args: tuple[Any, ...]) -> None:
+        """What a real connection refuses, inside a transaction too.
+
+        These four ran without it, so a statement the driver rejects was
+        accepted here as long as it was written inside `async with
+        connection.transaction()` -- which is where the chunked-pass driver
+        writes every one of its statements. The prepared-statement cache is the
+        connection's, not the scope's, because that is where PostgreSQL keeps
+        it: a statement first executed inside a transaction is poisoned for the
+        connection, not for the scope that happened to run it.
+        """
+        refuse_what_postgres_refuses(sql, args, self._connection._prepared)
 
     def _maybe_timeout(self) -> None:
         if self._fault is AdapterFault.STATEMENT_TIMEOUT:

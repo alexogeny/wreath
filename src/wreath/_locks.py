@@ -28,6 +28,7 @@ safety barrier, and keep guarded critical sections idempotent.
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import warnings
 from collections.abc import Awaitable, Callable
@@ -289,7 +290,7 @@ class SingletonRunner:
 
     __slots__ = (
         "_database", "_jitter", "_key", "_lead_errors", "_namespace", "_poll",
-        "_stopped", "_task", "_work", "_workload",
+        "_release_errors", "_stopped", "_task", "_work", "_workload",
     )
 
     def __init__(
@@ -315,6 +316,7 @@ class SingletonRunner:
         self._jitter = jitter if jitter is not None else _default_jitter
         self._stopped = False
         self._lead_errors = 0
+        self._release_errors = 0
         self._task: asyncio.Task[None] = asyncio.ensure_future(self._run())
 
     @property
@@ -327,6 +329,17 @@ class SingletonRunner:
         "nobody has needed to lead yet" from "leading has never once worked".
         """
         return self._lead_errors
+
+    @property
+    def release_errors(self) -> int:
+        """How many rounds ended with the connection's release itself failing.
+
+        Distinct from `lead_errors`, which counts leadership attempts that failed
+        to do their work. This counts rounds whose work may well have succeeded
+        and whose *cleanup* did not, so a runner that is quietly failing to hand
+        connections back is visible before the pool runs out of them.
+        """
+        return self._release_errors
 
     async def _run(self) -> None:
         while not self._stopped:
@@ -386,9 +399,34 @@ class SingletonRunner:
                 if counted:
                     _exit_held(self._database, self._workload)
                 if connection is not None:
-                    await _release(self._database, self._workload, connection,
-                                   "exclusive", self._namespace, self._key,
-                                   unlock=held)
+                    from .postgres import PostgresError
+
+                    try:
+                        await _release(self._database, self._workload, connection,
+                                       "exclusive", self._namespace, self._key,
+                                       unlock=held)
+                    except (PostgresError, OSError):
+                        # A failed release degrades this round; it must not end
+                        # the runner. Escaping a `finally` is exactly how it did:
+                        # the task died for the process lifetime, and because
+                        # nothing awaits `_task` until `stop()`, it surfaced only
+                        # as "Task exception was never retrieved" at GC. A runner
+                        # that has silently stopped contending is indistinguishable
+                        # from one that is simply not the leader.
+                        #
+                        # Named types, not `Exception`: `Pool.release` raises
+                        # `InterfaceError` on a double release, and the trailing
+                        # `connection.close()` fails with `OSError` on a dead
+                        # socket. Neither leaks the slot this catch lets through --
+                        # the `InterfaceError` is raised *before* `_borrowed` is
+                        # touched, and the close runs *after* the slot is already
+                        # back. `CancelledError` still propagates, because `stop()`
+                        # is waiting for it.
+                        self._release_errors += 1
+                        logging.getLogger("wreath").exception(
+                            "advisory lock release failed for %r; still contending",
+                            self._key,
+                        )
             await asyncio.sleep(self._poll + self._jitter(self._poll))
 
     async def stop(self) -> None:

@@ -1675,7 +1675,7 @@ class WebhookSource:
             return Response(status=409)
         try:
             await handler(WebhookContext(self._name, envelope, request), payload)
-        except Exception:  # noqa: BLE001 - records the outcome and re-raises
+        except Exception:  # records the outcome and re-raises
             # Broad and re-raising, which is the shape that earns it: the
             # receiver's own code failed, every way it can fail means the same
             # thing to the replay claim, and nothing is swallowed -- the caller
@@ -2196,7 +2196,7 @@ class WebhookDispatcher:
                         pass
         except asyncio.CancelledError:
             raise
-        except Exception as error:  # noqa: BLE001 - records the outcome and re-raises
+        except Exception as error:  # records the outcome and re-raises
             # Same shape as the delivery path above: this only makes the failure
             # visible on the sender before letting it propagate unchanged.
             self._last_error = f"{type(error).__name__}: {error}"

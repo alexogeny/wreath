@@ -305,39 +305,66 @@ async def test_a_failed_singleton_returns_its_pool_slot() -> None:
     assert runner.lead_errors >= 3, "a work() that fails every time went uncounted"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT in wreath._locks (not owned by this change): _release's finally "
-        "calls database.release() unguarded, so a release that raises -- which "
-        "Pool.release can, for a double-release or a close that fails -- "
-        "propagates out of SingletonRunner._run and kills the contention task "
-        "for the process's lifetime. Nothing counts it: the exception sits on a "
-        "task nobody awaits until stop(). See the report."
-    ),
-)
 @pytest.mark.asyncio
 async def test_a_singleton_survives_a_release_that_fails() -> None:
     """A failing release must degrade the round, not end the runner.
 
     Every other supervised loop in this tree agrees: `Doorbell._give_back`
     suppresses and moves on, `MessageBus._sweeper` counts and carries on. This
-    one stops, and stops silently.
+    one used to stop, and stop silently -- the exception escaped a `finally` and
+    sat on a task nobody awaits until `stop()`, so it surfaced at GC as "Task
+    exception was never retrieved" or not at all.
+
+    The lock is scripted as *not* acquired, so the loop's own contract is to keep
+    contending. A `work()` that returns would relinquish leadership voluntarily
+    and end the loop for a legitimate reason, which would make a passing
+    assertion here prove nothing about the release path.
     """
     from wreath._locks import SingletonRunner
 
     double = _double("adapter-release_error")
-    double.results = (True,)
+    double.results = ()  # try-lock answers None -> never the leader, keep polling
 
-    async def work() -> None:
-        return None
+    async def work() -> None:  # pragma: no cover - leadership is never won here
+        raise AssertionError("work() ran despite the lock not being held")
 
     runner = SingletonRunner(
         double, "leader", work, poll_interval=0.01, jitter=lambda base: 0.0
     )
     try:
         assert await until(lambda: double.acquired >= 3, within=1.0), (
-            f"a failing release ended leadership after {double.acquired} rounds"
+            f"a failing release ended contention after {double.acquired} round(s)"
+        )
+        assert runner.release_errors >= 3, (
+            "releases failed but nothing counted them -- a silent degradation is "
+            f"the defect this replaced (release_errors={runner.release_errors})"
+        )
+        assert runner.lead_errors == 0, (
+            "a failed release is not a failed leadership attempt; conflating them "
+            "would hide a work() that never runs"
+        )
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_clean_singleton_round_leaves_release_errors_at_zero() -> None:
+    """The counter's control. Without this, "it moved" proves nothing -- a
+    counter incremented unconditionally would satisfy the test above."""
+    from wreath._locks import SingletonRunner
+
+    double = _double("adapter-pool_timeout")  # a fault on acquire, not release
+    double.acquire_fault = None  # ... and then disarmed: this round is clean
+    double.results = ()
+
+    runner = SingletonRunner(
+        double, "leader", lambda: asyncio.sleep(0), poll_interval=0.01,
+        jitter=lambda base: 0.0,
+    )
+    try:
+        assert await until(lambda: double.acquired >= 3, within=1.0)
+        assert runner.release_errors == 0, (
+            f"a clean round counted a release error ({runner.release_errors})"
         )
     finally:
         await runner.stop()
@@ -561,3 +588,98 @@ async def test_a_successful_launch_does_seed_a_task() -> None:
     assert handle.task_id == "41"
     seeded = registry.get("41")
     assert seeded is not None and seeded.state == "queued"
+
+
+# --- the double must not be more capable than the driver ----------------------
+#
+# Thirteen introspection tests passed against a fake scripted with Python
+# `str`/`int` rows -- rows no PostgreSQL would ever send -- while the default
+# `validate_schema="error"` path had never once worked against a real server.
+# A double that accepts what the driver rejects hides exactly the defects it
+# exists to catch, so the refusals `_replay_adapters` already makes on the
+# connection have to hold everywhere a caller can reach.
+
+
+@pytest.mark.asyncio
+async def test_a_transaction_scope_refuses_what_a_connection_refuses() -> None:
+    """`= ANY($1)` with a list raises before PostgreSQL is reached.
+
+    The connection double refused it and the transaction double did not, so any
+    statement written inside `async with connection.transaction()` was accepted
+    here and rejected by the driver -- and the chunked-pass driver writes every
+    one of its statements inside a transaction.
+    """
+    double = DatabaseDouble("main")
+    connection = await double.acquire("write")
+    with pytest.raises(TypeError, match="unsupported PostgreSQL value type"):
+        await connection.fetch("SELECT * FROM t WHERE id = ANY($1)", [1, 2, 3])
+    async with connection.transaction() as tx:
+        with pytest.raises(TypeError, match="unsupported PostgreSQL value type"):
+            await tx.fetch("SELECT * FROM t WHERE id = ANY($1)", [1, 2, 3])
+
+
+@pytest.mark.asyncio
+async def test_a_transaction_scope_refuses_two_commands_in_one_statement() -> None:
+    """The extended query protocol takes one command per statement, in or out of
+    a transaction."""
+    double = DatabaseDouble("main")
+    connection = await double.acquire("write")
+    async with connection.transaction() as tx:
+        with pytest.raises(PostgresError, match="multiple commands"):
+            await tx.execute("UPDATE t SET x = 1; UPDATE t SET y = 2")
+
+
+@pytest.mark.asyncio
+async def test_a_fan_out_refuses_an_unbindable_argument_set() -> None:
+    """`map` binds each argument set separately, so each is refused separately.
+
+    This path checked nothing at all: a fan-out carrying the one value that
+    makes the driver raise ran cleanly against the double.
+    """
+    double = DatabaseDouble("main")
+    connection = await double.acquire("read")
+    with pytest.raises(TypeError, match="unsupported PostgreSQL value type"):
+        await connection.map("fetch", "SELECT $1", [([1, 2],), ((3,),)])
+    # And a fan-out of bindable values still works, so the refusal is not a ban.
+    assert await connection.map("fetch", "SELECT $1", [(1,), (2,)]) == []
+
+
+@pytest.mark.asyncio
+async def test_a_scope_shares_its_connections_prepared_statement_cache() -> None:
+    """A cast is poisoned for the *connection*, not for the scope that ran it.
+
+    PostgreSQL caches the plan on the backend, so a statement first executed
+    inside a transaction is already inferred when the next one outside it runs.
+    A per-scope cache would make the second call look like a first call, which
+    is the one thing this trap depends on being wrong about.
+    """
+    double = DatabaseDouble("main")
+    connection = await double.acquire("write")
+    async with connection.transaction() as tx:
+        await tx.fetch("SELECT $1::regclass", "things")  # first execution: coerced
+    with pytest.raises(TypeError, match="no binary encoder"):
+        await connection.fetch("SELECT $1::regclass", "things")
+
+
+def test_the_double_refuses_a_workload_the_pool_does_not_have() -> None:
+    """A typo'd workload names a pool that does not exist, and `Database` says
+    so. The double registering a statement against `"wirte"` and answering it
+    happily is a test that passes for an application that cannot start."""
+    double = DatabaseDouble("main")
+    with pytest.raises(ValueError, match="unknown PostgreSQL workload"):
+        double.statement("s", "SELECT 1", workload="wirte")
+
+
+def test_the_double_refuses_a_duplicate_statement_name() -> None:
+    """`Database.statement` raises on a name it already holds -- a guard that
+    exists because two subsystems claiming one name is a real collision."""
+    double = DatabaseDouble("main")
+    double.statement("s", "SELECT 1", workload="read")
+    with pytest.raises(ValueError, match="duplicate PostgreSQL statement"):
+        double.statement("s", "SELECT 2", workload="read")
+
+
+def test_the_double_refuses_an_empty_statement() -> None:
+    double = DatabaseDouble("main")
+    with pytest.raises(ValueError, match="statement name and SQL are required"):
+        double.statement("s", "   ", workload="read")

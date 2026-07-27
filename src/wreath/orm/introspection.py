@@ -136,8 +136,13 @@ async def validate_registry(registry: Any) -> SchemaDiff:
     connection = await registry.database.acquire(workload)
     try:
         issues: list[SchemaIssue] = []
+        # One position->name map per table, shared across every spec in the run.
+        # A foreign key has to resolve its *target* table's columns, and that
+        # target is usually another mapped model, so the cache turns what would
+        # be a per-constraint catalog read into one read per table.
+        columns: dict[tuple[str, str], dict[int, str]] = {}
         for spec in registry.specs:
-            issues.extend(await _validate_model(connection, spec))
+            issues.extend(await _validate_model(connection, spec, columns))
     finally:
         await registry.database.release(workload, connection)
     diff = SchemaDiff(tuple(sorted(issues)))
@@ -170,7 +175,13 @@ def _has_workload(database: Any, workload: str) -> bool:
     return True
 
 
-async def _validate_model(connection: Any, spec: ModelSpec) -> list[SchemaIssue]:
+async def _validate_model(
+    connection: Any,
+    spec: ModelSpec,
+    columns: dict[tuple[str, str], dict[int, str]] | None = None,
+) -> list[SchemaIssue]:
+    if columns is None:
+        columns = {}
     rows = await connection.fetch(_COLUMNS_SQL, spec.schema, spec.table)
     if not rows:
         return [
@@ -183,6 +194,7 @@ async def _validate_model(connection: Any, spec: ModelSpec) -> list[SchemaIssue]
     issues: list[SchemaIssue] = []
     actual = {str(row[2]): row for row in rows}
     by_position = {int(row[3]): str(row[2]) for row in rows}
+    columns[(spec.schema, spec.table)] = by_position
 
     for column in spec.columns:
         row = actual.get(column.database_name)
@@ -227,18 +239,46 @@ async def _validate_model(connection: Any, spec: ModelSpec) -> list[SchemaIssue]
                     )
                 )
 
-    issues.extend(await _validate_constraints(connection, spec, by_position))
+    issues.extend(await _validate_constraints(connection, spec, by_position, columns))
     return issues
 
 
+async def _column_names(
+    connection: Any,
+    schema: str,
+    table: str,
+    columns: dict[tuple[str, str], dict[int, str]],
+) -> dict[int, str]:
+    """The ``attnum -> name`` map for one table, read once per validation run.
+
+    A foreign key's target may be a model this registry maps, a table it does
+    not, or a table in another schema entirely, so the map is fetched on demand
+    rather than assembled from the specs.
+    """
+    key = (schema, table)
+    cached = columns.get(key)
+    if cached is not None:
+        return cached
+    rows = await connection.fetch(_COLUMNS_SQL, schema, table)
+    resolved = {int(row[3]): str(row[2]) for row in rows}
+    columns[key] = resolved
+    return resolved
+
+
 async def _validate_constraints(
-    connection: Any, spec: ModelSpec, by_position: dict[int, str]
+    connection: Any,
+    spec: ModelSpec,
+    by_position: dict[int, str],
+    columns: dict[tuple[str, str], dict[int, str]] | None = None,
 ) -> list[SchemaIssue]:
+    if columns is None:
+        columns = {}
+    columns.setdefault((spec.schema, spec.table), by_position)
     issues: list[SchemaIssue] = []
     rows = await connection.fetch(_CONSTRAINTS_SQL, spec.schema, spec.table)
     primary: tuple[str, ...] = ()
     unique: set[tuple[str, ...]] = set()
-    foreign: set[tuple[tuple[str, ...], str, str, tuple[int, ...]]] = set()
+    foreign: set[tuple[tuple[tuple[str, str], ...], str, str]] = set()
     for row in rows:
         kind = _text(row[0])
         local = _names(row[1], by_position)
@@ -247,7 +287,17 @@ async def _validate_constraints(
         elif kind == "u":
             unique.add(local)
         elif kind == "f":
-            foreign.add((local, _text(row[3]), _text(row[4]), tuple(_positions(row[2]))))
+            remote_schema, remote_table = _text(row[3]), _text(row[4])
+            remote_by_position = await _column_names(
+                connection, remote_schema, remote_table, columns
+            )
+            foreign.add(
+                (
+                    _pairs(row[1], row[2], by_position, remote_by_position),
+                    remote_schema,
+                    remote_table,
+                )
+            )
 
     for row in await connection.fetch(_INDEXES_SQL, spec.schema, spec.table):
         unique.add(_names(row[0], by_position))
@@ -272,11 +322,11 @@ async def _validate_constraints(
             )
     # Index corresponding local/remote column pairs so each declared reference
     # validates both ends with one lookup. Flattening composite constraints here
-    # preserves O(C + F) behavior while checking each paired target position.
+    # preserves O(C + F) behavior while checking each paired target column.
     foreign_keys = {
-        (local_name, schema, table, remote_position)
-        for local_names, schema, table, remote_positions in foreign
-        for local_name, remote_position in zip(local_names, remote_positions, strict=True)
+        (local_name, schema, table, remote_name)
+        for pairs, schema, table in foreign
+        for local_name, remote_name in pairs
     }
     for column in spec.columns:
         reference = column.reference
@@ -284,9 +334,9 @@ async def _validate_constraints(
             continue
         if (
             column.database_name,
-            reference.schema,
+            str(reference.schema),
             reference.table,
-            reference.position,
+            reference.column,
         ) not in foreign_keys:
             issues.append(
                 SchemaIssue(
@@ -329,6 +379,38 @@ def _positions(value: Any) -> list[int]:
 def _names(value: Any, by_position: dict[int, str]) -> tuple[str, ...]:
     return tuple(
         by_position[item] for item in _positions(value) if item in by_position
+    )
+
+
+def _pairs(
+    local: Any,
+    remote: Any,
+    by_position: dict[int, str],
+    remote_by_position: dict[int, str],
+) -> tuple[tuple[str, str], ...]:
+    """Pair a foreign key's local columns with their targets, by *name*.
+
+    ``conkey`` and ``confkey`` are physical ``attnum`` vectors, and an ``attnum``
+    is the order PostgreSQL created the columns in, which is not the order the
+    model declares them in -- wreath's own DDL generator sorts operations, so a
+    table declared ``id, name, slug`` is created ``name, ..., slug, id`` and
+    ``id`` is attnum 6. Comparing either vector against a declaration index is
+    therefore wrong on any table whose creation order differs, which is most of
+    them; both sides are resolved to names here so the comparison is made in the
+    only vocabulary the declaration and the catalog share.
+
+    A position missing from its map is dropped rather than guessed at. On the
+    local side that means a column the catalog does not have, already reported
+    as ``missing_column``; on the remote side, a target table that does not
+    exist, which surfaces as the ``missing_foreign_key`` this pairing feeds.
+    """
+    return tuple(
+        (local_name, remote_name)
+        for local_position, remote_position in zip(
+            _positions(local), _positions(remote), strict=False
+        )
+        if (local_name := by_position.get(local_position)) is not None
+        and (remote_name := remote_by_position.get(remote_position)) is not None
     )
 
 

@@ -600,6 +600,13 @@
         "tests/test_replay_faults.py",
         "tests/test_replay_to_test.py",
         "tests/test_replay_adversarial.py",
+        "tests/test_replay_fault_corpus.py",
+        "tests/test_replay_robustness.py",
+        "tests/test_replay_stage7.py",
+        "tests/test_replay_corpus_properties.py",
+        "tests/test_replay_owned_recovery.py",
+        "tests/test_replay_container_format.py",
+        "tests/test_replay_live_faults.py",
         "tests/test_prometheus.py",
         "tests/test_statsd.py",
         "tests/test_cloudwatch_emf.py"

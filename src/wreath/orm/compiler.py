@@ -29,6 +29,7 @@ from .expressions import (
     ColumnExpr,
     Expression,
     InExpr,
+    InSubqueryExpr,
     OrderExpr,
     Predicate,
     RelatedColumnExpr,
@@ -317,6 +318,14 @@ def _append_bind_paths(
         for index, item in enumerate(node.values):
             _append_bind_paths(item, (*path, "values", index), program)
         return
+    if isinstance(node, InSubqueryExpr):
+        # Left first, then the subquery's own predicates in their render order:
+        # the outer statement numbers placeholders positionally, and the
+        # subquery's WHERE is emitted after the left operand.
+        _append_bind_paths(node.left, (*path, "left"), program)
+        for index, predicate in enumerate(node.select.predicates):
+            _append_bind_paths(predicate, (*path, "select", "predicates", index), program)
+        return
     if isinstance(node, BooleanExpr):
         for index, operand in enumerate(node.operands):
             _append_bind_paths(operand, (*path, "operands", index), program)
@@ -424,6 +433,14 @@ def check_predicate_columns(model: type, node: Expression) -> None:
         for item in node.values:
             check_predicate_columns(model, item)
         return
+    if isinstance(node, InSubqueryExpr):
+        # Only the left operand belongs to this model. The subquery's predicates
+        # name *its* model's columns, and checking them here would reject every
+        # correct subquery.
+        check_predicate_columns(model, node.left)
+        for predicate in node.select.predicates:
+            check_predicate_columns(node.select.model, predicate)
+        return
     if isinstance(node, BooleanExpr):
         for operand in node.operands:
             check_predicate_columns(model, operand)
@@ -487,6 +504,29 @@ def compile_rebind(
             return InExpr(operator, original_left if left is None else left(values), operands)
 
         return rebind_in
+    if isinstance(node, InSubqueryExpr):
+        left = compile_rebind(node.left, placeholder, found)
+        inner = tuple(
+            compile_rebind(predicate, placeholder, found)
+            for predicate in node.select.predicates
+        )
+        if left is None and not any(inner):
+            return None
+        operator, original_left = node.operator, node.left
+        original_select, originals = node.select, node.select.predicates
+
+        def rebind_in_subquery(values: Any) -> Any:
+            predicates = tuple(
+                original if program is None else program(values)
+                for original, program in zip(originals, inner, strict=True)
+            )
+            return InSubqueryExpr(
+                operator,
+                original_left if left is None else left(values),
+                original_select._replace(predicates=predicates),
+            )
+
+        return rebind_in_subquery
     if isinstance(node, BooleanExpr):
         programs = tuple(
             compile_rebind(operand, placeholder, found) for operand in node.operands
@@ -569,7 +609,9 @@ def compile_count(registry: Any, select: Select) -> tuple[str, tuple[Any, ...], 
         builder.text(clause)
     if counting.predicates:
         builder.text(" WHERE ")
-        render_predicate(conjoin(counting.predicates), builder, "t0", filter_aliases)
+        render_predicate(
+            conjoin(counting.predicates), builder, "t0", filter_aliases, registry=registry
+        )
     return builder.sql(), tuple(builder.values), tuple(builder.oids)
 
 
@@ -596,7 +638,9 @@ def _build_plan(registry: Any, select: Select, spec: ModelSpec) -> _CachedPlan:
 
     if select.predicates:
         builder.text(" WHERE ")
-        render_predicate(conjoin(select.predicates), builder, "t0", filter_aliases)
+        render_predicate(
+            conjoin(select.predicates), builder, "t0", filter_aliases, registry=registry
+        )
     if select.orderings:
         builder.text(" ORDER BY ")
         builder.text(
@@ -648,6 +692,12 @@ def _filter_paths(
         _filter_paths(node.left, out, seen)
         for item in node.values:
             _filter_paths(item, out, seen)
+        return
+    if isinstance(node, InSubqueryExpr):
+        # Left only. A relationship reached inside the subquery would need a
+        # join on the *subquery's* FROM, not the outer one -- which is why
+        # `_check_subquery` refuses one outright rather than planning it here.
+        _filter_paths(node.left, out, seen)
         return
     if isinstance(node, BooleanExpr):
         for operand in node.operands:
@@ -876,7 +926,21 @@ def render_predicate(
     builder: SqlBuilder,
     alias: str,
     joins: dict[tuple[Any, ...], str],
+    *,
+    registry: Any = None,
 ) -> None:
+    """Render one predicate into `builder`, numbering placeholders positionally.
+
+    Args:
+        node: The predicate tree to render.
+        builder: Accumulates the SQL text and the bound values, in order.
+        alias: The table alias the unqualified columns belong to.
+        joins: Alias per relationship path, for columns reached through one.
+        registry: Needed only to render an `IN (SELECT ...)` subquery, which has
+            to resolve its own model to a table. Callers that never build one
+            may leave it None; a subquery reached without it raises rather than
+            rendering something half-qualified.
+    """
     if isinstance(node, BinaryExpr):
         if node.operator not in _BINARY_OPERATORS:
             raise ORMError(f"invalid SQL operator {node.operator!r}")
@@ -904,6 +968,19 @@ def render_predicate(
             _render_operand(value, builder, alias, joins)
         builder.text(")")
         return
+    if isinstance(node, InSubqueryExpr):
+        if node.operator not in _IN_OPERATORS:
+            raise ORMError(f"invalid SQL operator {node.operator!r}")
+        if registry is None:
+            raise ORMError(
+                "cannot render IN (SELECT ...) here: this caller renders predicates "
+                "without a registry, so the subquery's table cannot be resolved"
+            )
+        _render_operand(node.left, builder, alias, joins)
+        builder.text(f" {node.operator} (")
+        _render_subquery(node.select, builder, alias, registry)
+        builder.text(")")
+        return
     if isinstance(node, BooleanExpr):
         if node.operator not in _BOOLEAN_OPERATORS:
             raise ORMError(f"invalid SQL operator {node.operator!r}")
@@ -911,7 +988,7 @@ def render_predicate(
         for index, operand in enumerate(node.operands):
             if index:
                 builder.text(f" {node.operator} ")
-            render_predicate(operand, builder, alias, joins)
+            render_predicate(operand, builder, alias, joins, registry=registry)
         builder.text(")")
         return
     if isinstance(node, UnaryExpr):
@@ -919,13 +996,39 @@ def render_predicate(
             raise ORMError(f"invalid SQL operator {node.operator!r}")
         if node.operator == "NOT":
             builder.text("NOT (")
-            render_predicate(node.operand, builder, alias, joins)
+            render_predicate(node.operand, builder, alias, joins, registry=registry)
             builder.text(")")
             return
         _render_operand(node.operand, builder, alias, joins)
         builder.text(f" {node.operator}")
         return
     raise ORMError(f"cannot render {type(node).__name__} as a predicate")
+
+
+def _render_subquery(
+    select: Any, builder: SqlBuilder, outer_alias: str, registry: Any
+) -> None:
+    """Render a validated one-column subquery inside an enclosing statement.
+
+    The alias is derived from the enclosing one (`t0` -> `t0s`) rather than
+    drawn from the outer statement's `t1`, `t2`, ... sequence: those are planned
+    before rendering starts and a subquery is discovered during it, so sharing
+    the counter would mean threading mutable state through the renderer for no
+    gain. Deriving guarantees uniqueness at every depth, and a nested subquery
+    reads as `t0ss` -- which says where it came from.
+
+    The subquery's shape is already validated by `_check_subquery`, so there is
+    no ordering, paging, locking, eager load, or relationship join to emit; a
+    projection, a FROM, and an optional WHERE is the whole statement.
+    """
+    spec = registry.spec_for(select.model)
+    alias = f"{outer_alias}s"
+    column = select.projection[0].column
+    builder.text(f"SELECT {quote(alias)}.{quote(column.database_name)}")
+    builder.text(f" FROM {qualified(spec)} AS {quote(alias)}")
+    if select.predicates:
+        builder.text(" WHERE ")
+        render_predicate(conjoin(select.predicates), builder, alias, {}, registry=registry)
 
 
 def _render_operand(
@@ -1020,6 +1123,11 @@ def _walk_values(node: Expression, values: list[Any], oids: list[int]) -> None:
         for item in node.values:
             _walk_values(item, values, oids)
         return
+    if isinstance(node, InSubqueryExpr):
+        _walk_values(node.left, values, oids)
+        for predicate in node.select.predicates:
+            _walk_values(predicate, values, oids)
+        return
     if isinstance(node, BooleanExpr):
         for operand in node.operands:
             _walk_values(operand, values, oids)
@@ -1074,6 +1182,23 @@ def _shape_expression(node: Expression, out: list[bytes]) -> None:
         _shape_expression(node.left, out)
         for item in node.values:
             _shape_expression(item, out)
+        return
+    if isinstance(node, InSubqueryExpr):
+        # Everything that changes the subquery's SQL text, and nothing that
+        # changes only its bound values: the model, the projected column, and
+        # the shape of each predicate. Two subqueries over the same table
+        # filtering the same columns share a plan; two over different tables
+        # must not, and this is the only place that distinguishes them.
+        out.append(
+            b"q"
+            + node.operator.encode("ascii")
+            + str(len(node.select.predicates)).encode("ascii")
+        )
+        _shape_expression(node.left, out)
+        out.append(_model_shape(node.select.model))
+        out.append(node.select.projection[0].column.shape_projection)
+        for predicate in node.select.predicates:
+            _shape_expression(predicate, out)
         return
     if isinstance(node, BooleanExpr):
         out.append(
@@ -1147,7 +1272,30 @@ if _core is not None and hasattr(_core, "orm_shape"):
         UnaryExpr,
         ORMError,
     )
-    shape_of = _core.orm_shape
+    _shape_of_native = _core.orm_shape
+
+    def shape_of(registry: Any, select: Select) -> bytes:
+        """The native key, falling back to the pure one for a node C cannot key.
+
+        `orm_shape_configure` hands the builder a fixed set of expression classes
+        and it dispatches by *exact* type, so a node added since the extension
+        was built raises `ORMError("cannot key ...")` rather than quietly
+        producing a key that ignores it. That refusal is what makes this fallback
+        safe: `_shape_of_pure` raises the identical error for anything genuinely
+        unkeyable, so catching it either recovers a node the C does not know yet
+        or re-raises exactly what the caller would have seen.
+
+        `InSubqueryExpr` is that node today. The cost is one raised-and-caught
+        exception per compile of a query holding a subquery -- paid only by those
+        queries, never on the ordinary path, where the try costs nothing. Teaching
+        `orm_shape.c` the node would remove it; until then this is correct, and
+        correct-and-slower beats a plan cache that cannot tell two subqueries
+        apart.
+        """
+        try:
+            return _shape_of_native(registry, select)
+        except ORMError:
+            return _shape_of_pure(registry, select)
 else:
     shape_of = _shape_of_pure
 

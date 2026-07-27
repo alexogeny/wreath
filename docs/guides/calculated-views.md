@@ -523,7 +523,7 @@ as heavily as a busy noon, and produces a number that looks entirely reasonable.
 So an average against a bounded raw window with a coarser tier above it is
 refused where you wrote it:
 
-```python
+```python no-check="continues the declaration above; not a statement on its own"
 .measure(mean=avg(Trek.distance_km)).seal(after="2h").retain(raw="3 days", month=None)
 # SeriesError: measure 'mean' is an average and cannot be rolled up ...
 ```

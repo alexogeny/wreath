@@ -198,6 +198,19 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
   `podman` and `nerdctl` work too. Some database suites are also marked
   `network` and so are excluded by the default marker expression entirely —
   `-m ''` includes them.
+- **A database fixture must name its schema per xdist worker, and must assign
+  the name rather than default it.** Workers sharing one schema race on
+  `CREATE SCHEMA IF NOT EXISTS`, which is not atomic against a concurrent
+  creator; PostgreSQL reports the race as a `pg_namespace_nspname_index` or
+  `pg_type_typname_nsp_index` unique violation, which reads like anything except
+  a test-isolation bug. Two suites shipped with this and one of them was flaky
+  for days. Derive the name from `PYTEST_XDIST_WORKER`, and use plain assignment
+  — **`os.environ.setdefault` in a `conftest` silently does nothing**, because
+  the controller imports the conftest during collection, writes the value, then
+  spawns workers with *its own* environment, so every worker inherits the
+  controller's name and no-ops. That failure looks like the fix not working
+  rather than like a mistake in the fix. `tests/_camera_trap.py` and
+  `tests/test_replay_live_faults.py` are the patterns to copy.
 - `benchmarks/`: equivalent competitor applications and benchmark tooling
 - `docs/`: user documentation, API reference, cookbooks, agent guidance, design notes, and conformance reports
 

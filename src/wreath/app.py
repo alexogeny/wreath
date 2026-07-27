@@ -1864,6 +1864,45 @@ class Wreath:
                 return          # another caller compiled while we waited
             self._compile_routes_locked()
 
+    def _reject_session_after_authentication(self, route_middleware: tuple[Any, ...]) -> None:
+        """Refuse a session-reading backend behind route-scoped session middleware.
+
+        `SessionIdentityBackend` reads `request.state.session` during
+        authentication. `SessionMiddleware` is route middleware by design, so it
+        is compiled into a route's tape and runs *after* authorization has
+        already passed -- deliberately, so a miss or a static file never pays to
+        decode a cookie. Register the two together and the session the backend
+        needs is published after the backend has been asked for an identity, so
+        a caller holding a perfectly valid session cookie is refused on every
+        protected route.
+
+        The failure is a 401, which reads as "my login is broken" rather than
+        "these two are wired in the wrong order", and nothing else in the request
+        distinguishes it from a genuine anonymous call. So it is refused here,
+        naming the remedy, rather than left to be discovered in production.
+
+        Raises:
+            TypeError: The authentication backend needs a session and the session
+                middleware is registered on the route pipeline.
+        """
+        backend = self._auth_backend
+        if backend is None or not getattr(backend, "requires_session", False):
+            return
+        offenders = [
+            item for item in route_middleware if getattr(item, "publishes_session", False)
+        ]
+        if not offenders:
+            return
+        name = type(offenders[0]).__name__
+        raise TypeError(
+            f"{type(backend).__name__} reads request.state.session during "
+            f"authentication, but {name} was registered with add_middleware(), "
+            "which runs it after authorization -- every protected route would "
+            f"answer 401 with a valid session cookie. Register it with "
+            f"add_global_middleware({name}(...)) so the session is published "
+            "before authentication runs."
+        )
+
     def _compile_routes_locked(self) -> None:
         binding_specs = self._application_image.binding_specs()
         router = CompiledRouter(self._routing)
@@ -1874,6 +1913,7 @@ class Wreath:
             item[2]
             for item in sorted(self._global_middleware, key=lambda item: (item[0], item[1]))
         )
+        self._reject_session_after_authentication(app_middleware)
         # (before_hook, after_hook, is_sync). A synchronous before_sync hook is
         # dispatched without a coroutine/await in the global loop; otherwise the
         # async before hook is awaited as before.
@@ -2517,6 +2557,14 @@ class Wreath:
                     # failure, and it was being left open along with whatever it
                     # holds -- a connection, a file, a client.
                     steps.append(("app scope", self._app_scope.aclose))
+                    # Static mounts are opened by `static()` at registration, so
+                    # they exist even when startup fails before anything else
+                    # started -- and the server will not call shutdown.
+                    steps += [
+                        (f"static mount {prefix!r}", close)
+                        for prefix, handler in reversed(self._static_matcher._mounts)
+                        if (close := getattr(handler, "close", None)) is not None
+                    ]
                     steps += [
                         (f"http client {name!r}", client.close)
                         for name, client in reversed(started_clients)
@@ -2553,6 +2601,17 @@ class Wreath:
                 # from: an app-scoped generator may still want to talk to a
                 # database or HTTP client on the way out.
                 steps.append(("app scope", self._app_scope.aclose))
+                # Static mounts hold a root descriptor each, opened when `static()`
+                # registered them. Nothing else can reach the instance -- it is
+                # stored only as an opaque handler -- so this is the only place
+                # `StaticFiles.close()` is reachable through the public API, and
+                # its own docstring's "call it at shutdown" is otherwise advice
+                # nobody can take.
+                steps += [
+                    (f"static mount {prefix!r}", close)
+                    for prefix, handler in reversed(self._static_matcher._mounts)
+                    if (close := getattr(handler, "close", None)) is not None
+                ]
                 steps += [
                     (f"object store {name!r}", close)
                     for name, store in reversed(tuple(self._object_stores.items()))

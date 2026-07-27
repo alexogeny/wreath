@@ -23,6 +23,8 @@ flaw the second chapter fixes.
 
 from __future__ import annotations
 
+import os
+
 from wreath.orm import (
     Mapped,
     Model,
@@ -45,10 +47,20 @@ from wreath.orm.types import (
     TimestampTz,
 )
 
-#: One PostgreSQL namespace for the whole example, so `\dt camera_trap.*` in
-#: psql shows the domain and nothing else. The framework's own tables live in
-#: "wreath"; an application's belong somewhere it chose.
-SCHEMA = "camera_trap"
+#: The default namespace name. `\dt camera_trap.*` in psql shows the domain and
+#: nothing else. The framework's own tables live in "wreath"; an application's
+#: belong somewhere it chose.
+DEFAULT_SCHEMA = "camera_trap"
+
+#: One PostgreSQL namespace for the whole example.
+#:
+#: Read from the environment because a schema name is deployment configuration,
+#: not a property of the domain: one database can carry a staging copy beside
+#: production, and a test run can give each parallel worker its own namespace
+#: instead of six of them fighting over one. Resolved at import because
+#: `schema=` is fixed when the model class is built -- so a process serves
+#: exactly one schema, and changing it means a new process.
+SCHEMA = os.environ.get("CAMERA_TRAP_SCHEMA", DEFAULT_SCHEMA)
 
 
 class Reserve(Model, table="reserves", schema=SCHEMA):

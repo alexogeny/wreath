@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 
-from . import apidoc, charts, figures, hero, markdown, scripts, theme
+from . import apidoc, charts, codeblocks, figures, hero, markdown, scripts, theme
 from .config import Page, Section, Site
 
 _TAG = re.compile(r"<[^>]+>")
@@ -210,6 +210,11 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
             continue
         text = src.read_text(encoding="utf-8")
         description = _frontmatter_description(text) or site.description
+        # The Python in the page, checked against the real objects before the
+        # markdown is touched. Structural checks pass a page whose first line
+        # raises `AttributeError`; five such pages shipped in one week.
+        findings, _ = codeblocks.check_page(text, page.source)
+        (errors if site.strict else warnings).extend(str(f) for f in findings)
         # ```chart -> SVG; note any data files read so we can publish them.
         text, chart_tokens = charts.extract(
             text, source_dir,

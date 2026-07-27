@@ -158,7 +158,7 @@ and caches nothing, so the next request retries.
 part of the key, so a caller varying a parameter the handler ignores (`?_=1`)
 fills the store and evicts everything real:
 
-```python
+```python no-check="a bare decorator, shown without the handler it decorates"
 @cached(ttl=30, query_params=("page", "size"))   # only these reach the key
 ```
 

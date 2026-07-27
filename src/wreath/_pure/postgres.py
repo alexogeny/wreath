@@ -1499,7 +1499,7 @@ class Connection:
             self._fail_connection(OperationalError("PostgreSQL connection lost"), error)
         except PostgresError as error:
             self._fail_connection(error)
-        except BaseException as error:  # noqa: BLE001 -- see below; it re-raises
+        except BaseException as error:  # see below; it re-raises
             # Anything else reaching here is a defect in the driver rather than a
             # wire condition -- a decoder that cannot read the format it was sent,
             # a plan that does not match its rows. It still has to fail every

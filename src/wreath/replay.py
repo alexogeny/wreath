@@ -1029,8 +1029,8 @@ def fault_corpus() -> dict[str, FaultSchedule]:
         The statement succeeded and the *answer* could not be read. Modelled as
         a `ValueError`, not a `PostgresError`, because that is what it was:
         `text-format array decoding is not supported`, raised by the driver on
-        a cold catalog path in a default configuration. Every ``except
-        PostgresError`` in this tree steps around it, so a region that raised a
+        a cold catalog path in a default configuration. Every
+        `except PostgresError` in this tree steps around it, so a region that raised a
         server error would have proved a recovery that does not exist. This is
         also the region that pairs with the no-hang property: the failure is in
         the code that *resolves* a caller's future, which is exactly how a

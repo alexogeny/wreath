@@ -20,7 +20,11 @@ import pytest
 
 from wreath.orm import Mapped, Model, column
 from wreath.orm.errors import SchemaMismatchError
-from wreath.orm.introspection import _validate_constraints, validate_registry
+from wreath.orm.introspection import (
+    _validate_constraints,
+    _validate_model,
+    validate_registry,
+)
 from wreath.orm.registry import Registry
 from wreath.orm.types import Int64, Text
 from wreath.postgres import Database, connect
@@ -413,3 +417,177 @@ async def test_the_catalog_read_survives_a_composite_key_and_a_foreign_key(
     diff = await asyncio.wait_for(validate_registry(registry), timeout=15.0)
 
     assert not diff, f"a matching composite key reported {diff.report()}"
+
+
+# --------------------------------------------------------------------------
+# Physical column order, which is not declaration order.
+#
+# `attnum` is the order PostgreSQL created a column in. Nothing makes that the
+# order a model declares its columns in -- and wreath's own DDL generator sorts
+# its operations, so its tables routinely disagree with the declarations that
+# produced them. Every live test above happens to declare columns in the same
+# order the DDL creates them, which is why they passed while a foreign key's
+# target was being compared as a raw `confkey` integer against a declaration
+# index. These are the tests that do not grant that coincidence.
+# --------------------------------------------------------------------------
+
+#: `id` is created *last* here and declared *first* below, so its attnum is 3
+#: and its declaration index is 0. Any comparison that conflates the two reports
+#: a foreign key that PostgreSQL plainly has as missing.
+_SHUFFLED_DDL = """
+CREATE TABLE {schema}.reserves (
+    name text NOT NULL,
+    area_hectares bigint NOT NULL,
+    slug text NOT NULL UNIQUE,
+    id bigint PRIMARY KEY
+);
+CREATE TABLE {schema}.stations (
+    label text NOT NULL,
+    reserve_id bigint NOT NULL REFERENCES {schema}.reserves (id),
+    id bigint PRIMARY KEY
+);
+"""
+
+
+@pytest.fixture
+async def shuffled_schema() -> AsyncIterator[tuple[str, Any]]:
+    """Two tables whose physical column order differs from the declarations."""
+    assert _DSN is not None
+    schema = f"shuffled_{uuid.uuid4().hex[:12]}"
+    connection = await connect(_DSN)
+    try:
+        await connection.execute(f'CREATE SCHEMA "{schema}"')
+        for statement in _SHUFFLED_DDL.format(schema=f'"{schema}"').split(";"):
+            if statement.strip():
+                await connection.execute(statement)
+    finally:
+        await connection.close()
+
+    database = Database("live", _DSN)
+    await database.start()
+    try:
+        yield schema, database
+    finally:
+        await database.stop()
+        cleanup = await connect(_DSN)
+        try:
+            await cleanup.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        finally:
+            await cleanup.close()
+
+
+def _shuffled_models(schema: str) -> list[type]:
+    """Declared `id`-first against a database that created `id` last."""
+
+    class ShuffledReserve(Model, table="reserves", schema=schema):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        name: Mapped[str] = column(Text)
+        area_hectares: Mapped[int] = column(Int64)
+        slug: Mapped[str] = column(Text, unique=True)
+
+    class ShuffledStation(Model, table="stations", schema=schema):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        label: Mapped[str] = column(Text)
+        reserve_id: Mapped[int] = column(Int64, references=ShuffledReserve.id)
+
+    return [ShuffledReserve, ShuffledStation]
+
+
+@live
+async def test_a_foreign_key_validates_when_the_target_was_created_out_of_order(
+    shuffled_schema: tuple[str, Any],
+) -> None:
+    """The blocker: a correct schema, reported as missing every foreign key.
+
+    `confkey` here is `{4}` -- `reserves.id` is the fourth column PostgreSQL
+    created -- while the declaration puts `id` first. Comparing the two reported
+    `missing_foreign_key` on a constraint the database has. `validate_schema`
+    defaults to `"error"`, so this was a hard startup failure for any application
+    whose tables were not created in declaration order, which includes every
+    application whose tables wreath's own migration artifact created.
+    """
+    schema, database = shuffled_schema
+    registry = Registry(database, _shuffled_models(schema))
+
+    assert registry.validate_schema == "error", "the default under test moved"
+
+    diff = await asyncio.wait_for(validate_registry(registry), timeout=15.0)
+
+    assert not diff, f"a matching schema reported {diff.report()}"
+
+
+@live
+async def test_the_out_of_order_pass_is_not_vacuous(
+    shuffled_schema: tuple[str, Any],
+) -> None:
+    """Resolving both sides to names must not resolve everything to a match.
+
+    The failure mode of the fix is the mirror of the bug it replaces: pair the
+    columns by name and a foreign key that points somewhere else entirely could
+    be accepted. So this declares a reference to `reserves.slug` where the
+    database points at `reserves.id`, on the same out-of-order table, and
+    requires exactly that one issue -- not zero, and not one per column.
+    """
+    schema, database = shuffled_schema
+    reserve, _ = _shuffled_models(schema)
+
+    class WrongTarget(Model, table="stations", schema=schema):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        label: Mapped[str] = column(Text)
+        # The database's FK targets `reserves.id`, not `reserves.slug`.
+        reserve_id: Mapped[int] = column(Int64, references=reserve.slug)
+
+    registry = Registry(database, [reserve, WrongTarget], validate_schema="warn")
+
+    diff = await asyncio.wait_for(validate_registry(registry), timeout=15.0)
+
+    reported = {(issue.column, issue.issue_code) for issue in diff.issues}
+    assert reported == {("reserve_id", "missing_foreign_key")}, reported
+
+
+@live
+async def test_the_target_table_is_read_once_however_many_keys_point_at_it(
+    shuffled_schema: tuple[str, Any],
+) -> None:
+    """Resolving a target's columns must not become a per-constraint round trip.
+
+    The target of a foreign key is usually another mapped model, so the position
+    map is shared across the whole validation run. Without the cache this is a
+    catalog read per constraint, on a path that runs at every startup.
+    """
+    schema, database = shuffled_schema
+    models = _shuffled_models(schema)
+    registry = Registry(database, models, validate_schema="warn")
+
+    class CountingReads:
+        """Forwards to a real connection, counting the column reads.
+
+        A wrapper rather than a monkeypatch: the native `Connection` refuses
+        attribute assignment, and a double would put this test back on rows no
+        PostgreSQL sends -- which is the reason this file grew a live section.
+        """
+
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+            self.column_reads = 0
+
+        async def fetch(self, sql: str, *args: Any) -> Any:
+            if "pg_attribute" in sql:
+                self.column_reads += 1
+            return await self.inner.fetch(sql, *args)
+
+    connection = await database.acquire("write")
+    counting = CountingReads(connection)
+    try:
+        issues: list[Any] = []
+        columns: dict[tuple[str, str], dict[int, str]] = {}
+        for spec in registry.specs:
+            issues.extend(await _validate_model(counting, spec, columns))
+    finally:
+        await database.release("write", connection)
+    reads = counting.column_reads
+
+    assert not issues, issues
+    # Two tables, two column reads -- the foreign key's target resolves from the
+    # map the target's own validation already built.
+    assert reads == len(models), f"{reads} column reads for {len(models)} tables"

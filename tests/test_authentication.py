@@ -94,3 +94,82 @@ async def test_admin_route_is_pruned_for_non_admin_and_allowed_for_admin() -> No
 
     assert denied[0]["status"] == 403
     assert allowed[0]["status"] == 200
+
+
+# --- the session backend's ordering requirement -------------------------------
+#
+# `SessionIdentityBackend` reads `request.state.session`, which `SessionMiddleware`
+# publishes. Route middleware runs *after* authorization, so registering the two
+# in the obvious way authenticated every caller as anonymous and answered 401 to
+# a valid session cookie -- silently, and identically to a genuine anonymous
+# request. These pin the refusal that replaced it.
+
+
+def _session_app(*, global_scope: bool) -> Wreath:
+    from wreath.auth import SessionIdentityBackend
+    from wreath.middleware import SessionMiddleware
+
+    app = Wreath()
+    app.configure_auth(SessionIdentityBackend())
+    middleware = SessionMiddleware(secret="x" * 32, secure=False)
+    if global_scope:
+        app.add_global_middleware(middleware)
+    else:
+        app.add_middleware(middleware)
+
+    @app.get("/me")
+    @authenticated()
+    async def me(request: Any) -> dict[str, Any]:
+        return {"id": request.identity.id}
+
+    return app
+
+
+def test_a_session_backend_refuses_route_scoped_session_middleware() -> None:
+    app = _session_app(global_scope=False)
+    with pytest.raises(TypeError) as caught:
+        app._compile_routes()
+    message = str(caught.value)
+    # The remedy has to be in the message: the failure it replaces was a 401,
+    # which says nothing about middleware ordering.
+    assert "add_global_middleware" in message
+    assert "SessionMiddleware" in message
+    assert "SessionIdentityBackend" in message
+
+
+def test_the_correct_registration_is_not_refused() -> None:
+    """Otherwise the refusal above could pass by refusing everything."""
+    app = _session_app(global_scope=True)
+    app._compile_routes()
+
+
+def test_a_composite_backend_propagates_the_session_requirement() -> None:
+    """A wrapper must not hide the requirement its members carry."""
+    from wreath.auth import CompositeBackend, SessionIdentityBackend
+
+    bearer = BearerTokenBackend({"t": Identity(id="bo", type="User")})
+    assert not getattr(bearer, "requires_session", False)
+    assert CompositeBackend(bearer, SessionIdentityBackend()).requires_session
+    assert not CompositeBackend(bearer).requires_session
+
+
+def test_a_bearer_only_app_may_still_use_route_scoped_sessions() -> None:
+    """The refusal is about the *backend's* need, not about sessions at all.
+
+    A session used only by handlers -- a flash message, a wizard step -- has no
+    ordering requirement, and route scope is the cheaper registration because a
+    miss or a static file never decodes the cookie. Refusing that too would have
+    made the check a blanket ban rather than a statement about ordering.
+    """
+    from wreath.middleware import SessionMiddleware
+
+    app = Wreath()
+    app.configure_auth(BearerTokenBackend({"t": Identity(id="bo", type="User")}))
+    app.add_middleware(SessionMiddleware(secret="x" * 32, secure=False))
+
+    @app.get("/me")
+    @authenticated()
+    async def me(request: Any) -> dict[str, Any]:
+        return {"id": request.identity.id}
+
+    app._compile_routes()

@@ -19,11 +19,17 @@ Later stages add the review console and the admin surface to this same list.
 
 from __future__ import annotations
 
+from . import admin
 from .reserves import reserves
+from .session import session
 from .sightings import sightings
 from .species import species
 
-#: Included in this order by :func:`camera_trap.app.build`.
-ROUTERS = (reserves, sightings, species)
+#: Included in this order by `camera_trap.app.build`.
+ROUTERS = (reserves, sightings, species, session)
 
-__all__ = ["ROUTERS", "reserves", "sightings", "species"]
+#: `admin` is a module rather than a router: its two CRUD surfaces are
+#: *generated* from the models, and generating them needs a session opener that
+#: only exists once the application has an ORM registry. `admin.mount(app, ...)`
+#: is called from `build` after that point.
+__all__ = ["ROUTERS", "admin", "reserves", "session", "sightings", "species"]

@@ -13,7 +13,9 @@ import time
 
 import pytest
 
+from wreath import Wreath
 from wreath.staticfiles import StaticFiles
+from wreath.testing import TestClient
 
 
 def _fd_count() -> int:
@@ -78,3 +80,61 @@ async def test_serving_still_works_before_close(tmp_path) -> None:
         os.close(fd)
     finally:
         files.close()
+
+
+# --- reachability through the public API -------------------------------------
+#
+# `Wreath.static()` builds the instance itself and stores it only as an opaque
+# route handler, so before lifespan closed it there was no way for an
+# application to satisfy `close()`'s own "call it at shutdown" instruction. The
+# leak was bounded -- one descriptor per mount, for the process lifetime -- but
+# a documented contract nobody can satisfy is worse than an undocumented one.
+
+
+def _mount_fd(app) -> int:
+    (handler,) = [handler for _prefix, handler in app._static_matcher._mounts]
+    return handler._root_fd
+
+
+@pytest.mark.asyncio
+async def test_lifespan_shutdown_closes_a_static_mount(tmp_path) -> None:
+    app = Wreath()
+    app.static("/assets", str(tmp_path))
+    root_fd = _mount_fd(app)
+    assert os.fstat(root_fd)  # open while the app is up
+
+    async with TestClient(app):
+        pass
+
+    assert _mount_fd(app) == -1, "shutdown did not close the mount's descriptor"
+    with pytest.raises(OSError):
+        os.fstat(root_fd)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_startup_also_closes_a_static_mount(tmp_path) -> None:
+    """Startup failure is the path where nothing else ever will: the server is
+    told startup failed and never calls shutdown."""
+    app = Wreath()
+    app.static("/assets", str(tmp_path))
+
+    @app.on_startup
+    async def boom(_app) -> None:
+        raise RuntimeError("startup refused")
+
+    root_fd = _mount_fd(app)
+    sent: list[dict] = []
+    messages = iter([{"type": "lifespan.startup"}])
+
+    async def receive() -> dict:
+        return next(messages)
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    await app({"type": "lifespan"}, receive, send)
+
+    assert sent and sent[0]["type"] == "lifespan.startup.failed"
+    assert _mount_fd(app) == -1, "a failed startup left the mount's descriptor open"
+    with pytest.raises(OSError):
+        os.fstat(root_fd)

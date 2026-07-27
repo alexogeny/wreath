@@ -15,7 +15,11 @@ from wreath.auth import SessionIdentityBackend
 from wreath.middleware import SessionMiddleware
 
 app = Wreath()
-app.add_middleware(SessionMiddleware(secret=os.environ["SESSION_SECRET"]))
+# Global, not `add_middleware`: `SessionIdentityBackend` reads the session while
+# it authenticates, and route middleware runs *after* authorization. Registered
+# the other way, every protected route answers 401 to a valid session cookie —
+# so wreath refuses that combination when the routes compile.
+app.add_global_middleware(SessionMiddleware(secret=os.environ["SESSION_SECRET"]))
 
 # 1. an HTTP client pinned to the issuer origin
 app.http_client("idp", base_url="https://issuer.example.com")

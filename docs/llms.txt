@@ -11,6 +11,8 @@
 - [Home](index.md): what Wreath is and why.
 - [Getting started](getting-started/index.md): install and first app.
 - [Deployment](getting-started/deployment.md): project layout, running behind ASGI or the native server.
+- [The camera-trap example](example/index.md): the canonical example's argument -- one application, no glue; a sensitive station's coordinates absent (not null) for a volunteer and present for a ranger, from a Cedar policy that also answers "what may I do?".
+- [Camera-trap quickstart](example/quickstart.md): container, schema, migration artifact, deterministic seed, server, first request -- every command executed, real output pasted.
 - [Camera-trap walkthrough](example/walkthrough.md): the canonical example's schema toured in psql — local wall clocks, late data, partial indexes, and the free-text column chapter two recodes.
 - [Camera-trap read API](example/read-api.md): the canonical example's nine read routes -- nested routers, a local-date window bounded at bind time, declared queries, stable paging, and the species list the ORM invalidates.
 

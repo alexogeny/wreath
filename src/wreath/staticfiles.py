@@ -205,8 +205,11 @@ class StaticFiles:
         one change rather than two. The wait is bounded: a queued lookup is a
         single `openat`, and the queue is bounded by `max_workers`.
 
-        Call it at shutdown, after the server has stopped accepting. A lookup
-        submitted after it raises `RuntimeError` from the pool, as it did before.
+        `Wreath.static()` mounts are closed for you on lifespan shutdown, and on
+        a failed startup, since the instance it builds is reachable only as a
+        route handler. Call this yourself when you constructed the `StaticFiles`
+        directly, after the server has stopped accepting. A lookup submitted
+        after it raises `RuntimeError` from the pool, as it did before.
         """
         self._executor.shutdown(wait=True)
         # Read-and-clear before closing, so a second call cannot close a

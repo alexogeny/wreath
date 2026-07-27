@@ -63,13 +63,20 @@ Finally, serve it:
 
 ```bash
 PYTHONPATH=. wreath run camera_trap.app:app --port 8000
-curl -s localhost:8000/reserves
+
+curl -s localhost:8000/species                                  # public
+curl -s -c jar.txt -X POST 'localhost:8000/session?email=ranger1@example.org'
+curl -s -b jar.txt localhost:8000/reserves                      # needs a session
 ```
+
+The observations are not public — only the species vocabulary is — so the
+interesting routes want a session. `docs/example/quickstart.md` walks this whole
+sequence with the output each command prints.
 
 ## What is here so far
 
-Stages one and two of eight: the schema and the data, and the read API over
-them.
+Stages one to three of eight: the schema and the data, the read API over them,
+and the authorization that decides who sees what.
 
 - `camera_trap/models.py` — the nine tables, each with a docstring saying why it
   exists rather than what it contains
@@ -85,20 +92,19 @@ them.
 `docs/example/walkthrough.md` tours the schema in `psql`;
 `docs/example/read-api.md` walks the nine routes with real transcripts.
 
-Later stages add Cedar authorization, object storage and uploads, the analysis
-layer with its charts, and a second chapter that recodes `review_state` with a
-deferred migration.
+Later stages add object storage and uploads, the analysis layer with its charts,
+a second chapter that recodes `review_state` with a deferred migration, and an
+operations appendix.
 
-## A known blocker
+## The application runs the framework default
 
-**`wreath run` cannot start this application yet**, and neither can anything
-else that runs its lifespan with schema validation on. The ORM's start-up check
-reads the PostgreSQL catalog; the rows arrive in text format while the decoder
-that consumes them reads binary only, and it raises inside the connection's
-reader task rather than the caller's — so the caller waits on a future nobody
-will ever resolve. It is a hang rather than an error, which is the worst shape a
-failure can take.
+`build()` takes `validate_schema="error"` — the framework default — so the
+application reads the PostgreSQL catalog at startup and refuses to serve against
+a schema that does not match its models. The example's own tests build it that
+way too, rather than turning the check off, because a default that the canonical
+example does not exercise is a default nobody is checking.
 
-`build(validate_schema="off")` starts and serves normally, and that is what the
-example's tests pass. Nothing else about the application is affected: the
-migration CLI, the seed, and every route work.
+That was not always possible. The catalog read used to hang at lifespan startup,
+and once that was fixed it reported every foreign key missing on a correct
+schema. Both are fixed, and running the default here is what would catch a
+third.

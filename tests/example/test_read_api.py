@@ -71,16 +71,24 @@ def test_the_routers_compose_the_paths_the_domain_implies() -> None:
         (route.methods[0], route.path) for router in ROUTERS for route in router.routes
     )
     assert found == [
+        ("DELETE", "/session"),
         ("GET", "/reserves"),
         ("GET", "/reserves/{slug}"),
         ("GET", "/reserves/{slug}/stations"),
         ("GET", "/reserves/{slug}/stations/{station_id}"),
         ("GET", "/reserves/{slug}/stations/{station_id}/deployments"),
         ("GET", "/reserves/{slug}/stations/{station_id}/sightings"),
+        ("GET", "/session"),
         ("GET", "/sightings/{sighting_id}"),
         ("GET", "/species"),
         ("GET", "/species/{code}"),
+        ("POST", "/session"),
     ]
+    # The generated registry routes are deliberately absent: they are mounted by
+    # `admin.mount(app, ...)` during assembly rather than declared as a module
+    # router, because generating them needs the ORM registry. Asserting their
+    # absence here is what keeps this list a statement about *hand-written*
+    # routing rather than a list that quietly became everything.
 
 
 def test_a_declared_query_names_exactly_the_values_it_binds() -> None:
@@ -138,18 +146,26 @@ class _StationRow:
         self.sensitive = sensitive
 
 
-def test_a_sensitive_station_publishes_no_coordinates() -> None:
+def test_a_station_publishes_no_coordinates_unless_the_caller_may_locate_it() -> None:
     """Where a rhino midden is, is the one field this API must not leak.
 
     Asserted on the serializer rather than through a request, because that is
-    where the rule lives and a later stage will replace it with an
-    authorization rule in the same place.
+    where the redaction happens. Who is allowed to see it is decided in
+    `camera_trap.policies` and asserted against the Cedar policy in
+    `test_authorization.py`; here the only question is that the serializer
+    obeys the answer it is handed — including when nobody hands it one.
     """
-    shown: Any = station_json(_StationRow(sensitive=False))  # type: ignore[arg-type]
-    withheld: Any = station_json(_StationRow(sensitive=True))  # type: ignore[arg-type]
+    shown: Any = station_json(_StationRow(sensitive=False), locate=True)  # type: ignore[arg-type]
+    withheld: Any = station_json(_StationRow(sensitive=True), locate=False)  # type: ignore[arg-type]
     assert "latitude" in shown and "longitude" in shown
     assert "latitude" not in withheld and "longitude" not in withheld
     assert withheld["sensitive"] is True, "the client is told the field is withheld"
+
+    # The default is the safe one. A call site that forgets to ask the policy
+    # withholds rather than publishes, so the failure mode of forgetting is a
+    # missing field rather than a leaked coordinate.
+    forgotten: Any = station_json(_StationRow(sensitive=False))  # type: ignore[arg-type]
+    assert "latitude" not in forgotten
 
 
 def test_configuration_has_defaults_and_refuses_a_missing_database(
@@ -158,10 +174,36 @@ def test_configuration_has_defaults_and_refuses_a_missing_database(
     """Two knobs default, and the one with no sensible default says so."""
     monkeypatch.delenv("CAMERA_TRAP_MAX_WINDOW_DAYS", raising=False)
     monkeypatch.delenv("CAMERA_TRAP_SPECIES_CACHE_TTL", raising=False)
-    settings = Settings(dsn=None, max_window_days=90, species_cache_ttl=300.0)
+    settings = Settings(
+        dsn=None,
+        max_window_days=90,
+        species_cache_ttl=300.0,
+        session_key=None,
+        session_secure=True,
+    )
     with pytest.raises(RuntimeError, match="CAMERA_TRAP_DSN"):
         settings.database_url()
-    assert Settings(dsn="x", max_window_days=1, species_cache_ttl=1.0).database_url() == "x"
+    ready = Settings(
+        dsn="x",
+        max_window_days=1,
+        species_cache_ttl=1.0,
+        session_key="k" * 32,
+        session_secure=True,
+    )
+    assert ready.database_url() == "x"
+    # The session secret has the same shape: no default, and a refusal that
+    # says how to make one rather than a generated value that signs out every
+    # user the next time the process restarts.
+    with pytest.warns(RuntimeWarning, match="CAMERA_TRAP_SESSION_SECRET"):
+        assert settings.session_secret()
+    with pytest.raises(RuntimeError, match="at least 32"):
+        Settings(
+            dsn="x",
+            max_window_days=1,
+            species_cache_ttl=1.0,
+            session_key="short",
+            session_secure=True,
+        ).session_secret()
 
 
 def test_a_bad_number_in_the_environment_names_the_variable(
@@ -183,37 +225,37 @@ def test_a_bad_number_in_the_environment_names_the_variable(
 async def client():
     """The application, on a freshly built and seeded schema.
 
-    ``validate_schema="off"`` is not a preference. The ORM's start-up schema
-    check reads the PostgreSQL catalog, that read decodes as text where the
-    decoder expects binary, and the error surfaces inside the connection's
-    reader task rather than the caller's — so lifespan startup *hangs*. Remove
-    the argument when that is fixed; nothing else here depends on it.
+    Built on the framework default, ``validate_schema="error"``, so these tests
+    exercise the configuration a real deployment gets. That was not always
+    possible: the catalog read used to hang at lifespan startup, and once that
+    was fixed it reported every foreign key missing on a correct schema. Both
+    are fixed, and running the default here is what would catch a third.
     """
+    from _camera_trap import build_schema, drop_schema
     from camera_trap.app import build
-    from camera_trap.models import SCHEMA
-    from camera_trap.seed import seed
 
     from wreath.postgres import connect
     from wreath.testing import TestClient
 
     connection = await connect(_DSN)
     try:
-        await connection.execute(f'DROP SCHEMA IF EXISTS "{SCHEMA}" CASCADE')
-        await connection.execute(f'CREATE SCHEMA "{SCHEMA}"')
-        for statement in _ARTIFACT.read_text().splitlines():
-            if statement.strip():
-                await connection.execute(statement.rstrip(";"))
-        await seed(connection, sightings=SAMPLE)
+        await build_schema(connection, seed_rows=SAMPLE)
     finally:
         await connection.close()
 
-    application = build(validate_schema="off")
+    application = build()
     async with TestClient(application) as test_client:
-        yield test_client
+        # The read API requires an account: the observations are not public,
+        # only the species vocabulary is. These tests are about routing,
+        # binding, paging and the cache rather than about who may see what, so
+        # they run as a ranger -- the role that is refused nothing, which keeps
+        # an authorization failure from showing up here as a routing failure.
+        # `test_authorization.py` owns the question of what each role sees.
+        yield test_client.acting_as("ranger-1", roles=["ranger"], type="Observer")
 
     connection = await connect(_DSN)
     try:
-        await connection.execute(f'DROP SCHEMA IF EXISTS "{SCHEMA}" CASCADE')
+        await drop_schema(connection)
     finally:
         await connection.close()
 
@@ -249,12 +291,20 @@ async def test_a_station_cannot_be_reached_through_another_reserve(client) -> No
 
 
 @skip_without_database
-async def test_a_sensitive_stations_coordinates_never_reach_the_wire(client) -> None:
+async def test_a_sensitive_stations_coordinates_reach_only_a_ranger(client) -> None:
+    """The rule this endpoint had in stage 2, now that it has an identity.
+
+    Stage 2 withheld a sensitive station's coordinates from everybody, because
+    there was nobody to distinguish. Stage 3 replaced that with the real rule:
+    a ranger is told, and nobody else is. `client` here is acting as a ranger,
+    so this asserts the *permitted* side; `test_authorization.py` owns the
+    refused side and the grid behind it.
+    """
     response = await client.get(f"/reserves/{RESERVE}/stations")
     assert response.status == 200
     stations = {item["id"]: item for item in response.json()["items"]}
     assert stations[SENSITIVE_STATION]["sensitive"] is True
-    assert "latitude" not in stations[SENSITIVE_STATION]
+    assert "latitude" in stations[SENSITIVE_STATION], "a ranger may locate it"
     assert "longitude" in stations[OPEN_STATION]
 
 

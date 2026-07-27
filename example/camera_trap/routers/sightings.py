@@ -17,10 +17,12 @@ from __future__ import annotations
 from typing import Annotated
 
 from wreath import Request, Router
+from wreath.auth import authenticated
 from wreath.exceptions import NotFound
 from wreath.orm import FromORM, Session
 
 from ..models import Sighting
+from ..policies import may_locate, may_see_protection
 from ..wire import sighting_json
 
 ReadSession = Annotated[Session, FromORM("main", workload="read")]
@@ -29,7 +31,22 @@ sightings = Router(prefix="/sightings", tags=("sightings",))
 
 
 @sightings.get("/{sighting_id}", summary="One sighting with its station, camera and species")
+@authenticated()
 async def read_sighting(request: Request, sighting_id: int, session: ReadSession) -> dict:
+    """One sighting, or a 404 if this observer may not see it.
+
+    **A 404 and not a 403, and this is the sharpest decision in the example.**
+    A 403 says "this exists and you may not have it". For a rhino, that
+    sentence *is* the leak: a caller walking ids learns exactly which sightings
+    are restricted, and the count of restricted sightings at a station is a map
+    of where the rhinos are. Withholding the fact of existence is the only
+    answer that protects the animal, and it costs a caller nothing they were
+    entitled to.
+
+    The rule is the same Cedar policy the list endpoint filters by, asked here
+    about one row instead of a tier — so a sighting that cannot appear in the
+    list cannot be reached by guessing its id either. Two endpoints, one rule.
+    """
     found = await session.fetch_one(
         Sighting.select()
         .where(Sighting.id == sighting_id)
@@ -44,4 +61,10 @@ async def read_sighting(request: Request, sighting_id: int, session: ReadSession
     )
     if found is None:
         raise NotFound(f"no sighting {sighting_id}")
-    return sighting_json(found, related=True)
+    if not may_see_protection(request.identity, found.species.protection):
+        raise NotFound(f"no sighting {sighting_id}")
+    return sighting_json(
+        found,
+        related=True,
+        locate=may_locate(request.identity, sensitive=bool(found.station.sensitive)),
+    )
