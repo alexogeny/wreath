@@ -161,6 +161,7 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
             toc_html=_render_toc(rp.toc),
             css_href=_relative(rp.out_rel, _CSS_PATH),
             palette=site.palette,
+            feel=site.feel,
             search_root="../" * rp.out_rel.count("/"),
             description=rp.description,
             footer=_footer(rp.out_rel, prev, nxt),
@@ -203,7 +204,7 @@ def _write_404(output_dir: Path, site: Site) -> None:
         site_name=site.name, page_title="Page not found",
         content=_rewrite_md_links(body.html), nav_html=_render_nav(site.nav, "404.html"),
         toc_html="", css_href=_relative("404.html", _CSS_PATH), palette=site.palette,
-        search_root="", description="", footer="")
+        feel=site.feel, search_root="", description="", footer="")
     (output_dir / "404.html").write_text(html, encoding="utf-8")
 
 

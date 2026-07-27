@@ -1,5 +1,9 @@
-"""Gear-intake routes — a handler that consumes the ``as_form`` model, a single-return
-``status_code`` handler, and a ``response_model`` handler (all now translated)."""
+"""Gear-intake routes — a handler that consumes the ``as_form`` model, a
+``status_code`` handler that returns a DTO, and a ``response_model`` handler.
+
+The middle one is the ``status_code`` case that must NOT be auto-wrapped: the
+return is a model instance, and ``JSONResponse(<dataclass>)`` raises in wreath.
+"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends

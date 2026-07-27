@@ -5,13 +5,15 @@ from __future__ import annotations
 import pytest
 
 from wreath._jobcore import dedup_key
-from wreath.jobs import JobRunner
+from wreath.jobs import JobRunner, JobVanished
 
 
 class FakeConnection:
     def __init__(self, fetchval_result=1):
         self.calls: list[tuple[str, tuple]] = []
         self._fetchval_result = fetchval_result
+        #: Successive `fetchval` results, when a test needs them to differ.
+        self.fetchval_script: list | None = None
 
     async def execute(self, sql, *args):
         self.calls.append((sql, args))
@@ -19,6 +21,8 @@ class FakeConnection:
 
     async def fetchval(self, sql, *args):
         self.calls.append((sql, args))
+        if self.fetchval_script:
+            return self.fetchval_script.pop(0)
         return self._fetchval_result
 
     async def fetch(self, sql, *args):
@@ -120,6 +124,43 @@ async def test_enqueue_on_transaction_uses_tx_not_pool():
     assert job_id == 7
     assert db.acquired == 0  # rode the caller's transaction
     assert any("pg_notify" in sql for sql, _ in tx.calls)
+
+
+async def test_deduplicated_launch_returns_the_surviving_handle():
+    """The ordinary dedup case: the row the unique index kept is what you watch."""
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("import_herd")
+    async def import_herd(ctx):
+        pass
+
+    # Insert conflicted (no id returned); the surviving row is job 17.
+    db.connection.fetchval_script = [None, 17]
+    handle = await runner.launch("import_herd", key="nightly")
+
+    assert handle.task_id == "17"
+    assert handle.state == "running"
+
+
+async def test_launch_never_hands_back_a_stringified_none():
+    """The row vanished between the conflict and the read -- a retention sweep of
+    completed jobs will do that. There is no id to watch, and `str(None)` would
+    hand the client the four-character task id "None": a status endpoint that
+    404s and an SSE stream that never terminates."""
+    db = FakeDatabase()
+    runner = _runner(db)
+
+    @runner.task("import_herd")
+    async def import_herd(ctx):
+        pass
+
+    db.connection.fetchval_script = [None, None]  # conflict, then no surviving row
+    with pytest.raises(JobVanished) as raised:
+        await runner.launch("import_herd", key="nightly")
+
+    message = str(raised.value)
+    assert "nightly" in message and "import_herd" in message
 
 
 def test_schema_sql_has_table_and_indexes():

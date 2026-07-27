@@ -89,6 +89,13 @@ The task id *is* the job id, `ctx.report(...)` inside the handler updates it,
 and the runner sets `done`/`failed` itself — a retry stays `running`, because a
 retry is not an ending. See [Reporting task progress](progress.md#user-story-the-mutation-that-takes-ninety-seconds).
 
+`launch(..., key=...)` that deduplicates hands back the *surviving* row's
+handle, so submitting the same work twice yields the same task to watch. In the
+narrow race where that row is purged between the conflict and the lookup there
+is genuinely nothing to watch, and `launch` raises `wreath.jobs.JobVanished`
+rather than returning a task id that would 404 on the status endpoint and stream
+forever on the SSE one. Re-launch — nothing is holding the key any more.
+
 ## Scheduled work
 
 ```python
@@ -117,6 +124,41 @@ async def on_order(msg):
 ```
 
 A delivered `Message` carries `channel`, `group`, `tenant`, and the decoded `payload`. For durable messages, `ack()` completes it, `nack()` retries it with backoff, and `reject()` dead-letters it immediately.
+
+### When the doorbell's connection drops
+
+Both tiers lean on one `LISTEN` connection held for the life of the process — it carries ephemeral fan-out, and it is what saves durable consumers from polling. Held connections do not last forever: a failover, an idle timeout, a `pg_terminate_backend`, a network blip, and it is gone. **The bus reconnects and re-`LISTEN`s on every channel by itself**, with exponential backoff from 50 ms to 5 s, jittered so a fleet that lost the same database does not come back at it in lockstep. A connection that is accepted and then dies immediately does not reset that backoff — flapping is not recovery.
+
+That is a repair, not a save: ephemeral fan-out is at-most-once, so whatever was published during the gap is gone, and durable consumers fall back to `poll_interval` until the doorbell returns. So the outage is countable rather than silent:
+
+- **`bus.doorbell_reconnects`** — connections lost, plus failed attempts to open one (including at startup, since a bus that came up against a dead database has no doorbell either). Zero is healthy; climbing means it is down *now* and durable delivery is running on the poll interval.
+- **`bus.handler_errors`** — exceptions raised by ephemeral subscriber callbacks, counted separately and deliberately. Fire-and-forget delivery has nowhere else to put them (a durable handler's failure lands in the row's `last_error` and its retry state), and a bug in a handler must never read as a flapping database.
+
+A bus whose database is down at startup still starts, still consumes its own durable work, and picks up the doorbell when the database comes back.
+
+### Consumers in another service
+
+A durable publish enqueues one copy per subscriber **group**, and the groups are discovered fleet-wide: every bus writes its durable subscriptions into a shared `message_groups` table at startup, and every publisher reads it. So the consumer does not have to live in — or even be known to — the process doing the publishing.
+
+That matters because the alternative fails quietly. Discovering groups only from local registrations means a producer shipped before its consumer, or a producer in a different service, enqueues **nothing** for that group: no error, no dead letter, just a queue that never fills. A team finds that three days later.
+
+```python
+# service A — publishes, subscribes to nothing
+await bus.publish("order_placed", payload, durable=True)
+
+# service B — deployed later, against the same database
+@bus.subscribe("order_placed", group="analytics", durable=True)
+async def on_order(msg): ...
+```
+
+Service B's group is registered when its bus starts, and service A picks it up within `group_refresh` seconds (30 by default). Discovery is a timer, not a query on the publish path — a round trip in front of every durable publish would be a poor trade for a fact that only changes at deploy time.
+
+Two properties worth knowing:
+
+- **Local registrations are unioned with the persisted ones**, never replaced. A duplicate copy goes to a group that demonstrably has a consumer, and durable delivery is at-least-once anyway, so handlers already tolerate one; a *missing* copy is silent. It also means this works before you apply the new table — with no registry, a bus behaves exactly as it did when groups were local-only.
+- **A publish that reaches nobody is counted**, not hidden: `bus.unrouted_publishes`. Publishing to a channel no consumer exists for yet is legitimate, so it stays a no-op — but pass `require_group=True` when you know a consumer must exist and want `NoSubscriberGroup` instead of silence.
+
+`bus.known_groups("order_placed")` answers "will anything actually receive this?" before you ship, which is the check that used to require reading someone else's deployment.
 
 ## Running the workers
 

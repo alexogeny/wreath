@@ -92,6 +92,7 @@ nav:
           - Middleware: guides/middleware.md
           - Form-model binding: guides/forms.md
           - Templates: guides/templates.md
+          - Dates and times: guides/dates-and-times.md
       - Working with data:
           - PostgreSQL: guides/postgres.md
           - ORM: guides/orm.md
@@ -102,6 +103,7 @@ nav:
           - FastAPI and Alembic migration: guides/migrations.md
       - Users, auth, and security:
           - Authentication and authorization: guides/auth.md
+          - Permissions in the UI: guides/permissions.md
           - User management: guides/users.md
           - Idempotent writes: guides/idempotency.md
       - Realtime and background work:
@@ -109,10 +111,11 @@ nav:
           - Server-Sent Events: guides/sse.md
           - Task progress: guides/progress.md
           - Durable jobs and messaging: guides/jobs.md
+          - Chunked passes: guides/chunked-passes.md
       - Talking to other services:
           - Outbound HTTP and webhooks: guides/http-client.md
           - Calling another service: guides/service-client.md
-          - Object storage: guides/storage.md
+          - Object storage: guides/objects.md
       - Speed and delivery:
           - Caching: guides/caching.md
           - Response caching: guides/response-cache.md
@@ -155,6 +158,7 @@ nav:
           - Live progress for a long task: cookbook/recipes/stream-job-progress.md
           - Broadcast over WebSockets: cookbook/recipes/websocket-broadcast.md
           - Enqueue a durable job: cookbook/recipes/durable-job.md
+          - Write it exactly once: cookbook/recipes/exactly-once.md
           - Run work after the response: cookbook/recipes/background-jobs.md
       - Talking to other services:
           - Call a service with a token: cookbook/recipes/call-a-service.md
@@ -199,6 +203,8 @@ nav:
       - Outbound HTTP client: reference/http_client.md
       - Webhooks: reference/webhooks.md
       - Templates: reference/templates.md
+      - Dates and times: reference/temporal.md
+      - Keyed store: reference/store.md
       - Application cache: reference/cache.md
       - Cache-Control policies: reference/cache_control.md
       - Compression: reference/compression.md
@@ -207,11 +213,13 @@ nav:
       - Testing: reference/testing.md
       - Diagnostics: reference/doctor.md
       - Audit rules: reference/audit.md
-      - Object storage: reference/storage.md
+      - Object storage: reference/objects.md
       - Durable jobs: reference/jobs.md
+      - Chunked passes: reference/passes.md
       - Messaging: reference/messaging.md
       - Supervised services: reference/services.md
       - User management: reference/users.md
+      - Named queries: reference/queries.md
       - Pagination: reference/pagination.md
       - Health checks: reference/health.md
       - Rooms: reference/rooms.md

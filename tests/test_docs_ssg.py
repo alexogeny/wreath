@@ -1,6 +1,8 @@
 """The native static-site generator: config, markdown subset, and the build."""
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from wreath._docs import Nav, Page, Section, Site, build
@@ -207,7 +209,7 @@ def test_chart_from_json_renders_svg(tmp_path) -> None:
     html = (tmp_path / "site" / "index.html").read_text()
     assert '<figure class="chart">' in html and "<svg" in html
     # Two bars (rx="3"); non-wreath labels use the muted competitor hatch.
-    assert html.count('rx="3"') == 2 and "url(#wc-hatch)" in html
+    assert html.count('rx="3"') == 2 and "url(#wc-hatch-" in html
     # a bad source degrades to a visible note, not a crash
     (src / "index.md").write_text("# X\n\n```chart\nsource: gone.json\n```\n")
     build(_site_like(tmp_path), root=tmp_path)
@@ -330,7 +332,26 @@ def test_chart_colors_wreath_arms_distinctly() -> None:
         [("Wreath (metal)", 3.0), ("Wreath (native)", 2.0), ("BlackSheep", 1.0)], "t", "")
     # Each wreath arm gets its own fill; the competitor gets the hatch.
     assert "var(--primary)" in svg and "var(--accent)" in svg
-    assert "url(#wc-hatch)" in svg
+    assert "url(#wc-hatch-" in svg
+
+
+def test_two_charts_on_a_page_do_not_share_a_pattern_id() -> None:
+    """An SVG `pattern` id is document-scoped.
+
+    Two charts both calling their hatch `wc-hatch` is invalid HTML, and the
+    second chart's bars resolve against the first chart's pattern. `wreath
+    audit` reported it as a duplicate-id error on the performance page.
+    """
+    import re
+
+    from wreath._docs import charts
+
+    first = charts._svg_bar([("BlackSheep", 1.0)], "one", "")
+    second = charts._svg_bar([("BlackSheep", 1.0)], "two", "")
+    ids = re.compile(r'pattern id="([^"]+)"')
+    assert ids.search(first).group(1) != ids.search(second).group(1)
+    # Stable across builds, so a rebuild is not a diff.
+    assert first == charts._svg_bar([("BlackSheep", 1.0)], "one", "")
 
 
 def test_chart_source_is_published(tmp_path) -> None:
@@ -359,3 +380,229 @@ def test_cli_build_end_to_end(tmp_path) -> None:
     config = str(tmp_path / "wreath_docs.py")
     namespace = type("N", (), {"docs_action": "check", "config": config})()
     assert execute(namespace) == 0
+
+
+# --- theme: the design system holds together --------------------------------
+#
+# The theme is CSS, which is where unexplained numbers breed. These pin the
+# properties that make it a system rather than a pile of values, and the
+# accessibility floor that `wreath audit` would otherwise never see (its
+# contrast rules only read inline <style>, so they were dormant while the whole
+# stylesheet was an external file).
+
+
+def _all_themes():
+    from wreath._docs import THEMES
+
+    return sorted(THEMES.items())
+
+
+def test_every_theme_meets_aa_in_both_modes() -> None:
+    """Body, secondary text, and links, on both surfaces, for all five themes.
+
+    Two of these used to fail: `nord` and `terminal` light links sat at ~3.5:1
+    against white, which is below AA for normal text.
+    """
+    from wreath._audit.contrast import contrast_ratio
+
+    failures = []
+    for name, p in _all_themes():
+        pairs = {
+            "body": (p.fg, p.bg), "muted": (p.muted, p.bg),
+            "link": (p.link or p.primary, p.bg), "on-surface": (p.fg, p.surface),
+            "dark body": (p.dark_fg, p.dark_bg), "dark muted": (p.dark_muted, p.dark_bg),
+            "dark link": (p.dark_link or p.primary, p.dark_bg),
+            "dark on-surface": (p.dark_fg, p.dark_surface),
+        }
+        for role, (fg, bg) in pairs.items():
+            ratio = contrast_ratio(fg, bg) or 0.0
+            if ratio < 4.5:
+                failures.append(f"{name} {role}: {ratio:.2f}:1")
+    assert not failures, "below WCAG AA (4.5:1): " + ", ".join(failures)
+
+
+def test_control_boundaries_meet_non_text_contrast() -> None:
+    """WCAG 1.4.11 — 3:1, and only for things you can operate.
+
+    The decorative hairline (`--border`) is deliberately faint: a table rule at
+    3:1 is a cage, and 1.4.11 does not ask for one. What must clear 3:1 is the
+    boundary of a *control* and the focus ring, which is why the theme has a
+    second token for them.
+    """
+    from wreath._audit.contrast import contrast_ratio
+
+    failures = []
+    for name, p in _all_themes():
+        # `--border-strong` resolves to the muted text colour; see theme.py.
+        for mode, strong, bg in (("light", p.muted, p.bg), ("dark", p.dark_muted, p.dark_bg)):
+            ratio = contrast_ratio(strong, bg) or 0.0
+            if ratio < 3.0:
+                failures.append(f"{name} {mode} control border: {ratio:.2f}:1")
+    assert not failures, "control boundary below 3:1: " + ", ".join(failures)
+
+
+def test_the_critical_css_is_inlined_and_within_the_audit_budget() -> None:
+    """Inlined so the palette is auditable, small so it stays inlinable.
+
+    `wreath audit`'s contrast rules only inspect inline <style>, and its
+    perf rule caps an un-nonced inline asset at 16 KiB. The critical block has
+    to sit inside both constraints at once.
+    """
+    from wreath._docs import THEMES
+    from wreath._docs.theme import critical_css
+
+    for name, palette in THEMES.items():
+        size = len(critical_css(palette).encode("utf-8"))
+        assert size <= 16 * 1024, f"{name} critical CSS is {size} bytes (budget 16 KiB)"
+
+
+def test_a_built_page_carries_its_tokens_inline() -> None:
+    """So the contrast rule has something to read on every page it audits."""
+    from wreath._docs import THEMES
+    from wreath._docs.theme import page
+
+    html = page(site_name="D", page_title="P", content="<p>x</p>", nav_html="",
+                toc_html="", css_href="assets/docs.css", palette=THEMES["nord"])
+    assert "<style>" in html
+    assert "--fg:" in html and "--bg:" in html
+
+
+def test_no_built_page_reaches_the_network(tmp_path) -> None:
+    """The module's promise is a self-contained document; keep it true."""
+    import re
+
+    build(_site(tmp_path), root=tmp_path)
+    external = re.compile(r'(?:src|href)\s*=\s*"(?:https?:)?//')
+    for path in (tmp_path / "site").rglob("*.html"):
+        assert not external.search(path.read_text()), f"{path.name} loads a remote asset"
+
+
+def test_motion_is_optional() -> None:
+    """WCAG 2.3.3 — animation is a vestibular trigger, not a decoration."""
+    from wreath._docs import THEMES
+    from wreath._docs.theme import stylesheet
+
+    css = stylesheet(THEMES["wreath"])
+    assert "prefers-reduced-motion" in css
+
+
+def test_the_type_and_space_scales_are_declared_once() -> None:
+    """Ad-hoc sizes are what made it look janky; the scale is the fix."""
+    from wreath._docs import THEMES
+    from wreath._docs.theme import critical_css
+
+    css = critical_css(THEMES["wreath"])
+    for token in ("--text-base", "--text-3xl", "--space-1", "--space-6", "--measure"):
+        assert token in css, f"missing design token {token}"
+
+
+def test_syntax_colours_are_tinted_into_the_theme() -> None:
+    """Fixed GitHub hexes looked wrong in four of the five themes.
+
+    Each token is now a tuned hue mixed toward the page foreground, so it lands
+    in the active theme, and the light and dark sets are different colours
+    rather than one set used on both surfaces.
+    """
+    from wreath._docs import THEMES
+    from wreath._docs.theme import stylesheet
+
+    css = stylesheet(THEMES["sepia"])
+    for github_hex in ("#032f62", "#d73a49", "#6f42c1", "#e36209"):
+        assert github_hex not in css, f"{github_hex} is a fixed GitHub token colour"
+    assert "--tok-keyword:color-mix(in oklab," in css and "var(--fg))" in css
+    assert css.count("--tok-keyword") >= 2, "light and dark need their own hue"
+
+
+def test_syntax_tokens_stay_legible_on_every_code_surface() -> None:
+    """The reason the tokens are tuned hues and not brand derivations.
+
+    Mixing `--accent` toward the foreground collapsed to 2.5:1 on nord's light
+    surface — a bright accent cannot be darkened enough to read on a light
+    background. These are the measured floors for the set that replaced it.
+    """
+    from wreath._audit.contrast import _hex_to_rgb, contrast_ratio
+    from wreath._docs import THEMES
+    from wreath._docs.theme import _TINT, _syntax
+
+    def mix(top: str, bottom: str, pct: float) -> str:
+        """Approximate color-mix() in linear-light sRGB, close enough for a floor."""
+        def lin(c: int) -> float:
+            v = c / 255
+            return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+        def unlin(v: float) -> int:
+            out = 12.92 * v if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055
+            return max(0, min(255, round(255 * out)))
+
+        a, b = _hex_to_rgb(top), _hex_to_rgb(bottom)
+        mixed = (
+            unlin(lin(x) * pct + lin(y) * (1 - pct)) for x, y in zip(a, b, strict=True)
+        )
+        return "#" + "".join(f"{channel:02x}" for channel in mixed)
+
+    hexes = re.compile(r"--tok-(\w+):color-mix\(in oklab, (#[0-9a-f]{6})")
+    failures = []
+    for name, p in THEMES.items():
+        for is_light, fg, surface in ((True, p.fg, p.surface),
+                                      (False, p.dark_fg, p.dark_surface)):
+            for token, hue in hexes.findall(_syntax(is_light)):
+                ratio = contrast_ratio(mix(hue, fg, _TINT / 100), surface) or 0.0
+                if ratio < 4.5:
+                    mode = "light" if is_light else "dark"
+                    failures.append(f"{name} {mode} {token}: {ratio:.2f}:1")
+    assert not failures, "syntax token below AA: " + ", ".join(failures)
+
+
+def test_no_synthetic_font_weights() -> None:
+    """750/650/550 are not real weights; they render inconsistently."""
+    from wreath._docs import THEMES
+    from wreath._docs.theme import stylesheet
+
+    css = stylesheet(THEMES["wreath"])
+    for weight in ("font-weight:750", "font-weight:650", "font-weight:550"):
+        assert weight not in css, f"{weight} is not a system-font weight"
+
+
+def test_a_wide_table_scrolls_itself(tmp_path) -> None:
+    """Otherwise the page body scrolls sideways on a phone."""
+    out = render("| a | b |\n| - | - |\n| 1 | 2 |\n")
+    assert 'class="table-wrap"' in out.html
+    assert out.html.index("table-wrap") < out.html.index("<table")
+
+
+def test_table_headers_are_scoped() -> None:
+    """WCAG 1.3.1 — without scope a table reads as an undifferentiated grid."""
+    out = render("| a | b |\n| - | - |\n| 1 | 2 |\n")
+    assert out.html.count('<th scope="col"') == 2
+
+
+def test_the_page_is_navigable_by_keyboard_and_screen_reader() -> None:
+    from wreath._docs import THEMES
+    from wreath._docs.theme import page
+
+    html = page(site_name="D", page_title="P", content="<p>x</p>",
+                nav_html="<a href='x.html'>X</a>", toc_html="<a href='#y'>Y</a>",
+                css_href="assets/docs.css", palette=THEMES["wreath"])
+    assert 'href="#content"' in html                  # skip link
+    assert 'id="content"' in html                     # and its target
+    assert html.count("aria-label") >= 4              # both nav landmarks labelled
+    assert 'role="listbox"' not in html               # invalid with <a> children
+
+
+def test_every_theme_builds_a_whole_site(tmp_path) -> None:
+    from wreath._docs import THEMES
+
+    for name, palette in THEMES.items():
+        root = tmp_path / name
+        root.mkdir()
+        src = root / "docs"
+        (src / "guides").mkdir(parents=True)
+        (src / "index.md").write_text("# Home\n\ntext\n")
+        (src / "guides" / "routing.md").write_text("# Routing\n\n## S\n\n`x`\n")
+        site = Site("D", "docs", "site",
+                    Nav(Page("Home", "index.md"),
+                        Section("G", Page("R", "guides/routing.md"))),
+                    palette=palette)
+        report = build(site, root=root)
+        assert report.ok, f"{name}: {report.errors}"
+        assert (root / "site" / "index.html").read_text().startswith("<!doctype html>")

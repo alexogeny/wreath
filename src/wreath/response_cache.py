@@ -156,7 +156,14 @@ def cached(
                 if written & watched:
                     the_store.clear()
 
-            subscribe_writes(_on_write)
+            # Owned by the wrapper, because there is no later moment to
+            # unsubscribe at: the subscription is made when the handler is
+            # *decorated*. A handler registered on an app lives as long as the
+            # app does and this changes nothing; one that goes out of scope
+            # takes its subscription with it, instead of leaving a closure in a
+            # process-global list that makes `has_subscribers()` true forever
+            # and kills the session's skip-collection fast path.
+            subscribe_writes(_on_write, owner=wrapper)
             wrapper.invalidated_by = watched  # ty: ignore[unresolved-attribute]
 
         wrapper.cache_store = the_store       # ty: ignore[unresolved-attribute]

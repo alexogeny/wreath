@@ -14,7 +14,16 @@ reuses it.
 
 from __future__ import annotations
 
-from ..typegen.model import ApiModel, Field, Model, Operation, Parameter, TypeRef
+from ..typegen.model import (
+    DATE,
+    DATE_TIME,
+    ApiModel,
+    Field,
+    Model,
+    Operation,
+    Parameter,
+    TypeRef,
+)
 from .schema import Schema
 
 __all__ = ["graphql_models", "graphql_operations", "merge_into"]
@@ -26,6 +35,11 @@ _SCALAR_REFS = {
     "String": TypeRef("string"),
     "ID": TypeRef("string"),
     "JSON": TypeRef("unknown"),
+    # Without these two, the DateTime/Date scalars the schema now names would
+    # fall through to `TypeRef("reference", ...)` and generate a TypeScript
+    # reference to a model that does not exist.
+    "DateTime": DATE_TIME,
+    "Date": DATE,
 }
 
 

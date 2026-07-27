@@ -435,7 +435,36 @@ def build_parser() -> argparse.ArgumentParser:
     _add_doctor_parser(commands)
     _add_capture_parser(commands)
     _add_replay_parser(commands)
+    _add_passes_parser(commands)
     return parser
+
+
+def _add_passes_parser(commands: Any) -> None:
+    """`wreath passes status` -- where every chunked pass has got to.
+
+    The ledger row is the durable status, so this is one read of one table and
+    it is honest at three in the morning: a pass that has been running for two
+    hours is still there, and a pass nothing is driving says so instead of
+    looking idle.
+    """
+    passes_parser = commands.add_parser(
+        "passes", help="report on chunked passes (backfills, rollups, purges)"
+    )
+    actions = passes_parser.add_subparsers(dest="passes_action", required=True)
+    status = actions.add_parser(
+        "status", help="show every pass's phase, position, and pacing"
+    )
+    status.add_argument("target", help="application target as module:attribute")
+    status.add_argument("--factory", action="store_true")
+    status.add_argument(
+        "--database", default=None,
+        help="read one database's ledger (default: every one a job runner uses)",
+    )
+    status.add_argument(
+        "--schema", default=None, help="ledger schema (default: the job runner's)"
+    )
+    status.add_argument("--name", default=None, help="one pass by name")
+    status.add_argument("--json", action="store_true", dest="as_json")
 
 
 def _add_doctor_parser(commands: Any) -> None:
@@ -522,6 +551,21 @@ def _add_replay_parser(commands: Any) -> None:
         help="handler boundary: run it, use --replace-body, or resolve only",
     )
     plan.add_argument("--replace-body", default=None, help="REPLACE mode: recorded return string")
+
+    to_test = actions.add_parser(
+        "to-test",
+        help="write a runnable pytest that re-drives a recorded request",
+    )
+    to_test.add_argument("target", metavar="MODULE[:ATTRIBUTE]")
+    to_test.add_argument("recording", metavar="RECORDING", help="a .wtr1 recording")
+    to_test.add_argument(
+        "--output", "-o", metavar="PATH", default=None,
+        help="write the test here instead of to stdout",
+    )
+    to_test.add_argument(
+        "--name", default=None,
+        help="the generated test function's name (derived from the request otherwise)",
+    )
 
 
 def _add_capture_parser(commands: Any) -> None:
@@ -997,6 +1041,83 @@ def execute_typegen(namespace: argparse.Namespace) -> int:
         return error.exit_code
 
 
+def execute_passes(namespace: argparse.Namespace) -> int:
+    """Read every driven pass's ledger row and print it."""
+    import asyncio
+    import json as _json
+
+    application = load_application(namespace.target, factory=namespace.factory)
+    targets = _pass_ledgers(application, namespace)
+    if not targets:
+        raise CliError(
+            "no pass ledger to read: the application configures no job runner, "
+            "and no --database was given",
+            exit_code=2,
+        )
+    rows = asyncio.run(_read_pass_ledgers(targets, name=namespace.name))
+    if namespace.as_json:
+        print(_json.dumps({"passes": [row.as_dict() for row in rows]}, indent=2))
+        return 0
+    _print_passes(rows)
+    return 0
+
+
+def _pass_ledgers(application: Any, namespace: argparse.Namespace) -> list[tuple[Any, str]]:
+    """(database, schema) pairs to read, discovered from the job runners."""
+    if namespace.database is not None:
+        databases = getattr(application, "_databases", {})
+        database = databases.get(namespace.database)
+        if database is None:
+            known = ", ".join(sorted(databases)) or "none"
+            raise CliError(
+                f"unknown database {namespace.database!r}; configured: {known}",
+                exit_code=2,
+            )
+        return [(database, namespace.schema or "wreath")]
+    seen: list[tuple[Any, str]] = []
+    for runner in getattr(application, "_job_runners", {}).values():
+        pair = (runner._db, namespace.schema or runner._schema)
+        if pair not in seen:
+            seen.append(pair)
+    return seen
+
+
+async def _read_pass_ledgers(
+    targets: list[tuple[Any, str]], *, name: str | None
+) -> list[Any]:
+    from .passes import read_status
+
+    rows: list[Any] = []
+    for database, schema in targets:
+        await database.start()
+        try:
+            rows.extend(await read_status(database, schema=schema, name=name))
+        finally:
+            await database.stop()
+    return rows
+
+
+def _print_passes(rows: list[Any]) -> None:
+    if not rows:
+        print("no passes have run yet")
+        return
+    header = f"{'PASS':<32} {'PHASE':<9} {'UNITS':>8} {'ROWS':>12}  PACED"
+    print(header)
+    print("-" * len(header))
+    for row in rows:
+        label = row.name if not row.tenant else f"{row.name}@{row.tenant}"
+        print(
+            f"{label[:32]:<32} {row.phase:<9} {row.units_done:>8} "
+            f"{row.rows_done:>12}  {row.paced_reason or '-'}"
+        )
+        if row.last_advance is not None:
+            print(f"{'':<32} last advance {row.last_advance}")
+        if row.phase == "blocked" or row.last_error:
+            # The state hand-rolled backfills have no name for: nothing is
+            # driving it, and it will silently never finish.
+            print(f"{'':<32} {row.last_error or 'nothing is driving this pass'}")
+
+
 def execute_inspect(namespace: argparse.Namespace) -> int:
     # The CLI is a protocol client only: it never imports the application it
     # inspects. Everything it shows arrived over the Inspector socket.
@@ -1331,6 +1452,24 @@ def execute_replay(namespace: argparse.Namespace) -> int:
     app = load_application(namespace.target, factory=namespace.factory)
     action = namespace.replay_action
 
+    if action == "to-test":
+        source = asyncio.run(
+            rp.generate_test(
+                app,
+                rp.open_recording(namespace.recording),
+                target=namespace.target,
+                name=namespace.name,
+                origin=namespace.recording,
+            )
+        )
+        if namespace.output:
+            with open(namespace.output, "w", encoding="utf-8") as handle:
+                handle.write(source)
+            print(f"wrote {namespace.output}")
+        else:
+            print(source, end="")
+        return 0
+
     if action == "transport":
         recording = rp.open_recording(namespace.recording)
         schedule = None
@@ -1415,6 +1554,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return execute_capture(namespace)
         if namespace.command == "replay":
             return execute_replay(namespace)
+        if namespace.command == "passes":
+            try:
+                return execute_passes(namespace)
+            except (OSError, KeyError, ValueError) as error:
+                raise CliError(str(error), exit_code=2) from error
         if namespace.command == "migrations":
             from ._migrations_cli import execute as execute_migrations
 

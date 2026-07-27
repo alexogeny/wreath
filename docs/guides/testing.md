@@ -44,4 +44,46 @@ right value in isolation. The lifespan runs too, so startup and shutdown logic i
 covered. WebSocket handlers get their own `WebSocketTestSession` for driving a
 conversation and asserting on what comes back.
 
+## User story: the same request, as three different people
+
+> *Authorization tests are the same call repeated per role. Doing that with
+> tokens means every test carries a `Bearer` literal that has nothing to do with
+> what it is checking, and minting a real token per role is a fixture nobody
+> wants to maintain.*
+
+`acting_as` gives you a client that *is* someone:
+
+```python
+async def test_only_editors_may_edit_a_llama():
+    async with TestClient(app) as client:
+        admin = client.acting_as("root", roles=["admin"])
+        editor = client.acting_as("ada", roles=["editor"])
+        rider = client.acting_as("bo", roles=["rider"])
+
+        assert (await rider.patch("/llamas/7", json={"name": "Bea"})).status == 403
+        assert (await editor.patch("/llamas/7", json={"name": "Bea"})).status == 200
+        assert (await admin.delete("/llamas/7")).status == 200
+```
+
+Each derived client shares the application and its lifespan, so make as many as
+you have roles. The identity travels on the request rather than on the backend,
+so `admin` and `rider` can have calls in flight simultaneously without
+interfering — which matters as soon as you write a concurrency test.
+
+Pass a whole `Identity` when you need permissions or a non-default principal
+type; pass an id with `roles=`/`permissions=` for the common case. Passing both
+is an error, because two sources for the same fact is how a test ends up lying
+about what it covers.
+
+!!! warning "It bypasses authentication"
+
+    While an acting-as client exists, the application's authentication backend
+    is replaced with one that trusts the request scope, and it is restored when
+    the client exits. That is the right trade for testing *authorization* and
+    the wrong one for testing *authentication* — use a real token there, as in
+    the first example.
+
+For headers you want on every request without touching identity, there is
+`client.with_headers(x_tenant="acme")`.
+
 **Reference:** [`wreath.testing`](../reference/testing.md).

@@ -23,6 +23,7 @@ recolors with the active theme and light/dark automatically.
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -143,23 +144,37 @@ _WREATH_FILL = {
 }
 _OTHER_FILL = "#9aa4b2"
 
-_HATCH_DEFS = (
-    '<defs><pattern id="wc-hatch" width="7" height="7" patternUnits="userSpaceOnUse" '
-    'patternTransform="rotate(45)"><rect width="7" height="7" fill="#9aa4b2"/>'
-    '<line x1="0" y1="0" x2="0" y2="7" stroke="#6b7280" stroke-width="2.5"/></pattern></defs>')
+def _hatch_defs(uid: str) -> str:
+    """The `field` hatch, with an id unique to this chart.
+
+    An SVG `pattern` id is document-scoped, so a page carrying two charts used to
+    emit `wc-hatch` twice — invalid HTML, and the second chart's bars resolve
+    against the first chart's pattern. `wreath audit` reports it as a
+    duplicate-id error, which is how it was found.
+    """
+    return (
+        f'<defs><pattern id="wc-hatch-{uid}" width="7" height="7" '
+        'patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
+        '<rect width="7" height="7" fill="#9aa4b2"/>'
+        '<line x1="0" y1="0" x2="0" y2="7" stroke="#6b7280" stroke-width="2.5"/>'
+        "</pattern></defs>")
 
 
-def _bar_fill(label: str) -> str:
+def _bar_fill(label: str, uid: str) -> str:
     low = label.lower()
     if "wreath" in low:
         for key, color in _WREATH_FILL.items():
             if key in low:
                 return color
         return "var(--primary)"
-    return "url(#wc-hatch)"
+    return f"url(#wc-hatch-{uid})"
 
 
 def _svg_bar(pairs: list[tuple[str, float]], title: str, unit: str) -> str:
+    # Derived from the chart's own content, so the id is stable across builds
+    # (a counter would renumber every chart when one is inserted above it).
+    uid = sha256(
+        f"{title}\x00{unit}\x00{pairs}".encode()).hexdigest()[:8]
     width, label_w, value_w, row_h = 720, 172, 82, 32
     bar_area = width - label_w - value_w - 12
     top = 36 if title else 8
@@ -167,7 +182,7 @@ def _svg_bar(pairs: list[tuple[str, float]], title: str, unit: str) -> str:
     top_value = max((v for _, v in pairs), default=1.0) or 1.0
     parts = [
         f'<figure class="chart"><svg viewBox="0 0 {width} {height}" '
-        f'role="img" width="100%" style="max-width:{width}px">', _HATCH_DEFS]
+        f'role="img" width="100%" style="max-width:{width}px">', _hatch_defs(uid)]
     if title:
         parts.append(
             f'<text x="0" y="21" font-weight="700" font-size="15" '
@@ -182,7 +197,7 @@ def _svg_bar(pairs: list[tuple[str, float]], title: str, unit: str) -> str:
             f'<text x="{label_w - 8}" y="{mid + 4:.0f}" text-anchor="end" font-weight="{weight}" '
             f'fill="currentColor" font-size="13">{_esc(label)}</text>'
             f'<rect x="{label_w}" y="{cy + 4}" width="{bar_w:.1f}" height="{row_h - 10}" '
-            f'rx="3" fill="{_bar_fill(label)}"/>'
+            f'rx="3" fill="{_bar_fill(label, uid)}"/>'
             f'<text x="{label_w + bar_w + 6:.1f}" y="{mid + 4:.0f}" fill="currentColor" '
             f'font-size="12" font-weight="{weight}" '
             f'opacity="0.9">{_fmt(value)}{_esc(unit)}</text>')

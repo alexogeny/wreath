@@ -8,14 +8,18 @@ generation; OpenAPI consumes the same model. Nothing here emits target syntax
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import enum
 import inspect
 import types
 import typing
 from typing import Any
 
+from ..temporal import Instant
 from .model import (
     BOOLEAN,
+    DATE,
+    DATE_TIME,
     INTEGER,
     NULL,
     NUMBER,
@@ -27,16 +31,24 @@ from .model import (
     Model,
     Operation,
     Parameter,
+    PermissionSet,
     TypegenError,
     TypeRef,
 )
 
 _NONE_TYPE = type(None)
+#: `datetime`/`date` map alongside `Instant` because ported handlers annotate
+#: the stdlib types, and answering `unknown` to those is how a generated client
+#: ends up with `any` where a timestamp belongs. The refs live in `model` so the
+#: GraphQL side of typegen resolves to the identical ones.
 _SCALARS: dict[Any, TypeRef] = {
     bool: BOOLEAN,  # before int: bool is a subclass of int
     int: INTEGER,
     float: NUMBER,
     str: STRING,
+    Instant: DATE_TIME,
+    datetime.datetime: DATE_TIME,   # before `date`: datetime subclasses it
+    datetime.date: DATE,
 }
 _JS_KEYWORDS = frozenset(
     {
@@ -386,6 +398,22 @@ def build_api_model(
         version=version,
         models=builder.registry.models(),
         operations=tuple(operations),
+        permissions=_permission_sets(app),
+    )
+
+
+def _permission_sets(app: Any) -> tuple[PermissionSet, ...]:
+    """The app's authorization vocabulary, so the client can be typed on it.
+
+    Read from the same route declarations the server enforces, which is the
+    entire point: there is no second list of actions to drift.
+    """
+    from .._auth.permissions import declared_actions
+
+    return tuple(
+        PermissionSet(resource_type=resource_type, actions=actions)
+        for resource_type, actions in declared_actions(app).items()
+        if resource_type
     )
 
 

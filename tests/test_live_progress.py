@@ -107,9 +107,9 @@ def _elsewhere(bus: FakeBus) -> FakeBus:
 @pytest.mark.asyncio
 async def test_progress_written_on_one_worker_is_readable_on_another() -> None:
     """The job runs on worker 3; the browser is connected to worker 1."""
-    worker_1 = ProgressRegistry(FakeBus())
-    worker_3_bus = _elsewhere(worker_1._bus)
-    worker_3 = ProgressRegistry(worker_3_bus)
+    worker_1_bus = FakeBus()
+    worker_1 = ProgressRegistry(worker_1_bus)
+    worker_3 = ProgressRegistry(_elsewhere(worker_1_bus))
 
     worker_3.report("77", 42, "counting llamas")
     await asyncio.sleep(0)
@@ -130,8 +130,9 @@ async def test_a_registry_ignores_the_echo_of_its_own_report() -> None:
 @pytest.mark.asyncio
 async def test_a_received_report_is_never_rebroadcast() -> None:
     """One hop out from the writer; adding workers cannot make a storm."""
-    here = ProgressRegistry(FakeBus())
-    peer = _elsewhere(here._bus)
+    bus = FakeBus()
+    here = ProgressRegistry(bus)
+    peer = _elsewhere(bus)
 
     await peer.publish(
         PROGRESS_CHANNEL,
@@ -142,7 +143,7 @@ async def test_a_received_report_is_never_rebroadcast() -> None:
         await asyncio.sleep(0)
 
     assert here.get("77").percent == 10.0
-    assert here._bus.published == []
+    assert bus.published == []
 
 
 @pytest.mark.asyncio
@@ -158,8 +159,9 @@ async def test_a_bus_that_is_down_still_records_progress_locally() -> None:
     "payload", ["not-a-dict", {}, {"task_id": 7}, {"task_id": "77", "percent": "half"}]
 )
 async def test_a_malformed_progress_payload_is_ignored(payload: Any) -> None:
-    here = ProgressRegistry(FakeBus())
-    peer = _elsewhere(here._bus)
+    bus = FakeBus()
+    here = ProgressRegistry(bus)
+    peer = _elsewhere(bus)
     await peer.publish(PROGRESS_CHANNEL, payload)
     assert here.get("77") is None
 
@@ -326,8 +328,9 @@ async def test_reporting_from_a_runner_with_no_registry_is_a_no_op() -> None:
 @pytest.mark.asyncio
 async def test_a_jobs_progress_reaches_the_worker_serving_the_stream() -> None:
     """End to end: the job runs here, the browser is connected over there."""
-    worker_3 = ProgressRegistry(FakeBus())
-    worker_1 = ProgressRegistry(_elsewhere(worker_3._bus))
+    worker_3_bus = FakeBus()
+    worker_3 = ProgressRegistry(worker_3_bus)
+    worker_1 = ProgressRegistry(_elsewhere(worker_3_bus))
     runner = _runner(FakeDatabase(), progress=worker_3)
 
     @runner.task("import_herd")

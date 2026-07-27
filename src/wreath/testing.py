@@ -16,6 +16,7 @@ tests observe exactly the ASGI messages a server would.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -114,15 +115,141 @@ class WebSocketTestSession:
         return message["bytes"]
 
 
+class _ScopeIdentityBackend:
+    """Authenticates from the scope, so a test can *be* someone in one line.
+
+    Installed only when :meth:`TestClient.acting_as` is used, and only for the
+    life of the client. It reads the identity the client put on the request
+    scope, which keeps concurrent ``admin_client`` / ``rider_client`` requests
+    independent -- the identity rides the request, not the backend.
+    """
+
+    __slots__ = ()
+    scheme = "Bearer"
+
+    def challenge(self, request: Any) -> str:
+        return "Bearer"
+
+    async def authenticate(self, request: Any) -> Any:
+        return request.scope.get(_SCOPE_IDENTITY)
+
+
+#: Where `acting_as` puts the identity for `_ScopeIdentityBackend` to find.
+_SCOPE_IDENTITY = "wreath.test.identity"
+
+#: "Nothing was saved", distinct from "None was saved" (an app with no backend).
+_UNSET: Any = object()
+
+
 class TestClient:
     __test__ = False  # not a pytest collection target despite the name
-    __slots__ = ("_lifespan_from_app", "_lifespan_task", "_lifespan_to_app", "app")
+    __slots__ = (
+        "_headers",
+        "_identity",
+        "_lifespan_from_app",
+        "_lifespan_task",
+        "_lifespan_to_app",
+        "_restore_backend",
+        "_root",
+        "app",
+    )
 
-    def __init__(self, app: Any) -> None:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        headers: dict[str, str] | None = None,
+        identity: Any = None,
+    ) -> None:
         self.app = app
+        self._headers = dict(headers or {})
+        self._identity = identity
         self._lifespan_task: asyncio.Task[None] | None = None
         self._lifespan_to_app: asyncio.Queue[Message] | None = None
         self._lifespan_from_app: asyncio.Queue[Message] | None = None
+        self._restore_backend: Any = _UNSET
+        self._root: TestClient = self
+
+    # --- acting as someone ---------------------------------------------------
+
+    def acting_as(
+        self,
+        principal: Any,
+        *,
+        roles: Iterable[str] = (),
+        permissions: Iterable[str] = (),
+        type: str = "User",
+    ) -> TestClient:
+        """A client whose every request arrives authenticated as ``principal``.
+
+        The point is to test *authorization* without re-deriving a token for
+        every case::
+
+            async with TestClient(app) as client:
+                admin  = client.acting_as("root", roles=["admin"])
+                rider  = client.acting_as("bo", roles=["rider"])
+
+                assert (await admin.delete("/llamas/7")).status == 204
+                assert (await rider.delete("/llamas/7")).status == 403
+
+        ``principal`` is an :class:`~wreath.auth.Identity`, or an id to build
+        one from with ``roles``/``permissions``. Derived clients share the
+        application and the lifespan, so make as many as there are roles.
+
+        **This bypasses authentication.** While any acting-as client exists the
+        application's authentication backend is replaced with one that trusts
+        the scope, and it is restored when the client exits. That is the right
+        trade for an authorization test and the wrong one for a test *of*
+        authentication -- use a real token there.
+        """
+        from ._auth.models import Identity
+
+        if isinstance(principal, str):
+            principal = Identity(
+                principal,
+                type=type,
+                roles=frozenset(roles),
+                permissions=frozenset(permissions),
+            )
+        elif roles or permissions:
+            raise TypeError(
+                "pass roles/permissions with an id, or a complete Identity -- "
+                "not both"
+            )
+        derived = TestClient(self.app, headers=self._headers, identity=principal)
+        derived._root = self._root
+        derived._lifespan_task = self._lifespan_task
+        derived._lifespan_to_app = self._lifespan_to_app
+        derived._lifespan_from_app = self._lifespan_from_app
+        self._root._install_scope_backend()
+        return derived
+
+    def with_headers(self, **headers: str) -> TestClient:
+        """A client that sends ``headers`` on every request, plus its own."""
+        derived = TestClient(
+            self.app, headers={**self._headers, **headers}, identity=self._identity
+        )
+        derived._root = self._root
+        derived._lifespan_task = self._lifespan_task
+        derived._lifespan_to_app = self._lifespan_to_app
+        derived._lifespan_from_app = self._lifespan_from_app
+        return derived
+
+    def _install_scope_backend(self) -> None:
+        if self._restore_backend is not _UNSET:
+            return
+        self._restore_backend = getattr(self.app, "_auth_backend", None)
+        configure = getattr(self.app, "configure_auth", None)
+        if configure is not None:
+            configure(_ScopeIdentityBackend(), getattr(self.app, "_authorizer", None))
+
+    def _restore_auth_backend(self) -> None:
+        if self._restore_backend is _UNSET:
+            return
+        configure = getattr(self.app, "configure_auth", None)
+        if configure is not None and self._restore_backend is not None:
+            configure(self._restore_backend, getattr(self.app, "_authorizer", None))
+        self._restore_backend = _UNSET
 
     # --- lifespan ----------------------------------------------------------
 
@@ -148,6 +275,7 @@ class TestClient:
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
+        self._restore_auth_backend()
         assert self._lifespan_to_app is not None
         assert self._lifespan_from_app is not None
         self._lifespan_to_app.put_nowait({"type": "lifespan.shutdown"})
@@ -205,7 +333,7 @@ class TestClient:
     ) -> TestResponse:
         raw_headers = [
             (name.lower().encode("latin-1"), value.encode("latin-1"))
-            for name, value in (headers or {}).items()
+            for name, value in {**self._headers, **(headers or {})}.items()
         ]
         if json is not None:
             content = _json_dumps(json)
@@ -231,6 +359,10 @@ class TestClient:
             "client": ("testclient", 50000),
             "root_path": "",
         }
+        if self._identity is not None:
+            # On the scope rather than on the backend, so two clients acting as
+            # different people can have requests in flight at the same time.
+            scope[_SCOPE_IDENTITY] = self._identity
 
         sent: list[Message] = []
         body = content

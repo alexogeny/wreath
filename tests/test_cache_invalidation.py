@@ -13,6 +13,7 @@ matter there are that it does not echo, does not storm, and cannot fail a write.
 from __future__ import annotations
 
 import asyncio
+import gc
 import sys
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,11 @@ from wreath._orm_events import (  # noqa: E402
     subscribe_writes,
     unsubscribe_writes,
 )
-from wreath.cache import invalidate_across_workers  # noqa: E402
+from wreath.cache import (  # noqa: E402
+    SnapshotCache,
+    invalidate_across_workers,
+    refresh_on,
+)
 from wreath.orm.registry import Registry  # noqa: E402
 from wreath.orm.session import Session  # noqa: E402
 from wreath.response_cache import cached  # noqa: E402
@@ -154,6 +159,86 @@ async def test_a_cache_naming_no_models_ignores_writes_entirely() -> None:
     assert (await report(Req()))["n"] == 1
 
 
+def test_a_cached_handler_takes_its_subscription_with_it() -> None:
+    """`invalidate_on` subscribes at *decoration* time and has no later moment
+    to unsubscribe at, so the subscription is owned by the handler.
+
+    A closure left in the process-global list would outlive every handler that
+    ever existed, and -- worse than the memory -- `has_subscribers()` would stay
+    true for the rest of the process, so the session's "collect nothing when
+    nobody is listening" fast path would be dead in any app that caches at all.
+    """
+    from wreath import _orm_events
+
+    _orm_events._subscribers.clear()
+    _orm_events._bridges.clear()
+
+    def define() -> None:
+        @cached(invalidate_on=[User])
+        async def report(request: Any) -> dict:
+            return {}
+
+        assert len(_orm_events._subscribers) == 1     # listening while it lives
+
+    define()
+    gc.collect()
+
+    assert _orm_events._subscribers == []             # and gone with it
+    assert not has_subscribers()
+
+
+def test_a_cached_handler_that_is_still_referenced_keeps_listening() -> None:
+    """The ordinary case: a handler registered on an app lives for the process."""
+    from wreath import _orm_events
+
+    _orm_events._subscribers.clear()
+    _orm_events._bridges.clear()
+
+    @cached(invalidate_on=[User])
+    async def report(request: Any) -> dict:
+        return {}
+
+    routes = [report]                 # what an app's router holds
+    gc.collect()
+
+    assert len(_orm_events._subscribers) == 1
+    assert has_subscribers()
+    assert routes                     # the reference is the point
+
+
+@pytest.mark.asyncio
+async def test_a_shared_store_is_one_invalidation_domain() -> None:
+    """Documented coupling, pinned so it cannot change silently.
+
+    `_on_write` clears the whole store, so a write to *any* watched model of
+    *any* handler sharing that store drops everything in it -- including
+    entries for endpoints that named different models. Sharing a store buys one
+    budget and one invalidation surface; the second half of that is a cost.
+    """
+    from wreath.cache import BoundedCache
+
+    store: BoundedCache = BoundedCache(max_entries=32)
+    users_calls = 0
+
+    @cached(store=store, invalidate_on=[User])
+    async def users(request: Any) -> dict:
+        nonlocal users_calls
+        users_calls += 1
+        return {"n": users_calls}
+
+    @cached(store=store, invalidate_on=[Post])
+    async def posts(request: Any) -> dict:
+        return {}
+
+    await users(Req("/users"))
+    await posts(Req("/posts"))
+    assert (await users(Req("/users")))["n"] == 1      # cached
+
+    publish_write(frozenset({"Post"}))                # nothing users named
+
+    assert (await users(Req("/users")))["n"] == 2     # cleared anyway
+
+
 def test_the_watched_set_is_introspectable() -> None:
     @cached(invalidate_on=[User, Post])
     async def report(request: Any) -> dict:
@@ -201,6 +286,59 @@ async def test_a_rolled_back_transaction_publishes_nothing(
             raise RuntimeError("deliberate")
 
     assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_rolled_back_savepoint_publishes_nothing(
+    registry: Registry, database: FakeDatabase
+) -> None:
+    """The same rule one level deeper, where it used to be broken.
+
+    An inner ``begin()`` is a SAVEPOINT. Rolling it back used to leave its model
+    names on the session, so the outer commit announced a write that had been
+    undone. Over-invalidating is wasteful rather than wrong, but the invariant
+    is "a rolled-back write invalidates nothing", at every depth.
+    """
+    seen: list[frozenset[str]] = []
+    subscribe_writes(seen.append)
+
+    database.connection.script("INSERT", [[7, None]])
+    session = Session(registry, "write")
+    async with session.begin():
+        with pytest.raises(RuntimeError, match="deliberate"):
+            async with session.begin():
+                session.add(User(email="a@b.c", name="Ada"))
+                await session.flush()
+                raise RuntimeError("deliberate")
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_rolled_back_savepoint_keeps_the_enclosing_writes(
+    registry: Registry, database: FakeDatabase
+) -> None:
+    """The other half: a savepoint discards only what happened inside it.
+
+    Clearing the whole pending set on a savepoint rollback would be the
+    opposite defect -- a committed write that never invalidates anything, which
+    serves stale data rather than merely too little cache.
+    """
+    seen: list[frozenset[str]] = []
+    subscribe_writes(seen.append)
+
+    database.connection.script("INSERT", [[7, None]])
+    session = Session(registry, "write")
+    async with session.begin():
+        session.add(User(email="a@b.c", name="Ada"))
+        await session.flush()                      # kept: outside the savepoint
+        with pytest.raises(RuntimeError, match="deliberate"):
+            async with session.begin():
+                session.add(Post(title="draft", author_id=7))
+                await session.flush()              # discarded with the savepoint
+                raise RuntimeError("deliberate")
+
+    assert seen == [frozenset({"User"})]
 
 
 @pytest.mark.asyncio
@@ -459,3 +597,86 @@ async def test_a_write_outside_the_event_loop_is_not_carried() -> None:
 
     await asyncio.to_thread(publish_write, frozenset({"User"}))
     assert bus.published == []
+
+
+# --- snapshot caches ride the same event --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_write_refreshes_a_snapshot_cache() -> None:
+    """The other half of W1: reference data reloads instead of being dropped."""
+    loads = 0
+
+    def load_llamas() -> dict[int, str]:
+        nonlocal loads
+        loads += 1
+        return {1: f"Bea v{loads}"}
+
+    cache: SnapshotCache = SnapshotCache()
+    await cache.refresh(load_llamas)
+    assert cache.get(1) == "Bea v1"
+
+    refresh_on(cache, [User], load=load_llamas)
+    publish_write(frozenset({"User"}))
+    await asyncio.sleep(0)
+
+    assert cache.get(1) == "Bea v2"
+    assert cache.generation == 2
+
+
+@pytest.mark.asyncio
+async def test_an_unwatched_model_leaves_the_snapshot_alone() -> None:
+    cache: SnapshotCache = SnapshotCache()
+    await cache.refresh(lambda: {1: "Bea"})
+    refresh_on(cache, [User], load=lambda: {1: "reloaded"})
+
+    publish_write(frozenset({"Post"}))
+    await asyncio.sleep(0)
+
+    assert cache.get(1) == "Bea"
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_refresh_reaches_every_worker() -> None:
+    """A write on worker A reloads worker B's reference data, over one bus."""
+    worker_b = FakeBus()
+    invalidate_across_workers(worker_b)
+    worker_a = _elsewhere(worker_b)
+
+    cache: SnapshotCache = SnapshotCache()
+    await cache.refresh(lambda: {1: "Bea"})
+    refresh_on(cache, [User], load=lambda: {1: "renamed"})
+
+    await _commit_elsewhere(worker_a, "User")
+    await asyncio.sleep(0)
+
+    assert cache.get(1) == "renamed"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_loader_keeps_the_previous_generation() -> None:
+    """A reload that cannot run must not leave readers with nothing."""
+    def explode() -> dict:
+        raise RuntimeError("the database is down")
+
+    cache: SnapshotCache = SnapshotCache()
+    await cache.refresh(lambda: {1: "Bea"})
+    refresh_on(cache, [User], load=explode)
+
+    publish_write(frozenset({"User"}))     # must not raise
+    await asyncio.sleep(0)
+
+    assert cache.get(1) == "Bea"
+    assert cache.generation == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_on_returns_a_handle_that_can_be_stopped() -> None:
+    cache: SnapshotCache = SnapshotCache()
+    await cache.refresh(lambda: {1: "Bea"})
+    stop = refresh_on(cache, [User], load=lambda: {1: "renamed"})
+    stop()
+
+    publish_write(frozenset({"User"}))
+    await asyncio.sleep(0)
+    assert cache.get(1) == "Bea"

@@ -210,6 +210,17 @@ def test_postgres_store_schema_is_offered_as_a_migration() -> None:
     sql = store.schema_sql()
     assert "CREATE TABLE IF NOT EXISTS limits" in sql
     assert "key text PRIMARY KEY" in sql
+    # `updated` is a last-touched mark, not a deadline: a bucket refills rather
+    # than expiring, so only an idle purge retires one.
+    assert "updated timestamptz NOT NULL" in sql
+
+
+def test_postgres_store_refuses_a_second_policy() -> None:
+    """Two policies over one keyspace would limit neither of them."""
+    store = PostgresRateLimitStore(object())
+    store.configure(3.0, 1.0)
+    with pytest.raises(ValueError, match="already configured"):
+        store.configure(3.0, 1.0)
 
 
 # --- Postgres store ---------------------------------------------------------

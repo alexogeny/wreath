@@ -19,7 +19,28 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .analyzer import HTTP_METHODS, _base_kind, _Imports, _iter_py, module_pk_types
+from .analyzer import (
+    _SKIPPABLE,
+    HTTP_METHODS,
+    _base_kind,
+    _Imports,
+    _iter_py,
+    _relative_to,
+    _returns_in,
+    _skip_detail,
+    _skip_reason,
+    chain_tail,
+    lifespan_names,
+    lifespan_shape,
+    module_pk_types,
+    parent_map,
+    query_rule,
+    settings_class_rule,
+    settings_required,
+    status_code_rule,
+    status_int,
+)
+from .ir import SkippedFile
 from .rules import RULES
 
 _PHASE1_ONLY = (
@@ -57,6 +78,8 @@ _WREATH_MODULE = {
     "Cookie": "wreath.binding", "Form": "wreath.binding", "File": "wreath.binding",
     "CORSMiddleware": "wreath.middleware", "TrustedHostMiddleware": "wreath.middleware",
     "WebSocket": "wreath.websocket", "WebSocketDisconnect": "wreath.websocket",
+    # `wreath` re-exports JSONResponse and Response; the rest live in wreath.response.
+    "TextResponse": "wreath.response",
     "BadRequest": "wreath.exceptions", "Unauthorized": "wreath.exceptions",
     "Forbidden": "wreath.exceptions", "NotFound": "wreath.exceptions",
     "MethodNotAllowed": "wreath.exceptions", "Conflict": "wreath.exceptions",
@@ -114,6 +137,15 @@ _PG_PYANN = {
     "Varchar": "str", "Text": "str",
 }
 
+# The two `status_code=` verdicts whose target names a response class the emitter
+# can wrap the return in. `route.status_code_response` and `_empty` are determined
+# too, but one edits inside the returned call and the other appends a statement, so
+# they are annotated rather than rewritten (Phase 1 does spans, not statements).
+_STATUS_WRAPPER = {
+    "route.status_code_return": "JSONResponse",
+    "route.status_code_text": "TextResponse",
+}
+
 # rule_ids Phase 1 fully rewrites (or that map 1:1 needing no edit) → no annotation.
 _REWRITTEN = frozenset({
     "route.app", "route.router", "route.method", "route.include_static",
@@ -131,9 +163,20 @@ class EmitError(Exception):
 
 @dataclass(frozen=True)
 class PortResult:
+    """What one ``port_tree`` run wrote, left alone, and could not read.
+
+    ``skipped`` and ``failed`` are deliberately separate. A *skip* is a success:
+    the output was already current, or it had been hand-edited and refusing to
+    clobber it is the correct answer. A *failure* is a file that could not be
+    read or translated at all, so nothing about it reached the output tree. A
+    caller that folded the two together could not tell "your tree is already
+    ported" from "a third of your tree never made it".
+    """
+
     written_files: list[Path] = field(default_factory=list)
     regenerated: list[Path] = field(default_factory=list)
     skipped: list[Path] = field(default_factory=list)
+    failed: list[SkippedFile] = field(default_factory=list)
 
 
 #: AST nodes that carry a source span. `ast.AST` itself declares none of
@@ -223,6 +266,19 @@ class _Emitter(ast.NodeVisitor):
         self.needs_dataclass = False          # `from dataclasses import dataclass, field`
         self.annotated_lines: set[tuple[int, str]] = set()  # (line, rule_id) dedupe
         self._dep_targets: set[str] = set()   # function names referenced by Depends(<name>)
+        self._claimed_objects: set[int] = set()  # `.objects` billed by its verb
+        # Same parent map the analyzer builds, for the same reason: the verdict
+        # a query gets depends on its arguments and on the verbs chained after
+        # it, and neither is visible from the head node alone.
+        self._parents: dict[int, ast.AST] = {}
+        # Names handed to an application as `lifespan=`; filled by `visit_Module`,
+        # since the `FastAPI(lifespan=...)` call sits below the `def` it names.
+        self._lifespan_names: frozenset[str] = frozenset()
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self._parents = parent_map(node)
+        self._lifespan_names = lifespan_names(node)
+        self.generic_visit(node)
 
     # -- helpers -----------------------------------------------------------------
     def _seg(self, node: ast.AST) -> str:
@@ -335,7 +391,15 @@ class _Emitter(ast.NodeVisitor):
         if kind == "pydantic":
             self._rewrite_pydantic_class(node)
         elif kind == "settings":
-            self._annotate(node.lineno, "settings.class")
+            # Same verdict function the report uses. The emitter has no tree
+            # index, so a sub-group field reads as `complex` rather than
+            # `nested` — which lands on the same class verdict, since neither is
+            # the `scalar` shape the translated verdict requires.
+            rule_id = settings_class_rule(self.imports, node)
+            self._annotate(
+                node.lineno, rule_id,
+                settings_required(node) if rule_id == "settings.class_env" else "",
+            )
         elif kind == "ormar":
             self._rewrite_ormar_class(node)
         elif kind == "sqlmodel":
@@ -563,8 +627,9 @@ class _Emitter(ast.NodeVisitor):
             tail = dec_origin.split(".")[-1]
             if tail in ("field_validator", "model_validator", "validator", "root_validator"):
                 self._annotate(getattr(dec, "lineno", node.lineno), "pydantic.validator")
-            elif tail == "asynccontextmanager":
-                self._annotate(node.lineno, "lifespan.ctx")
+            elif tail == "asynccontextmanager" and self._is_lifespan(node):
+                rule_id, reason = lifespan_shape(node)
+                self._annotate(node.lineno, rule_id, reason)
             elif tail == "shared_task" or (tail == "task" and "celery" in dec_origin.lower()):
                 self._annotate(getattr(dec, "lineno", node.lineno), "bg.celery")
         if route_dec is not None:
@@ -578,13 +643,34 @@ class _Emitter(ast.NodeVisitor):
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
+    def _is_lifespan(self, node) -> bool:
+        """Mirrors the analyzer: only the app's lifespan gets the split advice.
+
+        `contextlib.asynccontextmanager` is stdlib, and an advisory-lock or
+        connection helper written with it needs no porting at all.
+        """
+        if node.name in self._lifespan_names or node.name == "lifespan":
+            return True
+        parameters = list(node.args.args) + list(node.args.posonlyargs)
+        return (
+            len(parameters) == 1
+            and parameters[0].annotation is not None
+            and self.imports.origin(parameters[0].annotation).split(".")[-1]
+            in ("FastAPI", "Starlette")
+        )
+
     def _ensure_request_param(self, node) -> None:
-        args = node.args.args
-        if args and args[0].arg == "request":
+        positional = list(node.args.posonlyargs) + list(node.args.args)
+        # Any parameter already named `request` satisfies the injection. Checking
+        # only position 0 produced `async def f(request: Request, x, request: Request)`
+        # for a handler that declared `request` second — which `ast.parse` accepts
+        # (duplicate arguments are a *compile* error, so the round-trip guard let
+        # it through) and CPython then refuses to compile.
+        if any(a.arg == "request" for a in positional + list(node.args.kwonlyargs)):
             return
         self.needs.add("Request")
-        if args:
-            first = args[0]
+        if positional:
+            first = positional[0]
             s = self.buf.start_of(first)
             self.buf._edits.append((s, s, b"request: Request, "))
         # zero-arg handlers are rare; annotate rather than risk paren surgery
@@ -626,24 +712,36 @@ class _Emitter(ast.NodeVisitor):
                 self.buf._edits.append((s, e, new.encode("utf-8")))
 
     def _rewrite_route_options(self, dec: ast.Call, node) -> None:
-        """Translate `status_code=`/`response_model=`; annotate what can't be done safely."""
+        """Translate `status_code=`/`response_model=`; annotate what can't be done safely.
+
+        The verdict comes from `status_code_rule`, the same function the report
+        uses, and only the two verdicts that name a *response class* are rewritten
+        here. That boundary is load-bearing: this used to wrap any single-`return`
+        body in `JSONResponse(...)`, which produced `JSONResponse(<dataclass>)` for
+        a handler returning a DTO — and wreath's JSON encoder raises on a
+        dataclass, so the ported handler failed on its first request. A verdict
+        that is not rewritten keeps its kwarg *and* gains an annotation naming the
+        exact edit, because silently dropping `status_code=` would leave the route
+        answering 200.
+        """
         drop: set[str] = set()
-        single_return = (
-            len(node.body) == 1
-            and isinstance(node.body[0], ast.Return)
-            and node.body[0].value is not None
-        )
         sc = next((kw for kw in dec.keywords if kw.arg == "status_code"), None)
-        literal_status = (sc is not None and isinstance(sc.value, ast.Constant)
-                          and isinstance(sc.value.value, int))
-        if literal_status and single_return:
-            ret = node.body[0]
-            self.needs.add("JSONResponse")
-            self.buf.replace(ret.value,
-                             f"JSONResponse({self._seg(ret.value)}, status={sc.value.value})")
-            drop.add("status_code")
-        elif sc is not None:
-            self._annotate(dec.lineno, "route.status_code")
+        if sc is not None:
+            rule_id = status_code_rule(self.imports, sc.value, node)
+            wrapper = _STATUS_WRAPPER.get(rule_id)
+            returns = _returns_in(node)
+            # `returned is not None` is implied by both wrapper verdicts (each
+            # requires a single return *of a literal*). Checked rather than
+            # asserted so an future rule added to `_STATUS_WRAPPER` without that
+            # guarantee degrades to an annotation instead of a bad edit.
+            returned = returns[0].value if len(returns) == 1 else None
+            if wrapper is not None and returned is not None:
+                status = status_int(self.imports, sc.value)
+                self.needs.add(wrapper)
+                self.buf.replace(returned, f"{wrapper}({self._seg(returned)}, status={status})")
+                drop.add("status_code")
+            else:
+                self._annotate(dec.lineno, rule_id)
         if any(kw.arg == "response_model" for kw in dec.keywords):
             # translated: drop the kwarg (the return annotation is the schema source)
             drop.add("response_model")
@@ -743,7 +841,21 @@ class _Emitter(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
-        if node.attr == "objects":
+        value = node.value
+        # Mirrors the analyzer: the verb after `.objects` names the rewrite, and
+        # the `.objects` underneath it is claimed so one chain gets one TODO.
+        if isinstance(value, ast.Attribute) and value.attr == "objects":
+            self._claimed_objects.add(id(value))
+            call = self._parents.get(id(node))
+            self._annotate(
+                value.lineno,
+                query_rule(
+                    node.attr,
+                    call if isinstance(call, ast.Call) else None,
+                    chain_tail(node, self._parents),
+                ),
+            )
+        elif node.attr == "objects" and id(node) not in self._claimed_objects:
             self._annotate(node.lineno, "orm.query")
         elif node.attr == "get_pydantic":
             self._annotate(node.lineno, "pydantic.get_pydantic")
@@ -934,6 +1046,12 @@ def port_tree(
     Idempotent: an unchanged source whose output still carries a matching provenance
     hash is skipped; an output that was hand-edited (its body hash no longer matches
     the recorded ``output-sha256``) is left untouched unless ``force``.
+
+    **A source that cannot be read is recorded in ``failed``, not fatal** — the same
+    rule ``analyze`` follows, for the same reason: one broken symlink in a large tree
+    must not end the run. **A destination that cannot be written *is* fatal**, because
+    it condemns every remaining file and a partial output tree is indistinguishable
+    from a complete one.
     """
     root = Path(root)
     if in_place and not force:
@@ -948,23 +1066,48 @@ def port_tree(
     for src_path in _iter_py(root):
         rel = src_path.relative_to(root) if root != src_path else src_path.name
         dest = (out_root / rel) if not in_place else src_path
-        source = src_path.read_text(encoding="utf-8")
-        if dest.exists() and not in_place:
-            existing = dest.read_text(encoding="utf-8")
-            rec_src, rec_out = _recorded_hashes(existing)
-            cur_src = hashlib.sha256(source.encode("utf-8")).hexdigest()
-            if rec_out is not None and rec_out != _output_hash(existing) and not force:
-                result.skipped.append(dest)  # hand-edited output — refuse to clobber
-                continue
-            if rec_src == cur_src:
-                result.skipped.append(dest)  # unchanged source — idempotent no-op
-                continue
-            emitted = emit_module(source)
+
+        # Reads are per-file recoverable; writes are not. Everything inside this
+        # block touches only *input* — the source, and any existing output whose
+        # provenance decides what to do next — so one bad file takes itself out
+        # of the run and leaves the rest in, exactly as `analyze` does. The
+        # writes below sit outside it deliberately (see the comment there).
+        try:
+            source = src_path.read_text(encoding="utf-8")
+            if dest.exists() and not in_place:
+                existing = dest.read_text(encoding="utf-8")
+                rec_src, rec_out = _recorded_hashes(existing)
+                cur_src = hashlib.sha256(source.encode("utf-8")).hexdigest()
+                if rec_out is not None and rec_out != _output_hash(existing) and not force:
+                    result.skipped.append(dest)  # hand-edited output — refuse to clobber
+                    continue
+                if rec_src == cur_src:
+                    result.skipped.append(dest)  # unchanged source — idempotent no-op
+                    continue
+                emitted = emit_module(source)
+                regenerating = True
+            else:
+                emitted = emit_module(source)
+                regenerating = False
+        except _SKIPPABLE as exc:
+            # An unreadable source, a non-UTF-8 one, or one that is not valid
+            # Python: recorded and stepped over. `EmitError` is deliberately not
+            # caught — a structurally broken *emit* is a tool bug, and turning it
+            # into a per-file skip is how a codemod quietly drops your code.
+            key = _relative_to(src_path, root)
+            result.failed.append(SkippedFile(key, _skip_reason(exc), _skip_detail(exc)))
+            continue
+
+        # A destination that cannot be written is fatal, and stays uncaught. An
+        # unreadable *source* costs one file; an unwritable *destination* means
+        # the output tree is wrong — a full disk, a read-only mount, a bad
+        # --output path — and every remaining file would hit it too. Continuing
+        # would hand back a half-written tree that looks like a complete port.
+        if regenerating:
             dest.write_text(emitted, encoding="utf-8")
             result.regenerated.append(dest)
-            continue
-        emitted = emit_module(source)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(emitted, encoding="utf-8")
-        result.written_files.append(dest)
+        else:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(emitted, encoding="utf-8")
+            result.written_files.append(dest)
     return result

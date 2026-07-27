@@ -214,6 +214,141 @@ def _compile_bind_program(select: Select) -> Callable[[Select], tuple[Any, ...]]
     return namespace["extract"]
 
 
+def check_predicate_columns(model: type, node: Expression) -> None:
+    """Raise if a predicate names a column of some other model.
+
+    ``Select.where`` cannot check this, because a predicate is built before it
+    meets a query. Nothing needs it per request either -- a handler's predicate
+    is written next to the query it filters. A *declared* query is different:
+    ``wreath.queries`` writes the predicate at class-definition time and runs it
+    much later, so a mistyped model would surface as a broken statement on a
+    request instead of at import. This is the walk that moves it back.
+
+    Relationship traversals are checked only at their first hop; the registry
+    owns the rest of the path, and it is not available this early.
+    """
+    if isinstance(node, RelatedColumnExpr):
+        owner = getattr(node.path[0], "owner", None) if node.path else None
+        if owner is not None and owner is not model:
+            raise DeclarationError(
+                f"{getattr(owner, '__name__', '?')}.{node.path[0].python_name} "
+                f"is not a relationship of {model.__name__}"
+            )
+        return
+    if isinstance(node, ColumnExpr):
+        if node.column.owner is not model:
+            raise DeclarationError(
+                f"{getattr(node.column.owner, '__name__', '?')}."
+                f"{node.column.python_name} is not a column of {model.__name__}"
+            )
+        return
+    if isinstance(node, ValueExpr):
+        return
+    if isinstance(node, BinaryExpr):
+        check_predicate_columns(model, node.left)
+        check_predicate_columns(model, node.right)
+        return
+    if isinstance(node, InExpr):
+        check_predicate_columns(model, node.left)
+        for item in node.values:
+            check_predicate_columns(model, item)
+        return
+    if isinstance(node, BooleanExpr):
+        for operand in node.operands:
+            check_predicate_columns(model, operand)
+        return
+    if isinstance(node, UnaryExpr):
+        check_predicate_columns(model, node.operand)
+
+
+def compile_rebind(
+    node: Expression, placeholder: type, found: list[Any]
+) -> Callable[[Any], Any] | None:
+    """Compile a substitution program for one predicate holding placeholders.
+
+    A declared query (see :mod:`wreath.queries`) fixes its tree once and varies
+    only the values in it, so the traversal that finds those positions can run
+    at declaration time instead of per call. Returns a function that rebuilds
+    the predicate from a mapping of parameter values, or ``None`` when the
+    predicate holds no placeholders at all and can be reused as it stands.
+    Every placeholder encountered is appended to ``found``, in the order it
+    binds, so the caller can name its parameters without a second walk.
+
+    This lives here rather than in ``wreath.queries`` because the shape of an
+    expression tree is this module's knowledge: it has to stay in step with
+    ``_append_bind_paths`` and ``_shape_expression``, and the three are only
+    reviewable together. A ``placeholder`` node's ``bind`` method owns what a
+    parameter *means*; this function owns only where one may appear.
+    """
+    if isinstance(node, placeholder):
+        found.append(node)
+        # `placeholder` is a runtime argument, so no checker can see that the
+        # nodes it selects have a `bind`; that contract belongs to the caller.
+        bound: Any = node
+        return bound.bind
+    if isinstance(node, BinaryExpr):
+        left = compile_rebind(node.left, placeholder, found)
+        right = compile_rebind(node.right, placeholder, found)
+        if left is None and right is None:
+            return None
+        operator, original_left, original_right = node.operator, node.left, node.right
+
+        def rebind_binary(values: Any) -> Any:
+            return BinaryExpr(
+                operator,
+                original_left if left is None else left(values),
+                original_right if right is None else right(values),
+            )
+
+        return rebind_binary
+    if isinstance(node, InExpr):
+        left = compile_rebind(node.left, placeholder, found)
+        items = tuple(compile_rebind(item, placeholder, found) for item in node.values)
+        if left is None and not any(items):
+            return None
+        operator, original_left, originals = node.operator, node.left, node.values
+
+        def rebind_in(values: Any) -> Any:
+            operands: Any = tuple(
+                original if program is None else program(values)
+                for original, program in zip(originals, items, strict=True)
+            )
+            return InExpr(operator, original_left if left is None else left(values), operands)
+
+        return rebind_in
+    if isinstance(node, BooleanExpr):
+        programs = tuple(
+            compile_rebind(operand, placeholder, found) for operand in node.operands
+        )
+        if not any(programs):
+            return None
+        operator, originals = node.operator, node.operands
+
+        def rebind_boolean(values: Any) -> Any:
+            return BooleanExpr(
+                operator,
+                tuple(
+                    original if program is None else program(values)
+                    for original, program in zip(originals, programs, strict=True)
+                ),
+            )
+
+        return rebind_boolean
+    if isinstance(node, UnaryExpr):
+        program = compile_rebind(node.operand, placeholder, found)
+        if program is None:
+            return None
+        operator = node.operator
+
+        def rebind_unary(values: Any) -> Any:
+            return UnaryExpr(operator, program(values))
+
+        return rebind_unary
+    if isinstance(node, (ColumnExpr, ValueExpr)):
+        return None
+    raise ORMError(f"cannot bind parameters inside {type(node).__name__}")
+
+
 def compile_select(registry: Any, select: Select) -> CompiledQuery:
     """Compile ``select`` against ``registry``, using its bounded plan cache."""
     spec = registry.spec_for(select.model)
@@ -838,7 +973,9 @@ __all__ = [
     "JoinedStep",
     "LoadPlan",
     "SelectinStep",
+    "check_predicate_columns",
     "compile_count",
+    "compile_rebind",
     "compile_select",
     "qualified",
     "quote",

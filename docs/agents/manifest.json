@@ -230,14 +230,16 @@
       "reference": [
         "docs/reference/middleware.md",
         "docs/reference/compression.md",
-        "docs/reference/cache_control.md"
+        "docs/reference/cache_control.md",
+        "docs/reference/store.md"
       ],
       "sources": [
         "src/wreath/middleware/",
         "src/wreath/compression.py",
         "src/wreath/cache_control.py",
         "src/wreath/_webpolicy.py",
-        "src/wreath/session_store.py"
+        "src/wreath/session_store.py",
+        "src/wreath/store.py"
       ],
       "tests": [
         "tests/test_middleware.py",
@@ -251,22 +253,27 @@
         "tests/test_compression_parity.py",
         "tests/test_proxy_middleware.py",
         "tests/test_ratelimit_middleware.py",
+        "tests/test_tiered_ratelimit.py",
         "tests/test_request_id_middleware.py",
         "tests/test_timing_middleware.py",
         "tests/test_idempotency.py",
+        "tests/test_exactly_once.py",
         "tests/test_webpolicy_parity.py",
-        "tests/test_session_store.py"
+        "tests/test_session_store.py",
+        "tests/test_store.py"
       ],
       "decisions": [
         "docs/decisions/0009-middleware-fusion-execution-model.md",
         "docs/decisions/0018-use-signed-double-submit-csrf-tokens.md",
         "docs/decisions/0019-use-cpython-zlib-instead-of-shipping-direct-zlib-extension.md"
-      ]
+      ],
+      "policy": "Hooks are fused into a linear tape; global middleware (`global_scope = True`) runs around routing and every response, including misses and error responses, so its `after` still runs when a handler raises. Idempotency is *response replay*, not the effect-once guarantee: `IdempotencyMiddleware`'s claim must be atomic (`MemoryIdempotencyStore` is sync between read and write; `PostgresIdempotencyStore` is one INSERT ... ON CONFLICT ... RETURNING, where a returned row *is* the claim -- no owner column). The default store is per-worker, so the durable guarantee has to come from a unique index on the key (`jobs.enqueue(key=...)`, a unique column); design so that losing the store costs work, never correctness. `docs/cookbook/recipes/exactly-once.md` and `tests/test_exactly_once.py` hold that composition. Rate limiting has two shapes for one reason: `request.identity` is set during route authorization, so a limiter keyed on the principal cannot be a global hook. `RateLimitMiddleware` stays global and keyed on the address (ingress: 404 floods, login floods) and *raises at construction* if handed `principal_key`, because degrading silently to one shared bucket is a production incident. `TieredRateLimitMiddleware` is route middleware (`global_scope = False`), keyed on the principal, with one store per tier so a promotion gets a full allowance; the tier comes from the caller's roles -- the same roles Cedar authorizes with -- and the most generous match wins. The claim, the lazy statement preparation, the `clock_timestamp()` clock and the offered-not-applied schema live once, in `wreath.store`; a returned row *is* the claim, and `live`/`expired` are exact complements so a purge can never drop a row a read would still honour. `MemoryRateLimitStore` stays outside it deliberately: a token bucket is arithmetic every read advances, not a stored payload."
     },
     {
       "name": "auth",
       "guides": [
-        "docs/guides/auth.md"
+        "docs/guides/auth.md",
+        "docs/guides/permissions.md"
       ],
       "reference": [
         "docs/reference/auth.md",
@@ -277,7 +284,8 @@
         "src/wreath/authorization.py",
         "src/wreath/_auth/",
         "src/wreath/_pure/authz.py",
-        "src/wreath/_native/authz.c"
+        "src/wreath/_native/authz.c",
+        "src/wreath/_livedoc.py"
       ],
       "tests": [
         "tests/test_authentication.py",
@@ -288,9 +296,11 @@
         "tests/test_rbac.py",
         "tests/test_cedar.py",
         "tests/test_cedar_engine.py",
-        "tests/test_jwt.py"
+        "tests/test_permissions.py",
+        "tests/test_jwt.py",
+        "tests/test_livedoc.py"
       ],
-      "policy": "Authentication (identity) and authorization (roles, permissions, Cedar) stay firmly apart. The Cedar engine is built in and dependency-free: policies parse at startup, evaluation is native with a pure twin, forbid overrides permit, default deny.",
+      "policy": "Authentication (identity) and authorization (roles, permissions, Cedar) stay firmly apart. The Cedar engine is built in and dependency-free: policies parse at startup, evaluation is native with a pure twin, forbid overrides permit, default deny. `permissions_router(app)` answers what the caller may do from the *same* authorizer that enforces it, and `declared_actions(app)` reads the vocabulary off the routes' `@authorize` declarations -- there is no second list to drift, and an undeclared action is refused rather than evaluated (otherwise the endpoint is an oracle for probing policies). Two questions, two shapes: the manifest is resource-type level and ETagged (the tag covers principal, roles, and the policy set, so a promotion or a deploy invalidates it and nothing else does); the batch endpoint is row level, because a Cedar decision depends on the resource. Neither is enforcement -- the route is re-evaluated on the next request, so a stale answer can only draw a button that then 403s. The vocabulary reaches the generated TS client through `ApiModel.permissions`. The permission change stream (`_livedoc.LiveDocument`, transported by `_busbridge`) is **at-most-once and advisory**: a narrowing change may arrive late, which is safe only because the manifest is for chrome and enforcement is re-evaluated on the route -- a stale manifest can draw a button that then 403s and can never permit anything. A stream never emits an ETag it cannot state truthfully: on a roles change the captured identity is stale by definition, so it emits `etag: null` rather than a tag that would tell the client to skip exactly the refetch it needs, and coalescing two pending changes lets *unknown* win. Subscriptions are capped per principal and overall and **refused** (503, client falls back to If-None-Match) rather than evicted, since evicting the oldest tab invites a reconnect that evicts the next; the ORM write subscription is registered on the first subscriber and dropped on the last, so the process-global listener list is bounded by live streams.",
       "decisions": [
         "docs/decisions/0023-built-in-cedar-engine.md"
       ]
@@ -405,32 +415,54 @@
         "src/wreath/messaging.py",
         "src/wreath/services.py",
         "src/wreath/progress.py",
-        "src/wreath/rooms.py"
+        "src/wreath/rooms.py",
+        "src/wreath/_busbridge.py"
       ],
       "tests": [
         "tests/jobs/",
         "tests/messaging/",
+        "tests/test_busbridge.py",
         "tests/test_progress.py",
         "tests/test_live_progress.py",
         "tests/test_rooms.py"
       ],
-      "policy": "PostgreSQL is the queue; there is no broker to operate. The service supervisor starts after databases and before user startup handlers, and stops in reverse: stop fetching, drain bounded in-flight work, then cancel. Watchable work: `JobRunner(progress=ProgressRegistry(...))` makes the job id the task id -- one identifier, no correlation -- and `launch()` seeds it `queued` so a client polling before a worker claims it does not get a 404. The runner owns the terminal states because only it can tell a retry from a dead-letter: success reports `done`, dead-letter reports `failed` with the error, and a retry leaves the task `running`. A handler never reports terminal state itself. `ProgressRegistry(bus)` carries reports to every worker on one channel with the rooms.py origin guard (apply locally, publish once, never relay what arrived); at-most-once, and a bus failure cannot fail the work being reported on."
+      "policy": "PostgreSQL is the queue; there is no broker to operate. The service supervisor starts after databases and before user startup handlers, and stops in reverse: stop fetching, drain bounded in-flight work, then cancel. Watchable work: `JobRunner(progress=ProgressRegistry(...))` makes the job id the task id -- one identifier, no correlation -- and `launch()` seeds it `queued` so a client polling before a worker claims it does not get a 404. The runner owns the terminal states because only it can tell a retry from a dead-letter: success reports `done`, dead-letter reports `failed` with the error, and a retry leaves the task `running`. A handler never reports terminal state itself. `ProgressRegistry(bus)` carries reports to every worker on one channel with the rooms.py origin guard (apply locally, publish once, never relay what arrived); at-most-once, and a bus failure cannot fail the work being reported on. Cross-worker transport discipline is one primitive: `_busbridge.BusBridge` owns the channel, the origin tag that drops a worker's own NOTIFY echo, and the deferred publish, and there is deliberately **no path from its receive to a publish** -- never-relaying is structural, not a flag. `rooms.py`, `progress.py`, and `_orm_events.WriteBroadcast` each keep only their payload shape and local apply. The one real difference is preserved: rooms publishes inline and unsuppressed (its caller is awaiting the fan-out), the other two are fire-and-forget and swallow (the row already committed; a percentage is commentary). Durable subscriber groups are discovered fleet-wide from a `message_groups` table, **unioned** with local registrations so a missing table degrades to the old behaviour and shipping before the DDL cannot regress; the snapshot is refreshed on a timer (`group_refresh`, 30s) rather than read per publish, because a query inside the caller's `tx` would abort *their* transaction if the table were absent. Registry failures are counted (`group_registry_errors`), never raised. A publish routed to nobody stays a no-op but increments `unrouted_publishes`; `require_group=True` raises `NoSubscriberGroup` instead. The doorbell's held LISTEN connection is supervised: it reconnects with jittered exponential backoff (50 ms to 5 s, no reset for a connection that flaps), counts losses and failed opens in `doorbell_reconnects`, and counts ephemeral handler exceptions separately in `handler_errors` so a bug in user code cannot read as a dropped connection."
     },
     {
-      "name": "storage",
+      "name": "passes",
       "guides": [
-        "docs/guides/storage.md"
+        "docs/guides/chunked-passes.md"
       ],
       "reference": [
-        "docs/reference/storage.md"
+        "docs/reference/passes.md"
       ],
       "sources": [
+        "src/wreath/passes.py",
+        "src/wreath/_passes/"
+      ],
+      "tests": [
+        "tests/passes/",
+        "tests/postgres/test_passes_integration.py"
+      ],
+      "policy": "A pass converts the past; the application writes the future in the shape the pass is converting to. That precondition is the primitive's rule rather than a caller's choice, and it is what makes a fixed ceiling sound. The cursor advances inside the chunk transaction, so position and data commit together -- the whole reason this is worth owning is that the ledger row and the walked table are two rows in one PostgreSQL cluster. The compare-and-swap is the chunk's first statement: it takes the row lock, so two workers serialise and the loser rolls back whole rather than doing anything observable. That exclusivity argument is why parallel sharded execution is deliberately not planned. The vocabulary is 'a half-open range over one ordered domain'; row counts are reported, never structural, so a bucketed range source still fits. Keyset never OFFSET is a complexity argument (N^2/(2c) against (N/c)*log N + N) and needs no benchmark -- its two correctness conditions are refusals: the leading key column must be indexed, and a composite key is one row comparison, never expanded ORs. A boundary that cannot be proven unique is refused because '>' silently skips siblings and '>=' loops forever. Pacing ships in the first release rather than after it: the primitive must not have a version in which an unpaced walk exists."
+    },
+    {
+      "name": "objects",
+      "guides": [
+        "docs/guides/objects.md"
+      ],
+      "reference": [
+        "docs/reference/objects.md"
+      ],
+      "sources": [
+        "src/wreath/objects.py",
         "src/wreath/storage.py",
         "src/wreath/_sigv4.py"
       ],
       "tests": [
         "tests/storage/"
-      ]
+      ],
+      "policy": "Blob/object storage: the `ObjectStore` protocol with `MemoryObjectStore` (the dev/test twin), a symlink-safe `LocalObjectStore` on the same `openat` containment as static files, and `S3ObjectStore` over `http_client` signed with zero-dependency SigV4. `normalize_key` is the single containment gate for every backend -- a key is validated there, not per backend. Named `objects` because \"store\" meant two unrelated things: this, and the small keyed tables behind rate limiting, idempotency, and sessions (`wreath.store`). `src/wreath/storage.py` is a deprecating alias that re-exports the old names (`Storage`/`S3Storage`/`StoragePath`/`StorageError`) and warns; it exists so the rename cannot break an existing import, and is removable once callers have moved."
     },
     {
       "name": "pagination",
@@ -537,12 +569,13 @@
         "tests/test_flight_recording.py",
         "tests/test_replay.py",
         "tests/test_replay_faults.py",
+        "tests/test_replay_to_test.py",
         "tests/test_replay_adversarial.py",
         "tests/test_prometheus.py",
         "tests/test_statsd.py",
         "tests/test_cloudwatch_emf.py"
       ],
-      "policy": "Recording is policy value types only and deny-by-default; the capture engine and WFR1 sink are not shipped (see docs/reference/roadmap.md). The projector drains the recorder's ring off the request path.",
+      "policy": "Recording is policy value types only and deny-by-default; the capture engine and WFR1 sink are not shipped (see docs/reference/roadmap.md). The projector drains the recorder's ring off the request path. `replay.generate_test` turns a WTR1 transport recording into a runnable pytest over TestClient: it parses the request out of the recorded bytes (request line + headers + Content-Length body only -- chunked or truncated is refused by name, never guessed), replays it now, and asserts what it observes. That makes it a *characterisation* test, and the generated docstring says so -- generated against a broken build it encodes the bug, generated after the fix it locks the fix in. Host/content-length/connection headers are dropped from the generated call because they are the test client's business, not the behaviour under test.",
       "decisions": [
         "docs/decisions/0021-native-flight-recorder-provisional-parameters.md",
         "docs/decisions/0022-native-flight-recorder-stage-1-followups.md"
@@ -645,7 +678,7 @@
         "tests/test_response_cache.py",
         "tests/test_cache_invalidation.py"
       ],
-      "policy": "Read-mostly application cache by atomic generation publication. Reads perform no hidden I/O; misses are explicit. Refresh is single-flight and failure preserves the previous generation. Shipped pure-first (dict-backed read path); the facade selects a native SnapshotCache only if one is measured in. `response_cache.cached` is a shared/public cache by default: it never stores a response that sets a cookie or is marked no-store/private, and a per-principal response needs an explicit `key`. Cache invalidation is driven by the ORM: a session announces the model names it wrote once its transaction commits, and caches that named those models clear. Published after commit, never before -- a rolled-back write must invalidate nothing. `cache.invalidate_across_workers(bus)` carries the same announcement to the other workers over the message bus. Subscribers (react to a write) and bridges (carry it off-worker) are separate lists so a received announcement is applied locally and never relayed onward; a bridge failure cannot fail a committed write, and cross-worker delivery is at-most-once, leaving the TTL as the backstop."
+      "policy": "Read-mostly application cache by atomic generation publication. Reads perform no hidden I/O; misses are explicit. Refresh is single-flight and failure preserves the previous generation. Shipped pure-first (dict-backed read path); the facade selects a native SnapshotCache only if one is measured in. `response_cache.cached` is a shared/public cache by default: it never stores a response that sets a cookie or is marked no-store/private, and a per-principal response needs an explicit `key`. Cache invalidation is driven by the ORM: a session announces the model names it wrote once its transaction commits, and caches that named those models clear. Published after commit, never before -- a rolled-back write must invalidate nothing. `cache.invalidate_across_workers(bus)` carries the same announcement to the other workers over the message bus. Subscribers (react to a write) and bridges (carry it off-worker) are separate lists so a received announcement is applied locally and never relayed onward; a bridge failure cannot fail a committed write, and cross-worker delivery is at-most-once, leaving the TTL as the backstop. `cache.refresh_on(snapshot, [Model], load=...)` puts the SnapshotCache on the same event: reference data *reloads* rather than dropping (a dropped generation is an explicit miss on data that still exists), single-flight, and a failing loader leaves the previous generation in place. Both halves go fleet-wide through the one `invalidate_across_workers` bridge."
     },
     {
       "name": "doctor",
@@ -663,6 +696,23 @@
         "tests/test_doctor.py"
       ],
       "policy": "Defects a green test suite cannot see, over layers only Wreath holds together. N+1: the ORM stamps each read's model onto the recorder's ORM_HYDRATE phase (dependency_id = the metadata image's model entry id, stamped onto `Registry._flight_model_ids` at startup like a Database's `_flight_dep_id`), and the completion carries the route, so a trace can name the shape rather than only the endpoint. Two surfaces, one vocabulary: `NPlusOneGuard` trips inside the query that crossed the limit so the traceback names the loop, and `diagnose_n_plus_one` / `wreath doctor n-plus-one` reads the same finding out of a running server's Inspector without reproducing anything. Both produce a `Finding`. Cost discipline: the ORM seam reads no ContextVar until a guard exists (`_nplusone.WATCHING`, a module attribute, not a crossing) and reads no phase marker until a metadata image exists (`_flight_model_ids` non-empty), so `wreath-request-trace` records zero added crossings for an app that uses neither. The guard is for development and staging; a guard that fails production requests is a worse outage than the N+1."
+    },
+    {
+      "name": "temporal",
+      "guides": [
+        "docs/guides/dates-and-times.md"
+      ],
+      "reference": [
+        "docs/reference/temporal.md"
+      ],
+      "sources": [
+        "src/wreath/temporal.py"
+      ],
+      "tests": [
+        "tests/test_temporal.py",
+        "tests/test_temporal_surfaces.py"
+      ],
+      "policy": "An `Instant` is always aware; a naive value is refused, never assumed UTC -- that assumption is the bug the module exists to prevent. Dependency-free over stdlib datetime/zoneinfo, because the core cannot take arrow and those are the applications being ported. One declaration settles every surface: ORM column, binding coercion, REST JSON, OpenAPI format, typegen alias, GraphQL scalar -- they used to be five places that drifted. Temporal JSON encoding is a *retry* in the `_json` facade (encode as-is; only a TypeError triggers rewrite-and-retry), never a pre-pass, so a payload with no timestamps pays one un-raised try and the ordinary response path is untouched. Body validation is deliberately NOT wired: it has a byte-for-byte C twin in `_native/validate.c`, and a silent divergence there is worse than the gap. The relative formatter is the single locale-keyed seam, so i18n is a table entry rather than a migration. ISO durations reject years/months: neither is a fixed number of seconds and a timedelta cannot hold one honestly."
     },
     {
       "name": "staticfiles",
@@ -712,7 +762,7 @@
       "tests": [
         "tests/port/"
       ],
-      "policy": "`wreath port` statically analyzes a FastAPI/Pydantic/ormar/SQLModel app and never imports the target. Phase 0 is report-only; code emission is deferred."
+      "policy": "`wreath port` statically analyzes a FastAPI/Pydantic/ormar/SQLModel app and never imports the target. Phase 0 is report-only; code emission is deferred. The rule catalog is sized from a measured 364k-line production corpus, not from guesses: `.objects.` chains were a third of every framework token there, so they are classified per *verb* (each naming its wreath call) rather than getting one verdict that reports the size of the job and nothing about its shape; a chain bills once, at its head. Alembic ops split six ways, and only by what `detect` provably reads off the ORM image: derivable DDL is TRANSLATED (the determined target is *no code* -- the same shape as `extra=\"forbid\"`), while a **rename** is separated because it is the one ordinary-looking op whose derived form is wrong rather than absent (an image differ reads it as drop+create and moves no data), alongside non-btree/expression indexes, unmodelled types and constraints, raw SQL, and `op.get_bind()` row rewrites. Rules must point only at *shipped* targets -- arrow and `op.get_bind` say so explicitly rather than promising designed-but-unshipped work -- and a rule whose wreath equivalent is automatic emits nothing at all (`strawberry.auto`, 305 sites, would otherwise bury every real finding). The analyzer and the emitter share `query_rule()`, `status_code_rule()`, `settings_class_rule()` and `lifespan_shape()` so a report and its emitted TODO cannot disagree about the same line -- and the emitter only *rewrites* a verdict whose target names a response class, because it used to wrap any single-`return` body in `JSONResponse(...)`, which for a DTO return produced a port that compiled and then raised on its first request. Verdicts turn on shape, not name, beyond queries: `BaseSettings` by field shape (scalar annotation + literal-or-absent default), `status_code=` by what wreath's own coercion table says the return becomes, a lifespan by whether a bare top-level `yield` partitions the body with nothing crossing it, and a `@strawberry.type` by whether its `auto` fields *are* the model's columns -- a subset is a schema widening, since exposure is per model, and a snake_case field is a wire rename, since strawberry camel-cases and wreath does not. Query verdicts turn on *arguments*, not the verb alone: a mechanical lookup (`__gte`, `__in`, a bare column) with a mechanical chain tail translates; a relation traversal (`ranch__slug` -- the join is a decision), a value-rewriting lookup (`__icontains` has to choose what 'contains' meant), or a write stays `needs-review`. Tail verbs are checked for their own arguments too, or `.all(name__icontains=x)` slips past the head test. **`TRANSLATED` means the target is determined, not that the emitter rewrites it** -- bodies are copied byte-for-byte regardless, and `test_the_emitter_never_rewrites_a_query` asserts that contract directly rather than through a no-query-is-translated proxy. Corpus fixtures are structural shape only, re-themed into the llama/trek domain; no corpus identifier may enter the repository."
     },
     {
       "name": "devtools",
@@ -768,6 +818,22 @@
         "tests/test_graphql.py"
       ],
       "policy": "The schema is derived from ModelSpec, never hand-written, so GraphQL cannot drift from REST or from the database. Safety limits (document size, depth, complexity, aliases, token budget) are enforced during the parse and may be widened but not removed. Relationship fields resolve through Session._load_relationship so a selection is batched, never N+1. Introspection is opt-in."
+    },
+    {
+      "name": "queries",
+      "guides": [
+        "docs/guides/orm.md"
+      ],
+      "reference": [
+        "docs/reference/queries.md"
+      ],
+      "sources": [
+        "src/wreath/queries.py"
+      ],
+      "tests": [
+        "tests/test_queries.py"
+      ],
+      "policy": "Reads only: writes belong to Session, whose one-way direction is an ORM invariant, so a layer that also wrote would duplicate that or work around it. A declaration's shape is fixed at class-definition time and only values vary, so it must compile once through the registry's existing plan cache -- a bound declaration's shape key stays byte-identical to the hand-written query's, and no second cache is added here (tested, not asserted). `Param` subclasses `RelatedColumnExpr` only to win operator dispatch against a column on the left; it never enters a tree, and the `_Placeholder` that does is deliberately not a `ValueExpr`, so one reaching `shape_of` raises rather than compiling a query with a hole in it. Validated at declaration time: the model, that every predicate column belongs to it, and that no `Param` sits in `order_by`/`limit`/`offset` where no caller could supply it."
     }
   ],
   "invariants": "AGENTS.md",

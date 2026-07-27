@@ -162,5 +162,26 @@ async def products(request): ...
 async def categories(request): ...
 ```
 
+**One store is one invalidation domain.** That is the same sentence as "one
+invalidation surface", read from the other side: invalidation clears the
+*store*, not the handler's slice of it. So if the endpoints sharing a store name
+different models, a write to any one of those models drops every entry in it:
+
+```python
+@cached(store=catalog_cache, invalidate_on=[Product])
+async def products(request): ...
+
+@cached(store=catalog_cache, invalidate_on=[Category])
+async def categories(request): ...
+
+# A Category write clears the cached /products responses too.
+```
+
+That is safe — you never serve stale data because of it — but it is wasted
+recomputation, and it grows with the number of endpoints in the group. Share a
+store across endpoints that watch the *same* models, or that are cheap enough
+that recomputing them together does not matter. Give an expensive endpoint with
+its own narrow `invalidate_on` its own store.
+
 Streaming, file, and SSE responses are never cached — their bodies aren't
 materialized — so they pass straight through.

@@ -36,15 +36,275 @@ Annotated for you (a real wreath target exists, but the rewrite isn't statically
 
 - ORM `.objects.` query chains, custom `BaseHTTPMiddleware`, lifespan context managers, bespoke auth bodies — each pointed at the corresponding built-in (`db.lock`, `app.jobs`, `oidc_provider`, …).
 
-Left untouched and flagged `unsupported` (no wreath equivalent — keep the library): DynamoDB, OR-Tools, GraphQL servers, cloud SDKs.
+Left untouched and flagged `unsupported` (no wreath equivalent — keep the library): DynamoDB, OR-Tools, cloud SDKs, pandas/numpy analysis code.
+
+## The ORM query chain, verb by verb
+
+In a mature ormar codebase `.objects.` is not one construct among many — it is
+*the* construct. In the production tree this catalog was measured against it
+appears 1105 times, about a third of every framework token in the repository.
+
+Reporting all of that as one line ("rewrite by hand") tells you the size of the
+job and nothing about its shape, so the report classifies each chain by its
+verb:
+
+| ormar | wreath | notes |
+| --- | --- | --- |
+| `.objects.filter(**kw)` | `Model.select().where(...)` + `session.fetch()` | `__gte`/`__in` carry across; `__icontains`/relation lookups need a decision |
+| `.objects.get_or_none(**kw)` | `await session.fetch_one(...)` | same contract, `None` on no match |
+| `.objects.get(pk)` | `await session.get(Model, pk)` | **ormar raises `NoMatch`, wreath returns `None`** — port the miss branch |
+| `.objects.create(**values)` | `session.add(Model(**values))` + `flush()` | |
+| `.objects.select_related(...)` | `.include(Model.rel.selectin())` | wreath never lazy-loads: a forgotten include *raises* rather than N+1-ing |
+| `.objects.count()` / `.exists()` | `await session.count(...)` | |
+| `.objects.get_or_create(...)` | — | a read-then-write race in one call; write the upsert explicitly |
+
+**The verdict depends on the arguments, not just the verb.** `filter(id=x)` is
+`translated`: every keyword maps to a wreath predicate with the value carried
+across untouched, so the target is fully determined. `filter(name__icontains=x)`
+is not — the value has to be wrapped in wildcards, and choosing that is a
+decision. Neither is `filter(ranch__slug=x)`, because `slug` lives on another
+table and the join is yours to write. Same verb, different verdicts; sort the
+JSON report by `rule_id` to get each list.
+
+A `translated` query still gets a `# TODO` comment rather than a rewrite. The
+tag says the target is determined, not that the emitter performs it: Phase 1
+transpiles declarations and copies function bodies byte-for-byte, and a query
+lives in a body.
+
+## Things wreath grew an answer for
+
+A porting tool ages in one specific way: a construct gets catalogued as "keep
+the library", wreath later ships the thing, and the report goes on recommending
+a dependency you could delete. These were re-pointed after measuring what a real
+codebase actually imports:
+
+- **`cachetools` TTL/LRU caches** → `wreath.cache`. Worth doing for more than
+  parity: a `TTLCache(ttl=300)` is a guess about staleness, and
+  `@cached(invalidate_on=[Llama])` clears on the committed write instead. Add
+  `invalidate_across_workers(bus)` and that becomes fleet-wide.
+- **`strawberry` / GraphQL servers** → `wreath.graphql`. Previously flagged
+  `unsupported`; it isn't any more. Types derive from the ORM registry, so a
+  `@strawberry.type` whose `strawberry.auto` fields *are* the model's columns is
+  a deletion, and the report says so. Two things stop it being one, and the
+  report names whichever applies rather than advising the delete anyway:
+  a type listing **fewer** columns than the model is a deliberately narrowed
+  surface, and wreath's exposure is per model rather than per field — deleting
+  the class would publish the rest. And strawberry camel-cases field names by
+  default while wreath emits the column name verbatim, so a `fleece_kg` field is
+  `fleeceKg` today and `fleece_kg` after the port: a rename every client sees.
+- **`httpx.AsyncClient`** → `app.http_client(...)`, a managed pool with lifespan
+  start/drain.
+- **FastAPI's `TestClient`** → `wreath.testing.TestClient`, which is **async**.
+  And `dependency_overrides`, which in a real suite is overwhelmingly used to
+  swap the auth dependency, is usually `TestClient.acting_as("bo", roles=[...])`.
+- **`fastapi.status` constants, response classes, `jsonable_encoder`** → direct
+  equivalents (or, for `jsonable_encoder`, nothing at all — wreath's codec
+  serializes dataclasses and ORM rows directly).
+
+- **`arrow`** → `wreath.temporal`, which is a rename per call:
+  `arrow.utcnow()`/`arrow.now()` become `temporal.now()`, `arrow.get(s)` becomes
+  `temporal.parse(s)`, and `.humanize()` becomes `temporal.relative(value)`. An
+  `Instant` is a `datetime` subclass, so it stores, compares, and serializes
+  with no conversion at the edges — and it refuses to be naive, which is the bug
+  arrow's implicit UTC hides. A calendar `shift(months=)` is the exception and
+  reports separately: months are not a fixed number of seconds, and temporal
+  will not pretend otherwise.
+
+This is a catalog that gets re-audited when a subsystem lands. `arrow` was
+`needs-review` with the note "a native temporal layer is designed but NOT
+shipped — do not wait for it", which was true when it was written and became
+misleading the day `wreath.temporal` merged.
+
+## Alembic revisions, sorted by risk
+
+Wreath's migration source of truth is the ORM image, not a chain of scripts, so
+most of an Alembic revision has no wreath counterpart to *write* — which is a
+translated verdict, not an outstanding task. The report sorts the operations by
+which ones that is actually true of:
+
+- **ordinary DDL** (`add_column`, `create_index`, `drop_table`,
+  `alter_column(nullable=)`, …) — `translated`. `wreath migrations detect` reads
+  these off the model change and `generate` emits the artifact. Confirm the
+  ported model declares the end state (wreath is `NOT NULL` by default) and the
+  revision is the generator's to own. The verdict is per *operation*, not per
+  verb: it holds only while every argument stays inside what detection covers —
+  tables, columns, primary keys, unique constraints, foreign keys and btree
+  indexes.
+- **renames** (`rename_table`, `alter_column(new_column_name=)`) — the one
+  ordinary-looking operation whose derived form is *wrong* rather than absent. An
+  image differ sees one object dropped and another created, and that moves no
+  data. Keep the revision, or rename in the database first so `detect` sees a
+  matching image.
+- **indexes wreath does not model yet** (expression, partial, covering,
+  non-btree) — emitted as `MANUAL` operations that cannot be applied, and
+  therefore cannot be downgraded either. Keep them in Alembic.
+- **types and constraints with no model attribute** (`sa.Numeric`, `sa.Enum`, a
+  check constraint, a bare `drop_constraint` whose kind the call does not say) —
+  the generator has nothing to derive them from. Decide whether the object moves
+  onto the model or the table stays in Alembic.
+- **raw SQL** (`op.execute(...)`) — no generator can infer it. Keep it in
+  Alembic.
+- **data migrations** (`op.get_bind()`) — this revision rewrites *rows*. It is
+  the one that takes an hour on a large table and holds up a deploy, so it is
+  called out separately rather than counted as one more DDL op.
+
+## Splits by shape, not by name
+
+Three more verdicts read the construct instead of its name, the way the query
+rules read a `filter()`'s arguments (and so does the `@strawberry.type` rule
+above). In each case the half that stays under review is the point:
+
+- **`BaseSettings`** is `translated` when every field is a `str`/`int`/`float`/
+  `bool` with a literal default or none at all: the target is `load_env` plus a
+  dataclass, and the report hands over the `required_env=[...]` list the
+  no-default fields imply, with any literal `env_prefix` already applied. One
+  validator, container type, computed default or sub-group and the class waits
+  for a human — a `list[str]` field is a JSON decode pydantic-settings did for
+  you and `load_env` will not.
+- **`status_code=`** has no slot on a wreath route; the status lives on the
+  response. When the handler's single `return` is a literal, wreath's own
+  coercion already decides which response class that is (dict/list/number →
+  `JSONResponse`, str → `TextResponse`), so wrapping it changes the status and
+  nothing else. When the return is a name or a call, the runtime type decides —
+  and a dataclass is not JSON-serializable in wreath at all
+  (`dataclasses.asdict` is the step), so the report asks rather than guesses.
+  `status_code=204` with no return is `return Response(status=204)`; with a
+  return it is a contradiction the source got away with.
+- **An `@asynccontextmanager` lifespan** splits into `on_startup`/`on_shutdown`
+  when a bare top-level `yield` partitions the body. If a name made before the
+  yield is used after it, the message names that name: the halves are separate
+  functions now, so it needs a home on `app.state`. An `asynccontextmanager`
+  that is *not* the app's lifespan — a lock or connection helper — is not
+  reported at all, because it needs no porting.
+
+## What it walks, and what it refuses to
+
+A real checkout is not just your application. It has a virtualenv in it, a
+`node_modules` next door, a `build/` holding a second copy of the source, and a
+`.git` full of nothing you wrote. Walking those as application code inflates the
+denominator with libraries you are not porting — and, with an environment
+present, drags a few thousand unrelated files into a run you did not ask for.
+
+So the walk prunes, on two bases:
+
+- **A virtualenv is found by its marker, `pyvenv.cfg` — not by its name.**
+  `.venv` is a convention, not a rule, and an environment called `herd-env` is
+  still an environment. Any directory containing that file is skipped whole. The
+  root you name is exempt: if you point `wreath port` *at* an environment, that
+  was a decision.
+- **Conventional infrastructure names**, so an environment with a missing or
+  stale marker still falls out: anything beginning with `.` (`.git`, `.tox`,
+  `.nox`, `.mypy_cache`, `.ruff_cache`, `.direnv`, `.idea`), plus `__pycache__`,
+  `node_modules`, `site-packages`, `venv`, `build`, `dist`, and `*.egg-info`.
+
+The prune is on the *name of a directory*, never on a pattern that could match a
+module you wrote: `env/`, `builders/` and `distribution/` are yours and are
+walked. Symbolic links to directories are not followed, so a link out of the tree
+cannot widen the run past the path you named.
+
+## One bad file is a line in the report, not the end of the run
+
+Over three thousand files there is always one that will not read: a broken
+symlink, a permission bit, a file deleted between the walk and the read, a
+latin-1 module, a fixture named `.py` that is really a blob, a generated
+expression nested past the parser's stack budget. None of those end the run any
+more — each takes its own file out and leaves the rest in.
+
+But a silently skipped file is indistinguishable from a file with nothing in it,
+and that is precisely how a coverage number becomes a lie. So every skip is
+named, with a stable reason code, in its own report section and under `skipped`
+in the JSON:
+
+```
+## Files that could not be analyzed
+
+- `unreadable` app/legacy/link.py — [Errno 2] No such file or directory
+- `undecodable` app/fixtures/latin1.py — 'utf-8' codec can't decode byte 0xe9…
+- `syntax-error` app/scripts/py2_import.py — Missing parentheses in call to 'print'
+- `too-deep` app/generated/tables.py — Stack overflow during compilation
+```
+
+The reasons are `unreadable` (an `OSError` — permissions, a dangling link, a
+vanished file, a directory that would not list), `undecodable` (not UTF-8),
+`syntax-error`, `invalid-source`, `too-deep`, and `out-of-memory`. Interrupting
+the run still interrupts it: `KeyboardInterrupt` is not caught.
+
+**Skipped files sit outside the coverage fraction entirely** — they contribute to
+neither its numerator nor its denominator, because a file that could not be
+parsed has no constructs to classify and inventing a verdict for it would be a
+guess. Coverage therefore answers "of what I could read, how much carries
+across", and the `files_analyzed` and `skipped` counts at the top of the report
+say how much of your tree that sentence covers. Read them together; a 92% over
+40 of your 3009 files is not a 92%.
 
 ## Idempotent, re-runnable
 
 Every emitted file carries a provenance header with a hash of its source and of its own output. Re-running skips unchanged sources and **refuses to clobber a file you've hand-edited** (unless `--force`), so a port can be an iterative conversation, not a one-shot leap.
 
+Emitting follows the same rule as analysing: **a source it cannot read is
+recorded and stepped over, not fatal.** Those land in `PortResult.failed` (with
+the same reason codes as the report) and print as `FAILED` lines, so a run over a
+tree with one broken symlink still ports the other three thousand files.
+
+A destination it cannot *write* is the opposite — that one is fatal, and
+deliberately so. An unreadable source costs you one file; an unwritable
+destination means the output tree itself is wrong (a full disk, a read-only
+mount, a bad `--output`), every remaining file would hit the same wall, and
+carrying on would hand you a half-written tree that looks like a complete port.
+
+`failed` and `skipped` stay separate for the same reason. A **skip** is a
+success — the output was already current, or you had hand-edited it and refusing
+to overwrite was correct. A **failure** never reached the output at all. Fold
+them together and "your tree is already ported" becomes indistinguishable from
+"a third of your tree never made it".
+
 ## Coverage is a diagnostic, not a target
 
-The report includes a coverage number — currently around **0.75** of constructs auto-translated on representative apps. Do not chase it toward 1.0. A meaningful fraction of any real app (queries, domain logic, third-party integrations) is *correctly* left for a human; the tool's value is that this remainder is **precisely enumerated up front** instead of discovered at runtime. A lower, honest number beats a higher, hopeful one.
+The report includes a coverage number — currently around **0.78** of constructs auto-translated across the representative apps.
+
+**When nothing was recognized, coverage is `n/a`, not 100%.** An empty
+denominator used to render as a perfect score, which meant the tool printed its
+most flattering number in the one situation where it had failed hardest: point it
+at a tree it understands nothing of — the wrong directory, a Django app, a
+checkout that did not finish — and it congratulated you. `coverage_overall()`
+and `coverage(category)` now return `None` there, the JSON carries `null`, and
+the summary line says so in words. If you consume the JSON, handle the null; a
+`null` that crashes your dashboard is a better failure than a `1.0` that does not.
+
+It once went *down*, when the catalog learned to recognise more of what a real codebase contains, and that was the right direction: the denominator grew because the tool stopped being silent about caches, migrations, GraphQL, and the test suite. It has since gone up by reading constructs it already recognised more closely, which is also the right direction — and once by *removing* a verdict, when the catalog stopped calling every single-`return` handler's `status_code=` translatable, because for a handler returning a DTO the rewrite it promised produced code that raised on the first request. Do not chase it toward 1.0. A meaningful fraction of any real app (queries, domain logic, third-party integrations) is *correctly* left for a human; the tool's value is that this remainder is **precisely enumerated up front** instead of discovered at runtime. A lower, honest number beats a higher, hopeful one.
+
+## What the exit code says
+
+CI reads the process, not the markdown — so the exit code has to draw the same
+distinction the report does, between *your code needs work* and *the run did not
+work*.
+
+| code | meaning |
+| --- | --- |
+| `0` | The analysis completed, and everything it recognised translates cleanly. |
+| `1` | The analysis completed; **unsupported constructs were found.** A fact about the application. |
+| `2` | The analysis is **incomplete**: files could not be read, or nothing was recognised at all. A fact about the run. |
+
+**`2` outranks `1`, and that ordering is the point.** It is normal to whitelist a
+nonzero exit — *"we know we have twelve unsupported constructs; gate on the count
+instead"* — and a pipeline that whitelists `1` would otherwise silently accept a
+run that analysed nothing. Worse, when files were skipped the unsupported count
+is a **lower bound rather than a count**, so the very number such a gate compares
+against is untrustworthy in exactly the case `2` reports. One collapsed nonzero
+cannot express that; two codes can.
+
+Two consequences worth knowing before you wire this into a pipeline. A tree with
+**one** unreadable file exits `2`, even if the other three thousand were fine —
+the report is incomplete, and that is what the code says. And pointing
+`wreath port` at something it recognises nothing in exits `2` as well, which
+includes pointing it at an app that has *already* been ported. Both are the
+honest answer to "did this run produce a number you can trust?"; neither is a
+claim that your code is broken. The `skipped` list and `files_analyzed` in the
+JSON tell you which of the two you are looking at.
+
+Emit mode (`--output` / `--in-place`) uses the same `0`/`2` split: sources that
+could not be read leave the output tree incomplete, which is a failed run even
+though every file it did reach was written correctly.
 
 ## The report as a checklist
 

@@ -365,7 +365,7 @@ def metrics_router(
     a future ``app.metrics()`` convenience is an additive follow-up.
     """
     # TODO(app-wiring): an `app.metrics(path=..., auth=...)` convenience on the
-    #   application factory would mirror `app.http_client`/`app.storage`; deferred
+    #   application factory would mirror `app.http_client`/`app.objects`; deferred
     #   because app.py is owned by a concurrent workstream.
     from .router import Router
 

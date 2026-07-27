@@ -74,6 +74,19 @@ class Select:
                 )
         return self._replace(predicates=self.predicates + tuple(predicates))
 
+    def rebound(self, predicates: tuple[Predicate, ...]) -> Select:
+        """This query with its predicates *replaced* rather than extended.
+
+        Every other builder method adds to a query; this one swaps one set of
+        predicates for another, which is what a declared query in
+        :mod:`wreath.queries` needs — it fixes a shape once and substitutes each
+        call's values into it. The caller owes the invariant that the
+        replacements have the same tree structure and column types as the
+        originals; anything else changes the plan-cache key, and a declared
+        query compiling once per shape is the whole point of declaring it.
+        """
+        return self._replace(predicates=predicates)
+
     def include(self, *load_options: LoadOption) -> Select:
         """Load relationships with this query."""
         for item in load_options:

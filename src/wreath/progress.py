@@ -43,10 +43,10 @@ id as the task id and lets the runner set the terminal states itself.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from dataclasses import dataclass
 from typing import Any
 
+from ._busbridge import BusBridge
 from ._json import dumps as _json_dumps
 from .cache import BoundedCache
 from .response import JSONResponse, Response, ServerSentEvent, SSEResponse
@@ -104,7 +104,7 @@ class ProgressRegistry:
     default for tests and one-worker deployments.
     """
 
-    __slots__ = ("_bus", "_channel", "_inflight", "_origin", "_store")
+    __slots__ = ("_bridge", "_store")
 
     def __init__(
         self,
@@ -115,16 +115,7 @@ class ProgressRegistry:
         channel: str = PROGRESS_CHANNEL,
     ) -> None:
         self._store: BoundedCache = BoundedCache(max_entries=max_tasks, ttl=ttl)
-        self._bus = bus
-        self._channel = channel
-        self._inflight: set[asyncio.Future[Any]] = set()
-        # Identifies reports this worker published, so the copy NOTIFY hands
-        # back to the sender is not applied twice. Same device as `rooms.py`.
-        self._origin = f"{id(self):x}"
-        if bus is not None:
-            # Registered at construction: the bus collects subscriptions before
-            # it starts, so a registry built later would never listen.
-            bus.subscribe(channel)(self._on_bus_message)
+        self._bridge = BusBridge(bus, channel=channel, apply=self._apply)
 
     def report(
         self, task_id: str, percent: float, message: str = "",
@@ -132,40 +123,20 @@ class ProgressRegistry:
     ) -> None:
         progress = Progress(_clamp(percent), message, state, error)
         self._store.set(task_id, progress)
-        if self._bus is not None:
-            self._carry(task_id, progress)
+        # Guarded rather than left to the bridge's own no-bus check, so a
+        # registry with no bus -- the default, and every test -- does not build
+        # a wire payload per report only to throw it away.
+        if self._bridge.attached:
+            # Deferred: a bus that is down must not fail the work being reported
+            # on. The percentage is commentary; losing one costs the client a
+            # stale bar until the next update, and the terminal state is what
+            # actually matters.
+            self._bridge.publish_soon({"task_id": task_id, **progress.as_dict()})
 
     # -- across workers --------------------------------------------------------
 
-    def _carry(self, task_id: str, progress: Progress) -> None:
-        """Publish a local report without making the reporting task wait."""
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            # A synchronous caller has no loop to publish on. Reporting from
-            # outside the event loop is not something a job handler does.
-            return
-        future = asyncio.ensure_future(self._publish(task_id, progress))
-        self._inflight.add(future)
-        future.add_done_callback(self._inflight.discard)
-
-    async def _publish(self, task_id: str, progress: Progress) -> None:
-        # A bus that is down must not fail the work being reported on. The
-        # percentage is commentary; losing one costs the client a stale bar
-        # until the next update, and the terminal state is what matters.
-        with contextlib.suppress(Exception):
-            await self._bus.publish(
-                self._channel,
-                {"task_id": task_id, "origin": self._origin, **progress.as_dict()},
-            )
-
-    async def _on_bus_message(self, message: Any) -> None:
+    async def _apply(self, payload: dict[str, Any]) -> None:
         """Apply another worker's report. Never republished -- one hop only."""
-        payload = message.payload
-        if not isinstance(payload, dict):
-            return
-        if payload.get("origin") == self._origin:
-            return  # our own NOTIFY, already applied locally
         task_id = payload.get("task_id")
         percent = payload.get("percent")
         if not isinstance(task_id, str) or not isinstance(percent, (int, float)):

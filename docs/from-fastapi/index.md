@@ -223,7 +223,7 @@ is not, keep your current data layer and use Wreath for the web tier.
 | Cognito / OIDC via `python-jose`/`authlib` | `app.oidc_provider(...)` + `BearerTokenBackend` — [Auth](../guides/auth.md) |
 | `fastapi-users` | `app.users(...)` — [User management](../guides/users.md) |
 | `sqlalchemy-dlock` | `db.lock(...)` / `session.lock(...)` — [Distributed locks](../guides/distributed-locks.md) |
-| `s3path` / hand-rolled S3 helpers | `wreath.storage` — [Object storage](../guides/storage.md) |
+| `s3path` / hand-rolled S3 helpers | `wreath.objects` — [Object storage](../guides/objects.md) |
 | `fastapi-pagination` | `wreath.pagination` — [Pagination](../guides/pagination.md) |
 | `aiometer` / `tenacity` on the client | `app.http_client(..., rate=, retries=)` |
 | `prometheus-fastapi-instrumentator` | `app.metrics(...)` / `telemetry.activate_*` — [Observability](../guides/observability.md) |

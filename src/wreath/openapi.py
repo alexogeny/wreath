@@ -37,7 +37,14 @@ def _openapi_schema(ref: TypeRef) -> dict[str, Any]:
     """
     simple = _TYPE_KEYS.get(ref.kind)
     if simple is not None:
-        return dict(simple)
+        schema = dict(simple)
+        if ref.kind == "string" and ref.name:
+            # A string kind carries its OpenAPI `format` in `name` -- the same
+            # field a `reference` uses for its model name, which is free here
+            # because a string is never a reference. That is what turns an
+            # `Instant` into `date-time` for every consumer at once.
+            schema["format"] = ref.name
+        return schema
     if ref.kind == "unknown":
         return {}
     if ref.kind == "reference":

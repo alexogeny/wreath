@@ -11,9 +11,19 @@ Two delivery tiers, chosen per publish/subscribe:
   with ``NOTIFY`` used only as a wakeup doorbell. At-least-once, replayable,
   dead-letterable.
 
-Durable fan-out delivers one copy per subscriber *group*. Groups are discovered
-from the subscriptions registered on the bus (declared in code deployed
-fleet-wide); a shared cross-instance group registry is a follow-up.
+Durable fan-out delivers one copy per subscriber *group*, and the groups are
+discovered **fleet-wide**: each bus writes its durable subscriptions into a
+shared ``message_groups`` table at startup, and every publisher reads that
+table. Discovering them from local registrations instead — as this module once
+did — meant a publisher deployed before its consumer, or living in a different
+service, enqueued nothing for that group: no error, no dead letter, the message
+simply never existed for it.
+
+Local registrations are **unioned** with the persisted ones rather than replaced
+by them, because the two failure modes are not symmetric. A duplicate copy goes
+to a group that has a consumer, and durable delivery is at-least-once anyway, so
+handlers are already idempotent. A lost copy is silent. The union also means a
+deployment that has not applied the new table behaves exactly as it did before.
 
 Multi-tenancy: a dedicated system schema + ``tenant`` column, never
 ``search_path`` (design 01 §5).
@@ -40,6 +50,34 @@ MessageHandler = Callable[["Message"], Awaitable[None]]
 _ACK = "ack"
 _RETRY = "retry"
 _REJECT = "reject"
+
+#: How often a bus re-reads the shared group registry. A group registered by a
+#: newly deployed service becomes visible to an already-running publisher within
+#: this long -- it is a deploy-time event, so seconds are the right unit and a
+#: read on the publish path is not.
+DEFAULT_GROUP_REFRESH = 30.0
+
+#: Reconnect backoff for the doorbell's held ``LISTEN`` connection. The first
+#: retry is nearly immediate because the ordinary loss -- a failover, an idle
+#: timeout, a ``pg_terminate_backend``, a network blip -- leaves a database that
+#: hands back a working connection at once, and every millisecond without a
+#: doorbell is ephemeral fan-out dropped on the floor. The cap keeps a database
+#: that is genuinely *down* at a handful of attempts a minute per bus rather
+#: than a reconnect storm against something already struggling, and it is the
+#: default poll interval because that is how long durable consumers take to
+#: notice work without a doorbell -- retrying slower than the fallback would be
+#: retrying slower than the damage.
+DOORBELL_BACKOFF_BASE = 0.05
+DOORBELL_BACKOFF_CAP = 5.0
+
+
+class NoSubscriberGroup(RuntimeError):
+    """A durable publish found no subscriber group, and the caller wanted one.
+
+    Only raised for ``publish(..., require_group=True)``. Publishing to a
+    channel nobody consumes yet is legitimate -- a producer often ships before
+    its consumer -- so the default stays a counted no-op.
+    """
 
 
 def _validate_channel(value: str) -> str:
@@ -95,25 +133,83 @@ class MessageBus:
         schema: str = "wreath",
         poll_interval: float = 5.0,
         lease: float = 30.0,
+        group_refresh: float = DEFAULT_GROUP_REFRESH,
     ) -> None:
         if poll_interval <= 0 or lease <= 0:
             raise ValueError("poll_interval and lease must be positive")
+        if group_refresh <= 0:
+            raise ValueError("group_refresh must be positive")
         self._db = database
         self._name = name
         self._schema = schema
         self._workload = workload
         self._poll = poll_interval
         self._lease = lease
+        self._group_refresh = group_refresh
         self._subs: list[_Subscription] = []
         self._table = f'"{schema}".messages'
+        self._groups_table = f'"{schema}".message_groups'
         self._supervisor: Any = None
         self._listen_conn: Any = None
         self._wake = asyncio.Event()
         self._inflight: set[asyncio.Future[Any]] = set()
+        # Channel -> the groups other processes registered for it. Refreshed on
+        # a timer by `_group_refresher`, never read on the publish path: a
+        # query there would put a round trip in front of every durable publish,
+        # and inside a caller's transaction a failing one would poison it.
+        self._remote_groups: dict[str, frozenset[str]] = {}
+        #: Durable publishes that found no group anywhere. Was silent; now the
+        #: one remaining way to lose a message is at least countable.
+        self.unrouted_publishes = 0
+        #: Failed reads of / writes to the group registry. Non-zero almost
+        #: always means `schema_sql()` was never applied.
+        self.group_registry_errors = 0
+        #: Times the doorbell's held LISTEN connection was lost, plus every
+        #: attempt to (re)open one that failed -- including the attempt made at
+        #: startup, since a bus that came up against a dead database has no
+        #: doorbell either. A database that stays down keeps this climbing
+        #: rather than reading as a single blip.
+        #: Non-zero means ephemeral fan-out was down for at least a moment and
+        #: those messages are gone (at-most-once has nowhere to replay from);
+        #: climbing means it still is, and durable consumers are running on the
+        #: poll interval. This used to be entirely invisible.
+        self.doorbell_reconnects = 0
+        #: Exceptions raised by *ephemeral* subscriber callbacks. Fire-and-forget
+        #: delivery has nowhere else to put them -- a durable handler's failure
+        #: lands in the row's `last_error` and its retry state -- and counting
+        #: them apart from `doorbell_reconnects` is the point: a bug in a
+        #: handler must never read as a flapping database.
+        self.handler_errors = 0
 
     @property
     def name(self) -> str:
         return self._name
+
+    def known_groups(self, channel: str) -> frozenset[str]:
+        """Every durable group a publish to ``channel`` will reach.
+
+        The deploy-time check: "will anything actually receive this?" is
+        answerable before shipping rather than by noticing an empty queue days
+        later. Reflects the registry as of the last refresh.
+        """
+        return frozenset(self._groups_for(channel))
+
+    def _groups_for(self, channel: str) -> list[str]:
+        """Local durable groups unioned with the ones other processes declared.
+
+        Union, not replace, because the failures are not symmetric: a duplicate
+        copy goes to a group that demonstrably has a consumer (this process
+        registered it) and durable delivery is at-least-once regardless, so
+        handlers already tolerate one. A missing copy is silent. The union is
+        also what makes this change safe to deploy before the DDL is applied --
+        with no registry table, the result is exactly what it was before.
+        """
+        local = {
+            sub.group
+            for sub in self._subs
+            if sub.channel == channel and sub.durable and sub.group
+        }
+        return sorted(local | self._remote_groups.get(channel, frozenset()))
 
     def _channel_wire(self, channel: str) -> str:
         return f"wm_{self._schema}_{channel}"[:63]
@@ -160,17 +256,31 @@ class MessageBus:
         durable: bool = False,
         tenant: str = "",
         key: str | None = None,
+        require_group: bool = False,
     ) -> None:
         """Publish ``payload`` (JSON-serialisable) to ``channel``.
 
         Ephemeral (default): a single ``NOTIFY`` fans out to live subscribers.
         Durable: one row per subscriber group is enqueued; pass ``tx`` to publish
         atomically with your writes (the outbox guarantee).
+
+        ``require_group`` (durable only) raises :class:`NoSubscriberGroup` when
+        no group is known for ``channel`` anywhere in the fleet, for the caller
+        who knows a consumer must exist. Without it the publish is a counted
+        no-op, because shipping a producer before its consumer is normal.
         """
         _validate_channel(channel)
+        if require_group and not durable:
+            raise ValueError(
+                "require_group applies to durable publishes; ephemeral fan-out "
+                "has no groups, only whoever happens to be listening"
+            )
         body = json.dumps(payload)
         if durable:
-            await self._publish_durable(channel, body, tx=tx, tenant=tenant, key=key)
+            await self._publish_durable(
+                channel, body, tx=tx, tenant=tenant, key=key,
+                require_group=require_group,
+            )
             return
         encoded = body.encode("utf-8")
         check_notify_payload(encoded)
@@ -185,14 +295,31 @@ class MessageBus:
             await self._db.release(self._workload, connection)
 
     async def _publish_durable(
-        self, channel: str, body: str, *, tx: Any, tenant: str, key: str | None
+        self,
+        channel: str,
+        body: str,
+        *,
+        tx: Any,
+        tenant: str,
+        key: str | None,
+        require_group: bool = False,
     ) -> None:
-        groups = sorted(
-            {s.group for s in self._subs if s.channel == channel and s.durable and s.group}
-        )
+        # Read from the refreshed snapshot, never from the database: a query
+        # here would be a round trip in front of every durable publish, and one
+        # issued inside the caller's transaction would abort *their* transaction
+        # if the registry table were missing.
+        groups = self._groups_for(channel)
         if not groups:
-            # No durable subscriber groups known on this bus; nothing to fan out
-            # to. Documented limitation: groups are discovered from registrations.
+            # Nobody, anywhere, consumes this channel. Legitimate before a
+            # consumer ships, so still a no-op -- but counted, because this is
+            # the one remaining way a durable message can vanish quietly.
+            self.unrouted_publishes += 1
+            if require_group:
+                raise NoSubscriberGroup(
+                    f"no durable subscriber group is registered for {channel!r}; "
+                    "the consumer has not started against this database, or "
+                    "schema_sql() was never applied"
+                )
             return
         sql = (
             f"INSERT INTO {self._table} "
@@ -211,16 +338,110 @@ class MessageBus:
                 # A generous default attempt cap; per-subscription retries govern
                 # the live consumer's backoff decisions.
                 await runner.execute(sql, channel, group, body, tenant, 6, dk)
-                await runner.execute("SELECT pg_notify($1, '')", self._channel_wire(channel))
+            # One doorbell for the whole fan-out. The notification carries no
+            # payload -- it only sets the consumers' wake event -- so a second
+            # one says nothing new, and with fleet-wide discovery a busy channel
+            # can have many groups.
+            await runner.execute("SELECT pg_notify($1, '')", self._channel_wire(channel))
         finally:
             if connection is not None:
                 await self._db.release(self._workload, connection)
 
+    # -- the shared group registry -------------------------------------------
+
+    async def _register_groups(self) -> None:
+        """Declare this process's durable groups so other publishers find them.
+
+        Runs at :meth:`start`, not at :meth:`subscribe`: the decorator is called
+        at import time, where there is no event loop and no database yet.
+
+        Idempotent by construction. The primary key serialises workers racing to
+        register the same group, and the ``DO UPDATE`` turns a restart into a
+        heartbeat rather than a conflict -- which is what makes ``seen_at``
+        useful: a group nobody has re-registered in months is a decommissioned
+        consumer whose queue will never drain.
+
+        Counted rather than raised on failure, like :meth:`_refresh_groups`: the
+        registry is an optimisation over local registrations, and a missing
+        table must not stop a bus from starting and consuming its own work.
+        """
+        pairs = sorted(
+            {(sub.channel, sub.group) for sub in self._subs if sub.durable and sub.group}
+        )
+        if not pairs:
+            return
+        sql = (
+            f'INSERT INTO {self._groups_table} (channel, "group", bus) '
+            "VALUES ($1, $2, $3) "
+            'ON CONFLICT (channel, "group") DO UPDATE SET '
+            "bus = excluded.bus, seen_at = now()"
+        )
+        try:
+            connection = await self._db.acquire(self._workload)
+            try:
+                for channel, group in pairs:
+                    await connection.execute(sql, channel, group, self._name)
+            finally:
+                await self._db.release(self._workload, connection)
+        except Exception:  # noqa: BLE001 - see above; the bus must still start
+            self.group_registry_errors += 1
+
+    async def _refresh_groups(self) -> None:
+        """Re-read every registered group into the publish-path snapshot.
+
+        Unfiltered on purpose: the groups worth discovering are exactly the ones
+        on channels this process does *not* subscribe to, so there is nothing to
+        narrow by. The table holds one row per (channel, group) across the whole
+        fleet, which is tens of rows, not thousands.
+
+        A failure leaves the previous snapshot in place and is counted rather
+        than raised -- the fallback is local registrations, which is what this
+        bus did before there was a registry.
+        """
+        sql = f'SELECT channel, "group" FROM {self._groups_table}'
+        try:
+            connection = await self._db.acquire(self._workload)
+            try:
+                rows = await connection.fetch(sql)
+            finally:
+                await self._db.release(self._workload, connection)
+        except Exception:  # noqa: BLE001 - see above; publishing must still work
+            self.group_registry_errors += 1
+            return
+        discovered: dict[str, set[str]] = {}
+        for row in rows:
+            discovered.setdefault(row["channel"], set()).add(row["group"])
+        self._remote_groups = {
+            channel: frozenset(groups) for channel, groups in discovered.items()
+        }
+
+    async def _group_refresher(self) -> None:
+        """Keep the snapshot current, so a new service's consumer is found.
+
+        The visibility window is ``group_refresh`` seconds (30 by default): a
+        group registered by a service deploying now reaches an already-running
+        publisher within that. Deploys are minutes apart and a publish is
+        microseconds, so the timer belongs here rather than on the write path.
+        """
+        stopping = self._supervisor.stopping
+        while not stopping.is_set():
+            await _sleep_or_stop(stopping, self._group_refresh)
+            if stopping.is_set():
+                break
+            await self._refresh_groups()
+
     # -- schema --------------------------------------------------------------
 
     def schema_sql(self) -> str:
-        """DDL for the durable messages table. Never auto-applied."""
+        """DDL for the durable messages and group-registry tables.
+
+        Never auto-applied — run it through migrations, consistent with the
+        driver's no-implicit-DDL stance. Until it is, a bus falls back to the
+        durable groups registered in its own process, which is how this module
+        behaved before the registry existed.
+        """
         t = self._table
+        g = self._groups_table
         return (
             f'CREATE SCHEMA IF NOT EXISTS "{self._schema}";\n'
             f"CREATE TABLE IF NOT EXISTS {t} (\n"
@@ -247,12 +468,37 @@ class MessageBus:
             "WHERE state = 'leased';\n"
             f"CREATE UNIQUE INDEX IF NOT EXISTS messages_dedup_idx ON {t} "
             '(channel, "group", dedup_key) WHERE dedup_key IS NOT NULL;\n'
+            # Keyed on (channel, group) and not on the bus name, because that is
+            # what identifies a competing-consumer set everywhere else here --
+            # `messages_claim_idx` and `messages_dedup_idx` use the same pair,
+            # and `_claim` filters on it. `bus` records which named bus most
+            # recently registered the group; `seen_at` is when, so a long-dead
+            # consumer is visible in a SELECT rather than only in a growing
+            # queue.
+            f"CREATE TABLE IF NOT EXISTS {g} (\n"
+            "  channel text NOT NULL,\n"
+            '  "group" text NOT NULL,\n'
+            "  bus text NOT NULL,\n"
+            "  registered_at timestamptz NOT NULL DEFAULT now(),\n"
+            "  seen_at timestamptz NOT NULL DEFAULT now(),\n"
+            '  PRIMARY KEY (channel, "group")\n'
+            ");\n"
         )
 
     # -- supervised service protocol ----------------------------------------
 
     async def start(self, supervisor: Any) -> None:
         self._supervisor = supervisor
+        # Declare what this process consumes, then learn what everyone else
+        # does, before anything here can publish. Both count their own failures
+        # rather than raising: the registry table is never auto-applied, and a
+        # bus must still start and drain its own queue without one.
+        await self._register_groups()
+        await self._refresh_groups()
+        # Spawned unconditionally, including on a bus with no subscriptions at
+        # all: a service that only *publishes* is exactly the one that needs to
+        # discover other services' groups.
+        supervisor.spawn(f"messaging:{self._name}:groups", self._group_refresher())
         ephemeral_channels = sorted({s.channel for s in self._subs if not s.durable})
         durable_subs = [s for s in self._subs if s.durable]
         # One held connection multiplexing every channel we care about for the
@@ -261,12 +507,17 @@ class MessageBus:
             {self._channel_wire(s.channel) for s in self._subs}
         )
         if listen_channels:
-            with contextlib.suppress(Exception):
-                self._listen_conn = await self._db.acquire(self._workload)
-                for wire in listen_channels:
-                    await self._listen_conn.listen(wire)
-                supervisor.spawn(f"messaging:{self._name}:doorbell",
-                                 self._doorbell(ephemeral_channels))
+            # Connect once here so a bus starting against a healthy database is
+            # listening by the time `start` returns, and spawn the loop
+            # regardless: it owns every subsequent connection *including this
+            # one having failed*. Spawning it only on a successful connect --
+            # as this did -- meant a database that was down at boot left the
+            # process with no doorbell for its entire lifetime.
+            await self._open_doorbell(listen_channels)
+            supervisor.spawn(
+                f"messaging:{self._name}:doorbell",
+                self._doorbell(ephemeral_channels, listen_channels),
+            )
         for sub in durable_subs:
             for index in range(sub.concurrency):
                 supervisor.spawn(
@@ -283,41 +534,151 @@ class MessageBus:
         while self._inflight and loop.time() < deadline:
             with contextlib.suppress(Exception):
                 await asyncio.wait(tuple(self._inflight), timeout=max(0.0, deadline - loop.time()))
-        if self._listen_conn is not None:
-            with contextlib.suppress(Exception):
-                await self._db.release(self._workload, self._listen_conn)
-            self._listen_conn = None
+        await self._release_listen()
 
     # -- loops ---------------------------------------------------------------
 
-    async def _doorbell(self, ephemeral_channels: list[str]) -> None:
-        if self._listen_conn is None:
+    async def _open_doorbell(self, listen_channels: list[str]) -> bool:
+        """Take a connection and ``LISTEN`` on every wire channel.
+
+        Reports failure rather than raising, because a database that will not
+        give us a connection is precisely the condition the reconnect loop
+        exists to ride out -- and because this also runs on the startup path,
+        where it must not stop a bus from consuming its own durable work.
+        Cancellation is not a failure and propagates.
+        """
+        connection: Any = None
+        try:
+            connection = await self._db.acquire(self._workload)
+            for wire in listen_channels:
+                await connection.listen(wire)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - the caller backs off and tries again
+            # Counted here rather than in the loop so the attempt made on the
+            # startup path lands too: a bus that came up against a database
+            # that was down has no doorbell, which is the same outage.
+            self.doorbell_reconnects += 1
+            if connection is not None:
+                with contextlib.suppress(Exception):
+                    await self._db.release(self._workload, connection)
+            return False
+        self._listen_conn = connection
+        return True
+
+    async def _release_listen(self) -> None:
+        """Give the held connection back, exactly once.
+
+        Both :meth:`drain` and the doorbell loop's own teardown call this, and a
+        clean shutdown runs them in that order, so the swap-to-``None`` is what
+        keeps the second caller from releasing a connection twice.
+        """
+        connection, self._listen_conn = self._listen_conn, None
+        if connection is None:
             return
+        with contextlib.suppress(Exception):
+            await self._db.release(self._workload, connection)
+
+    async def _doorbell(self, ephemeral_channels: list[str],
+                        listen_channels: list[str]) -> None:
+        """Hold a LISTEN connection for the process's lifetime, and get it back.
+
+        One connection is held for as long as the process runs, so every reason
+        a long-lived Postgres connection ends -- a failover, an idle timeout, a
+        ``pg_terminate_backend``, a network blip -- happens to this one
+        eventually. The driver's ``notifications()`` iterator *ends* when the
+        connection closes rather than raising, so the unsupervised loop this
+        replaces returned with nothing to notice: ephemeral fan-out stopped for
+        the lifetime of the process, durable consumers silently degraded to
+        ``poll_interval``, and the system kept working, slower and lossier,
+        with no signal at all. The supervisor owns tasks; it does not resurrect
+        them, so the retry has to live here.
+        """
+        stopping = self._supervisor.stopping
         # Map wire channel -> user channel for ephemeral dispatch.
         wire_to_channel = {self._channel_wire(c): c for c in ephemeral_channels}
         ephemeral_subs: dict[str, list[_Subscription]] = {}
         for sub in self._subs:
             if not sub.durable:
                 ephemeral_subs.setdefault(sub.channel, []).append(sub)
-        with contextlib.suppress(Exception):
-            async for note in self._listen_conn.notifications():
-                self._wake.set()  # wake durable consumers
-                channel = wire_to_channel.get(note.channel)
-                if channel is None:
-                    continue
-                payload: Any = None
-                if note.payload:
-                    with contextlib.suppress(Exception):
-                        payload = json.loads(note.payload)
-                for sub in ephemeral_subs.get(channel, ()):  # at-most-once, fire-and-forget
-                    message = Message(channel=channel, group=sub.group, tenant="",
-                                      payload=payload)
-                    self._spawn_ephemeral(sub, message)
+        loop = asyncio.get_running_loop()
+        attempt = 0
+        while not stopping.is_set():
+            if self._listen_conn is None and not await self._open_doorbell(listen_channels):
+                attempt += 1  # `_open_doorbell` counted it
+                await _sleep_or_stop(stopping, _doorbell_delay(attempt))
+                continue
+            opened = loop.time()
+            try:
+                await self._pump(wire_to_channel, ephemeral_subs)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a broken stream is a lost connection
+                pass
+            finally:
+                await self._release_listen()
+            if stopping.is_set():
+                # Shutdown closed it; that is not an outage and not a reason to
+                # open another one on the way out.
+                break
+            self.doorbell_reconnects += 1
+            # A connection that is accepted and then dies immediately is a flap,
+            # not a recovery, so only one that outlived the backoff cap resets
+            # the count -- otherwise a database in that state gets retried at
+            # the base delay forever, which is the storm the cap exists to stop.
+            attempt = 1 if loop.time() - opened >= DOORBELL_BACKOFF_CAP else attempt + 1
+            await _sleep_or_stop(stopping, _doorbell_delay(attempt))
+
+    async def _pump(
+        self,
+        wire_to_channel: dict[str, str],
+        ephemeral_subs: dict[str, list[_Subscription]],
+    ) -> None:
+        """Dispatch notifications until the connection's stream ends.
+
+        Returning is the ordinary end of a dropped connection. Dispatch errors
+        are counted and stepped over instead: ending this loop over one would
+        reopen the connection because of a bug in user code, and would make the
+        two indistinguishable in the counter that exists to tell them apart.
+        """
+        connection = self._listen_conn
+        if connection is None:
+            return
+        async for note in connection.notifications():
+            try:
+                self._dispatch(note, wire_to_channel, ephemeral_subs)
+            except Exception:  # noqa: BLE001 - user code, not the connection
+                self.handler_errors += 1
+
+    def _dispatch(
+        self,
+        note: Any,
+        wire_to_channel: dict[str, str],
+        ephemeral_subs: dict[str, list[_Subscription]],
+    ) -> None:
+        self._wake.set()  # wake durable consumers, whatever the channel was
+        channel = wire_to_channel.get(note.channel)
+        if channel is None:
+            return
+        payload: Any = None
+        if note.payload:
+            # Only a malformed payload is tolerated here -- a publisher on an
+            # older wire format, say. Anything else is ours to hear about.
+            with contextlib.suppress(ValueError, TypeError):
+                payload = json.loads(note.payload)
+        for sub in ephemeral_subs.get(channel, ()):  # at-most-once, fire-and-forget
+            message = Message(channel=channel, group=sub.group, tenant="",
+                              payload=payload)
+            self._spawn_ephemeral(sub, message)
 
     def _spawn_ephemeral(self, sub: _Subscription, message: Message) -> None:
         async def _run() -> None:
-            with contextlib.suppress(Exception):
+            try:
                 await sub.handler(message)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - at-most-once; nowhere to retry to
+                self.handler_errors += 1
         future = asyncio.ensure_future(_run())
         self._inflight.add(future)
         future.add_done_callback(self._inflight.discard)
@@ -434,6 +795,15 @@ class MessageBus:
         with contextlib.suppress(asyncio.TimeoutError):
             async with asyncio.timeout(self._poll):
                 await self._wake.wait()
+
+
+def _doorbell_delay(attempt: int) -> float:
+    """Seconds before reconnect ``attempt`` (1-based). Jittered so a fleet that
+    lost the same database does not come back at it in lockstep."""
+    return compute_backoff(
+        attempt, kind="exp", base=DOORBELL_BACKOFF_BASE,
+        cap=DOORBELL_BACKOFF_CAP, jitter=0.2,
+    )
 
 
 async def _sleep_or_stop(stopping: asyncio.Event, seconds: float) -> None:

@@ -259,7 +259,7 @@ class Wreath:
         "_job_runners",
         "_match",
         "_message_buses",
-        "_storages",
+        "_object_stores",
         "_middleware",
         "_middleware_order",
         "_oidc_providers",
@@ -353,7 +353,7 @@ class Wreath:
         self._webhook_hubs: dict[str, Any] = {}
         self._job_runners: dict[str, Any] = {}
         self._message_buses: dict[str, Any] = {}
-        self._storages: dict[str, Any] = {}
+        self._object_stores: dict[str, Any] = {}
         # Built at lifespan startup from the registered runners/buses; owns their
         # process-lifetime worker/consumer/sweeper tasks.
         self._supervisor: Any = None
@@ -380,21 +380,21 @@ class Wreath:
         self.state.__setattr__(f"http_{name}", client)
         return client
 
-    def storage(self, name: str, *, backend: str = "local", **options: Any) -> Any:
+    def objects(self, name: str, *, backend: str = "local", **options: Any) -> Any:
         """Register a lifespan-managed object-storage backend (``local`` or ``s3``).
 
-        Exposed on ``app.state.storage_<name>``. An ``s3`` backend owns a pinned
+        Exposed on ``app.state.objects_<name>``. An ``s3`` backend owns a pinned
         outbound ``HTTPClient`` started/stopped with the app; ``local`` opens its root
         at registration and is closed on shutdown. Credentials come from
         ``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY``/``AWS_SESSION_TOKEN`` unless
         given explicitly.
         """
-        from .storage import LocalStorage, S3Storage
+        from .objects import LocalObjectStore, S3ObjectStore
 
-        if name in self._storages:
-            raise ValueError(f"duplicate storage: {name}")
+        if name in self._object_stores:
+            raise ValueError(f"duplicate object store: {name}")
         if backend == "local":
-            store: Any = LocalStorage(
+            store: Any = LocalObjectStore(
                 options["root"], url_secret=options.get("url_secret")
             )
         elif backend == "s3":
@@ -419,20 +419,20 @@ class Wreath:
             sk = options.get("secret_key") or os.environ.get("AWS_SECRET_ACCESS_KEY")
             if not ak or not sk:
                 raise ValueError(
-                    "s3 storage needs AWS credentials "
+                    "s3 object storage needs AWS credentials "
                     "(env AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or access_key=/secret_key=)"
                 )
             token = options.get("session_token") or os.environ.get("AWS_SESSION_TOKEN")
-            client = HTTPClient(f"storage:{name}", base_url=base_url)
-            self._http_clients[f"__storage_{name}"] = client
-            store = S3Storage(
+            client = HTTPClient(f"objects:{name}", base_url=base_url)
+            self._http_clients[f"__objects_{name}"] = client
+            store = S3ObjectStore(
                 client, bucket=bucket, region=region, access_key=ak, secret_key=sk,
                 session_token=token, host=host, scheme=scheme, path_style=path_style,
             )
         else:
-            raise ValueError(f"unknown storage backend: {backend!r}")
-        self._storages[name] = store
-        self.state.__setattr__(f"storage_{name}", store)
+            raise ValueError(f"unknown object-store backend: {backend!r}")
+        self._object_stores[name] = store
+        self.state.__setattr__(f"objects_{name}", store)
         return store
 
     def oidc_provider(
@@ -1917,7 +1917,7 @@ class Wreath:
                     # built from: an app-scoped generator may still want to
                     # talk to a database or HTTP client on the way out.
                     await self._app_scope.aclose()
-                    for store in reversed(tuple(self._storages.values())):
+                    for store in reversed(tuple(self._object_stores.values())):
                         close = getattr(store, "close", None)
                         if close is not None:
                             close()

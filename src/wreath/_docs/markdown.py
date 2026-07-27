@@ -303,13 +303,22 @@ class _Renderer:
         while i < len(lines) and "|" in lines[i] and lines[i].strip():
             rows.append(_table_row(lines[i]))
             i += 1
+        # scope="col" is what tells a screen reader which header belongs to a
+        # cell; without it a table is read as an undifferentiated grid (WCAG
+        # 1.3.1). Every table here is a column-headed data table.
         head = "".join(
-            f"<th{_align(aligns, c)}>{_inline(cell)}</th>" for c, cell in enumerate(header))
+            f'<th scope="col"{_align(aligns, c)}>{_inline(cell)}</th>'
+            for c, cell in enumerate(header))
         body = "".join(
             "<tr>" + "".join(
                 f"<td{_align(aligns, c)}>{_inline(cell)}</td>" for c, cell in enumerate(row))
             + "</tr>" for row in rows)
-        self.out.append(f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>")
+        # Wrapped so a table wider than the column scrolls itself. Without it a
+        # wide table scrolls the whole page sideways on a phone, which is a
+        # layout bug the reader has to fight on every other page too.
+        self.out.append(
+            f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead>'
+            f"<tbody>{body}</tbody></table></div>")
         return i
 
     def _paragraph(self, lines: list[str], i: int) -> int:

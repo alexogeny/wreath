@@ -1,8 +1,8 @@
 """Zip64 stream framing verified against the stdlib ``zipfile`` reference reader.
 
-Standalone-runnable: ``storage.py`` is import-clean at module level (the ``_fsguard``
-import is lazy inside LocalStorage), so it loads by path under ``/usr/bin/python3``
-without the built wreath extension. Exercises `zip_stream`/`unzip_stream` + `InMemoryStorage`.
+Standalone-runnable: ``objects.py`` is import-clean at module level (the ``_fsguard``
+import is lazy inside LocalObjectStore), so it loads by path under ``/usr/bin/python3``
+without the built wreath extension. Exercises `zip_stream`/`unzip_stream` + `MemoryObjectStore`.
 """
 import asyncio
 import importlib.util
@@ -22,19 +22,21 @@ def _load(name, filename):
     return mod
 
 
-storage = _load("wreath_storage_standalone", "storage.py")
+# `objects.py`, not the deprecating `storage.py` alias: the alias imports
+# relatively, which a by-path load has no parent package for.
+module = _load("wreath_objects_standalone", "objects.py")
 
 
 async def _collect(store, keys):
     out = bytearray()
-    async for chunk in storage.zip_stream(store, keys):
+    async for chunk in module.zip_stream(store, keys):
         out += chunk
     return bytes(out)
 
 
 def _build(objects):
     async def go():
-        store = storage.InMemoryStorage()
+        store = module.MemoryObjectStore()
         for k, v in objects.items():
             await store.write(k, v)
         return await _collect(store, list(objects))
@@ -75,12 +77,12 @@ def test_unzip_roundtrip():
     objects = {"x/one.txt": b"one", "x/two.txt": b"two"}
 
     async def go():
-        store = storage.InMemoryStorage()
+        store = module.MemoryObjectStore()
         for k, v in objects.items():
             await store.write(k, v)
         archive = await _collect(store, list(objects))
         await store.write("bundle.zip", archive)
-        written = await storage.unzip_stream(store, "bundle.zip", prefix="out/")
+        written = await module.unzip_stream(store, "bundle.zip", prefix="out/")
         return written, {k: await store.read(k) for k in written}
 
     written, contents = asyncio.run(go())

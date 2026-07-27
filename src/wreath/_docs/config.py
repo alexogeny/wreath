@@ -131,13 +131,18 @@ THEMES: dict[str, Palette] = {
         muted="#5b6472", border="#d8dee9", surface="#e5e9f0",
         dark_bg="#2e3440", dark_fg="#eceff4", dark_muted="#a6accd",
         dark_border="#3b4252", dark_surface="#3b4252",
-        link="#5e81ac", dark_link="#8fbcbb"),
+        # Nord's `primary` is a mid-tone blue that reads at 3.5:1 on the light
+        # surface -- below AA for body text. The link is darkened two steps down
+        # the same ramp (5.3:1) and keeps the hue; `primary` stays the brand fill.
+        link="#456485", dark_link="#8fbcbb"),
     "terminal": Palette(
         primary="#16a34a", accent="#0891b2", fg="#111827", muted="#6b7280",
         border="#e5e7eb", surface="#f3f4f6",
         dark_bg="#0a0a0a", dark_fg="#e5e5e5", dark_muted="#a3a3a3",
         dark_border="#262626", dark_surface="#171717", radius="4px",
-        link="#0f9d58", dark_link="#4ade80"),
+        # Same problem as nord, worse: a saturated green on white is 3.5:1.
+        # Deepened to 6.2:1, which also stops it vibrating against the surface.
+        link="#08703c", dark_link="#4ade80"),
 }
 
 

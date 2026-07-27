@@ -6,18 +6,18 @@ the key. The signature is computed in-process — there is no round trip to S3 t
 mint it:
 
 ```python
-app.storage("assets", backend="s3", bucket="ev-assets", region="ap-southeast-2")
+app.objects("assets", backend="s3", bucket="ev-assets", region="ap-southeast-2")
 
 @app.post("/uploads")
 async def start_upload(request):
-    store = app.state.storage_assets
+    store = app.state.objects_assets
     body = await request.json()
     url = store.url(f"incoming/{body['key']}", expires=900, method="PUT")   # seconds
     return {"upload_url": url}
 ```
 
 `store.url(...)` signs locally. On S3 it is a fully query-signed URL the client
-`PUT`s to directly; on `LocalStorage` it is a signed relative path you verify at
+`PUT`s to directly; on `LocalObjectStore` it is a signed relative path you verify at
 your own route with `store.verify_local_url(...)` — so the same handler works in
 dev without an S3 bucket. For a download link, pass `method="GET"` instead.
 

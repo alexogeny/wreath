@@ -1023,6 +1023,11 @@ class Session:
         connection = await self._acquire()
         depth = self._depth
         savepoint = f"wreath_sp_{depth}"
+        # What the enclosing transaction had already written when this block
+        # opened. A rollback restores it rather than clearing it: a savepoint
+        # undoes only the work done inside it, so the names from before are
+        # still pending and still publish when the outermost commit lands.
+        written_before = self._written
         await connection.execute("BEGIN" if depth == 0 else f"SAVEPOINT {savepoint}")
         if depth == 0 and self._tenant is not None:
             # Bind the tenant namespace (and role) transaction-locally, before
@@ -1037,9 +1042,13 @@ class Session:
         except BaseException:
             self._depth = depth
             await self._unwind(connection, depth, savepoint, commit=False)
-            if depth == 0:
-                # Rolled back: those writes never happened, so nothing is stale.
-                self._written = frozenset()
+            # Rolled back: those writes never happened, so nothing is stale.
+            # This applies at every depth. A savepoint that rolls back used to
+            # leave its model names on the session, and the outer commit then
+            # announced them -- invalidating caches for a write that was undone.
+            # Over-invalidating is safe rather than wrong, but it contradicts
+            # the rule this whole seam exists for.
+            self._written = written_before
             raise
         else:
             self._depth = depth

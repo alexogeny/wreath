@@ -173,7 +173,10 @@ def test_the_schema_is_derived_from_the_orm(registry: Registry) -> None:
     sdl = api.sdl()
     assert "type User {" in sdl
     assert "email: String!" in sdl          # NOT NULL column -> non-null
-    assert "created_at: String" in sdl      # nullable column -> nullable
+    # Nullable column -> nullable, and a timestamp is a real scalar rather than
+    # falling through to String. The absent `!` is what this line is checking.
+    assert "created_at: DateTime\n" in sdl
+    assert "scalar DateTime" in sdl         # ... and the SDL declares it
     assert "posts: [Post!]!" in sdl         # to-many relationship
     assert "author: User" in sdl            # to-one relationship
     assert "users(limit: Int, offset: Int)" in sdl

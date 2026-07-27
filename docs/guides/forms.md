@@ -65,7 +65,7 @@ async def handler(request, display: Annotated[str, Form(alias="display-name")]):
     ...
 ```
 
-Mix a form-bound model with `File` parameters and the uploaded parts arrive alongside the parsed fields — see [Object storage](storage.md#uploads-land-straight-in-storage) for streaming an upload straight into a bucket.
+Mix a form-bound model with `File` parameters and the uploaded parts arrive alongside the parsed fields — see [Object storage](objects.md#uploads-land-straight-in-storage) for streaming an upload straight into a bucket.
 
 ## Coming from FastAPI
 

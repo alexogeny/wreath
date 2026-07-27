@@ -45,16 +45,56 @@ class Finding:
         }
 
 
+@dataclass(frozen=True)
+class SkippedFile:
+    """A path the analyzer could not read, decode, or parse — and why.
+
+    A silently skipped file is how a coverage number becomes a lie: the coverage
+    denominator counts constructs found in files that *were* analyzed, so every
+    file missing from that population has to be visible next to the number.
+    ``reason`` is a stable machine code (see ``analyzer._SKIP_REASONS``);
+    ``detail`` is the exception's own message, for a human.
+    """
+
+    file: str
+    reason: str
+    detail: str
+
+    def to_json(self) -> dict:
+        return {"file": self.file, "reason": self.reason, "detail": self.detail}
+
+
 class Report:
-    """Aggregate of findings with coverage math and JSON/markdown renderings."""
+    """Aggregate of findings with coverage math and JSON/markdown renderings.
 
-    __slots__ = ("findings", "roots")
+    **Coverage is undefined, not 1.0, when nothing was recognized.** ``coverage``
+    and ``coverage_overall`` return ``None`` for an empty denominator, and every
+    rendering here prints ``n/a`` for it. A tree the analyzer understood nothing
+    of is the case where the tool has failed hardest, and "100% auto-translatable"
+    is the single most misleading thing it could say there.
 
-    def __init__(self, findings: list[Finding], roots: list[str] | None = None) -> None:
+    **Skipped files sit outside the coverage fraction entirely.** They contribute
+    to neither numerator nor denominator — a file that could not be parsed has no
+    constructs to classify, and inventing a verdict for it would be a guess. So
+    coverage answers "of what I could read, how much carries across", and
+    ``files_analyzed``/``skipped`` say how much of the tree that sentence covers.
+    """
+
+    __slots__ = ("findings", "roots", "skipped", "files_analyzed")
+
+    def __init__(
+        self,
+        findings: list[Finding],
+        roots: list[str] | None = None,
+        skipped: list[SkippedFile] | None = None,
+        files_analyzed: int = 0,
+    ) -> None:
         # Deterministic ordering: by file, then line, then rule — so re-runs and
         # merged reports are byte-stable (idempotency, design 07 §3).
         self.findings = sorted(findings, key=lambda f: (f.file, f.line, f.rule_id, f.construct))
         self.roots = list(roots or [])
+        self.skipped = sorted(skipped or [], key=lambda s: (s.file, s.reason))
+        self.files_analyzed = files_analyzed
 
     # -- counts ---------------------------------------------------------------
     @property
@@ -68,17 +108,23 @@ class Report:
         return {_COUNT_KEY[t]: self._count(t) for t in (TRANSLATED, NEEDS_REVIEW, UNSUPPORTED)}
 
     # -- coverage -------------------------------------------------------------
-    def coverage(self, category: str) -> float:
-        """translated / recognized within ``category`` (1.0 if none recognized)."""
+    def coverage(self, category: str) -> float | None:
+        """translated / recognized within ``category``; ``None`` if none recognized.
+
+        ``None`` rather than ``1.0``: an empty denominator means the analyzer
+        recognized nothing here, which is the absence of an answer and not a
+        perfect score. Callers must render it as "n/a" (see ``_percent``).
+        """
         in_cat = [f for f in self.findings if f.category == category]
         if not in_cat:
-            return 1.0
+            return None
         translated = sum(1 for f in in_cat if f.tag == TRANSLATED)
         return translated / len(in_cat)
 
-    def coverage_overall(self) -> float:
+    def coverage_overall(self) -> float | None:
+        """translated / recognized across every category; ``None`` if none recognized."""
         if not self.findings:
-            return 1.0
+            return None
         return self._count(TRANSLATED) / len(self.findings)
 
     def categories(self) -> dict:
@@ -92,15 +138,21 @@ class Report:
 
     # -- renderings -----------------------------------------------------------
     def to_json(self) -> dict:
+        overall = self.coverage_overall()
         return {
             "roots": self.roots,
+            "files_analyzed": self.files_analyzed,
             "counts": self.counts(),
-            "coverage_overall": round(self.coverage_overall(), 4),
+            # ``null`` when nothing was recognized. A consumer that formats this
+            # blindly gets "None"/"null" in its output, which is loud; the old
+            # 1.0 was silently wrong, which is worse.
+            "coverage_overall": None if overall is None else round(overall, 4),
             "categories": {
-                cat: {**slot, "coverage": round(self.coverage(cat), 4)}
+                cat: {**slot, "coverage": _round(self.coverage(cat))}
                 for cat, slot in sorted(self.categories().items())
             },
             "findings": [f.to_json() for f in self.findings],
+            "skipped": [s.to_json() for s in self.skipped],
         }
 
     def to_markdown(self) -> str:
@@ -108,10 +160,20 @@ class Report:
         lines = [
             "# wreath port — analysis report",
             "",
+            f"- files analyzed: **{self.files_analyzed}**  ·  "
+            f"skipped: **{len(self.skipped)}**",
             f"- recognized constructs: **{self.recognized_constructs}**",
             f"- translated: **{c['translated']}**  ·  needs-review: **{c['needs_review']}**  "
             f"·  unsupported: **{c['unsupported']}**",
-            f"- overall auto-translatable: **{self.coverage_overall() * 100:.0f}%**",
+        ]
+        if self.coverage_overall() is None:
+            lines.append(
+                "- overall auto-translatable: **n/a** — nothing was recognized, so there "
+                "is no coverage to report (this is a failed analysis, not a perfect one)"
+            )
+        else:
+            lines.append(f"- overall auto-translatable: **{_percent(self.coverage_overall())}**")
+        lines += [
             "",
             "## Coverage by category",
             "",
@@ -121,8 +183,20 @@ class Report:
         for cat, slot in sorted(self.categories().items()):
             lines.append(
                 f"| {cat} | {slot['translated']} | {slot['needs_review']} | "
-                f"{slot['unsupported']} | {self.coverage(cat) * 100:.0f}% |"
+                f"{slot['unsupported']} | {_percent(self.coverage(cat))} |"
             )
+        lines += ["", "## Files that could not be analyzed", ""]
+        if not self.skipped:
+            lines.append("_none_")
+        else:
+            noun = "path was" if len(self.skipped) == 1 else "paths were"
+            lines.append(
+                f"{len(self.skipped)} {noun} skipped, so nothing in them is counted "
+                "above — coverage describes only the files that were read."
+            )
+            lines.append("")
+            for s in self.skipped:
+                lines.append(f"- `{s.reason}` {s.file} — {s.detail}")
         lines += ["", "## Findings needing review or unsupported", ""]
         flagged = [f for f in self.findings if f.tag != TRANSLATED]
         if not flagged:
@@ -136,7 +210,20 @@ class Report:
     def merge(cls, reports: list[Report]) -> Report:
         findings: list[Finding] = []
         roots: list[str] = []
+        skipped: list[SkippedFile] = []
+        analyzed = 0
         for r in reports:
             findings.extend(r.findings)
             roots.extend(r.roots)
-        return cls(findings, roots)
+            skipped.extend(r.skipped)
+            analyzed += r.files_analyzed
+        return cls(findings, roots, skipped, analyzed)
+
+
+def _percent(value: float | None) -> str:
+    """Render a coverage fraction, or ``n/a`` when its denominator was empty."""
+    return "n/a" if value is None else f"{value * 100:.0f}%"
+
+
+def _round(value: float | None) -> float | None:
+    return None if value is None else round(value, 4)

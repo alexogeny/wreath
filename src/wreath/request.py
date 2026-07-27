@@ -368,6 +368,43 @@ class Request:
             return default
         return value.decode("latin-1")
 
+    @property
+    def locale(self) -> str:
+        """The caller's preferred language tag, or ``"en"``.
+
+        Read from ``Accept-Language``, highest ``q`` first. This is what
+        :func:`wreath.temporal.relative` takes, so "3 hours ago" can be
+        translated later without finding every call site that renders one.
+
+        Deliberately forgiving: the header is attacker-controlled and a
+        malformed one must never fail a request, so anything unparseable falls
+        back to the default rather than raising. Only the tag is returned — no
+        negotiation against a list of supported languages, because the caller
+        knows which those are and this does not.
+        """
+        header = self.header("accept-language")
+        if not header:
+            return "en"
+        best: tuple[float, int, str] | None = None
+        for index, part in enumerate(header.split(",")):
+            tag, _, parameters = part.strip().partition(";")
+            tag = tag.strip()
+            if not tag or tag == "*":
+                continue
+            quality = 1.0
+            key, _, raw = parameters.partition("=")
+            if key.strip() == "q":
+                try:
+                    quality = float(raw)
+                except ValueError:
+                    continue
+            # Negated index so that, at equal quality, the earlier tag wins --
+            # which is the order the client listed its preference in.
+            candidate = (quality, -index, tag)
+            if best is None or candidate > best:
+                best = candidate
+        return best[2] if best is not None else "en"
+
     async def body(self) -> bytes:
         cached = self._body
         if cached is not _MISSING:

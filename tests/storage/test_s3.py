@@ -1,4 +1,4 @@
-"""S3Storage over a fake in-process transport (no network) + app.storage wiring.
+"""S3ObjectStore over a fake in-process transport (no network) + app.objects wiring.
 
 Real S3/MinIO integration is gated on an env DSN and lives elsewhere; here we pin
 the S3 REST + SigV4 signing behaviour against canned responses.
@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 
-from wreath.storage import ObjectStat, S3Storage, StoragePath, file_chunks
+from wreath.storage import ObjectPath, ObjectStat, S3ObjectStore, file_chunks
 
 
 class FakeResp:
@@ -36,7 +36,7 @@ class FakeClient:
 
 def _store(handler, **kw):
     client = FakeClient(handler)
-    store = S3Storage(
+    store = S3ObjectStore(
         client, bucket="b", region="us-east-1", access_key="AKIAEXAMPLE",
         secret_key="secretkey", host="b.s3.us-east-1.amazonaws.com", **kw,
     )
@@ -202,18 +202,18 @@ def test_presign_url_has_signature():
 def test_path_ergonomics():
     store, _ = _store(lambda *a: FakeResp(200))
     p = store.path("org/acme") / "state.json"
-    assert isinstance(p, StoragePath) and p.key == "org/acme/state.json"
+    assert isinstance(p, ObjectPath) and p.key == "org/acme/state.json"
 
 
-# -- app.storage wiring -------------------------------------------------------
-def test_app_storage_local_roundtrip(tmp_path):
+# -- app.objects wiring -------------------------------------------------------
+def test_app_objects_local_roundtrip(tmp_path):
     from wreath import Wreath
-    from wreath.storage import LocalStorage
+    from wreath.storage import LocalObjectStore
 
     app = Wreath()
-    store = app.storage("blobs", backend="local", root=str(tmp_path))
-    assert isinstance(store, LocalStorage)
-    assert app.state.storage_blobs is store
+    store = app.objects("blobs", backend="local", root=str(tmp_path))
+    assert isinstance(store, LocalObjectStore)
+    assert app.state.objects_blobs is store
 
     async def go():
         await store.write("a/b.txt", b"data")
@@ -222,28 +222,28 @@ def test_app_storage_local_roundtrip(tmp_path):
     asyncio.run(go())
     with_dup = False
     try:
-        app.storage("blobs", backend="local", root=str(tmp_path))
+        app.objects("blobs", backend="local", root=str(tmp_path))
     except ValueError:
         with_dup = True
     assert with_dup
 
 
-def test_app_storage_s3_registration():
+def test_app_objects_s3_registration():
     from wreath import Wreath
 
     app = Wreath()
-    store = app.storage(
+    store = app.objects(
         "assets", backend="s3", bucket="ev-assets", region="ap-southeast-2",
         access_key="AKIA", secret_key="sk",
     )
-    assert isinstance(store, S3Storage)
-    assert app.state.storage_assets is store
-    assert "__storage_assets" in app._http_clients  # lifespan-managed client
+    assert isinstance(store, S3ObjectStore)
+    assert app.state.objects_assets is store
+    assert "__objects_assets" in app._http_clients  # lifespan-managed client
     # repr never leaks credentials
-    assert repr(store) == "S3Storage(bucket='ev-assets', region='ap-southeast-2')"
+    assert repr(store) == "S3ObjectStore(bucket='ev-assets', region='ap-southeast-2')"
 
 
-def test_app_storage_missing_creds_raises(monkeypatch):
+def test_app_objects_missing_creds_raises(monkeypatch):
     from wreath import Wreath
 
     for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
@@ -251,7 +251,7 @@ def test_app_storage_missing_creds_raises(monkeypatch):
     app = Wreath()
     raised = False
     try:
-        app.storage("x", backend="s3", bucket="b", region="r")  # no creds, no env
+        app.objects("x", backend="s3", bucket="b", region="r")  # no creds, no env
     except ValueError:
         raised = True
     assert raised

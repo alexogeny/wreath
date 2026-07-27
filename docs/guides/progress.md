@@ -117,6 +117,10 @@ Four properties, each of which is a bug someone has shipped:
 An idempotent submission behaves the way you would want, too: `launch(...,
 key="nightly-import")` twice returns the *same* task id, because the second
 call looks up the row the unique index kept rather than handing back nothing.
+If that row is gone by the time it is read — purged after completing, in the
+window between the conflict and the lookup — there is no task to watch, and
+`launch` raises `wreath.jobs.JobVanished` instead of returning an id that
+cannot be polled. Every `TaskHandle` you are given carries a real job id.
 
 ### From GraphQL
 

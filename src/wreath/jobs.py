@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -34,6 +36,19 @@ JobHandler = Callable[..., Awaitable[None]]
 # The bounded SQL-safe identifier rule lives in ``_jobcore`` so jobs and
 # messaging share one definition; kept as a module-local alias for readability.
 _validate_identifier = validate_identifier
+
+
+class JobVanished(RuntimeError):
+    """A deduplicated :meth:`JobRunner.launch` found no row to hand back.
+
+    The insert conflicted -- so the work *was* already enqueued -- but the
+    surviving row was gone by the time it was read, which is what a retention
+    sweep over completed jobs looks like from here. There is no id to watch, and
+    inventing one is worse than saying so: a task id of ``"None"`` 404s on the
+    status endpoint and streams forever on the SSE one, and the client cannot
+    tell that from a job that failed. Re-launch (nothing is holding the key any
+    more) or treat the earlier run as finished.
+    """
 
 
 def _channel(schema: str, queue: str) -> str:
@@ -160,6 +175,7 @@ class JobRunner:
         self._progress = progress
         self._tasks: dict[str, _Task] = {}
         self._schedules: list[_Schedule] = []
+        self._passes: list[tuple[str, Any]] = []
         self._table = f'"{self._schema}".jobs'
         self._channel = _channel(self._schema, self._name)
         # Runtime (set at start()):
@@ -235,6 +251,85 @@ class JobRunner:
                       misfire=misfire)
         )
 
+    def drive(self, walk: Any, *, cron: str | None = None) -> str:
+        """Run a :class:`~wreath.passes.ChunkedPass` on this queue. Returns its task name.
+
+        One registration path rather than a registry the runner has to reconcile
+        at startup: this registers the task that runs a shift, arranges for the
+        ledger row to be seeded on first contact with the database, adds the
+        schedule when one is given, and enqueues the first shift when the runner
+        starts. The dependency is visible at the call site because the job runner
+        is literally the thing that drives the walk::
+
+            jobs.drive(normalize_grades)
+            jobs.drive(purge_replays, cron="*/5 * * * *")
+
+        **A shift must be shorter than the lease**, and this is where that is
+        checked. There is no heartbeat: a handler still running when its lease
+        expires is reclaimed by the sweeper, picked up by a second worker, and
+        re-claimed again when the first one's fenced completion matches nothing.
+        A pass survives that -- the cursor's compare-and-swap serialises the
+        duplicates -- but it must not *rely* on surviving something it can simply
+        not do.
+
+        A recurring pass needs ``cron=``: nothing else would start its next
+        cycle, and a pass that quietly stops after one cycle is worse than one
+        that refuses to be declared.
+        """
+        shift = float(walk.shift)
+        if shift >= self._lease:
+            raise ValueError(
+                f"pass {walk.name!r} has shift={shift:g}s but runner {self._name!r} "
+                f"leases jobs for {self._lease:g}s. A handler still running when "
+                "its lease expires is reclaimed while it runs, so a shift must "
+                "end and re-enqueue before then; the chain is "
+                "statement_timeout < within < shift < lease < command_timeout."
+            )
+        if walk.recurring and cron is None:
+            raise ValueError(
+                f"pass {walk.name!r} has a re-derived frontier, so it runs in "
+                "cycles and nothing would start the next one. Give it a "
+                'schedule: jobs.drive(pass, cron="*/5 * * * *").'
+            )
+        task = _pass_task_name(walk.name, walk.tenant)
+        if task in self._tasks:
+            raise ValueError(f"pass {walk.name!r} is already driven by this runner")
+
+        async def run_shift(ctx: JobContext) -> None:
+            stopping = self._supervisor.stopping if self._supervisor is not None else None
+            result = await walk.run_shift(self._db, stopping=stopping)
+            if result.error is not None and result.stopped == "failed":
+                raise RuntimeError(f"pass {walk.name!r} chunk failed: {result.error}")
+            ctx.report(0.0, f"pass {walk.name}: {result.rows} rows in {result.chunks} chunks")
+            if result.should_continue or (result.chunks and not result.complete):
+                await self._enqueue_next_shift(task, walk)
+
+        # Retries are the runner's ordinary backoff. A shift is safe to re-run
+        # from wherever the ledger says it got to, so there is nothing special
+        # to arrange here.
+        self.task(task)(run_shift)
+        self._passes.append((task, walk))
+        if cron is not None:
+            self.schedule(task, cron=cron, tenant=walk.tenant)
+        return task
+
+    async def _enqueue_next_shift(self, task: str, walk: Any) -> None:
+        # A fresh dedup key per shift, bucketed by the minute so a pass that
+        # cannot make progress re-enqueues at most once a minute instead of
+        # spinning, and self-heals as soon as it can advance again.
+        key = f"pass:{walk.name}:{walk.tenant}:{int(time.time() // 60)}"
+        with contextlib.suppress(Exception):
+            await self.enqueue(task, key=key, tenant=walk.tenant)
+
+    async def _start_passes(self) -> None:
+        """Give every driven pass its first shift, once the database is up."""
+        for task, walk in self._passes:
+            with contextlib.suppress(Exception):
+                status = await walk.status(self._db)
+                if status is not None and status.phase == "done" and not walk.recurring:
+                    continue
+                await self._enqueue_next_shift(task, walk)
+
     # -- enqueue -------------------------------------------------------------
 
     async def enqueue(
@@ -309,7 +404,11 @@ class JobRunner:
 
         A ``key`` that deduplicates does not lose the caller: the surviving row
         is looked up and its handle returned, so submitting the same work twice
-        yields the same task to watch rather than nothing at all.
+        yields the same task to watch rather than nothing at all. If that row is
+        gone by the time it is read -- purged after completing, in the window
+        between the conflict and the lookup -- there is nothing to watch and
+        :class:`JobVanished` is raised rather than a handle whose id is the
+        string ``"None"``.
         """
         job_id = await self.enqueue(
             task, *args, tx=tx, run_at=run_at, key=key, tenant=tenant,
@@ -322,6 +421,13 @@ class JobRunner:
         # Deduplicated by `key`: the work is already queued or running, and the
         # caller still needs to know which task to watch.
         existing = await self._existing_job_id(key, tx=tx)
+        if existing is None:
+            # `str(None)` here would mint the four-character task id "None" and
+            # hand it to a client as something to poll.
+            raise JobVanished(
+                f"launch({task!r}, key={key!r}) was deduplicated but the surviving "
+                "job row was gone when it was read; there is no task to watch"
+            )
         return TaskHandle(task_id=str(existing), state="running")
 
     async def _existing_job_id(self, key: str | None, *, tx: Any = None) -> Any:
@@ -385,6 +491,8 @@ class JobRunner:
         supervisor.spawn(f"jobs:{self._name}:sweeper", self._sweeper())
         if self._schedules:
             supervisor.spawn(f"jobs:{self._name}:scheduler", self._scheduler())
+        if self._passes:
+            supervisor.spawn(f"jobs:{self._name}:passes", self._start_passes())
 
     async def drain(self, deadline: float) -> None:
         # Stop-fetch is signalled by supervisor.stopping; here we wait for the
@@ -594,6 +702,12 @@ class JobRunner:
         with contextlib.suppress(asyncio.TimeoutError):
             async with asyncio.timeout(self._poll):
                 await self._wake.wait()
+
+
+def _pass_task_name(name: str, tenant: str) -> str:
+    """A task name for a pass, since a pass name is prose and a task name is not."""
+    slug = re.sub(r"[^A-Za-z0-9_]", "_", f"{name}_{tenant}" if tenant else name)
+    return _validate_identifier(f"pass_{slug}"[:63], "pass task name")
 
 
 async def _sleep_or_stop(stopping: asyncio.Event, seconds: float) -> None:

@@ -13,13 +13,20 @@ from .cache import CacheControlMiddleware
 from .compression import CompressionMiddleware
 from .cors import CORSMiddleware
 from .csrf import CSRFMiddleware, csrf_token
-from .idempotency import IdempotencyMiddleware
+from .idempotency import (
+    IdempotencyMiddleware,
+    IdempotencyStore,
+    MemoryIdempotencyStore,
+    PostgresIdempotencyStore,
+)
 from .proxy import ProxyHeadersMiddleware
 from .ratelimit import (
     MemoryRateLimitStore,
     PostgresRateLimitStore,
     RateLimitMiddleware,
     RateLimitStore,
+    TieredRateLimitMiddleware,
+    principal_key,
 )
 from .request_id import RequestIDMiddleware, request_id
 from .security import SecurityHeadersMiddleware, TrustedHostMiddleware
@@ -33,6 +40,9 @@ __all__ = [
     "CompressionMiddleware",
     "CallNext",
     "IdempotencyMiddleware",
+    "IdempotencyStore",
+    "MemoryIdempotencyStore",
+    "PostgresIdempotencyStore",
     "MemoryRateLimitStore",
     "Middleware",
     "MiddlewareHooks",
@@ -43,6 +53,8 @@ __all__ = [
     "ProxyHeadersMiddleware",
     "RateLimitMiddleware",
     "RateLimitStore",
+    "TieredRateLimitMiddleware",
+    "principal_key",
     "RequestIDMiddleware",
     "ResponseValue",
     "SecurityHeadersMiddleware",

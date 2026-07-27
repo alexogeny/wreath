@@ -75,11 +75,25 @@ class Operation:
 
 
 @dataclass(frozen=True, slots=True)
+class PermissionSet:
+    """The actions one resource type is authorized for, read off the routes.
+
+    In the IR because the generated client should be typed on the *server's*
+    vocabulary: a UI asking about an action the API does not enforce is a bug
+    that ought to be a compile error, not a silent ``false``.
+    """
+
+    resource_type: str
+    actions: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ApiModel:
     title: str
     version: str
     models: tuple[Model, ...] = ()
     operations: tuple[Operation, ...] = ()
+    permissions: tuple[PermissionSet, ...] = ()
 
 
 # Reusable singletons for the common scalar shapes.
@@ -89,6 +103,14 @@ BOOLEAN = TypeRef("boolean")
 INTEGER = TypeRef("integer")
 NUMBER = TypeRef("number")
 STRING = TypeRef("string")
+
+#: ISO-8601 strings, tagged with their OpenAPI `format` in ``name``. A string
+#: is never a reference, so ``name`` is free to carry the format -- which is
+#: what lets one declaration reach the schema, the TypeScript, and the GraphQL
+#: scalar saying the same thing. Defined here so the REST and GraphQL sides of
+#: typegen cannot drift to two different spellings.
+DATE_TIME = TypeRef("string", "date-time")
+DATE = TypeRef("string", "date")
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,11 +151,14 @@ class TypegenError(Exception):
 
 __all__ = [
     "ApiModel",
+    "DATE",
+    "DATE_TIME",
     "Diagnostic",
     "Field",
     "Model",
     "Operation",
     "Parameter",
+    "PermissionSet",
     "TypeKind",
     "TypeRef",
     "TypegenError",

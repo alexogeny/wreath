@@ -49,3 +49,36 @@ second when you want to tell the network what it may keep.
 
 **Reference:** [`wreath.cache`](../reference/cache.md),
 [`wreath.cache_control`](../reference/cache_control.md).
+
+## User story: reference data that reloads itself
+
+> *Countries, plans, feature definitions — read on nearly every request, changed
+> a few times a year, and always by someone forgetting to restart the workers
+> afterwards.*
+
+```python
+from wreath.cache import SnapshotCache, refresh_on
+
+countries: SnapshotCache[str, Country] = SnapshotCache()
+await countries.refresh(load_countries)
+refresh_on(countries, [Country], load=load_countries)
+```
+
+Now a committed write to `Country` — from an admin page, a migration, a job —
+reloads the snapshot. Note it *reloads* rather than dropping: this cache holds
+reference data, and a dropped generation would leave readers with an explicit
+miss on data that has not gone anywhere.
+
+It rides the same announcement the [response cache](response-cache.md) listens
+to, so one call makes both fleet-wide:
+
+```python
+invalidate_across_workers(app.messaging("bus", database="app"))
+```
+
+A write on any worker then reloads every worker's reference data over one bus
+channel. Two properties keep it safe to leave on: the refresh is single-flight,
+so a burst of writes is one reload; and a failing loader leaves the previous
+generation in place, so a database blip cannot empty a cache readers depend on.
+
+`refresh_on` returns a callable that stops watching.

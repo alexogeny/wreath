@@ -26,6 +26,12 @@ __all__ = ["ObjectType", "Schema", "SchemaField", "build_schema"]
 
 #: PostgreSQL type name -> GraphQL scalar. Anything unlisted becomes `String`,
 #: which is lossless for output because the JSON encoder stringifies it anyway.
+#:
+#: `DateTime`/`Date` are named rather than left as `String` because the SDL is
+#: the contract a client generates from: `String` says nothing, while a named
+#: scalar tells a code generator to parse it and tells a human what shape to
+#: send. The wire form is unchanged -- an ISO-8601 string either way -- so this
+#: costs an existing client nothing.
 _SCALARS = {
     "bool": "Boolean",
     "int2": "Int",
@@ -36,13 +42,17 @@ _SCALARS = {
     "text": "String",
     "varchar": "String",
     "uuid": "ID",
-    "date": "String",
-    "timestamp": "String",
-    "timestamptz": "String",
+    "date": "Date",
+    "timestamp": "DateTime",
+    "timestamptz": "DateTime",
     "json": "JSON",
     "jsonb": "JSON",
     "bytea": "String",
 }
+
+#: The scalars above that GraphQL does not define itself, so the SDL has to
+#: declare them. Everything else is a built-in.
+_CUSTOM_SCALARS = frozenset({"JSON", "DateTime", "Date"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +125,20 @@ class Schema:
     def sdl(self) -> str:
         """The schema in GraphQL SDL, for tooling and for a `/graphql` GET."""
         lines: list[str] = []
+        # A custom scalar has to be declared or the document is not valid SDL,
+        # and a client generator will reject it. Only the ones actually used are
+        # emitted, so a schema with no timestamps carries no `scalar DateTime`.
+        used = sorted(
+            {
+                schema_field.type_name
+                for object_type in self.types.values()
+                for schema_field in object_type.fields.values()
+                if schema_field.type_name in _CUSTOM_SCALARS
+            }
+        )
+        if used:
+            lines.extend(f"scalar {name}" for name in used)
+            lines.append("")
         for object_type in self.types.values():
             lines.append(f"type {object_type.name} {{")
             for schema_field in object_type.fields.values():

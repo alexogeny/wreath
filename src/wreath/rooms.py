@@ -41,6 +41,7 @@ from collections.abc import Awaitable, Callable
 from time import monotonic_ns as _monotonic_ns
 from typing import Any
 
+from ._busbridge import BusBridge
 from ._flight_markers import COV_PYTHON as _COV_PYTHON
 from ._flight_markers import PH_WS_FANOUT as _PH_WS_FANOUT
 from ._flight_markers import phase_marker as _phase_marker
@@ -61,21 +62,14 @@ class RoomRegistry:
     omit it for single-process fan-out.
     """
 
-    __slots__ = ("_bus", "_channel", "_origin", "_rooms")
+    __slots__ = ("_bridge", "_rooms")
 
     def __init__(self, bus: Any = None, *, channel: str = DEFAULT_CHANNEL) -> None:
-        self._bus = bus
-        self._channel = channel
         self._rooms: dict[str, set[Any]] = {}
-        # Identifies broadcasts this registry published, so the copy that comes
-        # back over the bus is not delivered to local members twice. `id(self)`
-        # is unique per process and never crosses a process boundary as an
-        # identity claim -- it only ever has to differ from other workers'.
-        self._origin = f"{id(self):x}"
-        if bus is not None:
-            # Registered at construction: the bus collects subscriptions before
-            # it starts, so a registry built after startup would never listen.
-            bus.subscribe(channel)(self._on_bus_message)
+        # The channel, the origin tag that drops this worker's own echo, and the
+        # malformed-payload rejection are all the bridge's; what stays here is
+        # the room name in the payload and the local fan-out.
+        self._bridge = BusBridge(bus, channel=channel, apply=self._apply)
 
     # -- membership ----------------------------------------------------------
 
@@ -121,15 +115,17 @@ class RoomRegistry:
         delivery is fire-and-forget, as ephemeral fan-out is.
         """
         delivered = await self._deliver_local(room, payload)
-        if self._bus is not None:
-            await self._bus.publish(
-                self._channel,
+        if self._bridge.attached:
+            # Awaited, not deferred: the caller asked for this fan-out and is
+            # waiting on its result, so a bus failure is theirs to see. That is
+            # the opposite of the write and progress bridges, whose callers have
+            # already finished the work being announced.
+            await self._bridge.publish(
                 {
                     "room": room,
                     "data": payload.decode("utf-8") if isinstance(payload, bytes) else payload,
                     "binary": isinstance(payload, bytes),
-                    "origin": self._origin,
-                },
+                }
             )
         return delivered
 
@@ -165,13 +161,12 @@ class RoomRegistry:
             )
         return delivered
 
-    async def _on_bus_message(self, message: Any) -> None:
-        """Fan a bus message out locally, unless this worker published it."""
-        payload = message.payload
-        if not isinstance(payload, dict):
-            return
-        if payload.get("origin") == self._origin:
-            return  # already delivered locally by `broadcast`
+    async def _apply(self, payload: dict[str, Any]) -> None:
+        """Fan another worker's broadcast out to local members.
+
+        Never republished: a room that relayed what it received would multiply
+        one message by the worker count, every hop.
+        """
         room = payload.get("room")
         data = payload.get("data")
         if not isinstance(room, str) or not isinstance(data, str):
@@ -187,4 +182,4 @@ class RoomRegistry:
         return {name: len(members) for name, members in self._rooms.items()}
 
     def __repr__(self) -> str:
-        return f"<RoomRegistry rooms={len(self._rooms)} channel={self._channel!r}>"
+        return f"<RoomRegistry rooms={len(self._rooms)} channel={self._bridge.channel!r}>"

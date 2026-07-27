@@ -202,13 +202,15 @@ async def test_without_a_store_the_session_still_travels_in_the_cookie() -> None
 
 
 class FakeStatement:
-    def __init__(self, result: Any = None) -> None:
+    def __init__(self, sql: str, workload: str, results: dict[str, Any]) -> None:
         self.calls: list[tuple] = []
-        self.result = result
+        self.sql = sql
+        self.workload = workload
+        self._results = results
 
     async def fetchrow(self, *args: Any) -> Any:
         self.calls.append(args)
-        return self.result
+        return self._results.get(self.sql)
 
     async def execute(self, *args: Any) -> str:
         self.calls.append(args)
@@ -216,13 +218,14 @@ class FakeStatement:
 
 
 class FakeDatabase:
+    """Statements are registered on first use, so results are keyed by SQL."""
+
     def __init__(self) -> None:
         self.statements: dict[str, FakeStatement] = {}
+        self.results: dict[str, Any] = {}
 
     def statement(self, name: str, sql: str, *, workload: str) -> FakeStatement:
-        statement = FakeStatement()
-        statement.sql = sql            # type: ignore[attr-defined]
-        statement.workload = workload  # type: ignore[attr-defined]
+        statement = FakeStatement(sql, workload, self.results)
         self.statements[name] = statement
         return statement
 
@@ -240,28 +243,48 @@ async def test_the_schema_is_offered_not_applied() -> None:
     assert "expires" in sql
 
 
+async def test_nothing_is_prepared_until_it_is_used() -> None:
+    """The store is built while the app is described; the database is not up."""
+    database = FakeDatabase()
+    store = PostgresSessionStore(database)
+    assert database.statements == {}
+
+    await store.load("sid")
+
+    assert list(database.statements) == ["wreath_session_read_live_wreath_session"]
+
+
 async def test_reads_and_writes_use_the_right_workloads() -> None:
     database = FakeDatabase()
-    PostgresSessionStore(database)
-    assert database.statements["wreath_session_load_wreath_session"].workload == "read"
+    store = PostgresSessionStore(database)
+    await store.load("sid")
+    await store.save("sid", {}, 60)
+    assert database.statements["wreath_session_read_live_wreath_session"].workload == "read"
     assert database.statements["wreath_session_save_wreath_session"].workload == "write"
 
 
 async def test_load_returns_none_for_a_missing_or_expired_row() -> None:
-    database = FakeDatabase()
-    store = PostgresSessionStore(database)
-    database.statements["wreath_session_load_wreath_session"].result = None
+    store = PostgresSessionStore(FakeDatabase())
     assert await store.load("sid") is None
 
 
 async def test_load_decodes_jsonb_handed_back_as_text() -> None:
     database = FakeDatabase()
     store = PostgresSessionStore(database)
-    database.statements["wreath_session_load_wreath_session"].result = ['{"user":"ada"}']
+    await store.load("sid")            # registers the statement
+    sql = database.statements["wreath_session_read_live_wreath_session"].sql
+    assert "expires >= clock_timestamp()" in sql   # an expired row never loads
+    database.results[sql] = ['{"user":"ada"}']
+
     assert await store.load("sid") == {"user": "ada"}
 
 
 async def test_expiry_is_pushed_to_the_database_clock() -> None:
-    store = PostgresSessionStore(FakeDatabase())
-    save_sql = store._save.sql  # type: ignore[attr-defined]
-    assert "clock_timestamp()" in save_sql
+    database = FakeDatabase()
+    store = PostgresSessionStore(database)
+    await store.save("sid", {"user": "ada"}, 60)
+    save = database.statements["wreath_session_save_wreath_session"]
+    # The lifetime is the caller's, but the deadline it becomes is the
+    # database's: one clock, whatever the workers' clocks say.
+    assert "clock_timestamp() + make_interval(secs => $3::float8)" in save.sql
+    assert save.calls == [("sid", '{"user":"ada"}', 60.0)]

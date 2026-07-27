@@ -77,6 +77,73 @@ async def read(
 `session.get` returns `None` for a missing primary key rather than raising, and a
 session that is never queried leases no connection at all.
 
+## User story: name the reads instead of rebuilding them
+
+> *As an application author, I have four handlers that all fetch llamas — by
+> paddock, by trek, the overdue ones, the ones a keeper still has to check — and
+> the filters are copied into each of them. I want the query that fetches a
+> paddock's herd to have a name, one place to change, and no per-request cost for
+> the privilege.*
+
+That module of small query-building functions is the data-access layer every
+application grows. `wreath.queries` is that layer, declared rather than written:
+
+```python
+from wreath.orm.types import Timestamp
+from wreath.queries import Param, Queries, query
+
+class Llama(Model, table="llamas"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    name: Mapped[str] = column(Text)
+    paddock_id: Mapped[int] = column(Int64)
+    checked_at: Mapped[object] = column(Timestamp)
+
+class Llamas(Queries[Llama]):
+    by_paddock = query(Llama.paddock_id == Param("paddock")).order_by(Llama.name)
+    overdue = query(Llama.checked_at < Param("before")).order_by(Llama.checked_at)
+    by_name = query(Llama.name == Param("name")).one()
+
+@app.get("/paddocks/{id}/herd")
+async def herd(
+    request,
+    session: Annotated[Session, FromORM("main", workload="read")],
+):
+    llamas = Llamas(session)
+    herd = await llamas.by_paddock(paddock=request.path_params["id"])
+    stale = await llamas.overdue.count(before=cutoff)
+    return {"herd": [llama.name for llama in herd], "overdue": stale}
+```
+
+A `Param` is the piece to understand. The declaration is written once with
+placeholders where the values go, so the *shape* of the query is fixed when the
+class is defined and only the values vary per call — which is exactly what the
+registry's compiled-plan cache is keyed on. `by_paddock` therefore compiles one
+statement and reuses it for every paddock in the herd, and the plan-cache key it
+produces is byte-identical to the one the hand-written query would have made.
+There is no second cache involved.
+
+Declaring also moves mistakes earlier. A column belonging to another model, or a
+parameter written somewhere no caller could ever supply it — an `order_by`, a
+`limit` — fails when the class is defined, at import, rather than on the first
+request that runs it. Per call, a missing or unexpected parameter is named in the
+error, and a value of the wrong type is rejected by the column's own rules before
+any SQL is sent.
+
+Parameters work with the six comparison operators, in either order. Operators
+spelled as methods — `like`, `in_`, the jsonb and array operators — bind their
+operand as they are written, so those take literals for now.
+
+`Queries` reads and never writes: writes belong to the session, whose strict
+one-way direction is an ORM invariant worth keeping in one place. That is why
+this is `Queries` and not a repository — the smaller surface is the correct one.
+Calling a declaration returns hydrated objects (or one object, or `None`, after
+`.one()`); `.count(...)` answers how many rows match without hydrating any of
+them; and `Llamas.by_paddock.bind(paddock=7)` hands back an ordinary `Select`, so
+anything that takes one — `session.fetch`, `wreath.pagination` — takes a declared
+query too.
+
+**Reference:** [`wreath.queries`](../reference/queries.md).
+
 ## Constraints and indexes
 
 A single column carries its own constraints as keywords: `unique=True`,

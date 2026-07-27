@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from .analyzer import analyze, analyze_all
 from .emit import PortResult, emit_module, port_tree
-from .ir import NEEDS_REVIEW, TRANSLATED, UNSUPPORTED, Finding, Report
+from .ir import NEEDS_REVIEW, TRANSLATED, UNSUPPORTED, Finding, Report, SkippedFile
 
 __all__ = [
     "analyze",
@@ -19,6 +19,7 @@ __all__ = [
     "PortResult",
     "Finding",
     "Report",
+    "SkippedFile",
     "TRANSLATED",
     "NEEDS_REVIEW",
     "UNSUPPORTED",

@@ -16,19 +16,19 @@ the same choice :class:`~wreath.middleware.PostgresRateLimitStore` makes.
 as a migration, so schema changes stay in the migration history where the rest
 of the schema lives.
 
-Expired rows are removed by :meth:`PostgresSessionStore.purge`; run it from a
-durable job rather than a background thread, so it retries and does not
-duplicate across workers.
+Expired rows are removed by :meth:`PostgresSessionStore.purge_pass` -- a chunked,
+resumable, paced walk you hand to the job runner rather than a background thread,
+so it retries, does not duplicate across workers, and cannot hold one long
+transaction open over a table that grows with every login.
 """
 
 from __future__ import annotations
 
-import re
 from typing import Any, Protocol
 
-__all__ = ["PostgresSessionStore", "SessionStore"]
+from .store import Column, Keyed, PostgresStore
 
-_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+__all__ = ["PostgresSessionStore", "SessionStore"]
 
 
 class SessionStore(Protocol):
@@ -54,56 +54,48 @@ class PostgresSessionStore:
     every session for this user" is one statement rather than a scan.
 
     PostgreSQL owns the clock (``clock_timestamp()``), so workers on disagreeing
-    wall clocks cannot disagree about expiry -- the same reasoning as the
-    PostgreSQL rate-limit store.
+    wall clocks cannot disagree about expiry -- the same reasoning, and now the
+    same :mod:`wreath.store` primitive, as the PostgreSQL rate-limit store.
+
+    Unlike the other two stores over that primitive, the lifetime is not the
+    store's to decide: the cookie's ``max_age`` is what a session should outlive,
+    so it is bound per write rather than fixed at construction.
     """
 
-    __slots__ = ("_database", "_delete", "_load", "_purge", "_save", "_table")
+    __slots__ = ("_database", "_store")
 
     def __init__(self, database: Any, *, table: str = "wreath_session") -> None:
-        if not _IDENTIFIER.fullmatch(table):
-            raise ValueError("table must be a plain SQL identifier")
         self._database = database
-        self._table = table
-        self._load: Any = database.statement(
-            f"wreath_session_load_{table}",
-            f"SELECT data FROM {table} "
-            "WHERE sid = $1 AND expires > clock_timestamp()",
-            workload="read",
+        self._store = PostgresStore(
+            database,
+            Keyed(
+                table=table,
+                columns=(Column("data", "jsonb", null=False),),
+                key="sid",
+                # An index on `expires`: purge scans by it, and a session table
+                # is big enough -- one row per login, not per caller -- for the
+                # difference between an index and a sequential scan to matter.
+                index_stamp=True,
+                prefix="wreath_session",
+            ),
+            # Nothing here is claimed, and a session is read on nearly every
+            # request, so the lookup may go to the read pool.
+            read_workload="read",
         )
-        self._save: Any = database.statement(
-            f"wreath_session_save_{table}",
-            f"INSERT INTO {table} (sid, data, expires) VALUES "
-            "($1, $2::jsonb, clock_timestamp() + make_interval(secs => $3::float8))\n"
-            "ON CONFLICT (sid) DO UPDATE SET data = EXCLUDED.data, "
-            "expires = EXCLUDED.expires",
-            workload="write",
-        )
-        self._delete: Any = database.statement(
-            f"wreath_session_delete_{table}",
-            f"DELETE FROM {table} WHERE sid = $1",
-            workload="write",
-        )
-        self._purge: Any = database.statement(
-            f"wreath_session_purge_{table}",
-            f"DELETE FROM {table} WHERE expires <= clock_timestamp()",
-            workload="write",
+        self._store.define(
+            "save",
+            self._store.upsert(
+                values={"sid": "$1", "data": "$2::jsonb", "expires": self._store.window("$3")},
+                update={"data": "excluded.data", "expires": "excluded.expires"},
+            ),
         )
 
     def schema_sql(self) -> str:
         """DDL for the backing table. Apply it as a migration."""
-        return (
-            f"CREATE TABLE IF NOT EXISTS {self._table} (\n"
-            "    sid text PRIMARY KEY,\n"
-            "    data jsonb NOT NULL,\n"
-            "    expires timestamptz NOT NULL\n"
-            ");\n"
-            f"CREATE INDEX IF NOT EXISTS {self._table}_expires_idx\n"
-            f"    ON {self._table} (expires)"
-        )
+        return self._store.schema_sql()
 
     async def load(self, sid: str) -> dict[str, Any] | None:
-        row = await self._load.fetchrow(sid)
+        row = await self._store.read(sid, live=True)
         if row is None:
             return None
         data = row[0]
@@ -117,11 +109,37 @@ class PostgresSessionStore:
     async def save(self, sid: str, data: dict[str, Any], max_age: int) -> None:
         from ._json import dumps as _json_dumps
 
-        await self._save.execute(sid, _json_dumps(data).decode("utf-8"), float(max_age))
+        await self._store.statement("save").execute(
+            sid, _json_dumps(data).decode("utf-8"), float(max_age)
+        )
 
     async def delete(self, sid: str) -> None:
-        await self._delete.execute(sid)
+        await self._store.delete(sid)
+
+    def purge_pass(self, *, chunk: int = 1000, **options: Any) -> Any:
+        """A recurring pass that deletes expired sessions, chunk by chunk.
+
+        The supported way to keep the table small::
+
+            jobs.drive(store.purge_pass(), cron="*/10 * * * *")
+
+        A session table is one row per login rather than one per request, so it
+        is exactly the size where a single unbounded ``DELETE`` starts holding a
+        snapshot open long enough for the application to notice afterwards. The
+        pass walks it in expiry order, one transaction per chunk, resumably, and
+        paced. See :mod:`wreath.passes`.
+        """
+        from ._passes.stores import keyed_purge_pass
+
+        return keyed_purge_pass(
+            self._store.declaration, self._database,
+            name=f"purge_{self._store.table}", chunk=chunk, **options,
+        )
 
     async def purge(self) -> str:
-        """Delete expired rows. Safe to run concurrently; run it from a job."""
-        return await self._purge.execute()
+        """Delete expired rows in **one unbounded statement**.
+
+        Safe to run concurrently, and fine for a small table -- but on a large
+        one it is the long transaction :meth:`purge_pass` exists to prevent.
+        """
+        return await self._store.purge()

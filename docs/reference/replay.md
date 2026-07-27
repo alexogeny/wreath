@@ -67,6 +67,31 @@ recipe [Fuzz your own routes](../cookbook/recipes/fuzz-your-routes.md).
 
 ::: wreath.replay.open_recording
 
+## Recording to regression test
+
+An incident produces a recording, and a recording is only useful while someone
+is looking at it. `wreath replay to-test` transcribes one into a runnable
+pytest, so the case survives the incident:
+
+```console
+$ wreath replay to-test herd.app:app herd-incident.wtr1 -o tests/test_incident.py
+```
+
+The request is parsed out of the recorded bytes, replayed **now** through
+[`TestClient`](testing.md), and what comes back becomes the assertion. So the
+result is a *characterisation* test: generated against the broken build it
+encodes the bug (watch it fail, fix, update the expectation); generated after
+the fix it locks the fix in. The tool cannot tell which you meant, and the
+generated docstring says so.
+
+Deliberately narrow: request line, headers, and a `Content-Length` body. A
+chunked body or a truncated tail is **refused by name** rather than guessed at,
+because a generated test that asserts a mis-decoded body is worse than no test.
+
+::: wreath.replay.recorded_request
+
+::: wreath.replay.generate_test
+
 ## Fault injection
 
 A [`FaultSchedule`](#wreath.replay.FaultSchedule) carries transport faults (keyed

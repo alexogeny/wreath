@@ -176,7 +176,7 @@ class StatsDBridge:
         """Flush on a fixed cadence. Drive from a supervised task.
 
         TODO(app-wiring): an ``app.statsd(...)`` factory that owns this loop in
-        the lifespan would mirror ``app.http_client``/``app.storage``.
+        the lifespan would mirror ``app.http_client``/``app.objects``.
         """
         import asyncio
 

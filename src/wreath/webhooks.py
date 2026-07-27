@@ -361,6 +361,51 @@ class LocalReplayStore:
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
+#: A delivery nobody is waiting on any more. Written once because the bounded
+#: purge and the chunked purge pass must agree about it exactly: a row that is
+#: still going to be retried is not rubbish.
+_SETTLED_STATES = "state IN ('delivered','failed','cancelled','unknown')"
+
+
+def _retention_purge_pass(
+    database: Any,
+    *,
+    table: str,
+    key: str,
+    chunk: int = 1000,
+    where: str | None = None,
+    within: Any = "5s",
+    shift: Any = "10s",
+    pace: Any = None,
+    schema: str = "wreath",
+) -> Any:
+    """The chunked pass behind the inbox's and the outbox's retention purge.
+
+    Both walk ``(retention_until, <primary key>)``: the retention stamp because
+    that is the ordered domain the frontier lives in, and the key appended
+    because two rows can share a stamp and a boundary that is not unique either
+    skips its siblings or loops on them.
+    """
+    from .passes import ChunkedPass, DutyCycle, Key, Purge, Rows, Sealed, Table
+
+    return ChunkedPass(
+        f"purge_{table}",
+        over=Table(table),
+        units=Rows(
+            key=(
+                Key("retention_until", "timestamptz", indexed=True),
+                Key(key, "text", unique=True),
+            ),
+            limit=chunk,
+            within=within,
+        ),
+        frontier=Sealed(),
+        work=Purge(where=where),
+        pace=pace if pace is not None else DutyCycle(),
+        shift=shift,
+        schema=schema,
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class InboxClaim:
@@ -458,7 +503,31 @@ class PostgresWebhookInbox:
             return InboxClaim("failed", token, status)
         return InboxClaim("active", token, status)
 
+    def purge_pass(self, database: Any, *, chunk: int = 1000, **options: Any) -> Any:
+        """A recurring pass that drops inbox rows past their retention.
+
+        The supported way to keep the inbox small::
+
+            jobs.drive(inbox.purge_pass(db), cron="23 * * * *")
+
+        :meth:`purge` has a chunk size and nothing else -- no cursor, so it
+        starts from the beginning of the index every time; no resumption, so a
+        redeploy loses where it was; and no pacing, so it competes with delivery
+        for the same pool. The pass supplies all three, and keeps one
+        transaction per chunk. See :mod:`wreath.passes`.
+        """
+        return _retention_purge_pass(
+            database, table=self.table, key="message_id", chunk=chunk, **options
+        )
+
     async def purge(self, session: Any, *, limit: int = 1000) -> int:
+        """Delete up to *limit* rows past their retention, in the caller's transaction.
+
+        One bounded chunk with no cursor, no resumption, and no pacing. It is
+        the right tool when you already hold a session and want a bounded amount
+        of work done right now; for keeping the table small forever, use
+        :meth:`purge_pass`.
+        """
         if limit <= 0:
             raise ValueError("webhook inbox purge limit must be positive")
         deleted = await session.raw(
@@ -550,7 +619,13 @@ class PostgresWebhookOutbox:
             f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS relay_path "
             "text NOT NULL DEFAULT '';\n"
             f"CREATE INDEX IF NOT EXISTS {table}_ready_idx ON {table} "
-            "(next_attempt_at, created_at) WHERE state IN ('pending','retry_wait');"
+            "(next_attempt_at, created_at) WHERE state IN ('pending','retry_wait');\n"
+            # Retention has always been read by both purges and never had an
+            # index under it, so every purge was a sequential scan and a sort.
+            # The chunked pass refuses to walk an unindexed key, which is how
+            # this surfaced.
+            f"CREATE INDEX IF NOT EXISTS {table}_retention_idx ON {table} "
+            "(retention_until) WHERE retention_until IS NOT NULL;"
         )
 
     async def enqueue(
@@ -589,13 +664,39 @@ class PostgresWebhookOutbox:
         ).execute()
         return delivery_id
 
+    def purge_pass(self, database: Any, *, chunk: int = 1000, **options: Any) -> Any:
+        """A recurring pass that drops settled deliveries past their retention.
+
+        The supported way to keep the outbox small::
+
+            jobs.drive(outbox.purge_pass(db), cron="43 * * * *")
+
+        Only rows in a settled state are eligible, exactly as :meth:`purge`
+        does it -- a delivery still waiting on a retry is not rubbish. What the
+        pass adds is the cursor, the resumption, and the pacing that a bare
+        ``LIMIT`` does not have. See :mod:`wreath.passes`.
+        """
+        return _retention_purge_pass(
+            database,
+            table=self.table,
+            key="delivery_id",
+            chunk=chunk,
+            where=_SETTLED_STATES,
+            **options,
+        )
+
     async def purge(self, session: Any, *, limit: int = 1000) -> int:
+        """Delete up to *limit* settled rows past retention, in the caller's transaction.
+
+        One bounded chunk with no cursor, no resumption, and no pacing; see
+        :meth:`purge_pass` for the form that keeps the table small forever.
+        """
         if limit <= 0:
             raise ValueError("webhook outbox purge limit must be positive")
         deleted = await session.raw(
             f"WITH expired AS (SELECT ctid FROM {self.table} "
             "WHERE retention_until < clock_timestamp() "
-            "AND state IN ('delivered','failed','cancelled','unknown') "
+            f"AND {_SETTLED_STATES} "
             "ORDER BY retention_until FOR UPDATE SKIP LOCKED LIMIT $1), "
             f"removed AS (DELETE FROM {self.table} AS o USING expired "
             "WHERE o.ctid=expired.ctid RETURNING 1) "

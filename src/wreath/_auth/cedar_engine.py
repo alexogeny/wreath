@@ -735,6 +735,19 @@ class CedarPolicies:
     def __repr__(self) -> str:
         return f"<CedarPolicies policies={len(self._policies)}>"
 
+    @property
+    def source(self) -> str:
+        """The Cedar text this policy set was parsed from.
+
+        Public because it identifies the policy set by content, and callers
+        that cache a decision against it need a tag that is the same on every
+        worker and across a restart. ``id()`` is not that: CPython reuses
+        addresses, so an address-derived tag can survive a reload that replaced
+        the policies. Read-only — the parse happens once, in ``__init__``, and
+        a settable source would let the text drift from ``_policies``.
+        """
+        return self._source
+
     def is_authorized(
         self,
         *,

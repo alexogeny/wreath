@@ -68,6 +68,54 @@ def _escape(text: str) -> str:
     return "".join(out)
 
 
+#: OpenAPI `format` -> the TypeScript alias emitted for it. Aliases rather than
+#: branded types on purpose: `IsoDateTime = string` stays assignable from a
+#: plain string, so nothing an existing client does breaks, while the field
+#: still reads as a timestamp in an editor. A branded type would be stricter and
+#: would force every caller to cast, which is a bigger promise than a generated
+#: client should make on its own.
+_ISO_ALIASES: dict[str, str] = {
+    "date-time": "IsoDateTime",
+    "date": "IsoDate",
+}
+
+_ISO_ALIAS_SOURCE = {
+    "IsoDateTime": (
+        '/** ISO-8601 timestamp with a UTC offset, e.g.\n'
+        ' *  "2026-07-26T09:30:00+00:00". */\n'
+        "export type IsoDateTime = string;"
+    ),
+    "IsoDate": (
+        '/** ISO-8601 calendar date, e.g. "2026-07-26". */\n'
+        "export type IsoDate = string;"
+    ),
+}
+
+
+def _aliases_used(declarations: tuple[Any, ...]) -> list[str]:
+    """Which ISO aliases these declarations mention, in declaration order.
+
+    Walked rather than string-matched so an API with no timestamps emits no
+    aliases at all, and one with only dates does not carry a datetime alias it
+    never uses.
+    """
+    found: list[str] = []
+
+    def visit(node: tuple[Any, ...]) -> None:
+        kind, name, args, _literals = node
+        if kind == "string":
+            alias = _ISO_ALIASES.get(name)
+            if alias is not None and alias not in found:
+                found.append(alias)
+        for arg in args or ():
+            visit(arg)
+
+    for _name, fields in declarations:
+        for _wire_name, type_tuple, _required in fields:
+            visit(type_tuple)
+    return found
+
+
 def ts_type(node: tuple[Any, ...]) -> str:
     kind, name, args, literals = node
     if kind == "unknown":
@@ -79,7 +127,11 @@ def ts_type(node: tuple[Any, ...]) -> str:
     if kind in ("integer", "number"):
         return "number"
     if kind == "string":
-        return "string"
+        # A tagged string keeps its meaning in the generated types: an alias is
+        # still assignable from `string`, so nothing breaks, but a reader (and
+        # an editor's hover) can see that the field is a timestamp rather than
+        # free text. `_ISO_ALIASES` declares them in the emitted module.
+        return _ISO_ALIASES.get(name, "string")
     if kind == "reference":
         return name  # type: ignore[return-value]
     if kind == "array":
@@ -115,7 +167,8 @@ def render_models(declarations: tuple[Any, ...], flags: int = 0) -> bytes:
     """Render the models module: data-model and per-operation parameter
     interfaces, in the order supplied (Python owns ordering)."""
     parts: list[str] = [GENERATOR_HEADER]
-    blocks = [
+    blocks = [_ISO_ALIAS_SOURCE[alias] for alias in _aliases_used(declarations)]
+    blocks += [
         "\n".join(_render_interface(name, fields)) for name, fields in declarations
     ]
     parts.append("\n\n".join(blocks) + ("\n" if blocks else ""))

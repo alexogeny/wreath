@@ -90,6 +90,33 @@ site = Site(..., palette=THEMES["sepia"], feel="papery")
 Both are just CSS variables, so a bespoke palette is a `Palette(primary=…, …)`
 away — no theme build step.
 
+### What the theme guarantees
+
+The look is a **design system, not a pile of values**: one type scale (a 1.25
+ratio from a 16px base), one 4px space scale, one elevation ramp, and a set of
+colour roles. Every rule spends those tokens, which is what keeps a page looking
+deliberate rather than approximate — and it means a bespoke palette inherits the
+proportions for free.
+
+Three properties hold for **every** theme, and each is a test:
+
+- **AA contrast in both modes** — body text, secondary text, links, and text on
+  the code surface all clear 4.5:1, light and dark. Control boundaries and the
+  focus ring clear 3:1 (WCAG 1.4.11); the decorative hairline deliberately does
+  not, because a table rule at 3:1 is a cage.
+- **Syntax colours belong to your theme.** Each token is a hue tuned for
+  legibility, then mixed toward the page foreground so it sits in the palette
+  instead of on top of it — a code block in `sepia` reads warm, not GitHub-blue.
+  The measured floor is 5.2:1 across all five themes and both modes.
+- **Nothing reaches the network.** No CDN, no web font, no remote image. The
+  design tokens are inlined into every page, so a page keeps its colours even if
+  the stylesheet is missing — and `wreath audit`'s contrast rules, which only
+  read inline `<style>`, can actually check them.
+
+Motion honours `prefers-reduced-motion`, tables scroll inside their own
+container rather than scrolling the page, there is a skip link, both navigation
+landmarks are labelled, and there is a print stylesheet.
+
 ## Charts from your data
 
 Point a ```` ```chart ```` block at a JSON file — a benchmark's `latest.json`,
@@ -179,8 +206,10 @@ site = Site(
   generated automatically, so coding agents and LLMs can navigate your docs.
 - **`sitemap.xml`** and per-page `<meta name="description">` (from front-matter)
   when you set `base_url` — SEO without a plugin.
-- **Theme**: light/dark following the OS, one small stylesheet, no CDN or JS
-  framework beyond the ~2 KB search/tabs/copy/theme script.
+- **Theme**: a tokenised design system (type/space/elevation scales), light/dark
+  following the OS with a toggle, AA contrast in every theme, reduced-motion and
+  print styles — one small stylesheet, no CDN or web font, and no JS framework
+  beyond the ~2 KB search/tabs/copy/theme script.
 
 `wreath docs check` is a real gate: beyond dead `.md` links, it validates every
 `#anchor` — an internal link to a heading that has moved or vanished fails the

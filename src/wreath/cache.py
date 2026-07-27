@@ -18,10 +18,18 @@ implementation is the shipped one; the facade still selects a native
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from ._native import _core
-from ._orm_events import WRITE_CHANNEL, WriteBroadcast
+from ._orm_events import (
+    WRITE_CHANNEL,
+    WriteBroadcast,
+    subscribe_writes,
+    unsubscribe_writes,
+)
 
 if _core is not None and hasattr(_core, "SnapshotCache"):
     SnapshotCache = _core.SnapshotCache
@@ -71,10 +79,62 @@ def invalidate_across_workers(bus: Any, *, channel: str = WRITE_CHANNEL) -> Writ
     return WriteBroadcast(bus, channel=channel)
 
 
+def refresh_on(
+    cache: Any,
+    models: Iterable[Any],
+    *,
+    load: Callable[[], Any],
+) -> Callable[[], None]:
+    """Reload ``cache`` whenever one of ``models`` is written::
+
+        countries: SnapshotCache[str, Country] = SnapshotCache()
+        await countries.refresh(load_countries)
+        refresh_on(countries, [Country], load=load_countries)
+
+    The snapshot cache holds reference data, so the right response to a write is
+    to *reload* rather than to drop -- a dropped generation would leave readers
+    with an explicit miss on data that has not gone anywhere.
+
+    This is the same announcement the response cache listens to, so
+    :func:`invalidate_across_workers` makes it fleet-wide too: a write on any
+    worker reloads every worker's reference data, over one bus channel.
+
+    Refresh is single-flight and a failing loader leaves the previous generation
+    in place, so a database blip cannot empty a cache that readers depend on.
+    The reload is scheduled rather than awaited -- the write has already
+    committed and must not wait on it.
+
+    Returns a callable that stops watching.
+    """
+    watched = frozenset(getattr(model, "__name__", str(model)) for model in models)
+    inflight: set[Any] = set()
+
+    def _on_write(written: frozenset[str]) -> None:
+        if not (written & watched):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # nothing to schedule the reload on
+        future = loop.create_task(_reload())
+        inflight.add(future)
+        future.add_done_callback(inflight.discard)
+
+    async def _reload() -> None:
+        # A loader that raises must not surface as a failed write, and must not
+        # disturb the generation readers are already on.
+        with contextlib.suppress(Exception):
+            await cache.refresh(load)
+
+    subscribe_writes(_on_write)
+    return lambda: unsubscribe_writes(_on_write)
+
+
 __all__ = [
     "BoundedCache",
     "CacheStats",
     "SnapshotCache",
     "WriteBroadcast",
     "invalidate_across_workers",
+    "refresh_on",
 ]

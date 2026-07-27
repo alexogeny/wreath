@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import datetime as _datetime
 import inspect
 import types
 import typing
@@ -44,6 +45,7 @@ from ._json import loads as _json_loads
 from ._native import _core
 from .exceptions import BadRequest, UnprocessableEntity
 from .request import Request
+from .temporal import Instant, TemporalError
 
 Handler = Callable[..., Awaitable[Any]]
 
@@ -337,6 +339,23 @@ def _convert_scalar(annotation: Any, raw: str, loc: tuple[Any, ...]) -> Any:
         if lowered in _FALSE_WORDS:
             return False
         raise ValidationError([_error(loc, f"{raw!r} is not a boolean", "bool")])
+    if annotation is Instant or annotation is _datetime.datetime:
+        # `datetime` is accepted alongside `Instant` because ported handlers
+        # annotate it, and answering `unsupported annotation` to those would be
+        # unhelpful. Both land on an aware `Instant`: a query string without an
+        # offset is refused rather than read as UTC, which is the mistake this
+        # type exists to make impossible.
+        try:
+            return Instant.parse(raw)
+        except TemporalError as error:
+            raise ValidationError([_error(loc, str(error), "instant")]) from None
+    if annotation is _datetime.date:
+        try:
+            return _datetime.date.fromisoformat(raw)
+        except ValueError:
+            raise ValidationError(
+                [_error(loc, f"{raw!r} is not an ISO-8601 date", "date")]
+            ) from None
     origin = typing.get_origin(annotation)
     if origin in (types.UnionType, typing.Union):
         options = [o for o in typing.get_args(annotation) if o is not _NONE_TYPE]

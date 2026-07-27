@@ -286,6 +286,40 @@ def test_request_entities_merge_over_static_entities() -> None:
     assert not ungranted.allowed
 
 
+# -- identifying the policy set -----------------------------------------------
+
+
+def test_the_policy_source_is_public() -> None:
+    """Callers that cache against a policy set need to identify it by content.
+
+    The permission manifest's `ETag` is the live one: a tag derived from the
+    engine object rather than its text differs per worker and per restart, so
+    `If-None-Match` never matches and the revalidation the manifest exists for
+    succeeds exactly never.
+    """
+    source = 'permit(principal == User::"alice", action, resource);'
+    assert CedarPolicies(source).source == source
+
+
+def test_two_engines_parsed_from_one_text_report_the_same_source() -> None:
+    """The property every worker in a fleet depends on."""
+    source = "permit(principal, action, resource);"
+    assert CedarPolicies(source).source == CedarPolicies(source).source
+
+
+def test_the_source_is_read_only_and_does_not_add_a_dict() -> None:
+    """The parse happens once; a settable source would drift from `_policies`.
+
+    The slots layout matters beyond tidiness -- `permissions.py` weak-references
+    engines to cache a tag, and an accidental `__dict__` would change which
+    branch of that cache an engine lands in.
+    """
+    policies = CedarPolicies("permit(principal, action, resource);")
+    with pytest.raises(AttributeError):
+        policies.source = "permit(principal, action, resource);"  # type: ignore[misc]
+    assert not hasattr(policies, "__dict__")
+
+
 # -- the whole app path -------------------------------------------------------
 
 
