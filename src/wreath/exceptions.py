@@ -73,6 +73,17 @@ class PayloadTooLarge(HTTPException):
     status = 413
 
 
+class RequestHeaderFieldsTooLarge(HTTPException):
+    """Too many header fields, or one too large to be worth parsing.
+
+    RFC 6585 §5. Distinct from `PayloadTooLarge` because the limit that was hit
+    is on the *request line and headers*, which a client fixes differently: a
+    413 says "send a smaller body", a 431 says "send fewer cookies".
+    """
+
+    status = 431
+
+
 class UnprocessableEntity(HTTPException):
     status = 422
 

@@ -14,6 +14,22 @@ cannot be placed on a line, and a chunk budget that does not fit inside a shift
 are all errors where you declared them rather than surprises at three in the
 morning.
 
+There are two range sources. `Rows` walks by keyset and asks the table where to
+go next, which is why its key has to identify exactly one row. `Buckets` computes
+its next range from the calendar and asks the table nothing, so it needs no
+unique key at all — only an index, because the chunk's predicate is still a range
+scan.
+
+A `Gate` is how a pass makes something else safe afterwards:
+**materialise → verify → only then the irreversible step.** Verification is
+always a question the database answers — `NoRowsMatch`, `Reconcile`, or
+`Constraint`, which adds a `CHECK` as `NOT VALID` and then validates it, so the
+check and the thing that will go on enforcing the invariant are the same
+predicate. A gate that restates the walk's own `where` is refused: a walk whose
+predicate was wrong would otherwise verify its own bug. Verification always
+publishes a durable fact, readable through `published_facts()` with nothing but
+a connection; running something irreversible is opt-in on top of that.
+
 Two things it reports are worth knowing about before you read a status line.
 Every percentage carries the provenance of its denominator, because `64%` and
 `64% (estimated)` are different sentences. And an ETA that cannot be computed

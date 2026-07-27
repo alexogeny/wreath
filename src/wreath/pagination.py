@@ -212,6 +212,10 @@ async def _count(session: Any, query: Select) -> int:
     counter = getattr(session, "count", None)
     if callable(counter):
         return await counter(query)
+    # No `count`: re-project to the primary key and count client-side. That
+    # transfers one row per match, which is why `Session` exposes `count` and
+    # this is reached only by a minimal double -- documented above rather than
+    # refused, because refusing it would break every such double.
     model = _as_model(query.model)
     primary_key = model.__wreath_primary_key__[0].python_name
     count_query = query._replace(

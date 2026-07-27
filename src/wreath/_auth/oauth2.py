@@ -228,5 +228,8 @@ def register_oauth2_login(
             # with the same shape. Without it, `@authorize(permissions=...)`
             # refused every SSO session while admitting the same person's token.
             "permissions": sorted(identity.permissions),
+            # The provider's own expiry, so the session ends when the token
+            # would have rather than when the cookie happens to.
+            "exp": identity.claims.get("exp"),
         }
         return RedirectResponse(post_login_redirect, status=302)

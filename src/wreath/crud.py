@@ -161,6 +161,7 @@ def crud_router(
     prefix: str | None = None,
     operations: Iterable[str] = _DEFAULT_OPERATIONS,
     expose: Iterable[str] = (),
+    fields: Iterable[str] | None = None,
     readonly: Iterable[str] = (),
     exclude: Iterable[str] = (),
     page_size: int = _DEFAULT_PAGE_SIZE,
@@ -174,6 +175,12 @@ def crud_router(
         open_session: ``(request) -> Session`` — a fresh ORM session per request;
             the CRUD handlers close it when done.
         expose: sensitive columns to include in responses anyway (explicit opt-in).
+        fields: the *only* columns to serialize. An allow-list, and the answer to
+            the deny-list's real weakness: `SENSITIVE_FIELD` matches names that
+            look like secrets, and `dob`, `iban`, `recovery_answer`, and `pw` do
+            not look like secrets. Naming what may leave is the only form that
+            stays correct when somebody adds a column. Mutually exclusive with
+            `expose`, which is the deny-list's escape hatch.
         readonly: columns excluded from create/update input (e.g. server-set).
         exclude: columns never serialized at all.
         operations: which of list/retrieve/create/update/delete to generate.
@@ -199,20 +206,38 @@ def crud_router(
 
     sensitive = sensitive_fields(model)
     exposed_sensitive = frozenset(expose)
+    allow_list = None if fields is None else tuple(fields)
+    if allow_list is not None:
+        if exposed_sensitive:
+            raise ValueError(
+                "pass either `fields` (an allow-list of what may leave) or "
+                "`expose` (exceptions to the sensitive-name deny-list), not both"
+            )
+        unknown = [name for name in allow_list if name not in columns]
+        if unknown:
+            raise ValueError(
+                f"{model.__name__} has no column(s) {', '.join(unknown)}; "
+                "`fields` names the columns to serialize"
+            )
     exclude_set = frozenset(exclude)
     readonly_set = frozenset(readonly)
     ops = frozenset(operations)
 
     # What leaves the server: every column minus the excluded, minus sensitive
     # ones that were not explicitly exposed.
-    output_fields = tuple(
-        name for name in columns
-        if name not in exclude_set and (name not in sensitive or name in exposed_sensitive)
+    output_fields = (
+        tuple(name for name in allow_list if name not in exclude_set)
+        if allow_list is not None
+        else tuple(
+            name for name in columns
+            if name not in exclude_set
+            and (name not in sensitive or name in exposed_sensitive)
+        )
     )
     # What the client may set: never the primary key, never read-only, never a
     # sensitive column (set those through a purpose-built endpoint, not CRUD).
     writable_fields = frozenset(
-        name for name in columns
+        name for name in (allow_list if allow_list is not None else columns)
         if name != pk_name and name not in readonly_set and name not in sensitive
     )
 

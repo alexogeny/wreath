@@ -1368,6 +1368,180 @@ def _result_document(result: Result) -> dict[str, Any]:
     }
 
 
+@probe("cedar-set-dedupe", expect=1.0, sizes=(200, 400, 800, 1600),
+       stage="handler", group="web",
+       assumption="Building a Cedar set of n scalars is linear in n.")
+def _cedar_set_dedupe(n: int):
+    """Converting an n-element Cedar set: O(n), not O(n**2).
+
+    A Cedar set is unordered with structural equality, so `_to_cedar_value`
+    drops duplicates. Comparing each candidate against every kept one is
+    quadratic, and this runs on every `is_authorized` call -- once for the
+    context and once per entity attribute -- so a policy carrying a few hundred
+    group ids paid it per authorization, and `/permissions` pays it once per
+    (resource, action) pair. Scalars must dedupe through a hash set; only
+    records and nested sets, which cannot be hashed, may compare pairwise."""
+    from wreath._auth.cedar_engine import _to_cedar_value
+
+    values = [f"group-{index}" for index in range(n)]
+    loops = 5
+    start = time.perf_counter()
+    for _ in range(loops):
+        _to_cedar_value(values, where="probe")
+    return (time.perf_counter() - start) / loops
+
+
+@probe("cedar-set-dedupe-comparisons", expect=0.0, sizes=(200, 400, 800, 1600),
+       stage="handler", group="web", metric="comparisons",
+       assumption="A Cedar set of scalars costs zero structural comparisons.")
+def _cedar_set_dedupe_comparisons(n: int):
+    """The same invariant stated as a count, so it cannot hide under a fast machine.
+
+    Wall time can flatter a quadratic when the constant is small; the number of
+    `_cedar_eq` calls cannot. For an all-scalar set it must be exactly zero at
+    every size."""
+    import wreath._auth.cedar_engine as engine
+
+    values = [f"group-{index}" for index in range(n)]
+    calls = 0
+    original = engine._cedar_eq
+
+    def counting(a: Any, b: Any) -> bool:
+        nonlocal calls
+        calls += 1
+        return original(a, b)
+
+    # Swapping the module's comparison is the point of this probe; the counter
+    # is restored in `finally` so nothing outside it observes the substitution.
+    engine._cedar_eq = counting  # ty: ignore[invalid-assignment]
+    try:
+        start = time.perf_counter()
+        engine._to_cedar_value(values, where="probe")
+        elapsed = time.perf_counter() - start
+    finally:
+        engine._cedar_eq = original
+    return elapsed, {"comparisons": calls}
+
+
+@probe("cedar-set-literal-eval", expect=1.0, sizes=(100, 200, 400, 800),
+       stage="handler", group="web",
+       assumption="Evaluating an n-member Cedar set literal is linear in n.")
+def _cedar_set_literal_eval(n: int):
+    """One authorization against a policy holding an n-member set: O(n).
+
+    A set literal is re-evaluated on every `is_authorized` call, and the
+    evaluator deduplicates it because a Cedar set is unordered with structural
+    equality. Scanning the kept members per candidate is O(n**2), so a policy
+    carrying an allowlist or a tenant list paid that per request -- measured
+    before the fix at 4x per doubling, 2.4ms for 800 members.
+
+    This exercises the shipped native evaluator; `_pure/cedar.py` carries the
+    same algorithm and the differential tests hold their outputs identical."""
+    from wreath.authorization import CedarEntity, CedarPolicies, EntityUid
+
+    members = ", ".join(f'"m{index}"' for index in range(n))
+    policies = CedarPolicies(
+        f"permit(principal, action, resource) when {{ "
+        f"[{members}].contains(principal.tag) }};"
+    )
+    entity = CedarEntity(uid=EntityUid("User", "bo"), attrs={"tag": "m0"})
+    principal = EntityUid("User", "bo")
+    action = EntityUid("Action", "read")
+    resource = EntityUid("Doc", "1")
+
+    loops = 5
+    start = time.perf_counter()
+    for _ in range(loops):
+        decision = policies.is_authorized(
+            principal=principal, action=action, resource=resource,
+            entities=[entity])
+    elapsed = (time.perf_counter() - start) / loops
+    assert decision.allowed, decision
+    return elapsed
+
+
+@probe("authorize-any-clause-expansion", expect=0.0, sizes=(4, 8, 16, 32),
+       stage="routing", group="web", metric="clauses",
+       assumption="Repeated overlapping 'any' checks do not multiply clauses.")
+def _authorize_any_clause_expansion(n: int):
+    """n overlapping mode='any' role checks on one route: bounded clauses.
+
+    Role and permission checks compile to disjunctive normal form, so each
+    `any` check multiplies the clause list by its value count and
+    `merge_requirements` accumulates them across nested routers -- K checks of
+    V values each is V**K. `_eligible` then scans every clause on every
+    request, so an unbounded expansion is a per-request cost, not just startup
+    memory. Checks naming the same values (a role hierarchy repeated on a
+    router and its parent) must collapse as they are folded in rather than
+    multiplying first; distinct values are refused past a ceiling instead."""
+    from wreath import Wreath
+    from wreath._auth.requirements import requirement_for
+    from wreath.authorization import roles
+
+    async def handler(request):
+        return {}
+
+    endpoint = handler
+    for _ in range(n):
+        endpoint = roles("viewer", "editor", "owner", mode="any")(endpoint)
+    app = Wreath()
+    app.get("/probe")(endpoint)
+    requirement = requirement_for(endpoint)
+    app._compile_capabilities([requirement])
+
+    loops = 5
+    start = time.perf_counter()
+    for _ in range(loops):
+        clauses = app._requirement_clauses(requirement)
+    elapsed = (time.perf_counter() - start) / loops
+    return elapsed, {"clauses": len(clauses)}
+
+
+@probe("orm-write-plan-cache", expect=0.0, sizes=(32, 64, 128, 256),
+       stage="handler", group="web", metric="compiles",
+       assumption="Flushing n rows of one shape compiles one statement.")
+def _orm_write_plan_cache(n: int):
+    """Inserting n rows of one model: one compiled statement, not n.
+
+    The read path has compiled once per query *shape* since the compiler
+    existed; the write path rebuilt its INSERT from the model spec for every
+    instance -- the column filter, both `", ".join(...)` generator
+    expressions, and the f-string assembly, once per row."""
+    import asyncio
+    import datetime
+    import sys
+
+    sys.path.insert(0, str(repo_root() / "tests"))
+    from orm.conftest import FakeDatabase, Membership, Post, User  # type: ignore
+
+    from wreath.orm.compiler import _count_write_sql_builds
+    from wreath.orm.registry import Registry
+    from wreath.orm.session import Session
+
+    registry = Registry(
+        FakeDatabase(), [User, Post, Membership], validate_schema="off")
+    created = datetime.datetime(2024, 1, 1)
+
+    async def flush_rows() -> None:
+        session = Session(registry, "write")
+        for index in range(n):
+            session.add(User(id=index, email=f"u{index}@e.x",
+                             name=f"n{index}", created_at=created))
+        async with session.begin():
+            await session.flush()
+
+    loop = asyncio.new_event_loop()
+    try:
+        with _count_write_sql_builds() as builds:
+            start = time.perf_counter()
+            loop.run_until_complete(flush_rows())
+            elapsed = time.perf_counter() - start
+        compiles = builds[0]
+    finally:
+        loop.close()
+    return elapsed, {"compiles": compiles}
+
+
 def _contract(p: Probe) -> dict[str, Any]:
     return {
         "group": p.group,

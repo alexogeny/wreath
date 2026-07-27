@@ -37,10 +37,20 @@ from wreath.middleware import RateLimitMiddleware
 app.add_middleware(RateLimitMiddleware(limit=100, window=60.0))
 ```
 
+`middleware.throttled` counts refusals. A limiter that has silently collapsed
+every caller into one bucket — see the proxy note above — otherwise looks exactly
+like one with nothing to do.
+
 A request the key function cannot name — no client address in the scope, behind
 a socket or an unusual server — lands in one shared bucket rather than skipping
 the limiter. A limiter that lets a request past because it could not identify it
 is not a limiter; use `exempt=` to allow one deliberately.
+
+`CSRFMiddleware(trusted_hosts=[...])` bounds the `Host` header the expected
+origin is derived from. Without it the Host is trusted, so the origin check
+depends on `TrustedHostMiddleware` being separately mounted — a dependency
+between two middlewares that nothing used to state. Naming the hosts here makes
+the CSRF check self-contained.
 
 A preflight is checked against `allow_methods` rather than echoing it: asking
 whether `DELETE` is allowed now gets an answer about `DELETE`. Origins compare

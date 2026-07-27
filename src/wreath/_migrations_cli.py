@@ -23,10 +23,39 @@ from .migrations import (
     detect_single,
     generate_single_plan,
     revert_single_artifact,
+    unpack_named_plan,
 )
 
 
-async def _detect(namespace: argparse.Namespace, application: Any) -> dict[str, Any]:
+async def _pending_passes(connection: Any) -> list[dict[str, Any]]:
+    """Passes still converting a column, so an operator sees them before applying.
+
+    A migration that narrows one of these columns will be refused, and finding
+    that out from a failed deploy is worse than reading it here. Absent ledger
+    table means no passes, which is the ordinary case for most applications.
+    """
+    from ._passes import ledger as _pass_ledger
+
+    table = _pass_ledger.table_name("wreath")
+    exists = await connection.fetchval("SELECT to_regclass($1) IS NOT NULL", table)
+    if not exists:
+        return []
+    entries = await _pass_ledger.all_pending_facts(connection, schema="wreath")
+    return [
+        {
+            "pass": entry.name,
+            "tenant": entry.tenant,
+            "guards": entry.fact,
+            "phase": entry.phase,
+            "holes_open": entry.holes_open,
+        }
+        for entry in entries
+    ]
+
+
+async def _detect(
+    namespace: argparse.Namespace, application: Any, *, with_passes: bool = False
+) -> dict[str, Any]:
     registries = getattr(application, "_orm_registries", {})
     registry = registries.get(namespace.database)
     if registry is None:
@@ -45,53 +74,23 @@ async def _detect(namespace: argparse.Namespace, application: Any) -> dict[str, 
         connection = await database.acquire(workload)
         try:
             detection = await detect_single(registry, connection)
+            # `detect` answers "is there drift"; `check` answers "is it safe to
+            # apply". Pending passes belong to the second question, so only that
+            # one pays for the ledger read.
+            passes = await _pending_passes(connection) if with_passes else []
         finally:
             await database.release(workload, connection)
     finally:
         await database.stop()
     return {
         "current": detection.current,
+        "pending_passes": passes,
         "operation_count": detection.diff.operation_count,
         "desired_fingerprint": detection.desired_fingerprint.hex(),
         "actual_fingerprint": detection.actual_fingerprint.hex(),
     }
 
 
-def _unpack_named_plan(tape: bytes) -> list[dict[str, Any]]:
-    if len(tape) < 12 or tape[:4] != b"WMP1":
-        raise ValueError("native named migration plan is invalid")
-    count = int.from_bytes(tape[8:12], "little")
-    offset = 12
-    operations: list[dict[str, Any]] = []
-    action_names = {1: "add", 2: "drop", 3: "alter"}
-    kind_names = {1: "table", 2: "column", 3: "constraint", 4: "index"}
-    for _ in range(count):
-        if len(tape) - offset < 20:
-            raise ValueError("native named migration plan is truncated")
-        action, kind, *lengths = struct.unpack_from("<IIHHHHHH", tape, offset)
-        offset += 20
-        if lengths[5] != 0:
-            raise ValueError("native named migration plan has unsupported flags")
-        values: list[str] = []
-        for length in lengths[:5]:
-            if length > len(tape) - offset:
-                raise ValueError("native named migration plan is truncated")
-            values.append(tape[offset : offset + length].decode("utf-8"))
-            offset += length
-        operations.append(
-            {
-                "action": action_names.get(action, f"unknown-{action}"),
-                "kind": kind_names.get(kind, f"unknown-{kind}"),
-                "schema": values[0],
-                "table": values[1],
-                "name": values[2],
-                "before": values[3],
-                "after": values[4],
-            }
-        )
-    if offset != len(tape):
-        raise ValueError("native named migration plan has trailing bytes")
-    return operations
 
 
 def _unpack_sql_tape(tape: bytes) -> list[dict[str, Any]]:
@@ -174,7 +173,7 @@ async def _generate(namespace: argparse.Namespace, application: Any) -> dict[str
             await database.release(workload, connection)
     finally:
         await database.stop()
-    operations = _unpack_named_plan(generation.plan.tape)
+    operations = unpack_named_plan(generation.plan.tape)
     statements = _unpack_sql_tape(generation.sql.tape)
     payload: dict[str, Any] = {
         "format": "WMP1+WMS1",
@@ -338,6 +337,7 @@ async def _status(namespace: argparse.Namespace, application: Any) -> dict[str, 
                     LIMIT 1""",
                 schema,
             )
+        pending_passes = await _pending_passes(connection)
     finally:
         await connection.close()
     history_checksum = bytes(history_tip[0]) if history_tip is not None else None
@@ -356,6 +356,7 @@ async def _status(namespace: argparse.Namespace, application: Any) -> dict[str, 
         "artifacts_match_code": chain.target_fingerprint == desired,
         "history_matches_artifacts": history_matches,
         "history_present": history_tip is not None,
+        "pending_passes": pending_passes,
         "migration_count": chain.migration_count,
         "chain_checksum": chain.checksum.hex(),
         "history_checksum": history_checksum.hex() if history_checksum else None,
@@ -395,9 +396,10 @@ def execute(
     exit_code = 0
     if namespace.migration_action in {"detect", "check"}:
         application = load_application(namespace.target, factory=namespace.factory)
-        payload = asyncio.run(_detect(namespace, application))
+        checking = namespace.migration_action == "check"
+        payload = asyncio.run(_detect(namespace, application, with_passes=checking))
         title = "schema is current" if payload["current"] else "schema drift detected"
-        if namespace.migration_action == "check" and not payload["current"]:
+        if checking and not payload["current"]:
             exit_code = 1
     elif namespace.migration_action == "generate":
         application = load_application(namespace.target, factory=namespace.factory)
@@ -428,9 +430,17 @@ def execute(
         print(title)
         for key, value in payload.items():
             if key not in {
-                "current", "migration_id", "operations", "statements", "review_sql"
+                "current", "migration_id", "operations", "statements", "review_sql",
+                "pending_passes",
             }:
                 print(f"  {key.replace('_', ' ')}: {value}")
+        for entry in payload.get("pending_passes", []):
+            who = entry["pass"] if not entry["tenant"] else f"{entry['pass']}[{entry['tenant']}]"
+            note = f", {entry['holes_open']} hole(s)" if entry["holes_open"] else ""
+            print(
+                f"  pending pass: {who} guards {entry['guards']} "
+                f"({entry['phase']}{note}) -- a migration narrowing it is refused"
+            )
         for operation in payload.get("operations", []):
             target = ".".join(
                 part for part in (

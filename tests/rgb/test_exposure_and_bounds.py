@@ -123,8 +123,10 @@ class TestIdempotencyBodyCap:
         class _State:
             idempotency_key = "k"
 
+            def get(self, name, default=None):
+                return getattr(self, name, default)
+
         class _Request:
-            _state = True
             state = _State()
 
         big = Response(b"x" * 4096, media_type=b"application/octet-stream")
@@ -144,8 +146,10 @@ class TestIdempotencyBodyCap:
         class _State:
             idempotency_key = "k"
 
+            def get(self, name, default=None):
+                return getattr(self, name, default)
+
         class _Request:
-            _state = True
             state = _State()
 
         await middleware.after(_Request(), Response(b"small"))

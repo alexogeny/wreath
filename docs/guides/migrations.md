@@ -250,8 +250,10 @@ fixed number of Python orchestration steps, never one call per migration operati
 2. begin a transaction and acquire a schema-specific advisory transaction lock;
 3. bootstrap central `wreath_migrations.history` and verify its parent/source tip;
 4. stream the locked live catalog into WMI1 and verify the artifact source;
-5. execute one metal-built PostgreSQL DDL block;
-6. stream the catalog again, require the target fingerprint, append history, and
+5. refuse any column this artifact narrows that a chunked pass is still
+   converting (see below);
+6. execute one metal-built PostgreSQL DDL block;
+7. stream the catalog again, require the target fingerprint, append history, and
    commit—or roll the whole transaction back.
 
 Any `MANUAL` operation makes the artifact ineligible for application. Error
@@ -276,6 +278,30 @@ are still being implemented and are emitted as `MANUAL`; changing an existing
 foreign key's action is likewise `MANUAL` (drop and recreate it). So `detect` is
 not yet a complete Alembic replacement and must not be used as the sole
 production drift gate.
+
+### A pass still converting a column blocks the migration that narrows it
+
+Step 5 is the only refusal that reads state outside the catalog. A
+[chunked pass](chunked-passes.md) converting `treks.grade` publishes a fact when
+its gate verifies every row is done; until then, an artifact that drops that
+column or changes its type is rejected before any DDL runs, inside the same
+transaction as the other four checks — so a refused narrowing leaves nothing
+behind.
+
+The reason this is a refusal rather than a warning: the DDL *succeeds*. Drop the
+column while the walk is at row four million and PostgreSQL does exactly what
+you asked, the migration records as applied, and the rows behind the cursor are
+simply gone. There is no error to notice.
+
+```bash
+wreath migrations check app:app --database main
+#   pending pass: normalize_grades guards column:app.treks.grade
+#     (walking) -- a migration narrowing it is refused
+```
+
+A database that has never run a pass has no ledger table, and that is read as
+"nothing is converting" rather than as an error — so this costs nothing to
+applications that do not use passes.
 
 ## Downgrade an artifact
 

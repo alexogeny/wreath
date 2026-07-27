@@ -67,6 +67,15 @@ async def admin(request) -> dict:
     return {"ok": True}
 ```
 
+Both take `mode="any"` to accept *one* of several values, where the default
+`mode="all"` requires every one. Keep the `any` checks few: they compile to a
+list of capability combinations, so each one multiplies that list by its number
+of values, and the checks accumulate down a chain of nested routers. Wreath
+refuses at declaration once the combinations pass a ceiling rather than
+expanding them — the alternative is an application that starts slowly and then
+matches every route slowly. Two `any` checks of three values each is fine; a
+dozen is a policy question, and the answer is Cedar.
+
 When your rules grow beyond a simple check, write them in Cedar. Wreath ships
 its own Cedar policy engine — no dependency, no service, evaluated natively —
 and `CedarPolicies` parses your policy set once at startup, where a syntax

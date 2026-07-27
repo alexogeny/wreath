@@ -589,6 +589,16 @@ def _update(world: World, text: str, args: tuple[Any, ...]) -> str:
     touched = [row for row in world.rows if evaluate(match.group("where"), row, args)]
     for assignment in match.group("set").split(","):
         column, _, expression = assignment.partition("=")
+        expression = expression.strip()
         for row in touched:
-            row[column.strip()] = _value(expression, args) if "$" in expression else expression
+            if "$" in expression:
+                row[column.strip()] = _value(expression, args)
+            else:
+                # `SET grade_text = 'moderate'` really stores `moderate`. Keeping
+                # the quotes would make every assertion about a converted value
+                # test the fake's spelling rather than the pass's behaviour.
+                try:
+                    row[column.strip()] = _literal_value(expression)
+                except ValueError:
+                    row[column.strip()] = expression
     return f"UPDATE {len(touched)}"

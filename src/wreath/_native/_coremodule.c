@@ -104,6 +104,12 @@ static PyMethodDef core_methods[] = {
      "max_part_bytes=-1) -> list[(headers, data)]\nA negative limit means no limit."},
     {"json_dumps", wreath_json_dumps, METH_O,
      "json_dumps(obj) -> bytes\nSerialize to compact UTF-8 JSON."},
+    {"msgpack_dumps", wreath_msgpack_dumps, METH_O,
+     "msgpack_dumps(obj) -> bytes\nSerialize to MessagePack."},
+    {"sse_frame", wreath_sse_frame, METH_VARARGS,
+     "sse_frame(comment, name, ident, retry, data) -> bytes\nFrame one SSE event."},
+    {"json_configure", wreath_json_configure, METH_VARARGS,
+     "json_configure(temporal_types, format_iso) -> None"},
     {"json_loads", wreath_json_loads, METH_O,
      "json_loads(data) -> object\n"
      "Parse JSON from str/bytes/bytearray with stdlib json.loads semantics."},

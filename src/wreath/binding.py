@@ -1182,8 +1182,22 @@ def compile_binder(
             registry_name, registry = compile_session_binding(registries, marker)
             sessions.append((name, (registry_name, marker.workload), registry, marker.workload))
 
-    async def bound(request: Request) -> Any:
-        kwargs: dict[str, Any] = {}
+    # Which machinery this handler actually needs is known here, not per
+    # request. A handler that asks for no connection, session, or dependency
+    # was still paying for all of it: four container allocations, a try/finally,
+    # an unconditional `await _release([], [])`, and a `reversed()` over an empty
+    # list. Measured at ~1.0us on a ~2.0us request (benchmarks/bench_scalar_
+    # binding.py), against a ~0.06us floor -- larger than the scalar conversion
+    # it surrounds, which is itself below that floor.
+    needs_resources = bool(
+        connections or sessions or resolvers or side_effect_resolvers
+    )
+    needs_body = bool(
+        form_specs or file_specs or form_model_tape is not None or body_spec is not None
+    )
+
+    def _extract_scalars(request: Request, kwargs: dict[str, Any]) -> None:
+        """Path, query, header, and cookie parameters. Synchronous by nature."""
         for name, alias, annotation in path_specs:
             kwargs[name] = _convert_scalar(
                 annotation, request.path_params[alias], ("path", alias)
@@ -1235,6 +1249,9 @@ def compile_binder(
                     kwargs[name] = default
                 else:
                     kwargs[name] = _convert_scalar(annotation, raw, ("cookie", alias))
+
+    async def _decode_body(request: Request, kwargs: dict[str, Any]) -> None:
+        """Multipart, form-model, and JSON body parameters."""
         if form_specs or file_specs:
             await form_tape.decode_multipart_validation_tape(request, kwargs)
         if form_model_tape is not None:
@@ -1246,6 +1263,20 @@ def compile_binder(
                 kwargs[name] = body_validator.decode_json_validation_tape(body, ("body",))
             except ValueError as exc:
                 raise BadRequest(f"invalid JSON body: {exc}") from None
+
+    async def bound_simple(request: Request) -> Any:
+        """No connection, session, or dependency: nothing to lease or release."""
+        kwargs: dict[str, Any] = {}
+        _extract_scalars(request, kwargs)
+        if needs_body:
+            await _decode_body(request, kwargs)
+        return await handler(request, **kwargs)
+
+    async def bound(request: Request) -> Any:
+        kwargs: dict[str, Any] = {}
+        _extract_scalars(request, kwargs)
+        if needs_body:
+            await _decode_body(request, kwargs)
         cache: dict[Any, Any] = {}
         cleanups: list[Any] = []
         borrowed: list[tuple[Any, Any, str]] = []
@@ -1316,9 +1347,10 @@ def compile_binder(
                 else:
                     await generator.aclose()
 
-    bound.__name__ = getattr(handler, "__name__", "bound")
-    bound.__qualname__ = getattr(handler, "__qualname__", "bound")
-    return bound
+    selected = bound if needs_resources else bound_simple
+    selected.__name__ = getattr(handler, "__name__", "bound")
+    selected.__qualname__ = getattr(handler, "__qualname__", "bound")
+    return selected
 
 
 async def _release(borrowed: list, opened: list) -> None:

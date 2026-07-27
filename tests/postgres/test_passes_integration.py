@@ -271,3 +271,105 @@ async def test_a_requeued_unit_survives_a_round_trip_through_jsonb(database):
 
     status = await walk.status(database)
     assert status.pending == 1
+
+
+# --- the terminal gate --------------------------------------------------------
+
+
+async def test_validate_constraint_takes_only_share_update_exclusive(database):
+    """The claim §10.4 rests on, and the one a fake driver can never settle.
+
+    ``VALIDATE CONSTRAINT`` is worth reaching for only because it scans without
+    blocking reads or writes. If it took ``ACCESS EXCLUSIVE`` the whole argument
+    would invert: verification would be the outage the pass spent an hour of
+    chunking to avoid.
+    """
+    await _apply(
+        database,
+        f"DROP TABLE IF EXISTS {_TABLE} CASCADE;\n"
+        f'CREATE SCHEMA IF NOT EXISTS "{_SCHEMA}";\n'
+        f"CREATE TABLE {_TABLE} (key text PRIMARY KEY, "
+        "expires timestamptz NOT NULL, converted text);\n"
+        f"INSERT INTO {_TABLE} (key, expires, converted) "
+        "VALUES ('a', now(), 'x'), ('b', now(), 'y');\n",
+    )
+    connection = await database.acquire("write")
+    try:
+        await connection.execute(
+            f"ALTER TABLE {_TABLE} ADD CONSTRAINT converted_present "
+            "CHECK (converted IS NOT NULL) NOT VALID"
+        )
+        async with connection.transaction() as tx:
+            await tx.execute(f"ALTER TABLE {_TABLE} VALIDATE CONSTRAINT converted_present")
+            modes = await tx.fetch(
+                "SELECT mode FROM pg_locks l JOIN pg_class c ON c.oid = l.relation "
+                "WHERE c.relname = 'replays' AND l.pid = pg_backend_pid()"
+            )
+        held = {row["mode"] for row in modes}
+        assert "ShareUpdateExclusiveLock" in held
+        assert "AccessExclusiveLock" not in held
+    finally:
+        await connection.execute(
+            f"ALTER TABLE {_TABLE} DROP CONSTRAINT IF EXISTS converted_present"
+        )
+        await database.release("write", connection)
+
+
+async def test_a_constraint_that_does_not_hold_names_the_offending_row(database):
+    # The other half of why the database is the right verifier: when it says no
+    # it says which row, which a hand-written SELECT would have to be asked for
+    # separately and usually is not.
+    from wreath._passes.gate import Constraint
+
+    await _apply(
+        database,
+        f"DROP TABLE IF EXISTS {_TABLE} CASCADE;\n"
+        f'CREATE SCHEMA IF NOT EXISTS "{_SCHEMA}";\n'
+        f"CREATE TABLE {_TABLE} (key text PRIMARY KEY, "
+        "expires timestamptz NOT NULL, converted text);\n"
+        f"INSERT INTO {_TABLE} (key, expires, converted) "
+        "VALUES ('a', now(), 'x'), ('b', now(), NULL);\n",
+    )
+    connection = await database.acquire("write")
+    try:
+        verdict = await Constraint("converted_present", "converted IS NOT NULL").check(
+            connection, walk=_purge()
+        )
+        assert verdict.ok is False
+        # A logic error, not a could-not-run: this must not be retried.
+        assert verdict.transient is False
+        assert "does not hold" in verdict.detail
+    finally:
+        await connection.execute(
+            f"ALTER TABLE {_TABLE} DROP CONSTRAINT IF EXISTS converted_present"
+        )
+        await database.release("write", connection)
+
+
+async def test_a_bucketed_walk_agrees_with_date_trunc_on_a_real_server(database):
+    """Whether Python's bucket boundaries match the database's.
+
+    Deliberately an integration test rather than a claim in the guide: the
+    ordering of ``date_trunc`` against ``AT TIME ZONE`` is reasoned from
+    documented semantics everywhere else in this codebase, and reasoning is not
+    measurement. Auckland is the interesting zone because its transitions land
+    on dates the northern hemisphere never exercises.
+    """
+    connection = await database.acquire("write")
+    try:
+        for moment in (
+            datetime.datetime(2026, 4, 5, 3, tzinfo=datetime.UTC),
+            datetime.datetime(2026, 9, 27, 15, tzinfo=datetime.UTC),
+            datetime.datetime(2026, 7, 27, 12, tzinfo=datetime.UTC),
+        ):
+            from wreath.temporal import Day
+
+            theirs = await connection.fetchval(
+                "SELECT (date_trunc('day', $1::timestamptz AT TIME ZONE "
+                "'Pacific/Auckland') AT TIME ZONE 'Pacific/Auckland')",
+                moment,
+            )
+            ours = Day.floor(moment, "Pacific/Auckland")
+            assert theirs == ours.astimezone(datetime.UTC), moment
+    finally:
+        await database.release("write", connection)

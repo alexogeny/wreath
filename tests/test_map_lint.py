@@ -163,3 +163,82 @@ def test_main_reports_failure_and_success(fake_repo: Path, monkeypatch: pytest.M
     (fake_repo / "src" / "wreath" / "gadgets.py").write_text("")
     assert map_lint.main([]) == 1
     assert map_lint.main(["--format", "json"]) == 1
+
+
+# -- MAP008: sanitizer builds mirror the real extensions ---------------------
+
+
+def _write_builds(root: Path, sanitizer_sources: str) -> None:
+    """A repo whose real `_core` compiles two files, plus one sanitizer build."""
+    (root / "setup.py").write_text(
+        'Extension(\n'
+        '    "wreath._native._core",\n'
+        '    sources=["src/wreath/_native/a.c", "src/wreath/_native/b.c"],\n'
+        '    depends=["src/wreath/_native/wreathcore.h"],\n'
+        ')\n'
+    )
+    sanitizers = root / "tools" / "sanitizers"
+    sanitizers.mkdir(parents=True, exist_ok=True)
+    (sanitizers / "setup_core.py").write_text(sanitizer_sources)
+
+
+def test_sanitizer_build_matching_the_extension_is_clean(fake_repo: Path) -> None:
+    _write_builds(
+        fake_repo,
+        'SOURCES = ("a.c", "b.c")\n'
+        'Extension("wreath._native._core", sources=[P / n for n in SOURCES])\n',
+    )
+    assert "MAP008" not in _codes(map_lint.scan(fake_repo))
+
+
+def test_sanitizer_build_omitting_a_source_is_caught(fake_repo: Path) -> None:
+    """The drift that hid cedar.c, jose.c, and scheduler.c from ASan."""
+    _write_builds(
+        fake_repo,
+        'SOURCES = ("a.c",)\n'
+        'Extension("wreath._native._core", sources=[P / n for n in SOURCES])\n',
+    )
+    findings = [f for f in map_lint.scan(fake_repo) if f.code == "MAP008"]
+    assert len(findings) == 1
+    assert "b.c" in findings[0].message
+
+
+def test_sanitizer_build_may_add_sources(fake_repo: Path) -> None:
+    """Only omissions matter; an extra test shim is legitimate."""
+    _write_builds(
+        fake_repo,
+        'SOURCES = ("a.c", "b.c", "shim.c")\n'
+        'Extension("wreath._native._core", sources=[P / n for n in SOURCES])\n',
+    )
+    assert "MAP008" not in _codes(map_lint.scan(fake_repo))
+
+
+def test_depends_entries_are_not_treated_as_sources(fake_repo: Path) -> None:
+    """`depends` names headers and #included C, which must not be compiled twice.
+
+    The reactor extension lists four `.c` files there; requiring the sanitizer
+    to compile them would break its build rather than protect it.
+    """
+    (fake_repo / "setup.py").write_text(
+        'Extension(\n'
+        '    "wreath._native._reactor",\n'
+        '    sources=["src/wreath/_native/_reactormodule.c"],\n'
+        '    depends=["src/wreath/_native/reactor_ring.c"],\n'
+        ')\n'
+    )
+    sanitizers = fake_repo / "tools" / "sanitizers"
+    sanitizers.mkdir(parents=True, exist_ok=True)
+    (sanitizers / "setup_reactor.py").write_text(
+        'Extension("wreath._native._reactor", sources=[P / "_reactormodule.c"])\n'
+    )
+    assert "MAP008" not in _codes(map_lint.scan(fake_repo))
+
+
+def test_sanitizer_building_an_unknown_extension_is_caught(fake_repo: Path) -> None:
+    _write_builds(
+        fake_repo,
+        'Extension("wreath._native._ghost", sources=[P / "a.c"])\n',
+    )
+    findings = [f for f in map_lint.scan(fake_repo) if f.code == "MAP008"]
+    assert len(findings) == 1
+    assert "does not define" in findings[0].message

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import threading
 from collections.abc import Awaitable, Callable, Iterable
 from time import monotonic_ns as _monotonic_ns
 from typing import Any, Literal, cast
@@ -165,7 +167,9 @@ def _make_dependency_capturer(scope: Any, rule: tuple[Any, int]) -> Any:
 #: OpenAPI document. Anything not named here -- including the default,
 #: "production" -- gets neither route and no existence leak.
 #: Most distinct access clauses one route may compile to. See
-#: `_requirement_clauses`.
+#: `_requirement_clauses`. Every clause is scanned on every request by
+#: `_eligible`, so this bounds request-path work as well as declaration-time
+#: memory.
 MAX_ACCESS_CLAUSES = 64
 
 NON_PRODUCTION_ENVIRONMENTS: tuple[str, ...] = (
@@ -259,6 +263,7 @@ class Wreath:
         "_authorizer",
         "_capabilities",
         "_classify",
+        "_compile_lock",
         "_crud_enabled",
         "background_errors",
         "_dirty",
@@ -363,6 +368,7 @@ class Wreath:
         self._exception_handlers: dict[type[Exception], ExceptionHandler] = {}
         self._status_handlers: dict[int, ExceptionHandler] = {}
         self._dirty = False
+        self._compile_lock = threading.Lock()
         self._crud_enabled = False
         #: Background tasks that raised after their response was sent. Nothing
         #: can be reported to the client at that point, so this is the only
@@ -1415,6 +1421,19 @@ class Wreath:
         return ProblemResponse(status=500, detail="Internal Server Error")
 
     def _compile_routes(self) -> None:
+        # Guarded because this is reachable from the request path (`__call__`
+        # compiles lazily when the route table is dirty). Under asyncio the body
+        # never awaits, so two requests cannot interleave inside it -- but
+        # AGENTS.md treats free-threading as a separately tested execution mode,
+        # and there two threads genuinely can. The lock costs one uncontended
+        # acquire on the rare compile, and nothing at all on the steady state,
+        # where `_dirty` is already False.
+        with self._compile_lock:
+            if not self._dirty:
+                return          # another caller compiled while we waited
+            self._compile_routes_locked()
+
+    def _compile_routes_locked(self) -> None:
         binding_specs = self._application_image.binding_specs()
         router = CompiledRouter(self._routing)
         app_middleware = tuple(
@@ -1690,20 +1709,37 @@ class Wreath:
                         combined |= mask
                     clauses = [clause | combined for clause in clauses]
                 else:
+                    # Disjunctive normal form: every `any` check multiplies the
+                    # clause list by its value count, so K such checks of V
+                    # values each produce V**K clauses. That is what DNF costs
+                    # -- deduplication cannot reduce it when the values are
+                    # distinct -- and the cost is not only declaration-time
+                    # memory: `_eligible` scans every clause on every request,
+                    # so an unbounded expansion silently turns route matching
+                    # into a per-request linear scan of that same product.
+                    #
+                    # Refused rather than expanded, because an app that would
+                    # take minutes to start and then match routes slowly is
+                    # worse than one that names the problem at declaration.
+                    # Checked *before* the multiplication, not after it: a dozen
+                    # checks would otherwise have to materialise millions of
+                    # clauses in order to discover it had too many.
+                    product = len(clauses) * len(masks)
+                    if product > MAX_ACCESS_CLAUSES:
+                        raise ValueError(
+                            f"this route's authorization expands to {product} "
+                            f"clauses (limit {MAX_ACCESS_CLAUSES}). Combining "
+                            "several mode='any' checks multiplies them, and they "
+                            "accumulate across nested routers; express the "
+                            "requirement as one check, or as a Cedar policy."
+                        )
                     clauses = [clause | mask for clause in clauses for mask in masks]
-        distinct = tuple(dict.fromkeys(clauses))
-        if len(distinct) > MAX_ACCESS_CLAUSES:
-            # `mode="any"` multiplies: k checks of n values each is n**k
-            # clauses, and every one of them is a row the router compares on
-            # every request. Refused at compile time, where the declaration that
-            # caused it is still in view.
-            raise ValueError(
-                f"this route's authorization expands to {len(distinct)} clauses "
-                f"(limit {MAX_ACCESS_CLAUSES}). Combining several mode='any' "
-                "checks multiplies them; express the requirement as one check, or "
-                "as a Cedar policy."
-            )
-        return distinct
+                    # Deduplicate as we go rather than only at the end: two
+                    # checks that share values (a role hierarchy repeated on a
+                    # router and its parent) collapse here instead of
+                    # multiplying first.
+                    clauses = list(dict.fromkeys(clauses))
+        return tuple(dict.fromkeys(clauses))
 
     def _identity_mask(self, identity: Identity | None) -> int:
         if identity is None:
@@ -1987,6 +2023,12 @@ class Wreath:
                     if self._supervisor is not None:
                         await self._supervisor.stop()
                         self._supervisor = None
+                    # App-scoped dependencies first, as on the ordinary shutdown
+                    # path: a startup handler may have opened one before the
+                    # failure, and it was being left open along with whatever it
+                    # holds -- a connection, a file, a client.
+                    with contextlib.suppress(Exception):
+                        await self._app_scope.aclose()
                     for client in reversed(started_clients):
                         await client.close()
                     for database in reversed(started_databases):

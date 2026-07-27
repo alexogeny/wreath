@@ -103,6 +103,7 @@ def schema_sql(schema: str) -> str:
         "  cycle_started timestamptz,\n"
         "  driven_at timestamptz,\n"
         "  last_drive_error text,\n"
+        "  guards text,\n"
         "  verified_at timestamptz,\n"
         "  verified_fact text,\n"
         "  last_error text,\n"
@@ -126,8 +127,8 @@ _COLUMNS = (
     "name, tenant, phase, cursor, ceiling, keyspace_from, pending, units_done, "
     "rows_done, denominator, denominator_kind, chunk_limit, paced_reason, "
     "window_started, window_rows, window_units, started_at, last_advance, "
-    "cycle_started, driven_at, last_drive_error, verified_at, verified_fact, "
-    "last_error"
+    "cycle_started, driven_at, last_drive_error, guards, verified_at, "
+    "verified_fact, last_error"
 )
 
 _HOLE_COLUMNS = "name, tenant, cursor_from, cursor_to, attempts, error, predicate, failed_at"
@@ -167,6 +168,14 @@ class LedgerRow:
     now: Any = None
     #: How many chunks of this pass were given up on and not yet cleared.
     holes_open: int = 0
+    #: The fact this pass *claims* it will establish, written when the row is
+    #: seeded. Distinct from ``verified_fact``, which is written only once
+    #: verification passes: a migration asking "may I narrow this column?"
+    #: has to tell "no pass guards it" apart from "a pass guards it and has
+    #: not finished", and those are the same answer if the claim is recorded
+    #: only at publication. Last in the field order, and defaulted, so every
+    #: existing construction of this row keeps working.
+    guards: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,11 +255,12 @@ def row_from_record(record: Any) -> LedgerRow:
         cycle_started=field("cycle_started", 18),
         driven_at=field("driven_at", 19),
         last_drive_error=field("last_drive_error", 20),
-        verified_at=field("verified_at", 21),
-        verified_fact=field("verified_fact", 22),
-        last_error=field("last_error", 23),
-        now=field("now", 24),
-        holes_open=int(field("holes_open", 25) or 0),
+        guards=field("guards", 21),
+        verified_at=field("verified_at", 22),
+        verified_fact=field("verified_fact", 23),
+        last_error=field("last_error", 24),
+        now=field("now", 25),
+        holes_open=int(field("holes_open", 26) or 0),
     )
 
 
@@ -291,15 +301,26 @@ class Ledger:
     def schema_sql(self) -> str:
         return schema_sql(self._schema)
 
-    async def seed(self, executor: Any, *, chunk_limit: int) -> None:
-        """Create this pass's row if it is not already there. Idempotent."""
+    async def seed(
+        self, executor: Any, *, chunk_limit: int, guards: str | None = None
+    ) -> None:
+        """Create this pass's row if it is not already there. Idempotent.
+
+        *guards* is the fact this pass's gate will publish, recorded here rather
+        than at publication because that is the only way a migration can tell
+        "nothing guards this column" from "something guards it and has not
+        finished". ``DO UPDATE`` keeps it current when a redeploy changes the
+        declaration, without disturbing a walk already in progress.
+        """
         await executor.execute(
-            f"INSERT INTO {self._table} (name, tenant, phase, chunk_limit, started_at) "
-            "VALUES ($1, $2, 'walking', $3, clock_timestamp()) "
-            "ON CONFLICT (name, tenant) DO NOTHING",
+            f"INSERT INTO {self._table} "
+            "(name, tenant, phase, chunk_limit, started_at, guards) "
+            "VALUES ($1, $2, 'walking', $3, clock_timestamp(), $4) "
+            "ON CONFLICT (name, tenant) DO UPDATE SET guards = EXCLUDED.guards",
             self._name,
             self._tenant,
             int(chunk_limit),
+            guards,
         )
 
     async def read(self, executor: Any) -> LedgerRow | None:
@@ -716,6 +737,74 @@ async def published_facts(
             )
         )
     return out
+
+
+@dataclass(frozen=True, slots=True)
+class PendingFact:
+    """A fact some pass claims and has not yet established."""
+
+    name: str
+    tenant: str
+    fact: str
+    phase: str
+    holes_open: int
+
+
+async def all_pending_facts(executor: Any, *, schema: str) -> list[PendingFact]:
+    """Every fact currently claimed and unpublished, for an operator's overview.
+
+    Separate from :func:`pending_facts` rather than an empty-filter special case:
+    that one is asked "are *these* columns safe" and an empty candidate list
+    honestly means "nothing to check", so making it mean "everything" would put
+    the two readings one typo apart.
+    """
+    table = table_name(schema)
+    holes = holes_table_name(schema)
+    records = await executor.fetch(
+        f"SELECT name, tenant, guards, phase, "
+        f"(SELECT count(*) FROM {holes} h WHERE h.name = p.name "
+        f"AND h.tenant = p.tenant) AS holes_open "
+        f"FROM {table} p WHERE verified_at IS NULL AND guards IS NOT NULL "
+        "ORDER BY name, tenant"
+    )
+    return [_pending_from_record(record) for record in records or ()]
+
+
+def _pending_from_record(record: Any) -> PendingFact:
+    field = _reader(record)
+    return PendingFact(
+        name=field("name", 0),
+        tenant=field("tenant", 1, ""),
+        fact=field("guards", 2, ""),
+        phase=field("phase", 3, ""),
+        holes_open=int(field("holes_open", 4) or 0),
+    )
+
+
+async def pending_facts(
+    executor: Any, *, schema: str, facts: tuple[str, ...] = ()
+) -> list[PendingFact]:
+    """Facts claimed by a pass that has not published them.
+
+    The inverse of :func:`published_facts`, and the half a migration actually
+    needs: it is asking whether it may narrow a column, and the dangerous answer
+    is not "no pass ever published this" but "a pass is *still working on it*".
+    Restricting to *facts* keeps the read proportional to the migration rather
+    than to the ledger.
+    """
+    if not facts:
+        return []
+    table = table_name(schema)
+    holes = holes_table_name(schema)
+    records = await executor.fetch(
+        f"SELECT name, tenant, guards, phase, "
+        f"(SELECT count(*) FROM {holes} h WHERE h.name = p.name "
+        f"AND h.tenant = p.tenant) AS holes_open "
+        f"FROM {table} p WHERE verified_at IS NULL AND guards = ANY($1) "
+        "ORDER BY name, tenant",
+        list(facts),
+    )
+    return [_pending_from_record(record) for record in records or ()]
 
 
 async def read_all(executor: Any, *, schema: str, name: str | None = None) -> list[LedgerRow]:

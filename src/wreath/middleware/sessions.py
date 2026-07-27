@@ -160,6 +160,11 @@ class SessionMiddleware:
             # The decoded payload is the serialization to diff against, so a
             # request that does not touch the session pays one JSON pass, not
             # two. `after` still serializes once to detect a change.
+            #
+            # Byte-for-byte, deliberately: a cookie whose bytes do not round-trip
+            # -- one minted by another encoder, or with its keys in another order
+            # -- looks changed and is reissued with the same content and a fresh
+            # signature. `tests/test_client_sessions_forms.py` pins that.
             session, baseline = loaded
         request.state.session = session
         request.state._session_loaded = baseline

@@ -170,6 +170,34 @@ async def test_halt_stops_at_the_hole_and_runs_nothing_after_it(database, world)
     assert len(world.rows) == 9
 
 
+async def test_retry_can_clear_a_hole_on_a_halted_pass(database, world):
+    """The default failure policy has to have a way out of it.
+
+    ``halt`` parks the cursor *before* its hole and stops the pass. Every later
+    shift then sees a phase that is not ``walking`` and declines to run -- so
+    without a way to lift that, the chunk is never re-attempted, the hole is
+    never cleared, and the terminal gate it bars is unreachable for the life of
+    the pass. ``halt`` would be a trap rather than a policy, and it is the
+    default.
+    """
+    walk = purge_pass(on_chunk_failure="halt")
+    world.before = _boom_on_delete
+    await walk.run(database, sleep=_nap)
+
+    status = await walk.status(database)
+    assert status.phase == "blocked"
+    assert status.holes_open == 1
+
+    world.before = None
+    assert await walk.retry(database) == 1
+    await walk.run(database, sleep=_nap)
+
+    cleared = await walk.status(database)
+    assert cleared.holes_open == 0
+    assert cleared.gate_barred is False
+    assert len(world.rows) == 0
+
+
 async def test_a_blocked_pass_is_not_retried_by_the_next_shift(database, world):
     walk = purge_pass(on_chunk_failure="halt")
     world.before = _boom_on_delete

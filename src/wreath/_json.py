@@ -8,10 +8,12 @@ or bytearray.
 
 Dates, times, datetimes, and durations encode as ISO-8601 strings, so a handler
 never writes ``.isoformat()`` by hand and two endpoints cannot spell the same
-moment differently. That happens on a **retry**, not on the way in: the encoder
-is tried as-is first, and only a ``TypeError`` triggers the walk that rewrites
-temporal values. A payload with no temporal values therefore pays no walk at
-all — the cost lands only on the payloads that need it.
+moment differently. An object that defines ``__jsonable__`` is asked how it
+would like to be encoded, which is how a result type goes back from a handler
+without the caller unwrapping it first. Both happen on a **retry**, not on the
+way in: the encoder is tried as-is first, and only a ``TypeError`` triggers the
+walk. A payload the encoders already understand therefore pays no walk at all —
+the cost lands only on the payloads that need it.
 
 What it does cost every JSON response is **one Python frame**, because this
 facade is now a function rather than a direct binding to the encoder. It adds
@@ -33,13 +35,34 @@ from ._native import _core
 if _core is not None:
     _dumps = _core.json_dumps
     loads = _core.json_loads
+    _configure = _core.json_configure
 else:
+    from ._pure.json import json_configure as _configure
     from ._pure.json import json_dumps as _dumps
     from ._pure.json import json_loads as loads
 
 
+def _install_temporal() -> None:
+    """Let whichever encoder is selected render temporal values inline.
+
+    Deferred to first use rather than done at import: `wreath.temporal` imports
+    from this module's neighbours, and binding it eagerly here would order the
+    two packages against each other.
+    """
+    global _temporal_installed
+    from .temporal import _TEMPORAL, format_iso
+
+    _configure(_TEMPORAL, format_iso)
+    _temporal_installed = True
+
+
+_temporal_installed = False
+
+
 def dumps(obj: Any) -> bytes:
     """Encode ``obj`` as compact UTF-8 JSON, rendering temporal values as ISO-8601."""
+    if not _temporal_installed:
+        _install_temporal()
     try:
         return _dumps(obj)
     except TypeError:

@@ -22,7 +22,10 @@ setup(
     ext_modules=[
         Extension(
             "wreath._native._reactor",
-            sources=[str(ROOT / "src/wreath/_native/_reactormodule.c")],
+            sources=[
+                str(ROOT / "src/wreath/_native" / name)
+                for name in ("_reactormodule.c", "reactor_wheel.c")
+            ],
             extra_compile_args=FLAGS,
             extra_link_args=["-fsanitize=address,undefined"],
         )

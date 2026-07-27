@@ -75,7 +75,7 @@ from ._passes.buckets import Buckets
 from ._passes.driver import Chunk, ShiftResult
 from ._passes.gate import Constraint, Gate, NoRowsMatch, Reconcile, Verification
 from ._passes.keyset import Key, PassDeclarationError
-from ._passes.ledger import Hole, PublishedFact
+from ._passes.ledger import Hole, PendingFact, PublishedFact
 from ._passes.pace import DutyCycle
 from ._passes.progress import Denominator, Estimated, Exact, Keyspace, Progress
 
@@ -542,6 +542,11 @@ class PassStatus:
     cycle_started: Any
     driven_at: Any
     last_drive_error: str | None
+    #: When the gate's verification last passed, and what it established. The
+    #: durable half of the terminal gate: a later migration reads this rather
+    #: than trusting a percentage.
+    verified_at: Any
+    verified_fact: str | None
     last_error: str | None
     progress: Progress
     #: Chunks given up on and not yet cleared. While this is non-zero the pass
@@ -549,6 +554,10 @@ class PassStatus:
     holes_open: int
     #: Units requeued to be walked out of order and not yet taken.
     pending: int
+    #: The fact this pass's gate will publish, recorded when the row is
+    #: seeded. Present *before* verification, which is the point: a migration
+    #: has to tell an unguarded column from one still being converted.
+    guards: str | None = None
 
     @property
     def state(self) -> str:
@@ -583,6 +592,9 @@ class PassStatus:
             "cycle_started": None if self.cycle_started is None else str(self.cycle_started),
             "driven_at": None if self.driven_at is None else str(self.driven_at),
             "last_drive_error": self.last_drive_error,
+            "guards": self.guards,
+            "verified_at": None if self.verified_at is None else str(self.verified_at),
+            "verified_fact": self.verified_fact,
             "last_error": self.last_error,
             "holes_open": self.holes_open,
             "pending": self.pending,
@@ -598,10 +610,12 @@ def _status_from(row: Any, keys: tuple[Key, ...] = ()) -> PassStatus:
         chunk_limit=row.chunk_limit, paced_reason=row.paced_reason,
         started_at=row.started_at, last_advance=row.last_advance,
         cycle_started=row.cycle_started, driven_at=row.driven_at,
-        last_drive_error=row.last_drive_error, last_error=row.last_error,
+        last_drive_error=row.last_drive_error, verified_at=row.verified_at,
+        verified_fact=row.verified_fact, last_error=row.last_error,
         progress=_progress.describe(row, keys, now=row.now),
         holes_open=row.holes_open,
         pending=len(row.pending or ()),
+        guards=row.guards,
     )
 
 
@@ -791,6 +805,14 @@ class ChunkedPass:
         return self._gate
 
     @property
+    def guards(self) -> str | None:
+        """The fact this pass claims, or ``None`` if its gate publishes none.
+
+        Seeded into the ledger so a migration can ask what is still in flight.
+        """
+        return None if self._gate is None else self._gate.publishes
+
+    @property
     def pace(self) -> DutyCycle:
         return self._pace
 
@@ -917,7 +939,9 @@ class ChunkedPass:
             # A unit can be queued before the pass has ever run -- a correction
             # that arrives during a deploy, say -- so the row has to exist for
             # the queue to be appended to.
-            await self._ledger.seed(connection, chunk_limit=self._units.limit)
+            await self._ledger.seed(
+                connection, chunk_limit=self._units.limit, guards=self.guards
+            )
             return await self._ledger.requeue(
                 connection, cursor_from=lower, cursor_to=upper
             )
@@ -1027,6 +1051,27 @@ def schema_sql(schema: str = "wreath") -> str:
     return _ledger.schema_sql(schema)
 
 
+def column_fact(schema: str, table: str, column: str) -> str:
+    """The canonical name for "this column has finished converting".
+
+    One spelling, used by both sides of a contract that would otherwise be a
+    convention: a pass declares ``Gate(publishes=column_fact(...))``, and
+    :mod:`wreath.migrations` refuses to narrow or drop that column until the
+    fact is published. A free-form string on each side would agree right up
+    until someone wrote ``public.treks.grade`` where the other expected
+    ``treks.grade``, and the failure would be a migration that sails through
+    instead of one that refuses.
+
+    The column named is **the one a later migration will narrow**, not the one
+    being filled. For a retype that drains ``grade`` into ``grade_next``, the
+    fact is about ``grade``: that is the column whose drop has to wait.
+    """
+    for part, what in ((schema, "schema"), (table, "table"), (column, "column")):
+        if not str(part).strip():
+            raise PassDeclarationError(f"column_fact needs a {what} name")
+    return f"column:{schema}.{table}.{column}"
+
+
 async def published_facts(
     database: Any,
     *,
@@ -1043,6 +1088,27 @@ async def published_facts(
     connection = await database.acquire(workload)
     try:
         return await _ledger.published_facts(connection, schema=schema, fact=fact)
+    finally:
+        await database.release(workload, connection)
+
+
+async def pending_facts(
+    database: Any,
+    *,
+    facts: tuple[str, ...],
+    schema: str = "wreath",
+    workload: str = "write",
+) -> list[PendingFact]:
+    """Which of *facts* a pass claims and has not yet established.
+
+    The half :func:`published_facts` cannot answer. A migration about to narrow
+    a column needs to tell "nothing guards this" from "something guards it and
+    is still working", and an absent published fact means both. This reads the
+    claim a pass records when its ledger row is seeded.
+    """
+    connection = await database.acquire(workload)
+    try:
+        return await _ledger.pending_facts(connection, schema=schema, facts=facts)
     finally:
         await database.release(workload, connection)
 
@@ -1066,6 +1132,7 @@ __all__ = [
     "NoRowsMatch",
     "PassDeclarationError",
     "PassStatus",
+    "PendingFact",
     "Progress",
     "PublishedFact",
     "Purge",
@@ -1077,6 +1144,8 @@ __all__ = [
     "Sql",
     "Table",
     "Verification",
+    "column_fact",
+    "pending_facts",
     "published_facts",
     "read_holes",
     "read_status",

@@ -343,12 +343,38 @@ def bench(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _pytest_command() -> list[str]:
+    """`pytest -q`, parallelised to fit the machine.
+
+    The suite used to run in about 3.5 seconds, where an xdist worker's
+    re-import of the native extensions cost more than it saved. It has since
+    grown past 4,400 tests and 30 seconds, and the trade has inverted.
+    Measured here (12 cores, best of two runs): serial 30.7s, `-n 2` 16.8s,
+    `-n 4` 9.8s, `-n 6` 8.1s, `-n 8` 8.1s, `-n 12` 9.5s -- so the curve
+    flattens at six and turns back up once workers outnumber the cores they
+    have to share with the extensions they each load.
+
+    Capped rather than `-n auto` for that last reason: `auto` is the core
+    count, which is past the flat part on any machine this wide. A bare
+    `uv run pytest` stays serial, because that is the one you attach a
+    debugger to.
+    """
+    workers = min(_PYTEST_MAX_WORKERS, os.cpu_count() or 1)
+    command = [sys.executable, "-m", "pytest", "-q"]
+    return command if workers < 2 else [*command, "-n", str(workers)]
+
+
+#: Past this the per-worker cost of importing the native extensions outweighs
+#: the parallelism; see `_pytest_command` for the measurements.
+_PYTEST_MAX_WORKERS = 6
+
+
 #: The gates a change has to pass, in the order that fails cheapest first.
 _CHECKS: tuple[tuple[str, list[str]], ...] = (
     ("map-lint", [sys.executable, "-m", "wreath._devtools.map_lint"]),
     ("ruff", [sys.executable, "-m", "ruff", "check", "."]),
     ("ty", [sys.executable, "-m", "ty", "check"]),
-    ("pytest", [sys.executable, "-m", "pytest", "-q"]),
+    ("pytest", _pytest_command()),
     ("native-lint", [sys.executable, "-m", "wreath._devtools.native_lint"]),
     ("native-error-lint", [sys.executable, "-m", "wreath._devtools.native_error_lint"]),
     ("native-memory-lint", [sys.executable, "-m", "wreath._devtools.native_memory_lint"]),

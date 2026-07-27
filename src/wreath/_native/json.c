@@ -306,6 +306,11 @@ write_double(Writer *w, double value)
     return rc;
 }
 
+/* Set once by `json_configure`; both NULL until then, and the encoder simply
+ * raises its ordinary TypeError in that case. */
+static PyObject *temporal_types = NULL;  /* tuple of date/time/datetime/timedelta */
+static PyObject *format_iso = NULL;      /* wreath.temporal.format_iso */
+
 static int
 encode_value(Writer *w, PyObject *obj, int depth)
 {
@@ -391,9 +396,67 @@ encode_value(Writer *w, PyObject *obj, int depth)
         return write_char(w, ']');
     }
 
+    /* Temporal values are rendered inline rather than by rewriting the document.
+     *
+     * `wreath._json.dumps` used to encode, catch TypeError, rebuild the whole
+     * payload through `temporal.jsonable`, and encode again. The retry itself is
+     * cheap -- the failed attempt aborts on the first temporal value in ~0.5us --
+     * but the rebuild is not: it reconstructs every dict and list in the
+     * document in Python. Measured 2026-07-27 on 1000 ORM-shaped rows carrying
+     * one timestamp each: 91us with no timestamps, 1550us with them, of which
+     * the rebuild was 1422us (92%). One `created_at` column made encoding 17x
+     * slower.
+     *
+     * Formatting stays in Python deliberately. `format_iso` is the single seam
+     * every surface renders through, and `datetime.isoformat` is already C, so
+     * reimplementing it here would risk divergence for no measured gain -- see
+     * the note on `wreath.temporal.format_iso`. Calling it keeps the bytes
+     * identical by construction; what this removes is the walk, not the format.
+     */
+    if (temporal_types != NULL && format_iso != NULL) {
+        int is_temporal = PyObject_IsInstance(obj, temporal_types);
+        if (is_temporal < 0) {
+            return -1;
+        }
+        if (is_temporal) {
+            PyObject *text = PyObject_CallOneArg(format_iso, obj);
+            if (text == NULL) {
+                return -1;
+            }
+            if (!PyUnicode_Check(text)) {
+                Py_DECREF(text);
+                PyErr_SetString(PyExc_TypeError,
+                                "format_iso must return str");
+                return -1;
+            }
+            int rc = write_json_string(w, text);
+            Py_DECREF(text);
+            return rc;
+        }
+    }
+
     PyErr_Format(PyExc_TypeError, "object of type %.100s is not JSON serializable",
                  type->tp_name);
     return -1;
+}
+
+/* json_configure(temporal_types, format_iso) -> None
+
+   Installed once at import by `wreath._json`. Kept as a configure hook rather
+   than an import from C so this file never reaches back into Python packages,
+   matching `template_configure` and `orm_shape_configure`. */
+PyObject *
+wreath_json_configure(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *types;
+    PyObject *formatter;
+
+    if (!PyArg_ParseTuple(args, "OO:json_configure", &types, &formatter)) {
+        return NULL;
+    }
+    Py_XSETREF(temporal_types, Py_NewRef(types));
+    Py_XSETREF(format_iso, Py_NewRef(formatter));
+    Py_RETURN_NONE;
 }
 
 PyObject *

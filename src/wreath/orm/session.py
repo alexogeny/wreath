@@ -32,8 +32,12 @@ from .compiler import (
     CompiledQuery,
     JoinedStep,
     SelectinStep,
+    _count_write_sql_builds,
     compile_count,
+    compile_delete,
+    compile_insert,
     compile_select,
+    compile_update,
     qualified,
     quote,
 )
@@ -228,6 +232,11 @@ def _count_key_map_builds() -> Iterator[list[int]]:
         _key_map_builds = previous
 
 
+# Re-exported so write-path probes are reached the same way as the two above;
+# the counter itself lives in the compiler, beside the code it counts.
+_count_write_sql_builds = _count_write_sql_builds
+
+
 def _pk_offsets(spec: ModelSpec, columns: tuple[ColumnSpec, ...]) -> tuple[int, ...]:
     """Where ``spec``'s primary-key columns sit within ``columns``.
 
@@ -319,6 +328,7 @@ class Session:
         "_new_stale",
         "_ordinal",
         "_registry",
+        "_statement_timeout",
         "_tenant",
         "_workload",
     )
@@ -329,6 +339,7 @@ class Session:
         workload: Workload,
         *,
         tenant: TenantContext | None = None,
+        statement_timeout: float | None = None,
     ) -> None:
         isolated = getattr(getattr(registry, "schema_mode", None), "kind", None) == "isolated"
         if isolated and tenant is None:
@@ -341,6 +352,16 @@ class Session:
                 "tenant context is only meaningful for an isolated registry; this "
                 "registry resolves every model to a qualified schema"
             )
+        # Seconds a statement may run before PostgreSQL cancels it. Applied as
+        # `SET LOCAL` inside the transaction rather than on the connection: a
+        # session-level `SET` would outlive this unit of work and travel with
+        # the pooled connection into somebody else's. Falls back to the
+        # registry's default so an application configures it once.
+        if statement_timeout is None:
+            statement_timeout = getattr(registry, "statement_timeout", None)
+        if statement_timeout is not None and statement_timeout <= 0:
+            raise SessionError("statement_timeout must be positive")
+        self._statement_timeout = statement_timeout
         self._tenant = tenant
         self._registry = registry
         self._workload = workload
@@ -792,8 +813,11 @@ class Session:
         # The projection is the target's own column tuple for every batch and
         # every row, so its key offsets resolve once for the whole load.
         child_offsets = _pk_offsets(target, target.columns)
+        batch_limit = _batch_limit(len(remote))
         for batch in _batches(tuple(keys), len(remote)):
-            sql, values = _selectin_sql(target, remote, batch)
+            sql, values = _selectin_sql(
+                target, remote, _pad_to_width(batch, batch_limit)
+            )
             connection = await self._acquire()
             rows = await connection.fetch(sql, *values)
             for row in rows:
@@ -915,6 +939,14 @@ class Session:
 
         Outside an explicit transaction this opens one for the flush and
         commits or rolls it back atomically.
+
+        That is also what makes this safe for an isolated-tenant session without
+        the :meth:`_check_tenant_bound` guard the read paths carry: the
+        ``begin()`` below binds ``search_path`` before any statement runs, so
+        there is no window where tenant-template SQL sees the pooled
+        connection's previous namespace. It is load-bearing rather than
+        incidental -- do not "optimise" the transaction away for a single-
+        statement flush.
         """
         self._check_usable()
         if not self._has_pending():
@@ -966,7 +998,16 @@ class Session:
     async def _flush_inner(self) -> frozenset[str]:
         # Collected before the pending set is cleared, and only when something
         # is listening -- an app with no cache subscribers pays one bool read.
-        written = self._collect_written() if _has_write_subscribers() else frozenset()
+        # Collected when anything is listening *or* when this flush is inside a
+        # transaction: a subscriber that registers before the commit -- a
+        # `@cached` handler decorated during startup, a broadcast attached by a
+        # later hook -- would otherwise miss the names of a transaction that was
+        # already open when it arrived, and see the write only from the next one.
+        written = (
+            self._collect_written()
+            if (_has_write_subscribers() or self._depth)
+            else frozenset()
+        )
         ordinals = self._new_ordinals
         for instance in sorted(
             self._new, key=lambda item: (self._order(type(item)), ordinals[id(item)])
@@ -988,24 +1029,15 @@ class Session:
 
     async def _insert(self, instance: Any) -> None:
         spec = self._registry.spec_for(type(instance))
-        columns = [
-            item
-            for item in spec.columns
-            if instance._orm_is_loaded(item.index) and item.server_default is None
-        ]
-        returning = [item for item in spec.columns if item not in columns]
-        names = ", ".join(quote(item.database_name) for item in columns)
-        placeholders = ", ".join(f"${index}" for index in range(1, len(columns) + 1))
-        sql = f"INSERT INTO {qualified(spec)}"
-        sql += f" ({names}) VALUES ({placeholders})" if columns else " DEFAULT VALUES"
-        if returning:
-            sql += " RETURNING " + ", ".join(
-                quote(item.database_name) for item in returning
-            )
-        values = [_wire_value(instance, item) for item in columns]
+        # The mask `_insert_columns` splits on is also what keys the compiled
+        # statement, so the linear split and the plan cache cannot disagree
+        # about which columns an insert supplies.
+        plan = compile_insert(self._registry, spec, _insert_mask(spec.columns, instance))
+        returning = plan.returning
+        values = [_wire_value(instance, item) for item in plan.columns]
         connection = await self._acquire()
         if returning:
-            row = await connection.fetchrow(sql, *values)
+            row = await connection.fetchrow(plan.sql, *values)
             if row is None:
                 raise ORMError(
                     f"INSERT into {spec.qualified_name} returned no row for "
@@ -1014,7 +1046,7 @@ class Session:
             for index, item in enumerate(returning):
                 instance._orm_set_loaded(item.index, item.pg_type.from_wire(row[index]))
         else:
-            await connection.execute(sql, *values)
+            await connection.execute(plan.sql, *values)
         instance._orm_state = PERSISTENT
         instance._orm_clear_dirty()
         key = instance._orm_primary_key()
@@ -1027,31 +1059,26 @@ class Session:
 
     async def _update(self, instance: Any) -> None:
         spec = self._registry.spec_for(type(instance))
-        columns = [
-            item
-            for item in spec.columns
-            if instance._orm_is_dirty(item.index) and not item.primary_key
-        ]
-        if not columns:
+        mask = 0
+        for position, item in enumerate(spec.columns):
+            if instance._orm_is_dirty(item.index) and not item.primary_key:
+                mask |= 1 << position
+        if not mask:
             return
-        assignments = ", ".join(
-            f"{quote(item.database_name)} = ${index}"
-            for index, item in enumerate(columns, start=1)
-        )
-        predicate, key_values = _key_predicate(spec, instance, len(columns) + 1)
-        sql = f"UPDATE {qualified(spec)} SET {assignments} WHERE {predicate}"
-        values = [_wire_value(instance, item) for item in columns] + key_values
+        plan = compile_update(self._registry, spec, mask)
+        values = [_wire_value(instance, item) for item in plan.columns]
+        values += [_wire_value(instance, item) for item in plan.key_columns]
         connection = await self._acquire()
-        status = await connection.execute(sql, *values)
+        status = await connection.execute(plan.sql, *values)
         _check_affected(status, spec, "UPDATE")
         instance._orm_clear_dirty()
 
     async def _delete(self, instance: Any) -> None:
         spec = self._registry.spec_for(type(instance))
-        predicate, values = _key_predicate(spec, instance, 1)
-        sql = f"DELETE FROM {qualified(spec)} WHERE {predicate}"
+        plan = compile_delete(self._registry, spec)
+        values = [_wire_value(instance, item) for item in plan.key_columns]
         connection = await self._acquire()
-        status = await connection.execute(sql, *values)
+        status = await connection.execute(plan.sql, *values)
         _check_affected(status, spec, "DELETE")
         key = instance._orm_primary_key()
         if key is not None:
@@ -1074,6 +1101,13 @@ class Session:
         # still pending and still publish when the outermost commit lands.
         written_before = self._written
         await connection.execute("BEGIN" if depth == 0 else f"SAVEPOINT {savepoint}")
+        if depth == 0 and self._statement_timeout is not None:
+            # Transaction-local, so PostgreSQL discards it at COMMIT/ROLLBACK
+            # and the pooled connection carries no timeout into its next lease.
+            # Set on the outermost transaction only -- a savepoint inherits it,
+            # and re-setting would let a nested block quietly widen the bound.
+            milliseconds = int(self._statement_timeout * 1000)
+            await connection.execute(f"SET LOCAL statement_timeout = {milliseconds}")
         if depth == 0 and self._tenant is not None:
             # Bind the tenant namespace (and role) transaction-locally, before
             # any tenant-template SQL runs. SET LOCAL is scoped to this
@@ -1226,6 +1260,37 @@ def _check_affected(status: Any, spec: ModelSpec, verb: str) -> None:
     )
 
 
+def _insert_mask(columns: Any, instance: Any) -> int:
+    """Which columns this instance supplies, as a positional bitmask.
+
+    The single definition of "supplied": loaded, and without a server default.
+    `_insert_columns` renders it as two lists and `Session._insert` uses it as
+    the key its compiled statement is cached under, so the rule cannot drift
+    between the split and the cache.
+    """
+    mask = 0
+    for position, item in enumerate(columns):
+        if instance._orm_is_loaded(item.index) and item.server_default is None:
+            mask |= 1 << position
+    return mask
+
+
+def _insert_columns(columns: Any, instance: Any) -> tuple[list[Any], list[Any]]:
+    """Split a model's columns into "supplied" and "comes back from RETURNING".
+
+    One pass. The `item not in columns` form this replaces re-scanned the
+    supplied list once per column, which is quadratic in the column count on
+    every insert -- invisible on a five-column model and not on a fifty-column
+    one.
+    """
+    mask = _insert_mask(columns, instance)
+    supplied: list[Any] = []
+    returning: list[Any] = []
+    for position, item in enumerate(columns):
+        (supplied if mask & (1 << position) else returning).append(item)
+    return supplied, returning
+
+
 def _sort_key(instance: Any) -> tuple[Any, ...]:
     key = instance._orm_primary_key()
     # Sort by identity so a flush order never depends on dict iteration; the
@@ -1259,15 +1324,6 @@ def _wire_value(instance: Any, column: ColumnSpec) -> Any:
     return column.pg_type.to_wire(instance._orm_get(column.index))
 
 
-def _key_predicate(
-    spec: ModelSpec, instance: Any, start: int
-) -> tuple[str, list[Any]]:
-    parts = []
-    values = []
-    for offset, item in enumerate(spec.primary_key):
-        parts.append(f"{quote(item.database_name)} = ${start + offset}")
-        values.append(_wire_value(instance, item))
-    return " AND ".join(parts), values
 
 
 def _key_tuple(spec: ModelSpec, primary_key: Any) -> tuple[Any, ...]:
@@ -1280,9 +1336,43 @@ def _key_tuple(spec: ModelSpec, primary_key: Any) -> tuple[Any, ...]:
     return values
 
 
+#: The batch sizes a select-in load is allowed to use. A statement's text
+#: contains one placeholder per key, so *every distinct key count* used to be a
+#: distinct statement -- a plan-cache entry per shape, evicting the shapes that
+#: matter. Rounding each batch up to one of these caps the number of shapes at
+#: the length of this tuple, at the cost of repeating a key to fill the last
+#: slot (which `IN` deduplicates for free).
+_BATCH_WIDTHS: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024)
+
+
+def _batch_widths() -> tuple[int, ...]:
+    """The allowed batch sizes, smallest first."""
+    return _BATCH_WIDTHS
+
+
+def _pad_to_width(
+    batch: tuple[tuple[Any, ...], ...], limit: int
+) -> tuple[tuple[Any, ...], ...]:
+    """Round a batch up to the next allowed width by repeating its last key.
+
+    Never past ``limit`` -- the caller's key and bind-parameter bounds are the
+    real ceiling, and padding through one to reach a rounder number would trade
+    a plan-cache entry for a statement the driver refuses.
+    """
+    for width in _BATCH_WIDTHS:
+        if len(batch) <= width <= limit:
+            return batch + (batch[-1],) * (width - len(batch))
+    return batch
+
+
+def _batch_limit(width: int) -> int:
+    """The largest batch the key and bind-parameter bounds allow."""
+    return min(MAX_SELECTIN_KEYS, max(1, MAX_BIND_PARAMETERS // max(width, 1)))
+
+
 def _batches(keys: tuple[tuple[Any, ...], ...], width: int) -> list[tuple[Any, ...]]:
     """Split identities into batches bounded by keys and by bind parameters."""
-    limit = min(MAX_SELECTIN_KEYS, max(1, MAX_BIND_PARAMETERS // max(width, 1)))
+    limit = _batch_limit(width)
     return [keys[start : start + limit] for start in range(0, len(keys), limit)]
 
 

@@ -72,15 +72,32 @@ def test_a_response_can_carry_the_result():
     assert JSONResponse(_full().as_dict()).body
 
 
-def test_returning_the_dataclass_itself_is_still_refused():
-    """Recorded rather than fixed: the encoder does not know dataclasses.
+def test_the_result_can_be_returned_directly():
+    """Stage 7 added the hook this test was left here to notice.
 
-    A `jsonable` hook would let the object go back directly, and that belongs to
-    `wreath.temporal`. Until then `as_dict()` is the documented way, and this
-    test is here so the day it changes, it changes on purpose.
+    `temporal.jsonable` now asks an object for `__jsonable__` before giving up,
+    so a handler can `return await view.run(...)` with no `.as_dict()`. The
+    explicit form still works and is what the wire contract is written in.
     """
+    assert loads(dumps(_full())) == loads(dumps(_full().as_dict()))
+
+
+def test_an_ordinary_dataclass_is_still_refused():
+    """The hook is opt-in, and that is the whole of its safety.
+
+    A blanket "serialize any dataclass" rule would quietly put every field of
+    every model a handler happened to return on the wire, including the ones a
+    sensitive-field guard exists to keep off it. Only a type that says it knows
+    how to become JSON gets rewritten.
+    """
+    from dataclasses import dataclass as plain
+
+    @plain
+    class Secretive:
+        token: str = "hunter2"
+
     with pytest.raises(TypeError):
-        dumps(_full())
+        dumps(Secretive())
 
 
 def test_absent_comparison_and_events_are_present_and_empty():

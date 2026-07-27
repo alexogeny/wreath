@@ -32,6 +32,20 @@ Idempotency-Key: 4b5f...-once-per-checkout
 - **Retry (same key)** → returns the stored response verbatim, plus
   `Idempotency-Replayed: true`. The handler never runs again.
 
+### When a key gets stuck
+
+A process that dies between reserving a key and storing its response leaves the
+key claimed until it expires, and every retry gets `409` until then.
+`middleware.conflicts` counts those refusals — climbing with no matching traffic
+is the signal — and `await middleware.release(key)` clears one.
+
+
+An **unauthenticated** request that sends a key is not guarded — there is no
+principal to scope the key by — and it now says so: the response carries
+`Idempotency-Ignored: unauthenticated` and `middleware.ignored` counts them.
+Silence there is how "idempotency works in staging" happens.
+
+
 ## Safe by construction
 
 - Only unsafe methods are considered — `POST`, `PUT`, `PATCH`, `DELETE`.

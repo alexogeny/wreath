@@ -57,6 +57,7 @@ Reference: :doc:`/reference/series`.
 
 from __future__ import annotations
 
+import re as _re
 from calendar import monthrange
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -69,6 +70,20 @@ from ._series.compile import (
     compile_series,
 )
 from ._series.envelope import aggregate_rows, fill, series_rows
+from ._series.settle import (
+    Seal,
+    SealState,
+    clear_correction,
+    difference,
+    fold,
+    insert_settled,
+    params_key,
+    replace_settled,
+    select_settled,
+    upsert_correction,
+    view_key,
+    watermark,
+)
 from .orm.compiler import check_predicate_columns, compile_rebind
 from .orm.errors import DeclarationError
 from .orm.expressions import ColumnExpr, Predicate, RelatedColumnExpr
@@ -87,7 +102,8 @@ from .orm.types import (
 # `compile_rebind` looks for. Public in `wreath.queries` precisely because two
 # modules now share that contract.
 from .queries import Placeholder
-from .temporal import Bucket, Instant, wall_clock
+from .temporal import Bucket, Instant, parse_duration, wall_clock
+from .temporal import now as _now
 from .temporal import zone as _zone_of
 
 __all__ = [
@@ -362,6 +378,9 @@ class SeriesResult:
     #: Markers over the same range, in the order they happened. Empty unless the
     #: declaration asked for them.
     events: tuple[SeriesEvent, ...] = ()
+    #: Where the watermark fell and what is known behind it. ``None`` for a view
+    #: that declares no seal, so a caller who never seals never has to check.
+    state: Any = None
 
     def __len__(self) -> int:
         return len(self.buckets)
@@ -386,7 +405,17 @@ class SeriesResult:
             "series": [item.as_dict() for item in self.series],
             "comparison": None if self.comparison is None else self.comparison.as_dict(),
             "events": [event.as_dict() for event in self.events],
+            "sealed": None
+            if self.state is None
+            else {
+                "through": self.state.sealed_through,
+                "settled": list(self.state.settled),
+                "corrections": list(self.state.corrections),
+            },
         }
+
+    def __jsonable__(self) -> dict[str, Any]:
+        return self.as_dict()
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,6 +444,9 @@ class AggregateResult:
             "rows": [row.as_dict() for row in self.rows],
             "measures": list(self.measures),
         }
+
+    def __jsonable__(self) -> dict[str, Any]:
+        return self.as_dict()
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,8 +629,8 @@ class _Builder:
 
     def seal(self, *_args: Any, **_kwargs: Any) -> Any:
         raise SeriesError(
-            "seal() is not implemented yet: settled buckets and corrections are "
-            "a later stage. Today every run recomputes the range it is given."
+            "seal() applies to a time series, not to this shape: there are no "
+            "buckets to close. Declare it on a Series(...)."
         )
 
     def retain(self, *_args: Any, **_kwargs: Any) -> Any:
@@ -732,7 +764,7 @@ class Series(_Builder):
     segment joining Monday to Wednesday.
     """
 
-    __slots__ = ("_at", "_bucket", "_compare", "_events", "_stored_in", "_top")
+    __slots__ = ("_at", "_bucket", "_compare", "_events", "_seal", "_stored_in", "_top")
 
     def __init__(
         self,
@@ -745,6 +777,7 @@ class Series(_Builder):
         _top: int = DEFAULT_TOP,
         _compare: Bucket | None = None,
         _events: _Events | None = None,
+        _seal: Seal | None = None,
     ) -> None:
         self._d = _state if _state is not None else _Declaration(model=model)
         self._at = _temporal(at)
@@ -757,6 +790,7 @@ class Series(_Builder):
         self._top = _top
         self._compare = _compare
         self._events = _events
+        self._seal = _seal
 
     def _with(self, **changes: Any) -> Series:
         return Series(
@@ -768,6 +802,7 @@ class Series(_Builder):
             _top=self._top,
             _compare=self._compare,
             _events=self._events,
+            _seal=self._seal,
         )
 
     @property
@@ -834,6 +869,7 @@ class Series(_Builder):
             _top=top,
             _compare=self._compare,
             _events=self._events,
+            _seal=self._seal,
         )
 
     def compare(self, *, previous: Bucket) -> Series:
@@ -873,6 +909,7 @@ class Series(_Builder):
             _top=self._top,
             _compare=previous,
             _events=self._events,
+            _seal=self._seal,
         )
 
     def events(
@@ -952,19 +989,102 @@ class Series(_Builder):
                 predicates=predicates,
                 limit=limit,
             ),
+            _seal=self._seal,
+        )
+
+    def seal(self, *, after: Any, on_late: str = "correct") -> Series:
+        """Declare when a bucket stops being able to change.
+
+        A bucket is **sealed** once ``after`` has elapsed since it *closed*, and
+        a sealed bucket is computed once and then read. Before that it is open
+        and every run recomputes it, because it can still move.
+
+        Args:
+            after: the lateness allowance -- ``"2h"``, ``"30m"``, or a number of
+                seconds. How long you are willing to wait for a straggler.
+            on_late: what a :meth:`reconcile` does when it finds a sealed bucket
+                whose rows have since changed. ``"correct"`` keeps the settled
+                value immutable and records the difference beside it.
+                ``"reopen"`` replaces it, which is only sound while the rows are
+                still there to recompute from -- so it is never the default.
+
+        A settled bucket is not a cache. It has no TTL, it is never evicted, and
+        nothing here deletes the rows it was computed from.
+        """
+        if self._seal is not None:
+            raise SeriesError(
+                "seal() is already declared; one watermark per view, because a "
+                "second one would make 'sealed' mean two different instants"
+            )
+        if self._d.group is not None:
+            raise SeriesError(
+                "seal() cannot be combined with by(): the top-N fold is ranked "
+                "over the whole range, so which series survive -- and what lands "
+                "in the remainder -- depends on the range being asked for. A "
+                "bucket settled for one range would be wrong for the next. Seal "
+                "an ungrouped view, or read this one open"
+            )
+        if self._compare is not None:
+            raise SeriesError(
+                "seal() cannot be combined with compare(): the comparison period "
+                "is a second range and settling it is a separate question. "
+                "Declare the seal on the view you read directly"
+            )
+        seconds = _lateness(after)
+        return Series(
+            self._d.model,
+            at=self._at,
+            bucket=self._bucket,
+            stored_in=self._stored_in,
+            _state=self._d,
+            _top=self._top,
+            _compare=self._compare,
+            _events=self._events,
+            _seal=Seal(after=seconds, on_late=on_late),
+        )
+
+    @property
+    def sealed_after(self) -> float | None:
+        """The declared lateness allowance in seconds, or ``None`` if open."""
+        return None if self._seal is None else self._seal.after
+
+    def _identity(self, zone_name: str, values: dict[str, Any]) -> tuple[str, str]:
+        """``(view, params)`` -- what a settled row is filed under."""
+        rendered = " ".join(repr(item) for item in self._d.predicates)
+        return (
+            view_key(
+                model=self._d.model,
+                at_column=self._at.column.python_name,
+                bucket=self._bucket,
+                zone_name=zone_name,
+                measures=self._d.measures,
+                predicate_sql=rendered,
+                fills=self._d.fills,
+            ),
+            params_key(values),
         )
 
     async def run(
-        self, session: Any, *, range: Range, zone: Any = None, **values: Any
+        self,
+        session: Any,
+        *,
+        range: Range,
+        zone: Any = None,
+        now: Any = None,
+        **values: Any,
     ) -> SeriesResult:
         """Run this declaration for one range and one reader's zone.
 
         The range is a runtime argument because it changes per request. The zone
-        is too, for now — nothing is materialised yet, so every run buckets
-        fresh and any zone is as cheap as any other. ``stored_in`` is the
-        default when a caller does not name one, and becomes load-bearing once
-        buckets are settled: a materialised Auckland day cannot be re-cut into a
-        London day after the fact.
+        is too, unless the view is sealed — a materialised Auckland day cannot
+        be re-cut into a London day after the fact, so a sealed view files its
+        settled buckets under the zone they were computed in and reading it in
+        another zone settles separately rather than lying.
+
+        ``now`` decides where the watermark falls and defaults to the present.
+        Passing one reads the range as of that instant, which is what makes a
+        sealing test deterministic and a "what did this look like on Friday"
+        question answerable.
         """
         if not self._d.measures:
             raise SeriesError("this view declares no measures; there is nothing to plot")
@@ -974,20 +1094,202 @@ class Series(_Builder):
         if self._compare is not None:
             _refuse_overlap(range, self._compare, zone_name)
         predicates = self._bind(values)
+        if self._seal is not None:
+            result = await self._run_sealed(
+                session, predicates, range, zone_name, values, now
+            )
+        else:
+            sql, args, _oids = compile_series(
+                session.registry,
+                self,
+                predicates,
+                start=_instant(range.start),
+                end=_instant(range.end),
+                zone_name=zone_name,
+                compare=self._compare,
+            )
+            rows = await session.declared(sql, args)
+            result = self._envelope(rows, range, zone_name)
+        if self._events is None:
+            return result
+        return replace(result, events=await self._markers(session, range, zone_name))
+
+    async def _compute(
+        self,
+        session: Any,
+        predicates: tuple[Predicate, ...],
+        start: Any,
+        end: Any,
+        zone_name: str,
+    ) -> dict[Any, dict[str, Any]]:
+        """``{bucket: {measure: value}}`` straight from the source rows."""
         sql, args, _oids = compile_series(
             session.registry,
             self,
             predicates,
-            start=_instant(range.start),
-            end=_instant(range.end),
+            start=_instant(start),
+            end=_instant(end),
             zone_name=zone_name,
-            compare=self._compare,
+            compare=None,
         )
         rows = await session.declared(sql, args)
-        result = self._envelope(rows, range, zone_name)
-        if self._events is None:
-            return result
-        return replace(result, events=await self._markers(session, range, zone_name))
+        buckets, found = series_rows(self, rows)
+        by_bucket = found.get((None, False), {})
+        return {item: dict(by_bucket.get(item, {})) for item in buckets}
+
+    async def _run_sealed(
+        self,
+        session: Any,
+        predicates: tuple[Predicate, ...],
+        range: Range,
+        zone_name: str,
+        values: dict[str, Any],
+        now: Any,
+    ) -> SeriesResult:
+        """Read settled buckets from storage and compute only what is still open.
+
+        Three statements at most, and two once the range is warm: read what is
+        settled, compute any sealed buckets nobody has settled yet, compute the
+        open tail. The middle one is the work sealing exists to stop repeating,
+        and it shrinks to nothing as the watermark advances past a range that
+        has already been read.
+        """
+        assert self._seal is not None
+        instant = _instant(now) if now is not None else _now()
+        edge = watermark(
+            instant,
+            bucket=self._bucket,
+            zone_name=zone_name,
+            after=self._seal.after,
+        )
+        start, end = _instant(range.start), _instant(range.end)
+        sealed_end = min(end, edge)
+        view, params = self._identity(zone_name, values)
+
+        settled: dict[Any, dict[str, Any]] = {}
+        corrected: list[Any] = []
+        if sealed_end > start:
+            stored = await session.declared(
+                select_settled(), (view, params, start, sealed_end)
+            )
+            for row in stored:
+                bucket, measures, delta = row[0], row[1], row[2]
+                settled[bucket] = fold(_as_mapping(measures), _as_mapping(delta))
+                if delta:
+                    corrected.append(bucket)
+            # Sealing advances forwards, so the buckets nobody has settled are a
+            # suffix: recomputing from just past the last stored one covers them
+            # without a second round trip to ask which are missing.
+            #
+            # `end_of` rather than adding the bucket's nominal length, because
+            # the last stored bucket may have been a 23- or 25-hour day and
+            # stepping by 24 would start the gap in the middle of one.
+            gap_from = (
+                self._bucket.end_of(max(settled), zone_name) if settled else start
+            )
+            if gap_from < sealed_end:
+                fresh = await self._compute(
+                    session, predicates, gap_from, sealed_end, zone_name
+                )
+                for bucket, measures in fresh.items():
+                    if bucket in settled:
+                        continue
+                    settled[bucket] = measures
+                    await session.declared(
+                        insert_settled(), (view, params, bucket, dict(measures))
+                    )
+
+        open_part: dict[Any, dict[str, Any]] = {}
+        if end > sealed_end:
+            open_part = await self._compute(
+                session, predicates, max(start, sealed_end), end, zone_name
+            )
+
+        merged = {**settled, **open_part}
+        buckets = sorted(merged)
+        found = {(None, False): merged}
+        return SeriesResult(
+            range=range,
+            zone=zone_name,
+            bucket=self._bucket.name,
+            buckets=tuple(buckets),
+            series=self._series_of(buckets, found),
+            state=SealState(
+                sealed_through=edge if sealed_end > start else None,
+                settled=tuple(sorted(settled)),
+                corrections=tuple(sorted(corrected)),
+            ),
+        )
+
+    async def reconcile(
+        self,
+        session: Any,
+        *,
+        range: Range,
+        zone: Any = None,
+        now: Any = None,
+        **values: Any,
+    ) -> tuple[Any, ...]:
+        """Find sealed buckets whose rows have changed, and record the difference.
+
+        This is how a late write is noticed. Nothing notices one on the write
+        path, and that is deliberate rather than missing: the ORM's write events
+        are model-grained by design — they publish which models a session
+        touched, not which rows — so they cannot say which bucket a late trek
+        belongs to or what it contributes. Making them row-grained to serve a
+        chart would put per-row bookkeeping on every write in the application.
+
+        So the application runs this: from a scheduled job, after an import,
+        after a backfill. It recomputes the sealed part of ``range`` from the
+        source rows, compares each bucket to what was settled, and writes a
+        delta where they disagree — or replaces the settled value outright if
+        the view declared ``on_late="reopen"``.
+
+        Returns the bucket starts it corrected, so a caller can log or alert on
+        late data arriving rather than discovering it in a discrepancy later.
+        """
+        if self._seal is None:
+            raise SeriesError(
+                "reconcile() needs a seal: with nothing settled, every run "
+                "already recomputes from the source rows and there is nothing "
+                "to compare against"
+            )
+        zone_name = _zone_name(zone if zone is not None else self._stored_in)
+        predicates = self._bind(values)
+        instant = _instant(now) if now is not None else _now()
+        edge = watermark(
+            instant, bucket=self._bucket, zone_name=zone_name, after=self._seal.after
+        )
+        start = _instant(range.start)
+        sealed_end = min(_instant(range.end), edge)
+        if sealed_end <= start:
+            return ()
+        view, params = self._identity(zone_name, values)
+        stored = await session.declared(
+            select_settled(), (view, params, start, sealed_end)
+        )
+        settled = {row[0]: _as_mapping(row[1]) for row in stored}
+        if not settled:
+            return ()
+        current = await self._compute(session, predicates, start, sealed_end, zone_name)
+        moved: list[Any] = []
+        for bucket, was in settled.items():
+            if bucket not in current:
+                continue
+            delta = difference(was, current[bucket], self._d.measures)
+            if delta is None:
+                continue
+            moved.append(bucket)
+            if self._seal.on_late == "reopen":
+                await session.declared(
+                    replace_settled(), (view, params, bucket, dict(current[bucket]))
+                )
+                await session.declared(clear_correction(), (view, params, bucket))
+            else:
+                await session.declared(
+                    upsert_correction(), (view, params, bucket, delta)
+                )
+        return tuple(sorted(moved))
 
     async def _markers(
         self, session: Any, range: Range, zone_name: str
@@ -1197,3 +1499,60 @@ def _zone_name(value: Any) -> str:
 
 def _instant(value: Any) -> Any:
     return Instant.of(value)
+
+
+#: ``2h``, ``30m``, ``90s``, ``250ms`` -- the same compact spelling
+#: ``ChunkedPass(within=...)`` takes, so one codebase has one duration syntax.
+_COMPACT_DURATION = _re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*(ms|s|m|h|d)?\s*$")
+_COMPACT_SCALE = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+
+
+def _lateness(value: Any) -> float:
+    """``seal(after=)`` as a number of seconds.
+
+    Takes the compact form (``"2h"``) or ISO-8601 (``"PT2H"``) or a plain number
+    of seconds. Neither spelling can express months or years, which is correct
+    rather than a limitation: a lateness allowance is *elapsed* time, and "one
+    month after the bucket closed" is not a fixed amount of it.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise SeriesError(
+            f"seal(after=) takes a duration like '2h' or a number of seconds, "
+            f"got {value!r}"
+        )
+    if isinstance(value, str):
+        match = _COMPACT_DURATION.fullmatch(value)
+        if match is not None:
+            seconds = float(match.group(1)) * _COMPACT_SCALE[match.group(2) or "s"]
+        else:
+            try:
+                seconds = parse_duration(value).total_seconds()
+            except Exception:
+                raise SeriesError(
+                    f"seal(after={value!r}) is not a duration. Write it compactly "
+                    f"('2h', '30m', '90s') or as ISO-8601 ('PT2H')"
+                ) from None
+    else:
+        seconds = float(value)
+    if seconds < 0:
+        raise SeriesError(
+            f"seal(after={value!r}) is negative, which would seal a bucket "
+            f"before it closed"
+        )
+    return seconds
+
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    """A stored JSONB column as a dict, however the driver handed it back.
+
+    A real driver decodes ``jsonb`` to a dict; a fake, and some configurations,
+    hand back the text. Accepting both here keeps the storage shape a fact about
+    PostgreSQL rather than about which decoder is installed.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, (bytes, bytearray, str)):
+        from ._json import loads
+
+        return dict(loads(value))
+    return dict(value)

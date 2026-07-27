@@ -30,6 +30,11 @@ SOURCES = [
     "postgres/plan.c",
     "postgres/connection.c",
     "postgres/pool.c",
+    "postgres/migration_artifact.c",
+    "postgres/migration_image.c",
+    "postgres/migration_resolver.c",
+    "postgres/migration_runner.c",
+    "postgres/migration_sql.c",
 ]
 
 setup(

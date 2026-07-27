@@ -75,11 +75,13 @@ uv run wreath-docs               # build the docs strictly (--serve to watch)
 uv run wreath-bench --framework wreath starlette fastapi   # installs competitors first
 
 # The individual gates, when you want one of them
-uv run pytest                 # the default marks; ~3.5s, run it serially
-uv run pytest -m '' -n 4      # everything, including network/fuzz/performance
+uv run pytest                 # the default marks, serially (~31s); use -n 6 (~8s)
+uv run pytest -m '' -n 6      # everything, including network/fuzz/performance
 uv run ruff check .
 uv run ty check
 uv run wreath-native-lint        # C complexity patterns (see below); 0 = clean
+uv run wreath-sanitize --all     # build each ASan/UBSan extension and drive tests at it
+uv run wreath-sanitize core --leaks   # ... and attribute what is still live at exit
 uv run wreath-map-lint           # the agent-facing maps still describe this repo
 uv run wreath-request-trace      # Python/native crossings for one request lifecycle
 uv run wreath-request-trace --check   # ... vs docs/agents/request-boundary-baseline.json
@@ -92,11 +94,16 @@ uv run wreath-decomp             # request stages, ORM internals, ns/frame calib
 See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmark, and documentation map.
 
 - `src/wreath/`: dependency-free framework core
-- `tests/`: correctness and ASGI behavior tests. The default marks run serially in
-  ~3.5s; parallelism does not pay there, because every xdist worker re-imports the
-  native extensions and that startup costs more than the suite. It does pay on the
-  full run (`-m ''`, ~11.6s serial): **`-n 4` takes ~4.6s, and more workers are
-  slower again** — `-n 8` and `-n 16` both land around 7s. Measure before raising it.
+- `tests/`: correctness and ASGI behavior tests. **Parallelism now pays on the
+  default marks, and it did not used to.** The suite was ~3.5s, where an xdist
+  worker's re-import of the native extensions cost more than it saved; it has
+  since passed 4,400 tests and 30s, and the trade inverted. Measured on 12 cores,
+  best of two runs: serial 30.7s, `-n 2` 16.8s, `-n 4` 9.8s, **`-n 6` 8.1s**,
+  `-n 8` 8.1s, `-n 12` 9.5s. The curve flattens at six and turns back up once
+  workers outnumber the cores they share with the extensions each one loads, so
+  prefer `-n 6` over `-n auto` on a wide machine. `uv run wreath-check` applies
+  `min(6, cpu_count)` for you; a bare `uv run pytest` stays serial, because that
+  is the one you attach a debugger to. Re-measure before changing the cap.
 - `benchmarks/`: equivalent competitor applications and benchmark tooling
 - `docs/`: user documentation, API reference, cookbooks, agent guidance, design notes, and conformance reports
 

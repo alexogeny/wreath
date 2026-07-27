@@ -210,7 +210,7 @@ def test_named_plan_unpacking_is_bounded_and_literal() -> None:
         + b"".join(values)
     )
 
-    assert _migrations_cli._unpack_named_plan(tape) == [
+    assert _migrations_cli.unpack_named_plan(tape) == [
         {
             "action": "alter",
             "kind": "column",
@@ -250,8 +250,9 @@ def test_review_sql_comes_from_the_bounded_native_statement_tape() -> None:
 
 
 def test_check_returns_one_for_drift_and_keeps_json_output(monkeypatch, capsys) -> None:
-    async def drift(namespace, application):
+    async def drift(namespace, application, *, with_passes=False):
         assert application == "application"
+        assert with_passes, "check asks for pending passes; detect does not"
         return {
             "current": False,
             "operation_count": 2,
@@ -343,11 +344,16 @@ async def test_status_requires_chain_code_and_catalog_to_agree(monkeypatch, tmp_
     application = SimpleNamespace(_orm_registries={"main": registry})
 
     class Connection:
-        async def fetchval(self, sql: str) -> bool:
+        async def fetchval(self, sql: str, *args: object) -> bool:
+            # `status` asks two of these now: whether the history table exists,
+            # and whether the pass ledger does.
             return True
 
         async def fetchrow(self, sql: str, schema: str):
             return artifact.checksum, artifact.target_fingerprint
+
+        async def fetch(self, sql: str, *args: object) -> list[object]:
+            return []
 
         async def close(self) -> None:
             return None

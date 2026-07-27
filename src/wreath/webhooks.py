@@ -318,7 +318,14 @@ def _optional_text(headers: Mapping[bytes, bytes], name: bytes) -> str | None:
 
 
 class LocalReplayStore:
-    """Bounded process-local webhook replay protection."""
+    """Bounded webhook replay protection **in one process**.
+
+    Enough for a single worker. Behind more than one it is a fast path rather
+    than the guarantee: each worker has its own view, so the same event
+    delivered twice to two workers is claimed twice and handled twice. Use
+    :class:`PostgresWebhookInbox` when the deduplication has to hold across
+    replicas -- it is the same claim in a table every worker shares.
+    """
 
     __slots__ = ("_entries", "_heap", "_lock", "_sequence", "max_entries", "ttl")
 

@@ -40,7 +40,7 @@ from typing import Any, Protocol
 from .._jobcore import dedup_key
 from ..request import Request
 from ..response import ProblemResponse, Response
-from ..store import CLAIMED, Column, Keyed, MemoryStore, PostgresStore
+from ..store import CLAIMED, Column, Keyed, MemoryStore, PostgresStore, Sql
 
 _UNCACHEABLE_BODY = ("StreamingResponse", "FileResponse", "SSEResponse", "PreparedResponse")
 
@@ -192,9 +192,9 @@ class PostgresIdempotencyStore:
                     "expires": self._store.window(),
                 },
                 update={
-                    "status": "excluded.status",
-                    "headers": "excluded.headers",
-                    "body": "excluded.body",
+                    "status": Sql("excluded.status"),
+                    "headers": Sql("excluded.headers"),
+                    "body": Sql("excluded.body"),
                 },
             ),
         )
@@ -278,7 +278,9 @@ class IdempotencyMiddleware:
     """Replay the stored response for a repeated ``Idempotency-Key``."""
 
     global_scope = True
-    __slots__ = ("_header", "_max_body_bytes", "_methods", "_store")
+    __slots__ = (
+        "_header", "_max_body_bytes", "_methods", "_store", "conflicts", "ignored",
+    )
 
     def __init__(
         self,
@@ -303,6 +305,15 @@ class IdempotencyMiddleware:
         # cap the key is released and the request stays retryable, which is the
         # same outcome as an un-snapshottable body.
         self._max_body_bytes = max_body_bytes
+        #: Requests that sent a key this middleware did not act on -- an
+        #: unauthenticated caller, whose key cannot be scoped to a principal.
+        #: Silence there is how "idempotency works in staging" happens.
+        self.ignored = 0
+        #: Requests refused with 409 because the key was already in flight.
+        #: A climbing count with no matching traffic means keys are *stuck*: a
+        #: process that died between reserving one and storing its response
+        #: leaves it claimed for the whole TTL. :meth:`release` is the lever.
+        self.conflicts = 0
 
     def _key(self, request: Request) -> str | None:
         """The store key for this request, or ``None`` to leave it unguarded.
@@ -347,6 +358,12 @@ class IdempotencyMiddleware:
         """
         key = self._key(request)
         if key is None:
+            if request.method in self._methods and request.header(self._header):
+                # A key was sent and is not being honoured. Counted here and
+                # named on the response below, so the client is told rather than
+                # left to assume.
+                self.ignored += 1
+                request.state.idempotency_ignored = True
             return None
         state, entry = await self._store.reserve(key)
         if state == "in_flight":
@@ -356,6 +373,7 @@ class IdempotencyMiddleware:
             )
             # A bare 409 invites an immediate retry into the same conflict.
             conflict.headers.append((b"retry-after", b"1"))
+            self.conflicts += 1
             return conflict
         if state == "done" and entry is not None:
             status, headers, body = entry
@@ -365,8 +383,25 @@ class IdempotencyMiddleware:
         request.state.idempotency_key = key
         return None
 
+    async def release(self, key: str) -> None:
+        """Forget ``key``, so a stuck claim can be cleared without waiting a day.
+
+        A process that dies between reserving a key and storing its response
+        leaves the key claimed until it expires, and every retry gets 409 until
+        then. There was no way to say "that one is not coming back".
+        """
+        await self._store.release(key)
+
     async def after(self, request: Request, response):
-        key = getattr(request.state, "idempotency_key", None) if request._state else None
+        # Read through the public state API rather than the request's private
+        # attribute: the state object is materialized lazily, and `get` is the
+        # supported way to ask without forcing it.
+        if request.state.get("idempotency_ignored"):
+            headers = getattr(response, "headers", None)
+            if headers is not None:
+                headers.append((b"idempotency-ignored", b"unauthenticated"))
+            return response
+        key = request.state.get("idempotency_key")
         if key is None:
             return response
         if (

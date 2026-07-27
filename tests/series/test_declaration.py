@@ -200,11 +200,16 @@ class TestLaterStagesRefuseByName:
     would enforce it.
     """
 
-    @pytest.mark.parametrize("method", ["seal", "retain", "archive", "drop"])
+    @pytest.mark.parametrize("method", ["retain", "archive", "drop"])
     def test_it_refuses_and_says_why(self, method):
         declared = view().measure(n=count())
         with pytest.raises(SeriesError, match="not implemented"):
             getattr(declared, method)(raw="3 days")
+
+    def test_seal_is_built_now_and_no_longer_refuses(self):
+        """Stage 7 landed; this is the entry that left the list."""
+        declared = view().measure(n=count()).seal(after="2h")
+        assert declared.sealed_after == 7200
 
     def test_drop_says_it_will_stay_opt_in(self):
         with pytest.raises(SeriesError, match="opt-in"):

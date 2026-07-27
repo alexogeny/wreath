@@ -52,6 +52,7 @@ class Registry:
     """Compiled models for one database."""
 
     __slots__ = (
+        "statement_timeout",
         "_by_name",
         "_by_table",
         "_cache",
@@ -80,7 +81,15 @@ class Registry:
         query_cache_size: int = 512,
         query_cache_bytes: int = 8 * 1024 * 1024,
         schema_mode: SchemaMode | None = None,
+        statement_timeout: float | None = None,
     ) -> None:
+        #: Default seconds a statement may run, applied by every `Session` this
+        #: registry opens. None leaves it to the server's own setting, which in
+        #: a default PostgreSQL is "forever" -- one pathological query then holds
+        #: a pooled connection until somebody notices.
+        self.statement_timeout = statement_timeout
+        if statement_timeout is not None and statement_timeout <= 0:
+            raise RegistryError("statement_timeout must be positive")
         if validate_schema not in _VALIDATE_MODES:
             raise RegistryError(
                 f"unknown validate_schema {validate_schema!r}; expected one of "

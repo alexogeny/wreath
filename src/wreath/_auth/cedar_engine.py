@@ -166,6 +166,31 @@ def _cedar_eq(a: Any, b: Any) -> bool:
     return False
 
 
+def _dedupe_key(value: Any) -> tuple[str, object] | None:
+    """A hashable identity for a converted value, or None if it needs ``_cedar_eq``.
+
+    The tag keeps kinds apart because :func:`_cedar_eq` does: ``True`` and ``1``
+    are *not* equal in Cedar's model, but in Python they compare equal and hash
+    alike, so an untagged set would silently merge them. Values of different
+    kinds are never ``_cedar_eq``, so partitioning by kind loses nothing.
+    """
+    if type(value) is bool:
+        return ("b", value)
+    if isinstance(value, int):
+        return ("i", value)
+    if isinstance(value, str):
+        return ("s", value)
+    if isinstance(value, tuple):
+        # An entity uid, so (str, str) and hashable; guarded anyway rather than
+        # assuming, since falling back is merely slower and never wrong.
+        try:
+            hash(value)
+        except TypeError:
+            return None
+        return ("t", value)
+    return None  # records and nested sets: structural comparison only
+
+
 def _to_cedar_value(value: object, *, where: str) -> Any:
     """Convert a Python value into the compiled value model, loudly or not at all."""
     if type(value) is bool or isinstance(value, str):
@@ -186,11 +211,32 @@ def _to_cedar_value(value: object, *, where: str) -> Any:
             converted[key] = _to_cedar_value(item, where=where)
         return converted
     if isinstance(value, list | tuple | set | frozenset):
+        # A Cedar set is unordered with structural equality, so duplicates have
+        # to go. Comparing every candidate against every kept one is O(N**2),
+        # and this runs on every `is_authorized` call -- once for the context
+        # and once per entity attribute -- so a policy carrying a few hundred
+        # group ids paid it per authorization. Measured before this change: 25
+        # elements 64us, 400 elements 14.4ms, a clean 4x per doubling.
+        #
+        # Scalars carry their own identity, so they dedupe through a set. Only
+        # records and nested sets, which are unhashable and need structural
+        # comparison, keep the pairwise scan -- and they compare against just
+        # the other unhashables rather than the whole result.
         deduplicated: list[object] = []
+        seen: set[tuple[str, object]] = set()
+        structural: list[object] = []
         for item in value:
             candidate = _to_cedar_value(item, where=where)
-            if not any(_cedar_eq(candidate, existing) for existing in deduplicated):
-                deduplicated.append(candidate)
+            key = _dedupe_key(candidate)
+            if key is not None:
+                if key in seen:
+                    continue
+                seen.add(key)
+            else:
+                if any(_cedar_eq(candidate, existing) for existing in structural):
+                    continue
+                structural.append(candidate)
+            deduplicated.append(candidate)
         return deduplicated
     raise TypeError(
         f"{where}: {type(value).__name__!r} has no Cedar equivalent; "

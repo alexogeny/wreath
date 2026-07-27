@@ -209,6 +209,12 @@ class JobRunner:
         self._waiters: list[asyncio.Event] = []
         self._listen_conn: Any = None
         self._inflight: set[asyncio.Future[Any]] = set()
+        #: Jobs this process claimed and has not started running. A batch claim
+        #: leases several at once, and a shutdown between the claim and the run
+        #: used to leave them leased until the lease expired -- so a rolling
+        #: deploy parked `batch - 1` jobs for `lease` seconds per restart, which
+        #: reads as a queue that stalls whenever you deploy.
+        self._claimed_not_started: list[_Claimed] = []
         self._worker_id = f"{self._name}"
         #: Sweeps that raised. The sweeper suppresses everything so a transient
         #: error cannot end the loop, which also meant a sweeper that had never
@@ -238,6 +244,15 @@ class JobRunner:
     @property
     def name(self) -> str:
         return self._name
+
+    def stats(self) -> dict[str, int]:
+        """Every counter this runner keeps, by name. See `MessageBus.stats`."""
+        return {
+            "run_errors": self.run_errors,
+            "sweep_errors": self.sweep_errors,
+            "schedule_errors": self.schedule_errors,
+            "dead_lettered": self.dead_lettered,
+        }
 
     @property
     def progress(self) -> Any:
@@ -621,6 +636,9 @@ class JobRunner:
             pending = tuple(self._inflight)
             with contextlib.suppress(Exception):
                 await asyncio.wait(pending, timeout=max(0.0, deadline - loop.time()))
+        # Claimed and never started: hand them back rather than making the next
+        # worker wait out the lease.
+        await self._release_unstarted()
         await self._release_listen()
 
     async def purge(self, *, older_than: float) -> None:
@@ -765,9 +783,11 @@ class JobRunner:
             if not claimed:
                 await self._park(wake)
                 continue
+            self._claimed_not_started.extend(claimed)
             for job in claimed:
                 if stopping.is_set():
                     break
+                self._discard_claim(job)
                 try:
                     await self._run(job)
                 except asyncio.CancelledError:
@@ -781,6 +801,31 @@ class JobRunner:
                     # which is the same path a crashed worker takes.
                     self.run_errors += 1
                     await self._park(wake)
+
+    def _discard_claim(self, job: _Claimed) -> None:
+        """Stop tracking ``job`` as claimed-but-unstarted."""
+        for index, pending in enumerate(self._claimed_not_started):
+            if pending is job:
+                del self._claimed_not_started[index]
+                return
+
+    async def _release_unstarted(self) -> None:
+        """Hand back everything claimed and never started.
+
+        Fenced like every other transition: a job the sweeper already reclaimed
+        has a newer fence, so this cannot pull it out from under whoever has it
+        now. `attempts` is deliberately *not* bumped -- the job was never
+        attempted, only held.
+        """
+        pending, self._claimed_not_started = self._claimed_not_started, []
+        for job in pending:
+            with contextlib.suppress(Exception):
+                await self._exec(
+                    f"UPDATE {self._table} SET state='ready', owner=NULL, "
+                    "lease_expiry=NULL, updated_at=now() "
+                    "WHERE id=$1 AND fence=$2 AND state='leased'",
+                    job.id, job.fence,
+                )
 
     async def _run(self, job: _Claimed) -> None:
         handler = self._tasks.get(job.task)

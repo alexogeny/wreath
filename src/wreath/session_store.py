@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from .store import Column, Keyed, PostgresStore
+from .store import Column, Keyed, PostgresStore, Sql
 
 __all__ = ["PostgresSessionStore", "SessionStore"]
 
@@ -86,7 +86,7 @@ class PostgresSessionStore:
             "save",
             self._store.upsert(
                 values={"sid": "$1", "data": "$2::jsonb", "expires": self._store.window("$3")},
-                update={"data": "excluded.data", "expires": "excluded.expires"},
+                update={"data": Sql("excluded.data"), "expires": Sql("excluded.expires")},
             ),
         )
 

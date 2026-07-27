@@ -622,6 +622,20 @@ def jsonable(value: Any) -> Any:
     anything that is not temporal is returned untouched — so a genuinely
     unserializable object reaches the encoder again and raises the error it
     should, rather than being swallowed here.
+
+    An object may also say how to become JSON by defining ``__jsonable__``,
+    which is how a result type like ``wreath.series.SeriesResult`` can be
+    returned from a handler directly. The hook is **opt-in and deliberately not
+    a blanket dataclass rule**: "serialize any dataclass" would put every field
+    of every model a handler happened to return on the wire, including the ones
+    a sensitive-field guard exists to keep off it. A type has to say it knows
+    how to become JSON. The result is walked again, so a hook may return
+    temporal values without converting them itself.
+
+    Cost, stated as inspection rather than measurement: this whole function runs
+    only after the encoder has already raised ``TypeError``, so a payload that
+    encodes normally never reaches it and pays nothing. Within the walk the hook
+    is one attribute lookup per non-temporal, non-container leaf.
     """
     if isinstance(value, _TEMPORAL):
         return format_iso(value)
@@ -629,4 +643,7 @@ def jsonable(value: Any) -> Any:
         return {key: jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [jsonable(item) for item in value]
+    hook = getattr(type(value), "__jsonable__", None)
+    if hook is not None:
+        return jsonable(hook(value))
     return value

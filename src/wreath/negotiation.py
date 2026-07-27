@@ -23,9 +23,17 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._json import dumps as _json_dumps
-from ._pure.msgpack import packb as _msgpack
+from ._native import _core
 from .request import Request
 from .response import ProblemResponse, Response
+
+# The pure encoder stays the reference implementation and the parity contract
+# (tests/test_msgpack_parity.py asserts the two are byte-for-byte), so
+# WREATH_PURE=1 selects it exactly as it does for JSON.
+if _core is not None and hasattr(_core, "msgpack_dumps"):
+    _msgpack = _core.msgpack_dumps
+else:
+    from ._pure.msgpack import packb as _msgpack
 
 __all__ = ["JSON", "MSGPACK", "Serializer", "negotiate", "parse_accept", "serialize"]
 

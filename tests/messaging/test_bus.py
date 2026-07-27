@@ -74,7 +74,9 @@ async def test_publish_durable_fans_out_per_group():
 
     await bus.publish("booking_created", {"id": 9}, durable=True)
     inserts = [args for sql, args in db.connection.calls if "INSERT INTO" in sql]
-    groups = sorted(args[1] for args in inserts)  # (channel, group, ...)
+    # One statement, every group: (channel, payload, tenant, group, dedup, ...)
+    assert len(inserts) == 1
+    groups = sorted(inserts[0][3::2])
     assert groups == ["billing", "fulfilment"]
 
 

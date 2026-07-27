@@ -103,6 +103,13 @@ PyObject *wreath_multipart_parse(PyObject *self, PyObject *args, PyObject *kwds)
 /* json.c */
 PyObject *wreath_json_dumps(PyObject *self, PyObject *arg);
 PyObject *wreath_json_loads(PyObject *self, PyObject *arg);
+PyObject *wreath_json_configure(PyObject *self, PyObject *args);
+
+/* msgpack.c */
+PyObject *wreath_msgpack_dumps(PyObject *self, PyObject *arg);
+
+/* sse.c */
+PyObject *wreath_sse_frame(PyObject *self, PyObject *args);
 
 /* templates.c */
 PyObject *wreath_template_render(PyObject *self, PyObject *args);

@@ -119,6 +119,7 @@ class CSRFMiddleware:
         "_same_site",
         "_secret",
         "_secure",
+        "_trusted_hosts",
         "_trusted_origins",
         "_allow_missing_origin",
     )
@@ -133,6 +134,7 @@ class CSRFMiddleware:
         secure: bool = True,
         same_site: str = "lax",
         trusted_origins: Iterable[str] = (),
+        trusted_hosts: Iterable[str] = (),
         exempt: Callable[[Request], bool] | None = None,
         allow_missing_origin: bool = False,
     ) -> None:
@@ -165,6 +167,13 @@ class CSRFMiddleware:
         self._trusted_origins = tuple(_normalize_origin(value) for value in trusted_origins)
         self._exempt = exempt
         self._allow_missing_origin = allow_missing_origin
+        # The expected origin is built from the `Host` header, which is the
+        # client's to set. That is safe only if something validates it, and the
+        # something was `TrustedHostMiddleware` -- a dependency between two
+        # middlewares that nothing stated and nothing enforced. Naming the hosts
+        # here makes this middleware self-contained; leaving it empty keeps the
+        # previous behaviour, and the guide says to mount TrustedHostMiddleware.
+        self._trusted_hosts = frozenset(host.lower() for host in trusted_hosts)
 
     def _sign(self, issued: int, nonce: str) -> str:
         return _csrf_sign(self._secret, issued, nonce)
@@ -176,6 +185,15 @@ class CSRFMiddleware:
         return _csrf_validate(self._secret, token, now, self._max_age)
 
     def _origin_valid(self, request: Request, headers: dict[bytes, bytes]) -> bool:
+        if self._trusted_hosts:
+            host = headers.get(b"host")
+            if host is None:
+                return False
+            try:
+                if host.decode("ascii").lower() not in self._trusted_hosts:
+                    return False
+            except UnicodeDecodeError:
+                return False
         expected = _request_origin(request, headers)
         if expected is None:
             return False

@@ -22,6 +22,7 @@ import datetime
 
 import pytest
 
+from wreath._passes.driver import Binds
 from wreath.passes import (
     Buckets,
     Ceiling,
@@ -36,7 +37,7 @@ from wreath.passes import (
 )
 from wreath.temporal import Day, Hour, Month
 
-from .fakes import FakeDatabase, World
+from .fakes import FakeDatabase, World, evaluate
 
 NOW = datetime.datetime(2026, 7, 27, 12, 0, tzinfo=datetime.UTC)
 RECORDED = Key("recorded_at", "timestamptz", indexed=True)
@@ -179,14 +180,33 @@ def test_a_month_step_is_calendar_arithmetic_not_thirty_days():
 
 
 def test_a_day_across_a_dst_change_is_not_twenty_four_hours():
-    # Auckland leaves daylight saving on 2026-04-05, so that local day is 25
-    # hours. A source that stepped a fixed timedelta would cut the bucket an
-    # hour short and put an hour of rows in the wrong day, twice a year.
+    # Auckland leaves daylight saving on 2026-04-05, so that local day really
+    # runs for 25 hours. A source that stepped a fixed timedelta would cut the
+    # bucket an hour short and file an hour of rows under the wrong day, twice
+    # a year, in whichever direction nobody checked.
     units = Buckets(on=RECORDED, step=Day, zone="Pacific/Auckland")
     start = units.floor(datetime.datetime(2026, 4, 5, 3, tzinfo=datetime.UTC))
     end = units.advance(start)
 
-    assert (end - start) == datetime.timedelta(hours=25)
+    # The offset really moved, which is what makes this day unusual.
+    assert start.utcoffset() == datetime.timedelta(hours=13)
+    assert end.utcoffset() == datetime.timedelta(hours=12)
+    elapsed = end.astimezone(datetime.UTC) - start.astimezone(datetime.UTC)
+    assert elapsed == datetime.timedelta(hours=25)
+
+
+def test_subtracting_two_bucket_boundaries_directly_is_the_trap():
+    # Pinned deliberately, because it is CPython's rule rather than this
+    # module's and it bites exactly where nobody is looking. Two aware datetimes
+    # that share a `tzinfo` subtract on the *wall clock*, so the 25-hour day
+    # above measures 24 unless both sides are converted first. Correct on every
+    # day but two a year, which is the worst way for something to be wrong.
+    units = Buckets(on=RECORDED, step=Day, zone="Pacific/Auckland")
+    start = units.floor(datetime.datetime(2026, 4, 5, 3, tzinfo=datetime.UTC))
+    end = units.advance(start)
+
+    assert (end - start) == datetime.timedelta(hours=24)
+    assert end.astimezone(datetime.UTC) - start.astimezone(datetime.UTC) != (end - start)
 
 
 def test_per_chunk_covers_several_buckets_in_one_range():
@@ -258,28 +278,28 @@ async def test_an_empty_table_completes_rather_than_looping(database):
     assert result.chunks == 0
 
 
-async def test_a_bucket_chunk_is_half_open_at_the_top(database, world):
-    # A row exactly on a boundary belongs to the bucket that starts there, not
-    # to the one that ends there. Anything else counts it twice.
-    world.rows = [
-        {"id": "edge", "recorded_at": datetime.datetime(2026, 7, 25, tzinfo=datetime.UTC)},
-        {"id": "before", "recorded_at": datetime.datetime(2026, 7, 24, 23, tzinfo=datetime.UTC)},
-    ]
-    walk = rollup_pass()
-    deleted: list[tuple] = []
-    original = world.before
+def test_a_bucket_chunk_is_half_open_at_the_top():
+    # A row landing exactly on a boundary belongs to the bucket that *starts*
+    # there, never to the one that ends there. A closed top would put it in
+    # both, which double-counts every boundary row in a rollup and is the kind
+    # of error that shows up as a total that is slightly, unaccountably high.
+    units = Buckets(on=RECORDED, step=Day, zone="UTC")
+    binds = Binds()
+    where = units.chunk_where(
+        binds,
+        cursor_from=(datetime.datetime(2026, 7, 24, tzinfo=datetime.UTC),),
+        cursor_to=(datetime.datetime(2026, 7, 25, tzinfo=datetime.UTC),),
+        frontier=None,
+    )
+    args = binds.args
 
-    def record(sql, args):
-        if sql.startswith("DELETE FROM treks"):
-            deleted.append(args)
+    on_lower = {"recorded_at": datetime.datetime(2026, 7, 24, tzinfo=datetime.UTC)}
+    on_upper = {"recorded_at": datetime.datetime(2026, 7, 25, tzinfo=datetime.UTC)}
+    inside = {"recorded_at": datetime.datetime(2026, 7, 24, 13, tzinfo=datetime.UTC)}
 
-    world.before = record
-    await walk.run(database, sleep=_nap)
-    world.before = original
-
-    # Two chunks, one row each: the boundary row was not in both.
-    assert len(world.rows) == 0
-    assert len(deleted) == 2
+    assert evaluate(where, on_lower, args) is True
+    assert evaluate(where, inside, args) is True
+    assert evaluate(where, on_upper, args) is False
 
 
 async def test_the_cursor_survives_a_stopped_shift(database, world):

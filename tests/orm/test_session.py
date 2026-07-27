@@ -288,7 +288,16 @@ async def test_selectin_batches_stay_within_the_configured_bound(
     await session.load(users, User.posts)
     assert len(database.connection.calls) == 2
     assert len(database.connection.calls[0][1]) == MAX_SELECTIN_KEYS
-    assert len(database.connection.calls[1][1]) == 5
+    # The tail batch is padded up to one of the allowed statement widths, so a
+    # run of odd key counts does not mint a plan-cache entry each. The five real
+    # keys are still the only distinct ones -- `IN` collapses the repeats -- and
+    # the width never exceeds the bound this test is named for.
+    from wreath.orm.session import _batch_widths
+
+    tail = len(database.connection.calls[1][1])
+    assert 5 <= tail <= MAX_SELECTIN_KEYS
+    assert tail in _batch_widths()
+    assert len(set(database.connection.calls[1][1])) == 5
 
 
 async def test_nested_selectin_loads_the_next_level(

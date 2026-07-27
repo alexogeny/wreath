@@ -60,6 +60,7 @@ from .requirements import (
 
 __all__ = [
     "PERMISSION_CHANNEL",
+    "TYPE_LEVEL_ID",
     "declared_actions",
     "permission_document",
     "permissions_router",
@@ -73,6 +74,13 @@ PERMISSION_CHANNEL = "wreath_permissions"
 #: what lets the vocabulary be grouped by resource type without a second
 #: declaration. An action without the separator is grouped under ``""``.
 _SEPARATOR = "::"
+
+#: The entity id the manifest asks about, standing for "any row of this type".
+#: A literal ``"*"`` was a real id somebody's data can hold -- and a Cedar
+#: policy written for that row would then decide what the *manifest* says. The
+#: NUL cannot appear in a URL path segment, a JSON string PostgreSQL will store,
+#: or a Cedar entity id, so nothing can collide with it.
+TYPE_LEVEL_ID = "\x00type-level"
 
 #: How many ids one batch request may ask about. A generous UI page: the
 #: endpoint exists so a table is one call, and a table nobody scrolls is not
@@ -382,7 +390,7 @@ def permissions_router(
             # principal ever" so a nav item can be drawn. Row-level questions
             # go to the batch endpoint, which is why both exist.
             granted = await _allowed_actions(
-                request, authorizer, actions, _entity(resource_type, "*")
+                request, authorizer, actions, _entity(resource_type, TYPE_LEVEL_ID)
             )
             if granted:
                 allowed[resource_type] = granted

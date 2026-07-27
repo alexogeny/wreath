@@ -1209,6 +1209,18 @@ def _print_passes(rows: list[Any]) -> None:
             )
         if row.pending:
             print(f"{'':<28} {row.pending} unit(s) queued to be walked out of order")
+        if row.verified_at:
+            # The gate's durable output, and the thing a migration reads before
+            # it agrees to narrow a column. Worth printing next to the walk it
+            # came from, because "did this finish?" and "is it safe to deploy
+            # the next migration?" are the same question asked twice.
+            fact = row.verified_fact or "(no fact named)"
+            print(f"{'':<28} verified {row.verified_at}: published {fact}")
+        elif row.guards:
+            print(
+                f"{'':<28} guards {row.guards}, not yet published -- a migration "
+                "narrowing that column is refused until it is"
+            )
 
 
 def _progress_cell(row: Any) -> str:

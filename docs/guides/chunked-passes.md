@@ -166,6 +166,52 @@ A recurring pass needs `cron=`, and `jobs.drive` refuses without it. Nothing els
 would start the next cycle, and a pass that quietly stops after one is worse than
 one that refuses to be declared.
 
+## Where the next range comes from
+
+`Rows(key=...)` walks by keyset: the next chunk is the next *limit* rows after
+the cursor, found by asking the table. Everything above about unique, indexed,
+single-direction keys is about that — the boundary is a row that exists, so it
+has to identify exactly one.
+
+`Buckets(on=..., step=Day, zone=...)` is the other shape, and it asks the table
+nothing at all. The next range after "the day starting the 24th" is "the day
+starting the 25th", whether or not a single row landed in either:
+
+```python
+fold_yesterday = ChunkedPass(
+    "fold_treks",
+    over=Table("treks"),
+    units=Buckets(on=Key("recorded_at", "timestamptz", indexed=True),
+                  step=Day, zone="Pacific/Auckland"),
+    frontier=Sealed(after="2h"),
+    work=Apply(fold_one_day, idempotent=Declared("the rollup upserts by day")),
+)
+```
+
+Three things follow from a range being computed rather than found:
+
+- **The key does not have to be unique.** A bucket boundary is a value the
+  calendar produced, not a row the table happened to hold, so it cannot land
+  between siblings. The index requirement stays, because the chunk's *predicate*
+  is still a range scan.
+- **The range is closed at the bottom and open at the top** — `>= start AND <
+  end` — which is the opposite anchoring to a keyset chunk, and it is what stops
+  a row exactly on a boundary being counted in both buckets.
+- **The frontier is tested against a range's end.** A bucket cannot settle
+  before the moment it stops accepting rows, so at noon on the 27th the 27th is
+  still open and is left alone. Folding it in would settle a number that is
+  still moving.
+
+The zone is part of the declaration and **not** a runtime argument, for the same
+reason it is in [calculated views](calculated-views.md): a materialised Auckland
+day cannot be re-cut into a London day afterwards.
+
+The calendar arithmetic is [`wreath.temporal`](dates-and-times.md)'s, so a day
+that spans a daylight-saving change is 23 or 25 hours rather than 24. If you
+ever compare two boundaries yourself, convert both to UTC first — two aware
+datetimes sharing a `tzinfo` subtract on the wall clock, which is correct on
+every day but the two a year that matter.
+
 ## What the work can be
 
 - **`Purge()`** — delete every row in the chunk. Idempotent by nature.
@@ -333,6 +379,147 @@ await roll_up_days.requeue(db, bucket_end, after=bucket_start)
 Two callers arrive at this from opposite directions — a rollup folding in a late
 correction, and an operator clearing a dead-lettered chunk — and get the same
 mechanism.
+
+## The terminal gate: verify before anything irreversible
+
+Some passes exist to make something else safe afterwards — a migration that
+narrows a column, a partition that gets dropped. The rule is one line, and every
+arrow in it is a place where reversing the order loses data permanently:
+
+> **materialise → verify → only then the irreversible step.**
+
+```python
+convert_grades = ChunkedPass(
+    "convert_grades",
+    over=Trek,
+    units=Rows(key=Trek.id, limit=5_000),
+    frontier=Ceiling.at_launch(),
+    work=Rewrite({"grade_text": "grade::text"}, where="grade IS NOT NULL"),
+    gate=Gate(
+        verify=Constraint("trek_grade_text_present", "grade_text IS NOT NULL"),
+        publishes="trek.grade_text",
+    ),
+)
+```
+
+### Counters are progress, never proof
+
+`rows_done == denominator` is a statement about the pass's own bookkeeping, and
+the failure it absorbs perfectly is a walk that skipped one range and
+double-counted another. So a verification is always a question the *database*
+answers, in one of three grades:
+
+- **`NoRowsMatch("grade_text IS NULL")`** — ask the table the question the
+  irreversible step depends on.
+- **`Reconcile(source, against)`** — two independent counts that must agree.
+  Cheap at coarse grain, and possible only *before* the source is removed, which
+  is the only moment it will ever be possible.
+- **`Constraint(name, check)`** — add it `NOT VALID` (instant, checks nothing),
+  then `VALIDATE CONSTRAINT` (scans under `SHARE UPDATE EXCLUSIVE`, blocking
+  neither reads nor writes, and naming the offending row if it fails).
+
+`Constraint` is the one to reach for when it fits, because the verification and
+the thing that will enforce the invariant afterwards are the *same predicate*.
+That is available only because the same tool emits the DDL; a bolt-on backfill
+library has to hand-write a `SELECT` and hope it matches the constraint somebody
+adds later.
+
+### The verification may not restate the walk
+
+If the walk selected `WHERE grade_text IS NULL` and the check asks
+`WHERE grade_text IS NULL`, a walk whose predicate was subtly wrong verifies its
+own bug and reports success. So a gate that repeats the work's own `where` is
+**refused where you declared it**. Derive the check from the invariant the
+irreversible step needs, not from the walk.
+
+### The gate publishes a fact; the irreversible step consumes it
+
+Verification always writes a durable fact into the ledger. Running something
+irreversible is separate and opt-in, because the two callers need different
+things: a deferred migration's terminal step is *permission for a later
+migration somebody else runs*, while a rollup owns the partition it is dropping.
+
+```python
+for fact in await published_facts(db):
+    print(fact.name, fact.fact, fact.verified_at)
+```
+
+That is readable with a connection and a schema and no pass declaration, which
+is exactly what a migration deciding "may I narrow this column?" has in hand.
+Pass `then=` when the pass does own its terminal step; it runs once, behind a
+phase compare-and-swap, after the fact is published.
+
+### A migration will not narrow a column you are still converting
+
+The fact is not only readable — it is *read*. When a pass guards a column,
+`wreath migrations apply` refuses any artifact that drops it or changes its type
+until the gate has published:
+
+```python
+from wreath.passes import column_fact
+
+normalize_grades = ChunkedPass(
+    "normalize_grades",
+    over=Trek,
+    units=Rows(key=Trek.id, limit=10_000),
+    frontier=Ceiling.at_launch(monotone="ids come from an identity column"),
+    work=Rewrite(...),
+    gate=Gate(
+        verify=Constraint("grade_next IS NOT NULL"),
+        publishes=column_fact("app", "treks", "grade"),
+    ),
+)
+```
+
+`column_fact` exists so both halves of that contract spell the column the same
+way. A free-form string would agree right up until someone wrote `treks.grade`
+where the other side expected `app.treks.grade`, and the failure would be a
+migration that sails through rather than one that refuses.
+
+**Name the column a later migration will narrow, not the one you are filling.**
+A retype drains `grade` into `grade_next`; the fact is about `grade`, because
+`grade` is what the swap migration drops.
+
+The refusal names the pass and what would clear it:
+
+```
+refusing to apply migration to schema 'app': it narrows 1 column(s) a chunked
+pass is still converting, and narrowing a column before its backfill finishes
+loses the rows behind the cursor:
+  - drops app.treks.grade, which pass 'normalize_grades' has not finished
+    (phase walking)
+Let the pass finish -- `wreath passes status` shows where it is -- and apply
+this migration afterwards.
+```
+
+A pass with an open hole cannot publish, because a hole bars its gate. The
+refusal says so and points at `wreath passes retry`, since waiting will not
+clear that one. `wreath migrations check` lists every guarded column before you
+deploy, so the first you hear of this is not a failed release.
+
+A pass whose gate publishes nothing guards nothing, and a column no pass guards
+is never refused — the scan exists to catch the one dangerous case, not to make
+every migration ask permission.
+
+### A failed verification is not transient
+
+If the check answers *no*, the walk's logic is wrong and running it again will
+fail identically at the same row. The pass stops at `unverified` with the
+failing check recorded, and `wreath passes retry` deliberately will not restart
+it — that is for a chunk that was given up on, and burning a maintenance window
+to fail at the same row helps nobody.
+
+A check that *could not run* — a dropped connection, a lock timeout — is a
+different thing entirely: nothing has been concluded, so the pass stays where it
+is and the next shift tries again.
+
+### Scope
+
+`Gate(scope="pass")` verifies the whole table once the walk completes, which is
+what a migration needs. `Gate(scope="unit")` verifies each range as the walk
+passes it, which is what a recurring pass needs — one bad bucket must not freeze
+the ladder behind it. A recurring pass has no completion for a whole-pass gate
+to fire at, so declaring one is refused.
 
 ## Applying the schema
 

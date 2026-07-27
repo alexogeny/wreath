@@ -168,6 +168,45 @@ cedar_set_contains(cedar_ctx *ctx, PyObject *set_list, PyObject *value, int dept
     return 0;
 }
 
+/* Build a hashable identity for a Cedar value.
+ *
+ * Returns 0 on success with *key set to an owned reference, or to NULL when the
+ * value needs structural comparison instead. Returns -1 with a Python exception
+ * set on a real failure; unlike the evaluation helpers in this file, this one
+ * never uses the NULL-without-exception convention.
+ *
+ * The tag keeps kinds apart because `cedar_eq` does: `True` and `1` are not
+ * equal in Cedar's model, but Python compares them equal and hashes them alike,
+ * so an untagged key would silently merge them. Mirrors `_dedupe_key` in
+ * `_pure/cedar.py` and `_auth/cedar_engine.py`. */
+static int
+cedar_dedupe_key(PyObject *value, PyObject **key)
+{
+    const char *tag;
+    *key = NULL;
+    if (PyBool_Check(value)) {
+        tag = "b";               /* before the int test: bool subclasses int */
+    }
+    else if (PyLong_Check(value)) {
+        tag = "i";
+    }
+    else if (PyUnicode_Check(value)) {
+        tag = "s";
+    }
+    else if (cedar_is_uid(value)) {
+        /* A (str, str) entity uid, so hashable by construction. Testing for a
+         * uid rather than any tuple is what keeps this total: there is no
+         * unhashable case to fall back from, so nothing here clears an
+         * exception to signal "not applicable". */
+        tag = "t";
+    }
+    else {
+        return 0;                /* records and nested sets: structural */
+    }
+    *key = Py_BuildValue("(sO)", tag, value);
+    return *key == NULL ? -1 : 0;
+}
+
 /* Evaluate to a strict bool: 1 true, 0 false, -1 error. */
 static int
 cedar_eval_bool(cedar_ctx *ctx, PyObject *node, int depth, const char *what)
@@ -644,26 +683,72 @@ cedar_eval(cedar_ctx *ctx, PyObject *node, int depth)
         return cedar_eval(ctx, PyTuple_GET_ITEM(node, condition ? 2 : 3), depth + 1);
     }
     case 14: { /* SET */
+        /* Deduplicated by hash where the member allows it. Scanning the kept
+         * list per candidate is O(n**2), and a set literal is re-evaluated on
+         * every authorization, so a policy holding a few hundred entries (an
+         * allowlist, a tenant list) paid that per request. Only records and
+         * nested sets, which cannot be hashed, still compare structurally --
+         * and only against each other. `_pure/cedar.py` does the same. */
         PyObject *items = PyTuple_GET_ITEM(node, 1);
         PyObject *result = PyList_New(0);
-        if (result == NULL) {
+        PyObject *seen = PySet_New(NULL);
+        PyObject *structural = PyList_New(0);
+        if (result == NULL || seen == NULL || structural == NULL) {
+            Py_XDECREF(result);
+            Py_XDECREF(seen);
+            Py_XDECREF(structural);
             return NULL;
         }
         for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(items); i++) {
             PyObject *item = cedar_eval(ctx, PyTuple_GET_ITEM(items, i), depth + 1);
             if (item == NULL) {
-                Py_DECREF(result);
-                return NULL;
+                goto set_error;
             }
-            int present = cedar_set_contains(ctx, result, item, 0);
-            if (present < 0 || (present == 0 && PyList_Append(result, item) < 0)) {
+            PyObject *key;
+            if (cedar_dedupe_key(item, &key) < 0) {
                 Py_DECREF(item);
-                Py_DECREF(result);
-                return NULL;
+                goto set_error;
+            }
+            if (key != NULL) {
+                int present = PySet_Contains(seen, key);
+                if (present < 0 || (present == 0 && PySet_Add(seen, key) < 0)) {
+                    Py_DECREF(key);
+                    Py_DECREF(item);
+                    goto set_error;
+                }
+                Py_DECREF(key);
+                if (present) {
+                    Py_DECREF(item);
+                    continue;
+                }
+            }
+            else {
+                int present = cedar_set_contains(ctx, structural, item, 0);
+                if (present < 0 ||
+                    (present == 0 && PyList_Append(structural, item) < 0)) {
+                    Py_DECREF(item);
+                    goto set_error;
+                }
+                if (present) {
+                    Py_DECREF(item);
+                    continue;
+                }
+            }
+            if (PyList_Append(result, item) < 0) {
+                Py_DECREF(item);
+                goto set_error;
             }
             Py_DECREF(item);
         }
+        Py_DECREF(seen);
+        Py_DECREF(structural);
         return result;
+
+    set_error:
+        Py_DECREF(result);
+        Py_DECREF(seen);
+        Py_DECREF(structural);
+        return NULL;
     }
     case 15: { /* RECORD */
         PyObject *entries = PyTuple_GET_ITEM(node, 1);

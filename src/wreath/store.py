@@ -82,6 +82,38 @@ class _Claimed:
 CLAIMED: Final = _Claimed()
 
 
+class Sql(str):
+    """A fragment the caller is asserting is safe to interpolate.
+
+    Column *names* are checked as identifiers; the expressions beside them
+    cannot be, because an expression is arbitrary SQL by definition. The type is
+    the check: a plain `str` in an expression position is refused, so text that
+    arrived from a request cannot reach the statement without somebody having
+    written `Sql(...)` around it and meant it.
+
+    A bind placeholder (``$1``) needs no marker -- it is the safe form, and
+    requiring ceremony for it would push callers toward the unsafe one.
+    """
+
+    __slots__ = ()
+
+
+_PLACEHOLDER = re.compile(r"^\$\d+(::[A-Za-z0-9_ ]+)?$")
+
+
+def _expression(value: object, *, what: str) -> str:
+    """Accept a placeholder or an explicitly marked fragment; refuse plain text."""
+    if isinstance(value, Sql):
+        return str(value)
+    if isinstance(value, str) and _PLACEHOLDER.fullmatch(value.strip()):
+        return value
+    raise TypeError(
+        f"{what} must be a bind placeholder like '$1' or an explicitly marked "
+        f"Sql(...) fragment, not {value!r}. Anything built from request data "
+        "belongs in a placeholder."
+    )
+
+
 def sql_identifier(value: str, *, what: str = "table") -> str:
     """Return ``value`` if it is a bare SQL identifier, else raise.
 
@@ -188,11 +220,11 @@ class Keyed:
 MAX_IDENTIFIER_BYTES: Final = 63
 
 
-def _interval(seconds: float | str) -> str:
+def _interval(seconds: float | str) -> Sql:
     # A float is rendered as a literal (the store owns the lifetime); a string is
     # a placeholder, for when the caller supplies it per write.
     if isinstance(seconds, str):
-        return f"make_interval(secs => {seconds}::float8)"
+        return Sql(f"make_interval(secs => {_expression(seconds, what='an interval')}::float8)")
     value = float(seconds)
     # The literal goes into statement text, so a non-finite or negative lifetime
     # would be discovered by PostgreSQL at prepare time (or, for a negative one,
@@ -201,7 +233,7 @@ def _interval(seconds: float | str) -> str:
         raise ValueError("a store lifetime must be a finite number of seconds")
     if value <= 0:
         raise ValueError("a store lifetime must be positive")
-    return f"make_interval(secs => {value!r}::float8)"
+    return Sql(f"make_interval(secs => {value!r}::float8)")
 
 
 @dataclass(slots=True)
@@ -257,7 +289,7 @@ class PostgresStore:
                     # The payload is reset as well as the deadline: a reclaimed
                     # row must look exactly like a fresh one, or the next reader
                     # replays the previous holder's answer.
-                    update={stamp: window} | {c.name: "NULL" for c in declaration.columns},
+                    update={stamp: window} | {c.name: Sql("NULL") for c in declaration.columns},
                     where=self.expired,
                     # Presence is the whole answer, so return the cheapest proof
                     # of it. See `claim`.
@@ -287,26 +319,29 @@ class PostgresStore:
         return self._declaration.table
 
     @property
-    def expired(self) -> str:
+    def expired(self) -> Sql:
         """The predicate for a row the store no longer honours."""
-        return f"{ALIAS}.{self._declaration.stamp} < clock_timestamp()"
+        return Sql(f"{ALIAS}.{self._declaration.stamp} < clock_timestamp()")
 
     @property
-    def live(self) -> str:
+    def live(self) -> Sql:
         """The predicate for a row that is still good.
 
         The exact complement of :attr:`expired`, so a purge can never drop a row
         a read would still have honoured.
         """
-        return f"{ALIAS}.{self._declaration.stamp} >= clock_timestamp()"
+        return Sql(f"{ALIAS}.{self._declaration.stamp} >= clock_timestamp()")
 
-    def window(self, seconds: float | str | None = None) -> str:
-        """A deadline ``seconds`` from the database's clock, not the caller's."""
+    def window(self, seconds: float | str | None = None) -> Sql:
+        """A deadline ``seconds`` from the database's clock, not the caller's.
+
+        A string lifetime must be a bind placeholder; see :class:`Sql`.
+        """
         if seconds is None:
             seconds = self._declaration.ttl
             if seconds is None:
                 raise ValueError("this store has no ttl; pass the lifetime explicitly")
-        return f"clock_timestamp() + {_interval(seconds)}"
+        return Sql(f"clock_timestamp() + {_interval(seconds)}")
 
     def upsert(
         self,
@@ -318,13 +353,24 @@ class PostgresStore:
     ) -> str:
         """One ``INSERT ... ON CONFLICT DO UPDATE`` over this store's key.
 
-        Both mappings are ``column -> SQL expression``; the columns are
-        interpolated, so each is checked as an identifier. The result is a
-        single statement by construction -- two statements would be two chances
-        for a concurrent worker to interleave.
+        Both mappings are ``column -> expression``. The columns are
+        interpolated, so each is checked as an identifier; the expressions are
+        checked as :class:`Sql` -- a bind placeholder, or a fragment the caller
+        marked deliberately. The result is a single statement by construction --
+        two statements would be two chances for a concurrent worker to
+        interleave.
         """
         for column in (*values, *update):
             sql_identifier(column, what="column")
+        checked_values = {
+            column: _expression(expr, what=f"the value for {column!r}")
+            for column, expr in values.items()
+        }
+        checked_update = {
+            column: _expression(expr, what=f"the update for {column!r}")
+            for column, expr in update.items()
+        }
+        values, update = checked_values, checked_update
         assignments = ",\n".join(f"    {column} = {expr}" for column, expr in update.items())
         sql = (
             f"INSERT INTO {self.table} AS {ALIAS} ({', '.join(values)})\n"
@@ -411,6 +457,24 @@ class PostgresStore:
     async def delete(self, key: str) -> str:
         """Drop ``key``. Not an error when it is already gone."""
         return await self.statement("delete").execute(key)
+
+    async def purge_count(self, idle_seconds: float | None = None) -> int | None:
+        """:meth:`purge`, reporting how many rows went.
+
+        ``None`` when the driver's status cannot be read -- a test double, a
+        backend that reports nothing. Splitting this from :meth:`purge` keeps
+        the status string available to callers that want it while giving the
+        scheduled job that runs this something it can actually record: "the
+        purge ran" and "the purge removed 40 000 rows" are different facts.
+        """
+        status = await self.purge(idle_seconds)
+        if not isinstance(status, str) or not status.startswith("DELETE"):
+            return None
+        _, _, count = status.partition(" ")
+        try:
+            return int(count.strip())
+        except ValueError:
+            return None
 
     async def purge(self, idle_seconds: float | None = None) -> str:
         """Drop rows the store no longer honours.
@@ -540,6 +604,7 @@ class MemoryStore:
 __all__ = [
     "ALIAS",
     "CLAIMED",
+    "Sql",
     "Column",
     "Keyed",
     "MemoryStore",

@@ -52,12 +52,16 @@ class FakeConnection:
         return [sql for sql, _ in self.calls]
 
     def inserted_groups(self) -> list[str]:
-        """The group each durable message row was enqueued for, in order."""
-        return [
-            args[1]
-            for sql, args in self.calls
-            if "INSERT INTO" in sql and ".messages" in sql
-        ]
+        """The group each durable message row was enqueued for, in order.
+
+        One statement carries every group, so the parameters are
+        ``(channel, payload, tenant, group, dedup, group, dedup, ...)``.
+        """
+        groups: list[str] = []
+        for sql, args in self.calls:
+            if "INSERT INTO" in sql and ".messages" in sql:
+                groups.extend(args[3::2])
+        return groups
 
     def registrations(self) -> list[tuple[Any, ...]]:
         return [

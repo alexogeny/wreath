@@ -193,6 +193,21 @@ class MessageBus:
     def name(self) -> str:
         return self._name
 
+    def stats(self) -> dict[str, int]:
+        """Every counter this bus keeps, by name.
+
+        The counters were readable one attribute at a time, which means an
+        exporter has to know each name and gains nothing when one is added. This
+        is the shape a metrics scrape wants.
+        """
+        return {
+            "unrouted_publishes": self.unrouted_publishes,
+            "group_registry_errors": self.group_registry_errors,
+            "doorbell_reconnects": self.doorbell_reconnects,
+            "handler_errors": self.handler_errors,
+            "delivery_errors": self.delivery_errors,
+        }
+
     def known_groups(self, channel: str) -> frozenset[str]:
         """Every durable group a publish to ``channel`` will reach.
 
@@ -342,10 +357,25 @@ class MessageBus:
                     "schema_sql() was never applied"
                 )
             return
+        # One statement for every group. A loop of INSERTs was N round trips on
+        # the publish path -- inside the caller's transaction, where each one
+        # also holds their locks a little longer -- and the count grows with the
+        # fleet, which is exactly when it is least affordable.
+        rows = []
+        params: list[Any] = [channel, body, tenant]
+        for group in groups:
+            dk = dedup_key(f"{channel}:{group}", key) if key is not None else None
+            params.extend([group, dk])
+            group_index, dedup_index = len(params) - 1, len(params)
+            # A generous default attempt cap; per-subscription retries govern
+            # the live consumer's backoff decisions.
+            rows.append(
+                f"($1, ${group_index}, $2::jsonb, $3, 'ready', now(), 6, ${dedup_index})"
+            )
         sql = (
             f"INSERT INTO {self._table} "
             '(channel, "group", payload, tenant, state, run_at, max_attempts, dedup_key) '
-            "VALUES ($1, $2, $3::jsonb, $4, 'ready', now(), $5, $6) "
+            f"VALUES {', '.join(rows)} "
             'ON CONFLICT (channel, "group", dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING'
         )
         runner = tx if tx is not None else None
@@ -354,11 +384,7 @@ class MessageBus:
             connection = await self._db.acquire(self._workload)
             runner = connection
         try:
-            for group in groups:
-                dk = dedup_key(f"{channel}:{group}", key) if key is not None else None
-                # A generous default attempt cap; per-subscription retries govern
-                # the live consumer's backoff decisions.
-                await runner.execute(sql, channel, group, body, tenant, 6, dk)
+            await runner.execute(sql, *params)
             # One doorbell for the whole fan-out. The notification carries no
             # payload -- it only sets the consumers' wake event -- so a second
             # one says nothing new, and with fleet-wide discovery a busy channel

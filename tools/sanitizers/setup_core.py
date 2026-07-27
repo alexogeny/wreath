@@ -20,6 +20,7 @@ FLAGS = [
 SOURCES = (
     "_coremodule.c",
     "authz.c",
+    "cedar.c",
     "env.c",
     "headers.c",
     "codecs.c",
@@ -28,16 +29,20 @@ SOURCES = (
     "ws.c",
     "multipart.c",
     "json.c",
+    "msgpack.c",
+    "sse.c",
     "templates.c",
     "http.c",
     "router.c",
     "dtrouter.c",
     "dtbitset.c",
     "security.c",
+    "jose.c",
     "webpolicy.c",
     "observability.c",
     "proxy.c",
     "ratelimit.c",
+    "scheduler.c",
 )
 
 setup(

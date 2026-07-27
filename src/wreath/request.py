@@ -11,7 +11,11 @@ from ._codecs import parse_cookies, parse_qs
 from ._headers import build_header_map, find_header
 from ._json import loads as _json_loads
 from ._multipart import parse as multipart_parse
-from .exceptions import ClientDisconnect, PayloadTooLarge
+from .exceptions import (
+    ClientDisconnect,
+    PayloadTooLarge,
+    RequestHeaderFieldsTooLarge,
+)
 from .state import State
 
 
@@ -43,6 +47,18 @@ class RequestLimits:
     #: and per-part limits. Defaults to `max_body_bytes`; lower it to bound the
     #: parse-time amplification (body plus materialized parts) more tightly.
     max_form_memory_bytes: int = 16 * 1024 * 1024
+    #: Bytes the `Cookie` header may carry. Browsers stay far under this; a
+    #: request past it is either broken or probing, and parsing it builds a dict
+    #: proportional to whatever arrived -- on any route that reads a session, a
+    #: CSRF token, or a bearer cookie, which is most of them. Refused with 431.
+    #:
+    #: There is deliberately no `max_headers` beside it. The header *count* is
+    #: already bounded by every server's frame limits, and enforcing a second
+    #: bound here cost a crossing in `pre_activation` -- the number
+    #: `docs/agents/request-boundary-baseline.json` asks changes to protect.
+    #: The cookie bound is the one that pays for itself, because it guards a
+    #: parse rather than a length.
+    max_cookie_bytes: int = 16 * 1024
     #: Fields one urlencoded form body may contain. A large body is otherwise
     #: only bounded by `max_body_bytes`, which admits millions of tiny fields;
     #: this bounds the field count directly, refused while scanning with 413.
@@ -51,6 +67,7 @@ class RequestLimits:
     def __post_init__(self) -> None:
         for name in (
             "max_body_bytes",
+            "max_cookie_bytes",
             "max_parts",
             "max_part_header_bytes",
             "max_part_bytes",
@@ -130,6 +147,27 @@ class FormData:
         return len(self.fields)
 
 
+#: RFC 2046 §5.1.1: 1..70 characters from this set, not ending in a space.
+_BOUNDARY_CHARS = frozenset(
+    b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'()+_,-./:=? "
+)
+
+
+def _valid_boundary(value: bytes) -> bool:
+    """Whether ``value`` is a boundary the RFC allows.
+
+    Unchecked, a boundary was whatever followed `boundary=` -- any length, any
+    byte. That is where a parser differential lives: the proxy or WAF in front
+    reads the body one way and this reads it another, and the disagreement is
+    the whole attack.
+    """
+    return (
+        1 <= len(value) <= 70
+        and not value.endswith(b" ")
+        and all(byte in _BOUNDARY_CHARS for byte in value)
+    )
+
+
 def _multipart_boundary(content_type: bytes) -> bytes | None:
     for fragment in content_type.split(b";"):
         key, sep, value = fragment.strip(b" \t").partition(b"=")
@@ -137,7 +175,7 @@ def _multipart_boundary(content_type: bytes) -> bytes | None:
             value = value.strip(b" \t")
             if len(value) >= 2 and value.startswith(b'"') and value.endswith(b'"'):
                 value = value[1:-1]
-            return value or None
+            return value if _valid_boundary(value) else None
     return None
 
 Receive = Callable[[], Awaitable[dict[str, Any]]]
@@ -336,6 +374,11 @@ class Request:
             if header_map is None
             else header_map.get(b"cookie")
         )
+        if value is not None and len(value) > self._limits.max_cookie_bytes:
+            raise RequestHeaderFieldsTooLarge(
+                f"Cookie header is {len(value)} bytes; the limit is "
+                f"{self._limits.max_cookie_bytes}"
+            )
         parsed: dict[str, str] = {} if value is None else parse_cookies(value)
         self._cookies = parsed
         return parsed

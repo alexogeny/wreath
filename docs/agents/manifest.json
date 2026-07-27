@@ -15,7 +15,7 @@
     "all_gates": "uv run wreath-check",
     "all_gates_with_docs": "uv run wreath-check --docs",
     "tests": "uv run pytest",
-    "tests_full": "uv run pytest -m '' -n 4",
+    "tests_full": "uv run pytest -m '' -n 6",
     "lint": "uv run ruff check .",
     "types": "uv run ty check",
     "map_lint": "uv run wreath-map-lint",
@@ -24,6 +24,8 @@
     "docs_build": "uv run wreath-docs",
     "benchmarks": "uv run wreath-bench",
     "server_sanitizer_build": "uv run python tools/sanitizers/build_server.py",
+    "sanitize": "uv run wreath-sanitize --all",
+    "sanitize_leaks": "uv run wreath-sanitize core --leaks",
     "core_sanitizer_build": "uv run python tools/sanitizers/build_core.py",
     "postgres_sanitizer_build": "uv run python tools/sanitizers/build_postgres.py"
   },
@@ -101,7 +103,10 @@
         "src/wreath/_headers.py",
         "src/wreath/_codecs.py",
         "src/wreath/_json.py",
-        "src/wreath/_multipart.py"
+        "src/wreath/_multipart.py",
+        "src/wreath/_pure/msgpack.py",
+        "src/wreath/_native/msgpack.c",
+        "src/wreath/_native/sse.c"
       ],
       "tests": [
         "tests/test_request.py",
@@ -110,6 +115,9 @@
         "tests/test_background.py",
         "tests/test_sse_response.py",
         "tests/test_negotiation.py",
+        "tests/test_msgpack_parity.py",
+        "tests/test_sse_frame_parity.py",
+        "tests/test_json_temporal.py",
         "tests/test_native_parity.py",
         "tests/test_native_response_regressions.py"
       ],
@@ -293,9 +301,11 @@
         "tests/test_auth_routing.py",
         "tests/test_auth_verifier_call_count.py",
         "tests/test_authz_native.py",
+        "tests/test_authorization_complexity.py",
         "tests/test_rbac.py",
         "tests/test_cedar.py",
         "tests/test_cedar_engine.py",
+        "tests/test_cedar_set_dedupe.py",
         "tests/test_permissions.py",
         "tests/test_jwt.py",
         "tests/test_livedoc.py"

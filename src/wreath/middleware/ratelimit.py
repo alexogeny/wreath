@@ -33,7 +33,7 @@ from typing import Any, Protocol
 from .._native import _core
 from ..request import Request
 from ..response import ProblemResponse
-from ..store import ALIAS, Column, Keyed, PostgresStore
+from ..store import ALIAS, Column, Keyed, PostgresStore, Sql
 
 if _core is not None and hasattr(_core, "TokenBucket"):
     TokenBucket: Any = _core.TokenBucket
@@ -167,21 +167,21 @@ class PostgresRateLimitStore:
             self._store.upsert(
                 values={
                     "key": "$1",
-                    "tokens": "$2::float8 - $3::float8",
-                    "allowed": "true",
-                    "updated": "clock_timestamp()",
+                    "tokens": Sql("$2::float8 - $3::float8"),
+                    "allowed": Sql("true"),
+                    "updated": Sql("clock_timestamp()"),
                 },
                 # `allowed` is written as well as returned: when a bucket is
                 # short, the stored token count alone cannot say whether this
                 # call consumed or was refused -- both land in [0, cost).
                 update={
-                    "tokens": (
+                    "tokens": Sql(
                         f"{refill}\n"
                         f"           - CASE WHEN {refill} >= $3::float8 "
                         "THEN $3::float8 ELSE 0::float8 END"
                     ),
-                    "allowed": f"{refill} >= $3::float8",
-                    "updated": "clock_timestamp()",
+                    "allowed": Sql(f"{refill} >= $3::float8"),
+                    "updated": Sql("clock_timestamp()"),
                 },
                 returning="tokens, allowed",
             ),
@@ -280,7 +280,7 @@ class RateLimitMiddleware:
     global_scope = True
     __slots__ = (
         "_cost", "_exempt", "_key", "_policy_headers", "_store", "_try_acquire",
-        "before", "before_sync",
+        "before", "before_sync", "throttled",
     )
 
     def __init__(
@@ -293,6 +293,7 @@ class RateLimitMiddleware:
         store: RateLimitStore | None = None,
         key: Callable[[Request], str | None] | None = None,
         exempt: Callable[[Request], bool] | None = None,
+        _route_scoped: bool = False,
     ) -> None:
         if limit <= 0:
             raise ValueError("limit must be positive")
@@ -303,11 +304,17 @@ class RateLimitMiddleware:
         capacity = float(limit if burst is None else burst)
         if capacity < cost:
             raise ValueError("burst must be at least the per-request cost")
-        if key is principal_key:
+        if key is principal_key and not _route_scoped:
             # A global hook runs at ingress, before route authorization has
             # identified anyone, so `principal_key` would silently degrade to
             # the client address and put every caller in one bucket. That is a
             # production incident, not a preference -- refuse it at startup.
+            #
+            # `_route_scoped` is how `TieredRateLimitMiddleware` says "I run
+            # after authentication". It used to assign `child._key` afterwards
+            # instead, which meant the guard could be stepped around by anyone
+            # who noticed the attribute -- and read as an oversight rather than
+            # a declaration.
             raise ValueError(
                 "RateLimitMiddleware is a global hook and runs before "
                 "authentication, so it cannot key on the principal; use "
@@ -334,6 +341,10 @@ class RateLimitMiddleware:
         self._store = selected
         self._cost = cost
         self._key = key if key is not None else _client_key
+        #: Requests this limiter refused. Without it, a limiter keying everyone
+        #: the same -- see `_client_key` behind a proxy -- looks exactly like one
+        #: with nothing to do.
+        self.throttled = 0
         self._exempt = exempt
         # Resolved once rather than branching and re-looking-up per request. A
         # synchronous store also skips a coroutine on the hot path; the memory
@@ -370,6 +381,7 @@ class RateLimitMiddleware:
         response.headers.extend(self._policy_headers)
         # Remaining *is* known here: the request was refused, so there is none.
         response.headers.append((b"x-ratelimit-remaining", b"0"))
+        self.throttled += 1
         return response
 
     def _before_local_sync(self, request: Request) -> Any | None:
@@ -444,15 +456,13 @@ class TieredRateLimitMiddleware:
         # is cannot change afterwards.
         self._dispatch: dict[str | None, tuple[Any, bool]] = {}
         for name, (limit, window) in {**tiers, None: default}.items():
+            # `_route_scoped` is the declaration that this limiter runs after
+            # authentication, which is what makes `principal_key` valid -- the
+            # global form refuses it because a global hook runs at ingress.
             child = RateLimitMiddleware(
                 limit=limit, window=window, cost=cost, exempt=exempt, store=build(),
+                key=key, _route_scoped=True,
             )
-            # Assigned rather than passed: `RateLimitMiddleware` refuses
-            # `principal_key` at construction because *it* is a global hook and
-            # would key everyone the same. This middleware is route-scoped and
-            # runs after authentication, which is precisely what makes the key
-            # valid here.
-            child._key = key
             hook = child.before
             self._dispatch[name] = (
                 (hook, True) if hook is not None else (child.before_sync, False)

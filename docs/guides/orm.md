@@ -59,6 +59,16 @@ session. The statement "succeeded" in the driver's terms, so this used to pass
 unnoticed and only showed up as the next read disagreeing.
 
 
+### Bounding a query
+
+`Registry(..., statement_timeout=5.0)` — or `Session(..., statement_timeout=…)`
+for one unit of work — issues `SET LOCAL statement_timeout` on the outermost
+transaction. Transaction-local on purpose: a session-level `SET` would travel
+with the pooled connection into somebody else's work. Without it, one
+pathological query holds a connection for as long as PostgreSQL allows, which in
+a default install is forever.
+
+
 ## User story: fetch a row, or a filtered page
 
 > *As an API author, I want to read one row by id and run a small filtered query

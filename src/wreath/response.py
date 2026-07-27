@@ -14,6 +14,7 @@ from typing import Any, cast
 from urllib.parse import quote, urlsplit
 
 from ._json import dumps as _json_dumps
+from ._native import _core
 
 # PreparedResponse's only request-time work is replaying two prebuilt ASGI
 # messages, so there is nothing above the noise floor for C to accelerate; the
@@ -461,21 +462,50 @@ def _encode_sse(event: ServerSentEvent | str | bytes | Mapping[str, Any]) -> byt
         data = event.get("data")
     else:
         raise TypeError(f"cannot frame SSE event of type {type(event).__name__!r}")
+    return _frame_fields(
+        None if comment is None else str(comment),
+        None if name is None else str(name),
+        None if ident is None else str(ident),
+        None if retry is None else int(retry),
+        None if data is None else (
+            data.decode("utf-8") if isinstance(data, bytes) else str(data)
+        ),
+    )
+
+
+def _sse_frame_fields(
+    comment: str | None,
+    name: str | None,
+    ident: str | None,
+    retry: int | None,
+    data: str | None,
+) -> bytes:
+    """Frame already-resolved SSE fields. The parity contract for ``sse.c``.
+
+    Split from :func:`_encode_sse` so the native twin has a narrow, exactly
+    mirrorable boundary: shape dispatch and coercion stay in Python, and only
+    the framing -- the part that walks the payload -- crosses.
+    """
     lines: list[str] = []
     if comment is not None:
-        _sse_lines("", str(comment), lines)
+        _sse_lines("", comment, lines)
     if name is not None:
-        lines.append(_sse_single_line("event", str(name)))
+        lines.append(_sse_single_line("event", name))
     if ident is not None:
-        lines.append(_sse_single_line("id", str(ident)))
+        lines.append(_sse_single_line("id", ident))
     if retry is not None:
-        lines.append(f"retry: {int(retry)}")
+        lines.append(f"retry: {retry}")
     if data is not None:
-        text = data.decode("utf-8") if isinstance(data, bytes) else str(data)
-        _sse_lines("data", text, lines)
+        _sse_lines("data", data, lines)
     if not lines:
         lines.append(":")  # bare keep-alive comment
     return ("\n".join(lines) + "\n\n").encode("utf-8")
+
+
+if _core is not None and hasattr(_core, "sse_frame"):
+    _frame_fields = _core.sse_frame
+else:
+    _frame_fields = _sse_frame_fields
 
 
 class SSEResponse(StreamingResponse):

@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from wreath.store import CLAIMED, Column, Keyed, MemoryStore, PostgresStore, sql_identifier
+from wreath.store import CLAIMED, Column, Keyed, MemoryStore, PostgresStore, Sql, sql_identifier
 
 # --- fakes -------------------------------------------------------------------
 
@@ -249,7 +249,7 @@ def test_the_upsert_builder_keeps_the_shape_every_caller_needs() -> None:
     store = PostgresStore(object(), _declaration(ttl=60.0))
     sql = store.upsert(
         values={"key": "$1", "status": "$2", "expires": store.window("$3")},
-        update={"status": "excluded.status"},
+        update={"status": Sql("excluded.status")},
         returning="s.status",
     )
     assert sql == (
@@ -262,7 +262,7 @@ def test_the_upsert_builder_keeps_the_shape_every_caller_needs() -> None:
     assert sql.count(";") == 0
     # A column name is interpolated, so it is checked like any other identifier.
     with pytest.raises(ValueError, match="plain SQL identifier"):
-        store.upsert(values={"key; --": "$1"}, update={"status": "excluded.status"})
+        store.upsert(values={"key; --": "$1"}, update={"status": Sql("excluded.status")})
 
 
 def test_a_fixed_ttl_renders_as_a_literal_window() -> None:

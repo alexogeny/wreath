@@ -51,6 +51,12 @@ killed rather than drained. A group that stays registered keeps every publisher
 enqueueing one copy per message into a queue nobody reads.
 
 
+On shutdown the runner hands back anything it claimed and never started, fenced
+so it cannot pull a job out from under whoever holds it now. A batch claim takes
+several jobs at once, and without this a rolling deploy parked the untouched ones
+for a full lease per restart.
+
+
 ## A durable job runner
 
 Configure a runner on an existing `app.postgres()` database. Its workers, lease sweeper, and cron scheduler run for the process lifetime, started during lifespan:

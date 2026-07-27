@@ -39,6 +39,30 @@ def _type_name(value: Any) -> str:
     return type(value).__name__
 
 
+def _dedupe_key(value: Any) -> tuple[str, object] | None:
+    """A hashable identity for a Cedar value, or None if it needs ``_cedar_eq``.
+
+    The tag keeps kinds apart because :func:`_cedar_eq` does: ``True`` and ``1``
+    are not equal in Cedar's model, but Python compares them equal and hashes
+    them alike. Values of different kinds are never ``_cedar_eq``, so
+    partitioning by kind loses nothing. Mirrors ``cedar_dedupe_key`` in
+    ``_native/cedar.c`` and ``_dedupe_key`` in ``_auth/cedar_engine.py``.
+    """
+    if type(value) is bool:
+        return ("b", value)
+    if isinstance(value, int):
+        return ("i", value)
+    if isinstance(value, str):
+        return ("s", value)
+    if isinstance(value, tuple):
+        try:
+            hash(value)
+        except TypeError:
+            return None
+        return ("t", value)
+    return None  # records and nested sets: structural comparison only
+
+
 def _cedar_eq(a: Any, b: Any, depth: int = 0) -> bool:
     if depth > _MAX_DEPTH:
         raise _EvalError("value is nested too deeply")
@@ -191,11 +215,27 @@ def _evaluate(node: Any, request: tuple, store: dict, depth: int) -> Any:
             return _evaluate(node[2], request, store, depth + 1)
         return _evaluate(node[3], request, store, depth + 1)
     if op == 14:  # SET
+        # Deduplicated by hash where the member allows it. Comparing each
+        # candidate against every kept one is O(n**2), and a set literal is
+        # re-evaluated on every authorization, so a policy holding a few
+        # hundred entries (an allowlist, a tenant list) paid that per request.
+        # `_native/cedar.c` does the same thing the same way; the two must stay
+        # algorithmically aligned as well as byte-for-byte.
         items: list[object] = []
+        seen: set[tuple[str, object]] = set()
+        structural: list[object] = []
         for item_node in node[1]:
             candidate = _evaluate(item_node, request, store, depth + 1)
-            if not any(_cedar_eq(candidate, existing) for existing in items):
-                items.append(candidate)
+            key = _dedupe_key(candidate)
+            if key is not None:
+                if key in seen:
+                    continue
+                seen.add(key)
+            else:
+                if any(_cedar_eq(candidate, existing) for existing in structural):
+                    continue
+                structural.append(candidate)
+            items.append(candidate)
         return items
     if op == 15:  # RECORD
         return {key: _evaluate(value, request, store, depth + 1) for key, value in node[1]}

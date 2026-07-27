@@ -12,8 +12,8 @@ Run them individually while you work:
 
 | Command | What it protects |
 |---|---|
-| `uv run pytest` | Behaviour — the default suite (~3.5s, run serially). |
-| `uv run pytest -m '' -n 4` | Everything, including network, fuzz, and performance. |
+| `uv run pytest` | Behaviour — the default suite. Serial (~31s); add `-n 6` for ~8s. |
+| `uv run pytest -m '' -n 6` | Everything, including network, fuzz, and performance. |
 | `uv run ruff check .` | Lint and import hygiene. |
 | `uv run ty check` | Types. |
 | `uv run wreath-map-lint` | The maps you arrived by — that `docs/agents/manifest.json`, `AGENTS.md`, `repo-map.md`, and `docs/llms.txt` still describe this repository. |

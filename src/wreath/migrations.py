@@ -428,6 +428,58 @@ class DowngradeWouldStrandCode(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class PendingPassHazard:
+    """One column this artifact narrows while a pass is still converting it."""
+
+    schema: str
+    table: str
+    column: str
+    action: str
+    pass_name: str
+    tenant: str
+    phase: str
+    holes_open: int
+
+    def describe(self) -> str:
+        verb = "drops" if self.action == "drop" else "changes the type of"
+        where = f"{self.schema}.{self.table}.{self.column}"
+        who = self.pass_name if not self.tenant else f"{self.pass_name}[{self.tenant}]"
+        state = f"phase {self.phase}"
+        if self.holes_open:
+            state += f", {self.holes_open} chunk(s) given up on"
+        return f"{verb} {where}, which pass {who!r} has not finished ({state})"
+
+
+class MigrationBlockedByPass(RuntimeError):
+    """A migration was refused because a pass has not published for a column it narrows."""
+
+    def __init__(self, schema: str, hazards: tuple[PendingPassHazard, ...]) -> None:
+        self.schema = schema
+        self.hazards = hazards
+        listing = "\n".join(f"  - {hazard.describe()}" for hazard in hazards)
+        blocked = tuple(h for h in hazards if h.holes_open)
+        remedy = (
+            "Let the pass finish -- `wreath passes status` shows where it is -- and "
+            "apply this migration afterwards. The pass's gate publishes when it has "
+            "verified every row converted, and that publication is what clears this."
+        )
+        if blocked:
+            remedy += (
+                "\nSome of these have chunks that were given up on; a pass cannot "
+                "publish while a hole bars its gate. Clear them with "
+                "`wreath passes retry <name>` first."
+            )
+        super().__init__(
+            f"refusing to apply migration to schema {schema!r}: it narrows "
+            f"{len(hazards)} column(s) a chunked pass is still converting, and "
+            "narrowing a column before its backfill finishes loses the rows "
+            "behind the cursor:\n"
+            f"{listing}\n"
+            f"{remedy}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class MigrationGeneration:
     """Review metadata retained by the native named operation planner."""
 
@@ -861,6 +913,14 @@ async def apply_single_artifact(
                 f"{actual_fingerprint.hex()} does not match artifact source "
                 f"{artifact.source_fingerprint.hex()} for schema {schema!r}"
             )
+        # The fifth refusal, and the only one that reads state outside the
+        # catalog: a column may not be narrowed while a pass is still writing
+        # it. Inside the same transaction as the other four, so a rejected
+        # narrowing leaves nothing behind and cannot race a gate publishing
+        # between the check and the DDL.
+        pass_hazards = await _pending_pass_hazards(connection, artifact.named_plan)
+        if pass_hazards:
+            raise MigrationBlockedByPass(schema, pass_hazards)
         await connection.execute(ddl_block)
         resulting = await _decode_catalog_snapshot(
             connection, _SINGLE_CATALOG_SQL, (schema,)
@@ -898,6 +958,134 @@ async def apply_single_artifact(
         target_fingerprint=artifact.target_fingerprint,
         destructive_approved=allow_destructive,
     )
+
+
+_PLAN_ACTION_NAMES = {1: "add", 2: "drop", 3: "alter"}
+_PLAN_KIND_NAMES = {1: "table", 2: "column", 3: "constraint", 4: "index"}
+
+
+def unpack_named_plan(tape: bytes) -> list[dict[str, Any]]:
+    """Decode a native named plan into one dict per operation.
+
+    Lives here rather than in the CLI because two readers need it now: the CLI
+    renders it for review, and :func:`_pending_pass_hazards` asks it which
+    columns an artifact narrows.
+    """
+    if len(tape) < 12 or tape[:4] != b"WMP1":
+        raise ValueError("native named migration plan is invalid")
+    count = int.from_bytes(tape[8:12], "little")
+    offset = 12
+    operations: list[dict[str, Any]] = []
+    for _ in range(count):
+        if len(tape) - offset < 20:
+            raise ValueError("native named migration plan is truncated")
+        action, kind, *lengths = struct.unpack_from("<IIHHHHHH", tape, offset)
+        offset += 20
+        if lengths[5] != 0:
+            raise ValueError("native named migration plan has unsupported flags")
+        values: list[str] = []
+        for length in lengths[:5]:
+            if length > len(tape) - offset:
+                raise ValueError("native named migration plan is truncated")
+            values.append(tape[offset : offset + length].decode("utf-8"))
+            offset += length
+        operations.append(
+            {
+                "action": _PLAN_ACTION_NAMES.get(action, f"unknown-{action}"),
+                "kind": _PLAN_KIND_NAMES.get(kind, f"unknown-{kind}"),
+                "schema": values[0],
+                "table": values[1],
+                "name": values[2],
+                "before": values[3],
+                "after": values[4],
+            }
+        )
+    if offset != len(tape):
+        raise ValueError("native named migration plan has trailing bytes")
+    return operations
+
+
+def _narrowed_columns(named_plan: bytes) -> tuple[tuple[str, str, str, str], ...]:
+    """``(schema, table, column, action)`` for each column this plan narrows.
+
+    "Narrows" is deliberately both a drop and a retype. Dropping the old column
+    is the obvious half; changing its type is the same hazard wearing a
+    different verb, because a conversion still running behind the cursor is
+    reading rows in the shape the alter is about to remove.
+
+    A dropped *table* is not listed. It takes its columns with it, and a pass
+    walking a table someone is dropping in the same deploy is a bigger problem
+    than this refusal is shaped to describe.
+    """
+    out: list[tuple[str, str, str, str]] = []
+    for operation in unpack_named_plan(named_plan):
+        if operation["kind"] != "column":
+            continue
+        if operation["action"] not in ("drop", "alter"):
+            continue
+        out.append(
+            (
+                operation["schema"],
+                operation["table"],
+                operation["name"],
+                operation["action"],
+            )
+        )
+    return tuple(out)
+
+
+async def _pending_pass_hazards(
+    connection: Any, named_plan: bytes, *, ledger_schema: str = "wreath"
+) -> tuple[PendingPassHazard, ...]:
+    """Columns this plan narrows that a chunked pass has not finished converting.
+
+    Shaped after :func:`_downgrade_hazards`: read live state, return what is
+    wrong, and let the caller decide to refuse. The state read here is the pass
+    ledger rather than the ORM registry, because the question is not "does code
+    still reference this" but "is something still writing it".
+
+    A database that has never run a pass has no ledger table, and that is not an
+    error -- it is the answer "nothing is converting anything". Checked with
+    ``to_regclass`` rather than by catching a failure, so a real error from the
+    read is still a real error.
+    """
+    from ._passes import ledger as _pass_ledger
+
+    candidates = _narrowed_columns(named_plan)
+    if not candidates:
+        return ()
+    table = _pass_ledger.table_name(ledger_schema)
+    exists = await connection.fetchval("SELECT to_regclass($1) IS NOT NULL", table)
+    if not exists:
+        return ()
+    facts = {
+        _column_fact(schema, tbl, column): (schema, tbl, column, action)
+        for schema, tbl, column, action in candidates
+    }
+    pending = await _pass_ledger.pending_facts(
+        connection, schema=ledger_schema, facts=tuple(facts)
+    )
+    hazards: list[PendingPassHazard] = []
+    for entry in pending:
+        schema, tbl, column, action = facts[entry.fact]
+        hazards.append(
+            PendingPassHazard(
+                schema=schema,
+                table=tbl,
+                column=column,
+                action=action,
+                pass_name=entry.name,
+                tenant=entry.tenant,
+                phase=entry.phase,
+                holes_open=entry.holes_open,
+            )
+        )
+    return tuple(hazards)
+
+
+def _column_fact(schema: str, table: str, column: str) -> str:
+    """The spelling :func:`wreath.passes.column_fact` produces, without the import."""
+    return f"column:{schema}.{table}.{column}"
 
 
 def _downgrade_hazards(
@@ -1113,6 +1301,8 @@ __all__ = [
     "HISTORY_VERIFIED",
     "DowngradeHazard",
     "DowngradeWouldStrandCode",
+    "MigrationBlockedByPass",
+    "PendingPassHazard",
     "FleetResolution",
     "MigrationConfig",
     "MigrationDetection",

@@ -89,6 +89,8 @@ wreath-native-gil-status = "wreath._devtools.native_gil_status:main"
 wreath-native-memory-lint = "wreath._devtools.native_memory_lint:main"
 wreath-native-profile = "wreath._devtools.native_profile:main"
 wreath-complexity-probe = "wreath._devtools.complexity_probe:main"
+# Drives an ASan/UBSan build and attributes what it finds; see _devtools/sanitize.py.
+wreath-sanitize = "wreath._devtools.sanitize:main"
 # Checks that the agent-facing maps still describe the repository.
 wreath-map-lint = "wreath._devtools.map_lint:main"
 wreath-request-trace = "wreath._devtools.request_trace:main"

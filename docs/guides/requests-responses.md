@@ -28,6 +28,14 @@ Return a plain dict for the ordinary case and Wreath sends `200
 application/json`; reach for a response type only when you need to say something
 more — a specific status, a redirect, a stream, or a file.
 
+`RequestLimits.max_cookie_bytes` (16 KiB) bounds the `Cookie` header before it is
+parsed — parsing builds a dict proportional to whatever arrived, on every route
+that reads a session or a CSRF token. Past it, `431`. The header *count* is
+deliberately left to the server in front: it is already bounded by every server's
+frame limits, and a second check here cost a boundary crossing in
+`pre_activation`.
+
+
 ## The request
 
 The `Request` carries everything about the incoming call — method, URL, headers,

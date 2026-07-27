@@ -12,7 +12,9 @@ of the data and the number of round trips.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+import re
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -117,6 +119,145 @@ class _CachedPlan:
     hydrate_plan: Any = None
 
 
+# Test-only, the same contract as the session's `_probes`: counts how many write
+# statements were compiled from scratch rather than served from the registry
+# cache. The invariant is that this tracks the distinct write *shapes* in a
+# flush -- (model, which columns participate) -- not the number of instances
+# carrying each shape. `None` in production keeps this to one predictable global
+# load per compile.
+_write_sql_builds: list[int] | None = None
+
+
+@contextmanager
+def _count_write_sql_builds() -> Iterator[list[int]]:
+    """Count write statements compiled from scratch inside the block."""
+    global _write_sql_builds
+    counter = [0]
+    previous, _write_sql_builds = _write_sql_builds, counter
+    try:
+        yield counter
+    finally:
+        _write_sql_builds = previous
+
+
+@dataclass(frozen=True, slots=True)
+class WritePlan:
+    """A compiled INSERT, UPDATE, or DELETE for one (model, column set).
+
+    Writes have shapes exactly as reads do: what varies between two inserts of
+    the same model is *which* columns are loaded, and that selects the statement
+    text. What does not vary is the text itself, so it is compiled once per shape
+    and held in the same registry cache as read plans -- one budget, one
+    eviction policy, one lock.
+
+    ``columns`` are the values to bind in placeholder order; ``key_columns`` are
+    the primary-key values bound after them (empty for INSERT). ``returning`` is
+    what the statement asks the database to send back.
+    """
+
+    sql: str
+    columns: tuple[ColumnSpec, ...]
+    key_columns: tuple[ColumnSpec, ...] = ()
+    returning: tuple[ColumnSpec, ...] = ()
+
+
+def _write_shape_key(registry: Any, spec: ModelSpec, op: bytes, mask: int) -> bytes:
+    """A cache key over everything that changes a write statement.
+
+    The mask is positional over ``spec.columns``, so it identifies the
+    participating set exactly; the model name and registry fingerprint keep two
+    models (or two registries) from colliding.
+    """
+    width = (mask.bit_length() + 7) // 8
+    return b"".join((
+        registry.fingerprint,
+        b"w",
+        op,
+        _model_shape(spec.model_type),
+        b"|",
+        mask.to_bytes(width, "big"),
+    ))
+
+
+def compile_insert(registry: Any, spec: ModelSpec, mask: int) -> WritePlan:
+    """The INSERT for the columns selected by ``mask``, compiled once per shape.
+
+    Columns outside the mask are what the database fills in -- server defaults
+    and anything the caller left unloaded -- so they are exactly the RETURNING
+    list. Splitting on the mask also removes the ``item not in columns`` scan the
+    previous implementation ran per column, which made a wide table's INSERT
+    quadratic in its own column count.
+    """
+    cached = registry.cached_plan(key := _write_shape_key(registry, spec, b"i", mask))
+    if cached is not None:
+        return cached
+
+    if _write_sql_builds is not None:
+        _write_sql_builds[0] += 1
+    columns = tuple(
+        item for position, item in enumerate(spec.columns) if mask & (1 << position)
+    )
+    returning = tuple(
+        item for position, item in enumerate(spec.columns) if not mask & (1 << position)
+    )
+    names = ", ".join(quote(item.database_name) for item in columns)
+    placeholders = ", ".join(f"${index}" for index in range(1, len(columns) + 1))
+    sql = f"INSERT INTO {qualified(spec)}"
+    sql += f" ({names}) VALUES ({placeholders})" if columns else " DEFAULT VALUES"
+    if returning:
+        sql += " RETURNING " + ", ".join(
+            quote(item.database_name) for item in returning
+        )
+    return registry.store_plan(
+        key, WritePlan(sql=sql, columns=columns, returning=returning)
+    )
+
+
+def compile_update(registry: Any, spec: ModelSpec, mask: int) -> WritePlan:
+    """The UPDATE for the dirty columns selected by ``mask``."""
+    cached = registry.cached_plan(key := _write_shape_key(registry, spec, b"u", mask))
+    if cached is not None:
+        return cached
+
+    if _write_sql_builds is not None:
+        _write_sql_builds[0] += 1
+    columns = tuple(
+        item for position, item in enumerate(spec.columns) if mask & (1 << position)
+    )
+    assignments = ", ".join(
+        f"{quote(item.database_name)} = ${index}"
+        for index, item in enumerate(columns, start=1)
+    )
+    predicate = _key_predicate_sql(spec, len(columns) + 1)
+    sql = f"UPDATE {qualified(spec)} SET {assignments} WHERE {predicate}"
+    return registry.store_plan(
+        key,
+        WritePlan(sql=sql, columns=columns, key_columns=tuple(spec.primary_key)),
+    )
+
+
+def compile_delete(registry: Any, spec: ModelSpec) -> WritePlan:
+    """The DELETE for one model; its only shape is its primary key."""
+    cached = registry.cached_plan(key := _write_shape_key(registry, spec, b"d", 0))
+    if cached is not None:
+        return cached
+
+    if _write_sql_builds is not None:
+        _write_sql_builds[0] += 1
+    sql = f"DELETE FROM {qualified(spec)} WHERE {_key_predicate_sql(spec, 1)}"
+    return registry.store_plan(
+        key, WritePlan(sql=sql, columns=(), key_columns=tuple(spec.primary_key))
+    )
+
+
+def _key_predicate_sql(spec: ModelSpec, start: int) -> str:
+    """``pk = $n [AND ...]``, with placeholders numbered from ``start``."""
+    return " AND ".join(
+        f"{quote(item.database_name)} = ${start + offset}"
+        for offset, item in enumerate(spec.primary_key)
+    )
+
+
 def quote(identifier: str) -> str:
     """Quote one registry-validated identifier.
 
@@ -188,6 +329,20 @@ def _append_bind_paths(
     raise ORMError(f"cannot compile bind extraction for {type(node).__name__}")
 
 
+
+def _generated_names(body: str) -> list[str]:
+    """The bare names a generated extractor body refers to.
+
+    Split on the punctuation the builder emits, so anything that is not a plain
+    attribute, index, or keyword shows up as a non-identifier fragment.
+    """
+    return [
+        fragment
+        for fragment in re.split(r"[.,()\[\]\s]+", body)
+        if fragment and not fragment.isdigit()
+    ]
+
+
 def _compile_bind_program(select: Select) -> Callable[[Select], tuple[Any, ...]]:
     """Generate one fixed attribute program for a query shape.
 
@@ -215,6 +370,17 @@ def _compile_bind_program(select: Select) -> Callable[[Select], tuple[Any, ...]]
     if len(expressions) == 1:
         body += ","
     namespace: dict[str, Any] = {}
+    # Every fragment reaching this body is an attribute name off a compiled
+    # projection, i.e. developer-declared. That was true and unstated, which is
+    # exactly the shape AGENTS.md asks generated code to document -- and an
+    # assertion is cheaper than the argument, because it fails at the moment the
+    # precondition stops holding rather than at whatever this evaluates to.
+    for fragment in _generated_names(body):
+        if not fragment.isidentifier():
+            raise ValueError(
+                f"refusing to generate an extractor from {fragment!r}: only "
+                "declared attribute names may reach the generated body"
+            )
     exec(f"def extract(select):\n    return ({body})", {}, namespace)
     return namespace["extract"]
 

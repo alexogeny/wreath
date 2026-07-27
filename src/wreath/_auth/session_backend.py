@@ -36,6 +36,17 @@ class SessionIdentityBackend:
         subject = principal.get("sub")
         if not isinstance(subject, str) or not subject:
             return None
+        # An SSO session used to last the *cookie's* max_age -- 14 days by
+        # default -- whatever the identity provider said about the token it was
+        # minted from. When the login flow recorded an `exp`, honour it: the
+        # provider's answer to "how long is this person signed in" should not be
+        # overridden by a cookie setting nobody connected to it.
+        expires = principal.get("exp")
+        if isinstance(expires, (int, float)) and not isinstance(expires, bool):
+            import time
+
+            if expires <= time.time():
+                return None
         roles = principal.get("roles") or ()
         # Permissions as well as roles: a bearer identity carries both, and an
         # SSO identity that dropped them made `@authorize(permissions=...)`

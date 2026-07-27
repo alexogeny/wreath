@@ -31,6 +31,7 @@ Two kinds of listener, kept apart on purpose:
 
 from __future__ import annotations
 
+import threading
 import weakref
 from collections.abc import Callable
 from typing import Any
@@ -70,6 +71,12 @@ _bridges: list[Callable[[frozenset[str]], None]] = []
 #: swallowing *silently* meant a cache listener that had been raising since
 #: deploy was indistinguishable from one that worked.
 _errors = {"subscriber": 0, "bridge": 0}
+
+#: Guards the two lists. They are mutated from ordinary code *and* from a
+#: weakref callback, which the interpreter may run on whichever thread happened
+#: to drop the last reference -- so "this is a same-process seam, it cannot
+#: race" was true of the callers and not of the collector.
+_lock = threading.Lock()
 
 
 def subscriber_errors() -> int:
@@ -115,10 +122,14 @@ class _OwnedSubscriber:
 
 
 def _reap(dead: weakref.ref[Any]) -> None:
-    """Drop the subscription whose owner has just been collected."""
-    for entry in tuple(_subscribers):
-        if isinstance(entry, _OwnedSubscriber) and entry.owner is dead:
-            _subscribers.remove(entry)
+    """Drop the subscription whose owner has just been collected.
+
+    Runs from a weakref callback, i.e. on whichever thread released the owner.
+    """
+    with _lock:
+        for entry in tuple(_subscribers):
+            if isinstance(entry, _OwnedSubscriber) and entry.owner is dead:
+                _subscribers.remove(entry)
 
 
 def subscribe_writes(
@@ -131,23 +142,29 @@ def subscribe_writes(
     held weakly and the subscription is dropped the moment it is collected, so
     ``callback`` must not be the only thing keeping ``owner`` alive.
     """
-    if owner is None:
-        if callback not in _subscribers:
-            _subscribers.append(callback)
-        return
-    reference = weakref.ref(owner)
-    for entry in _subscribers:
-        if (
-            isinstance(entry, _OwnedSubscriber)
-            and entry.owner == reference
-            and entry.callback == callback
-        ):
+    with _lock:
+        if owner is None:
+            if callback not in _subscribers:
+                _subscribers.append(callback)
             return
-    _subscribers.append(_OwnedSubscriber(owner, callback))
+        reference = weakref.ref(owner)
+        for entry in _subscribers:
+            if (
+                isinstance(entry, _OwnedSubscriber)
+                and entry.owner == reference
+                and entry.callback == callback
+            ):
+                return
+        _subscribers.append(_OwnedSubscriber(owner, callback))
 
 
 def unsubscribe_writes(callback: Callable[[frozenset[str]], None]) -> None:
     """Stop delivering to ``callback``, however it was registered."""
+    with _lock:
+        _unsubscribe(callback)
+
+
+def _unsubscribe(callback: Callable[[frozenset[str]], None]) -> None:
     for entry in tuple(_subscribers):
         if entry == callback or (
             isinstance(entry, _OwnedSubscriber) and entry.callback == callback

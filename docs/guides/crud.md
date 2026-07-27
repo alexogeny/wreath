@@ -42,6 +42,20 @@ text travels only when it came from the model's own validation, because a driver
 error's message carries table names and constraint identifiers.
 
 
+### Naming what may leave
+
+`expose` is the escape hatch on a deny-list, and a deny-list matches names that
+*look* like secrets — `dob`, `iban`, `recovery_answer`, and `pw` do not. When the
+model holds anything of that shape, name the columns instead:
+
+```python
+crud_router(Patient, open_session, fields=("id", "name"))   # only these
+```
+
+`fields` is an allow-list: it survives somebody adding a column, which is the
+case the deny-list cannot cover. Mutually exclusive with `expose`.
+
+
 ## Secrets are hidden and unwritable by default
 
 Any column whose name looks like a secret — `password`, `*_hash`, `token`,

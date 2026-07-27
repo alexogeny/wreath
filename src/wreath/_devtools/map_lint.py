@@ -27,6 +27,14 @@ Findings:
 * ``MAP006`` -- a ``docs/llms.txt`` link points at a page that does not exist.
 * ``MAP007`` -- a guide is missing from ``docs/llms.txt``, the compact index
   agents read instead of the nav.
+* ``MAP008`` -- a sanitizer build in ``tools/sanitizers/`` no longer compiles
+  the same sources as the extension it mirrors. Each ``setup_*.py`` keeps its
+  own ``SOURCES`` tuple and says it is "kept in step with setup.py"; nothing
+  checked that, and it drifted -- ``cedar.c``, ``jose.c``, and ``scheduler.c``
+  were in the shipped ``_core`` extension but had never been built under
+  ASan/UBSan. A file missing here is not a broken build: it is C that the
+  sanitizer suites silently do not cover, which is the worst way to be wrong
+  about memory safety.
 
 Run it with ``uv run wreath-map-lint``; ``0`` means clean.
 """
@@ -206,11 +214,105 @@ def check_llms_txt(root: Path) -> list[Finding]:
     return findings
 
 
+#: `setup.py` names each extension as a dotted module string; the sanitizer
+#: builds mirror one extension each and name it the same way.
+_EXTENSION_RE = re.compile(r'"(wreath\._(?:native|exp)\._[a-z0-9_]+)"')
+_C_SOURCE_RE = re.compile(r'([A-Za-z0-9_/]+\.c)')
+
+
+def _sources_block(text: str, start: int, end: int) -> str:
+    """The text of the ``sources=[...]`` list within ``text[start:end]``.
+
+    Only that list counts. A ``depends=[...]`` beside it names headers *and*
+    files that are ``#include``d rather than compiled -- the reactor extension
+    lists five such ``.c`` files -- so reading the whole block would demand the
+    sanitizer compile units that must not be compiled separately.
+    """
+    marker = text.find("sources=", start)
+    if marker == -1 or marker >= end:
+        return ""
+    opening = text.find("[", marker)
+    if opening == -1 or opening >= end:
+        return ""
+    depth = 0
+    for index in range(opening, end):
+        if text[index] == "[":
+            depth += 1
+        elif text[index] == "]":
+            depth -= 1
+            if depth == 0:
+                return text[opening : index + 1]
+    return ""
+
+
+def _extension_sources(text: str) -> dict[str, set[str]]:
+    """Map each extension name to the basenames of the C files it compiles.
+
+    Both build files are read as text rather than imported: `setup.py` runs
+    pkg-config for the optional HTTP/3 backend at import time, and a linter that
+    needed QUIC libraries installed to check a source list would not run.
+
+    The sanitizer builds hold their file names in a module-level ``SOURCES``
+    tuple and interpolate it into ``sources=[...]``, so when the list itself
+    names no ``.c`` file the whole module is read instead. Each of those builds
+    mirrors exactly one extension, which is what makes that safe.
+    """
+    sources: dict[str, set[str]] = {}
+    matches = list(_EXTENSION_RE.finditer(text))
+    for position, match in enumerate(matches):
+        start = match.end()
+        end = matches[position + 1].start() if position + 1 < len(matches) else len(text)
+        names = {
+            Path(name).name
+            for name in _C_SOURCE_RE.findall(_sources_block(text, start, end))
+        }
+        if not names and len(matches) == 1:
+            names = {Path(name).name for name in _C_SOURCE_RE.findall(text)}
+        sources.setdefault(match.group(1), set()).update(names)
+    return sources
+
+
+def check_sanitizer_sources(root: Path) -> list[Finding]:
+    """Every sanitizer build compiles what its real extension compiles.
+
+    Only *missing* sources are reported. A sanitizer build may legitimately add
+    a file (a test shim), but a file it omits is C excluded from ASan/UBSan
+    coverage while the suite still reports success.
+    """
+    findings: list[Finding] = []
+    setup = root / "setup.py"
+    sanitizers = root / "tools/sanitizers"
+    if not setup.exists() or not sanitizers.is_dir():
+        return findings
+
+    real = _extension_sources(setup.read_text(encoding="utf-8"))
+    for build in sorted(sanitizers.glob("setup_*.py")):
+        relative = f"tools/sanitizers/{build.name}"
+        mirrored = _extension_sources(build.read_text(encoding="utf-8"))
+        for extension, listed in mirrored.items():
+            expected = real.get(extension)
+            if expected is None:
+                findings.append(
+                    Finding("MAP008", relative, f"builds {extension!r}, which setup.py"
+                            " does not define")
+                )
+                continue
+            missing = sorted(expected - listed)
+            if missing:
+                findings.append(
+                    Finding("MAP008", relative, f"{extension} omits {', '.join(missing)};"
+                            " those sources ship but are never built under the"
+                            " sanitizers, so their suites pass without covering them")
+                )
+    return findings
+
+
 def scan(root: Path) -> list[Finding]:
     findings = check_manifest(root)
     for relative in PROSE_MAPS:
         findings.extend(check_prose(root, relative))
     findings.extend(check_llms_txt(root))
+    findings.extend(check_sanitizer_sources(root))
     return findings
 
 

@@ -266,6 +266,12 @@ def cached(
                 # write and nothing per read. Row-grained would need a read set
                 # recorded per request -- real work on the hot path to save a
                 # few misses on the cold one.
+                #
+                # Clears the *whole* store, including entries other handlers
+                # sharing it put there. That coupling is the documented price of
+                # sharing a store -- one budget and one invalidation surface --
+                # and `tests/test_cache_invalidation.py` pins it. Give a handler
+                # its own store when it should not be swept by its neighbours.
                 if written & watched:
                     the_store.clear()
 

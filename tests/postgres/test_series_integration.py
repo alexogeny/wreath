@@ -26,8 +26,9 @@ import os
 
 import pytest
 
+from wreath._series.settle import schema_sql, watermark
 from wreath.postgres import Database
-from wreath.temporal import Day, Hour, Month, Week, zone
+from wreath.temporal import Day, Hour, Instant, Month, Week, zone
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("WREATH_TEST_POSTGRES_DSN"),
@@ -252,3 +253,93 @@ async def _shifted_spine(database, start: str, end: str, unit: str) -> list:
         return [row[0] for row in rows]
     finally:
         await database.release("read", connection)
+
+
+# -- stage 7: sealing ---------------------------------------------------------
+
+
+class TestSealedBucketBoundaries:
+    """What only a real server can settle about a settled bucket.
+
+    The arithmetic in `_series.settle` decides *which* buckets are sealed; these
+    check that the boundary it picks is the boundary PostgreSQL would pick, on
+    the two days a year the answer is interesting.
+    """
+
+    async def test_the_watermark_lands_on_a_boundary_date_trunc_agrees_with(
+        self, database
+    ):
+        """A settled bucket start and a freshly computed one must be one instant.
+
+        If they disagree even once, a settled row files itself under a bucket
+        the spine will never generate, and the value silently disappears from
+        every later read.
+        """
+        for moment in (
+            datetime.datetime(2026, 4, 5, 1, 30, tzinfo=datetime.UTC),
+            datetime.datetime(2026, 9, 27, 1, 30, tzinfo=datetime.UTC),
+        ):
+            theirs = await fetchval(
+                database,
+                "SELECT date_trunc('day', $1::timestamptz AT TIME ZONE $2) "
+                "AT TIME ZONE $2",
+                moment,
+                AUCKLAND,
+            )
+            ours = watermark(
+                Instant.of(moment), bucket=Day, zone_name=AUCKLAND, after=0
+            )
+            assert ours == theirs, f"python and postgres disagree at {moment}"
+
+    async def test_the_lateness_allowance_is_elapsed_time(self, database):
+        """Two hours after a 23-hour day still means two hours.
+
+        The allowance is subtracted as a fixed offset and only the *bucket*
+        boundary is calendar arithmetic. Checking against the server keeps that
+        split honest across the spring-forward day.
+        """
+        moment = datetime.datetime(2026, 9, 27, 14, tzinfo=datetime.UTC)
+        theirs = await fetchval(
+            database,
+            "SELECT date_trunc('day', ($1::timestamptz - interval '2 hours') "
+            "AT TIME ZONE $2) AT TIME ZONE $2",
+            moment,
+            AUCKLAND,
+        )
+        ours = watermark(
+            Instant.of(moment), bucket=Day, zone_name=AUCKLAND, after=7200
+        )
+        assert ours == theirs
+
+    async def test_the_gap_step_lands_on_the_next_bucket_across_a_short_day(
+        self, database
+    ):
+        """Stepping past the last settled bucket is `end_of`, not plus 24 hours.
+
+        On a 23-hour day, adding a nominal day would start the gap an hour into
+        a bucket that is already stored — recomputing part of a settled value
+        and leaving a real gap unfilled.
+        """
+        start = await fetchval(
+            database,
+            "SELECT date_trunc('day', $1::timestamptz AT TIME ZONE $2) AT TIME ZONE $2",
+            datetime.datetime(2026, 9, 27, 6, tzinfo=datetime.UTC),
+            AUCKLAND,
+        )
+        theirs = await fetchval(
+            database,
+            "SELECT (($1::timestamptz AT TIME ZONE $2) + interval '1 day') "
+            "AT TIME ZONE $2",
+            start,
+            AUCKLAND,
+        )
+        assert Day.end_of(Instant.of(start), AUCKLAND) == theirs
+
+    async def test_the_settled_tables_apply_cleanly(self, database):
+        """The DDL a migration would carry, against a real server."""
+        connection = await database.acquire("write")
+        try:
+            await connection.execute(schema_sql(schema="wreath_series_test"))
+            await connection.execute(schema_sql(schema="wreath_series_test"))
+        finally:
+            await database.release("write", connection)

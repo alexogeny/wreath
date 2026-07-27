@@ -334,15 +334,109 @@ declaration is a value.
 That is the whole contract, and it is deliberately small: a scan can read a
 declaration instead of parsing the handler that runs it.
 
+## Sealing: when a bucket stops being able to change
+
+Yesterday's total is not going to move. Recomputing it on every page load is not
+a cheap safety net, it is the same arithmetic over the same rows reaching the
+same number, once per reader, forever. `.seal()` says how long you are willing
+to wait for a straggler, and after that the bucket is computed once and read:
+
+```python
+activity = (
+    Series(Trek, at=Trek.started_at, bucket=Day, stored_in=zone("Pacific/Auckland"))
+        .measure(started=count(), distance=sum_(Trek.distance_km, unit="km"))
+        .seal(after="2h")
+)
+```
+
+A bucket `[start, end)` is **sealed** once `after` has elapsed since it *closed*
+— so with `Day` buckets in Auckland and two hours of allowance, Tuesday seals at
+2am on Wednesday, Auckland time. Before that it is **open** and every run
+recomputes it, because it can still move.
+
+A settled bucket is **not a cache**, and the difference is not pedantry. A cache
+may be evicted, must be recomputable, and manages staleness with a TTL. A
+settled value is final: there is no TTL column, nothing evicts it, and nothing
+recomputes it on a hunch. Reading a fully settled range does not touch the
+source table at all.
+
+The zone stops being a per-request argument once a view seals. A materialised
+Auckland day cannot be re-cut into a London day afterwards, so settled buckets
+are filed under the zone they were computed in — reading the same view in
+another zone settles separately rather than lying about it. Declare it with
+`stored_in=`.
+
+Two tables hold this, and like every other table Wreath owns, **a migration
+applies them and nothing applies them for you**:
+`wreath._series.settle.schema_sql()` emits the DDL.
+
+### The write that arrives late
+
+A trek recorded on Monday for Friday's work lands behind the watermark, in a
+bucket that is already settled. Three things could happen and only one of them
+is defensible.
+
+**Refusing the write** is wrong, decisively. `Trek` is a business table, and a
+chart's watermark must never be able to fail a business write — the same rule
+that stops a broken cache subscriber failing a committed one.
+
+**Silently rewriting the settled value** is the other failure, and it is the one
+sealing exists to prevent. If a settled number can change under you, it was
+never settled.
+
+So the settled value stays immutable and the difference is recorded beside it,
+folded in when the series is read. The envelope says which buckets carry one:
+
+```python
+result = await activity.run(session, range=Range(start, end))
+result.state.sealed_through   # the first bucket that is still open
+result.state.corrections      # buckets whose settled value has a late adjustment
+```
+
+Late data arriving therefore looks like late data arriving, rather than like a
+discrepancy somebody finds in a spreadsheet three weeks later.
+
+**Nothing notices a late write on the write path**, and that is deliberate. The
+ORM's write events are model-grained by design — they publish which models a
+session touched, not which rows — so they cannot say which bucket a late trek
+belongs to or what it contributes, and making them row-grained to serve a chart
+would put per-row bookkeeping on every write in the application. Instead you run
+`reconcile()`, from a scheduled job or after an import:
+
+```python
+corrected = await activity.reconcile(session, range=Range(start, end))
+```
+
+It recomputes the sealed part, compares it to what was settled, and records the
+differences. Until something calls it, the gap is *visible* rather than assumed
+away: `sealed_through` says exactly how far the settled data goes.
+
+`on_late="reopen"` is available and replaces the settled value outright instead
+of recording a delta. It is never the default, because it is only sound while
+the source rows are still there to recompute from — a rule that works until
+retention lands and then quietly stops is worse than one that never worked.
+
+### What cannot be sealed yet
+
+**A grouped view.** The top-N survivors are ranked over the whole range, so
+which series survive — and what falls into the remainder — depends on the range
+being asked for. A bucket settled for one range would be wrong for the next, so
+`.seal()` with `.by()` is refused rather than storing something only valid for
+the range that happened to materialise it.
+
+**A comparison.** The previous period is a second range and settling it is a
+separate question; declare the seal on the view you read directly.
+
 ## What is not built yet
 
-The declaration surface names four methods that a later stage fills in:
-`.seal()`, `.retain()`, `.archive()` and `.drop()`. They exist today and they
-**refuse by name** rather than quietly doing nothing, because a declaration that
-read as though retention were configured while nothing enforced it would be worse
-than one that failed. Nothing in this module deletes anything, and `.drop()` will
-stay opt-in when it arrives — a declaration written to make a chart fast must not
-be able to remove a business record as a side effect.
+The declaration surface names three more methods that a later stage fills in:
+`.retain()`, `.archive()` and `.drop()`. They exist today and they **refuse by
+name** rather than quietly doing nothing, because a declaration that read as
+though retention were configured while nothing enforced it would be worse than
+one that failed. Nothing in this module deletes anything — sealing decides a
+bucket is final, not that anything goes away — and `.drop()` will stay opt-in
+when it arrives, because a declaration written to make a chart fast must not be
+able to remove a business record as a side effect.
 
 Reference: [`wreath.series`](../reference/series.md), and
 [`wreath.temporal`](../reference/temporal.md) for the bucket vocabulary.
