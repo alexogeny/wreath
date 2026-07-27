@@ -2,36 +2,38 @@
 
 A small, versioned, length-prefixed binary protocol over a Unix-domain socket.
 The server runs inside the application process next to the recorder; the CLI
-(``wreath inspect``) and :class:`InspectorClient` are protocol clients — they
+(`wreath inspect`) and `InspectorClient` are protocol clients — they
 never import the target application. Formatting happens after receipt.
 
 Security model (v1, read-only):
 
 - Disabled unless configured: nothing binds a socket without an
-  :class:`InspectorConfig`.
-- The socket is created owner-only (``0600``) and never over an existing
+  `InspectorConfig`.
+- The socket is created owner-only (`0600`) and never over an existing
   non-socket path.
-- Peer credentials are checked where available (``SO_PEERCRED`` on Linux): the
+- Peer credentials are checked where available (`SO_PEERCRED` on Linux): the
   peer must be the same UID (or root).
 - Strict frame and response limits; a malformed or oversized frame closes the
   connection after one error frame.
 - v1 exposes no mutating command, so no capability token exists yet; the token
-  requirement starts with ``ARM_CAPTURE`` (stage 5).
+  requirement starts with `ARM_CAPTURE` (stage 5).
 
-Frame layout (16-byte header, network byte order)::
+Frame layout (16-byte header, network byte order):
 
-    magic     4s  b"WFI1"
-    version   u8  PROTOCOL_VERSION
-    command   u8  Command
-    flags     u16 bit 0 = error, bit 1 = truncated
-    request   u32 client-chosen id, echoed in the response
-    length    u32 payload byte length
+```text
+magic     4s  b"WFI1"
+version   u8  PROTOCOL_VERSION
+command   u8  Command
+flags     u16 bit 0 = error, bit 1 = truncated
+request   u32 client-chosen id, echoed in the response
+length    u32 payload byte length
+```
 
 Payloads are UTF-8 JSON objects. The stage-2 plan sketches TLV payloads keyed
 by metadata IDs; that binary projection belongs with the stage-4 native
 drain/projector, so v1 keeps the payloads JSON while the framing, limits, and
-command surface already match the spec. Responses carry ``generation`` (the
-worker's request counter at snapshot time), ``truncated`` flags on paged
+command surface already match the spec. Responses carry `generation` (the
+worker's request counter at snapshot time), `truncated` flags on paged
 lists, and loss counters so clients can detect races or incomplete data.
 """
 
@@ -118,7 +120,7 @@ class InspectorError(Exception):
 class InspectorConfig:
     """Where (and whether) the read-only Inspector listens.
 
-    The Inspector is off unless a config is provided. ``path`` must live in a
+    The Inspector is off unless a config is provided. `path` must live in a
     directory the owning user controls; the socket itself is created 0600.
     """
 
@@ -942,11 +944,11 @@ async def serve_inspector(
     projector: Any = None,
     arm_registry: Any = None,
 ) -> InspectorServer:
-    """Start the read-only Inspector beside ``recorder`` and return the server.
+    """Start the read-only Inspector beside `recorder` and return the server.
 
-    When ``projector`` is given, the projection-backed commands (TIMELINE,
-    RECENT_FAILURES, ROUTE_DISTRIBUTIONS) become available. When ``arm_registry``
-    is given *and* the config carries a ``capture_token``, the capture-control
+    When `projector` is given, the projection-backed commands (TIMELINE,
+    RECENT_FAILURES, ROUTE_DISTRIBUTIONS) become available. When `arm_registry`
+    is given *and* the config carries a `capture_token`, the capture-control
     commands (ARM_CAPTURE, DISARM_CAPTURE, CAPTURE_STATUS) become available behind
     that token.
     """

@@ -1,11 +1,11 @@
 """Pure-Python token-bucket twin.
 
-Mirrors the observable behavior of ``wreath._native.ratelimit.TokenBucket``: lazy
-refill, a hard ``max_entries`` ceiling, reclaiming buckets that have refilled to
+Mirrors the observable behavior of `wreath._native.ratelimit.TokenBucket`: lazy
+refill, a hard `max_entries` ceiling, reclaiming buckets that have refilled to
 capacity, and evicting the fullest bucket when every one is still limited.
 
-The native type's ``slots`` attribute is not mirrored: it reports the size of
-the C hash table, which has no counterpart here. ``tracked`` is the portable
+The native type's `slots` attribute is not mirrored: it reports the size of
+the C hash table, which has no counterpart here. `tracked` is the portable
 observable.
 """
 
@@ -58,7 +58,7 @@ class TokenBucket:
         del self._buckets[fullest]
 
     def acquire(self, key: str, now: float, cost: float = 1.0) -> float:
-        """Consume ``cost`` tokens. Returns 0.0 when allowed, else retry-after."""
+        """Consume `cost` tokens. Returns 0.0 when allowed, else retry-after."""
         if not isinstance(key, str):
             raise TypeError("key must be a string")
         if cost <= 0.0:

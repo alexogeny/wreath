@@ -8,19 +8,19 @@ scoped to HTTP/1.1 in this first cut:
   arrival schedule, and connection-lifecycle events (peer half-close / reset)
   into the *existing* native (or pure) HTTP/1 protocol driver over a fake
   transport, and reproduces the owned parser / framing / response-encoding
-  behavior. Explicitly variable response fields (``Date``) are normalized before
-  comparison. See :func:`replay_transport`.
+  behavior. Explicitly variable response fields (`Date`) are normalized before
+  comparison. See `replay_transport`.
 
 - **Endpoint-plan replay** starts from a canonical semantic request and runs the
   owned routing, binding, validation, auth-requirement evaluation, and
   serialization. The handler may be invoked, skipped, or replaced with a recorded
   return/exception; a run that invokes arbitrary Python is labelled *best effort*,
-  never deterministic. See :func:`replay_endpoint_plan`.
+  never deterministic. See `replay_endpoint_plan`.
 
 Both surfaces are replay/test-only: they run over fake transports and never touch
 a real socket, file, or subprocess, and cannot broaden any capture policy.
 
-A :class:`FaultSchedule` perturbs a *compatible* recording along owned seams
+A `FaultSchedule` perturbs a *compatible* recording along owned seams
 (short reads, truncation, mid-stream reset/half-close), keyed only to stable
 owned coordinates, so owned failure handling can be exercised and asserted
 deterministic.
@@ -92,6 +92,10 @@ MAX_CHUNK_BYTES = 256 * 1024 * 1024
 _CHUNK = struct.Struct("<4sII")  # tag, byte_length, crc32
 _MAGIC_TRANSPORT = b"WTR1"
 _MAGIC_FAULTS = b"WFS1"
+#: Every chunk tag a `WFS1` schedule may carry. See `_chunk_map`'s
+#: `known`: a tag is not checksummed, so an open vocabulary would let one
+#: flipped bit drop the optional `ADPT` chunk without a word.
+_FAULT_CHUNKS = frozenset({b"FALT", b"ADPT"})
 _CONTAINER_VERSION = 1
 
 
@@ -102,7 +106,7 @@ def _chunk(tag: bytes, payload: bytes) -> bytes:
 
 
 def _read_chunks(data: bytes, offset: int) -> list[tuple[bytes, bytes]]:
-    """Read every complete, CRC-valid chunk from ``offset``. A torn or corrupt
+    """Read every complete, CRC-valid chunk from `offset`. A torn or corrupt
     tail stops iteration (recoverable), matching the WFR1 reader's contract."""
     chunks: list[tuple[bytes, bytes]] = []
     view = memoryview(data)
@@ -118,6 +122,82 @@ def _read_chunks(data: bytes, offset: int) -> list[tuple[bytes, bytes]]:
         chunks.append((tag, payload))
         offset = end
     return chunks
+
+
+def _chunk_map(
+    data: bytes,
+    offset: int,
+    *,
+    container: str,
+    recover_tail: bool,
+    known: frozenset[bytes] | None = None,
+) -> dict[bytes, bytes]:
+    """Every complete chunk by tag, refusing a tag that appears twice.
+
+    A **repeat** of a tag already read is refused by name. It is not a new
+    field, it is a second copy of one, and `dict()` silently kept the last.
+    Appending one more `SEGS` chunk to a valid recording would then replace
+    every segment in it while the file still verified -- same magic, same
+    version, every CRC good -- so a replay would run bytes nobody recorded and
+    say nothing. Refused for the same reason `recorded_request` refuses a
+    chunked body: a container that quietly holds something other than what it
+    appears to is worse than one that will not open.
+
+    `recover_tail` is where the two containers deliberately differ, and the
+    difference is what each one is *for*:
+
+    - A **recording** recovers. The writer appends, so a capture cut short by a
+      crash ends mid-chunk, and every complete chunk before the tear is the
+      forensic material the incident produced. Throwing it away to punish the
+      tear helps nobody.
+    - A **fault schedule** refuses. Its whole promise is that two runs got the
+      same injection, and a torn `ADPT` chunk would drop every adapter fault
+      while the transport half still decoded -- a schedule that injects less
+      than it says it does, in a run that stays green. A weaker schedule
+      running under the name of a stronger one is the failure this refusal
+      exists to prevent, and it is not a tear anybody can act on: schedules are
+      generated, not salvaged.
+
+    `known`, when given, is the complete set of tags the container may hold;
+    anything else is refused by name. **The CRC covers the payload, not the
+    tag**, so a single flipped bit in a tag turns a chunk the reader needs into
+    one it has never heard of -- and an *optional* chunk that goes unrecognised
+    simply vanishes while every checksum still verifies. Measured: flipping one
+    bit of the `P` in `ADPT` left a chunk whose CRC still checked out, and a
+    schedule carrying an adapter fault decoded cleanly as one carrying none --
+    the same injection, silently weaker. A recording has no optional
+    chunks, so it stays open to a future writer's extra ones; a schedule has
+    `ADPT`, so it names its vocabulary and the version byte carries forward
+    compatibility instead.
+    """
+    seen: dict[bytes, bytes] = {}
+    consumed = offset
+    for tag, payload in _read_chunks(data, offset):
+        if known is not None and tag not in known:
+            raise ReplayError(
+                f"{container} container holds an unrecognised "
+                f"{tag.decode('latin-1', 'replace')!r} chunk. A chunk tag is "
+                "not covered by the CRC, so one flipped bit turns a chunk this "
+                "reader needs into one it silently ignores; the vocabulary is "
+                "fixed and the version byte is how it grows"
+            )
+        if tag in seen:
+            raise ReplayError(
+                f"{container} container repeats the {tag.decode('latin-1')!r} "
+                "chunk; a second copy of a chunk would silently replace the "
+                "first, so the container is refused rather than guessed at"
+            )
+        seen[tag] = payload
+        consumed += _CHUNK.size + len(payload)
+    if not recover_tail and consumed != len(data):
+        raise ReplayError(
+            f"{container} container has {len(data) - consumed} trailing bytes "
+            "that are not a complete chunk, so part of it was lost or altered; "
+            "a fault schedule is refused rather than recovered, because a "
+            "schedule missing half its faults injects less than it claims and "
+            "the run that used it still passes"
+        )
+    return seen
 
 
 def _build_id() -> int:
@@ -161,9 +241,9 @@ class SegmentKind(IntEnum):
 class TransportSegment:
     """One recorded inbound event with its virtual-clock arrival offset.
 
-    ``offset_us`` is microseconds from the connection's virtual start; it drives
+    `offset_us` is microseconds from the connection's virtual start; it drives
     the replay schedule and is the coordinate a virtual-clock fault trigger keys
-    to. ``data`` is empty for the EOF/RESET lifecycle kinds.
+    to. `data` is empty for the EOF/RESET lifecycle kinds.
     """
 
     offset_us: int
@@ -177,7 +257,7 @@ class TransportRecording:
 
     Deliberately minimal and self-describing: the segments plus the peer/socket
     addresses the scope needs and a build fingerprint for compatibility checks.
-    Serializes to a checksummed ``WTR1`` container that recovers a torn tail.
+    Serializes to a checksummed `WTR1` container that recovers a torn tail.
     """
 
     segments: tuple[TransportSegment, ...]
@@ -205,7 +285,7 @@ class TransportRecording:
             raise ReplayError("not a WTR1 transport recording")
         if len(data) < 5 or data[4] != _CONTAINER_VERSION:
             raise ReplayError("unsupported WTR1 container version")
-        chunks = dict(_read_chunks(data, 5))
+        chunks = _chunk_map(data, 5, container="WTR1", recover_tail=True)
         if b"HEAD" not in chunks or b"SEGS" not in chunks:
             raise ReplayError("transport recording is missing a required chunk")
         head = chunks[b"HEAD"]
@@ -236,7 +316,7 @@ def record_transport_segments(
     """Build a recording from a list of inbound byte chunks.
 
     A convenience for producing a recording from bytes a connection received:
-    each chunk becomes a DATA segment spaced ``interval_us`` apart, optionally
+    each chunk becomes a DATA segment spaced `interval_us` apart, optionally
     followed by an EOF/RESET lifecycle segment.
     """
     segments: list[TransportSegment] = []
@@ -359,10 +439,10 @@ async def _drain(transport: _ReplayTransport) -> None:
 
     The reliable done-signal is the driver closing the transport: replay delivers
     a read-EOF after the last segment, and a keep-alive driver closes on EOF while
-    a ``Connection: close`` response closes on its own. Draining to *close* — not
+    a `Connection: close` response closes on its own. Draining to *close* — not
     to a short quiescence — is what lets pipelined and keep-alive replays reproduce
     *every* response, however long the lull between them. The quiet plateau is only
-    a fallback for a driver that leaves the connection open; ``_MAX_PUMPS`` bounds
+    a fallback for a driver that leaves the connection open; `_MAX_PUMPS` bounds
     a stuck app so replay can never hang.
     """
     stable = 0
@@ -387,7 +467,7 @@ async def _drain(transport: _ReplayTransport) -> None:
 
 def _feed(protocol: Any, data: bytes) -> None:
     """Feed bytes through the BufferedProtocol zero-copy path when available
-    (the native server's production ingress), else ``data_received``."""
+    (the native server's production ingress), else `data_received`."""
     if not isinstance(protocol, asyncio.BufferedProtocol):
         protocol.data_received(data)
         return
@@ -410,8 +490,8 @@ def _feed(protocol: Any, data: bytes) -> None:
 class TransportReplayResult:
     """The owned, comparable outcome of a transport replay.
 
-    ``response`` is the raw bytes the protocol wrote; ``normalized`` has variable
-    fields (``Date``) replaced so two builds can be compared. ``terminal`` is the
+    `response` is the raw bytes the protocol wrote; `normalized` has variable
+    fields (`Date`) replaced so two builds can be compared. `terminal` is the
     connection disposition the owned driver chose.
     """
 
@@ -431,8 +511,8 @@ class H2ReplayResult:
     """The owned outcome of an HTTP/2 transport replay, decoded per stream.
 
     HTTP/2 responses are HPACK-encoded and multiplexed, so raw bytes are not a
-    stable comparison key; ``streams`` holds each stream's decoded status,
-    headers, and body. ``raw`` is kept for byte-level inspection.
+    stable comparison key; `streams` holds each stream's decoded status,
+    headers, and body. `raw` is kept for byte-level inspection.
     """
 
     streams: dict[int, Any]  # stream_id -> H2StreamResponse
@@ -446,7 +526,7 @@ class H2ReplayResult:
     goaway: int | None = None
 
     def _canonical(self) -> tuple[Any, ...]:
-        # Drop the variable ``date`` header so two builds compare equal.
+        # Drop the variable `date` header so two builds compare equal.
         streams: dict[int, tuple[Any, ...]] = {}
         for sid, stream in self.streams.items():
             headers = tuple((k, v) for k, v in stream.headers if k != b"date")
@@ -455,14 +535,14 @@ class H2ReplayResult:
 
     def matches(self, other: H2ReplayResult) -> bool:
         """Whether two replays produced the same owned outcome (per-stream
-        responses, terminal, and GOAWAY), ignoring the variable ``date``."""
+        responses, terminal, and GOAWAY), ignoring the variable `date`."""
         return self._canonical() == other._canonical()
 
 
 def _normalize_response(data: bytes) -> bytes:
     """Replace variable HTTP/1 response fields so builds compare equal.
 
-    Only ``Date`` varies for an owned HTTP/1 response (connection ids are an
+    Only `Date` varies for an owned HTTP/1 response (connection ids are an
     HTTP/2/3 concern). The header value is replaced with a constant token; the
     header's presence and position are preserved.
     """
@@ -573,9 +653,9 @@ async def replay_transport(
     Feeds each recorded segment into the protocol over a fake transport,
     advancing a virtual clock to each segment's offset and pumping the loop so
     the app task can run. Returns the owned response bytes and terminal
-    disposition. An optional :class:`FaultSchedule` perturbs the inbound stream
+    disposition. An optional `FaultSchedule` perturbs the inbound stream
     along transport seams before it reaches the parser. For HTTP/2 use
-    :func:`replay_transport_h2`, which decodes the frames it wrote back.
+    `replay_transport_h2`, which decodes the frames it wrote back.
     """
     if protocol_cls is None:
         protocol_cls = _default_protocol_cls()
@@ -603,7 +683,7 @@ async def replay_transport_h2(
     The recording is raw HTTP/2 wire bytes (client preface, SETTINGS, HEADERS/
     DATA frames); byte-level faults apply exactly as for HTTP/1. The frames the
     server wrote back are decoded into per-stream owned responses so two builds
-    can be compared without depending on HPACK byte layout or the ``date`` value.
+    can be compared without depending on HPACK byte layout or the `date` value.
     """
     protocol_cls = _default_h2_protocol_cls()
     if protocol_cls is None:
@@ -636,7 +716,7 @@ def _default_h2_protocol_cls() -> type | None:
 
 def _fire_timeout(protocol: Any) -> None:
     """Fire the driver's owned request/keep-alive timeout enforcement. Both the
-    native and pure HTTP/1 drivers expose ``_replay_fire_timeout`` for exactly
+    native and pure HTTP/1 drivers expose `_replay_fire_timeout` for exactly
     this; a driver without it (e.g. HTTP/2) is a no-op.
 
     The `callable` guard is what tolerates a driver that does not implement it.
@@ -692,21 +772,21 @@ _FIRE_TIMEOUT = 100
 class FaultKind(IntEnum):
     """The owned seam perturbation a fault descriptor applies."""
 
-    SHORT_READ = 0  # deliver only the first ``value`` bytes of the segment
-    TRUNCATE = 1  # drop this segment's bytes past ``value`` and every later one
+    SHORT_READ = 0  # deliver only the first `value` bytes of the segment
+    TRUNCATE = 1  # drop this segment's bytes past `value` and every later one
     RESET = 2  # inject a peer reset after this segment
     HALF_CLOSE = 3  # inject a peer half-close (EOF) after this segment
-    CLOCK_JUMP = 4  # advance the virtual clock by ``value`` us before this segment
+    CLOCK_JUMP = 4  # advance the virtual clock by `value` us before this segment
     DUPLICATE = 5  # feed this segment's bytes twice (peer retransmission)
     TIMEOUT = 6  # fire the driver's owned request/keep-alive timeout after this segment
-    SPLIT = 7  # deliver this segment as two reads, split at ``value``
+    SPLIT = 7  # deliver this segment as two reads, split at `value`
 
 
 @dataclass(frozen=True, slots=True)
 class FaultDescriptor:
     """One perturbation keyed to a stable owned coordinate.
 
-    ``segment_index`` is the trigger: the Nth recorded DATA segment. ``value``
+    `segment_index` is the trigger: the Nth recorded DATA segment. `value`
     parameterizes SHORT_READ/TRUNCATE (a byte offset within the segment). No
     trigger references wall-clock time or an address, so a schedule is bit-for-bit
     reproducible.
@@ -733,8 +813,8 @@ class AdapterSeam(IntEnum):
 @dataclass(frozen=True, slots=True)
 class AdapterFaultDescriptor:
     """One boundary-adapter fault, keyed to a stable owned coordinate: the named
-    database/client and (for query/request seams) the Nth operation. ``kind`` is
-    a :class:`wreath.replay.AdapterFault` value."""
+    database/client and (for query/request seams) the Nth operation. `kind` is
+    a `wreath.replay.AdapterFault` value."""
 
     seam: int
     target: str
@@ -756,7 +836,7 @@ def _decode_str(data: bytes, offset: int) -> tuple[str, int]:
 @dataclass(frozen=True, slots=True)
 class FaultSchedule:
     """An ordered, checksummed set of faults — a first-class replay input that
-    round-trips through its own ``WFS1`` container. Transport faults perturb the
+    round-trips through its own `WFS1` container. Transport faults perturb the
     inbound byte stream; adapter faults perturb the PostgreSQL/HTTP boundaries.
     Both are keyed only to stable owned coordinates, so a schedule is bit-for-bit
     reproducible across runs and builds."""
@@ -783,7 +863,9 @@ class FaultSchedule:
             raise ReplayError("not a WFS1 fault schedule")
         if len(data) < 5 or data[4] != _CONTAINER_VERSION:
             raise ReplayError("unsupported WFS1 container version")
-        chunks = dict(_read_chunks(data, 5))
+        chunks = _chunk_map(
+            data, 5, container="WFS1", recover_tail=False, known=_FAULT_CHUNKS
+        )
         if b"FALT" not in chunks:
             raise ReplayError("fault schedule is missing its FALT chunk")
         body = chunks[b"FALT"]
@@ -811,8 +893,8 @@ class FaultSchedule:
 class _TransportFaultPlan:
     """Applies a fault schedule to the inbound DATA segments during replay.
 
-    Keyed to the DATA-segment index (the trigger). ``rewrite`` returns the reads
-    to actually feed -- one per ``data_received`` the protocol will see -- and,
+    Keyed to the DATA-segment index (the trigger). `rewrite` returns the reads
+    to actually feed -- one per `data_received` the protocol will see -- and,
     when a lifecycle fault fires, the close kind to deliver after them. TRUNCATE
     latches so every later segment is suppressed too.
 
@@ -892,61 +974,61 @@ def fault_corpus() -> dict[str, FaultSchedule]:
     does not belong; a cross product nobody can reason about is worse than a
     short list that maps to named incidents.
 
-    ``transport-*`` / ``schedule-*``
+    `transport-*` / `schedule-*`
         The inbound byte stream and the virtual clock: short reads, truncation,
         peer reset, half-close, retransmission, and the driver's own timeout.
 
-    ``transport-split-*``
+    `transport-split-*`
         The odd one out, and deliberately so. Every other transport region
         removes or reorders bytes, and its assertion is that the degradation is
-        handled. ``SPLIT`` removes nothing -- it moves the *read boundary* into
+        handled. `SPLIT` removes nothing -- it moves the *read boundary* into
         the middle of a frame -- so its assertion is **equality** with the
         unfaulted replay. That is the property an incremental parser breaks
         first, and no "handled it gracefully" outcome can hide a violation of it.
 
-    ``adapter-pool_*`` / ``adapter-server_error`` / ``adapter-connection_drop``
-    ``adapter-lost_commit`` / ``adapter-release_error``
+    `adapter-pool_*` / `adapter-server_error` / `adapter-connection_drop`
+    `adapter-lost_commit` / `adapter-release_error`
         The PostgreSQL pool: acquire, the Nth statement, and the release that
-        has to happen anyway. ``lost_commit`` is the ambiguous one -- the write
+        has to happen anyway. `lost_commit` is the ambiguous one -- the write
         may or may not be durable, which is the only pool fault where retrying
         is not obviously safe.
 
-    ``adapter-connect_error`` / ``adapter-read_timeout``
+    `adapter-connect_error` / `adapter-read_timeout`
         The outbound HTTP client, beneath its own timeout and phase handling.
 
-    ``adapter-listen_refused`` / ``adapter-notify_stream_end``
-    ``adapter-notify_stream_error``
-        The LISTEN/NOTIFY doorbell. ``STREAM_END`` and ``STREAM_ERROR`` are
-        deliberately separate regions: ``Connection.notifications()`` *returns*
+    `adapter-listen_refused` / `adapter-notify_stream_end`
+    `adapter-notify_stream_error`
+        The LISTEN/NOTIFY doorbell. `STREAM_END` and `STREAM_ERROR` are
+        deliberately separate regions: `Connection.notifications()` *returns*
         when the connection closes rather than raising, so a supervisor written
-        around ``except`` sees nothing at all. Modelling only the raising case
+        around `except` sees nothing at all. Modelling only the raising case
         would have re-blessed the bug where ephemeral fan-out stopped for the
         life of a process with no signal.
 
-    ``adapter-begin_error`` / ``adapter-statement_timeout``
-    ``adapter-commit_error``
+    `adapter-begin_error` / `adapter-statement_timeout`
+    `adapter-commit_error`
         The transaction scope, at its three distinct moments: no work ran, work
         ran and rolled back, work ran and its durability is unknown. A caller's
         recovery turns on which, so collapsing them makes "did my write happen?"
         unanswerable.
 
-    ``adapter-claim_lost``
-        An ``INSERT ... ON CONFLICT ... RETURNING`` claim that succeeds and
+    `adapter-claim_lost`
+        An `INSERT ... ON CONFLICT ... RETURNING` claim that succeeds and
         returns *no row*. Not an error, which is the entire hazard: the caller
         sees a successful statement with an empty result and carries on.
 
-    ``adapter-connection_failed``
+    `adapter-connection_failed`
         The *lease* ends, not one statement on it. Separate from
-        ``connection_drop`` because the two want opposite recoveries: a dropped
+        `connection_drop` because the two want opposite recoveries: a dropped
         statement may be retried on the connection already held, and this one
         never may -- it latches, so every later operation raises the identical
         error. A caller that cannot tell them apart spends its whole attempt
         budget re-issuing into a connection that is gone.
 
-    ``adapter-decode_error``
+    `adapter-decode_error`
         The statement succeeded and the *answer* could not be read. Modelled as
-        a ``ValueError``, not a ``PostgresError``, because that is what it was:
-        ``text-format array decoding is not supported``, raised by the driver on
+        a `ValueError`, not a `PostgresError`, because that is what it was:
+        `text-format array decoding is not supported`, raised by the driver on
         a cold catalog path in a default configuration. Every ``except
         PostgresError`` in this tree steps around it, so a region that raised a
         server error would have proved a recovery that does not exist. This is
@@ -954,7 +1036,7 @@ def fault_corpus() -> dict[str, FaultSchedule]:
         the code that *resolves* a caller's future, which is exactly how a
         printed error and a permanent wait can coexist.
 
-    ``adapter-prepared_poison``
+    `adapter-prepared_poison`
         Works once, fails forever after. PostgreSQL infers a parameter's type on
         the first execution and the prepared statement carries the inference, so
         the second execution binds by an OID nothing can encode. It is the only
@@ -963,15 +1045,15 @@ def fault_corpus() -> dict[str, FaultSchedule]:
         and reconnecting does not clear it, so "it worked when I tried it" is
         true and useless.
 
-    ``adapter-object_*``
+    `adapter-object_*`
         Object storage: unreachable, a write torn part-way (the key exists and
-        the bytes are wrong), and a read shorter than ``stat`` promised -- the
+        the bytes are wrong), and a read shorter than `stat` promised -- the
         last without raising, so a caller trusting the length is truncated
         silently.
 
-    ``adapter-*-then-*``
+    `adapter-*-then-*`
         Compounds, where two faults *together* are the failure and either alone
-        is handled: a doorbell that drops and then cannot re-``LISTEN``, a lost
+        is handled: a doorbell that drops and then cannot re-`LISTEN`, a lost
         claim followed by an unknown commit, a torn write followed by a read.
     """
     from ._replay_adapters import AdapterFault
@@ -1086,7 +1168,7 @@ def fault_corpus() -> dict[str, FaultSchedule]:
 
 
 def open_recording(path: str) -> TransportRecording:
-    """Read a recording file. Currently the ``WTR1`` transport recording; the
+    """Read a recording file. Currently the `WTR1` transport recording; the
     reader dispatches on the container magic so future kinds slot in here."""
     with open(path, "rb") as handle:
         data = handle.read()
@@ -1109,13 +1191,13 @@ _GENERATED_HEADER = "# Generated by `wreath replay to-test`. Re-generate rather 
 
 
 def recorded_request(recording: TransportRecording) -> CanonicalRequest:
-    """The first HTTP/1.1 request in ``recording``, as a canonical request.
+    """The first HTTP/1.1 request in `recording`, as a canonical request.
 
     Reads the DATA segments in arrival order and parses one request out of them,
     so a request the peer split across several reads is reassembled exactly as
     the server saw it.
 
-    Deliberately narrow: request line, headers, and a ``Content-Length`` body.
+    Deliberately narrow: request line, headers, and a `Content-Length` body.
     Anything else -- a chunked body, a truncated tail -- raises rather than
     guessing, because a generated test that asserts a mis-decoded body is worse
     than no test at all.
@@ -1198,14 +1280,14 @@ async def generate_test(
     name: str | None = None,
     origin: str | None = None,
 ) -> str:
-    """A runnable pytest module that re-drives ``recording`` against ``app``.
+    """A runnable pytest module that re-drives `recording` against `app`.
 
-    ``target`` is how the generated file should import the application --
-    ``"myapp:app"``, or ``"myapp"`` for a module-level ``app``. ``origin`` is
+    `target` is how the generated file should import the application --
+    `"myapp:app"`, or `"myapp"` for a module-level `app`. `origin` is
     the recording's filename, written into the docstring so a reader six months
     later knows where the case came from.
 
-    The request is replayed **now**, through :class:`~wreath.testing.TestClient`,
+    The request is replayed **now**, through `wreath.testing.TestClient`,
     and what comes back becomes the assertion. So this is a *characterisation*
     test: it pins what this request does today. Generated against the broken
     build it encodes the bug (watch it fail, then fix, then update); generated

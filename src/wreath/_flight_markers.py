@@ -1,8 +1,8 @@
 """Armed-request phase-marker propagation to dependency seams.
 
-Dispatch binds the native context's ``_flight_phase`` here only when the
-request was sampled into Detailed (``flight == 2``), so every other request
-pays exactly one ``ContextVar.get(None)`` per dependency call and nothing
+Dispatch binds the native context's `_flight_phase` here only when the
+request was sampled into Detailed (`flight == 2`), so every other request
+pays exactly one `ContextVar.get(None)` per dependency call and nothing
 else. Two properties make the binding safe to read from anywhere:
 
 - The native server runs each request in its own task, and a task's context
@@ -11,7 +11,7 @@ else. Two properties make the binding safe to read from anywhere:
 - A binding that escapes the request anyway (captured by a spawned task or a
   background hook) degrades to an inert no-op: the protocol severs the
   context's borrowed recorder pointers when the completion is published
-  (``wreath_request_context_sever``), and ``_flight_phase`` checks them.
+  (`wreath_request_context_sever`), and `_flight_phase` checks them.
 """
 
 from __future__ import annotations
@@ -21,14 +21,14 @@ from typing import Any
 
 from ._flight_schema import CaptureFieldClass, PhaseCoverage, PhaseKind
 
-#: The armed request's bound ``_flight_phase``; read with ``.get(None)``.
+#: The armed request's bound `_flight_phase`; read with `.get(None)`.
 phase_marker: ContextVar[Any] = ContextVar("wreath_flight_phase_marker")
 
 #: The armed *Forensic* request's dependency capturer, bound only when a capture
 #: arm is active and its narrowed policy permits dependency payloads. Read with
-#: ``.get(None)`` and always nested inside the phase-marker gate, so a request
+#: `.get(None)` and always nested inside the phase-marker gate, so a request
 #: that is not Detailed-sampled never touches it. The bound callable takes
-#: ``(field_class, data)`` and redacts per the arm's dependency disposition; an
+#: `(field_class, data)` and redacts per the arm's dependency disposition; an
 #: escaped binding no-ops once the native context is severed at completion.
 capture_marker: ContextVar[Any] = ContextVar("wreath_flight_capture_marker")
 
@@ -49,9 +49,9 @@ def record_phase(phase_id: int, duration_ns: int, *, dependency_id: int = 0,
                  coverage: int = COV_PYTHON) -> None:
     """Record one phase against the armed request, if there is one.
 
-    The whole cost on an unsampled request is one ``ContextVar.get(None)`` and a
+    The whole cost on an unsampled request is one `ContextVar.get(None)` and a
     predicted branch, so call sites can time unconditionally only when the timing
-    itself is free; otherwise gate on ``phase_marker.get(None)`` first and skip
+    itself is free; otherwise gate on `phase_marker.get(None)` first and skip
     the clock reads too.
     """
     marker = phase_marker.get(None)

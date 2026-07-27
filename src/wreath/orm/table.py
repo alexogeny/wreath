@@ -1,15 +1,16 @@
 """Table-level schema declarations found in a model body by type.
 
-These sit alongside :func:`narrow` and :func:`rule`: you declare them as plain
+These sit alongside `narrow` and `rule`: you declare them as plain
 class attributes and the metaclass collects them by type, so the attribute name
-is only documentation::
+is only documentation:
 
-    class Membership(Model, table="memberships", schema=TENANT_SCHEMA):
-        org_id: Mapped[int] = column(Int64)
-        user_id: Mapped[int] = column(Int64)
-        _identity = unique("org_id", "user_id")
-        _lookup = index("user_id", "org_id")
-
+```python
+class Membership(Model, table="memberships", schema=TENANT_SCHEMA):
+    org_id: Mapped[int] = column(Int64)
+    user_id: Mapped[int] = column(Int64)
+    _identity = unique("org_id", "user_id")
+    _lookup = index("user_id", "org_id")
+```
 Constraints and indexes declared this way are named deterministically by the
 migration engine (never by you), so a downgrade drops exactly what an upgrade
 created. Columns are named by their database name (which is the attribute name).
@@ -21,7 +22,7 @@ from .errors import DeclarationError
 
 
 class Unique:
-    """A composite ``UNIQUE`` constraint over two or more columns."""
+    """A composite `UNIQUE` constraint over two or more columns."""
 
     __slots__ = ("columns",)
 
@@ -33,7 +34,7 @@ class Unique:
 
 
 class Eq:
-    """``column = literal``."""
+    """`column = literal`."""
 
     __slots__ = ("column", "value")
 
@@ -46,7 +47,7 @@ class Eq:
 
 
 class IsNull:
-    """``column IS NULL``, or ``IS NOT NULL`` when *negated*."""
+    """`column IS NULL`, or `IS NOT NULL` when *negated*."""
 
     __slots__ = ("column", "negated")
 
@@ -59,7 +60,7 @@ class IsNull:
 
 
 class InValues:
-    """``column IN (...)`` over two or more literals."""
+    """`column IN (...)` over two or more literals."""
 
     __slots__ = ("column", "values")
 
@@ -72,7 +73,7 @@ class InValues:
 
 
 class AllOf:
-    """Two or more predicates joined by ``AND``."""
+    """Two or more predicates joined by `AND`."""
 
     __slots__ = ("operands",)
 
@@ -85,22 +86,22 @@ class AllOf:
 
 #: Every predicate shape a partial index may carry. Deliberately small: each one
 #: has a PostgreSQL normal form this codebase has measured and can reproduce
-#: exactly, which is what keeps ``detect`` from reporting drift forever against
-#: an index it just created. See :mod:`wreath.orm._index_predicate`.
+#: exactly, which is what keeps `detect` from reporting drift forever against
+#: an index it just created. See `wreath.orm._index_predicate`.
 PREDICATES = (Eq, IsNull, InValues, AllOf)
 
 
 class Index:
-    """A multi-column btree index, optionally ``UNIQUE`` and optionally partial.
+    """A multi-column btree index, optionally `UNIQUE` and optionally partial.
 
-    ``where`` carries a predicate built from :func:`eq`, :func:`is_null`,
-    :func:`is_not_null`, :func:`one_of` and :func:`all_of`. Columns are named by
-    string for the same reason :func:`index` names them by string -- a model
+    `where` carries a predicate built from `eq`, `is_null`,
+    `is_not_null`, `one_of` and `all_of`. Columns are named by
+    string for the same reason `index` names them by string -- a model
     cannot refer to its own attributes from inside its own class body, so the
-    query language (``Job.state == "ready"``) is not available here.
+    query language (`Job.state == "ready"`) is not available here.
 
-    ``where_sql`` is the rendered predicate in PostgreSQL's own normal form, set
-    by the registry once column types are known. It is ``None`` until then.
+    `where_sql` is the rendered predicate in PostgreSQL's own normal form, set
+    by the registry once column types are known. It is `None` until then.
     """
 
     __slots__ = ("columns", "unique", "where", "where_sql")
@@ -150,26 +151,26 @@ def _check_predicate_column(column: object, where: str) -> str:
 
 
 def eq(column: str, value: object) -> Eq:
-    """``column = value``, for a text, integer, or boolean column."""
+    """`column = value`, for a text, integer, or boolean column."""
     return Eq(_check_predicate_column(column, "eq()"), value)
 
 
 def is_null(column: str) -> IsNull:
-    """``column IS NULL``."""
+    """`column IS NULL`."""
     return IsNull(_check_predicate_column(column, "is_null()"), False)
 
 
 def is_not_null(column: str) -> IsNull:
-    """``column IS NOT NULL`` -- the shape a unique partial index usually wants."""
+    """`column IS NOT NULL` -- the shape a unique partial index usually wants."""
     return IsNull(_check_predicate_column(column, "is_not_null()"), True)
 
 
 def one_of(column: str, values: object) -> InValues:
-    """``column IN (...)``, over two or more literals of one type.
+    """`column IN (...)`, over two or more literals of one type.
 
-    A single-element list is refused: PostgreSQL rewrites ``IN ('a')`` to
-    ``= 'a'``, so the catalog would never match what was declared. Use
-    :func:`eq`, which is what that means anyway.
+    A single-element list is refused: PostgreSQL rewrites `IN ('a')` to
+    `= 'a'`, so the catalog would never match what was declared. Use
+    `eq`, which is what that means anyway.
     """
     name = _check_predicate_column(column, "one_of()")
     if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple)):
@@ -185,7 +186,7 @@ def one_of(column: str, values: object) -> InValues:
 
 
 def all_of(*predicates: object) -> AllOf:
-    """Two or more predicates joined by ``AND``."""
+    """Two or more predicates joined by `AND`."""
     if len(predicates) < 2:
         raise DeclarationError("all_of() joins two or more predicates")
     for predicate in predicates:
@@ -204,10 +205,12 @@ def all_of(*predicates: object) -> AllOf:
 def index(*columns: str, unique: bool = False, where: object = None) -> Index:
     """Declare a multi-column btree index by column name.
 
-    ``unique=True`` makes it a unique index; ``where=`` makes it partial::
+    `unique=True` makes it a unique index; `where=` makes it partial:
 
-        _claim = index("queue", "run_at", where=eq("state", "ready"))
-        _dedup = index("queue", "dedup_key", unique=True, where=is_not_null("dedup_key"))
+    ```python
+    _claim = index("queue", "run_at", where=eq("state", "ready"))
+    _dedup = index("queue", "dedup_key", unique=True, where=is_not_null("dedup_key"))
+    ```
     """
     _check_columns(columns, "index()")
     if where is not None and not isinstance(where, PREDICATES):

@@ -4,21 +4,21 @@ Endpoint-plan replay can run a *real* handler (INVOKE) that reaches out to the
 PostgreSQL driver or an outbound HTTP client. To replay that deterministically —
 and, more valuably, to *red-team the owned handling of a boundary failure* — we
 substitute injected doubles for those boundaries. A double either returns a
-scripted result or raises a modeled fault (``pool-acquire timeout``, ``server
-error after the round trip``, ``connection drop mid-result``, ...), and the
+scripted result or raises a modeled fault (`pool-acquire timeout`, ``server
+error after the round trip`, `connection drop mid-result``, ...), and the
 framework's owned recovery — error mapping, connection release, transaction
 outcome — runs for real.
 
 Adapters are explicit and request-scoped. They never touch a real socket, and
 they are installed only for the duration of a replay:
 
-- **PostgreSQL** doubles replace ``app._databases[name]``. Because the binder
+- **PostgreSQL** doubles replace `app._databases[name]`. Because the binder
   looks its database up by name at request time, installing a double plus forcing
-  a route recompile routes every ``FromDatabase`` connection to it. The double
+  a route recompile routes every `FromDatabase` connection to it. The double
   counts acquisitions and releases, so a test can assert the framework returned
   the connection to the pool even on the error path.
-- **Outbound HTTP** doubles subclass the real ``HTTPClient`` and override only
-  the transport seam (``_request_timed``), so the client's own timeout, phase,
+- **Outbound HTTP** doubles subclass the real `HTTPClient` and override only
+  the transport seam (`_request_timed`), so the client's own timeout, phase,
   and error handling runs while the modeled fault is injected beneath it.
 """
 
@@ -216,7 +216,7 @@ def refuse_multiple_commands(sql: str) -> None:
 
 
 def refuse_uninferable_cast(sql: str, args: tuple[Any, ...], seen: set[str]) -> None:
-    """The trap that survives one call. ``seen`` is the prepared-statement cache."""
+    """The trap that survives one call. `seen` is the prepared-statement cache."""
     text = " ".join(sql.split())
     first_time = text not in seen
     seen.add(text)
@@ -264,7 +264,7 @@ class _ConnectionDouble:
         self._query = 0
         self._txn = 0
         self._prepared: set[str] = set()
-        #: Set once a ``CONNECTION_FAILED`` fault fires. It latches: the lease is
+        #: Set once a `CONNECTION_FAILED` fault fires. It latches: the lease is
         #: over, and every later operation on it raises the *same* error object,
         #: which is what makes "retry on this connection" visibly wrong.
         self._failure: Exception | None = None
@@ -329,14 +329,14 @@ class _ConnectionDouble:
     async def notifications(self) -> Any:
         """The doorbell's stream, and the two ways it can stop.
 
-        ``NOTIFY_STREAM_END`` returns without raising, mirroring the real
-        connection closing; ``NOTIFY_STREAM_ERROR`` raises. A supervisor that
+        `NOTIFY_STREAM_END` returns without raising, mirroring the real
+        connection closing; `NOTIFY_STREAM_ERROR` raises. A supervisor that
         only handles the second is the bug this seam exists to catch.
 
         With **no** fault the stream *stays open*, which is what a real one does
         when there is simply nothing to deliver. It used to return, so an
         un-faulted double made the doorbell churn exactly as hard as
-        ``NOTIFY_STREAM_END`` did -- and a region whose behaviour is
+        `NOTIFY_STREAM_END` did -- and a region whose behaviour is
         indistinguishable from the control is a region that proves nothing. Held
         open, the reconnect counter is a signal again.
         """
@@ -384,12 +384,12 @@ class _ConnectionDouble:
 
 
 class _TransactionDouble:
-    """One ``async with connection.transaction()`` scope.
+    """One `async with connection.transaction()` scope.
 
     The three faults sit at genuinely different moments, and the difference is
-    what a caller's recovery has to distinguish: ``BEGIN_ERROR`` means no work
-    ran, ``STATEMENT_TIMEOUT`` means the scope died mid-body and rolls back
-    cleanly, and ``COMMIT_ERROR`` means the work may or may not be durable --
+    what a caller's recovery has to distinguish: `BEGIN_ERROR` means no work
+    ran, `STATEMENT_TIMEOUT` means the scope died mid-body and rolls back
+    cleanly, and `COMMIT_ERROR` means the work may or may not be durable --
     the only one of the three where retrying is not obviously safe.
     """
 
@@ -437,15 +437,15 @@ class _TransactionDouble:
 
 
 class ObjectStoreDouble:
-    """An ``ObjectStore`` double that injects modeled storage failures.
+    """An `ObjectStore` double that injects modeled storage failures.
 
     Only the four methods a fault can meaningfully perturb are overridden;
-    everything else delegates to a real :class:`MemoryObjectStore`, so a handler
+    everything else delegates to a real `MemoryObjectStore`, so a handler
     exercising the store's ordinary behaviour runs against real code and only
     the faulted operation is synthetic.
 
-    ``OBJECT_READ_SHORT`` is the interesting one: it returns *fewer bytes than
-    ``stat`` reported*, without raising. A caller that trusts the length it was
+    `OBJECT_READ_SHORT` is the interesting one: it returns *fewer bytes than
+    `stat` reported*, without raising. A caller that trusts the length it was
     given, rather than what it received, silently processes a truncated object.
     """
 
@@ -509,9 +509,9 @@ class ObjectStoreDouble:
 
 
 class DatabaseDouble:
-    """A ``Database`` double that scripts results and injects boundary faults.
+    """A `Database` double that scripts results and injects boundary faults.
 
-    ``acquired``/``released`` count the owned pool lifecycle so a test can prove
+    `acquired`/`released` count the owned pool lifecycle so a test can prove
     the framework returned the connection even when a query raised.
     """
 
@@ -573,24 +573,43 @@ class DatabaseDouble:
         self.listens = 0
 
     def statement(self, name: str, sql: str, *, workload: str = "read") -> Any:
-        """Register a prepared statement, exactly as ``Database`` does.
+        """Register a prepared statement, exactly as `Database` does.
 
-        Present so the stores built on :class:`wreath.store.PostgresStore` --
+        Present so the stores built on `wreath.store.PostgresStore` --
         the idempotency replay table, the session store, the cache -- replay
         against a double at all. They reach the database only through a
-        ``Statement``, which leases and releases a connection per call, so
+        `Statement`, which leases and releases a connection per call, so
         without this seam their claim/read/purge paths were the one family of
         owned PostgreSQL code a fault schedule could not touch.
 
-        The real :class:`~wreath.postgres.Statement` is used rather than a
+        The real `wreath.postgres.Statement` is used rather than a
         double of it: it is the code that acquires, calls, and releases, and
         replacing it would replace the behaviour under test with a copy of it.
         """
         from .postgres import Statement
+        from .postgres import _workload as check_workload
 
+        # The same three refusals the real `Database.statement` makes, in the
+        # same order. A double that accepts a registration the driver rejects is
+        # not modelling the boundary, it is hiding it -- which is exactly how
+        # thirteen introspection tests passed against a fake scripted with rows
+        # no PostgreSQL would ever send.
+        if not name or not sql.strip():
+            raise ValueError("statement name and SQL are required")
+        check_workload(workload)
         if name in self._statements:
             raise ValueError(f"duplicate PostgreSQL statement: {name}")
-        statement = Statement(self, name, sql, workload)  # type: ignore[arg-type]
+        # Structural, not nominal: `Statement` only ever calls `acquire`,
+        # `release`, and reads `_flight_dep_id`, all of which this double has.
+        # The annotation says `Database` because that is the only production
+        # caller, and widening it to a protocol for a test double's sake would
+        # put replay's needs into the driver's public types.
+        statement = Statement(
+            self,  # ty: ignore[invalid-argument-type]
+            name,
+            sql,
+            workload,  # ty: ignore[invalid-argument-type]
+        )
         self._statements[name] = statement
         return statement
 
@@ -612,9 +631,9 @@ class DatabaseDouble:
 
 
 class FaultyHttpClient(HTTPClient):
-    """An ``HTTPClient`` whose transport seam injects modeled faults.
+    """An `HTTPClient` whose transport seam injects modeled faults.
 
-    Overriding only ``_request_timed`` keeps the client's owned timeout, phase,
+    Overriding only `_request_timed` keeps the client's owned timeout, phase,
     and error handling on the real code path; the fault (or scripted response) is
     delivered where the socket would be. Faults are keyed to the Nth request.
     """
@@ -656,7 +675,7 @@ class ReplayAdapters:
     @classmethod
     def from_faults(cls, adapter_faults: Any) -> ReplayAdapters:
         """Build adapter doubles from a fault schedule's serialized adapter faults
-        (``AdapterFaultDescriptor`` records). Each named target becomes one double
+        (`AdapterFaultDescriptor` records). Each named target becomes one double
         carrying its acquire/query/release/listen/transaction, request, or object
         faults, so a checksummed schedule fully reconstructs the boundary
         perturbations for a replay."""
@@ -724,7 +743,7 @@ class ReplayAdapters:
 
 @contextmanager
 def installed_adapters(app: Any, adapters: ReplayAdapters | None) -> Iterator[None]:
-    """Install boundary doubles on ``app`` for the duration of a replay.
+    """Install boundary doubles on `app` for the duration of a replay.
 
     Databases are swapped in place and the routes are marked dirty so the binder
     recompiles against the doubles; HTTP clients and object stores are swapped by

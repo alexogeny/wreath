@@ -49,15 +49,16 @@ class Access:
     """A per-operation authorization rule for generated CRUD routes.
 
     Build one with a factory and hand it to `crud_router(authorize=...)`, either
-    as a single rule for every operation or keyed by operation / group::
+    as a single rule for every operation or keyed by operation / group:
 
-        crud_router(Widget, open_session, authorize={
-            "read":   Access.public(),            # list + retrieve
-            "create": Access.roles("editor", "admin", mode="any"),
-            "update": Access.roles("admin"),      # only admins
-            "delete": Access.deny(),              # nobody, ever (403)
-        })
-
+    ```python
+    crud_router(Widget, open_session, authorize={
+        "read":   Access.public(),            # list + retrieve
+        "create": Access.roles("editor", "admin", mode="any"),
+        "update": Access.roles("admin"),      # only admins
+        "delete": Access.deny(),              # nobody, ever (403)
+    })
+    ```
     Keys may be an operation (`list`/`retrieve`/`create`/`update`/
     `delete`), a group (`read` = list+retrieve, `write` = create+update+
     delete), or `"*"` as the default. A more specific key wins.
@@ -124,7 +125,7 @@ _OP_GROUP = {
 }
 
 #: A column whose name matches this is treated as a secret: hidden from output
-#: and rejected from input unless explicitly ``expose``d.
+#: and rejected from input unless explicitly `expose`d.
 SENSITIVE_FIELD = re.compile(
     r"pass(word|wd|phrase)|secret|token|_hash|hash_|^hash$|salt|private[_-]?key"
     r"|api[_-]?key|credential|ssn|otp|mfa|totp|cvv|security[_-]?code",

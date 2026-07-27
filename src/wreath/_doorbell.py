@@ -1,13 +1,13 @@
-"""One supervised ``LISTEN`` connection, shared by the bus and the job runner.
+"""One supervised `LISTEN` connection, shared by the bus and the job runner.
 
-Both :class:`wreath.messaging.MessageBus` and :class:`wreath.jobs.JobRunner`
-hold a single PostgreSQL connection for the life of the process, so a ``NOTIFY``
+Both `wreath.messaging.MessageBus` and `wreath.jobs.JobRunner`
+hold a single PostgreSQL connection for the life of the process, so a `NOTIFY`
 wakes them without waiting out a poll. Every reason a long-lived connection ends
--- a failover, an idle timeout, a ``pg_terminate_backend``, a network blip --
-happens to that one connection eventually, and the driver's ``notifications()``
+-- a failover, an idle timeout, a `pg_terminate_backend`, a network blip --
+happens to that one connection eventually, and the driver's `notifications()`
 iterator *ends* rather than raising when it does.
 
-Both subsystems once wrapped the whole thing in ``contextlib.suppress(Exception)``
+Both subsystems once wrapped the whole thing in `contextlib.suppress(Exception)`
 and spawned the loop only after a successful connect. Two failures followed, and
 they are why this module is supervised rather than hopeful:
 
@@ -20,20 +20,20 @@ they are why this module is supervised rather than hopeful:
 The supervisor owns tasks; it does not resurrect them. So the retry lives here.
 
 **What a pump owes, and where the two callers deliberately differ.**
-:class:`Doorbell` treats any exception out of ``pump`` as a lost connection and
+`Doorbell` treats any exception out of `pump` as a lost connection and
 reconnects. A pump that runs *user* code must therefore catch and count that
 itself -- otherwise a bug in a handler is indistinguishable from a flapping
 database in the very counter that exists to tell them apart.
 
-* ``MessageBus._pump`` dispatches to subscriber callbacks, so it catches per
-  notification and counts ``handler_errors`` separately from ``reconnects``.
-* ``JobRunner._pump`` only sets an event. There is no user code on its path, so
+* `MessageBus._pump` dispatches to subscriber callbacks, so it catches per
+  notification and counts `handler_errors` separately from `reconnects`.
+* `JobRunner._pump` only sets an event. There is no user code on its path, so
   it has nothing to catch and deliberately has no second counter -- one that
   could only ever read zero would suggest a distinction the runner cannot make.
 
 That asymmetry is the point, not an oversight. It is the same rule
-:mod:`wreath._busbridge` follows when it keeps ``rooms`` publishing inline and
-unsuppressed while ``progress`` is fire-and-forget: extract the machinery, keep
+`wreath._busbridge` follows when it keeps `rooms` publishing inline and
+unsuppressed while `progress` is fire-and-forget: extract the machinery, keep
 the difference that carries meaning.
 """
 
@@ -46,7 +46,7 @@ from typing import Any
 
 from ._jobcore import compute_backoff
 
-#: Reconnect backoff for the ``NOTIFY`` doorbell. 50ms first, because the
+#: Reconnect backoff for the `NOTIFY` doorbell. 50ms first, because the
 #: ordinary loss -- a failover, an idle timeout, a blip -- leaves a database that
 #: hands back a working connection at once, and every millisecond without a
 #: doorbell is fan-out on the floor and polling latency on every job.
@@ -59,7 +59,7 @@ BACKOFF_CAP = 5.0
 
 
 def delay(attempt: int) -> float:
-    """Seconds before reconnect ``attempt`` (1-based). Jittered so a fleet that
+    """Seconds before reconnect `attempt` (1-based). Jittered so a fleet that
     lost the same database does not come back at it in lockstep."""
     return compute_backoff(
         attempt, kind="exp", base=BACKOFF_BASE, cap=BACKOFF_CAP, jitter=0.2,
@@ -67,16 +67,16 @@ def delay(attempt: int) -> float:
 
 
 async def sleep_or_stop(stopping: asyncio.Event, seconds: float) -> None:
-    """Wait ``seconds``, or until shutdown -- whichever comes first."""
+    """Wait `seconds`, or until shutdown -- whichever comes first."""
     with contextlib.suppress(asyncio.TimeoutError):
         async with asyncio.timeout(seconds):
             await stopping.wait()
 
 
 class Doorbell:
-    """A held ``LISTEN`` connection that reopens itself until shutdown.
+    """A held `LISTEN` connection that reopens itself until shutdown.
 
-    ``pump`` receives the live connection and returns when its stream ends,
+    `pump` receives the live connection and returns when its stream ends,
     which is the ordinary end of a dropped connection. See the module docstring
     for what a pump owes about *its own* exceptions.
     """
@@ -95,7 +95,7 @@ class Doorbell:
         self._workload = workload
         self._pump = pump
         #: Assignable after construction because a bus cannot know its channels
-        #: until subscriptions are registered, which happens after ``__init__``.
+        #: until subscriptions are registered, which happens after `__init__`.
         self._channels: tuple[str, ...] = tuple(channels)
         self._conn: Any = None
         #: Connections lost *and* failed opens, including the one attempted on
@@ -105,7 +105,7 @@ class Doorbell:
 
     @property
     def connection(self) -> Any:
-        """The held connection, or ``None`` between attempts and after release."""
+        """The held connection, or `None` between attempts and after release."""
         return self._conn
 
     @property
@@ -117,10 +117,10 @@ class Doorbell:
         self._channels = tuple(value)
 
     async def open(self) -> bool:
-        """Take a connection and ``LISTEN`` on every wire channel.
+        """Take a connection and `LISTEN` on every wire channel.
 
         Reports failure rather than raising, because a database that will not
-        give us a connection is precisely the condition :meth:`run` exists to
+        give us a connection is precisely the condition `run` exists to
         ride out -- and because this also runs on the startup path, where it must
         not stop a caller from doing its own work by polling. Cancellation is not
         a failure and propagates.
@@ -143,8 +143,8 @@ class Doorbell:
     async def release(self) -> None:
         """Give the held connection back, exactly once.
 
-        Both the owner's ``drain`` and :meth:`run`'s own teardown call this, and
-        a clean shutdown runs them in that order, so the swap-to-``None`` is what
+        Both the owner's `drain` and `run`'s own teardown call this, and
+        a clean shutdown runs them in that order, so the swap-to-`None` is what
         keeps the second caller from releasing a connection twice.
         """
         connection, self._conn = self._conn, None

@@ -6,17 +6,18 @@ OpenAPI schema, the generated TypeScript, and the GraphQL scalar. Most
 applications re-decide it in each of them, and the drift is invisible until a
 client reads a naive timestamp as if it were UTC.
 
-The usual answer is to reach for ``arrow`` or ``pendulum`` in every module.
+The usual answer is to reach for `arrow` or `pendulum` in every module.
 Wreath's core carries no mandatory dependencies, so that answer is unavailable —
 which turns out to be the better outcome, because it forces the decision into
-one place that every surface already goes through::
+one place that every surface already goes through:
 
-    from wreath.temporal import Instant, now, relative
+```python
+from wreath.temporal import Instant, now, relative
 
-    started = Instant.parse(request.query["since"])   # aware, or it raises
-    when = relative(started, locale=request.locale)   # "3 hours ago"
-
-**An `Instant` is always zone-aware.** It subclasses :class:`datetime.datetime`,
+started = Instant.parse(request.query["since"])   # aware, or it raises
+when = relative(started, locale=request.locale)   # "3 hours ago"
+```
+**An `Instant` is always zone-aware.** It subclasses `datetime.datetime`,
 so it stores, compares, and does arithmetic exactly like one — but it cannot be
 constructed without an offset. Assuming UTC for a naive value is the single bug
 this module exists to prevent, and it is refused loudly rather than guessed at.
@@ -25,14 +26,14 @@ assume="Australia/Sydney")``.
 
 **The relative formatter takes a locale.** "3 hours ago" is the string every
 codebase ends up hand-rolling at the edge, and it is also the one that is
-locale-dependent. Keeping it here — reached through ``request.locale`` — means
+locale-dependent. Keeping it here — reached through `request.locale` — means
 translating it later is a parameter to one function rather than a hunt through
-every template. English ships today; :data:`_LOCALES` is where the next
+every template. English ships today; `_LOCALES` is where the next
 language goes, and the docstring there marks exactly where CLDR plural rules
 slot in.
 
-Everything is pure Python over stdlib ``datetime``/``zoneinfo``. There is no
-native twin yet; see the note on :func:`format_iso` for what would have to be
+Everything is pure Python over stdlib `datetime`/`zoneinfo`. There is no
+native twin yet; see the note on `format_iso` for what would have to be
 measured before writing one.
 """
 
@@ -75,15 +76,15 @@ UTC = datetime.UTC
 class TemporalError(ValueError):
     """A value could not be understood as a time, a duration, or a zone.
 
-    A ``ValueError`` subclass because that is what a caller parsing untrusted
+    A `ValueError` subclass because that is what a caller parsing untrusted
     input already handles.
     """
 
 
 def zone(name: str) -> ZoneInfo:
-    """The named IANA time zone, or a :class:`TemporalError` naming it.
+    """The named IANA time zone, or a `TemporalError` naming it.
 
-    ``ZoneInfoNotFoundError`` is accurate but arrives without the name in the
+    `ZoneInfoNotFoundError` is accurate but arrives without the name in the
     common formatting, and a bad zone is nearly always a typo in configuration.
     """
     try:
@@ -95,10 +96,10 @@ def zone(name: str) -> ZoneInfo:
 class Instant(datetime.datetime):
     """A moment in time that always knows its offset.
 
-    A :class:`datetime.datetime` subclass, so it is stored by ``TimestampTz``,
-    compared, and added to a ``timedelta`` exactly like one — arithmetic and
-    ``astimezone`` return an ``Instant`` because CPython preserves the subclass.
-    What it will not do is exist without a ``tzinfo``.
+    A `datetime.datetime` subclass, so it is stored by `TimestampTz`,
+    compared, and added to a `timedelta` exactly like one — arithmetic and
+    `astimezone` return an `Instant` because CPython preserves the subclass.
+    What it will not do is exist without a `tzinfo`.
     """
 
     __slots__ = ()
@@ -132,8 +133,8 @@ class Instant(datetime.datetime):
     def parse(cls, text: str) -> Instant:
         """An ISO-8601 timestamp that carries an offset.
 
-        Accepts everything ``datetime.fromisoformat`` does, which since 3.11
-        includes the trailing ``Z`` every JSON client emits. A string without an
+        Accepts everything `datetime.fromisoformat` does, which since 3.11
+        includes the trailing `Z` every JSON client emits. A string without an
         offset raises: there is no correct default, and UTC is merely the most
         popular wrong one.
         """
@@ -152,9 +153,9 @@ class Instant(datetime.datetime):
         *,
         assume: str | datetime.tzinfo | None = None,
     ) -> Instant:
-        """Adopt an existing ``datetime``.
+        """Adopt an existing `datetime`.
 
-        A naive value needs ``assume`` to say which zone it was written in.
+        A naive value needs `assume` to say which zone it was written in.
         Without it this raises rather than picking one — the caller knows and
         this module does not.
         """
@@ -179,7 +180,7 @@ class Instant(datetime.datetime):
     def iso(self) -> str:
         """The ISO-8601 form, with an explicit offset.
 
-        UTC renders as ``+00:00`` rather than ``Z`` so that two services never
+        UTC renders as `+00:00` rather than `Z` so that two services never
         produce different bytes for the same moment.
         """
         return self.isoformat()
@@ -195,7 +196,7 @@ class Instant(datetime.datetime):
     def relative(
         self, *, now: datetime.datetime | None = None, locale: str = "en"
     ) -> str:
-        """This moment as a person would say it — ``"3 hours ago"``."""
+        """This moment as a person would say it — `"3 hours ago"`."""
         return relative(self, now=now, locale=locale)
 
 
@@ -209,12 +210,12 @@ def now(in_zone: str | datetime.tzinfo = UTC) -> Instant:
 
 
 def _utc_now() -> Instant:
-    """The current moment, reachable from functions that shadow ``now``."""
+    """The current moment, reachable from functions that shadow `now`."""
     return Instant.of(datetime.datetime.now(UTC))
 
 
 def parse(text: str) -> Instant:
-    """An ISO-8601 timestamp that carries an offset. See :meth:`Instant.parse`."""
+    """An ISO-8601 timestamp that carries an offset. See `Instant.parse`."""
     return Instant.parse(text)
 
 
@@ -229,22 +230,22 @@ def parse(text: str) -> Instant:
 
 
 def wall_clock(value: datetime.datetime, tz: datetime.tzinfo) -> datetime.datetime:
-    """``value`` as a plain naive ``datetime`` on ``tz``'s wall clock.
+    """`value` as a plain naive `datetime` on `tz`'s wall clock.
 
     Public because reading an instant on somebody's clock is the first step of
     every calendar calculation in the codebase, and each caller that reinvents
-    it reinvents the trap below with it. :class:`Bucket` uses it to truncate,
-    and :mod:`wreath.series` to step a comparison period back a month.
+    it reinvents the trap below with it. `Bucket` uses it to truncate,
+    and `wreath.series` to step a comparison period back a month.
 
-    Built component-wise rather than with ``replace(tzinfo=None)`` because
-    ``replace`` preserves the subclass, and an :class:`Instant` refuses to exist
+    Built component-wise rather than with `replace(tzinfo=None)` because
+    `replace` preserves the subclass, and an `Instant` refuses to exist
     without an offset -- correctly, since that is the bug it is here to prevent.
 
-    ``fold`` is dropped, and nothing is lost by dropping it: both passes of an
+    `fold` is dropped, and nothing is lost by dropping it: both passes of an
     ambiguous hour read the same on a wall clock, which is exactly what
-    ``value AT TIME ZONE zone`` returns for them too. Putting a local time back
+    `value AT TIME ZONE zone` returns for them too. Putting a local time back
     on the timeline is where the choice actually happens -- see
-    :func:`from_wall_clock`.
+    `from_wall_clock`.
     """
     local = Instant.of(value).astimezone(tz)
     return datetime.datetime(
@@ -258,14 +259,14 @@ def from_wall_clock(
 ) -> datetime.datetime:
     """A naive local wall clock put back on the timeline, as PostgreSQL does it.
 
-    The inverse of :func:`wall_clock`, and public for the same reason: every
+    The inverse of `wall_clock`, and public for the same reason: every
     calendar calculation here ends by putting a local time back on the
-    timeline, and a caller that reinvents that reinvents the ``fold`` question
+    timeline, and a caller that reinvents that reinvents the `fold` question
     with it.
 
     On the two days a year a zone changes offset, a local time can name two
     instants or none at all. This resolves **to the later of the two
-    candidates**, because that is what ``timestamp AT TIME ZONE zone`` does.
+    candidates**, because that is what `timestamp AT TIME ZONE zone` does.
     That is measured, not assumed: 864 samples across nine zones, both
     transition directions, and the ambiguous, skipped and ordinary cases, with
     no disagreement -- including a zone with a half-hour DST step
@@ -275,7 +276,7 @@ def from_wall_clock(
     *day* boundary lands in the gap rather than an hour boundary.
 
     Matching it is not tidiness. A bucket boundary computed here and one
-    generated by ``generate_series`` have to be the same instant: when they
+    generated by `generate_series` have to be the same instant: when they
     differ, a settled row files itself under a bucket the spine never emits and
     the value silently disappears from every later read.
     """
@@ -292,68 +293,68 @@ def from_wall_clock(
 class Bucket:
     """One interval width, in the three vocabularies that have to agree.
 
-    ``trunc`` is the PostgreSQL ``date_trunc`` unit that assigns a row to a
-    bucket; ``step`` is the ``generate_series`` interval that walks from one
-    bucket to the next; and :meth:`floor` and :meth:`end_of` are the Python
+    `trunc` is the PostgreSQL `date_trunc` unit that assigns a row to a
+    bucket; `step` is the `generate_series` interval that walks from one
+    bucket to the next; and `floor` and `end_of` are the Python
     answers to the same two questions, for code that has a moment in hand and
     no connection.
 
-    Both SQL fragments are drawn from :data:`BUCKETS` rather than from a
-    caller, so neither is ever user input -- :func:`bucket` is the only way to
+    Both SQL fragments are drawn from `BUCKETS` rather than from a
+    caller, so neither is ever user input -- `bucket` is the only way to
     reach one by name, and it refuses anything not in the table.
     """
 
-    #: The name a caller writes and a payload carries -- ``"day"``.
+    #: The name a caller writes and a payload carries -- `"day"`.
     name: str
-    #: The ``date_trunc`` unit. Equal to :attr:`name` for every unit today, and
+    #: The `date_trunc` unit. Equal to `name` for every unit today, and
     #: kept separate because the two are not the same kind of thing.
     trunc: str
-    #: The ``generate_series`` step, as an interval literal: ``"1 day"``.
+    #: The `generate_series` step, as an interval literal: `"1 day"`.
     step: str
-    #: Calendar months per step, for the units a ``timedelta`` cannot hold.
-    #: Zero means :attr:`delta` is the width instead.
+    #: Calendar months per step, for the units a `timedelta` cannot hold.
+    #: Zero means `delta` is the width instead.
     months: int = 0
-    #: Fixed width, for the units that have one. ``None`` for calendar units.
+    #: Fixed width, for the units that have one. `None` for calendar units.
     delta: datetime.timedelta | None = None
 
     def floor(self, value: datetime.datetime, in_zone: str | datetime.tzinfo) -> Instant:
-        """The instant this bucket starts, for the wall clock in ``in_zone``.
+        """The instant this bucket starts, for the wall clock in `in_zone`.
 
-        The mirror of ``date_trunc(unit, value AT TIME ZONE zone)``: read the
+        The mirror of `date_trunc(unit, value AT TIME ZONE zone)`: read the
         moment on the zone's wall clock, truncate there, and convert back. Doing
         it in that order is what makes a "day" the reader's calendar day rather
-        than a fixed 24 hours -- see :meth:`end_of` for why that distinction has
+        than a fixed 24 hours -- see `end_of` for why that distinction has
         teeth.
 
         On the two days a year a zone changes offset, a local wall clock can be
         ambiguous or absent. Both cases resolve to the *later* of the candidate
-        instants, via :func:`from_wall_clock`, because that is what
-        ``AT TIME ZONE`` does -- **measured against a live PostgreSQL**, across
+        instants, via `from_wall_clock`, because that is what
+        `AT TIME ZONE` does -- **measured against a live PostgreSQL**, across
         nine zones and both transition directions, rather than reasoned from the
         documentation. An earlier revision resolved an ambiguous local time to
-        the first of its two instants, which disagreed with ``date_trunc`` for
+        the first of its two instants, which disagreed with `date_trunc` for
         every value in the second pass of a repeated hour.
 
         **Comparing the result across zones needs care**, and this is CPython's
         rule rather than this module's: by PEP 495 a datetime inside an
         ambiguous hour compares *unequal* to the same instant expressed in
         another zone, so that comparison stays transitive when one local time
-        names two instants. Convert with ``astimezone`` before comparing, or
+        names two instants. Convert with `astimezone` before comparing, or
         compare two values in the same zone. The trap is that the naive form is
         correct on every day but one.
 
-        **``floor(v) <= v < end_of(v)`` does not hold for every value**, at
-        ``minute`` granularity inside a repeated hour, and that is a property of
+        **`floor(v) <= v < end_of(v)` does not hold for every value**, at
+        `minute` granularity inside a repeated hour, and that is a property of
         the calendar rather than a defect here: one local time names two
         instants, a bucket start can only be one of them, and values at the
         other one fall outside their own bucket. **PostgreSQL does the same
         thing with the same inputs** — verified, not assumed — so this is the
-        shared answer rather than a divergence. At ``hour`` and coarser the
+        shared answer rather than a divergence. At `hour` and coarser the
         window is wide enough to contain both passes and the invariant holds.
 
         Every caller in the tree passes an already-truncated boundary except the
         sealing watermark, and there the boundary is now the one
-        ``generate_series`` will emit, which is the property sealing actually
+        `generate_series` will emit, which is the property sealing actually
         needs.
         """
         tz = _tzinfo(in_zone)
@@ -367,7 +368,7 @@ class Bucket:
         """The instant the *next* bucket starts -- this one's exclusive end.
 
         Ranges here are half-open throughout, so a bucket runs from
-        :meth:`floor` up to but not including this. Sealing (when a bucket
+        `floor` up to but not including this. Sealing (when a bucket
         becomes final) is the other caller: a bucket cannot settle before the
         moment it stops accepting rows, and that moment is this one.
 
@@ -375,7 +376,7 @@ class Bucket:
         a day spanning a DST change is 23 or 25 hours rather than 24, and a
         month is a calendar month rather than an approximation. The conversion
         back resolves an ambiguous or skipped boundary the same way
-        :meth:`floor` does -- see :func:`from_wall_clock` -- so a bucket's end
+        `floor` does -- see `from_wall_clock` -- so a bucket's end
         and the next bucket's start are one instant.
         """
         tz = _tzinfo(in_zone)
@@ -430,7 +431,7 @@ BUCKETS: dict[str, Bucket] = {
 
 
 def bucket(name: str | Bucket) -> Bucket:
-    """The named bucket, or a :class:`TemporalError` listing the real ones."""
+    """The named bucket, or a `TemporalError` listing the real ones."""
     if isinstance(name, Bucket):
         return name
     found = BUCKETS.get(name) if isinstance(name, str) else None
@@ -460,13 +461,13 @@ _DURATION = re.compile(
 
 
 def parse_duration(text: str) -> datetime.timedelta:
-    """An ISO-8601 duration such as ``PT3H`` or ``P1DT2H30M``.
+    """An ISO-8601 duration such as `PT3H` or `P1DT2H30M`.
 
     The stdlib has no parser for these and configuration files are full of
     them, which is how every codebase ends up with its own half-correct one.
 
     Years and months are rejected: they are not a fixed number of seconds, so
-    a ``timedelta`` cannot hold one honestly.
+    a `timedelta` cannot hold one honestly.
     """
     if not isinstance(text, str):
         raise TemporalError(f"expected an ISO-8601 duration, got {type(text).__name__}")
@@ -489,17 +490,17 @@ def parse_duration(text: str) -> datetime.timedelta:
 
 
 def format_duration(value: datetime.timedelta) -> str:
-    """An ISO-8601 duration, the inverse of :func:`parse_duration`.
+    """An ISO-8601 duration, the inverse of `parse_duration`.
 
-    Zero renders as ``PT0S`` rather than the empty ``P``, which is what a
+    Zero renders as `PT0S` rather than the empty `P`, which is what a
     reader — and most parsers — expect.
 
-    Built from the timedelta's own integer ``days``/``seconds``/``microseconds``
-    rather than from ``total_seconds()``. A float total loses precision on large
-    values, and formatting one with ``%g`` rounds to six significant digits and
-    switches to scientific notation for small ones — so ``timedelta.max`` came
-    out a day too long and one microsecond came out ``PT1e-06S``, which
-    :func:`parse_duration` rejects. A formatter whose own inverse cannot read its
+    Built from the timedelta's own integer `days`/`seconds`/`microseconds`
+    rather than from `total_seconds()`. A float total loses precision on large
+    values, and formatting one with `%g` rounds to six significant digits and
+    switches to scientific notation for small ones — so `timedelta.max` came
+    out a day too long and one microsecond came out `PT1e-06S`, which
+    `parse_duration` rejects. A formatter whose own inverse cannot read its
     output is worse than no formatter, so the integer components are the only
     honest source.
     """
@@ -540,12 +541,12 @@ def _seconds_text(secs: int, micro: int) -> str:
 class _Locale:
     """One language's phrasing for a relative time.
 
-    ``units`` maps a unit to ``(singular, plural)``. English needs only that,
+    `units` maps a unit to `(singular, plural)`. English needs only that,
     which is exactly why it is a poor guide: most languages need a *plural
     rule*, not a pair. When a second language lands, this grows a
-    ``plural(n) -> category`` callable per locale implementing the CLDR
-    categories (``zero``/``one``/``two``/``few``/``many``/``other``) and
-    ``units`` becomes a mapping keyed by category. Nothing outside this module
+    `plural(n) -> category` callable per locale implementing the CLDR
+    categories (`zero`/`one`/`two`/`few`/`many`/`other`) and
+    `units` becomes a mapping keyed by category. Nothing outside this module
     changes when that happens, which is the whole point of the seam.
     """
 
@@ -600,14 +601,14 @@ def relative(
     now: datetime.datetime | None = None,
     locale: str = "en",
 ) -> str:
-    """``value`` phrased the way a person would say it, relative to ``now``.
+    """`value` phrased the way a person would say it, relative to `now`.
 
-    ``"just now"``, ``"3 minutes ago"``, ``"yesterday"``, ``"in 2 hours"``.
-    Pass ``request.locale`` to honour the caller's ``Accept-Language``; an
+    `"just now"`, `"3 minutes ago"`, `"yesterday"`, `"in 2 hours"`.
+    Pass `request.locale` to honour the caller's `Accept-Language`; an
     unknown locale renders English rather than failing.
 
-    Both ``value`` and ``now`` must carry an offset. Comparing an aware moment
-    to a naive one is a ``TypeError`` waiting to fire on whichever request first
+    Both `value` and `now` must carry an offset. Comparing an aware moment
+    to a naive one is a `TypeError` waiting to fire on whichever request first
     supplies the other kind, so it is refused here with an explanation.
     """
     moment = Instant.of(value)
@@ -662,7 +663,7 @@ def format_iso(value: Any) -> str:
     One function so every surface renders a temporal value identically — the
     JSON encoder, a template, and a log line cannot disagree.
 
-    **On a native twin:** this and :meth:`Instant.parse` are the two operations
+    **On a native twin:** this and `Instant.parse` are the two operations
     on the response path, so they are where C would pay if anywhere. Before
     writing it, measure: encode a realistic response body containing timestamps
     with `wreath-decomp`, ablate the formatting, and compare against the A/A
@@ -681,22 +682,22 @@ def format_iso(value: Any) -> str:
     raise TemporalError(f"{type(value).__name__} is not a temporal value")
 
 
-#: The types :func:`jsonable` knows how to render. `datetime` precedes `date`
+#: The types `jsonable` knows how to render. `datetime` precedes `date`
 #: because it subclasses it.
 _TEMPORAL = (datetime.datetime, datetime.date, datetime.time, datetime.timedelta)
 
 
 def jsonable(value: Any) -> Any:
-    """``value`` with every temporal object replaced by its ISO-8601 string.
+    """`value` with every temporal object replaced by its ISO-8601 string.
 
     Used by the JSON encoder's fallback so a handler never writes
-    ``.isoformat()`` by hand. Containers are rebuilt rather than mutated, and
+    `.isoformat()` by hand. Containers are rebuilt rather than mutated, and
     anything that is not temporal is returned untouched — so a genuinely
     unserializable object reaches the encoder again and raises the error it
     should, rather than being swallowed here.
 
-    An object may also say how to become JSON by defining ``__jsonable__``,
-    which is how a result type like ``wreath.series.SeriesResult`` can be
+    An object may also say how to become JSON by defining `__jsonable__`,
+    which is how a result type like `wreath.series.SeriesResult` can be
     returned from a handler directly. The hook is **opt-in and deliberately not
     a blanket dataclass rule**: "serialize any dataclass" would put every field
     of every model a handler happened to return on the wire, including the ones
@@ -705,7 +706,7 @@ def jsonable(value: Any) -> Any:
     temporal values without converting them itself.
 
     Cost, stated as inspection rather than measurement: this whole function runs
-    only after the encoder has already raised ``TypeError``, so a payload that
+    only after the encoder has already raised `TypeError`, so a payload that
     encodes normally never reaches it and pays nothing. Within the walk the hook
     is one attribute lookup per non-temporal, non-container leaf.
     """

@@ -1,10 +1,10 @@
 """OAuth2 helpers: machine-to-machine tokens and an auth-code + PKCE login.
 
-The login flow registers ``/auth/login`` and ``/auth/callback`` on the app,
-carries CSRF ``state`` and the PKCE verifier in the signed session, exchanges
+The login flow registers `/auth/login` and `/auth/callback` on the app,
+carries CSRF `state` and the PKCE verifier in the signed session, exchanges
 the code at the provider's (origin-pinned) token endpoint, verifies the returned
-``id_token`` with the provider's own JWKS verifier, and writes a minimal
-principal into the session for the :class:`SessionIdentityBackend` to read.
+`id_token` with the provider's own JWKS verifier, and writes a minimal
+principal into the session for the `SessionIdentityBackend` to read.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def _bearer_401(error: str) -> JSONResponse:
 class ClientCredentials:
     """Cached OAuth2 client-credentials (M2M) token acquisition.
 
-    ``token_path`` is a path on ``http_client``'s pinned origin, or a zero-arg
+    `token_path` is a path on `http_client`'s pinned origin, or a zero-arg
     callable returning one (so it can be resolved lazily after OIDC discovery).
     """
 
@@ -135,7 +135,7 @@ def register_oauth2_login(
     post_login_redirect: str = "/",
     session_key: str = "principal",
 ) -> None:
-    """Register the login + callback routes for ``provider`` on ``app``."""
+    """Register the login + callback routes for `provider` on `app`."""
 
     state_key = f"_oidc_state_{name}"
     verifier_key = f"_oidc_verifier_{name}"

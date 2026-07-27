@@ -8,6 +8,13 @@ Two layers:
 * Behavioral tests require the optional ``wreath._native._http3`` backend and are
   skipped when it is not built. In the dedicated HTTP/3 CI job (backend present)
   they must run, not skip.
+
+The skip reasons diagnose rather than guess. "Not built" and "built but will not
+load" are different failures with different fixes, and reporting the first for
+the second costs real time: the extension can sit compiled on disk while a
+transitive QUIC library is absent, at which point the honest answer is the
+loader's error, not an instruction to build something that already exists.
+``docs/guides/server.md`` carries the toolchain the build needs.
 """
 from __future__ import annotations
 
@@ -27,6 +34,37 @@ def http3_backend_available() -> bool:
     return _http3_available()
 
 
+def _backend_skip_reason() -> str:
+    """Explain why the HTTP/3 backend is unusable, in the loader's own words.
+
+    Three outcomes, because they need three different fixes:
+
+    * the extension was never compiled -- build it;
+    * it compiled but a transitive QUIC library is missing from the loader path
+      -- supply the library, do not rebuild;
+    * it loads fine, in which case this string is never shown.
+
+    The middle case is the one worth naming. ``ldd`` on the extension reports the
+    unresolved library, but a skip reading "not built" points away from that and
+    at a build that has in fact already happened.
+    """
+    if importlib.util.find_spec("wreath._native._http3") is None:
+        return (
+            "the optional HTTP/3 extension is not compiled; rebuild with "
+            "WREATH_BUILD_HTTP3=1 (see docs/guides/server.md for the ngtcp2 / "
+            "nghttp3 / OpenSSL 3.5+ toolchain it needs)"
+        )
+    try:
+        importlib.import_module("wreath._native._http3")
+    except (ImportError, ValueError) as exc:
+        return (
+            f"the HTTP/3 extension is compiled but will not load: {exc}. "
+            "The build is present and a transitive QUIC library is not -- supply "
+            "it on LD_LIBRARY_PATH rather than rebuilding (docs/guides/server.md)"
+        )
+    return "the HTTP/3 backend is available"
+
+
 def curl_has_http3() -> bool:
     curl = shutil.which("curl")
     if curl is None:
@@ -41,12 +79,19 @@ def curl_has_http3() -> bool:
 
 requires_h3 = pytest.mark.skipif(
     not http3_backend_available(),
-    reason="optional wreath._native._http3 backend not built (WREATH_BUILD_HTTP3=1)",
+    reason=_backend_skip_reason(),
 )
 
+# Named separately from `requires_h3` so a skip says which of the two
+# prerequisites is absent. Reporting "needs the backend and an HTTP/3-capable
+# curl" when only one is missing sends the reader to check both.
 requires_curl_h3 = pytest.mark.skipif(
     not (http3_backend_available() and curl_has_http3()),
-    reason="needs the HTTP/3 backend and an HTTP/3-capable curl",
+    reason=(
+        _backend_skip_reason()
+        if not http3_backend_available()
+        else "curl is absent or was built without HTTP/3 (check `curl --version` for HTTP3)"
+    ),
 )
 
 

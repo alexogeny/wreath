@@ -1,4 +1,4 @@
-"""Hand-drawn explanatory figures — a ```` ```figure ```` block.
+"""Hand-drawn explanatory figures — a ``` ``figure ```` block.
 
 A small, closed registry of diagrams about wreath's own machinery, each emitted
 as inline SVG animated with CSS. Not a diagram *language*: these are three

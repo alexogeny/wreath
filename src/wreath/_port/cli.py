@@ -1,12 +1,12 @@
-"""Thin presentation layer for ``wreath port`` (mirrors ``_migrations_cli``).
+"""Thin presentation layer for `wreath port` (mirrors `_migrations_cli`).
 
-All analysis lives in the ``_port`` core; this only parses the namespace, drives
-``analyze_all``, and renders.
+All analysis lives in the `_port` core; this only parses the namespace, drives
+`analyze_all`, and renders.
 
-**Exit codes follow the same convention as the rest of the CLI**: ``2`` means the
-command never got started, ``1`` means it ran and has something to report, ``0``
-means it ran clean. ``wreath docs`` uses exactly this split — ``2`` for an
-unknown action or a config that would not load, ``1`` for a build that ran and
+**Exit codes follow the same convention as the rest of the CLI**: `2` means the
+command never got started, `1` means it ran and has something to report, `0`
+means it ran clean. `wreath docs` uses exactly this split — `2` for an
+unknown action or a config that would not load, `1` for a build that ran and
 had errors.
 
 ===== ==========================================================================
@@ -18,19 +18,19 @@ had errors.
        files that could not be read, or both. The report names which.
  2     The analysis never ran over anything -- no Python file was analyzed. In
        practice this is a wrong or empty directory. Unreadable source paths
-       raise from here and reach the same code via ``CliError`` in ``_cli``.
+       raise from here and reach the same code via `CliError` in `_cli`.
 ===== ==========================================================================
 
-Skipped files fold into ``1`` rather than earning a code of their own. They do
+Skipped files fold into `1` rather than earning a code of their own. They do
 change what the numbers mean -- **an unsupported count taken over a partial tree
 is a lower bound rather than a count** -- and the report says so in the summary
-line, the ``skipped`` section, and ``files_analyzed``. But a third level would be
+line, the `skipped` section, and `files_analyzed`. But a third level would be
 a scheme no other wreath command has, and the case that actually needs its own
-code is "you pointed me at nothing", which ``2`` covers.
+code is "you pointed me at nothing", which `2` covers.
 
-Emit mode (``--output``/``--in-place``) reads the same way: sources that could
-not be read are work remaining (``1``), a tree with nothing to emit at all is
-``2``, and everything written is ``0``.
+Emit mode (`--output`/`--in-place`) reads the same way: sources that could
+not be read are work remaining (`1`), a tree with nothing to emit at all is
+`2`, and everything written is `0`.
 """
 from __future__ import annotations
 
@@ -48,18 +48,18 @@ EXIT_OK = 0
 #: Ran, and left work: unsupported constructs, unreadable files, or both.
 EXIT_WORK_REMAINS = 1
 #: Never ran over anything -- no Python file was analyzed. A wrong or empty
-#: directory, and the same code ``_cli`` raises for a source path that is absent.
+#: directory, and the same code `_cli` raises for a source path that is absent.
 EXIT_NOT_RUN = 2
 
 
 def _resolve(report: Report, finding: Finding) -> Path | None:
-    """The real path behind ``finding.file``, which is spelled relative to a root.
+    """The real path behind `finding.file`, which is spelled relative to a root.
 
-    With one root that is ``root / file``. With several it is ambiguous by
-    construction -- two apps may both hold ``models.py`` -- so every root is
+    With one root that is `root / file`. With several it is ambiguous by
+    construction -- two apps may both hold `models.py` -- so every root is
     tried and the first hit wins. Ambiguity here costs at most the wrong app's
     identically-named file in a context block; guessing wrong is visible, and the
-    alternative (teaching ``Finding`` which root it came from) changes a
+    alternative (teaching `Finding` which root it came from) changes a
     serialized contract for a display convenience.
     """
     candidates = [Path(root) / finding.file for root in report.roots]
@@ -71,7 +71,7 @@ def _resolve(report: Report, finding: Finding) -> Path | None:
 
 
 def _context_lines(path: Path, line: int, before: int, after: int) -> list[str]:
-    """``before``/``after`` source lines around ``line``, with the hit marked."""
+    """`before`/`after` source lines around `line`, with the hit marked."""
     try:
         source = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:

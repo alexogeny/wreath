@@ -3,8 +3,8 @@
 Stage 7 settled a bucket once it could no longer change. A tier is that idea
 applied twice: **a tier is this view at a coarser grain.** Nothing new is stored
 and no second table appears -- a daily tier and an hourly tier are two view keys
-in ``series_buckets``, filed under the same ``(view, params, bucket)`` primary
-key that a sealed ungrouped view already uses, because ``view_key`` is derived
+in `series_buckets`, filed under the same `(view, params, bucket)` primary
+key that a sealed ungrouped view already uses, because `view_key` is derived
 from the declaration's *content* and the grain is part of that content.
 
 That is why §7.3's claim that rollup and settlement "are the same thing from two
@@ -16,20 +16,20 @@ that differs is which grain you asked for, and that already lives in the key.
 Two consequences follow, and both are load-bearing:
 
 * **A coarser tier cannot exist without a seal.** A tier stores a value on the
-  understanding that it is final, and only :meth:`~wreath.series.Series.seal`
-  says when a value is final. ``retain()`` past ``raw`` therefore requires
-  ``seal()`` rather than inventing a second watermark.
+  understanding that it is final, and only `seal`
+  says when a value is final. `retain()` past `raw` therefore requires
+  `seal()` rather than inventing a second watermark.
 * **Rollup is computed from the source rows, not from the finer tier.** At this
   stage nothing is ever removed, so raw is always present and recomputing from
   it is both correct and free of the average-of-averages trap. Tier-from-tier
   rollup becomes necessary only when retention starts actually removing rows,
-  and that is the moment :attr:`~wreath.series.Measure.rollup_safe` earns its
+  and that is the moment `rollup_safe` earns its
   keep rather than merely being recorded.
 
 What retention means today
 --------------------------
 
-``retain(raw="3 days", day="1 year")`` does **not** delete anything, and this
+`retain(raw="3 days", day="1 year")` does **not** delete anything, and this
 stage adds no way to. It is a promise about what will stay warm, and the read
 path keeps that promise honestly: a range older than raw's window is served from
 the coarsest tier that still covers it, *even though raw happens to still be
@@ -48,7 +48,7 @@ from ..temporal import BUCKETS, Bucket
 from ..temporal import zone as _zone_of
 
 #: A day, in seconds. The boundary past which a materialised grain can serve
-#: only the zone it was computed in -- see :func:`serves_zone`.
+#: only the zone it was computed in -- see `serves_zone`.
 _DAY = 86400.0
 
 #: Mean lengths for the calendar units, used only to *order* grains by
@@ -58,7 +58,7 @@ _MEAN_MONTH = 2629800.0
 
 
 def width(grain: Bucket) -> float:
-    """Roughly how long ``grain`` is, for ordering grains from fine to coarse.
+    """Roughly how long `grain` is, for ordering grains from fine to coarse.
 
     Approximate on purpose. Nothing computes a boundary from this -- it answers
     "is a month coarser than a week?", which does not need a calendar.
@@ -74,10 +74,10 @@ class Tier:
     """One rung of the ladder: a grain, and how long it is guaranteed warm.
 
     Args:
-        grain: the bucket width this tier stores, or ``None`` for the raw rows
+        grain: the bucket width this tier stores, or `None` for the raw rows
             themselves. Raw is a tier because retention is a ladder and the
             source rows are its bottom rung.
-        keep: seconds this tier is guaranteed queryable, or ``None`` for
+        keep: seconds this tier is guaranteed queryable, or `None` for
             "indefinitely". Never a deletion instruction -- see the module
             docstring.
     """
@@ -94,7 +94,7 @@ class Tier:
         return self.grain is None
 
     def covers(self, instant: Any, *, now: Any) -> bool:
-        """Whether this tier still promises to answer for ``instant``."""
+        """Whether this tier still promises to answer for `instant`."""
         if self.keep is None:
             return True
         return instant >= now - datetime.timedelta(seconds=self.keep)
@@ -106,7 +106,7 @@ class Tier:
 
 @dataclass(frozen=True, slots=True)
 class Ladder:
-    """The declared tiers, finest first, with ``raw`` always at the bottom."""
+    """The declared tiers, finest first, with `raw` always at the bottom."""
 
     tiers: tuple[Tier, ...]
 
@@ -116,7 +116,7 @@ class Ladder:
 
     @property
     def materialised(self) -> tuple[Tier, ...]:
-        """Every tier that stores rows -- everything above ``raw``."""
+        """Every tier that stores rows -- everything above `raw`."""
         return self.tiers[1:]
 
     @property
@@ -145,9 +145,9 @@ class Ladder:
 
 
 def build(spec: dict[str, Any], *, refuse: Any) -> Ladder:
-    """Turn ``retain(raw=…, hour=…, day=…)`` into an ordered ladder.
+    """Turn `retain(raw=…, hour=…, day=…)` into an ordered ladder.
 
-    ``refuse`` is the exception class to raise, passed in so this module does
+    `refuse` is the exception class to raise, passed in so this module does
     not import the public one and create a cycle.
     """
     if not spec:
@@ -200,16 +200,16 @@ def build(spec: dict[str, Any], *, refuse: Any) -> Ladder:
     return Ladder(tuple(tiers))
 
 
-#: Retention windows are written the way people say them -- ``"3 days"``,
-#: ``"14 days"``, ``"1 year"``. Deliberately a *different* parser from
-#: ``seal(after=)``, and the difference is the point.
+#: Retention windows are written the way people say them -- `"3 days"`,
+#: `"14 days"`, `"1 year"`. Deliberately a *different* parser from
+#: `seal(after=)`, and the difference is the point.
 #:
 #: A seal allowance is elapsed time and has to be exact, so
 #: `temporal.parse_duration` refuses months and years for the good reason that
 #: they are not a fixed number of seconds. A retention window is a promise about
 #: roughly how long something stays warm, and it is only ever compared against
-#: ``now - keep`` to decide which tier answers. "About a year" is the honest
-#: meaning of ``day="1 year"``, so mean lengths are the right precision here
+#: `now - keep` to decide which tier answers. "About a year" is the honest
+#: meaning of `day="1 year"`, so mean lengths are the right precision here
 #: rather than a compromise -- and keeping this local leaves `parse_duration`
 #: as strict as it should be.
 _UNITS: dict[str, float] = {
@@ -225,9 +225,9 @@ _UNITS: dict[str, float] = {
 
 
 def _window(value: Any, name: str, refuse: Any) -> float | None:
-    """Seconds, or ``None`` for forever.
+    """Seconds, or `None` for forever.
 
-    ``None`` is spelled ``None`` rather than ``0`` or ``"forever"`` because it
+    `None` is spelled `None` rather than `0` or `"forever"` because it
     is the *absence* of an expiry, and the design writes it that way.
     """
     if value is None:
@@ -265,17 +265,17 @@ def _window(value: Any, name: str, refuse: Any) -> float | None:
 def serves_zone(
     grain: Bucket | None, stored_zone: str, read_zone: str, *, at: Any
 ) -> bool:
-    """Whether a tier cut in ``stored_zone`` can answer for ``read_zone``.
+    """Whether a tier cut in `stored_zone` can answer for `read_zone`.
 
     §7.4's rule, and the non-obvious half of tiering: **a materialised tier is
-    zone-specific.** Daily buckets cut in ``Pacific/Auckland`` cannot answer a
+    zone-specific.** Daily buckets cut in `Pacific/Auckland` cannot answer a
     question about London days, because the boundaries do not line up and no
     amount of re-aggregation recovers them.
 
     The rule is that the offset *difference* between the two zones has to be a
     whole multiple of the grain. Hourly rows therefore serve any whole-hour
-    zone but not ``Asia/Kolkata`` (+5:30), ``Asia/Kathmandu`` (+5:45), or
-    ``Pacific/Chatham`` (+12:45). Daily and coarser rows serve only the zone
+    zone but not `Asia/Kolkata` (+5:30), `Asia/Kathmandu` (+5:45), or
+    `Pacific/Chatham` (+12:45). Daily and coarser rows serve only the zone
     they were computed in -- an offset difference is never a whole number of
     days.
 
@@ -331,13 +331,13 @@ def plan(
     allow_coarsening: bool,
     refuse: Any,
 ) -> tuple[Segment, ...]:
-    """Split ``[start, end)`` into contiguous pieces, one authoritative tier each.
+    """Split `[start, end)` into contiguous pieces, one authoritative tier each.
 
     §7.4's three steps: split by tier availability, pick **exactly one** tier
     per piece so a boundary can neither double-count nor gap, and hand the
     pieces back for the caller to stitch onto one spine.
 
-    The split points are the retention edges, ``now - keep``, because that is
+    The split points are the retention edges, `now - keep`, because that is
     the only place availability changes. Each piece is then resolved from its
     *oldest* instant, which is the binding one -- a tier that covers the start
     of a half-open piece covers all of it.

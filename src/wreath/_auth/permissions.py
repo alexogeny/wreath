@@ -2,7 +2,7 @@
 
 Every application with a real authorization model ends up maintaining it twice:
 once as the policies the server evaluates, and once in the frontend as a pile
-of ``user.role === "editor"`` checks deciding which buttons to render. The
+of `user.role === "editor"` checks deciding which buttons to render. The
 second copy drifts, and it drifts *quietly* -- a button that should have been
 hidden is only a 403 the user did not expect, which no test notices.
 
@@ -10,16 +10,16 @@ Wreath owns the Cedar engine and the typegen IR, so the second copy can be
 deleted instead of maintained. Four surfaces, and the differences between them
 are the important part:
 
-* :func:`declared_actions` reads the vocabulary off the routes. The actions a
+* `declared_actions` reads the vocabulary off the routes. The actions a
   client may ask about are exactly the actions the API enforces -- there is no
   second list to keep in step, because there is no second list.
-* the **manifest** (``GET /permissions/manifest``) answers *what can this user
-  ever do* -- resource-type level, fetched once, revalidated with an ``ETag``.
+* the **manifest** (`GET /permissions/manifest`) answers *what can this user
+  ever do* -- resource-type level, fetched once, revalidated with an `ETag`.
   That is what nav items, buttons, and route guards need.
-* the **batch endpoint** (``POST /permissions``) answers *what can this user do
+* the **batch endpoint** (`POST /permissions`) answers *what can this user do
   to these specific rows*, because a Cedar decision generally depends on the
   resource and no manifest can enumerate rows.
-* the **stream** (``GET /permissions/stream``) says *your manifest moved, ask
+* the **stream** (`GET /permissions/stream`) says *your manifest moved, ask
   again*. Only two things can move it, and Wreath can see both: its own policy
   set was replaced, or this user's roles were written -- which the ORM already
   announces. So the client fetches once and is told when to refetch, instead of
@@ -34,7 +34,7 @@ ephemeral fan-out over a connection that can drop, so a *narrowing* change may
 arrive late or not at all. A late narrowing draws a button that 403s, which is
 cosmetic; a late *widening* hides a button the user could have used, which is
 also cosmetic. Neither can grant anything, because **enforcement stays on the
-route** -- keep ``@authorize`` there. A stream is not a permission cache with a
+route** -- keep `@authorize` there. A stream is not a permission cache with a
 push, and treating it as one would be the one way to make this unsafe.
 """
 
@@ -71,13 +71,13 @@ __all__ = [
 #: SQL identifier, because `wreath.messaging` validates channel names as one.
 PERMISSION_CHANNEL = "wreath_permissions"
 
-#: Actions are conventionally ``Type::verb`` (see the Cedar guide), which is
+#: Actions are conventionally `Type::verb` (see the Cedar guide), which is
 #: what lets the vocabulary be grouped by resource type without a second
-#: declaration. An action without the separator is grouped under ``""``.
+#: declaration. An action without the separator is grouped under `""`.
 _SEPARATOR = "::"
 
 #: The entity id the manifest asks about, standing for "any row of this type".
-#: A literal ``"*"`` was a real id somebody's data can hold -- and a Cedar
+#: A literal `"*"` was a real id somebody's data can hold -- and a Cedar
 #: policy written for that row would then decide what the *manifest* says. The
 #: NUL cannot appear in a URL path segment, a JSON string PostgreSQL will store,
 #: or a Cedar entity id, so nothing can collide with it.
@@ -86,7 +86,7 @@ TYPE_LEVEL_ID = "\x00type-level"
 #: How many ids one batch request may ask about. A generous UI page: the
 #: endpoint exists so a table is one call, and a table nobody scrolls is not
 #: 200 rows. It is a ceiling rather than a page size -- see
-#: :func:`permissions_router` for why going over it refuses rather than
+#: `permissions_router` for why going over it refuses rather than
 #: truncates.
 DEFAULT_MAX_IDS = 200
 
@@ -102,7 +102,7 @@ DEFAULT_MAX_CONCURRENCY = 8
 def declared_actions(app: Any) -> dict[str, tuple[str, ...]]:
     """Resource type -> the actions this application enforces on it.
 
-    Read off the routes' ``@authorize(action=...)`` declarations, so it cannot
+    Read off the routes' `@authorize(action=...)` declarations, so it cannot
     disagree with what is enforced. A route with no policy contributes nothing.
     """
     found: dict[str, set[str]] = {}
@@ -125,7 +125,7 @@ def declared_actions(app: Any) -> dict[str, tuple[str, ...]]:
 
 
 def _vocabulary_reader(app: Any) -> Callable[[], dict[str, tuple[str, ...]]]:
-    """:func:`declared_actions`, recomputed only when the route table moved.
+    """`declared_actions`, recomputed only when the route table moved.
 
     Every endpoint here needs the vocabulary on every request, and rebuilding it
     means merging each route's requirements, splitting each action, and sorting
@@ -137,8 +137,8 @@ def _vocabulary_reader(app: Any) -> Callable[[], dict[str, tuple[str, ...]]]:
     is claimed; nothing here needed an ablation to justify.
 
     A comparison rather than a one-off computation, because the route table is
-    not settled when this is built. ``permissions_router`` promises the routes
-    it describes may be declared *after* it is mounted; and ``wreath.replay``
+    not settled when this is built. `permissions_router` promises the routes
+    it describes may be declared *after* it is mounted; and `wreath.replay`
     swaps every route's endpoint for a stub and back again, which keeps the
     route *count* identical -- so counting would not see it. Comparing the
     definitions sees both. (Adding a route once the table has compiled is
@@ -160,7 +160,7 @@ def _vocabulary_reader(app: Any) -> Callable[[], dict[str, tuple[str, ...]]]:
 
 
 class _Requirement:
-    """A ``PolicyRequirement``-shaped ask for one action against one resource.
+    """A `PolicyRequirement`-shaped ask for one action against one resource.
 
     Built per evaluation rather than reusing the route's, because the route's
     resource is a callable over *its* request and this one is being asked about
@@ -200,10 +200,10 @@ def _private(response: Response) -> Response:
 
 
 def _private_stream(response: SSEResponse) -> SSEResponse:
-    """As :func:`_private`, but replacing the ``no-cache`` ``SSEResponse`` set.
+    """As `_private`, but replacing the `no-cache` `SSEResponse` set.
 
-    Appending a second ``cache-control`` line would leave the first one --
-    ``no-cache``, which permits a *shared* store -- as the one a proxy reads.
+    Appending a second `cache-control` line would leave the first one --
+    `no-cache`, which permits a *shared* store -- as the one a proxy reads.
     """
     response.headers = [
         header for header in response.headers if header[0] != b"cache-control"
@@ -213,7 +213,7 @@ def _private_stream(response: SSEResponse) -> SSEResponse:
 
 
 def _etag_matches(header: str | None, tag: str) -> bool:
-    """Whether ``If-None-Match`` covers ``tag`` (RFC 9110 §13.1.2).
+    """Whether `If-None-Match` covers `tag` (RFC 9110 §13.1.2).
 
     A list, `*`, and the weak `W/` prefix are all legal, and comparing the whole
     header to one tag with `==` meant a client that sent two -- or a proxy that
@@ -261,25 +261,25 @@ async def _decide(
     *,
     limit: int,
 ) -> list[bool]:
-    """Answer every ``(resource, action)`` ask, in ask order, ``limit`` at a time.
+    """Answer every `(resource, action)` ask, in ask order, `limit` at a time.
 
-    Every ask is one ``authorizer.authorize``. With the built-in engine that is
+    Every ask is one `authorizer.authorize`. With the built-in engine that is
     in-process and the loop never yields, so this is the same work either way --
-    the case it exists for is the *remote* authorizer the ``CedarEngine``
+    the case it exists for is the *remote* authorizer the `CedarEngine`
     protocol invites, where each ask is a round trip. Evaluated one at a time, a
     batch of two hundred ids over three actions is six hundred round trips end
-    to end; ``limit`` at a time it is six hundred divided by ``limit``. That is
+    to end; `limit` at a time it is six hundred divided by `limit`. That is
     a complexity argument, not a measurement -- no benchmark run here can see a
     network that is not in it.
 
     Bounded rather than gathered whole, because gathering whole would trade this
     endpoint's own denial of service for one aimed at somebody else's
-    authorization service: ``max_ids`` already caps the work at ids x actions,
+    authorization service: `max_ids` already caps the work at ids x actions,
     and firing all of it at once makes one request a burst of exactly that size.
 
-    ``limit <= 1`` restores strictly sequential evaluation. It is the escape
+    `limit <= 1` restores strictly sequential evaluation. It is the escape
     hatch for an authorizer that cannot take concurrent calls carrying one
-    request -- see :func:`permissions_router`, which states that requirement.
+    request -- see `permissions_router`, which states that requirement.
     """
     if not asks:
         return []
@@ -314,22 +314,22 @@ def permission_document(
     max_subscribers: int = 1024,
     max_per_principal: int = 4,
 ) -> LiveDocument:
-    """The change signal behind ``{prefix}/stream``.
+    """The change signal behind `{prefix}/stream`.
 
     Build one yourself when you need a handle on it -- to call
-    ``document.notify_all("policies")`` from a reload hook, or
-    ``document.close_all()`` at shutdown -- and pass it to
-    :func:`permissions_router`. Otherwise that function builds one.
+    `document.notify_all("policies")` from a reload hook, or
+    `document.close_all()` at shutdown -- and pass it to
+    `permissions_router`. Otherwise that function builds one.
 
-    ``bus`` (``app.messaging(...)``) is what makes a role change on the worker
+    `bus` (`app.messaging(...)`) is what makes a role change on the worker
     that took the write reach the worker holding the stream. Without it the
     signal is local, which is right for one worker and for tests.
 
-    ``roles_model`` is your role-membership model, or its name; a committed
+    `roles_model` is your role-membership model, or its name; a committed
     write to it is what makes one user's manifest stale. It has to be named
     because Wreath cannot know which of your tables grants a role -- and without
     it the stream still works, still notices a policy-set change, and still
-    delivers an explicit ``notify``.
+    delivers an explicit `notify`.
     """
     watch: Iterable[Any] = () if roles_model is None else (roles_model,)
     return LiveDocument(
@@ -360,12 +360,12 @@ def permissions_router(
 ) -> Router:
     """Routes that answer what the caller may do, from the app's own policies.
 
-    ``GET  {prefix}``               the vocabulary, so a client can discover it
-    ``GET  {prefix}/manifest``      what this caller may ever do (``ETag``)
-    ``GET  {prefix}/stream``        SSE: that manifest moved, ask again
-    ``POST {prefix}``               what this caller may do to these rows
+    `GET  {prefix}`               the vocabulary, so a client can discover it
+    `GET  {prefix}/manifest`      what this caller may ever do (`ETag`)
+    `GET  {prefix}/stream`        SSE: that manifest moved, ask again
+    `POST {prefix}`               what this caller may do to these rows
 
-    Mount it with ``app.include_router(permissions_router(app))``. The
+    Mount it with `app.include_router(permissions_router(app))`. The
     application is passed in because every answer is read off *its* routes and
     evaluated by *its* authorizer -- the endpoint cannot drift from enforcement
     even in principle, and it is only ever read at request time, so the routes
@@ -377,28 +377,28 @@ def permissions_router(
     anonymously: the generated client bakes the vocabulary in at *build* time,
     from the app object, never over HTTP.
 
-    ``max_ids`` bounds one batch request. The endpoint runs
-    ``len(ids) x len(actions)`` policy evaluations, so an unbounded list is a
+    `max_ids` bounds one batch request. The endpoint runs
+    `len(ids) x len(actions)` policy evaluations, so an unbounded list is a
     denial of service one authenticated caller can post. Over the ceiling it
     **refuses**, naming the limit, rather than truncating: a truncated answer
     draws a UI that is confidently wrong, and an absent answer is only absent.
 
-    ``max_concurrency`` bounds how many of those evaluations are in flight at
-    once. It matters only for a **remote** authorizer, which the ``CedarEngine``
+    `max_concurrency` bounds how many of those evaluations are in flight at
+    once. It matters only for a **remote** authorizer, which the `CedarEngine`
     protocol invites: the built-in engine is in-process and the loop never
     yields, so concurrency there is the same work in the same order. Evaluating
-    a full batch one ask at a time is ``max_ids x len(actions)`` round trips end
-    to end; this makes it that over ``max_concurrency``. It is deliberately not
+    a full batch one ask at a time is `max_ids x len(actions)` round trips end
+    to end; this makes it that over `max_concurrency`. It is deliberately not
     unbounded -- gathering the whole product would turn one caller's batch into
     a burst of that size against a service that is not yours to overload.
 
     **An authorizer must therefore tolerate concurrent calls carrying one
     request.** The built-in one does; it reads the request and never writes to
-    it. If yours cannot, pass ``max_concurrency=1`` and evaluation returns to
+    it. If yours cannot, pass `max_concurrency=1` and evaluation returns to
     strictly sequential.
 
-    ``bus`` and ``roles_model`` configure the stream; see
-    :func:`permission_document`, which builds the document when you do not pass
+    `bus` and `roles_model` configure the stream; see
+    `permission_document`, which builds the document when you do not pass
     one.
     """
     if document is None:
@@ -509,7 +509,7 @@ def permissions_router(
         def tag_for(reason: str) -> str | None:
             """The new tag, but only when it can be stated truthfully.
 
-            The manifest's tag covers the caller's roles, and ``identity`` was
+            The manifest's tag covers the caller's roles, and `identity` was
             captured when the stream opened. On a *policy* change those roles
             are still current, so the recomputed tag is the real one and a
             client holding it can skip the refetch. On a *roles* change the
@@ -646,7 +646,7 @@ def _manifest_etag(
 
 
 def _shared_fingerprint(app: Any) -> str:
-    """Everything in :func:`_manifest_etag` except *who is asking*.
+    """Everything in `_manifest_etag` except *who is asking*.
 
     An open stream re-reads this on each keep-alive tick, so a policy set
     replaced in-process moves it and every stream says "refetch" without a
@@ -654,7 +654,7 @@ def _shared_fingerprint(app: Any) -> str:
     the per-principal half cannot be compared across subscribers, and this is
     computed once per worker rather than once per stream.
 
-    ``""`` when there is no authorizer -- nothing to drift from.
+    `""` when there is no authorizer -- nothing to drift from.
     """
     authorizer = _authorizer(app)
     if authorizer is None:
@@ -672,12 +672,12 @@ def _shared_fingerprint(app: Any) -> str:
 #: holding a whole policy set for the life of the process.
 _INSTANCE_TOKENS: WeakKeyDictionary[Any, bytes] = WeakKeyDictionary()
 
-#: The same, for an engine that can be neither weak-referenced (a ``__slots__``
-#: class without ``__weakref__``) nor hashed. Keyed by address and holding the
+#: The same, for an engine that can be neither weak-referenced (a `__slots__`
+#: class without `__weakref__`) nor hashed. Keyed by address and holding the
 #: engine, which is the whole point: a retained engine's address cannot be
 #: handed to anything else, so the key stays unique. It does retain one engine
 #: per such instance -- accepted, because the alternative is a tag that changes
-#: on every read, and :func:`_shared_fingerprint` is re-read on every stream
+#: on every read, and `_shared_fingerprint` is re-read on every stream
 #: keep-alive tick; that would tell every open stream the policies moved, every
 #: few seconds, forever.
 #:
@@ -691,10 +691,10 @@ _PINNED_TOKENS: BoundedCache = BoundedCache(max_entries=64)
 def _instance_token(engine: Any) -> bytes:
     """A random tag minted once for this engine object.
 
-    Deliberately **not** ``id(engine)``. CPython reuses addresses aggressively
-    -- freeing one ``__slots__`` instance and allocating the next of the same
+    Deliberately **not** `id(engine)`. CPython reuses addresses aggressively
+    -- freeing one `__slots__` instance and allocating the next of the same
     shape lands on the same address reproducibly -- so a reload could replace
-    the engine without moving the ``ETag``, and every client holding a manifest
+    the engine without moving the `ETag`, and every client holding a manifest
     would keep serving a stale one with no event that could ever correct it. A
     random token cannot collide that way. It also keeps a heap address out of a
     client-visible header.
@@ -714,12 +714,12 @@ def _instance_token(engine: Any) -> bytes:
 
 
 def _policy_fingerprint(authorizer: Any) -> bytes:
-    """Identify the policy set behind ``authorizer``, however it is shaped.
+    """Identify the policy set behind `authorizer`, however it is shaped.
 
     Content first, because a content-derived tag is the same on every worker
     and across a restart -- which is what lets a client hold its manifest
     through a rolling deploy that did not touch the policies. An authorizer
-    that exposes nothing gets :func:`_instance_token` instead, which cannot say
+    that exposes nothing gets `_instance_token` instead, which cannot say
     *which* policy set this is but does reliably say *a different one*.
     """
     # Opportunistic hooks, asked of the authorizer itself: neither the

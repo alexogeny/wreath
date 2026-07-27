@@ -1,9 +1,9 @@
 """OIDC provider: discovery, a JWKS-backed bearer verifier, and endpoints.
 
-An :class:`OidcProvider` is registered like an HTTP client (``app.oidc_provider``)
-and discovered during lifespan startup. Its ``bearer_verifier()`` returns an
-async ``Verifier`` for :class:`wreath.auth.BearerTokenBackend`; the resulting
-``Identity`` flows straight into the existing Cedar authorizer mappers.
+An `OidcProvider` is registered like an HTTP client (`app.oidc_provider`)
+and discovered during lifespan startup. Its `bearer_verifier()` returns an
+async `Verifier` for `wreath.auth.BearerTokenBackend`; the resulting
+`Identity` flows straight into the existing Cedar authorizer mappers.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def _default_ports(scheme: str) -> int:
 
 
 def _same_origin_path(issuer: str, url: str) -> str:
-    """Return the path(+query) of ``url``, requiring it to share ``issuer``'s
+    """Return the path(+query) of `url`, requiring it to share `issuer`'s
     origin. This is the anti-SSRF pin: every endpoint we fetch must live on the
     exact issuer origin, so a tampered discovery document cannot redirect us."""
     iss = urlsplit(issuer)
@@ -121,7 +121,7 @@ class OidcProvider:
         await self._cache.prefetch()
 
     def bearer_verifier(self):  # noqa: ANN201 - returns an async Verifier
-        """Return an async ``Verifier`` closing over this provider's JWKS cache."""
+        """Return an async `Verifier` closing over this provider's JWKS cache."""
 
         async def verify(token: str) -> Identity | None:
             cache = self._cache

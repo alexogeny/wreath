@@ -11,14 +11,14 @@ statements, and fifty of them hydrated `Trek`.* That sentence contains the fix.
 
 Two ways in, one vocabulary:
 
-* A :class:`QueryLedger` bound to the running request counts what the ORM
+* A `QueryLedger` bound to the running request counts what the ORM
   hydrates and trips the moment a model is queried once too often, so the
   traceback lands on the line that did it. This is the development path.
-* :func:`find_n_plus_one` reads the same fact out of recorded traces --
-  ``ORM_HYDRATE`` phases carry the model, the completion carries the route --
+* `find_n_plus_one` reads the same fact out of recorded traces --
+  `ORM_HYDRATE` phases carry the model, the completion carries the route --
   so a production endpoint can be diagnosed without reproducing it.
 
-Both produce a :class:`Finding`, so the sentence a developer reads in a
+Both produce a `Finding`, so the sentence a developer reads in a
 traceback is the sentence an operator reads in `wreath doctor`.
 """
 
@@ -40,12 +40,12 @@ __all__ = [
     "watch",
 ]
 
-#: The running request's :class:`QueryLedger`, or ``None``.
+#: The running request's `QueryLedger`, or `None`.
 query_ledger: ContextVar[Any] = ContextVar("wreath_query_ledger", default=None)
 
-#: Whether any :class:`~wreath.doctor.NPlusOneGuard` exists in this process.
-#: The ORM seam reads this module attribute before it reads ``query_ledger``,
-#: because a ``ContextVar.get`` is a Python/native boundary crossing and an
+#: Whether any `NPlusOneGuard` exists in this process.
+#: The ORM seam reads this module attribute before it reads `query_ledger`,
+#: because a `ContextVar.get` is a Python/native boundary crossing and an
 #: application that never installed a guard should not pay one per query to
 #: discover that. It latches on and is never cleared: a guard that existed once
 #: may have bound a ledger to a request still in flight.
@@ -57,7 +57,7 @@ def watch() -> None:
     global WATCHING
     WATCHING = True
 
-#: Phase names as the Inspector puts them on the wire (``PhaseKind`` lowercased).
+#: Phase names as the Inspector puts them on the wire (`PhaseKind` lowercased).
 _ORM_HYDRATE = "orm_hydrate"
 _DB_QUERY = "db_query"
 
@@ -104,7 +104,7 @@ class Finding:
 
 
 class NPlusOneDetected(RuntimeError):
-    """Raised at the query that crossed :class:`QueryLedger`'s limit.
+    """Raised at the query that crossed `QueryLedger`'s limit.
 
     Deliberately raised from the ORM call rather than reported at the end of the
     request: the whole difficulty with an N+1 is finding the loop, and a
@@ -121,8 +121,8 @@ class NPlusOneDetected(RuntimeError):
 class QueryLedger:
     """Per-request tally of ORM queries by model.
 
-    Passive by default: it counts, and :meth:`finding` reports afterwards.
-    Give it ``on_exceeded`` and it acts the moment a model crosses ``limit`` --
+    Passive by default: it counts, and `finding` reports afterwards.
+    Give it `on_exceeded` and it acts the moment a model crosses `limit` --
     once per model, so a runaway loop produces one diagnosis rather than a
     thousand.
     """
@@ -145,12 +145,12 @@ class QueryLedger:
         self._tripped: set[str] = set()
 
     def record(self, model: str) -> None:
-        """Count one query that hydrated ``model``.
+        """Count one query that hydrated `model`.
 
-        ``model`` is a key, not a label: the ORM passes ``module.QualName``,
+        `model` is a key, not a label: the ORM passes `module.QualName`,
         because two models of the same name in different modules would
         otherwise share a tally and trip this on two innocent reads. What a
-        reader is shown comes from :meth:`_display`.
+        reader is shown comes from `_display`.
         """
         count = self.counts.get(model, 0) + 1
         self.counts[model] = count
@@ -212,9 +212,9 @@ def find_n_plus_one(
 ) -> list[Finding]:
     """Scan recorded traces for requests that repeated one model's query.
 
-    ``traces`` are Inspector ``timeline`` traces; ``routes`` and ``models`` are
-    its ``metadata`` tables, used only to turn IDs into names. An ID with no
-    entry degrades to ``model:5`` rather than being dropped -- a metadata image
+    `traces` are Inspector `timeline` traces; `routes` and `models` are
+    its `metadata` tables, used only to turn IDs into names. An ID with no
+    entry degrades to `model:5` rather than being dropped -- a metadata image
     that has moved on is a reason to read the number, not to hide the finding.
 
     Returns findings worst first, so the top of the list is where to start.

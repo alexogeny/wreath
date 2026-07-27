@@ -1,10 +1,10 @@
 """A JWKS key cache with single-flight, rate-limited refresh.
 
-Keys are fetched over a lifespan-managed :class:`wreath.http_client.HTTPClient`
-pinned to the identity provider's origin, so a hostile ``kid`` can never steer a
-fetch elsewhere — ``kid`` is only ever a dictionary key here, never part of a
+Keys are fetched over a lifespan-managed `wreath.http_client.HTTPClient`
+pinned to the identity provider's origin, so a hostile `kid` can never steer a
+fetch elsewhere — `kid` is only ever a dictionary key here, never part of a
 URL. Refresh-on-unknown-kid is guarded by a single-flight lock plus a negative
-cache (a minimum interval between fetches) so a stream of bogus ``kid`` values
+cache (a minimum interval between fetches) so a stream of bogus `kid` values
 cannot be amplified into a request flood against the IdP.
 """
 
@@ -84,7 +84,7 @@ class JwksCache:
         return None
 
     async def resolve(self, kid: str | None) -> JwtKey | None:
-        """Return the key for ``kid``, refreshing once if it is unknown/stale."""
+        """Return the key for `kid`, refreshing once if it is unknown/stale."""
         now = self._now()
         key = self._lookup(kid)
         if key is not None and now < self._expires_at:

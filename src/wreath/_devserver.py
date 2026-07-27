@@ -62,7 +62,7 @@ def _excluded_directory(relative: str, name: str, patterns: Sequence[str]) -> bo
 def _walk_files(
     root: Path, includes: Sequence[str], excludes: Sequence[str]
 ) -> Iterable[tuple[str, FileSignature]]:
-    # ``os.scandir`` and ``DirEntry.stat`` keep directory iteration and metadata
+    # `os.scandir` and `DirEntry.stat` keep directory iteration and metadata
     # reads in the platform's C implementation. Carry relative prefixes through
     # the stack to avoid constructing Path objects or rescanning path segments
     # for every file on each reload poll.

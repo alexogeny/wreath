@@ -1,18 +1,18 @@
 """Model declaration, object state, and storage selection.
 
-``ModelMeta`` compiles a class body into an ordered column layout once, at
+`ModelMeta` compiles a class body into an ordered column layout once, at
 class creation. Registries later resolve relationships against that layout; no
 part of the request path inspects annotations or class bodies again.
 
 Every concrete model gets a *storage base* holding its values:
 
-* the native backend generates one C type per model whose ``tp_basicsize`` is
+* the native backend generates one C type per model whose `tp_basicsize` is
   fixed, with unboxed inline cells for scalars and C descriptors for access;
-* :class:`PureModel` is the reference implementation, over a list and integer
+* `PureModel` is the reference implementation, over a list and integer
   bitmaps.
 
 Both implement the same storage protocol with the same observable behavior.
-Assignment validates through the column's ``PgType.coerce`` in both, so the
+Assignment validates through the column's `PgType.coerce` in both, so the
 type rules have one implementation rather than two that can drift.
 """
 
@@ -297,9 +297,9 @@ def _storage_base(
 ) -> type:
     """The class that will hold this model's values.
 
-    Native storage is generated per model, so its ``tp_basicsize`` is fixed and
-    scalar cells are unboxed. It is rooted at ``object`` rather than ``Model``:
-    rooting it at ``Model`` would make its metatype conflict with ``ModelMeta``.
+    Native storage is generated per model, so its `tp_basicsize` is fixed and
+    scalar cells are unboxed. It is rooted at `object` rather than `Model`:
+    rooting it at `Model` would make its metatype conflict with `ModelMeta`.
     """
     if _native is None:
         return PureModel
@@ -337,9 +337,9 @@ def _install_descriptors(
 
 
 def enforce_rules(instance: Any) -> None:
-    """Raise if any whole-object rule refuses ``instance``.
+    """Raise if any whole-object rule refuses `instance`.
 
-    A ``CheckViolation`` is a ``ValueError``, the same thing a refused
+    A `CheckViolation` is a `ValueError`, the same thing a refused
     assignment raises, so a caller that already handles a bad value handles a
     broken rule without a new except clause.
     """
@@ -366,13 +366,14 @@ def _reject_duplicates(model: str, items: list[Any], kind: str) -> None:
 class Model(metaclass=ModelMeta):
     """Base class for mapped models.
 
-    Subclass with ``table=`` to map a class to a table::
+    Subclass with `table=` to map a class to a table:
 
-        class User(Model, table="users"):
-            id: Mapped[int] = column(Int64, primary_key=True)
-            email: Mapped[str] = column(Text, unique=True)
-
-    Subclassing without ``table=`` declares a reusable mixin whose columns are
+    ```python
+    class User(Model, table="users"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        email: Mapped[str] = column(Text, unique=True)
+    ```
+    Subclassing without `table=` declares a reusable mixin whose columns are
     inherited, in declaration order, ahead of the subclass's own.
     """
 
@@ -441,7 +442,7 @@ class Model(metaclass=ModelMeta):
 
     @classmethod
     def _orm_new(cls) -> Any:
-        """Allocate an empty instance, bypassing ``__init__``."""
+        """Allocate an empty instance, bypassing `__init__`."""
         raise NotImplementedError
 
     def _orm_get(self, index: int) -> Any:
@@ -508,7 +509,7 @@ class PureModel(Model):
     """Reference storage: a value list plus integer bitmaps.
 
     This is the behavior the native storage must match. It is used whenever the
-    compiled extension is unavailable or ``WREATH_PURE=1`` is set.
+    compiled extension is unavailable or `WREATH_PURE=1` is set.
     """
 
     __slots__ = (
@@ -534,7 +535,7 @@ class PureModel(Model):
 
     @classmethod
     def _orm_new(cls) -> Any:
-        """Allocate an empty instance, bypassing ``__init__``.
+        """Allocate an empty instance, bypassing `__init__`.
 
         The hydrator fills cells directly; running the constructor would apply
         defaults over values the database just returned.

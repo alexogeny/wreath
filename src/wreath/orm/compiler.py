@@ -46,7 +46,7 @@ _BINARY_OPERATORS = frozenset({
     # jsonb / array operators; "= ANY"/"= ALL" render specially (see below).
     "@>", "<@", "?", "?|", "?&", "#>>", "#>", "&&", "= ANY", "= ALL",
 })
-#: Operators that render ``left = ANY(right)`` / ``left = ALL(right)`` rather
+#: Operators that render `left = ANY(right)` / `left = ALL(right)` rather
 #: than the ordinary infix form, with the array column on the right.
 _ARRAY_QUANTIFIERS = {"= ANY": "ANY", "= ALL": "ALL"}
 _BOOLEAN_OPERATORS = frozenset({"AND", "OR"})
@@ -114,7 +114,7 @@ class _CachedPlan:
     load_plan: LoadPlan
     projected_columns: tuple[ColumnSpec, ...]
     #: Native direct-hydration plan for this shape, compiled on first use.
-    #: ``False`` records that this shape cannot use the direct path, which is
+    #: `False` records that this shape cannot use the direct path, which is
     #: distinct from "not compiled yet".
     hydrate_plan: Any = None
 
@@ -150,8 +150,8 @@ class WritePlan:
     and held in the same registry cache as read plans -- one budget, one
     eviction policy, one lock.
 
-    ``columns`` are the values to bind in placeholder order; ``key_columns`` are
-    the primary-key values bound after them (empty for INSERT). ``returning`` is
+    `columns` are the values to bind in placeholder order; `key_columns` are
+    the primary-key values bound after them (empty for INSERT). `returning` is
     what the statement asks the database to send back.
     """
 
@@ -164,7 +164,7 @@ class WritePlan:
 def _write_shape_key(registry: Any, spec: ModelSpec, op: bytes, mask: int) -> bytes:
     """A cache key over everything that changes a write statement.
 
-    The mask is positional over ``spec.columns``, so it identifies the
+    The mask is positional over `spec.columns`, so it identifies the
     participating set exactly; the model name and registry fingerprint keep two
     models (or two registries) from colliding.
     """
@@ -180,11 +180,11 @@ def _write_shape_key(registry: Any, spec: ModelSpec, op: bytes, mask: int) -> by
 
 
 def compile_insert(registry: Any, spec: ModelSpec, mask: int) -> WritePlan:
-    """The INSERT for the columns selected by ``mask``, compiled once per shape.
+    """The INSERT for the columns selected by `mask`, compiled once per shape.
 
     Columns outside the mask are what the database fills in -- server defaults
     and anything the caller left unloaded -- so they are exactly the RETURNING
-    list. Splitting on the mask also removes the ``item not in columns`` scan the
+    list. Splitting on the mask also removes the `item not in columns` scan the
     previous implementation ran per column, which made a wide table's INSERT
     quadratic in its own column count.
     """
@@ -214,7 +214,7 @@ def compile_insert(registry: Any, spec: ModelSpec, mask: int) -> WritePlan:
 
 
 def compile_update(registry: Any, spec: ModelSpec, mask: int) -> WritePlan:
-    """The UPDATE for the dirty columns selected by ``mask``."""
+    """The UPDATE for the dirty columns selected by `mask`."""
     cached = registry.cached_plan(key := _write_shape_key(registry, spec, b"u", mask))
     if cached is not None:
         return cached
@@ -251,7 +251,7 @@ def compile_delete(registry: Any, spec: ModelSpec) -> WritePlan:
 
 
 def _key_predicate_sql(spec: ModelSpec, start: int) -> str:
-    """``pk = $n [AND ...]``, with placeholders numbered from ``start``."""
+    """`pk = $n [AND ...]`, with placeholders numbered from `start`."""
     return " AND ".join(
         f"{quote(item.database_name)} = ${start + offset}"
         for offset, item in enumerate(spec.primary_key)
@@ -261,7 +261,7 @@ def _key_predicate_sql(spec: ModelSpec, start: int) -> str:
 def quote(identifier: str) -> str:
     """Quote one registry-validated identifier.
 
-    Identifiers reach this function only after ``validate_identifier``, so the
+    Identifiers reach this function only after `validate_identifier`, so the
     embedded-quote escape is belt-and-braces rather than the actual defense.
     """
     return '"' + identifier.replace('"', '""') + '"'
@@ -276,7 +276,7 @@ def qualified(spec: ModelSpec) -> str:
 class SqlBuilder:
     """Accumulates SQL text and bind values for one statement.
 
-    Public because :mod:`wreath._series` renders its own statements against
+    Public because `wreath._series` renders its own statements against
     the same predicate machinery. Placeholder numbering is positional, so a
     caller must emit text and binds in the order they appear in the SQL.
     """
@@ -349,7 +349,7 @@ def _compile_bind_program(select: Select) -> Callable[[Select], tuple[Any, ...]]
     Paths contain only compiler-selected attribute names and integer indexes;
     no SQL, identifier, or user value enters the generated source. The resulting
     function uses attribute/index bytecodes on cache hits instead of repeatedly
-    classifying the expression tree or calling ``getattr`` per path component.
+    classifying the expression tree or calling `getattr` per path component.
     """
     paths: list[tuple[str | int, ...]] = []
     for index, predicate in enumerate(select.predicates):
@@ -388,10 +388,10 @@ def _compile_bind_program(select: Select) -> Callable[[Select], tuple[Any, ...]]
 def check_predicate_columns(model: type, node: Expression) -> None:
     """Raise if a predicate names a column of some other model.
 
-    ``Select.where`` cannot check this, because a predicate is built before it
+    `Select.where` cannot check this, because a predicate is built before it
     meets a query. Nothing needs it per request either -- a handler's predicate
     is written next to the query it filters. A *declared* query is different:
-    ``wreath.queries`` writes the predicate at class-definition time and runs it
+    `wreath.queries` writes the predicate at class-definition time and runs it
     much later, so a mistyped model would surface as a broken statement on a
     request instead of at import. This is the walk that moves it back.
 
@@ -437,18 +437,18 @@ def compile_rebind(
 ) -> Callable[[Any], Any] | None:
     """Compile a substitution program for one predicate holding placeholders.
 
-    A declared query (see :mod:`wreath.queries`) fixes its tree once and varies
+    A declared query (see `wreath.queries`) fixes its tree once and varies
     only the values in it, so the traversal that finds those positions can run
     at declaration time instead of per call. Returns a function that rebuilds
-    the predicate from a mapping of parameter values, or ``None`` when the
+    the predicate from a mapping of parameter values, or `None` when the
     predicate holds no placeholders at all and can be reused as it stands.
-    Every placeholder encountered is appended to ``found``, in the order it
+    Every placeholder encountered is appended to `found`, in the order it
     binds, so the caller can name its parameters without a second walk.
 
-    This lives here rather than in ``wreath.queries`` because the shape of an
+    This lives here rather than in `wreath.queries` because the shape of an
     expression tree is this module's knowledge: it has to stay in step with
-    ``_append_bind_paths`` and ``_shape_expression``, and the three are only
-    reviewable together. A ``placeholder`` node's ``bind`` method owns what a
+    `_append_bind_paths` and `_shape_expression`, and the three are only
+    reviewable together. A `placeholder` node's `bind` method owns what a
     parameter *means*; this function owns only where one may appear.
     """
     if isinstance(node, placeholder):
@@ -521,7 +521,7 @@ def compile_rebind(
 
 
 def compile_select(registry: Any, select: Select) -> CompiledQuery:
-    """Compile ``select`` against ``registry``, using its bounded plan cache."""
+    """Compile `select` against `registry`, using its bounded plan cache."""
     spec = registry.spec_for(select.model)
     shape_key = shape_of(registry, select)
     plan = registry.cached_plan(shape_key)
@@ -546,18 +546,18 @@ def compile_select(registry: Any, select: Select) -> CompiledQuery:
 
 
 def compile_count(registry: Any, select: Select) -> tuple[str, tuple[Any, ...], tuple[int, ...]]:
-    """Compile ``SELECT COUNT(*)`` for the rows ``select`` matches.
+    """Compile `SELECT COUNT(*)` for the rows `select` matches.
 
     Reuses the filter-join and predicate machinery but drops projection, load
     joins, ordering, paging, and row locking -- none of them change how many
     parent rows match. Filter joins are always to-one (the compiler rejects
-    to-many filter joins), so ``COUNT(*)`` over the joined-and-filtered rows
+    to-many filter joins), so `COUNT(*)` over the joined-and-filtered rows
     equals the parent-row count; no subquery wrapper is needed.
 
-    Unlike :func:`compile_select` this is not plan-cached: it is called at most
+    Unlike `compile_select` this is not plan-cached: it is called at most
     once per page request, not per row, so rendering fresh -- which lets the
     bound values be captured directly, without the cached bind program -- is
-    both simpler and cheap enough. Returns ``(sql, values, oids)``.
+    both simpler and cheap enough. Returns `(sql, values, oids)`.
     """
     spec = registry.spec_for(select.model)
     counting = select._replace(orderings=(), limit_=None, offset_=None, includes=())
@@ -631,7 +631,7 @@ def _filter_paths(
 ) -> None:
     """Collect each distinct relationship path a predicate reaches through.
 
-    ``seen`` deduplicates in O(1); a plain ``not in out`` list scan would be
+    `seen` deduplicates in O(1); a plain `not in out` list scan would be
     O(paths^2) across a predicate tree touching many related columns. First-seen
     order is preserved (the join-emission order downstream depends on it).
     """
@@ -670,7 +670,7 @@ def plan_filter_joins(
     expressions: Iterable[Expression],
     clauses: list[str],
 ) -> dict[tuple[Any, ...], str]:
-    """Emit an INNER JOIN per relationship path ``expressions`` reach through.
+    """Emit an INNER JOIN per relationship path `expressions` reach through.
 
     These joins constrain rows and select nothing: filtering is not loading, so
     a filtered relation stays unloaded unless the query also `.include()`s it.
@@ -678,10 +678,10 @@ def plan_filter_joins(
     satisfy a predicate on the child's column, and INNER lets PostgreSQL reorder
     the join.
 
-    Takes expressions rather than a ``Select`` because a calculated view groups
-    by a column as well as filtering by one, and a ``GROUP BY`` on a related
+    Takes expressions rather than a `Select` because a calculated view groups
+    by a column as well as filtering by one, and a `GROUP BY` on a related
     column needs the same join a predicate on it would get. Aliases are returned
-    keyed by relationship path, which is what :func:`render_predicate` reads.
+    keyed by relationship path, which is what `render_predicate` reads.
     """
     paths: list[tuple[Any, ...]] = []
     seen: set[tuple[Any, ...]] = set()
@@ -882,7 +882,7 @@ def render_predicate(
             raise ORMError(f"invalid SQL operator {node.operator!r}")
         quantifier = _ARRAY_QUANTIFIERS.get(node.operator)
         if quantifier is not None:
-            # ``value = ANY(column)`` -- the bound value is on the left, the
+            # `value = ANY(column)` -- the bound value is on the left, the
             # array column on the right, wrapped in the quantifier function.
             _render_operand(node.left, builder, alias, joins)
             builder.text(f" = {quantifier}(")
@@ -945,7 +945,7 @@ def _render_operand(
         builder.text(builder.bind(node.pg_type.to_wire(node.value), node.pg_type.oid))
         return
     # A nested binary node appears as an operand for jsonb path extraction:
-    # ``(data #>> $1) = $2``. Parenthesize so operator precedence is explicit.
+    # `(data #>> $1) = $2`. Parenthesize so operator precedence is explicit.
     if isinstance(node, BinaryExpr):
         if node.operator not in _BINARY_OPERATORS or node.operator in _ARRAY_QUANTIFIERS:
             raise ORMError(f"invalid SQL operator {node.operator!r}")
@@ -980,7 +980,7 @@ def _collect_binds_pure(select: Select) -> tuple[tuple[Any, ...], tuple[int, ...
 def _collect_binds_native(select: Select) -> tuple[tuple[Any, ...], tuple[int, ...]]:
     """The native traversal returns the ordered value nodes; encoding to wire
     format stays in this flat Python loop (a per-value call must not cross into
-    C). Output is byte-identical to :func:`_collect_binds_pure`."""
+    C). Output is byte-identical to `_collect_binds_pure`."""
     values: list[Any] = []
     oids: list[int] = []
     # A predicate-free read has no tree to walk; skip the C crossing so it is

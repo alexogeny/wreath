@@ -98,7 +98,7 @@ class RouteDefinition:
     summary: str | None = None
     dependencies: tuple[Depends, ...] = ()
     requirement: AuthRequirement = AuthRequirement()
-    #: An explicit client-facing operation identifier. When ``None`` the typegen
+    #: An explicit client-facing operation identifier. When `None` the typegen
     #: and OpenAPI layers derive a deterministic id from method and path.
     operation_id: str | None = None
 

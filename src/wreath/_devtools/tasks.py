@@ -249,10 +249,10 @@ def bench(argv: list[str] | None = None) -> int:
       full request-lifecycle database benchmarks (each behind a throwaway
       container); and
     * combines the matrix passes and the lifecycle rows into one self-contained
-      HTML report at ``benchmark-results/full-battery.html``.
+      HTML report at `benchmark-results/full-battery.html`.
 
-    It owns a few options and forwards everything else to ``benchmarks.run``, so
-    ``wreath-bench --framework wreath starlette`` still narrows the matrix.
+    It owns a few options and forwards everything else to `benchmarks.run`, so
+    `wreath-bench --framework wreath starlette` still narrows the matrix.
     """
     parser = argparse.ArgumentParser(
         prog="wreath-bench",

@@ -15,9 +15,9 @@ from .native_lint import (
     strip_c,
 )
 
-#: ``iter_sources`` and ``repo_root`` are re-exported rather than merely used.
-#: They were part of this module's surface before ``main`` moved to
-#: :func:`~wreath._devtools.native_lint.run_lint`, and callers import them from
+#: `iter_sources` and `repo_root` are re-exported rather than merely used.
+#: They were part of this module's surface before `main` moved to
+#: `run_lint`, and callers import them from
 #: here; dropping them because the module body stopped needing them would be a
 #: silent narrowing.
 __all__ = ["DEFAULT_ROOTS", "WAIVER", "Rule", "iter_sources", "main", "repo_root", "scan_text"]

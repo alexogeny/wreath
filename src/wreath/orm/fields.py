@@ -1,6 +1,6 @@
 """Column declarations and the descriptor that backs field access.
 
-A ``column()`` in a class body is a *prototype*. ``ModelMeta`` clones one
+A `column()` in a class body is a *prototype*. `ModelMeta` clones one
 descriptor per concrete model so a column declared on a shared mixin can hold
 a different storage index in each model that inherits it.
 """
@@ -18,7 +18,7 @@ from .types import PgType
 
 
 class _Missing:
-    """The absence of a default, distinct from a ``None`` default."""
+    """The absence of a default, distinct from a `None` default."""
 
     __slots__ = ()
 
@@ -35,9 +35,9 @@ MISSING: Any = _Missing()
 class Mapped[T]:
     """Typing-only marker for a mapped column.
 
-    ``Mapped[int]`` documents that class access yields a SQL expression and
-    instance access yields an ``int``. It carries no runtime behavior: the
-    registry compiles declarations from ``column()`` objects, never from
+    `Mapped[int]` documents that class access yields a SQL expression and
+    instance access yields an `int`. It carries no runtime behavior: the
+    registry compiles declarations from `column()` objects, never from
     annotations.
     """
 
@@ -100,7 +100,7 @@ class Column:
         self.unique = unique
         self.indexed = indexed
         #: The access method for this column's index ("btree"/"gin"), or None
-        #: when it has no index. Kept separate from ``indexed`` so the column
+        #: when it has no index. Kept separate from `indexed` so the column
         #: fingerprint (which encodes only index *presence*) is unchanged.
         self.index_method = index_method
         self.default = default
@@ -201,10 +201,10 @@ _INDEX_METHODS = frozenset({"btree", "gin"})
 
 
 def _resolve_index(index: bool | str) -> tuple[bool, str | None]:
-    """Normalize ``index=`` into an (present, method) pair.
+    """Normalize `index=` into an (present, method) pair.
 
-    ``False``/``None`` -> no index; ``True`` -> btree; a method name -> that
-    access method. ``indexed`` stays a plain bool so the column fingerprint is
+    `False`/`None` -> no index; `True` -> btree; a method name -> that
+    access method. `indexed` stays a plain bool so the column fingerprint is
     unchanged for existing btree/none columns.
     """
     if index is False or index is None:
@@ -235,24 +235,25 @@ def column(
 ) -> Any:
     """Declare a mapped column.
 
-    ``default`` is a Python value or a zero-argument callable applied when a
-    constructor omits the field. ``index=True`` declares one ordinary btree index
-    on this column; ``index="gin"`` declares a GIN index instead (the right
-    choice for ``Jsonb`` and ``Array`` columns queried with the containment and
-    key operators). ``server_default`` names a database-side
+    `default` is a Python value or a zero-argument callable applied when a
+    constructor omits the field. `index=True` declares one ordinary btree index
+    on this column; `index="gin"` declares a GIN index instead (the right
+    choice for `Jsonb` and `Array` columns queried with the containment and
+    key operators). `server_default` names a database-side
     default, which makes the column optional on insert and returned by
-    ``RETURNING``. ``references`` takes another model's column expression
-    (``references=User.id``) and records a foreign key.
+    `RETURNING`. `references` takes another model's column expression
+    (`references=User.id`) and records a foreign key.
 
-    ``check`` takes one constraint from ``wreath.orm.constraints``, or a sequence
-    of them, applied in order after the type has accepted the value::
+    `check` takes one constraint from `wreath.orm.constraints`, or a sequence
+    of them, applied in order after the type has accepted the value:
 
-        salary: Mapped[int] = column(Int64, check=Ge(0))
-        name: Mapped[str] = column(Text, check=[Length(1, 200), Pattern(r"\\S")])
-
+    ```python
+    salary: Mapped[int] = column(Int64, check=Ge(0))
+    name: Mapped[str] = column(Text, check=[Length(1, 200), Pattern(r"\\S")])
+    ```
     Checks run on every write -- the constructor, assignment, and a request
     body -- and cost one comparison each, not one call each. A subclass adds to
-    them with ``narrow()``; nothing removes them.
+    them with `narrow()`; nothing removes them.
     """
     if not isinstance(pg_type, PgType):
         raise DeclarationError(
@@ -294,7 +295,7 @@ def column(
 
 
 def resolve_default(spec: Any) -> Any:
-    """Produce a fresh default value for ``spec``, calling factory defaults."""
+    """Produce a fresh default value for `spec`, calling factory defaults."""
     default = spec.default
     if default is MISSING:
         return MISSING

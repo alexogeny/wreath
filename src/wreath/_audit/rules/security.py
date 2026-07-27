@@ -1,15 +1,15 @@
 """HTTP-compliance and web-security rules for the application a developer builds
 on Wreath — so a downstream SaaS gets first-class compliance signal from
-``wreath audit runtime`` against its own live responses.
+`wreath audit runtime` against its own live responses.
 
 Two entry points, mirroring the perf rules:
 
-``RESPONSE_SECURITY_RULES`` — ``(view: ResponseView) -> Iterator[Finding]``,
+`RESPONSE_SECURITY_RULES` — `(view: ResponseView) -> Iterator[Finding]`,
 applied to every live response by the runtime auditor. These catch defects that
 only show on the wire: cookie attribute flags, HSTS, the status-specific RFC
 MUSTs (401→WWW-Authenticate, 405→Allow), and CORS misconfiguration. HTTP
 compliance is inherently a property of the response, so it lives in the runtime
-tier; the static tier's app-level checks stay in ``perf.app_perf``.
+tier; the static tier's app-level checks stay in `perf.app_perf`.
 
 References cite the governing RFC clause (or OWASP secure-header guidance) so a
 finding is actionable and traceable, not just advisory.
@@ -37,8 +37,8 @@ def _rule(fn):
 class ResponseView:
     """One live response, normalized for the security rules.
 
-    ``headers`` is lower-cased and last-value-wins (fine for the single-valued
-    headers these rules read); ``set_cookies`` keeps every ``Set-Cookie`` value
+    `headers` is lower-cased and last-value-wins (fine for the single-valued
+    headers these rules read); `set_cookies` keeps every `Set-Cookie` value
     because a response commonly sets more than one.
     """
 
@@ -64,7 +64,7 @@ def _f(rule_id, severity, view: ResponseView, message, reference, suggestion="")
 
 
 def _parse_cookie(raw: str) -> tuple[str, dict[str, str]]:
-    """``"sid=x; Path=/; Secure"`` -> ``("sid", {"path": "/", "secure": ""})``."""
+    """`"sid=x; Path=/; Secure"` -> `("sid", {"path": "/", "secure": ""})`."""
     parts = raw.split(";")
     name = parts[0].split("=", 1)[0].strip()
     attrs: dict[str, str] = {}

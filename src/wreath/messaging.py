@@ -2,18 +2,18 @@
 
 Two delivery tiers, chosen per publish/subscribe:
 
-* **Ephemeral fan-out** (``durable=False``): ``NOTIFY`` to every live subscriber
+* **Ephemeral fan-out** (`durable=False`): `NOTIFY` to every live subscriber
   on this channel. At-most-once, sub-millisecond, no persistence — the direct
-  "tell all replicas now" analogue. Payloads are bounded (``NOTIFY`` caps at
+  "tell all replicas now" analogue. Payloads are bounded (`NOTIFY` caps at
   8000 bytes); oversized payloads must go durable.
-* **Durable** (``durable=True``): a work-queue table consumed with
-  ``FOR UPDATE SKIP LOCKED`` + fencing (the same machinery as :mod:`wreath.jobs`),
-  with ``NOTIFY`` used only as a wakeup doorbell. At-least-once, replayable,
+* **Durable** (`durable=True`): a work-queue table consumed with
+  `FOR UPDATE SKIP LOCKED` + fencing (the same machinery as `wreath.jobs`),
+  with `NOTIFY` used only as a wakeup doorbell. At-least-once, replayable,
   dead-letterable.
 
 Durable fan-out delivers one copy per subscriber *group*, and the groups are
 discovered **fleet-wide**: each bus writes its durable subscriptions into a
-shared ``message_groups`` table at startup, and every publisher reads that
+shared `message_groups` table at startup, and every publisher reads that
 table. Discovering them from local registrations instead — as this module once
 did — meant a publisher deployed before its consumer, or living in a different
 service, enqueued nothing for that group: no error, no dead letter, the message
@@ -25,8 +25,8 @@ to a group that has a consumer, and durable delivery is at-least-once anyway, so
 handlers are already idempotent. A lost copy is silent. The union also means a
 deployment that has not applied the new table behaves exactly as it did before.
 
-Multi-tenancy: a dedicated system schema + ``tenant`` column, never
-``search_path`` (design 01 §5).
+Multi-tenancy: a dedicated system schema + `tenant` column, never
+`search_path` (design 01 §5).
 """
 
 from __future__ import annotations
@@ -64,8 +64,8 @@ _REJECT = "reject"
 #: read on the publish path is not.
 DEFAULT_GROUP_REFRESH = 30.0
 
-#: Reconnect backoff for the doorbell's held ``LISTEN`` connection, re-exported
-#: from :mod:`wreath._doorbell` where the supervision itself lives. The cap is
+#: Reconnect backoff for the doorbell's held `LISTEN` connection, re-exported
+#: from `wreath._doorbell` where the supervision itself lives. The cap is
 #: the default poll interval on purpose: that is how long durable consumers take
 #: to notice work without a doorbell, so retrying slower than the fallback would
 #: be retrying slower than the damage.
@@ -74,7 +74,7 @@ DEFAULT_GROUP_REFRESH = 30.0
 class NoSubscriberGroup(RuntimeError):
     """A durable publish found no subscriber group, and the caller wanted one.
 
-    Only raised for ``publish(..., require_group=True)``. Publishing to a
+    Only raised for `publish(..., require_group=True)`. Publishing to a
     channel nobody consumes yet is legitimate -- a producer often ships before
     its consumer -- so the default stays a counted no-op.
     """
@@ -124,7 +124,7 @@ class _Subscription:
 
 class MessageBus:
     """A named message bus on one application database. Obtain via
-    :meth:`wreath.Wreath.messaging`."""
+    `wreath.Wreath.messaging`."""
 
     def __init__(
         self,
@@ -213,7 +213,7 @@ class MessageBus:
         climbing means it still is, and durable consumers are running on the
         poll interval. This used to be entirely invisible.
 
-        Kept deliberately apart from :attr:`handler_errors`: a bug in a
+        Kept deliberately apart from `handler_errors`: a bug in a
         subscriber must never read as a flapping database.
         """
         return self._doorbell.reconnects
@@ -235,7 +235,7 @@ class MessageBus:
         }
 
     def known_groups(self, channel: str) -> frozenset[str]:
-        """Every durable group a publish to ``channel`` will reach.
+        """Every durable group a publish to `channel` will reach.
 
         The deploy-time check: "will anything actually receive this?" is
         answerable before shipping rather than by noticing an empty queue days
@@ -287,9 +287,9 @@ class MessageBus:
         durable: bool = False,
         retries: int = 5,
     ) -> Callable[[MessageHandler], MessageHandler]:
-        """Decorator registering ``handler(message)`` for ``channel``.
+        """Decorator registering `handler(message)` for `channel`.
 
-        Durable subscriptions require a ``group`` (the competing-consumer set that
+        Durable subscriptions require a `group` (the competing-consumer set that
         shares one copy of each message); ephemeral ones ignore it.
         """
         _validate_channel(channel)
@@ -320,14 +320,14 @@ class MessageBus:
         key: str | None = None,
         require_group: bool = False,
     ) -> None:
-        """Publish ``payload`` (JSON-serialisable) to ``channel``.
+        """Publish `payload` (JSON-serialisable) to `channel`.
 
-        Ephemeral (default): a single ``NOTIFY`` fans out to live subscribers.
-        Durable: one row per subscriber group is enqueued; pass ``tx`` to publish
+        Ephemeral (default): a single `NOTIFY` fans out to live subscribers.
+        Durable: one row per subscriber group is enqueued; pass `tx` to publish
         atomically with your writes (the outbox guarantee).
 
-        ``require_group`` (durable only) raises :class:`NoSubscriberGroup` when
-        no group is known for ``channel`` anywhere in the fleet, for the caller
+        `require_group` (durable only) raises `NoSubscriberGroup` when
+        no group is known for `channel` anywhere in the fleet, for the caller
         who knows a consumer must exist. Without it the publish is a counted
         no-op, because shipping a producer before its consumer is normal.
         """
@@ -425,16 +425,16 @@ class MessageBus:
     async def _register_groups(self) -> None:
         """Declare this process's durable groups so other publishers find them.
 
-        Runs at :meth:`start`, not at :meth:`subscribe`: the decorator is called
+        Runs at `start`, not at `subscribe`: the decorator is called
         at import time, where there is no event loop and no database yet.
 
         Idempotent by construction. The primary key serialises workers racing to
-        register the same group, and the ``DO UPDATE`` turns a restart into a
-        heartbeat rather than a conflict -- which is what makes ``seen_at``
+        register the same group, and the `DO UPDATE` turns a restart into a
+        heartbeat rather than a conflict -- which is what makes `seen_at`
         useful: a group nobody has re-registered in months is a decommissioned
         consumer whose queue will never drain.
 
-        Counted rather than raised on failure, like :meth:`_refresh_groups`: the
+        Counted rather than raised on failure, like `_refresh_groups`: the
         registry is an optimisation over local registrations, and a missing
         table must not stop a bus from starting and consuming its own work.
         """
@@ -485,9 +485,9 @@ class MessageBus:
             self.group_registry_errors += 1
 
     async def prune_groups(self, *, unseen_for: float) -> None:
-        """Drop registry rows nobody has re-registered in ``unseen_for`` seconds.
+        """Drop registry rows nobody has re-registered in `unseen_for` seconds.
 
-        The backstop behind :meth:`_deregister_groups`: a consumer that was
+        The backstop behind `_deregister_groups`: a consumer that was
         killed rather than drained never deregistered, and `seen_at` is how that
         becomes visible. Run it from a scheduled job.
         """
@@ -500,9 +500,9 @@ class MessageBus:
         )
 
     async def purge(self, *, older_than: float) -> None:
-        """Delete finished messages older than ``older_than`` seconds.
+        """Delete finished messages older than `older_than` seconds.
 
-        As with :meth:`wreath.jobs.JobRunner.purge`: caller-driven, `done` and
+        As with `wreath.jobs.JobRunner.purge`: caller-driven, `done` and
         `dead` only, and the thing that keeps this table from being append-only.
         """
         if older_than <= 0:
@@ -545,7 +545,7 @@ class MessageBus:
     async def _group_refresher(self) -> None:
         """Keep the snapshot current, so a new service's consumer is found.
 
-        The visibility window is ``group_refresh`` seconds (30 by default): a
+        The visibility window is `group_refresh` seconds (30 by default): a
         group registered by a service deploying now reaches an already-running
         publisher within that. Deploys are minutes apart and a publish is
         microseconds, so the timer belongs here rather than on the write path.
@@ -682,7 +682,7 @@ class MessageBus:
         """Dispatch notifications until the connection's stream ends.
 
         Returning is the ordinary end of a dropped connection, and
-        :class:`~wreath._doorbell.Doorbell` reopens on it.
+        `Doorbell` reopens on it.
 
         **This pump runs user code, so it catches for itself.** Dispatch errors
         are counted and stepped over: letting one out would end the loop, which
@@ -877,8 +877,8 @@ class MessageBus:
     async def _reclaim_expired(self, sub: _Subscription) -> None:
         """Return this group's expired leases to `ready`, counting the attempt.
 
-        Same reasoning as :meth:`wreath.jobs.JobRunner._reclaim_expired`: a
-        consumer that dies mid-handler never reaches :meth:`_retry`, so a
+        Same reasoning as `wreath.jobs.JobRunner._reclaim_expired`: a
+        consumer that dies mid-handler never reaches `_retry`, so a
         reclaim that did not count the attempt made a message which reliably
         kills its consumer immortal -- redelivered on every sweep, never
         dead-lettered.

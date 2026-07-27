@@ -17,9 +17,9 @@ _ORDER = {Severity.ERROR: 0, Severity.WARN: 1, Severity.INFO: 2}
 
 @dataclass(frozen=True)
 class Finding:
-    """One audit result. ``reference`` is a WCAG success criterion (a11y) or a perf
-    budget id; ``location`` is ``line:col`` within a surface, or empty for app-level
-    findings; ``surface`` is ``api-docs`` / ``static:<path>`` / ``app``."""
+    """One audit result. `reference` is a WCAG success criterion (a11y) or a perf
+    budget id; `location` is `line:col` within a surface, or empty for app-level
+    findings; `surface` is `api-docs` / `static:<path>` / `app`."""
 
     rule_id: str
     severity: Severity

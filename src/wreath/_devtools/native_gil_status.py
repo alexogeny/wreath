@@ -1,7 +1,7 @@
 """Report whether importing Wreath's native package enables the GIL.
 
 Free-threaded CPython may enable the GIL when it imports an extension that has
-not declared no-GIL support.  This probe runs before importing ``wreath._native``
+not declared no-GIL support.  This probe runs before importing `wreath._native`
 so that the transition is observable.  It is diagnostic only: passing the probe
 does not prove that the extensions are data-race safe.
 """

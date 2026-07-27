@@ -1,13 +1,13 @@
 """Render one declaration into one PostgreSQL statement.
 
 Everything here reuses the ORM's own predicate machinery rather than growing a
-parallel one: :func:`~wreath.orm.compiler.plan_filter_joins` emits the joins a
-predicate reaches through, and :func:`~wreath.orm.compiler.render_predicate`
-renders the predicate itself. A calculated view's ``where()`` is therefore the
-same filter language a ``Select`` takes, compiled by the same code — which is
+parallel one: `plan_filter_joins` emits the joins a
+predicate reaches through, and `render_predicate`
+renders the predicate itself. A calculated view's `where()` is therefore the
+same filter language a `Select` takes, compiled by the same code — which is
 the point, and is why a predicate that works in one works in the other.
 
-Following ``compile_count`` rather than ``compile_select``, none of this is
+Following `compile_count` rather than `compile_select`, none of this is
 plan-cached. A declaration runs once per chart request, not once per row, so
 rendering fresh is simpler and lets bound values be captured directly. Claiming
 a cache would pay here would need a measurement nobody has taken.
@@ -27,7 +27,7 @@ from ..orm.compiler import (
 )
 from ..orm.expressions import ColumnExpr, RelatedColumnExpr
 
-#: ``timestamptz``. Range bounds bind as this so PostgreSQL compares them to the
+#: `timestamptz`. Range bounds bind as this so PostgreSQL compares them to the
 #: declared column without an inferred cast.
 _TIMESTAMPTZ_OID = 1184
 _TEXT_OID = 25
@@ -36,10 +36,10 @@ _INT8_OID = 20
 #: The finest resolution a PostgreSQL timestamp holds. Subtracting exactly one
 #: before truncating is what makes the spine's upper bound exclusive: a range
 #: ending precisely on a boundary stops at the previous bucket, and one ending
-#: mid-bucket still includes the bucket it stops in. See ``_spine``.
+#: mid-bucket still includes the bucket it stops in. See `_spine`.
 _ONE_TICK = "interval '1 microsecond'"
 
-#: The two values the ``period`` discriminator takes when a view compares. Only
+#: The two values the `period` discriminator takes when a view compares. Only
 #: ever emitted as literals from here, never taken from a caller.
 CURRENT = "current"
 PREVIOUS = "previous"
@@ -86,16 +86,16 @@ def _where(
 
 
 def _local(bound: str, zone: str) -> str:
-    """A ``timestamptz`` read on the zone's wall clock, as a naive timestamp."""
+    """A `timestamptz` read on the zone's wall clock, as a naive timestamp."""
     return f"({bound} AT TIME ZONE {zone}::text)"
 
 
 def _shifted(builder: SqlBuilder, value: Any, zone_name: str, step: str) -> str:
-    """``value`` moved one comparison period earlier, as a ``timestamptz``.
+    """`value` moved one comparison period earlier, as a `timestamptz`.
 
     The shift happens on the *local* wall clock and is converted back, which is
     the whole of why a comparison period is worth compiling rather than
-    subtracting in Python. ``interval '1 month'`` applied to a naive local
+    subtracting in Python. `interval '1 month'` applied to a naive local
     timestamp is calendar arithmetic, so "the same day last month" lands on the
     same day number whatever the month lengths are, and an intervening clock
     change moves the instant rather than the wall time.
@@ -112,13 +112,13 @@ def _shifted(builder: SqlBuilder, value: Any, zone_name: str, step: str) -> str:
 def _window(
     builder: SqlBuilder, at_sql: str, *, start: Any, end: Any, zone_name: str, step: str | None
 ) -> str:
-    """``at`` inside one half-open window — ``start <= at < end``.
+    """`at` inside one half-open window — `start <= at < end`.
 
     Rendered here rather than passed in as an ORM predicate because the spine's
     bounds are rendered here too, from the same two values: a window and a spine
     that disagree by a bucket is the failure this whole statement exists to make
     impossible, and the surest way to keep them agreeing is to give them one
-    author. ``step`` shifts the window into the comparison period.
+    author. `step` shifts the window into the comparison period.
     """
     if step is None:
         low = builder.bind(start, _TIMESTAMPTZ_OID)
@@ -153,10 +153,10 @@ def _plan(
 def compile_aggregate(
     registry: Any, declaration: Any, predicates: tuple[Any, ...]
 ) -> tuple[str, tuple[Any, ...], tuple[int, ...]]:
-    """``SELECT`` the declared measures, grouped by the declared key.
+    """`SELECT` the declared measures, grouped by the declared key.
 
     One row per group, or exactly one row when nothing is grouped. The row
-    budget binds as ``LIMIT ceiling + 1`` so the caller can tell "this is the
+    budget binds as `LIMIT ceiling + 1` so the caller can tell "this is the
     whole answer" from "there was more", and refuse rather than quietly draw a
     truncated chart (§6).
     """
@@ -196,26 +196,26 @@ def compile_series(
 
     Four parts, in the order they are rendered:
 
-    ``survivors``
+    `survivors`
         the grouping values that make the cut, ranked over the *whole* range
         rather than per bucket, so a series does not appear and vanish as the
         reader scrolls. Ties break on the key itself, which is what makes the
         survivor set stable between two runs of the same query.
-    ``agg``
+    `agg`
         one aggregate per bucket per surviving key, with everything else folded
         into a single remainder. The fold is applied *before* aggregation, so
         the remainder's average is a true average of the tail's rows rather than
         an average of averages — the trap that makes a folded mean meaningless.
-    ``spine``
+    `spine`
         every bucket in the range, whether or not anything happened in it,
         generated on the local wall clock and converted back afterwards.
     the outer select
         the spine LEFT JOINed to the aggregate, so an empty bucket arrives as a
         row with nulls rather than as an absence the caller has to notice.
 
-    ``compare`` adds a second period. It stays *one* statement — two statements
+    `compare` adds a second period. It stays *one* statement — two statements
     are how the periods end up misaligned by a bucket — so the spine gains a
-    second arm over the shifted range, every row carries a ``period``
+    second arm over the shifted range, every row carries a `period`
     discriminator, and both arms join the same aggregate. The survivors are
     still ranked over the primary period alone: "the top seven paddocks this
     month, and what those seven did last month" keeps a legend that means one
@@ -336,15 +336,15 @@ def compile_events(
     """Markers inside the range, each knowing its exact instant and its bucket.
 
     Alignment is the requirement; one round trip is a nice-to-have that must not
-    be bought with a bad type. A tagged ``UNION ALL`` of buckets and events would
+    be bought with a bad type. A tagged `UNION ALL` of buckets and events would
     force both into one row shape with half the columns null in every row, and a
     discriminator the client has to switch on — a worse envelope, worse generated
     types, and a worse decode, in exchange for a round trip the driver may
     already be pipelining.
 
-    So this is a second statement, and alignment is structural instead: ``trunc``
-    and ``zone_name`` arrive from the same declaration that rendered the series,
-    and the window from the same :class:`~wreath.series.Range`. There is no
+    So this is a second statement, and alignment is structural instead: `trunc`
+    and `zone_name` arrive from the same declaration that rendered the series,
+    and the window from the same `Range`. There is no
     second copy of either to drift from.
 
     The bucket travels *with* the event rather than being recomputed on the
@@ -388,10 +388,10 @@ def _spine(
     """Every bucket in the range, generated on the local wall clock.
 
     The order is the whole trick, and it is the reason this is worth owning.
-    ``AT TIME ZONE`` on a ``timestamptz`` yields a *naive* local timestamp;
-    ``generate_series`` stepping over naive timestamps advances by a calendar
+    `AT TIME ZONE` on a `timestamptz` yields a *naive* local timestamp;
+    `generate_series` stepping over naive timestamps advances by a calendar
     day, which is what a reader means by "daily". Generating over
-    ``timestamptz`` instead steps by exactly 24 hours, so the day a clock
+    `timestamptz` instead steps by exactly 24 hours, so the day a clock
     changes is an hour out and every boundary after it is wrong. Converting back
     at the end yields the correct instant for each local midnight, including the
     ones 23 and 25 hours apart.
@@ -400,7 +400,7 @@ def _spine(
     the half-open range is honoured in the one place it is written: a range
     ending exactly on a boundary excludes the bucket starting there.
 
-    ``step`` adds the comparison arm. Its bounds are the same two values shifted
+    `step` adds the comparison arm. Its bounds are the same two values shifted
     on the *local* clock before truncating, so a comparison month is a calendar
     month and the two arms can legitimately be different lengths — February
     against March is 28 buckets against 31, and saying so is more honest than

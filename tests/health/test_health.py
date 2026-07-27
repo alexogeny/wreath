@@ -38,10 +38,26 @@ async def test_evaluate_one_fail():
     assert detail["db"]["status"] == "fail" and "down" in detail["db"]["error"]
 
 
-def test_health_router_builds():
+def test_health_router_registers_both_endpoints():
+    """Was `assert router is not None`, which a `Router()` returning nothing at
+    all would still have satisfied. Assert the routes instead."""
     router = health_router([callable_check("db", _ok)])
-    # a Router with the two endpoints registered
-    assert router is not None
+    paths = {getattr(route, "path", None) for route in router.routes}
+    assert {"/health", "/ready"} <= paths, paths
+
+
+def test_health_router_mounts_alerts_only_when_asked():
+    """`alerts=` is a separate path on purpose: a stalled backfill needs a
+    person, and putting it on `/ready` would let a load balancer drain the very
+    workers that would finish the pass."""
+    without = {getattr(r, "path", None) for r in health_router([]).routes}
+    withal = {
+        getattr(r, "path", None)
+        for r in health_router([], alerts=[callable_check("passes", _ok)]).routes
+    }
+    assert "/health/alerts" in withal
+    assert "/health/alerts" in without   # the path exists either way...
+    assert withal == without             # ...only the probe list differs
 
 
 # --- E5: criticality, timeouts, and per-check timing ------------------------

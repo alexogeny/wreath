@@ -3,9 +3,11 @@
 Preflight `OPTIONS` requests short-circuit from the `before` hook; simple
 requests get their response headers appended by the `after` hook. All
 allow-list computation happens once at construction, so the per-request work
-is a header lookup and, for hits, a few list appends::
+is a header lookup and, for hits, a few list appends:
 
-    app.add_middleware(CORSMiddleware(allow_origins=["https://app.example"]))
+```python
+app.add_middleware(CORSMiddleware(allow_origins=["https://app.example"]))
+```
 """
 
 from __future__ import annotations

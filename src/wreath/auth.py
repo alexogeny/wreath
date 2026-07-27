@@ -1,8 +1,8 @@
 """Authentication: identities, credentials, and authentication backends.
 
 Authentication establishes *who* a request is. Authorization — what an identity
-is permitted to do — lives in :mod:`wreath.authorization`. Both are thin public
-facades over the private ``wreath._auth`` implementation package.
+is permitted to do — lives in `wreath.authorization`. Both are thin public
+facades over the private `wreath._auth` implementation package.
 """
 
 from __future__ import annotations

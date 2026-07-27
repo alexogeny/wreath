@@ -5,8 +5,8 @@ decode. There is no inference and no implicit widening: a column declares the
 type it has in the database, and values that do not fit it are rejected before
 any SQL runs.
 
-``coerce`` validates and normalizes a Python value on assignment. ``to_wire``
-and ``from_wire`` convert between that Python value and the representation the
+`coerce` validates and normalizes a Python value on assignment. `to_wire`
+and `from_wire` convert between that Python value and the representation the
 driver codec exchanges, and are the identity for everything except JSON.
 """
 
@@ -49,7 +49,7 @@ class PgType:
         self._from_wire = from_wire
 
     def coerce(self, value: Any) -> Any:
-        """Validate ``value`` for this type, returning the normalized value."""
+        """Validate `value` for this type, returning the normalized value."""
         return self._coerce(value)
 
     def to_wire(self, value: Any) -> Any:
@@ -70,8 +70,8 @@ class _ArrayType(PgType):
     """A one-dimensional PostgreSQL array type that remembers its element type.
 
     An array reuses its element's scalar codec value-by-value, so it only needs
-    to carry the element ``PgType`` around: coercion validates each element with
-    it, and ``any_eq``/``all_eq`` bind a scalar against it.
+    to carry the element `PgType` around: coercion validates each element with
+    it, and `any_eq`/`all_eq` bind a scalar against it.
     """
 
     __slots__ = ("element",)
@@ -167,10 +167,10 @@ def _check_aware_datetime(value: Any) -> datetime.datetime:
 def _check_numeric(value: Any) -> Decimal:
     """Accept the exact numeric types only.
 
-    ``float`` is refused rather than converted. A column is declared ``numeric``
+    `float` is refused rather than converted. A column is declared `numeric`
     precisely because binary floating point cannot hold its values -- accepting
     a float would put the collapse back in, one layer up from the codec that
-    just removed it. ``Decimal(str(x))`` at the call site is the explicit way to
+    just removed it. `Decimal(str(x))` at the call site is the explicit way to
     say what rounding you wanted.
     """
     if isinstance(value, Decimal):
@@ -239,11 +239,11 @@ _ARRAY_OID: dict[int, int] = {
 
 
 def Array(element: PgType, *, nullable_elements: bool = False) -> _ArrayType:
-    """Declare a one-dimensional PostgreSQL array of ``element``.
+    """Declare a one-dimensional PostgreSQL array of `element`.
 
-    Each element is validated and wired through ``element``'s own rules, so
-    ``Array(Uuid)`` accepts a ``list``/``tuple`` of UUIDs and rejects anything
-    else. Elements are non-nullable unless ``nullable_elements=True``. Nested
+    Each element is validated and wired through `element`'s own rules, so
+    `Array(Uuid)` accepts a `list`/`tuple` of UUIDs and rejects anything
+    else. Elements are non-nullable unless `nullable_elements=True`. Nested
     arrays are not supported: an element type may not itself be an array.
     """
     if not isinstance(element, PgType):
@@ -304,7 +304,7 @@ BY_OID: dict[int, PgType] = {
 }
 
 # Canonical array types, one per supported element, registered so result
-# validation and introspection can decode an array column by its OID. ``Array``
+# validation and introspection can decode an array column by its OID. `Array`
 # always returns the same OID for a given element, so any of these decodes any
 # column of that array type.
 for _element in (
@@ -314,7 +314,7 @@ for _element in (
     _canonical_array = Array(_element)
     BY_OID[_canonical_array.oid] = _canonical_array
 
-#: The ``text[]`` type the jsonb key operators (``?|``, ``?&``, ``#>>`` paths)
+#: The `text[]` type the jsonb key operators (`?|`, `?&`, `#>>` paths)
 #: bind their operands as.
 TextArray = Array(Text)
 

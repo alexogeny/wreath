@@ -2,7 +2,7 @@
 
 The encoder is built on the stdlib encoder with the same strictness as the C
 version: bytes output, str-only object keys, and non-finite floats rejected.
-The decoder twin is stdlib ``json.loads`` itself — the native decoder is
+The decoder twin is stdlib `json.loads` itself — the native decoder is
 written to match its observable behaviour exactly.
 """
 
@@ -12,14 +12,14 @@ import json
 import math
 from typing import Any
 
-#: Set once by :mod:`wreath._json`, mirroring ``_core.json_configure``. Both stay
+#: Set once by `wreath._json`, mirroring `_core.json_configure`. Both stay
 #: None until then, and the encoder raises its ordinary TypeError in that case.
 _temporal_types: tuple[type, ...] | None = None
 _format_iso: Any = None
 
 
 def json_configure(temporal_types: tuple[type, ...], format_iso: Any) -> None:
-    """Teach the encoder to render temporal values inline, as ``json.c`` does."""
+    """Teach the encoder to render temporal values inline, as `json.c` does."""
     global _temporal_types, _format_iso
     _temporal_types = temporal_types
     _format_iso = format_iso

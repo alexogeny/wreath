@@ -2,7 +2,7 @@
 
 A background task is application work that runs *after* the complete response
 has been emitted but still inside the ASGI application invocation. Ownership is
-explicit: a task belongs to a response, is awaited by ``Wreath._finish_http`` once
+explicit: a task belongs to a response, is awaited by `Wreath._finish_http` once
 the final response message is sent, and is interrupted by process shutdown like
 any other in-process work. This is not a durable job queue -- for work that must
 survive process loss, use an external queue and hand this task only a durable
@@ -23,8 +23,8 @@ Background = Callable[[], Awaitable[None]]
 def _is_async_callable(function: Callable[..., Any]) -> bool:
     """Classify a callable as async once, at task-construction time.
 
-    ``functools.partial`` is unwrapped to its underlying callable, and callable
-    objects are classified by their ``__call__``. Everything else is treated as
+    `functools.partial` is unwrapped to its underlying callable, and callable
+    objects are classified by their `__call__`. Everything else is treated as
     synchronous and offloaded to a thread so it cannot block the event loop.
     """
     unwrapped = function

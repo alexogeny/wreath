@@ -4,7 +4,7 @@ No CDN, no web fonts, no JS framework — three system font stacks and a blob of
 CSS driven by custom properties, with a theme control that also honours the OS
 preference.
 
-**The frame is woven; the content is plain.** ``AGENTS.md`` states the brand law
+**The frame is woven; the content is plain.** `AGENTS.md` states the brand law
 as *"the brand may be poetic; the API must stay literal"*, and this theme is that
 law rendered as design. Character lives in the chrome — the ring mark, the serif
 page titles, the traced nav thread, the mono structural layer. The reading
@@ -12,27 +12,27 @@ column stays disciplined: one measure, one rhythm, full-contrast body text, and
 nothing decorative between the reader and the words. A docs site is 95% prose
 somebody has to read for an hour, so the boldness budget is spent on the frame.
 
-**Three type voices, one job each.** :data:`_SERIF` carries display (page titles,
-section heads) — the poetic register. :data:`_SANS` carries body copy — the
-neutral one. :data:`_MONO` carries *structure*: eyebrows, nav section labels, the
+**Three type voices, one job each.** `_SERIF` carries display (page titles,
+section heads) — the poetic register. `_SANS` carries body copy — the
+neutral one. `_MONO` carries *structure*: eyebrows, nav section labels, the
 table-of-contents head, table headers, admonition titles, keyboard hints, code.
 That last one is the deliberate move; setting the structural chrome in mono is
 what makes the hierarchy legible without a single extra rule or box, and it is
 the literal register the brand law asks for.
 
-**Everything is a token.** There are four scales (:data:`type <_TYPE>`,
-tracking, space, elevation) declared once in :func:`critical_css`, and every rule
+**Everything is a token.** There are four scales (`type`,
+tracking, space, elevation) declared once in `critical_css`, and every rule
 below spends them rather than inventing a number. If you find yourself typing a
-raw ``rem`` into a component rule, the scale is missing a step; add the step.
+raw `rem` into a component rule, the scale is missing a step; add the step.
 
-**Two stylesheets, on purpose.** :func:`critical_css` is the design tokens plus
+**Two stylesheets, on purpose.** `critical_css` is the design tokens plus
 enough paint to make an unstyled flash look intentional, and it is *inlined* into
-every page. :func:`stylesheet` is the whole thing and is written once to
-``assets/docs.css``, which the browser caches across a 129-page site. Inlining
+every page. `stylesheet` is the whole thing and is written once to
+`assets/docs.css`, which the browser caches across a 129-page site. Inlining
 only the tokens costs ~2 KiB per page and buys two things: a page whose colours
 survive a missing stylesheet, and — less obviously — an auditable one.
-``wreath audit``'s contrast, non-text-contrast, and focus rules only read inline
-``<style>``, so while the whole theme lived in an external file those three rules
+`wreath audit`'s contrast, non-text-contrast, and focus rules only read inline
+`<style>`, so while the whole theme lived in an external file those three rules
 silently never ran on a single built page.
 """
 
@@ -102,7 +102,7 @@ _LAYOUT = ("--measure:73ch;--sidebar-w:16rem;--toc-w:14rem;"
 
 
 def _colour_tokens(palette: Palette) -> tuple[str, str]:
-    """The light and dark colour roles for ``palette``.
+    """The light and dark colour roles for `palette`.
 
     Beyond the obvious ones: `--surface-2` gives hover and inset states somewhere
     to live that is not "the code background", and `--border-strong` separates a
@@ -909,8 +909,8 @@ _MAX_TABS = 8
 def _tab_rules() -> str:
     """`:nth-of-type` pairs that make the radio group behave like tabs.
 
-    The markup is ``.tabbed > input* , .tab-labels , .tab-panel*``: the labels
-    box is the first child ``div``, so panel *k* is the ``(k + 2)``-th one.
+    The markup is `.tabbed > input* , .tab-labels , .tab-panel*`: the labels
+    box is the first child `div`, so panel *k* is the `(k + 2)`-th one.
     """
     rules = []
     for index in range(_MAX_TABS):
@@ -946,15 +946,15 @@ def _root_blocks(palette: Palette, feel: str) -> str:
 def critical_css(palette: Palette, feel: str = "flat") -> str:
     """Tokens plus the paint an unstyled first frame needs. Inlined per page.
 
-    Kept small deliberately: ``wreath audit`` caps an un-nonced inline asset at
+    Kept small deliberately: `wreath audit` caps an un-nonced inline asset at
     16 KiB, and every byte here is paid once per page rather than once per site.
-    Components belong in :func:`stylesheet`.
+    Components belong in `stylesheet`.
     """
     return _root_blocks(palette, feel) + _CRITICAL_CSS
 
 
 def stylesheet(palette: Palette, feel: str = "flat") -> str:
-    """The full stylesheet for ``palette`` + ``feel`` — written to assets/docs.css.
+    """The full stylesheet for `palette` + `feel` — written to assets/docs.css.
 
     Standalone on purpose: it re-declares the tokens so the file works on its own
     for anyone linking it directly, and so a page keeps its theme if the inline

@@ -2,30 +2,30 @@
 
 A migration that adds a column takes milliseconds and belongs in front of
 startup. A migration that rewrites ten million rows takes an hour and does not.
-:mod:`wreath.passes` already walks a big table durably, resumably and paced;
+`wreath.passes` already walks a big table durably, resumably and paced;
 what it cannot do is say whether running it is *safe*, and that is what these
 declarations are for.
 
 Two shapes, because doc 16 conflated them and they need different mechanisms:
 
-:class:`Recode`
+`Recode`
     Same column, same PostgreSQL type, different values -- a status column
-    moving from ``"1"`` to ``"planned"``. Rows genuinely differ mid-window and
+    moving from `"1"` to `"planned"`. Rows genuinely differ mid-window and
     the hazard is **semantic**: the column reads fine and means something else.
-    Its safety mechanism is the predicate scan in :mod:`._migrations.scan`.
+    Its safety mechanism is the predicate scan in `._migrations.scan`.
 
-:class:`Retype`
+`Retype`
     The column's type changes. It cannot be done in place --
-    ``ALTER COLUMN … TYPE`` rewrites the table under ``ACCESS EXCLUSIVE``, which
+    `ALTER COLUMN … TYPE` rewrites the table under `ACCESS EXCLUSIVE`, which
     is the hour-long deploy block being avoided -- so it is the four-step form:
     add a nullable column, fill it, prove it full, and let a *later* migration
     drop the old one. Two columns exist throughout, so the hazard is
     **nullability**, which is loud where a wrong comparison is silent. Its
     safety mechanism is the gate.
 
-There is deliberately no ``Transitional`` type. A PostgreSQL column has exactly
+There is deliberately no `Transitional` type. A PostgreSQL column has exactly
 one type, so "one column holds both shapes mid-window" is not representable --
-``orm/types.py`` opens with that rule and ``orm/model.py`` puts the OID in a
+`orm/types.py` opens with that rule and `orm/model.py` puts the OID in a
 plan-cache key. The declaration carries the mapping instead, and the mapping is
 what makes the scan decidable.
 """
@@ -46,10 +46,10 @@ class DeferredDeclarationError(ValueError):
 #: Why a deferred migration may take a fixed ceiling over a key it cannot prove
 #: is monotone.
 #:
-#: ``Ceiling.at_launch()`` normally refuses such a key, because a row inserted
+#: `Ceiling.at_launch()` normally refuses such a key, because a row inserted
 #: behind the cursor is one the pass will never see. For a deferred migration
 #: that row is *harmless* rather than absent, and the reason is the precondition
-#: every pass is declared under (``passes.py:168-169``): a pass converts the
+#: every pass is declared under (`passes.py:168-169`): a pass converts the
 #: past, and the application writes the future in the shape being converted to.
 #: A row arriving mid-walk is therefore already in the new encoding and needs no
 #: visit.
@@ -90,8 +90,8 @@ def _primary_key(model: Any) -> tuple[Any, ...]:
 def _walk_key(model: Any) -> Any:
     """The keyset key: the model's primary key, which is unique and indexed.
 
-    ``Rows(key=...)`` takes column *expressions* (``Trek.id``), so the raw
-    :class:`~wreath.orm.fields.Column` objects on the model are resolved back
+    `Rows(key=...)` takes column *expressions* (`Trek.id`), so the raw
+    `Column` objects on the model are resolved back
     through the class to the descriptors' expressions.
     """
     expressions = tuple(
@@ -107,9 +107,9 @@ class Recode:
     Args:
         column: the column being re-encoded.
         mapping: old value to new value. **Finite and invertible**, because that
-            is exactly what lets the scan widen ``col == new`` into
-            ``col IN (new, old)`` rather than merely permitting it. A conversion
-            that cannot enumerate its pairs is not a ``Recode``.
+            is exactly what lets the scan widen `col == new` into
+            `col IN (new, old)` rather than merely permitting it. A conversion
+            that cannot enumerate its pairs is not a `Recode`.
         chunk: rows per chunk, passed straight to the pass.
         pace: how much of the machine the walk may be.
         name: the pass's ledger identity; derived from the column by default.
@@ -155,7 +155,7 @@ class Recode:
 
     @property
     def converts(self) -> str:
-        """``schema.table.column`` for the column being converted."""
+        """`schema.table.column` for the column being converted."""
         return _column_key(self.column)
 
     @property
@@ -169,14 +169,14 @@ class Recode:
 
         No gate: Shape A adds no column, so there is nothing for a later
         migration to narrow and no fact for it to wait on. The safety mechanism
-        is :meth:`scan`, and it runs before the walk starts rather than after it
+        is `scan`, and it runs before the walk starts rather than after it
         finishes.
 
-        It does declare ``rewrites``, which is the *downgrade* half of the same
-        question. Having no gate means having no ``guards``, so before this the
+        It does declare `rewrites`, which is the *downgrade* half of the same
+        question. Having no gate means having no `guards`, so before this the
         ledger recorded no association between this pass and the column at all
-        -- a downgrade could not have found it to refuse. ``rewrites`` is that
-        association, and unlike ``guards`` it is never cleared: the old values
+        -- a downgrade could not have found it to refuse. `rewrites` is that
+        association, and unlike `guards` it is never cleared: the old values
         are gone from the table and finishing does not bring them back.
         """
         model = _model_of(self.column)
@@ -208,7 +208,7 @@ class Recode:
         )
 
     def scan(self, **populations: Any) -> ScanReport:
-        """Every read of this column, classified. See :mod:`._migrations.scan`."""
+        """Every read of this column, classified. See `._migrations.scan`."""
         return scan(self.column, dict(self.mapping), **populations)
 
 
@@ -227,7 +227,7 @@ class Retype:
         name: the pass's ledger identity; derived from the column by default.
 
     The gate is not optional here and it is the half X1 cannot ship without.
-    Verification is ``NOT VALID`` then ``VALIDATE CONSTRAINT`` -- the constraint
+    Verification is `NOT VALID` then `VALIDATE CONSTRAINT` -- the constraint
     the swap migration is *about to add* -- so the thing proven and the thing
     later enforced are the same predicate, and a walk that was subtly wrong
     cannot verify its own bug.
@@ -281,8 +281,8 @@ class Retype:
     def build(self) -> ChunkedPass:
         """The walk, its gate, and the fact the gate publishes.
 
-        ``Ceiling.at_launch()`` and ``scope="pass"`` are not a choice: a gate
-        with ``scope="unit"`` cannot publish a fact, and a whole-pass gate is
+        `Ceiling.at_launch()` and `scope="pass"` are not a choice: a gate
+        with `scope="unit"` cannot publish a fact, and a whole-pass gate is
         refused on a recurring pass, so a pass that guards a column is
         necessarily a bounded one that finishes.
         """
@@ -308,7 +308,7 @@ class Retype:
         """Shape B has no re-encode window, so there is nothing to scan.
 
         Both columns are separately typed and correct throughout; an unconverted
-        row reads ``NULL``, which the ORM already models and the gate proves
+        row reads `NULL`, which the ORM already models and the gate proves
         gone. Returning an explicitly empty report rather than raising keeps one
         calling shape for both declarations.
         """

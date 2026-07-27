@@ -1,7 +1,7 @@
-"""Optional dev-only ``AuditMiddleware``.
+"""Optional dev-only `AuditMiddleware`.
 
 Off by default (never mounted unless the app opts in). When mounted, it runs the a11y
-rules over outgoing ``text/html`` responses and logs findings — intended for local
+rules over outgoing `text/html` responses and logs findings — intended for local
 development, not production. It never rewrites the response and swallows its own errors,
 so it can never change behaviour or break a response; the cost is only paid when mounted.
 """
@@ -16,7 +16,7 @@ _LOG = logging.getLogger("wreath.audit")
 
 
 class AuditMiddleware:
-    """Mount with ``app.add_middleware(AuditMiddleware())`` in development only."""
+    """Mount with `app.add_middleware(AuditMiddleware())` in development only."""
 
     global_scope = True
     __slots__ = ("_logger",)

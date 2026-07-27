@@ -49,8 +49,8 @@ class RelationshipExpr:
     def __getattr__(self, name: str) -> Any:
         """Reach a column or a further relationship on the target model.
 
-        ``Book.author.name`` is a predicate operand, not a load: see
-        :class:`~wreath.orm.expressions.RelatedColumnExpr`.
+        `Book.author.name` is a predicate operand, not a load: see
+        `RelatedColumnExpr`.
         """
         # Dunder and private lookups must miss normally, or copy/pickle
         # protocols see a relationship where they expect absence.
@@ -194,15 +194,15 @@ def relationship(
     back_populates: str | None = None,
     load: LoadStrategy = "raise",
 ) -> Any:
-    """Declare a relationship to ``target``.
+    """Declare a relationship to `target`.
 
-    ``target`` is a model class or its name, resolved only inside the registry
-    that owns both models. ``foreign_key`` names the column holding the key: a
+    `target` is a model class or its name, resolved only inside the registry
+    that owns both models. `foreign_key` names the column holding the key: a
     column on this model makes the relationship to-one, and a column on the
     target makes it to-many.
 
-    ``load`` defaults to ``"raise"``, so reading the attribute without loading
-    it raises instead of emitting a query. ``"selectin"`` and ``"joined"`` load
+    `load` defaults to `"raise"`, so reading the attribute without loading
+    it raises instead of emitting a query. `"selectin"` and `"joined"` load
     it with every query for this model.
     """
     if load not in LOAD_STRATEGIES:

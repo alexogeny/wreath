@@ -1,11 +1,12 @@
 """OpenAPI 3.1 document generation from typed route signatures.
 
-The same signature inspection that drives request binding (``wreath.binding``)
-produces the schema, so the docs can never drift from the validation::
+The same signature inspection that drives request binding (`wreath.binding`)
+produces the schema, so the docs can never drift from the validation:
 
-    app = Wreath()
-    app.enable_docs()          # /openapi.json and /docs
-
+```python
+app = Wreath()
+app.enable_docs()          # /openapi.json and /docs
+```
 Dataclass bodies become component schemas; typed path/query parameters become
 parameter objects; a dataclass or scalar return annotation becomes the 200
 response schema. Handlers without typed signatures still appear with their
@@ -30,7 +31,7 @@ _TYPE_KEYS: dict[str, dict[str, Any]] = {
 
 
 def _openapi_schema(ref: TypeRef) -> dict[str, Any]:
-    """Render one canonical :class:`TypeRef` as an OpenAPI 3.1 schema.
+    """Render one canonical `TypeRef` as an OpenAPI 3.1 schema.
 
     OpenAPI and the client generators therefore share one interpretation of
     Python annotations -- the difference is only the output syntax.
@@ -206,11 +207,11 @@ def generate_openapi(
 
 
 # Self-contained API-docs renderer. No CDN, no external assets: the page is
-# rendered from the same ``ApiModel`` that feeds the spec and the typed clients,
+# rendered from the same `ApiModel` that feeds the spec and the typed clients,
 # so the three can never drift. Every user-authored string is escaped; the only
-# ``Markup`` (unescaped) fragments are framework-generated.
+# `Markup` (unescaped) fragments are framework-generated.
 #
-# TODO: de-dup these tokens with ``_devtools/bench_report.py::_STYLE`` -- copied
+# TODO: de-dup these tokens with `_devtools/bench_report.py::_STYLE` -- copied
 # here to keep this subsystem within its file boundary.
 _DOCS_STYLE = """
 :root{--paper:#F6F7F9;--raise:#fff;--ink:#0E141B;--muted:#5A6672;--rule:#DDE2E8;
@@ -326,7 +327,7 @@ def _render_operation(operation: Any, escape: Any, try_it_out: bool) -> str:
 
 
 def render_operations(model: Any, try_it_out: bool = False) -> str:
-    """Render the operation cards of an ``ApiModel`` as escaped HTML (a str of
+    """Render the operation cards of an `ApiModel` as escaped HTML (a str of
     already-safe markup). Grouped by first tag."""
     from html import escape
 
@@ -344,7 +345,7 @@ def render_operations(model: Any, try_it_out: bool = False) -> str:
 
 
 def render_models(model: Any) -> str:
-    """Render the component schemas of an ``ApiModel`` as escaped HTML."""
+    """Render the component schemas of an `ApiModel` as escaped HTML."""
     from html import escape
 
     if not model.models:
@@ -365,7 +366,7 @@ def render_models(model: Any) -> str:
 def render_docs_body(
     app: Any, *, title: str = "Wreath", version: str = "0.1.0", try_it_out: bool = False
 ) -> str:
-    """Build the (nonce-free) inner docs HTML for ``app``. Expensive part --
+    """Build the (nonce-free) inner docs HTML for `app`. Expensive part --
     caches well; the per-request shell wraps it with a CSP nonce."""
     from .typegen.inspect import build_api_model
 
@@ -383,7 +384,7 @@ def render_docs_shell(
     try_it_out: bool = False,
 ) -> str:
     """Wrap a cached docs body in the outer shell, injecting the per-response
-    CSP ``nonce`` on the single inline ``<style>``/``<script>``."""
+    CSP `nonce` on the single inline `<style>`/`<script>`."""
     from html import escape
 
     from .templates import Markup, Template

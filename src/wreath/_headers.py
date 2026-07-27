@@ -1,4 +1,4 @@
-"""Header-list helpers over ASGI-style ``list[tuple[bytes, bytes]]``.
+"""Header-list helpers over ASGI-style `list[tuple[bytes, bytes]]`.
 
 Names are expected lowercase, as the ASGI spec guarantees for servers.
 """

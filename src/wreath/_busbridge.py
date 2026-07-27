@@ -1,12 +1,12 @@
 """One bus channel, one origin tag, and the rule that keeps fan-out bounded.
 
-Three subsystems broadcast across workers over :mod:`wreath.messaging` --
+Three subsystems broadcast across workers over `wreath.messaging` --
 WebSocket rooms, ORM write announcements, and task progress. Each needs the same
 four things, and each of them is a place to be quietly wrong:
 
 * **One channel, subscribed at construction.** The bus collects its
   subscriptions before it starts, so a bridge built later never listens at all.
-* **An origin tag.** ``NOTIFY`` hands the sender its own message back, and
+* **An origin tag.** `NOTIFY` hands the sender its own message back, and
   applying that copy is at best wasted work and at worst a double delivery.
 * **A publish that cannot hurt the caller.** No running loop, or a bus that is
   down, must not surface as a failed write or a failed broadcast.
@@ -14,7 +14,7 @@ four things, and each of them is a place to be quietly wrong:
   turns one write into a storm that grows with the worker count.
 
 That last one is why this module exists rather than three careful copies of the
-same reasoning. There is no path from :meth:`BusBridge._receive` to a publish
+same reasoning. There is no path from `BusBridge._receive` to a publish
 here, so a caller cannot create one by forgetting -- it would have to write the
 relay itself.
 
@@ -42,12 +42,12 @@ Apply = Callable[[dict[str, Any]], Awaitable[None]]
 class BusBridge:
     """Carries one subsystem's payloads between workers on one channel.
 
-    ``bus`` may be ``None``, and that is a supported configuration rather than a
+    `bus` may be `None`, and that is a supported configuration rather than a
     degraded one: a single-worker deployment or a test wants the local half
     without a database behind it. A detached bridge subscribes to nothing and
     both publish methods are no-ops.
 
-    ``apply`` receives each payload that came from *another* worker, already
+    `apply` receives each payload that came from *another* worker, already
     filtered for the two failures every caller shares: a payload that is not a
     mapping, and the echo of this worker's own publish. Everything past that --
     what the payload's fields mean, whether they are well formed, what to do
@@ -130,7 +130,7 @@ class BusBridge:
         """Publish inline, letting a bus failure reach the caller.
 
         For a caller who is already awaiting the fan-out and can do something
-        about it going wrong -- :meth:`wreath.rooms.RoomRegistry.broadcast`,
+        about it going wrong -- `wreath.rooms.RoomRegistry.broadcast`,
         whose caller asked for the broadcast and is waiting on its result.
         """
         if self._bus is None:

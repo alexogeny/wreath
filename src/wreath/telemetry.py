@@ -1,19 +1,19 @@
 """Wreath telemetry — native metrics, tracing configuration, and OpenTelemetry integration.
 
 This module carries the Native Flight Recorder's public configuration and value
-types (:class:`TelemetryConfig` and friends): constructing one validates it and
-lets you compute its exact fixed memory budget. Passing it to ``wreath.server``
+types (`TelemetryConfig` and friends): constructing one validates it and
+lets you compute its exact fixed memory budget. Passing it to `wreath.server`
 creates a native recorder and starts the off-path projector that drains its ring.
 
-It also hosts the lazy OpenTelemetry bridge (:func:`current_span`,
-:func:`activate_otel`): the request path never constructs a Python OTel object,
+It also hosts the lazy OpenTelemetry bridge (`current_span`,
+`activate_otel`): the request path never constructs a Python OTel object,
 so these let user code opt in only at the call site, degrading to an immutable
-:class:`SpanContextView` when no OTel packages are installed. The runtime spine
-(worker, ring, projector, exporter) lives behind ``wreath._native._flight``,
-``wreath._projector``, ``wreath._otlp``, and ``wreath._export``.
+`SpanContextView` when no OTel packages are installed. The runtime spine
+(worker, ring, projector, exporter) lives behind `wreath._native._flight`,
+`wreath._projector`, `wreath._otlp`, and `wreath._export`.
 
-See ``docs/plans/native-flight-recorder-stage-1.md`` (modes, sizing) and
-``docs/decisions/0021-native-flight-recorder-provisional-parameters.md``.
+See `docs/plans/native-flight-recorder-stage-1.md` (modes, sizing) and
+`docs/decisions/0021-native-flight-recorder-provisional-parameters.md`.
 """
 
 from __future__ import annotations
@@ -103,7 +103,7 @@ class HistogramConfig:
         )
 
     def histogram_count(self, route_count: int) -> int:
-        """The number of histograms this policy allocates for ``route_count`` routes."""
+        """The number of histograms this policy allocates for `route_count` routes."""
         if self.per_route is PerRoutePolicy.GLOBAL:
             return 1
         if self.per_route is PerRoutePolicy.SELECTED:
@@ -185,8 +185,8 @@ class MemoryBudget:
 class TelemetryConfig:
     """An immutable, validated telemetry configuration.
 
-    Constructing it never starts anything; it is a value passed to ``Wreath(...)``
-    or ``configure_telemetry(...)`` in a later stage. Validation here is the whole
+    Constructing it never starts anything; it is a value passed to `Wreath(...)`
+    or `configure_telemetry(...)` in a later stage. Validation here is the whole
     point of Stage 0: reject overflow, unbounded cardinality, and invalid modes
     before any native memory is ever reserved.
     """
@@ -295,7 +295,7 @@ class SpanContextView:
 
     This is what the bridge returns when the OpenTelemetry API is absent, and the
     correlation source when it is present. It reflects the *incoming* (remote)
-    context parsed from ``traceparent``; exposing the server's own generated span
+    context parsed from `traceparent`; exposing the server's own generated span
     id to Python needs a native read seam and is deferred, so instrumentation
     treats this as the remote parent to child-span under.
     """
@@ -317,7 +317,7 @@ class SpanContextView:
         return format(self.span_id, "016x")
 
     def traceparent(self) -> str | None:
-        """The W3C ``traceparent`` string for this context, or None if invalid."""
+        """The W3C `traceparent` string for this context, or None if invalid."""
         if not self.is_valid:
             return None
         return f"00-{self.trace_id_hex}-{self.span_id_hex}-{'01' if self.sampled else '00'}"
@@ -326,7 +326,7 @@ class SpanContextView:
 def current_span(request: object) -> SpanContextView:
     """The current request's W3C trace context as an immutable view.
 
-    Reads only the incoming ``traceparent`` header and constructs no
+    Reads only the incoming `traceparent` header and constructs no
     OpenTelemetry object; returns an empty (invalid) view for an unpropagated or
     malformed request. Safe to call whether or not telemetry is enabled.
     """
@@ -371,11 +371,11 @@ def activate_otel(request: object) -> object:
     """Lazily hand the request's trace context to the OpenTelemetry API.
 
     When the OTel API is importable and the request carries a valid context, this
-    returns an OTel ``Context`` holding the request's *owned server span* (see
-    :func:`server_span`), so app instrumentation parents its spans under the same
+    returns an OTel `Context` holding the request's *owned server span* (see
+    `server_span`), so app instrumentation parents its spans under the same
     server span the recorder exports -- not the incoming remote parent. When OTel
     is absent, or the request is unpropagated, it returns the native
-    :class:`SpanContextView`. It creates an SDK object only here, at the call site
+    `SpanContextView`. It creates an SDK object only here, at the call site
     -- never on the request path -- so an app that never calls it pays nothing.
     """
     view = server_span(request)
@@ -402,12 +402,12 @@ def activate_otel(request: object) -> object:
 
 # --- Prometheus exposition bridge -------------------------------------------
 #
-# Where the OTLP path (``wreath._otlp``/``wreath._export``) pushes the projector's
+# Where the OTLP path (`wreath._otlp`/`wreath._export`) pushes the projector's
 # aggregated metrics to a collector, this bridge renders the *same* projector
 # snapshot as Prometheus text exposition to be *scraped*. It is opt-in and off the
-# request path: a scrape calls ``bridge.render()``, which reads one consistent
-# ``Projector.snapshot()`` (plus ``recorder_loss()``); an app that never mounts it
-# pays nothing. The renderer and format live in ``wreath._prometheus``.
+# request path: a scrape calls `bridge.render()`, which reads one consistent
+# `Projector.snapshot()` (plus `recorder_loss()`); an app that never mounts it
+# pays nothing. The renderer and format live in `wreath._prometheus`.
 
 
 def activate_prometheus(
@@ -418,17 +418,17 @@ def activate_prometheus(
 ) -> object:
     """Wrap a metrics snapshot source in a Prometheus exposition bridge.
 
-    ``source`` is a :class:`wreath._projector.Projector` (or anything exposing
-    ``snapshot()`` and optionally ``recorder_loss()``). The returned
-    :class:`wreath._prometheus.PrometheusBridge` renders Prometheus text
+    `source` is a `wreath._projector.Projector` (or anything exposing
+    `snapshot()` and optionally `recorder_loss()`). The returned
+    `wreath._prometheus.PrometheusBridge` renders Prometheus text
     exposition format 0.0.4 from the projector's per-route counters/errors,
     duration histogram, pending gauge, and loss counters — the same aggregates
-    the OTLP exporter reads. Mount ``bridge.handler()`` (or
-    ``wreath._prometheus.metrics_router(source)``) at ``/metrics`` yourself, so
+    the OTLP exporter reads. Mount `bridge.handler()` (or
+    `wreath._prometheus.metrics_router(source)`) at `/metrics` yourself, so
     exposure and any auth gating stay your decision.
 
-    ``route_labels`` maps a numeric ``route_id`` to scrape labels (e.g. from the
-    metadata image's route table); without it rows are labelled by ``route_id``.
+    `route_labels` maps a numeric `route_id` to scrape labels (e.g. from the
+    metadata image's route table); without it rows are labelled by `route_id`.
     """
     from ._prometheus import PrometheusBridge
 
@@ -441,11 +441,11 @@ def activate_openmetrics(
     namespace: str = "wreath",
     route_labels: RouteLabels = None,
 ) -> object:
-    """Like :func:`activate_prometheus`, but the bridge renders OpenMetrics 1.0.0.
+    """Like `activate_prometheus`, but the bridge renders OpenMetrics 1.0.0.
 
-    Same ``Projector.snapshot()`` aggregates; the exposition drops the ``_total``
-    suffix from counter ``# TYPE`` families, terminates with ``# EOF``, and
-    advertises ``application/openmetrics-text; version=1.0.0``.
+    Same `Projector.snapshot()` aggregates; the exposition drops the `_total`
+    suffix from counter `# TYPE` families, terminates with `# EOF`, and
+    advertises `application/openmetrics-text; version=1.0.0`.
     """
     from ._prometheus import PrometheusBridge
 
@@ -467,11 +467,11 @@ def activate_statsd(
     """Wrap a snapshot source in a StatsD/DogStatsD UDP push bridge.
 
     Where Prometheus/OpenMetrics expose the projector aggregates for scrape, this
-    *pushes* the same ``Projector.snapshot()`` state as StatsD lines: counters as
-    deltas since the last :meth:`~wreath._statsd.StatsDBridge.flush`, gauges
-    absolute. ``dogstatsd=True`` emits ``|#k:v`` tags (route/method/path labels);
-    plain StatsD folds labels into the metric name. Drive ``bridge.flush()`` (or
-    ``bridge.run_periodic(interval)`` from a supervised task) yourself.
+    *pushes* the same `Projector.snapshot()` state as StatsD lines: counters as
+    deltas since the last `flush`, gauges
+    absolute. `dogstatsd=True` emits `|#k:v` tags (route/method/path labels);
+    plain StatsD folds labels into the metric name. Drive `bridge.flush()` (or
+    `bridge.run_periodic(interval)` from a supervised task) yourself.
     """
     from ._statsd import StatsDBridge
 
@@ -491,11 +491,11 @@ def activate_cloudwatch_emf(
 ) -> object:
     """Wrap a snapshot source in a CloudWatch EMF bridge.
 
-    Renders the same ``Projector.snapshot()`` aggregates as EMF structured-JSON
+    Renders the same `Projector.snapshot()` aggregates as EMF structured-JSON
     log lines (one blob per route + a global blob); written to stdout, CloudWatch
     Logs turns them into metrics with no agent. Counters are per-period deltas
-    (CloudWatch SUMs) unless ``cumulative=True``. Call ``bridge.emit()`` on a
-    cadence (or ``bridge.render()`` for the text).
+    (CloudWatch SUMs) unless `cumulative=True`. Call `bridge.emit()` on a
+    cadence (or `bridge.render()` for the text).
     """
     from ._cloudwatch_emf import EmfBridge
 

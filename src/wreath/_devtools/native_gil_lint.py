@@ -15,8 +15,8 @@ from .native_lint import (
     strip_c,
 )
 
-#: ``iter_sources`` and ``repo_root`` are re-exported, not merely used -- see the
-#: note in :mod:`~wreath._devtools.native_error_lint`.
+#: `iter_sources` and `repo_root` are re-exported, not merely used -- see the
+#: note in `native_error_lint`.
 __all__ = ["DEFAULT_ROOTS", "WAIVER", "Rule", "iter_sources", "main", "repo_root", "scan_text"]
 
 DEFAULT_ROOTS = ("src/wreath/_native",)

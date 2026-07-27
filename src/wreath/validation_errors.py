@@ -2,23 +2,24 @@
 
 Wreath already answers a failed body/query/path validation with RFC 9457, which
 is the right envelope. What applications add on top is presentation: their own
-field names, their own wording, and their own language::
+field names, their own wording, and their own language:
 
-    from wreath.validation_errors import MessageCatalogue, catalogue_formatter
+```python
+from wreath.validation_errors import MessageCatalogue, catalogue_formatter
 
-    catalogue = MessageCatalogue({
-        "en": {"missing": "This field is required.", "int": "Enter a whole number."},
-        "fr": {"missing": "Ce champ est obligatoire.", "int": "Entrez un entier."},
-    })
-    app.set_validation_formatter(catalogue_formatter(catalogue))
-
+catalogue = MessageCatalogue({
+    "en": {"missing": "This field is required.", "int": "Enter a whole number."},
+    "fr": {"missing": "Ce champ est obligatoire.", "int": "Entrez un entier."},
+})
+app.set_validation_formatter(catalogue_formatter(catalogue))
+```
 The default output is unchanged from what Wreath has always produced, so
 installing nothing keeps today's behaviour byte for byte.
 
-An error carries a machine-readable ``type`` (``"missing"``, ``"int"``,
-``"too_complex"``, ...) produced by both the pure validator and
-``_native/validate.c``. That is the catalogue key -- translate on ``type``, never
-on the English ``msg``, which is a developer-facing default and may change.
+An error carries a machine-readable `type` (`"missing"`, `"int"`,
+`"too_complex"`, ...) produced by both the pure validator and
+`_native/validate.c`. That is the catalogue key -- translate on `type`, never
+on the English `msg`, which is a developer-facing default and may change.
 
 **No C here, deliberately.** Formatting and language negotiation happen only on
 a 422, which is an error path by construction. `AGENTS.md` says to measure
@@ -46,8 +47,8 @@ __all__ = [
     "select_language",
 ]
 
-#: ``(errors, request) -> ProblemDetail``. ``errors`` is the raw list of
-#: ``{"loc": [...], "msg": str, "type": str}`` dicts.
+#: `(errors, request) -> ProblemDetail`. `errors` is the raw list of
+#: `{"loc": [...], "msg": str, "type": str}` dicts.
 ValidationFormatter = Callable[[list[dict[str, Any]], "Request"], ProblemDetail]
 
 
@@ -77,12 +78,12 @@ def _quality(parameters: Sequence[str]) -> float:
 
 
 def select_language(accept_language: str | bytes | None, offered: Sequence[str]) -> str:
-    """Pick the best of ``offered`` for an ``Accept-Language`` header.
+    """Pick the best of `offered` for an `Accept-Language` header.
 
-    ``offered`` is in preference order and must not be empty; its first entry is
+    `offered` is in preference order and must not be empty; its first entry is
     the fallback. Matching is case-insensitive and honours prefixes, so a client
-    asking for ``en-GB`` is served ``en`` when only ``en`` is offered. ``q=0``
-    explicitly refuses a language, and ``*`` accepts anything still on offer.
+    asking for `en-GB` is served `en` when only `en` is offered. `q=0`
+    explicitly refuses a language, and `*` accepts anything still on offer.
 
     Returns the fallback for a missing, empty, or unparseable header -- a bad
     Accept-Language is never a client error.
@@ -145,11 +146,11 @@ def select_language(accept_language: str | bytes | None, offered: Sequence[str])
 
 
 class MessageCatalogue:
-    """Per-language messages keyed by an error's ``type``.
+    """Per-language messages keyed by an error's `type`.
 
     The first language given is the default and the negotiation fallback. A
     language missing a key falls back to the default language's message, and a
-    key missing everywhere leaves the validator's own ``msg`` in place -- a
+    key missing everywhere leaves the validator's own `msg` in place -- a
     partial translation degrades to English rather than to a blank.
     """
 
@@ -191,13 +192,13 @@ def catalogue_formatter(
     aliases: Mapping[str, str] | None = None,
     detail: str = "Request validation failed",
 ) -> ValidationFormatter:
-    """A formatter that translates each error's ``msg`` via ``catalogue``.
+    """A formatter that translates each error's `msg` via `catalogue`.
 
-    ``aliases`` renames the *last* path segment of a location, so an external
-    API can expose ``userName`` for a Python ``user_name`` without the handler
+    `aliases` renames the *last* path segment of a location, so an external
+    API can expose `userName` for a Python `user_name` without the handler
     signature changing.
 
-    The emitted problem carries the negotiated language in a ``language``
+    The emitted problem carries the negotiated language in a `language`
     extension, so a client can tell what it was served.
     """
     alias_map = dict(aliases or {})

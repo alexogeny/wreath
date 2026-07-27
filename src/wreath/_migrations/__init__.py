@@ -1,4 +1,4 @@
-"""Implementation for :mod:`wreath.migrations`.
+"""Implementation for `wreath.migrations`.
 
-The public facade is ``wreath.migrations``; everything here is internal.
+The public facade is `wreath.migrations`; everything here is internal.
 """

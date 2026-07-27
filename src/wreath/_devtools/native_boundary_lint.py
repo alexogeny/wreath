@@ -1,14 +1,14 @@
 """Find excessive CPython object traffic in Wreath's native hot paths.
 
-This complements ``wreath-native-lint`` (algorithmic complexity) and
-``wreath-native-profile`` (measured runtime attribution). It looks specifically for
+This complements `wreath-native-lint` (algorithmic complexity) and
+`wreath-native-profile` (measured runtime attribution). It looks specifically for
 static signs of avoidable Python/native-boundary work:
 
     uv run wreath-native-boundary-lint
     uv run wreath-native-boundary-lint --format json
 
 The rules are intentionally heuristic. Waive an intentional finding in place
-with ``native-boundary-lint: allow NB001 -- reason``.
+with `native-boundary-lint: allow NB001 -- reason`.
 """
 
 from __future__ import annotations
@@ -28,8 +28,8 @@ from .native_lint import (
     strip_c,
 )
 
-#: ``iter_sources`` and ``repo_root`` are re-exported, not merely used -- see the
-#: note in :mod:`~wreath._devtools.native_error_lint`.
+#: `iter_sources` and `repo_root` are re-exported, not merely used -- see the
+#: note in `native_error_lint`.
 __all__ = ["DEFAULT_ROOTS", "WAIVER", "Rule", "iter_sources", "main", "repo_root", "scan_text"]
 
 DEFAULT_ROOTS = ("src/wreath/_native",)

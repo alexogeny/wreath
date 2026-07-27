@@ -16,28 +16,28 @@ gate for the maps the site build does not read.
 
 Findings:
 
-* ``MAP001`` -- the manifest has a key the schema does not define. This is the
+* `MAP001` -- the manifest has a key the schema does not define. This is the
   one that catches the `"subsystems[5]"` class of damage: a patch that means to
   edit an array element and instead adds a sibling key is silent, and the data
   it added is unreachable by anything that walks `subsystems`.
-* ``MAP002`` -- the manifest cites a path that does not exist.
-* ``MAP003`` -- a public module under ``src/wreath`` appears in no subsystem's
-  ``sources``. A subsystem nobody mapped is a subsystem an agent finds by grep.
-* ``MAP004`` -- a subsystem is missing a required field.
-* ``MAP005`` -- a prose map cites a repo path that does not exist.
-* ``MAP006`` -- a ``docs/llms.txt`` link points at a page that does not exist.
-* ``MAP007`` -- a guide is missing from ``docs/llms.txt``, the compact index
+* `MAP002` -- the manifest cites a path that does not exist.
+* `MAP003` -- a public module under `src/wreath` appears in no subsystem's
+  `sources`. A subsystem nobody mapped is a subsystem an agent finds by grep.
+* `MAP004` -- a subsystem is missing a required field.
+* `MAP005` -- a prose map cites a repo path that does not exist.
+* `MAP006` -- a `docs/llms.txt` link points at a page that does not exist.
+* `MAP007` -- a guide is missing from `docs/llms.txt`, the compact index
   agents read instead of the nav.
-* ``MAP008`` -- a sanitizer build in ``tools/sanitizers/`` no longer compiles
-  the same sources as the extension it mirrors. Each ``setup_*.py`` keeps its
-  own ``SOURCES`` tuple and says it is "kept in step with setup.py"; nothing
-  checked that, and it drifted -- ``cedar.c``, ``jose.c``, and ``scheduler.c``
-  were in the shipped ``_core`` extension but had never been built under
+* `MAP008` -- a sanitizer build in `tools/sanitizers/` no longer compiles
+  the same sources as the extension it mirrors. Each `setup_*.py` keeps its
+  own `SOURCES` tuple and says it is "kept in step with setup.py"; nothing
+  checked that, and it drifted -- `cedar.c`, `jose.c`, and `scheduler.c`
+  were in the shipped `_core` extension but had never been built under
   ASan/UBSan. A file missing here is not a broken build: it is C that the
   sanitizer suites silently do not cover, which is the worst way to be wrong
   about memory safety.
 
-Run it with ``uv run wreath-map-lint``; ``0`` means clean.
+Run it with `uv run wreath-map-lint`; `0` means clean.
 """
 
 from __future__ import annotations
@@ -222,11 +222,11 @@ _C_SOURCE_RE = re.compile(r'([A-Za-z0-9_/]+\.c)')
 
 
 def _sources_block(text: str, start: int, end: int) -> str:
-    """The text of the ``sources=[...]`` list within ``text[start:end]``.
+    """The text of the `sources=[...]` list within `text[start:end]`.
 
-    Only that list counts. A ``depends=[...]`` beside it names headers *and*
-    files that are ``#include``d rather than compiled -- the reactor extension
-    lists five such ``.c`` files -- so reading the whole block would demand the
+    Only that list counts. A `depends=[...]` beside it names headers *and*
+    files that are `#include`d rather than compiled -- the reactor extension
+    lists five such `.c` files -- so reading the whole block would demand the
     sanitizer compile units that must not be compiled separately.
     """
     marker = text.find("sources=", start)
@@ -253,9 +253,9 @@ def _extension_sources(text: str) -> dict[str, set[str]]:
     pkg-config for the optional HTTP/3 backend at import time, and a linter that
     needed QUIC libraries installed to check a source list would not run.
 
-    The sanitizer builds hold their file names in a module-level ``SOURCES``
-    tuple and interpolate it into ``sources=[...]``, so when the list itself
-    names no ``.c`` file the whole module is read instead. Each of those builds
+    The sanitizer builds hold their file names in a module-level `SOURCES`
+    tuple and interpolate it into `sources=[...]`, so when the list itself
+    names no `.c` file the whole module is read instead. Each of those builds
     mirrors exactly one extension, which is what makes that safe.
     """
     sources: dict[str, set[str]] = {}
@@ -309,11 +309,11 @@ def check_sanitizer_sources(root: Path) -> list[Finding]:
 
 
 def _module_name(source: str) -> str | None:
-    """``src/wreath/session_store.py`` -> ``session_store``; nested paths -> None.
+    """`src/wreath/session_store.py` -> `session_store`; nested paths -> None.
 
     Only a top-level module or package has a conventional test path worth
-    guessing at. ``src/wreath/_auth/cedar.py`` does not -- its tests live wherever
-    the subsystem that owns ``_auth`` put them.
+    guessing at. `src/wreath/_auth/cedar.py` does not -- its tests live wherever
+    the subsystem that owns `_auth` put them.
     """
     if not source.startswith("src/wreath/"):
         return None
@@ -324,11 +324,11 @@ def _module_name(source: str) -> str | None:
 
 
 def _conventional_tests(root: Path, module: str) -> list[str]:
-    """The test paths named after ``module`` that actually exist.
+    """The test paths named after `module` that actually exist.
 
     Deliberately only the two exact spellings the repository already uses --
-    ``tests/test_<module>.py`` and ``tests/<module>/``. A prefix match would sweep
-    up ``tests/test_native_lint_readability.py`` under ``native_lint``, and a
+    `tests/test_<module>.py` and `tests/<module>/`. A prefix match would sweep
+    up `tests/test_native_lint_readability.py` under `native_lint`, and a
     guessed-wrong entry in the manifest is worse than a missing one: an agent
     reads it and runs the wrong suite.
     """
@@ -348,20 +348,20 @@ def repair(root: Path, adopt: list[tuple[str, str]]) -> tuple[list[str], list[st
     """Apply the mechanically-derivable manifest repairs.
 
     Two of them, and no more. Both have exactly one right answer, which is what
-    separates them from the findings a person has to resolve -- ``MAP002`` cannot
-    know where a moved file went, and ``MAP003`` cannot know which subsystem a new
+    separates them from the findings a person has to resolve -- `MAP002` cannot
+    know where a moved file went, and `MAP003` cannot know which subsystem a new
     module belongs to. Guessing at either would produce a manifest that lints
     clean and lies, which is the failure this whole tool exists to prevent.
 
-    * **adopt** -- ``name=src/wreath/x.py`` puts a source under the subsystem you
+    * **adopt** -- `name=src/wreath/x.py` puts a source under the subsystem you
       name (you supply the judgment) and brings its conventional tests with it
       (the tool supplies the bookkeeping).
     * **conventional tests** -- for every source already listed, attach
-      ``tests/test_<module>.py`` / ``tests/<module>/`` when it exists on disk and
+      `tests/test_<module>.py` / `tests/<module>/` when it exists on disk and
       is not listed yet. This is the half that silently rots: the module gets
       mapped when it lands, and the test file added a week later does not.
 
-    Returns ``(changes, refusals)``.
+    Returns `(changes, refusals)`.
     """
     path = root / MANIFEST
     try:

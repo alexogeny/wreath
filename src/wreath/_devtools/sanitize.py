@@ -4,14 +4,14 @@ The sanitizer builds under `tools/sanitizers/` produce an ASan/UBSan `.so`, but
 driving one takes an incantation that is easy to get subtly wrong -- and every
 way of getting it wrong reports success:
 
-* forget ``LD_PRELOAD`` and the interpreter refuses to load the extension, or
+* forget `LD_PRELOAD` and the interpreter refuses to load the extension, or
   loads it without the runtime;
-* forget ``PYTHONPATH`` and you test the *ordinary* build while believing you
+* forget `PYTHONPATH` and you test the *ordinary* build while believing you
   sanitized it;
-* leave ``detect_leaks=1`` on and CPython's own interned strings and module
+* leave `detect_leaks=1` on and CPython's own interned strings and module
   state bury a real leak in a few hundred records of noise;
 * read the pytest exit code and miss that ASan reports to stderr and, with
-  ``-fno-sanitize-recover=all``, aborts rather than failing a test.
+  `-fno-sanitize-recover=all`, aborts rather than failing a test.
 
 So this runs it and answers the question that matters: **did anything the
 sanitizer found belong to Wreath's C?** Leak frames are attributed by the
@@ -27,7 +27,7 @@ than hidden -- the summary always says how many were dismissed and why.
 Three test failures are *expected* under a sanitized run and are reported as
 "known artifact" rather than as findings: `wreath-native-lint`,
 `wreath-map-lint`, and `wreath-request-trace` resolve the repository root from
-the imported package, which under ``PYTHONPATH`` points into the sanitized copy
+the imported package, which under `PYTHONPATH` points into the sanitized copy
 where no C sources live and no baseline was measured. They say nothing about
 memory safety.
 """

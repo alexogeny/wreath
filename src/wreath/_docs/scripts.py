@@ -1,14 +1,14 @@
 """The client runtime — the part that makes a built site feel live.
 
-Two scripts, split by when they have to run. :data:`BOOT` is a few hundred bytes
-inlined in ``<head>``: it drops the ``no-js`` class and applies the stored theme
+Two scripts, split by when they have to run. `BOOT` is a few hundred bytes
+inlined in `<head>`: it drops the `no-js` class and applies the stored theme
 *before first paint*, which is the only way to avoid a white flash on a dark
-page. :func:`runtime` is everything else, written once to ``assets/docs.js`` and
-loaded with ``defer`` so it is cached across the whole site instead of paid for
+page. `runtime` is everything else, written once to `assets/docs.js` and
+loaded with `defer` so it is cached across the whole site instead of paid for
 per page.
 
 Everything here is an enhancement over markup that already works. With
-JavaScript off you get every page, every link, every nav section (``<details>``),
+JavaScript off you get every page, every link, every nav section (`<details>`),
 every content tab (a CSS radio group), and the whole table of contents; you lose
 the search palette, instant navigation, the copy buttons, and the scroll-spy.
 Nothing that carries content depends on this file.
@@ -548,5 +548,5 @@ _RUNTIME = r"""
 
 
 def runtime() -> str:
-    """The full client runtime, written once to ``assets/docs.js``."""
+    """The full client runtime, written once to `assets/docs.js`."""
     return _RUNTIME.strip() + "\n"

@@ -1,15 +1,15 @@
 """Phase 1 declarative emitter (design 07 §3/§7).
 
-Source-to-source translation by **pure ``ast`` + position-based text splicing** —
-no ``ast.unparse`` (loses comments/formatting) and no third-party CST. The rule is
+Source-to-source translation by **pure `ast` + position-based text splicing** —
+no `ast.unparse` (loses comments/formatting) and no third-party CST. The rule is
 design 07's contract: **transpile declarations, copy logic**. Only declarative spans
 (imports, class headers, decorators, parameter markers, exception constructors,
 middleware registration) are rewritten in the original source text; every function
-body is preserved byte-for-byte, with ``# TODO(wreath-port: ...)`` annotation lines
+body is preserved byte-for-byte, with `# TODO(wreath-port: ...)` annotation lines
 inserted above anything the analyzer tagged needs-review / unsupported (and above any
 construct Phase 1 does not yet rewrite, e.g. ORM models — nothing is silently skipped).
 
-Every emitted file is re-``ast.parse``d as a round-trip guard: a structurally broken
+Every emitted file is re-`ast.parse`d as a round-trip guard: a structurally broken
 emit is a tool bug and raises rather than being written.
 """
 from __future__ import annotations
@@ -76,8 +76,8 @@ _FASTAPI_TO_WREATH = {
 _FASTAPI_RENAMED = {"FastAPI": "Wreath", "APIRouter": "Router"}
 
 # A rewritten wreath name -> the module it is actually imported from. Markers live in
-# ``wreath.binding`` and CORSMiddleware/TrustedHostMiddleware in ``wreath.middleware``;
-# everything else (Wreath, Router, Depends, Request) is top-level ``wreath``.
+# `wreath.binding` and CORSMiddleware/TrustedHostMiddleware in `wreath.middleware`;
+# everything else (Wreath, Router, Depends, Request) is top-level `wreath`.
 _WREATH_MODULE = {
     "Query": "wreath.binding", "Path": "wreath.binding", "Header": "wreath.binding",
     "Cookie": "wreath.binding", "Form": "wreath.binding", "File": "wreath.binding",
@@ -168,9 +168,9 @@ class EmitError(Exception):
 
 @dataclass(frozen=True)
 class PortResult:
-    """What one ``port_tree`` run wrote, left alone, and could not read.
+    """What one `port_tree` run wrote, left alone, and could not read.
 
-    ``skipped`` and ``failed`` are deliberately separate. A *skip* is a success:
+    `skipped` and `failed` are deliberately separate. A *skip* is a success:
     the output was already current, or it had been hand-edited and refusing to
     clobber it is the correct answer. A *failure* is a file that could not be
     read or translated at all, so nothing about it reached the output tree. A
@@ -430,7 +430,7 @@ class _Emitter(ast.NodeVisitor):
             self._rewrite_pydantic_field(stmt)
 
     def _strip_all_bases(self, node: ast.ClassDef) -> None:
-        """Remove the whole ``(...)`` base list — correct only when it is the sole base."""
+        """Remove the whole `(...)` base list — correct only when it is the sole base."""
         b = self.buf.b
         pstart = self.buf.start_of(node.bases[0])
         pend = self.buf.end_of(node.bases[-1])
@@ -669,7 +669,7 @@ class _Emitter(ast.NodeVisitor):
             self._annotate(node.lineno, "route.method", "add `request: Request` param by hand")
 
     def _delete_decorator(self, dec) -> None:
-        """Remove a whole ``@decorator`` line (assumes it sits on its own line)."""
+        """Remove a whole `@decorator` line (assumes it sits on its own line)."""
         start = self.buf._starts[dec.lineno - 1]
         nxt = self.buf.b.find(b"\n", start)
         end = (nxt + 1) if nxt != -1 else len(self.buf.b)
@@ -926,7 +926,7 @@ def _mutable_factory(value: ast.AST | None) -> str | None:
 
 
 def _copy_tablename(value: ast.AST | None) -> str | None:
-    """Pull the tablename out of ``base_ormar_config.copy(tablename="x")``."""
+    """Pull the tablename out of `base_ormar_config.copy(tablename="x")`."""
     if isinstance(value, ast.Call):
         for kw in value.keywords:
             if kw.arg == "tablename" and isinstance(kw.value, ast.Constant):
@@ -949,17 +949,17 @@ def _provenance(source: str, body: str) -> str:
 
 
 def _read_source(source) -> str:
-    """A ``Path`` is read from disk; a ``str`` is treated as source text verbatim."""
+    """A `Path` is read from disk; a `str` is treated as source text verbatim."""
     if isinstance(source, Path):
         return source.read_text(encoding="utf-8")
     return source
 
 
 def emit_module(source) -> str:
-    """Port one module. ``source`` may be a Path/path-string (read) or source text.
+    """Port one module. `source` may be a Path/path-string (read) or source text.
 
     Returns the ported source (with a provenance header), preserving every function
-    body verbatim. Raises :class:`EmitError` if the result is not valid Python.
+    body verbatim. Raises `EmitError` if the result is not valid Python.
     """
     text = _read_source(source)
     tree = ast.parse(text)
@@ -1010,14 +1010,14 @@ def port_tree(
     in_place: bool = False,
     force: bool = False,
 ) -> PortResult:
-    """Port every ``.py`` under ``root`` into a sister tree (or in place).
+    """Port every `.py` under `root` into a sister tree (or in place).
 
     Idempotent: an unchanged source whose output still carries a matching provenance
     hash is skipped; an output that was hand-edited (its body hash no longer matches
-    the recorded ``output-sha256``) is left untouched unless ``force``.
+    the recorded `output-sha256`) is left untouched unless `force`.
 
-    **A source that cannot be read is recorded in ``failed``, not fatal** — the same
-    rule ``analyze`` follows, for the same reason: one broken symlink in a large tree
+    **A source that cannot be read is recorded in `failed`, not fatal** — the same
+    rule `analyze` follows, for the same reason: one broken symlink in a large tree
     must not end the run. **A destination that cannot be written *is* fatal**, because
     it condemns every remaining file and a partial output tree is indistinguishable
     from a complete one.

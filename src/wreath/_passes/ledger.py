@@ -8,7 +8,7 @@ where the walk stopped is the moment the row becomes an epitaph; and a recurring
 pass needs a *new* job per cycle with a new dedup key, while all of them must
 share one position.
 
-So the position is a table of its own, ``"wreath".passes``, beside the jobs
+So the position is a table of its own, `"wreath".passes`, beside the jobs
 table because it is job-adjacent -- and, crucially, **in the same database as
 the data being walked**. That is what makes the whole design work: the cursor
 advance and the work commit in one transaction, because the ledger row and the
@@ -22,10 +22,10 @@ serialise rather than collide, and a worker whose lease expired while a
 replacement moved on fails its own swap and knows it -- without needing the job
 runner's fence to stay safe.
 
-Beside it sits ``"wreath".pass_holes``, one row per chunk that failed often
+Beside it sits `"wreath".pass_holes`, one row per chunk that failed often
 enough to be given up on. A hole is not an error message: it carries the range,
 the attempt count, and **the predicate that would reproduce it**, so an operator
-can run the chunk by hand and see the real error rather than a truncated ``repr``
+can run the chunk by hand and see the real error rather than a truncated `repr`
 from three weeks ago. That is the difference between a hole and a task.
 """
 
@@ -40,15 +40,15 @@ from .progress import WINDOW_SECONDS
 
 #: The pass state machine.
 #:
-#: ``walking`` → ``done`` is the whole of it for a pass with no gate. With one,
-#: completion routes through ``verifying`` → ``verified`` → (``applying`` →)
-#: ``done``, and every transition is a compare-and-swap, so a second worker that
+#: `walking` → `done` is the whole of it for a pass with no gate. With one,
+#: completion routes through `verifying` → `verified` → (`applying` →)
+#: `done`, and every transition is a compare-and-swap, so a second worker that
 #: independently concludes "finished" matches no rows and does nothing.
 #:
-#: The two stopped states are deliberately distinct. ``blocked`` is a chunk that
-#: was given up on, and the fix is to retry it. ``unverified`` is a verification
+#: The two stopped states are deliberately distinct. `blocked` is a chunk that
+#: was given up on, and the fix is to retry it. `unverified` is a verification
 #: that ran and answered no, which means the walk's logic is wrong and retrying
-#: it will fail identically -- so ``wreath passes retry`` clears the first and
+#: it will fail identically -- so `wreath passes retry` clears the first and
 #: refuses the second.
 WALKING = "walking"
 DONE = "done"
@@ -75,15 +75,15 @@ def rewrites_table_name(schema: str) -> str:
 
 
 def _placeholders(values: tuple[str, ...]) -> str:
-    """``$1, $2, ...`` for an ``IN`` list, one placeholder per value.
+    """`$1, $2, ...` for an `IN` list, one placeholder per value.
 
-    Not ``= ANY($1)``, which is the obvious spelling and does not work: the
+    Not `= ANY($1)`, which is the obvious spelling and does not work: the
     driver infers a parameter's type from the Python value, and it has no case
-    for ``list`` -- passing one raises ``unsupported PostgreSQL value type``.
+    for `list` -- passing one raises `unsupported PostgreSQL value type`.
     Both readers here were written that way and neither had ever run against a
     real server, because their tests use fakes and fakes do not infer types.
 
-    The list is bounded by the columns one migration touches, so an ``IN`` list
+    The list is bounded by the columns one migration touches, so an `IN` list
     is the right size of hammer; a reader proportional to the *ledger* would
     need the array, and would need a codec first.
     """
@@ -95,9 +95,9 @@ def schema_sql(schema: str) -> str:
 
     Never auto-applied. A table that appears because a process started is a
     schema change with no history and no review, which is the same stance
-    ``JobRunner.schema_sql`` and every :mod:`wreath.store` declaration take.
+    `JobRunner.schema_sql` and every `wreath.store` declaration take.
 
-    Every statement here is separated by ``;\\n`` and contains no ``;\\n`` of
+    Every statement here is separated by `;\\n` and contains no `;\\n` of
     its own, because every caller splits on exactly that -- the trigger function
     below is written on one line for no other reason.
     """
@@ -225,7 +225,7 @@ class LedgerRow:
     #: How many chunks of this pass were given up on and not yet cleared.
     holes_open: int = 0
     #: The fact this pass *claims* it will establish, written when the row is
-    #: seeded. Distinct from ``verified_fact``, which is written only once
+    #: seeded. Distinct from `verified_fact`, which is written only once
     #: verification passes: a migration asking "may I narrow this column?"
     #: has to tell "no pass guards it" apart from "a pass guards it and has
     #: not finished", and those are the same answer if the claim is recorded
@@ -234,13 +234,13 @@ class LedgerRow:
     guards: str | None = None
     #: The column whose *values* this pass overwrote in place, if any.
     #:
-    #: Deliberately not ``guards``, and the difference is the whole point.
-    #: ``guards`` is a claim a gate will discharge -- it is answered by
-    #: ``verified_at`` and stops mattering once publication clears it.
-    #: ``rewrites`` is a fact about the data that publication does **not**
+    #: Deliberately not `guards`, and the difference is the whole point.
+    #: `guards` is a claim a gate will discharge -- it is answered by
+    #: `verified_at` and stops mattering once publication clears it.
+    #: `rewrites` is a fact about the data that publication does **not**
     #: clear: once a re-encode has run, the old values are gone from the table
     #: and no later event puts them back. A downgrade therefore has to read it
-    #: with no ``verified_at`` filter, because a *finished* re-encode is the
+    #: with no `verified_at` filter, because a *finished* re-encode is the
     #: dangerous case rather than the safe one.
     rewrites: str | None = None
 
@@ -272,7 +272,7 @@ class Hole:
 
 
 def _json(value: Any) -> Any:
-    """Decode a ``jsonb`` column whichever way the driver handed it back."""
+    """Decode a `jsonb` column whichever way the driver handed it back."""
     if isinstance(value, (str, bytes, bytearray)):
         return _json_loads(value)
     return value
@@ -383,17 +383,17 @@ class Ledger:
         *guards* is the fact this pass's gate will publish, recorded here rather
         than at publication because that is the only way a migration can tell
         "nothing guards this column" from "something guards it and has not
-        finished". ``DO UPDATE`` keeps it current when a redeploy changes the
+        finished". `DO UPDATE` keeps it current when a redeploy changes the
         declaration, without disturbing a walk already in progress.
 
         *rewrites* is the column whose values this pass overwrites in place.
         It is recorded for the opposite reason: not so a migration can wait for
-        it, but so a *downgrade* can refuse forever after. ``COALESCE`` on the
+        it, but so a *downgrade* can refuse forever after. `COALESCE` on the
         update rather than a plain overwrite, because a redeploy that drops the
         declaration must not erase the record that the values were already
         changed -- forgetting is the failure mode here, not staleness.
 
-        It is also written to the append-only ``pass_rewrites`` table, and that
+        It is also written to the append-only `pass_rewrites` table, and that
         copy is the one a downgrade actually depends on. The ledger row is
         working state and a plausible future purge job would delete it; the
         record is not, and deleting it is refused by the database. Written
@@ -463,7 +463,7 @@ class Ledger:
     async def skip_to(self, executor: Any, *, expected: Any, cursor: Any) -> bool:
         """Move the cursor past a hole without counting the chunk as done.
 
-        ``units_done`` deliberately does not move: a skipped chunk is not a unit
+        `units_done` deliberately does not move: a skipped chunk is not a unit
         of work completed, and letting it count would make the percentage claim
         progress the pass did not make.
         """
@@ -487,9 +487,9 @@ class Ledger:
         count and the interval describe the same stretch of time instead of
         overlapping by one chunk.
 
-        ``now()`` rather than ``clock_timestamp()`` on purpose: it is stable for
+        `now()` rather than `clock_timestamp()` on purpose: it is stable for
         the whole transaction, so the rollover test cannot disagree with itself
-        between the ``CASE`` arms.
+        between the `CASE` arms.
         """
         roll = (
             "window_started IS NULL "
@@ -593,9 +593,9 @@ class Ledger:
     async def block(self, executor: Any, *, error: str, phase: str = BLOCKED) -> None:
         """Stop the pass, and say why in the row itself.
 
-        *phase* distinguishes the two ways a pass stops: ``blocked`` at a chunk
+        *phase* distinguishes the two ways a pass stops: `blocked` at a chunk
         it gave up on, which an operator clears by retrying it, and
-        ``unverified`` at a verification that answered no, which is not
+        `unverified` at a verification that answered no, which is not
         retryable at all.
         """
         await executor.execute(
@@ -610,14 +610,14 @@ class Ledger:
     async def unblock(self, executor: Any) -> bool:
         """Return a pass stopped at a hole to walking. Refuses an unverified one.
 
-        Without this a halted pass is stopped forever: ``halt`` parks the cursor
-        *before* the hole and sets ``blocked``, and every later shift sees a
-        phase that is not ``walking`` and declines to run -- so nothing ever
+        Without this a halted pass is stopped forever: `halt` parks the cursor
+        *before* the hole and sets `blocked`, and every later shift sees a
+        phase that is not `walking` and declines to run -- so nothing ever
         re-attempts the chunk, the hole is never cleared, and the terminal gate
         it bars can never be reached. Clearing a hole has to be able to restart
-        the pass, or ``halt`` is not a policy but a trap.
+        the pass, or `halt` is not a policy but a trap.
 
-        ``unverified`` is deliberately not matched: a verification that answered
+        `unverified` is deliberately not matched: a verification that answered
         no will answer no again, and retrying it burns a maintenance window to
         fail at the same row.
         """
@@ -700,7 +700,7 @@ class Ledger:
         """Take the oldest pending unit, as the chunk transaction's first statement.
 
         Same exclusivity as the cursor swap and for the same reason: the read is
-        ``FOR UPDATE`` so two workers serialise, and the removal commits with the
+        `FOR UPDATE` so two workers serialise, and the removal commits with the
         work, so a unit whose chunk rolls back is still pending afterwards.
         """
         record = await executor.fetchrow(
@@ -853,7 +853,7 @@ class PendingFact:
 async def all_pending_facts(executor: Any, *, schema: str) -> list[PendingFact]:
     """Every fact currently claimed and unpublished, for an operator's overview.
 
-    Separate from :func:`pending_facts` rather than an empty-filter special case:
+    Separate from `pending_facts` rather than an empty-filter special case:
     that one is asked "are *these* columns safe" and an empty candidate list
     honestly means "nothing to check", so making it mean "everything" would put
     the two readings one typo apart.
@@ -886,7 +886,7 @@ async def pending_facts(
 ) -> list[PendingFact]:
     """Facts claimed by a pass that has not published them.
 
-    The inverse of :func:`published_facts`, and the half a migration actually
+    The inverse of `published_facts`, and the half a migration actually
     needs: it is asking whether it may narrow a column, and the dangerous answer
     is not "no pass ever published this" but "a pass is *still working on it*".
     Restricting to *facts* keeps the read proportional to the migration rather
@@ -916,7 +916,7 @@ class RewrittenColumn:
     fact: str
     phase: str
     finished: bool
-    #: ``False`` when the append-only record survives but the ledger row that
+    #: `False` when the append-only record survives but the ledger row that
     #: should sit beside it is gone. The refusal is the same either way -- the
     #: values were changed and that cannot become false -- but an operator
     #: seeing this needs to know their ledger has been tidied, because the next
@@ -930,13 +930,13 @@ async def rewritten_columns(
     """Passes that have re-encoded any of *facts*, finished or not.
 
     The reader a downgrade needs, and the one place in this module that asks a
-    question **without** filtering on ``verified_at``. Every other reader here
+    question **without** filtering on `verified_at`. Every other reader here
     is asking "is this settled yet?", where finishing is the good answer. This
     one is asking "have the values on disk already been changed?", where
     finishing is the *worse* answer: a half-converted column at least still
     holds some originals, while a completed re-encode holds none at all.
 
-    Reads the **union** of the ledger and the append-only ``pass_rewrites``
+    Reads the **union** of the ledger and the append-only `pass_rewrites`
     record, and that union is the whole protection. A naive "no row, no hazard"
     cannot tell a column that was never re-encoded from one whose ledger row was
     deleted, because both are the absence of a row -- and getting that wrong in
@@ -945,7 +945,7 @@ async def rewritten_columns(
     record breaks the tie: it is written when the pass is seeded, it is never
     updated, and the database refuses to delete it.
 
-    Restricted to *facts* for the same reason as :func:`pending_facts` -- the
+    Restricted to *facts* for the same reason as `pending_facts` -- the
     read stays proportional to the migration rather than to the ledger -- and an
     empty tuple honestly means "nothing to check".
     """
@@ -1031,7 +1031,7 @@ async def read_holes(
 
 
 def _affected(tag: Any) -> int:
-    """The row count out of a command tag such as ``UPDATE 1``.
+    """The row count out of a command tag such as `UPDATE 1`.
 
     A driver that hands back something other than a tag (a fake in a test, a
     backend that returns None for DML) is read as "one row", because the

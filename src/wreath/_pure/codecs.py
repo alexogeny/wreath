@@ -29,7 +29,7 @@ def percent_decode(data: bytes, plus_as_space: bool = False) -> bytes:
 
 
 def parse_qs(query: bytes, max_fields: int = 0) -> list[tuple[str, str]]:
-    """Decode ``a=1&b=2`` pairs. ``max_fields`` > 0 bounds the field count,
+    """Decode `a=1&b=2` pairs. `max_fields` > 0 bounds the field count,
     rejected while scanning before the offending field is decoded (0 = no bound).
     """
     pairs: list[tuple[str, str]] = []

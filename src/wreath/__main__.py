@@ -1,4 +1,4 @@
-"""Support ``python -m wreath``."""
+"""Support `python -m wreath`."""
 
 from __future__ import annotations
 

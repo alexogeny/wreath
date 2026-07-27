@@ -1,11 +1,11 @@
 """Authorization: roles, permissions, policies, and authorization decisions.
 
 Authorization determines *what* an authenticated identity may do. Establishing
-identity lives in :mod:`wreath.auth`. Both are thin public facades over the
-private ``wreath._auth`` implementation package.
+identity lives in `wreath.auth`. Both are thin public facades over the
+private `wreath._auth` implementation package.
 
-:class:`LiveDocument` is re-exported here because :func:`permission_document`
-returns one: it is the per-principal document primitive -- an ``ETag`` and a
+`LiveDocument` is re-exported here because `permission_document`
+returns one: it is the per-principal document primitive -- an `ETag` and a
 change stream -- and permissions are its first caller.
 """
 

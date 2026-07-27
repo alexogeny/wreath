@@ -1,24 +1,25 @@
 """A dependency-free PostgreSQL ORM for Wreath.
 
 Models are declared explicitly and compiled once, into immutable metadata owned
-by an application registry::
+by an application registry:
 
-    from wreath.orm import Mapped, Model, column, relationship
-    from wreath.orm.types import Int64, Text
+```python
+from wreath.orm import Mapped, Model, column, relationship
+from wreath.orm.types import Int64, Text
 
-    class User(Model, table="users"):
-        id: Mapped[int] = column(Int64, primary_key=True)
-        email: Mapped[str] = column(Text, unique=True)
-        posts = relationship("Post", foreign_key="author_id", load="selectin")
+class User(Model, table="users"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    email: Mapped[str] = column(Text, unique=True)
+    posts = relationship("Post", foreign_key="author_id", load="selectin")
 
-    registry = app.orm(database="main", models=[User, Post])
-
+registry = app.orm(database="main", models=[User, Post])
+```
 Two rules shape everything here:
 
 * **Attribute access never performs I/O.** Reading a column that was not
   selected, or a relationship that was not loaded, raises. Loading is always a
-  visible ``await``.
-* **Raw SQL stays first class.** ``Session.raw()`` and the ``wreath.postgres``
+  visible `await`.
+* **Raw SQL stays first class.** `Session.raw()` and the `wreath.postgres`
   driver are unchanged and undeprecated; the ORM never rewrites the SQL you
   write yourself.
 

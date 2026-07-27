@@ -1,9 +1,9 @@
-"""Tier-3 auto-remediation (``--fix``).
+"""Tier-3 auto-remediation (`--fix`).
 
 Structurally-safe, semantics-preserving fixes applied by **byte-offset splicing** at the
 parser's element positions — never re-serialising the document, so CSP nonces, formatting
 and comments survive untouched. Only the safe subset from design 08 §5 is applied
-(inject ``lang``, add ``alt=""``, add ``th`` ``scope``, clamp a positive ``tabindex``,
+(inject `lang`, add `alt=""`, add `th` `scope`, clamp a positive `tabindex`,
 strip a zoom-disabling viewport); everything else stays suggestion-only. For source-owned
 *generated* HTML (the API-docs shell) the CLI presents these as patch suggestions rather
 than editing rendered bytes, since that artefact is rebuilt each run.
@@ -30,7 +30,7 @@ class _Text:
         return self._starts[line - 1] + col
 
     def tag_close(self, start: int) -> int:
-        """Index of the ``>`` that closes the tag opening at ``start`` (quote-aware)."""
+        """Index of the `>` that closes the tag opening at `start` (quote-aware)."""
         quote = ""
         i = start
         while i < len(self.html):
@@ -67,7 +67,7 @@ _FIXABLE = ("html-lang", "img-alt", "table-headers", "tabindex", "viewport-scale
 
 
 def apply_fixes(html: str) -> tuple[str, list[str]]:
-    """Return ``(fixed_html, applied)`` — the safe-subset remediations spliced in."""
+    """Return `(fixed_html, applied)` — the safe-subset remediations spliced in."""
     root = parse_html(html)
     tx = _Text(html)
     applied: list[str] = []

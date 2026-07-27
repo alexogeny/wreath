@@ -1072,9 +1072,9 @@ def _pagination_model() -> Any:
 def _pagination_apply_sort(n: int):
     """Applying n request-controlled sort tokens is O(n), not O(n^2).
 
-    ``Select`` is immutable; a per-token ``order_by`` recopies a growing tuple
-    (1+2+...+k) -- O(k^2) in the attacker-controlled ``?sort=`` token count.
-    ``apply_sort`` folds every token into one ``order_by`` call, so this stays
+    `Select` is immutable; a per-token `order_by` recopies a growing tuple
+    (1+2+...+k) -- O(k^2) in the attacker-controlled `?sort=` token count.
+    `apply_sort` folds every token into one `order_by` call, so this stays
     linear. A regression back to the per-token loop turns this quadratic."""
     from wreath.pagination import apply_sort
 
@@ -1331,8 +1331,8 @@ def _sigv4_canonical_request(n: int):
 def _compute_backoff_attempt(attempt: int):
     """Retry backoff is O(1) in the attempt number, not O(attempt).
 
-    ``base * factor**(attempt-1)`` would grow the bignum exponent with the
-    attempt count; the ``min(attempt-1, 32)`` cap holds the exponent constant so
+    `base * factor**(attempt-1)` would grow the bignum exponent with the
+    attempt count; the `min(attempt-1, 32)` cap holds the exponent constant so
     the arithmetic stays flat. A regression that drops the cap makes a hot
     retry-scheduling call scale with (and overflow at) large attempt counts."""
     from wreath._jobcore import compute_backoff

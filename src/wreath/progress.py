@@ -22,21 +22,22 @@ stream reads it.
     async def stream(request):
         return progress_stream(progress, request.path_params["task_id"])
 
-Inside the task, ``reporter.update(42, "processing invoices")`` /
-``reporter.done()`` / ``reporter.fail(exc)``.
+Inside the task, `reporter.update(42, "processing invoices")` /
+`reporter.done()` / `reporter.fail(exc)`.
 
 **Across workers.** The registry is in-process, which is exactly wrong for the
 case that matters most: the durable job runs on worker 3 and the browser is
 connected to worker 1. Give the registry the message bus and every report
-reaches every worker, so whichever one holds the stream can answer it::
+reaches every worker, so whichever one holds the stream can answer it:
 
-    progress = ProgressRegistry(app.messaging("bus", database="app"))
-
+```python
+progress = ProgressRegistry(app.messaging("bus", database="app"))
+```
 No Redis — the bus is the database you already have. Delivery is at-most-once,
 as ephemeral fan-out is: a worker that missed an update gets the next one, and
 percentages are a running commentary rather than a ledger.
 
-The natural pairing is :meth:`wreath.jobs.JobRunner.launch`, which uses the job
+The natural pairing is `wreath.jobs.JobRunner.launch`, which uses the job
 id as the task id and lets the runner set the terminal states itself.
 """
 
@@ -69,7 +70,7 @@ PROGRESS_CHANNEL = "wreath_progress"
 
 _TERMINAL = ("done", "failed")
 
-#: States only :meth:`ProgressRegistry.stream` synthesises, to say *why* a stream
+#: States only `ProgressRegistry.stream` synthesises, to say *why* a stream
 #: ended. A registry never stores one: they describe the stream, not the task.
 #: Without them every non-terminal close -- entry expired, id never seen, budget
 #: spent -- looked identical to each other and to a dropped connection, so a long
@@ -101,7 +102,7 @@ def _ended(last: Progress | None, state: str, message: str) -> Progress:
 
     Carries the last percent seen rather than zero, so a client can render
     "stalled at 40%" instead of a bar that jumps back to the start on the way
-    out. ``error`` stays ``None``: nothing failed, the stream just stopped.
+    out. `error` stays `None`: nothing failed, the stream just stopped.
     """
     return Progress(last.percent if last is not None else 0.0, message, state, None)
 
@@ -117,14 +118,14 @@ class Progress:
 
     @property
     def terminal(self) -> bool:
-        """The *task* finished: ``done`` or ``failed``."""
+        """The *task* finished: `done` or `failed`."""
         return self.state in _TERMINAL
 
     @property
     def ends_stream(self) -> bool:
         """Nothing further will arrive on the stream that yielded this.
 
-        Broader than :attr:`terminal`, which is about the task. A stream also
+        Broader than `terminal`, which is about the task. A stream also
         ends when the registry forgets an entry, when an id never appears, or
         when a watch budget runs out -- and a client needs to tell those apart
         from the connection simply dropping.
@@ -137,7 +138,7 @@ class Progress:
 
 
 class ProgressRegistry:
-    """A bounded map of task id -> latest :class:`Progress`.
+    """A bounded map of task id -> latest `Progress`.
 
     Pass the message bus to make it fleet-wide: every report is applied here and
     published once, and every other worker applies what it receives without
@@ -198,7 +199,7 @@ class ProgressRegistry:
         )
 
     def reporter(self, task_id: str) -> ProgressReporter:
-        """A handle bound to ``task_id`` to hand to the running task."""
+        """A handle bound to `task_id` to hand to the running task."""
         return ProgressReporter(self, task_id)
 
     def get(self, task_id: str) -> Progress | None:
@@ -207,12 +208,12 @@ class ProgressRegistry:
     async def stream(
         self, task_id: str, *, interval: float = 1.0, max_duration: float | None = None
     ):
-        """Yield each new :class:`Progress` for ``task_id`` until it is terminal.
+        """Yield each new `Progress` for `task_id` until it is terminal.
 
-        Polls every ``interval`` seconds (thread-safe, no cross-task signalling);
-        stops after a ``done``/``failed`` state, once the entry is gone, once a
+        Polls every `interval` seconds (thread-safe, no cross-task signalling);
+        stops after a `done`/`failed` state, once the entry is gone, once a
         task that never appeared has been waited for long enough, or once
-        ``max_duration`` seconds have passed.
+        `max_duration` seconds have passed.
 
         That last case is the one worth naming: a stream for an id that does not
         exist used to poll forever, so any caller -- including an unauthenticated
@@ -222,12 +223,12 @@ class ProgressRegistry:
         starts watching a moment before the task is registered.
 
         **Every stream ends with an event saying why**, so a close is never
-        ambiguous with a dropped connection: ``done``/``failed`` when the task
-        finished, ``expired`` when the registry forgot the entry mid-stream,
-        ``unknown`` when the id never appeared, ``detached`` when
-        ``max_duration`` ran out while the task was still going. The last three
-        are :attr:`Progress.ends_stream` but not :attr:`Progress.terminal` in the
-        ``expired``/``unknown`` sense the task never reached -- the registry
+        ambiguous with a dropped connection: `done`/`failed` when the task
+        finished, `expired` when the registry forgot the entry mid-stream,
+        `unknown` when the id never appeared, `detached` when
+        `max_duration` ran out while the task was still going. The last three
+        are `Progress.ends_stream` but not `Progress.terminal` in the
+        `expired`/`unknown` sense the task never reached -- the registry
         stopped being able to answer, which is not the same as the work stopping.
         """
         last: Progress | None = None
@@ -263,7 +264,7 @@ class ProgressRegistry:
 
 
 class ProgressReporter:
-    """A task's write handle for one ``task_id`` (from ``registry.reporter``)."""
+    """A task's write handle for one `task_id` (from `registry.reporter`)."""
 
     __slots__ = ("_registry", "_task_id")
 
@@ -292,17 +293,17 @@ def status_response(
     *,
     authorize: Callable[[str], bool] | None = None,
 ) -> Response:
-    """A JSON status for ``task_id`` (``404`` if unknown, expired, or refused).
+    """A JSON status for `task_id` (`404` if unknown, expired, or refused).
 
-    ``authorize(task_id) -> bool`` decides whether *this* caller may watch that
-    task. It matters more than it looks: :meth:`wreath.jobs.JobRunner.launch`
+    `authorize(task_id) -> bool` decides whether *this* caller may watch that
+    task. It matters more than it looks: `wreath.jobs.JobRunner.launch`
     makes the task id the job id, which is a sequence, so without a guard the
     ids are countable and every task's state, message, and error text is
     readable by whoever counts. The predicate is synchronous on purpose -- this
     function is not a coroutine, and a handler that needs to await something can
     do it before calling.
 
-    A refusal answers ``404``, identical to an unknown id: a distinct ``403``
+    A refusal answers `404`, identical to an unknown id: a distinct `403`
     would confirm which ids exist, which is most of what enumeration wants.
     """
     if authorize is not None and not authorize(task_id):
@@ -337,11 +338,11 @@ def progress_stream(
     max_duration: float | None = None,
     authorize: Callable[[str], bool] | None = None,
 ) -> SSEResponse | Response:
-    """An SSE response streaming ``progress`` events until the task is terminal.
+    """An SSE response streaming `progress` events until the task is terminal.
 
-    ``authorize`` and ``max_duration`` are :func:`status_response`'s and
-    :meth:`ProgressRegistry.stream`'s respectively; a refused caller gets the
-    same ``404`` a missing task does, before any stream is opened.
+    `authorize` and `max_duration` are `status_response`'s and
+    `ProgressRegistry.stream`'s respectively; a refused caller gets the
+    same `404` a missing task does, before any stream is opened.
     """
     if authorize is not None and not authorize(task_id):
         return _unknown_task(task_id)

@@ -1,7 +1,7 @@
 """Curated WCAG 2.2 A/AA rules applicable to server-generated HTML.
 
-Each rule is a callable ``(root, surface) -> Iterator[Finding]`` registered in
-``A11Y_RULES``. The set is deliberately curated to criteria that are decidable from
+Each rule is a callable `(root, surface) -> Iterator[Finding]` registered in
+`A11Y_RULES`. The set is deliberately curated to criteria that are decidable from
 static markup — keyboard/focus-trap runtime behaviour, live regions, and motion are out
 of scope (see docs/reference). Colour contrast (1.4.3) is Tier 2, not here.
 

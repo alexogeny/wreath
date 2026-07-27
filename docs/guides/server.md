@@ -222,6 +222,52 @@ best protocol it supports and older clients still work. HTTP/3 is compiled in
 only when the extension is built with `WREATH_BUILD_HTTP3=1`, because it pulls in
 a QUIC stack you shouldn't pay for unless you want it.
 
+### Building the HTTP/3 extension
+
+`WREATH_BUILD_HTTP3=1` needs `pkg-config`, nghttp3, and ngtcp2 built against a
+QUIC-capable TLS backend. Wreath accepts either ngtcp2 crypto backend —
+`libngtcp2_crypto_ossl` (vanilla OpenSSL 3.5 or newer, which is where the QUIC
+TLS API landed) or `libngtcp2_crypto_quictls`.
+
+Most distributions do not package a usable combination. Debian trixie, for
+example, ships ngtcp2 with only the **GnuTLS** crypto backend, which wreath does
+not link against; the OpenSSL one is not packaged at all. Build both libraries
+into a local prefix instead — the release tarballs ship a pre-generated
+`configure`, so this needs only a C compiler and `make`:
+
+```bash
+PREFIX="$HOME/.local/wreath-quic"
+
+curl -sSLO https://github.com/ngtcp2/nghttp3/releases/download/v1.8.0/nghttp3-1.8.0.tar.xz
+tar xf nghttp3-1.8.0.tar.xz && cd nghttp3-1.8.0
+./configure --prefix="$PREFIX" --enable-lib-only && make -j"$(nproc)" && make install && cd ..
+
+curl -sSLO https://github.com/ngtcp2/ngtcp2/releases/download/v1.25.0/ngtcp2-1.25.0.tar.xz
+tar xf ngtcp2-1.25.0.tar.xz && cd ngtcp2-1.25.0
+OPENSSL_CFLAGS="-I/usr/include" OPENSSL_LIBS="-lssl -lcrypto" \
+  ./configure --prefix="$PREFIX" --enable-lib-only --with-openssl
+make -j"$(nproc)" && make install && cd ..
+
+export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH"
+export LD_LIBRARY_PATH="$PREFIX/lib:$LD_LIBRARY_PATH"
+```
+
+Check ngtcp2's configure summary reports `libngtcp2_crypto_ossl: yes` before
+building — if it reports `no`, the extension will compile and then fail to load.
+The `OPENSSL_*` overrides exist so configure can find OpenSSL without
+`pkg-config`; drop them if `openssl.pc` is installed.
+
+Keep the prefix **first** on `LD_LIBRARY_PATH`. A distribution `libngtcp2` with a
+matching soname will otherwise satisfy the core library while the crypto backend
+comes from your build, mixing two versions across one ABI.
+
+`wreath.server._http3_available()` reports whether the extension *loads*, not
+whether it exists. A partial toolchain — the `.so` compiled, a transitive library
+absent — reports `False` so `serve()` raises its own actionable error rather than
+an `ImportError` from deep in the import machinery. When that happens, `ldd` on
+`src/wreath/_native/_http3*.so` names the missing library, and the fix is to
+supply it rather than to rebuild.
+
 ## Configuring from the environment
 
 The same application should run differently in development and production without

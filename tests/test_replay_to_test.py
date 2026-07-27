@@ -239,3 +239,210 @@ def test_a_single_request_with_a_trailing_newline_is_still_accepted():
 
     assert request.method == "POST"
     assert request.body == b'{"name": "Bea"}\n'
+
+
+# --- every refusal it advertises, and nothing it does not --------------------
+#
+# `recorded_request` refuses rather than guesses, which only means something if
+# every refusal is reachable. The table below is checked against the number of
+# `raise ReplayError` sites in the function itself, so adding a refusal without
+# a case for it turns this red instead of shipping an unreachable one.
+
+REFUSALS = {
+    "no request bytes at all": (b"", "no request"),
+    "a head with no terminator": (
+        b"GET /llamas HTTP/1.1\r\nhost: x\r\n",
+        "incomplete",
+    ),
+    "a request line missing its version": (
+        b"GET /llamas\r\nhost: x\r\n\r\n",
+        "malformed",
+    ),
+    "a header line with no colon": (
+        b"GET /llamas HTTP/1.1\r\nhost: x\r\njust-a-word\r\n\r\n",
+        "malformed header",
+    ),
+    "a chunked body": (
+        b"POST /llamas HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\n\r\n0\r\n\r\n",
+        "chunked",
+    ),
+    "a body shorter than its content-length": (
+        b"POST /llamas HTTP/1.1\r\nhost: x\r\ncontent-length: 99\r\n\r\n{}",
+        "incomplete",
+    ),
+    "two requests on one connection": (GET + POST, "more than one request"),
+}
+
+
+@pytest.mark.parametrize(("case", "payload"), sorted(REFUSALS.items()))
+def test_every_advertised_refusal_actually_fires(case: str, payload) -> None:
+    raw, match = payload
+    with pytest.raises(ReplayError, match=match):
+        recorded_request(_recording(raw))
+
+
+def test_the_refusal_table_covers_every_refusal_in_the_function() -> None:
+    """A coverage gate that cannot drift, because it reads the code.
+
+    Three of this repository's seven "checks with nothing to check" were
+    refusals nobody had ever seen fire. Counting the `raise` sites in
+    `recorded_request` and comparing them with the cases above means a new
+    refusal ships with a case for it or turns this red.
+    """
+    import inspect
+
+    from wreath.replay import recorded_request as function
+
+    source = inspect.getsource(function)
+    assert source.count("raise ReplayError(") == len(REFUSALS), (
+        "recorded_request has a refusal with no case in REFUSALS (or one case "
+        "too many); every refusal must be shown to fire"
+    )
+
+
+def test_a_recording_it_does_not_refuse_is_read_correctly() -> None:
+    """The control the table needs. A `recorded_request` that refused
+    everything would satisfy all seven cases above."""
+    request = recorded_request(_recording(POST))
+    assert (request.method, request.path) == ("POST", "/llamas")
+    assert request.body == b'{"name": "Bea"}\n'
+
+
+# --- the headers the generator drops, and the ones it must not ---------------
+
+
+HOP_BY_HOP = (
+    b"GET /llamas/7 HTTP/1.1\r\n"
+    b"host: herd.example\r\n"
+    b"content-length: 0\r\n"
+    b"connection: keep-alive\r\n"
+    b"accept: application/json\r\n"
+    b"x-request-id: 9f51\r\n"
+    b"\r\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_transport_headers_are_dropped_from_the_generated_call() -> None:
+    """`host`, `content-length` and `connection` are the test client's business.
+
+    Carrying them into the generated call would assert on transport rather than
+    on behaviour: `TestClient` sets its own `host`, computes its own framing,
+    and a pinned `connection: keep-alive` would make the test fail the day the
+    client changed how it pools. The rule is in `wreath.replay`'s docstring and
+    in the subsystem manifest; this is where it is enforced.
+    """
+    source = await generate_test(_app(), _recording(HOP_BY_HOP), target="herd.app:app")
+    assert "'host'" not in source
+    assert "'content-length'" not in source
+    assert "'connection'" not in source
+
+
+@pytest.mark.asyncio
+async def test_every_other_header_survives_into_the_generated_call() -> None:
+    """The other half, without which the test above passes for a generator that
+    drops every header."""
+    source = await generate_test(_app(), _recording(HOP_BY_HOP), target="herd.app:app")
+    assert "'accept': 'application/json'" in source
+    assert "'x-request-id': '9f51'" in source
+
+
+@pytest.mark.asyncio
+async def test_a_header_named_like_a_dropped_one_is_kept() -> None:
+    """The drop is by exact name. `x-connection` is not `connection`, and a
+    prefix or substring match would quietly delete a caller's header."""
+    raw = (
+        b"GET /llamas/7 HTTP/1.1\r\nhost: x\r\n"
+        b"x-connection: pooled\r\nhost-region: eu\r\n\r\n"
+    )
+    source = await generate_test(_app(), _recording(raw), target="herd.app:app")
+    assert "'x-connection': 'pooled'" in source
+    assert "'host-region': 'eu'" in source
+
+
+# --- record -> generate -> run -> the same observation -----------------------
+
+
+async def _run_generated(source: str, app_factory) -> None:
+    """Compile and run a generated module against a module-level app."""
+    import sys
+    import types
+
+    module = types.ModuleType("herd_roundtrip_app")
+    module.app = app_factory()
+    sys.modules["herd_roundtrip_app"] = module
+    try:
+        namespace: dict = {}
+        exec(compile(source, "generated_test.py", "exec"), namespace)
+        test = next(value for name, value in namespace.items() if name.startswith("test_"))
+        await test()
+    finally:
+        del sys.modules["herd_roundtrip_app"]
+
+
+@pytest.mark.asyncio
+async def test_the_generated_test_asserts_what_the_client_actually_observes() -> None:
+    """The round trip, closed: record, generate, run, and the same answer.
+
+    Not "it produces a file that imports". The generated assertion has to be the
+    observation a direct `TestClient` call makes for the same request, or the
+    tool has transcribed something other than what happened -- which is the one
+    failure mode that would make every generated regression test worthless
+    while all of them passed.
+    """
+    from wreath.testing import TestClient
+
+    async with TestClient(_app()) as client:
+        direct = await client.request("GET", "/llamas/7?include=treks")
+
+    source = await generate_test(_app(), _recording(GET), target="herd_roundtrip_app:app")
+    assert f"assert response.status == {direct.status}" in source
+    assert f"assert response.body == {direct.body!r}" in source
+    await _run_generated(source, _app)
+
+
+@pytest.mark.asyncio
+async def test_the_generated_assertion_fails_when_the_behaviour_changes() -> None:
+    """Proof the assertion is load-bearing rather than decorative.
+
+    A characterisation test that passes against a *different* application is not
+    a characterisation of anything. Generated against one app and run against
+    one that answers differently, it must fail -- and this is the only way to
+    know the generated `assert` is comparing something real.
+    """
+    source = await generate_test(_app(), _recording(GET), target="herd_roundtrip_app:app")
+
+    def changed() -> Wreath:
+        app = Wreath()
+
+        @app.get("/llamas/{llama_id}")
+        async def llama(request, llama_id: int) -> dict:
+            return {"id": llama_id, "name": "Someone Else"}
+
+        return app
+
+    with pytest.raises(AssertionError):
+        await _run_generated(source, changed)
+
+
+@pytest.mark.asyncio
+async def test_a_generated_test_is_stable_across_regenerations() -> None:
+    """Two generations of the same recording produce the same source.
+
+    A generator whose output varied -- header order, dict ordering, a timestamp
+    -- would show up as a diff on every regeneration, and a file that always
+    diffs is a file nobody reads.
+    """
+    first = await generate_test(_app(), _recording(POST), target="herd.app:app")
+    second = await generate_test(_app(), _recording(POST), target="herd.app:app")
+    assert first == second
+
+
+@pytest.mark.asyncio
+async def test_the_generated_source_is_valid_python_and_says_it_is_generated() -> None:
+    import ast
+
+    source = await generate_test(_app(), _recording(POST), target="herd.app:app")
+    ast.parse(source)  # a file that does not parse is not a test
+    assert source.splitlines()[0].startswith("# Generated by")
+    assert "Re-generate rather than edit" in source

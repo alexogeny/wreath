@@ -1,11 +1,11 @@
-"""Pure AWS Signature Version 4 signing (zero-dependency, stdlib ``hmac``/``hashlib``).
+"""Pure AWS Signature Version 4 signing (zero-dependency, stdlib `hmac`/`hashlib`).
 
 This is the shipped implementation AND the parity contract for an optional native
-``sigv4_signing_key`` helper (design 09 §5/§10). It is used by the Phase-2 S3
+`sigv4_signing_key` helper (design 09 §5/§10). It is used by the Phase-2 S3
 storage backend, and is implemented + vector-tested now as the correctness anchor.
 
-TODO(native): the 4-HMAC signing-key chain (``signing_key``) is the only piece worth
-a ``security.c`` accelerator; any such twin MUST be byte-identical to this.
+TODO(native): the 4-HMAC signing-key chain (`signing_key`) is the only piece worth
+a `security.c` accelerator; any such twin MUST be byte-identical to this.
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def _hmac(key: bytes, msg: str) -> bytes:
 
 
 def uri_encode(value: str, *, encode_slash: bool = True) -> str:
-    """RFC 3986 percent-encoding with AWS's unreserved set (``A-Za-z0-9-._~``)."""
+    """RFC 3986 percent-encoding with AWS's unreserved set (`A-Za-z0-9-._~`)."""
     return quote(value, safe="" if encode_slash else "/")
 
 
@@ -110,7 +110,7 @@ def sign(
     payload_hash: str | None = None,
     session_token: str | None = None,
 ) -> dict[str, str]:
-    """Return the headers to add for a header-auth SigV4 request (``Authorization`` etc.)."""
+    """Return the headers to add for a header-auth SigV4 request (`Authorization` etc.)."""
     date_stamp = amz_date[:8]
     hdrs: dict[str, str] = {k.lower(): v for k, v in (headers or {}).items()}
     hdrs.setdefault("host", host)

@@ -1,17 +1,17 @@
 """A small, controllable in-process cache with LRU eviction and optional TTL.
 
-Distinct from :class:`SnapshotCache` (whole-generation, read-mostly reference
+Distinct from `SnapshotCache` (whole-generation, read-mostly reference
 data): this is a *bounded, evictable* key/value store for hot request-path uses
 — response caching, idempotency replay — where you want a hard ceiling on
 entries and time, no background threads, and no external backend to operate.
 
-You control it completely: a fixed ``max_entries`` (LRU eviction past it), an
-optional ``ttl`` (lazy expiry on read), and explicit ``delete``/``clear``. It is
+You control it completely: a fixed `max_entries` (LRU eviction past it), an
+optional `ttl` (lazy expiry on read), and explicit `delete`/`clear`. It is
 built for single-thread (event-loop) use; there is no internal lock.
 
-The read/write path is ``OrderedDict`` moves and pops that CPython already
+The read/write path is `OrderedDict` moves and pops that CPython already
 services in C, so this pure implementation is the shipped one; a native twin can
-be selected the same way :mod:`wreath.cache` selects ``SnapshotCache`` if a
+be selected the same way `wreath.cache` selects `SnapshotCache` if a
 measured one is ever added.
 """
 
@@ -45,7 +45,7 @@ class BoundedCache[K, V]:
     Args:
         max_entries: hard ceiling; the least-recently-used entry is evicted once
             a set would exceed it. Must be positive.
-        ttl: seconds an entry stays fresh, or ``None`` to never expire by time.
+        ttl: seconds an entry stays fresh, or `None` to never expire by time.
             Expiry is lazy — checked on read — so nothing runs in the background.
         clock: monotonic time source, injectable for deterministic tests.
     """
@@ -87,7 +87,7 @@ class BoundedCache[K, V]:
         return entry
 
     def get(self, key: K, default: V | None = None) -> V | None:
-        """Return the value for ``key`` (refreshing its recency), or ``default``."""
+        """Return the value for `key` (refreshing its recency), or `default`."""
         entry = self._live(key)
         if entry is None:
             self._misses += 1
@@ -97,7 +97,7 @@ class BoundedCache[K, V]:
         return entry[0]
 
     def set(self, key: K, value: V) -> None:
-        """Store ``value`` under ``key``, evicting the LRU entry if now over capacity."""
+        """Store `value` under `key`, evicting the LRU entry if now over capacity."""
         expiry = None if self._ttl is None else self._clock() + self._ttl
         if key in self._data:
             self._data.move_to_end(key)
@@ -110,7 +110,7 @@ class BoundedCache[K, V]:
         return self._live(key) is not None  # type: ignore[arg-type]
 
     def delete(self, key: K) -> bool:
-        """Drop ``key``; return whether it was present."""
+        """Drop `key`; return whether it was present."""
         return self._data.pop(key, None) is not None
 
     def clear(self) -> None:

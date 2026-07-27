@@ -4,11 +4,11 @@ Covers the block and inline constructs wreath's own docs actually use: ATX
 headings (with GitHub slugs + a table of contents), fenced code blocks,
 unordered/ordered lists, blockquotes, thematic breaks, paragraphs, and inline
 code / strong / emphasis / links / autolinks. It renders straight to HTML today;
-the seam to watch is :func:`render` — the native ``_docs`` extension will parse
+the seam to watch is `render` — the native `_docs` extension will parse
 into the versioned WDT1 tape and this becomes the parity twin's render half.
 
 Security is the load-bearing property: every text and attribute span is HTML-
-escaped, and link targets are scheme-checked (no ``javascript:`` URLs). Full
+escaped, and link targets are scheme-checked (no `javascript:` URLs). Full
 CommonMark (nested lists, reference links, the emphasis delimiter stack, GFM
 tables) and syntax highlighting are follow-on work in the native parser.
 """
@@ -25,7 +25,7 @@ __all__ = ["Rendered", "TocEntry", "render", "slugify"]
 _SAFE_SCHEME = re.compile(r"^(?:https?:|mailto:|#|/|\.{0,2}/|[^:]*$)", re.IGNORECASE)
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 #: `key="value"` attributes trailing a fence's language, e.g.
-#: ```` ```python title="app.py" hl_lines="3 4" ````.
+#: ``` ``python title="app.py" hl_lines="3 4" ````.
 _FENCE_ATTR = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
 #: Optional trailing `{#custom-id}` on a heading (attr_list style) — lets a page
 #: pin an explicit anchor, e.g. mkdocstrings' dotted `wreath.mod.Class` ids so
@@ -381,7 +381,7 @@ _SPAN = re.compile(r"(<span[^>]*>|</span>)")
 
 
 def _line_numbers(spec: str) -> frozenset[int]:
-    """Parse an ``hl_lines`` spec — ``"2 5-7"`` — into a set of line numbers."""
+    """Parse an `hl_lines` spec — `"2 5-7"` — into a set of line numbers."""
     out: set[int] = set()
     for part in spec.split():
         start, sep, end = part.partition("-")
@@ -396,7 +396,7 @@ def _line_numbers(spec: str) -> frozenset[int]:
 
 
 def _mark_lines(html: str, wanted: frozenset[int]) -> str:
-    """Wrap the 1-indexed lines in ``wanted`` so they can be shaded."""
+    """Wrap the 1-indexed lines in `wanted` so they can be shaded."""
     if not wanted:
         return html
     lines: list[str] = [""]
@@ -435,7 +435,7 @@ def _indent(line: str) -> int:
 
 
 def _strip_frontmatter(lines: list[str]) -> list[str]:
-    """Drop a leading ``---`` … ``---`` YAML front-matter block, if present."""
+    """Drop a leading `---` … `---` YAML front-matter block, if present."""
     if lines and lines[0].strip() == "---":
         for j in range(1, len(lines)):
             if lines[j].strip() == "---":
@@ -468,5 +468,5 @@ def _align(aligns: list[str], column: int) -> str:
 
 
 def render(source: str) -> Rendered:
-    """Render markdown ``source`` to HTML plus its table of contents and title."""
+    """Render markdown `source` to HTML plus its table of contents and title."""
     return _Renderer().render(source)

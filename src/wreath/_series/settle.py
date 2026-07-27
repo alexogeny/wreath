@@ -1,7 +1,7 @@
 """Sealing: the point at which a bucket stops being a question and becomes an answer.
 
-A bucket ``[start, end)`` is **sealed** once ``now() >= end + lateness``, where
-the lateness is declared by ``.seal(after=...)``. Before that it is **open** and
+A bucket `[start, end)` is **sealed** once `now() >= end + lateness`, where
+the lateness is declared by `.seal(after=...)`. Before that it is **open** and
 every read recomputes it, because it can still change. After it, the value is
 final, and recomputing it is not a cheap safety net -- it is doing the same
 arithmetic over the same rows to reach the same number, once per reader,
@@ -10,7 +10,7 @@ forever.
 **A settled bucket is not a cache**, and the vocabulary here keeps that
 straight. A cache may be evicted, must be recomputable, and manages staleness
 with a TTL. A settled row has no TTL, is never evicted, and is not recomputed on
-a hunch. The words are ``seal``, ``sealed``, ``open`` and ``settled``; the
+a hunch. The words are `seal`, `sealed`, `open` and `settled`; the
 response cache is a genuine cache and keeps its own name.
 
 **Nothing here deletes anything.** Settling stores a value; it does not touch the
@@ -24,13 +24,13 @@ The hard case is a row that lands behind the watermark: a trek recorded late, a
 backfill, an import that ran on Monday for Friday's work. Three answers, and the
 design settles on the third:
 
-* **Refuse the write.** Wrong, decisively. ``Trek`` is a business table, and a
+* **Refuse the write.** Wrong, decisively. `Trek` is a business table, and a
   chart's watermark must never be able to fail a business write -- the same rule
   that says a broken cache subscriber cannot fail a committed write.
 * **Re-open the bucket.** Right in spirit, but only sound while the raw rows are
   still there to recompute from. That is a shrinking window once retention
   lands, and a rule that works for three days and then quietly stops is worse
-  than one that never worked. Available as ``on_late="reopen"``, never the
+  than one that never worked. Available as `on_late="reopen"`, never the
   default.
 * **Record a correction.** The settled value stays immutable and the difference
   is stored beside it, folded in when the series is read. A delta is small, it
@@ -42,18 +42,18 @@ Who notices a late write, and why it is not the write path
 ----------------------------------------------------------
 
 Nothing here hooks the ORM's write events, and that is deliberate rather than an
-omission. ``_orm_events`` is **model-grained on purpose** -- it publishes the set
+omission. `_orm_events` is **model-grained on purpose** -- it publishes the set
 of model *names* a session touched, with a written argument against carrying
 rows -- so it cannot say which bucket a late row belongs to or what it
 contributes. Making it row-grained to serve this would put per-row bookkeeping
 on every write in the application to save work on a chart.
 
-So corrections are found by :func:`reconcile`, an operation the application runs
+So corrections are found by `reconcile`, an operation the application runs
 deliberately: it recomputes sealed buckets, compares them to what was stored,
 and records the difference. Stage 8's rollup job is its intended caller, and the
 design already notes that a chunked backfill and a rollup want the same
 machinery. Until something calls it, a late write is not *silently* absorbed --
-:attr:`SealState.settled_through` and the envelope's ``corrections`` say exactly
+`SealState.settled_through` and the envelope's `corrections` say exactly
 how far the settled data has been reconciled, so the gap is visible rather than
 assumed away.
 """
@@ -80,13 +80,13 @@ def schema_sql(*, schema: str = SCHEMA) -> str:
 
     Emitted for a migration to apply. Nothing in Wreath runs this for you.
 
-    The primary key is ``(view, params, bucket)``: one settled value per
-    declaration, per set of bound parameters, per bucket. ``params`` is present
-    because a view carrying ``Param("herd")`` computes a different number for
+    The primary key is `(view, params, bucket)`: one settled value per
+    declaration, per set of bound parameters, per bucket. `params` is present
+    because a view carrying `Param("herd")` computes a different number for
     each herd, and storing them under one key would serve one herd's activity to
     another.
 
-    ``measures`` is JSONB rather than a column per measure because the measure
+    `measures` is JSONB rather than a column per measure because the measure
     names are the caller's, declared in Python and changeable without a
     migration -- the table has to hold whatever they chose.
     """
@@ -116,12 +116,12 @@ class Seal:
     """How long after a bucket closes it stops being able to change.
 
     Args:
-        after: the lateness allowance, as seconds or a duration like ``"2h"``.
+        after: the lateness allowance, as seconds or a duration like `"2h"`.
             A bucket is sealed once this much time has passed since its *end*,
             not since its start.
         on_late: what a reconcile does when it finds a sealed bucket whose rows
-            have changed. ``"correct"`` records the difference beside the
-            settled value and leaves it immutable. ``"reopen"`` replaces the
+            have changed. `"correct"` records the difference beside the
+            settled value and leaves it immutable. `"reopen"` replaces the
             settled value outright, which is only sound while the raw rows are
             still present -- so it stays opt-in.
     """
@@ -141,7 +141,7 @@ class SealState:
     """Where the watermark falls for one range, and what is known behind it."""
 
     #: The first bucket start that is still open. Everything strictly before
-    #: this is sealed. ``None`` when the whole range is open.
+    #: this is sealed. `None` when the whole range is open.
     sealed_through: Any
     #: Bucket starts inside the range that have a stored settled value.
     settled: tuple[Any, ...] = ()
@@ -156,15 +156,15 @@ class SealState:
 def watermark(now: Any, *, bucket: Bucket, zone_name: str, after: float) -> Any:
     """The first bucket start that is still open.
 
-    A bucket ``[start, end)`` is sealed once ``now >= end + after``, so the
-    buckets still open are exactly those ending after ``now - after``. Flooring
+    A bucket `[start, end)` is sealed once `now >= end + after`, so the
+    buckets still open are exactly those ending after `now - after`. Flooring
     that instant gives the first of them.
 
-    ``after`` is a fixed number of seconds and is subtracted as an absolute
+    `after` is a fixed number of seconds and is subtracted as an absolute
     offset, which is the right arithmetic here: "two hours after the bucket
     closed" means two hours of elapsed time, not two hours on a wall clock that
     may have jumped. The *bucket* boundary is where the calendar matters, and
-    :meth:`~wreath.temporal.Bucket.floor` already owns that.
+    `floor` already owns that.
     """
     deadline = now - datetime.timedelta(seconds=after)
     return bucket.floor(deadline, zone_name)
@@ -211,7 +211,7 @@ def view_key(
 def params_key(values: dict[str, Any]) -> str:
     """A stable identity for one set of bound parameters.
 
-    ``""`` when a view takes none, so the common case reads as absent rather
+    `""` when a view takes none, so the common case reads as absent rather
     than as a hash of nothing.
     """
     if not values:
@@ -240,7 +240,7 @@ def select_settled(*, schema: str = SCHEMA) -> str:
 def insert_settled(*, schema: str = SCHEMA) -> str:
     """Store one computed bucket.
 
-    ``DO NOTHING`` rather than ``DO UPDATE``: two readers materialising the same
+    `DO NOTHING` rather than `DO UPDATE`: two readers materialising the same
     sealed bucket compute the same number from the same rows, so the loser has
     nothing to add. Overwriting would also be the one path by which an ordinary
     read could silently change a settled value, which is exactly what sealing
@@ -269,7 +269,7 @@ def upsert_correction(*, schema: str = SCHEMA) -> str:
 
 
 def replace_settled(*, schema: str = SCHEMA) -> str:
-    """``on_late="reopen"``: overwrite the settled value and drop its correction.
+    """`on_late="reopen"`: overwrite the settled value and drop its correction.
 
     Two statements rather than one, because dropping a correction that is no
     longer true is part of reopening and leaving it would double-count.
@@ -315,9 +315,9 @@ def fold(settled: dict[str, Any], delta: dict[str, Any] | None) -> dict[str, Any
 def difference(
     settled: dict[str, Any], current: dict[str, Any], measures: tuple[tuple[str, Any], ...]
 ) -> dict[str, Any] | None:
-    """What to record so ``fold(settled, delta) == current``.
+    """What to record so `fold(settled, delta) == current`.
 
-    ``None`` when nothing moved, so a reconcile over a quiet range writes
+    `None` when nothing moved, so a reconcile over a quiet range writes
     nothing at all rather than a table of zeroes.
     """
     delta: dict[str, Any] = {}
@@ -337,7 +337,7 @@ def difference(
 
 
 def naive_local(value: Any, zone_name: str) -> Any:
-    """The wall clock an instant reads as in ``zone_name``.
+    """The wall clock an instant reads as in `zone_name`.
 
     Shared with the compiler's bucketing so a settled bucket and a freshly
     computed one are the same instant, not two readings that agree most days.

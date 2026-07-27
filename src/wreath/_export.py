@@ -1,24 +1,24 @@
 """OTLP export pipeline for the Native Flight Recorder (Stage 4, slice 4c).
 
 This is the threaded, network-facing half of OTLP support: the projector hands
-each finished :class:`~wreath._projector.ProjectedTrace` to
-:meth:`ExportPipeline.on_trace`, which enqueues it on a bounded queue; a
+each finished `ProjectedTrace` to
+`ExportPipeline.on_trace`, which enqueues it on a bounded queue; a
 dedicated exporter thread drains the queue on an interval, batches it, maps it to
-OTLP through the pure :mod:`wreath._otlp` builders, and pushes it over a
+OTLP through the pure `wreath._otlp` builders, and pushes it over a
 transport. Metrics are exported on the same tick from a snapshot provider.
 
 Two isolation guarantees hold the plan's line that exporter behavior never
 touches a request stack and its failures never stall anything:
 
-- ``on_trace`` only enqueues (dropping and counting when the queue is full), so
+- `on_trace` only enqueues (dropping and counting when the queue is full), so
   the projector thread never blocks on the network.
 - Every transport call is wrapped; a raising/​slow exporter increments an error
   counter and the pipeline keeps draining. Backpressure shows up as visible
   queue drops, never as growth or a stalled projector.
 
-The default :class:`OtlpHttpExporter` speaks OTLP/HTTP+JSON over the standard
+The default `OtlpHttpExporter` speaks OTLP/HTTP+JSON over the standard
 library (`urllib`), so enabling export pulls in **no** third-party dependency;
-any object with ``export_traces``/``export_metrics`` methods can stand in.
+any object with `export_traces`/`export_metrics` methods can stand in.
 """
 
 from __future__ import annotations
@@ -57,9 +57,9 @@ class TraceMetricTransport(_Protocol):
 
 
 class OtlpHttpExporter:
-    """A minimal OTLP/HTTP+JSON exporter over ``urllib`` (no third-party dep).
+    """A minimal OTLP/HTTP+JSON exporter over `urllib` (no third-party dep).
 
-    Posts to ``{endpoint}/v1/traces`` and ``{endpoint}/v1/metrics`` with a bounded
+    Posts to `{endpoint}/v1/traces` and `{endpoint}/v1/metrics` with a bounded
     timeout. Any transport-level failure raises, which the pipeline isolates and
     counts -- this class deliberately holds no retry/backoff policy of its own so
     that the single "drop and count" backpressure story stays in one place.
@@ -100,9 +100,9 @@ class OtlpHttpExporter:
 class ExportPipeline:
     """Owns the export queue and the exporter thread.
 
-    ``snapshot_provider`` is called on the exporter thread each tick to obtain a
-    fresh :class:`ProjectorSnapshot` for metrics; pass ``None`` to export traces
-    only. ``image`` supplies low-cardinality route names/attributes to the OTLP
+    `snapshot_provider` is called on the exporter thread each tick to obtain a
+    fresh `ProjectorSnapshot` for metrics; pass `None` to export traces
+    only. `image` supplies low-cardinality route names/attributes to the OTLP
     mapping.
     """
 
@@ -163,7 +163,7 @@ class ExportPipeline:
         self, provider: Callable[[], ProjectorSnapshot | None]
     ) -> None:
         """Attach the metrics source. The projector is built after the pipeline
-        (it needs the pipeline's ``on_trace``), so this wires the back-reference."""
+        (it needs the pipeline's `on_trace`), so this wires the back-reference."""
         self._snapshot_provider = provider
 
     def start(self) -> None:

@@ -4,7 +4,7 @@ Operator overloads only build nodes. Nothing here inspects a database, holds a
 connection, or renders SQL text; the compiler owns rendering and the session
 owns execution.
 
-Nodes compare by identity, because ``==`` is overloaded to *build* an equality
+Nodes compare by identity, because `==` is overloaded to *build* an equality
 predicate rather than answer one.
 """
 
@@ -34,8 +34,8 @@ IN = "IN"
 NOT_IN = "NOT IN"
 
 # JSONB and array operators. The two-word "= ANY"/"= ALL" tokens are rendered
-# specially by the compiler (``value = ANY(column)``); the rest render as an
-# ordinary ``left <op> right`` and only widen the operator allowlist.
+# specially by the compiler (`value = ANY(column)`); the rest render as an
+# ordinary `left <op> right` and only widen the operator allowlist.
 CONTAINS = "@>"
 CONTAINED_BY = "<@"
 HAS_KEY = "?"
@@ -149,39 +149,39 @@ class ColumnExpr(Expression):
 
     # -- JSONB and array operators ----------------------------------------
     #
-    # ``contains``/``contained_by`` work on both jsonb and array columns (the
+    # `contains`/`contained_by` work on both jsonb and array columns (the
     # operand takes the column's own type); the jsonb key operators require a
-    # ``Jsonb`` column and the array operators require an ``Array`` column, both
+    # `Jsonb` column and the array operators require an `Array` column, both
     # checked at build time so a mistyped query fails at the call site.
 
     def contains(self, other: Any) -> BinaryExpr:
-        """``self @> other`` -- jsonb/array containment."""
+        """`self @> other` -- jsonb/array containment."""
         return BinaryExpr(CONTAINS, self, _bind(self.column, other))
 
     def contained_by(self, other: Any) -> BinaryExpr:
-        """``self <@ other`` -- reverse jsonb/array containment."""
+        """`self <@ other` -- reverse jsonb/array containment."""
         return BinaryExpr(CONTAINED_BY, self, _bind(self.column, other))
 
     def has_key(self, key: str) -> BinaryExpr:
-        """``self ? key`` -- the jsonb object has this top-level key."""
+        """`self ? key` -- the jsonb object has this top-level key."""
         self._require_jsonb("has_key")
         return BinaryExpr(HAS_KEY, self, _bind_as(key, Text))
 
     def has_any(self, keys: Any) -> BinaryExpr:
-        """``self ?| keys`` -- the jsonb object has any of these keys."""
+        """`self ?| keys` -- the jsonb object has any of these keys."""
         self._require_jsonb("has_any")
         return BinaryExpr(HAS_ANY, self, _bind_as(_nonempty(keys, "has_any"), TextArray))
 
     def has_all(self, keys: Any) -> BinaryExpr:
-        """``self ?& keys`` -- the jsonb object has all of these keys."""
+        """`self ?& keys` -- the jsonb object has all of these keys."""
         self._require_jsonb("has_all")
         return BinaryExpr(HAS_ALL, self, _bind_as(_nonempty(keys, "has_all"), TextArray))
 
     def path(self, elements: Any, *, as_json: bool = False) -> _JsonPath:
         """A jsonb path extraction completed by a comparison.
 
-        ``Model.data.path(["a", "b"]) == "x"`` renders ``(data #>> $1) = $2``.
-        ``as_json=True`` extracts a sub-document with ``#>`` instead, usable with
+        `Model.data.path(["a", "b"]) == "x"` renders `(data #>> $1) = $2`.
+        `as_json=True` extracts a sub-document with `#>` instead, usable with
         the jsonb operators.
         """
         if self.column.pg_type is not Json and self.column.pg_type is not Jsonb:
@@ -191,19 +191,19 @@ class ColumnExpr(Expression):
         return _JsonPath(self, tuple(elements), as_json)
 
     def overlaps(self, other: Any) -> BinaryExpr:
-        """``self && other`` -- the arrays share at least one element."""
+        """`self && other` -- the arrays share at least one element."""
         self._require_array("overlaps")
         return BinaryExpr(
             OVERLAPS, self, _bind_as(_nonempty(other, "overlaps"), self.column.pg_type)
         )
 
     def any_eq(self, value: Any) -> BinaryExpr:
-        """``value = ANY(self)`` -- ``value`` is an element of the array."""
+        """`value = ANY(self)` -- `value` is an element of the array."""
         element = self._require_array("any_eq")
         return BinaryExpr(ANY_EQ, _bind_as(value, element), self)
 
     def all_eq(self, value: Any) -> BinaryExpr:
-        """``value = ALL(self)`` -- every array element equals ``value``."""
+        """`value = ALL(self)` -- every array element equals `value`."""
         element = self._require_array("all_eq")
         return BinaryExpr(ALL_EQ, _bind_as(value, element), self)
 
@@ -235,23 +235,23 @@ class ColumnExpr(Expression):
 class RelatedColumnExpr(ColumnExpr):
     """A column reached by traversing relationships from the queried model.
 
-    ``Book.author.name`` is one of these. It compares against ``authors.name``
-    while the query still selects books, so the compiler turns ``path`` into an
+    `Book.author.name` is one of these. It compares against `authors.name`
+    while the query still selects books, so the compiler turns `path` into an
     INNER JOIN and renders this operand against that join's alias.
 
-    Filtering is not loading: a query that only mentions ``Book.author.name``
-    joins ``authors`` to constrain rows and selects nothing from it, so
-    ``book.author`` still raises unless the query also ``.include()``s it. That
+    Filtering is not loading: a query that only mentions `Book.author.name`
+    joins `authors` to constrain rows and selects nothing from it, so
+    `book.author` still raises unless the query also `.include()`s it. That
     keeps the rule that attribute access never performs I/O.
 
-    A subclass of ``ColumnExpr``, so every comparison, ``in_``, and ordering
-    method is inherited. Code that branches on ``isinstance(node, ColumnExpr)``
+    A subclass of `ColumnExpr`, so every comparison, `in_`, and ordering
+    method is inherited. Code that branches on `isinstance(node, ColumnExpr)`
     must therefore test for this type *first*.
     """
 
     __slots__ = ("path",)
     #: The relationship trail to this column. Declared so the type checker sees
-    #: an attribute here, not the ``path()`` jsonb method inherited from ColumnExpr.
+    #: an attribute here, not the `path()` jsonb method inherited from ColumnExpr.
     path: tuple[Any, ...]
 
     def __init__(self, column: Any, path: tuple[Any, ...]) -> None:
@@ -291,7 +291,7 @@ class BinaryExpr(Predicate):
 class InExpr(Predicate):
     """Membership against an explicit value list.
 
-    Rendered as ``IN ($1, $2, ...)`` because the driver codecs exchange scalars
+    Rendered as `IN ($1, $2, ...)` because the driver codecs exchange scalars
     rather than arrays; the operand count is therefore part of the query shape.
     """
 
@@ -359,11 +359,11 @@ def _bind_many(column: Any, values: Any) -> tuple[ValueExpr, ...]:
 
 
 def _bind_as(value: Any, pg_type: Any) -> ValueExpr:
-    """Bind ``value`` against an explicit type rather than the column's own.
+    """Bind `value` against an explicit type rather than the column's own.
 
-    The jsonb key operators take ``text``/``text[]`` operands and ``any_eq``
+    The jsonb key operators take `text`/`text[]` operands and `any_eq`
     takes the array's element type, so those bind through this rather than
-    ``_bind`` (which would coerce against the column type).
+    `_bind` (which would coerce against the column type).
     """
     if isinstance(value, Expression):
         raise TypeError(
@@ -384,10 +384,10 @@ def _nonempty(values: Any, label: str) -> list[Any]:
 class _JsonPath:
     """A pending jsonb path extraction, completed by a comparison.
 
-    ``Model.data.path(["a", "b"])`` renders nothing on its own; comparing it
-    (or, for ``as_json`` paths, applying a jsonb operator) builds the predicate.
-    Text paths compare against ``text`` (``#>>``); json paths against ``jsonb``
-    (``#>``). It is intentionally unhashable and cannot be used in a boolean
+    `Model.data.path(["a", "b"])` renders nothing on its own; comparing it
+    (or, for `as_json` paths, applying a jsonb operator) builds the predicate.
+    Text paths compare against `text` (`#>>`); json paths against `jsonb`
+    (`#>`). It is intentionally unhashable and cannot be used in a boolean
     context, for the same reason column expressions cannot.
     """
 
@@ -444,20 +444,20 @@ class _JsonPath:
         return self._compare(ILIKE, pattern)
 
     def contains(self, other: Any) -> BinaryExpr:
-        """``(data #> path) @> other`` -- containment on the sub-document."""
+        """`(data #> path) @> other` -- containment on the sub-document."""
         if not self._as_json:
             raise DeclarationError("contains() on a path requires path(..., as_json=True)")
         return BinaryExpr(CONTAINS, self._extract(), _bind_as(other, Jsonb))
 
     def has_key(self, key: str) -> BinaryExpr:
-        """``(data #> path) ? key`` -- key test on the sub-document."""
+        """`(data #> path) ? key` -- key test on the sub-document."""
         if not self._as_json:
             raise DeclarationError("has_key() on a path requires path(..., as_json=True)")
         return BinaryExpr(HAS_KEY, self._extract(), _bind_as(key, Text))
 
 
 def and_(*predicates: Predicate) -> Predicate:
-    """Combine predicates with ``AND``; a single predicate passes through."""
+    """Combine predicates with `AND`; a single predicate passes through."""
     if not predicates:
         raise ValueError("and_() requires at least one predicate")
     if len(predicates) == 1:
@@ -466,7 +466,7 @@ def and_(*predicates: Predicate) -> Predicate:
 
 
 def or_(*predicates: Predicate) -> Predicate:
-    """Combine predicates with ``OR``; a single predicate passes through."""
+    """Combine predicates with `OR`; a single predicate passes through."""
     if not predicates:
         raise ValueError("or_() requires at least one predicate")
     if len(predicates) == 1:

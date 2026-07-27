@@ -3,23 +3,23 @@
 A deferred migration converts a column's *values* while the application keeps
 serving. During that window some rows hold the old encoding and some hold the
 new, and the failure this module exists to prevent is silent: a comparison
-against the wrong encoding does not raise, it returns ``False``. A filter
+against the wrong encoding does not raise, it returns `False`. A filter
 quietly drops rows, a join quietly matches nothing, a chart quietly reads low.
 
 So every read that touches a converting column is classified before the
 migration is allowed to start:
 
-``rewritable``
+`rewritable`
     The predicate means the same thing in both encodings once it is widened to
     accept both -- and because the mapping is finite and total, this module can
     say what the widened form *is* rather than merely permitting it.
-``refused``
+`refused`
     No correct transitional form exists. Ordered comparison is the headline
-    case (``1 < 2`` but ``'gentle' > 'rolling'``), and grouping, ordering,
+    case (`1 < 2` but `'gentle' > 'rolling'`), and grouping, ordering,
     aggregating and joining are worse, because they are not filters and a scan
-    that only read ``where`` clauses would pass an application about to lose
+    that only read `where` clauses would pass an application about to lose
     rows from a join.
-``undecidable``
+`undecidable`
     The operator is visible but the value is not -- a bound parameter, a value
     that arrives with the request. Refused for the same reason: the supplied
     value could be in either encoding, so equality is no safer than ordering.
@@ -68,7 +68,7 @@ from ..orm.expressions import (
 #: Operators whose meaning depends on the *order* of the encoding. A mapping
 #: that happens to preserve order would make these safe, but "preserves order
 #: over the values in the mapping" is not "preserves order over the values in
-#: the table" -- see :func:`_monotone_note`.
+#: the table" -- see `_monotone_note`.
 ORDERED = frozenset({LT, LE, GT, GE})
 
 #: Operators that match an *encoding* rather than a value, so no widening is
@@ -116,9 +116,9 @@ class TransitionalHazard:
 class ScanReport:
     """Everything the scan looked at, and what it concluded.
 
-    ``examined`` is carried because a report that counted only findings would
+    `examined` is carried because a report that counted only findings would
     say "clean" when it looked at nothing -- the shape doc 19 found in
-    ``coverage_overall()`` returning ``1.0`` on an empty denominator.
+    `coverage_overall()` returning `1.0` on an empty denominator.
     """
 
     column: str
@@ -126,7 +126,7 @@ class ScanReport:
     hazards: tuple[TransitionalHazard, ...] = ()
     rewrites: tuple[TransitionalHazard, ...] = ()
     scanned_nothing: bool = False
-    #: ``"recode"`` scans; ``"retype"`` has no re-encode window to scan.
+    #: `"recode"` scans; `"retype"` has no re-encode window to scan.
     shape: str = "recode"
 
     @property
@@ -163,14 +163,14 @@ class ScanReport:
 
 # -- the waiver registry ------------------------------------------------------
 #
-# Shaped after passes' ``Declared``: a written reason, no ``strict=False``, no
+# Shaped after passes' `Declared`: a written reason, no `strict=False`, no
 # global off switch. The waiver attaches to the read that needs it rather than
 # to the migration, because a blanket waiver on a migration is indistinguishable
 # from not having the feature.
 
 #: Waivers declared against a *site name* rather than an object, keyed
-#: ``(column, site)``. Both halves are stable strings, which is the whole
-#: reason this exists -- see :func:`waive_transitional`.
+#: `(column, site)`. Both halves are stable strings, which is the whole
+#: reason this exists -- see `waive_transitional`.
 _SITE_WAIVERS: dict[tuple[str, str], str] = {}
 
 
@@ -186,12 +186,12 @@ def _require_reason(reason: str) -> str:
 def transitional_read(column: Any, *, reason: str) -> Any:
     """Waive the transitional check for one read, with a written reason.
 
-    The reason is not decoration. It appears in ``wreath migrations check``
-    output as a count and in ``--json`` in full, so "we waived everything" is
+    The reason is not decoration. It appears in `wreath migrations check`
+    output as a count and in `--json` in full, so "we waived everything" is
     visible in review rather than discovered afterwards.
 
     This form decorates a function. A *declared* query is a slotted value with
-    nowhere to hang an attribute, so it takes :func:`waive_transitional`
+    nowhere to hang an attribute, so it takes `waive_transitional`
     instead; the error below says so rather than failing obscurely.
     """
     written = _require_reason(reason)
@@ -215,10 +215,10 @@ def transitional_read(column: Any, *, reason: str) -> Any:
 def waive_transitional(column: Any, *, site: str, reason: str) -> None:
     """Waive one read named by its declared site, for reads that are values.
 
-    A ``QueryDeclaration`` is immutable and slotted, so there is nothing to
+    A `QueryDeclaration` is immutable and slotted, so there is nothing to
     decorate. Keying on the declared *name* rather than on object identity is
     deliberate: the name is the thing the declaration sells, it is stable across
-    a reload, and ``id()`` is not an identity -- a lesson this codebase has paid
+    a reload, and `id()` is not an identity -- a lesson this codebase has paid
     for twice.
     """
     key = _column_key(column) if not isinstance(column, str) else column
@@ -244,7 +244,7 @@ def waiver_for(target: Any, column: str, site: str | None = None) -> str | None:
 
 
 def _column_key(column: Any) -> str:
-    """``schema.table.column`` for a model column or a column expression."""
+    """`schema.table.column` for a model column or a column expression."""
     inner = getattr(column, "column", column)
     owner = getattr(inner, "owner", None)
     if owner is None:
@@ -264,7 +264,7 @@ def _is_target(expression: Any, column: Any) -> bool:
 def _literals(node: Any) -> tuple[list[Any], bool]:
     """Every literal in *node*, and whether any operand was dynamic.
 
-    A ``Placeholder`` from a declared query's ``Param`` is dynamic: the operator
+    A `Placeholder` from a declared query's `Param` is dynamic: the operator
     is visible but the value is not, and a value that arrives with a request
     could be in either encoding.
     """
@@ -512,7 +512,7 @@ def _is_referenced(column: Any, registry: Any) -> bool:
 
 
 def _check_hazard(column: Any, name: str) -> TransitionalHazard | None:
-    """A ``check=`` constraint validates one encoding and will reject the other."""
+    """A `check=` constraint validates one encoding and will reject the other."""
     if not getattr(column, "checks", ()):
         return None
     return TransitionalHazard(
@@ -556,8 +556,8 @@ def scan_view(
 ) -> list[TransitionalHazard]:
     """A calculated view: its filters, and what it does to the column besides filter.
 
-    ``wreath.series`` exposes :attr:`declared_columns` for exactly this reader,
-    tagging each column ``time`` / ``aggregate`` / ``group``. A grouped chart
+    `wreath.series` exposes `declared_columns` for exactly this reader,
+    tagging each column `time` / `aggregate` / `group`. A grouped chart
     over a half-converted column shows one category forking into two, with
     nothing raising.
     """
@@ -597,9 +597,9 @@ def scan(
 ) -> ScanReport:
     """Every population, against one converting column.
 
-    *queries* are ``Queries`` subclasses, *views* are ``Series``/``Aggregate``
+    *queries* are `Queries` subclasses, *views* are `Series`/`Aggregate`
     declarations, and *registry* supplies the model declarations. Discovery is
-    deliberately a separate concern -- see :func:`collect_populations` -- so the
+    deliberately a separate concern -- see `collect_populations` -- so the
     lattice can be tested with no global state at all.
     """
     inner = getattr(column, "column", column)
@@ -692,7 +692,7 @@ def collect_populations(modules: Any) -> tuple[tuple[Any, ...], tuple[Any, ...]]
 
     Discovery is separated from the lattice on purpose: walking loaded modules
     is a heuristic, and a heuristic that silently returns nothing is exactly the
-    failure :class:`ScanReport` reports as ``scanned_nothing``.
+    failure `ScanReport` reports as `scanned_nothing`.
     """
     from ..queries import Queries
 
@@ -725,7 +725,7 @@ def collect_populations(modules: Any) -> tuple[tuple[Any, ...], tuple[Any, ...]]
 def scan_application(registry: Any = None, modules: Any = None) -> list[ScanReport]:
     """One report per deferred declaration reachable from the loaded application.
 
-    This is the ``wreath migrations check`` reader. It needs no database: the
+    This is the `wreath migrations check` reader. It needs no database: the
     scan is startup work over declarations that are already values, which is why
     it can run in CI against an application that has never connected to
     anything.

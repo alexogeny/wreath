@@ -1,7 +1,7 @@
 """How far along a pass is, and the three ways of being honest about it.
 
-A percentage without a provenance is a rumour. ``64%`` reads as a measurement,
-and the reader plans around it; ``64% (estimated)`` reads as what it is, and the
+A percentage without a provenance is a rumour. `64%` reads as a measurement,
+and the reader plans around it; `64% (estimated)` reads as what it is, and the
 difference matters most in exactly the situation where the bar has been sitting
 at ninety-seven for an hour. So the denominator's kind travels with the number
 everywhere it goes -- the ledger column, the CLI row, the JSON body -- and there
@@ -12,12 +12,12 @@ There are only three honest denominators, and each lies in its own way:
 ======== =============================== ============ ==============================
 kind     how                             cost         lies when
 ======== =============================== ============ ==============================
-exact    ``SELECT count(*)`` once        a full scan  never, but it can be minutes
-estimated ``pg_class.reltuples``         free         ``ANALYZE`` is stale
-keyspace ``(cursor - min) / (max - min)`` free        the key is sparse or clumped
+exact    `SELECT count(*)` once        a full scan  never, but it can be minutes
+estimated `pg_class.reltuples`         free         `ANALYZE` is stale
+keyspace `(cursor - min) / (max - min)` free        the key is sparse or clumped
 ======== =============================== ============ ==============================
 
-The default is ``estimated``, because a full count in front of a long pass
+The default is `estimated`, because a full count in front of a long pass
 delays the thing the operator actually asked for in order to make a progress bar
 prettier.
 
@@ -25,7 +25,7 @@ prettier.
 been paced hard for the last ten minutes should say so rather than average it
 away against a fast first hour. And when the window holds nothing, there is no
 ETA -- not infinity, not zero, not "calculating..." forever. The field is absent
-and :class:`Progress` says why, because a fabricated ETA is worse than no ETA:
+and `Progress` says why, because a fabricated ETA is worse than no ETA:
 someone plans around it.
 """
 
@@ -85,7 +85,7 @@ class Denominator:
 
 @dataclass(frozen=True, slots=True)
 class Estimated(Denominator):
-    """``pg_class.reltuples`` -- free, and stale exactly as often as ``ANALYZE`` is.
+    """`pg_class.reltuples` -- free, and stale exactly as often as `ANALYZE` is.
 
     The default, and the right default: a pass exists because the table is big,
     and counting a big table before starting to walk it spends minutes making a
@@ -116,7 +116,7 @@ class Estimated(Denominator):
 
 @dataclass(frozen=True, slots=True)
 class Exact(Denominator):
-    """``SELECT count(*)`` once, at launch. Never wrong, and never free."""
+    """`SELECT count(*)` once, at launch. Never wrong, and never free."""
 
     kind = "exact"
     counts_rows = True
@@ -136,7 +136,7 @@ class Keyspace(Denominator):
     id range is not half the rows unless the ids were handed out evenly.
 
     It reports no ETA, and that is not an omission. The rate window counts rows,
-    and rows are not the unit this measures, so ``remaining / rate`` would be a
+    and rows are not the unit this measures, so `remaining / rate` would be a
     ratio of two different things dressed up as a time. §9.2's rule is that the
     field is absent and the state says why.
     """
@@ -174,7 +174,7 @@ _EXAMPLE: dict[str, Any] = {
 
 
 def position(key: Key, value: Any) -> float | None:
-    """One key value as a point on a line, or ``None`` if it is not on one.
+    """One key value as a point on a line, or `None` if it is not on one.
 
     Only the leading key column is placed. A composite key's later columns
     subdivide a value the leading column already located, and at the resolution
@@ -209,9 +209,9 @@ def position(key: Key, value: Any) -> float | None:
 class Progress:
     """How far along, how fast, how much longer -- and what is not knowable.
 
-    ``percent`` and ``denominator_kind`` are handed out together or not at all.
-    ``eta_seconds`` is ``None`` whenever it cannot be computed honestly, and
-    ``eta_absent`` then carries the sentence explaining which input was missing.
+    `percent` and `denominator_kind` are handed out together or not at all.
+    `eta_seconds` is `None` whenever it cannot be computed honestly, and
+    `eta_absent` then carries the sentence explaining which input was missing.
     """
 
     percent: float | None
@@ -248,7 +248,7 @@ def _seconds_between(later: Any, earlier: Any) -> float | None:
 
 
 def rate_of(row: Any) -> float | None:
-    """Rows per second over the trailing window, or ``None`` when it holds nothing.
+    """Rows per second over the trailing window, or `None` when it holds nothing.
 
     The chunk that opens a window contributes no rows to it, so the count and the
     interval describe the same stretch of time rather than overlapping by one
@@ -324,7 +324,7 @@ def _keyspace_percent(row: Any, keys: tuple[Key, ...]) -> float | None:
 
 
 #: Stands in when a reader has a ledger row but no declaration, which is the
-#: CLI's ordinary situation. Only ``descending`` is ever consulted.
+#: CLI's ordinary situation. Only `descending` is ever consulted.
 _ANY_KEY = Key(name="_", type="text")
 
 
@@ -364,7 +364,7 @@ def describe(row: Any, keys: tuple[Key, ...], *, now: Any = None) -> Progress:
 def _state(row: Any, *, rate: float | None, now: Any) -> tuple[str, str | None]:
     """Walking, slow, stalled, blocked or done -- three of which need an operator.
 
-    The one people leave out is ``blocked``: nothing is driving the pass, so it
+    The one people leave out is `blocked`: nothing is driving the pass, so it
     will silently never finish. A hand-rolled backfill has no name for that
     state, which is why the terminal window closes and the column stays half
     converted for three weeks.

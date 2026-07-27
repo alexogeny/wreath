@@ -1,7 +1,7 @@
 """Build the deterministic NFR metadata image from a compiled application.
 
 Runtime NFR records carry only numeric IDs; this module turns a compiled
-``Wreath`` application into the canonical :class:`MetadataImage` that gives those
+`Wreath` application into the canonical `MetadataImage` that gives those
 IDs meaning. It is pure introspection with no runtime effect: the same
 application always produces a byte-identical image regardless of process,
 address-space layout, or route-registration order.
@@ -29,7 +29,7 @@ from ._flight_schema import (
 
 
 def build_metadata_image(app: Any) -> MetadataImage:
-    """Introspect a compiled ``Wreath`` app into a canonical metadata image."""
+    """Introspect a compiled `Wreath` app into a canonical metadata image."""
     from ._auth.requirements import merge_requirements, requirement_for
     from .binding import inspect_handler
 
@@ -342,7 +342,7 @@ def _ws_operation_id(path: str) -> str:
 def _model_names(registry: Any) -> list[str]:
     """The model class names a registry holds, for the image's models table.
 
-    A registry exposes ``specs`` (a tuple of ``ModelSpec``) whose ``model_type``
+    A registry exposes `specs` (a tuple of `ModelSpec`) whose `model_type`
     is the class; the other attribute names are tolerated so a registry-shaped
     test double or a future container still resolves. Anything that yields
     neither a class nor a spec is skipped rather than guessed at.

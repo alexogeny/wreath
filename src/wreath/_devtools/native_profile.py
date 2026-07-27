@@ -8,7 +8,7 @@ shell.
     uv run wreath-native-profile counters -- uv run pytest tests/test_native_perf.py
     uv run wreath-native-profile cache --output .profiles/router -- python bench.py
 
-Build Wreath with ``WREATH_NATIVE_PROFILE=1 uv sync --reinstall-package wreath`` first
+Build Wreath with `WREATH_NATIVE_PROFILE=1 uv sync --reinstall-package wreath` first
 to retain symbols and frame pointers in the optimized native extensions.
 """
 

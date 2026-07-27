@@ -1,6 +1,6 @@
 """ORM error types.
 
-Declaration mistakes surface as :class:`DeclarationError` while a registry
+Declaration mistakes surface as `DeclarationError` while a registry
 compiles, never at request time. Everything else is raised by a session.
 """
 
@@ -14,7 +14,7 @@ class ORMError(Exception):
 class DeclarationError(ORMError):
     """An invalid model, column, or relationship declaration.
 
-    Always raised while ``app.orm()`` compiles a registry, so a running
+    Always raised while `app.orm()` compiles a registry, so a running
     application never discovers a broken declaration mid-request.
     """
 
@@ -27,15 +27,15 @@ class UnloadedAttributeError(ORMError, AttributeError):
     """A scalar column was read on an object that never loaded it.
 
     Attribute access never issues SQL, so an unprojected column raises rather
-    than silently returning ``None`` or fetching a row.
+    than silently returning `None` or fetching a row.
     """
 
 
 class UnloadedRelationshipError(ORMError, AttributeError):
     """A relationship was read without being loaded.
 
-    Load it explicitly with ``.include(...)`` on the query or
-    ``await session.load(instance, Model.relationship)``.
+    Load it explicitly with `.include(...)` on the query or
+    `await session.load(instance, Model.relationship)`.
     """
 
 
@@ -44,7 +44,7 @@ class MappingError(ORMError):
 
 
 class MultipleResultsError(ORMError):
-    """``fetch_one()`` matched more than one row."""
+    """`fetch_one()` matched more than one row."""
 
 
 class SchemaMismatchError(ORMError):

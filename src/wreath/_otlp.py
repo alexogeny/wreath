@@ -2,25 +2,25 @@
 
 The recorder's neutral cells stay the source model; OpenTelemetry names, span
 shapes, and OTLP wire structures live only here, in the projector's adapter
-layer. This module maps the reassembled :class:`~wreath._projector.ProjectedTrace`
-objects (and a :class:`~wreath._projector.ProjectorSnapshot`) to OTLP/JSON
-request dicts -- ``ExportTraceServiceRequest`` and ``ExportMetricsServiceRequest``
+layer. This module maps the reassembled `ProjectedTrace`
+objects (and a `ProjectorSnapshot`) to OTLP/JSON
+request dicts -- `ExportTraceServiceRequest` and `ExportMetricsServiceRequest`
 in the protobuf JSON encoding -- with **no dependency on any OpenTelemetry SDK**.
 Building these plain dicts needs only the standard library, so the mapping is
 fully unit-testable; a concrete transport (the optional adapter/dependency group
-and the server-lifespan wiring) rides slice 4c on top of the :class:`SpanExporter`
-protocol and :class:`BoundedExportQueue` defined here.
+and the server-lifespan wiring) rides slice 4c on top of the `SpanExporter`
+protocol and `BoundedExportQueue` defined here.
 
 **Timestamps.** A span's wall clock is anchored on
-:attr:`ProjectedTrace.observed_unix_nano`: ``end = observed`` and
-``start = observed - duration``. Each completion cell carries its monotonic end
-instant (``end_offset_ms`` from the worker's clock epoch), and the projector maps
-it to Unix time through the recorder's calibration pair -- so ``observed`` is the
+`ProjectedTrace.observed_unix_nano`: `end = observed` and
+`start = observed - duration`. Each completion cell carries its monotonic end
+instant (`end_offset_ms` from the worker's clock epoch), and the projector maps
+it to Unix time through the recorder's calibration pair -- so `observed` is the
 request's true completion instant, drift-free (no wall-clock jumps, no
 drain-latency skew), to millisecond precision.
 
 **Cardinality.** Span names and attributes come only from route *metadata* -- the
-method and the route *template* (``/users/{id}``), never the concrete path, query
+method and the route *template* (`/users/{id}`), never the concrete path, query
 values, header values, user/tenant IDs, or SQL. That keeps names and any future
 metric labels low-cardinality by construction.
 """
@@ -242,11 +242,11 @@ def build_trace_request(
     image: MetadataImage | None = None,
     resource_attributes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Map reassembled traces to an OTLP ``ExportTraceServiceRequest`` dict.
+    """Map reassembled traces to an OTLP `ExportTraceServiceRequest` dict.
 
     Each completion becomes one SERVER span; its detail phases become child spans
     (CLIENT for dependency calls, INTERNAL otherwise). Returns an empty request
-    (no ``resourceSpans``) when there is nothing to export.
+    (no `resourceSpans`) when there is nothing to export.
     """
     routes = _Routes(image)
     spans: list[dict[str, Any]] = []
@@ -271,7 +271,7 @@ def build_trace_request(
 
 def _exponential_histogram(metric: RouteMetric) -> dict[str, Any]:
     """The recorder's base-2 log buckets are exactly an OTLP exponential
-    histogram at scale 0 (bucket i covers roughly ``(2^i, 2^(i+1)]``
+    histogram at scale 0 (bucket i covers roughly `(2^i, 2^(i+1)]`
     microseconds), so map them directly rather than reconstructing boundaries."""
     counts = metric.buckets
     first = next((i for i, c in enumerate(counts) if c), None)
@@ -299,9 +299,9 @@ def build_metrics_request(
     now_unix_nano: int,
     resource_attributes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Map per-route aggregates to an OTLP ``ExportMetricsServiceRequest`` dict:
+    """Map per-route aggregates to an OTLP `ExportMetricsServiceRequest` dict:
     a cumulative request-count Sum (with an error count) and a request-duration
-    ExponentialHistogram, both keyed by the low-cardinality ``http.route``."""
+    ExponentialHistogram, both keyed by the low-cardinality `http.route`."""
     routes = _Routes(image)
     count_points: list[dict[str, Any]] = []
     duration_points: list[dict[str, Any]] = []
@@ -359,7 +359,7 @@ def build_metrics_request(
 
 
 def resource(attributes: dict[str, str] | None) -> dict[str, Any]:
-    """An OTLP Resource dict. Defaults ``service.name`` to ``wreath`` unless the
+    """An OTLP Resource dict. Defaults `service.name` to `wreath` unless the
     caller overrides it."""
     attrs = {"service.name": "wreath"}
     if attributes:
@@ -373,7 +373,7 @@ def resource(attributes: dict[str, str] | None) -> dict[str, Any]:
 class SpanExporter(_Protocol):
     """The minimal contract a trace exporter satisfies. The concrete OTLP/HTTP
     adapter (slice 4c, optional dependency group) implements this; tests use a
-    collecting stub. ``export`` must not raise on the projector's behalf -- the
+    collecting stub. `export` must not raise on the projector's behalf -- the
     queue isolates it -- but it may signal a permanent failure by raising, which
     the queue counts as a drop."""
 
@@ -404,7 +404,7 @@ class BoundedExportQueue:
 
     def offer(self, trace: ProjectedTrace) -> bool:
         """Enqueue a trace, returning False (and counting a drop) if full. Safe
-        to hand directly as the projector's ``on_trace`` hook."""
+        to hand directly as the projector's `on_trace` hook."""
         with self._lock:
             self._offered += 1
             if len(self._items) == self._items.maxlen:
@@ -414,7 +414,7 @@ class BoundedExportQueue:
             return True
 
     def drain(self, max_items: int | None = None) -> list[ProjectedTrace]:
-        """Remove and return up to ``max_items`` queued traces (all if None)."""
+        """Remove and return up to `max_items` queued traces (all if None)."""
         with self._lock:
             if max_items is None or max_items >= len(self._items):
                 batch = list(self._items)

@@ -1,7 +1,7 @@
 """Pure-Python trusted-proxy matcher twins.
 
-Mirrors ``wreath._native.proxy``. The C parser is deliberately stricter than
-``ipaddress`` in one respect -- it rejects zone identifiers ("fe80::1%eth0"),
+Mirrors `wreath._native.proxy`. The C parser is deliberately stricter than
+`ipaddress` in one respect -- it rejects zone identifiers ("fe80::1%eth0"),
 which are meaningless in a forwarded hop -- so this twin rejects them too.
 """
 

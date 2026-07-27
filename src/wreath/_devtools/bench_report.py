@@ -3,9 +3,9 @@
 Used two ways, and they share one renderer so the live report and the CLI can
 never drift apart:
 
-- ``benchmarks/run.py`` and ``benchmarks/lifecycle.py`` call ``generate_report``
-  after every scenario to refresh ``latest.html``.
-- ``wreath-bench-report`` renders any saved result documents on demand.
+- `benchmarks/run.py` and `benchmarks/lifecycle.py` call `generate_report`
+  after every scenario to refresh `latest.html`.
+- `wreath-bench-report` renders any saved result documents on demand.
 
 The report is one HTML file with no external requests: no CDN, no webfont, no
 network. It is written to disk and opened locally; nothing is uploaded.
@@ -20,7 +20,7 @@ a single run" is unenforceable if the report cannot show the spread.
 
 A winner is crowned only when it is real:
 
-- the rows must be rankable at all (``is_rankable``) -- one protocol, one load
+- the rows must be rankable at all (`is_rankable`) -- one protocol, one load
   generator, and never an errored row; and
 - with repeated runs, the leader's worst sample must still beat the runner-up's
   best sample. Overlapping ranges are labelled "within noise" rather than being
@@ -126,7 +126,7 @@ def is_rankable(rows: list[dict[str, Any]]) -> bool:
 def merge_documents(documents: list[dict[str, Any]]) -> dict[str, Any]:
     """Reduce N result documents to one, medianed per (scenario, framework, protocol).
 
-    Every numeric metric keeps its raw samples under ``_samples`` so the range can
+    Every numeric metric keeps its raw samples under `_samples` so the range can
     be shown; aggregation never replaces the raw values.
     """
     grouped: dict[tuple[str, ...], list[dict[str, Any]]] = {}

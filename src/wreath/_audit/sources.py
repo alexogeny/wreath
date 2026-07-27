@@ -35,7 +35,7 @@ def render_api_docs(app: Any, *, title: str, version: str, spec_path: str = "/op
 
 
 def discover_static_dirs(app: Any) -> list[str]:
-    """The directories behind the app's mounted ``static()`` handlers.
+    """The directories behind the app's mounted `static()` handlers.
 
     Reads the static matcher's registered mounts. Empty when the app mounts no
     static trees or the internals move."""

@@ -1,6 +1,6 @@
 """A GraphQL schema derived from the ORM registry.
 
-Types are not hand-written. They are read from the same ``ModelSpec`` the SQL
+Types are not hand-written. They are read from the same `ModelSpec` the SQL
 compiler, the OpenAPI generator, and typegen read, so the GraphQL surface cannot
 drift from the REST surface or from the database -- there is one source of truth
 and three renderings of it.
@@ -8,8 +8,8 @@ and three renderings of it.
 Each exposed model contributes:
 
 - an object type with a field per column and a field per relationship,
-- a singular root field (``user(id: 1)``),
-- a plural root field (``users(limit: 20, offset: 0)``).
+- a singular root field (`user(id: 1)`),
+- a plural root field (`users(limit: 20, offset: 0)`).
 
 Relationship fields are the reason this is worth owning rather than bolting a
 generic GraphQL library on: they resolve through the session's batched
@@ -60,7 +60,7 @@ _CUSTOM_SCALARS = frozenset({"JSON", "DateTime", "Date"})
 class SchemaField:
     """One field on an object type.
 
-    Exactly one of ``column``, ``relationship``, or ``resolver`` is set; that is
+    Exactly one of `column`, `relationship`, or `resolver` is set; that is
     what the executor dispatches on.
     """
 
@@ -94,7 +94,7 @@ class ObjectType:
 class RootField:
     """A queryable entry point.
 
-    ``spec`` is the backing ModelSpec for a derived root; ``resolver`` is set
+    `spec` is the backing ModelSpec for a derived root; `resolver` is set
     instead for a custom root field, which need not correspond to a table.
     """
 
@@ -192,8 +192,8 @@ def _plural(name: str) -> str:
 def _is_exposed(model_name: str, column_name: str, expose: frozenset[str]) -> bool:
     """Whether a column that *looks* sensitive was explicitly opted back in.
 
-    Accepts ``"Model.column"`` and a bare ``"column"``, the second so a name
-    like ``api_key`` can be exposed once rather than per model.
+    Accepts `"Model.column"` and a bare `"column"`, the second so a name
+    like `api_key` can be exposed once rather than per model.
     """
     return f"{model_name}.{column_name}" in expose or column_name in expose
 
@@ -204,20 +204,20 @@ def build_schema(
     *,
     expose: Iterable[str] = (),
 ) -> Schema:
-    """Build a schema from ``registry``, optionally narrowed to ``models``.
+    """Build a schema from `registry`, optionally narrowed to `models`.
 
-    **Exposure is opt-in when ``models`` is given**, and that is the intended
+    **Exposure is opt-in when `models` is given**, and that is the intended
     use: a registry holds every table the application has, including ones with
     no business being queryable from the internet. Passing None exposes them
     all, which is convenient in development and rarely right in production.
 
     **Columns whose names look sensitive are left out of the schema**, on the
-    same rule and the same regex :func:`wreath.crud.sensitive_fields` uses --
-    ``password``, ``*_hash``, ``token``, ``secret``, ``api_key``, and the rest.
-    Both surfaces are generated from one ``ModelSpec``, so it would be strange
+    same rule and the same regex `wreath.crud.sensitive_fields` uses --
+    `password`, `*_hash`, `token`, `secret`, `api_key`, and the rest.
+    Both surfaces are generated from one `ModelSpec`, so it would be strange
     for the REST one to hide a password hash and the GraphQL one to answer
-    ``{ user { passwordHash } }``. Name a column in ``expose`` to put it back,
-    which is the same deliberate, auditable act ``crud_router(expose=...)``
+    `{ user { passwordHash } }`. Name a column in `expose` to put it back,
+    which is the same deliberate, auditable act `crud_router(expose=...)`
     asks for.
     """
     from ..crud import SENSITIVE_FIELD

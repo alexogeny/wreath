@@ -18,7 +18,7 @@ class _Node:
 class RouteTable:
     """Segment trie matching the semantics of wreath._native._core.RouteTable.
 
-    Paths split as ``path[1:].split("/")`` so trailing slashes stay
+    Paths split as `path[1:].split("/")` so trailing slashes stay
     significant. Static segments win over parameters at each level, with
     backtracking so parameter routes still match when a static branch
     dead-ends. HEAD falls back to GET.

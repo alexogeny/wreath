@@ -1,11 +1,11 @@
 """Pure-Python core for the durable-jobs and messaging coordinator.
 
 Everything here is deterministic, allocation-light, and free of I/O so it can be
-unit-tested without a database and, later, replaced by a native ``_queue``
-accelerator behind a byte-identical twin (see ``docs/plans`` / design 01).
+unit-tested without a database and, later, replaced by a native `_queue`
+accelerator behind a byte-identical twin (see `docs/plans` / design 01).
 
 TODO(native-queue): the state-machine validator, backoff arithmetic, and dedup
-hashing are the concerns design 01 earmarks for ``_native/_queue/`` (envelope /
+hashing are the concerns design 01 earmarks for `_native/_queue/` (envelope /
 jobstate / backoff / dedup). They live in pure Python for this cut; a native
 fast-path plus pure twin can drop in without changing the coordinator API.
 """
@@ -18,13 +18,13 @@ from typing import Final
 
 # --- job/message lifecycle state machine -----------------------------------
 #
-# ``ready`` -> ``leased`` (a worker claims it) -> ``done`` | ``failed`` (retry,
-# back to ``ready``) | ``dead`` (attempts exhausted). ``leased`` -> ``ready`` is
+# `ready` -> `leased` (a worker claims it) -> `done` | `failed` (retry,
+# back to `ready`) | `dead` (attempts exhausted). `leased` -> `ready` is
 # the lease-expiry reclaim path.
 #
 # This table is the *reference* for that lifecycle, not a runtime gate. The
 # coordinators enforce it in SQL -- every transition is an UPDATE with
-# ``WHERE id=$1 AND fence=$2``, so a fenced or stale worker's move simply
+# `WHERE id=$1 AND fence=$2`, so a fenced or stale worker's move simply
 # matches no row -- which is the only place it can be enforced correctly, since
 # two workers can disagree about the current state but not about what the row
 # says. `valid_transition`/`check_transition` exist for callers reasoning about
@@ -56,7 +56,7 @@ def validate_identifier(value: str, kind: str) -> str:
 
     The shared rule for every config-time name the jobs and messaging
     coordinators derive Postgres object names and LISTEN/NOTIFY channels from:
-    1..63 bytes, each character an ASCII alphanumeric or ``_``/``$``. ``kind``
+    1..63 bytes, each character an ASCII alphanumeric or `_`/`$`. `kind`
     names the identifier in the error so callers get an actionable message.
     """
     if not value or len(value.encode("utf-8")) > 63:
@@ -77,14 +77,14 @@ class TransitionError(ValueError):
 
 
 def valid_transition(old: str, new: str) -> bool:
-    """Return whether ``old -> new`` is a legal lifecycle move."""
+    """Return whether `old -> new` is a legal lifecycle move."""
     if old not in STATES or new not in STATES:
         return False
     return new in _TRANSITIONS[old]
 
 
 def check_transition(old: str, new: str) -> None:
-    """Raise :class:`TransitionError` unless ``old -> new`` is legal."""
+    """Raise `TransitionError` unless `old -> new` is legal."""
     if not valid_transition(old, new):
         raise TransitionError(f"illegal job transition: {old!r} -> {new!r}")
 
@@ -104,9 +104,9 @@ def compute_backoff(
     jitter: float = 0.0,
     jitter_fn: Callable[[], float] | None = None,
 ) -> float:
-    """Seconds to wait before retry ``attempt`` (1-based).
+    """Seconds to wait before retry `attempt` (1-based).
 
-    Deterministic given ``jitter_fn`` (injected in tests). ``jitter`` is the
+    Deterministic given `jitter_fn` (injected in tests). `jitter` is the
     fraction of the computed delay added as bounded random jitter, so a thundering
     herd of same-age failures does not retry in lockstep.
     """
@@ -142,7 +142,7 @@ def _default_jitter() -> float:
 
 
 def dedup_key(scope: str, key: str) -> str:
-    """A stable idempotency key for ``(scope, key)``.
+    """A stable idempotency key for `(scope, key)`.
 
     Hashed rather than concatenated so an arbitrary user key can't collide with a
     different scope's key by sharing a delimiter, and so the stored key is a
@@ -176,13 +176,13 @@ def check_notify_payload(payload: bytes) -> None:
 
 # --- minimal 5-field cron ---------------------------------------------------
 #
-# Standard ``minute hour day-of-month month day-of-week`` with ``*``, lists
-# (``1,2``), ranges (``1-5``), and steps (``*/5``, ``0-30/10``). No named months
+# Standard `minute hour day-of-month month day-of-week` with `*`, lists
+# (`1,2`), ranges (`1-5`), and steps (`*/5`, `0-30/10`). No named months
 # or special strings — enough for scheduled jobs without a cron dependency.
 
 
 class CronSchedule:
-    """A parsed 5-field cron expression with a ``next_after`` computation."""
+    """A parsed 5-field cron expression with a `next_after` computation."""
 
     __slots__ = ("_expr", "_minute", "_hour", "_dom", "_month", "_dow")
 
@@ -228,8 +228,8 @@ def _parse_cron_field(
 ) -> frozenset[int]:
     """Parse one cron field into the set of values it matches.
 
-    ``wrap`` is the day-of-week field, where every crontab accepts **7** as a
-    second spelling of Sunday (``0``). Refusing it made `0 0 * * 7` -- a form
+    `wrap` is the day-of-week field, where every crontab accepts **7** as a
+    second spelling of Sunday (`0`). Refusing it made `0 0 * * 7` -- a form
     people copy straight out of a crontab -- a startup error.
     """
     if wrap:

@@ -1,28 +1,28 @@
 """Compact JSON with a native encoder and decoder.
 
-``dumps`` returns UTF-8 bytes (orjson-style) and is stricter than stdlib
-``json.dumps``: object keys must be str and non-finite floats raise
-ValueError. ``loads`` matches stdlib ``json.loads`` semantics (including the
+`dumps` returns UTF-8 bytes (orjson-style) and is stricter than stdlib
+`json.dumps`: object keys must be str and non-finite floats raise
+ValueError. `loads` matches stdlib `json.loads` semantics (including the
 NaN/Infinity constants and lone surrogate escapes) and accepts str, bytes,
 or bytearray.
 
 Dates, times, datetimes, and durations encode as ISO-8601 strings, so a handler
-never writes ``.isoformat()`` by hand and two endpoints cannot spell the same
-moment differently. An object that defines ``__jsonable__`` is asked how it
+never writes `.isoformat()` by hand and two endpoints cannot spell the same
+moment differently. An object that defines `__jsonable__` is asked how it
 would like to be encoded, which is how a result type goes back from a handler
 without the caller unwrapping it first. Both happen on a **retry**, not on the
-way in: the encoder is tried as-is first, and only a ``TypeError`` triggers the
+way in: the encoder is tried as-is first, and only a `TypeError` triggers the
 walk. A payload the encoders already understand therefore pays no walk at all —
 the cost lands only on the payloads that need it.
 
 What it does cost every JSON response is **one Python frame**, because this
 facade is now a function rather than a direct binding to the encoder. It adds
-no Python/native boundary crossing (``wreath-request-trace`` is unchanged), and
+no Python/native boundary crossing (`wreath-request-trace` is unchanged), and
 a frame is small against a serialization measured in microseconds — but that
 last part is an expectation, not a measurement, and AGENTS.md does not let it
-be stated as one. If ``wreath-decomp`` ever attributes a response-path delta
+be stated as one. If `wreath-decomp` ever attributes a response-path delta
 here, the way to remove the frame is to teach the encoders about temporal
-values directly, which means changing ``_native/json.c`` and its pure twin
+values directly, which means changing `_native/json.c` and its pure twin
 together and byte-for-byte.
 """
 
@@ -60,7 +60,7 @@ _temporal_installed = False
 
 
 def dumps(obj: Any) -> bytes:
-    """Encode ``obj`` as compact UTF-8 JSON, rendering temporal values as ISO-8601."""
+    """Encode `obj` as compact UTF-8 JSON, rendering temporal values as ISO-8601."""
     if not _temporal_installed:
         _install_temporal()
     try:

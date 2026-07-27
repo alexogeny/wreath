@@ -1,10 +1,10 @@
-"""Build a :class:`~wreath._docs.config.Site` into a static HTML tree.
+"""Build a `Site` into a static HTML tree.
 
 The Python facade owns everything except the per-file markdown parse: page
 collection from the nav, output-path mapping, relative-link resolution, the
 nav/TOC assembly, strict orphan/dead-link checks, and all file I/O. The result is
 a plain directory of self-contained HTML you can serve with wreath's hardened
-:class:`~wreath.staticfiles.StaticFiles`.
+`StaticFiles`.
 
 **Every markdown page under the source tree is link-checked, in the nav or not.**
 Reachability decides what gets *written*, never what gets *verified*: an orphan
@@ -164,7 +164,7 @@ class _RenderedPage:
 
 
 def build(site: Site, root: Path | None = None) -> BuildReport:
-    """Render ``site`` to its output directory. Returns a :class:`BuildReport`."""
+    """Render `site` to its output directory. Returns a `BuildReport`."""
     base = Path(root or ".")
     source_dir = base / site.source
     output_dir = base / site.output
@@ -298,7 +298,7 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
 
 
 def _sections(html: str, toc, title: str) -> list[tuple[str, str, str]]:
-    """Split a rendered page into ``(anchor, heading, text)`` search records.
+    """Split a rendered page into `(anchor, heading, text)` search records.
 
     One record per h2/h3 rather than one blob per page. It costs a little more
     JSON and buys three things a page-level index cannot: a result that lands on
@@ -446,7 +446,7 @@ def _copy_chart_sources(sources: set[Path], source_root: Path, output_dir: Path)
     """Publish each chart's data file so its `raw data` link resolves in the site.
 
     Only files that live under the docs source tree are copied (a chart pointed at
-    a sibling directory like ``../benchmark-results/`` is read at build time but
+    a sibling directory like `../benchmark-results/` is read at build time but
     not republished — it isn't ours to serve).
     """
     for path in sources:

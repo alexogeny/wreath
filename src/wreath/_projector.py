@@ -4,19 +4,19 @@ The recorder's request path only ever *publishes* fixed cells into a single
 writer / single reader ring. Turning those cells back into whole requests --
 joining a completion to its correlation carrier and detail phases, aggregating
 route metrics, and handing finished traces to an exporter -- is work that must
-never touch a request stack. This module is that work: a :class:`Projector`
+never touch a request stack. This module is that work: a `Projector`
 owns one background thread that drains the ring in bounded batches, reassembles
 traces, keeps a bounded window of recent completions (and failures) for the
 Inspector, and offers each finished trace to an optional export hook whose
 failures are isolated to a counter.
 
 Everything here is pure Python and reads only through the recorder's public
-``drain`` / ``loss`` / ``histogram`` accessors, so it works identically over the
-native ``Recorder`` and the pure oracle. The OTLP mapping (Stage 4b) and the
+`drain` / `loss` / `histogram` accessors, so it works identically over the
+native `Recorder` and the pure oracle. The OTLP mapping (Stage 4b) and the
 server lifespan wiring (Stage 4c) build on the export hook and snapshot API
 exposed here; nothing in this file imports an exporter SDK.
 
-**Assembly ordering.** ``context_end`` publishes a request's cells in the fixed
+**Assembly ordering.** `context_end` publishes a request's cells in the fixed
 order completion, then correlation, then phase batches, so a completion is seen
 *before* its trailing carriers. Rather than guess when the tail has arrived, the
 projector settles a completion after a *quiet cycle* -- one full drain cycle in
@@ -63,14 +63,14 @@ __all__ = [
 ]
 
 class _RecorderLike(_Protocol):
-    """The recorder surface the projector reads: the native ``Recorder`` and the
+    """The recorder surface the projector reads: the native `Recorder` and the
     pure oracle both satisfy it structurally."""
 
     def drain(self, max_cells: int = ..., /) -> bytes: ...
     def loss(self, reason: int, /) -> int: ...
 
 
-#: Default projector tuning. All are overridable per :class:`Projector`.
+#: Default projector tuning. All are overridable per `Projector`.
 _DEFAULT_INTERVAL: Final = 0.05  # seconds between drain cycles
 _DEFAULT_MAX_CELLS: Final = 4096  # cells drained per cycle
 _DEFAULT_RECENT: Final = 1024  # finished traces retained for the Inspector
@@ -116,7 +116,7 @@ class ProjectedTrace:
     #: Wall-clock time (Unix nanoseconds) the projector finalized this trace.
     #: The completion cell carries only a duration, so this observation time is
     #: the anchor an exporter uses to place the span on a wall clock:
-    #: ``start ~= observed_unix_nano - duration_us*1000``. It is later than the
+    #: `start ~= observed_unix_nano - duration_us*1000`. It is later than the
     #: true completion instant by at most one drain interval.
     observed_unix_nano: int = 0
 
@@ -166,7 +166,7 @@ class ProjectorSnapshot:
 @dataclass(slots=True)
 class _Assembly:
     """A completion accumulating its trailing correlation/phase cells until it
-    settles. ``cycle`` is the last drain cycle in which any cell for this request
+    settles. `cycle` is the last drain cycle in which any cell for this request
     arrived; a completion settles once a later cycle passes without one."""
 
     completion: CompletionCell | None = None
@@ -178,10 +178,10 @@ class _Assembly:
 class Projector:
     """Drains a recorder's ring on a background thread and reassembles traces.
 
-    The projector is inert until :meth:`start`; construction allocates only its
-    bounded buffers. ``on_trace``, when given, is called with each finished
-    :class:`ProjectedTrace` on the projector thread; any exception it raises is
-    swallowed and counted (``export_error``) so a failing exporter can never
+    The projector is inert until `start`; construction allocates only its
+    bounded buffers. `on_trace`, when given, is called with each finished
+    `ProjectedTrace` on the projector thread; any exception it raises is
+    swallowed and counted (`export_error`) so a failing exporter can never
     stall the drain or perturb the request path.
     """
 
@@ -262,7 +262,7 @@ class Projector:
     def stop(self, timeout: float = 2.0) -> None:
         """Signal the drain thread to finish, drain once more, and join.
 
-        A final :meth:`poll` on the way out flushes whatever the ring still
+        A final `poll` on the way out flushes whatever the ring still
         holds, so shutdown does not silently strand recorded cells.
         """
         self._stop.set()
@@ -295,7 +295,7 @@ class Projector:
     def _ingest(self, raw: bytes) -> None:
         """Decode a drained buffer and fold each cell into the pending table.
         Nothing finalizes here -- a completion settles only after a quiet cycle
-        (see :meth:`_settle`), so its whole tail has a chance to arrive first."""
+        (see `_settle`), so its whole tail has a chance to arrive first."""
         for offset in range(0, len(raw) - CELL_SIZE + 1, CELL_SIZE):
             cell = raw[offset : offset + CELL_SIZE]
             kind = cell[1]
@@ -319,7 +319,7 @@ class Projector:
                 self._evict_oldest_pending()
             entry = _Assembly()
             self._pending[request_id] = entry
-        # ``cycle`` tracks the last cycle a cell for this request arrived, so a
+        # `cycle` tracks the last cycle a cell for this request arrived, so a
         # completion settles only after a full quiet cycle -- however many cycles
         # its correlation/phase tail is spread across.
         entry.cycle = self._cycle

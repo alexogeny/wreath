@@ -1,4 +1,4 @@
-"""Pure-Python twin for :class:`SnapshotCache`.
+"""Pure-Python twin for `SnapshotCache`.
 
 An immutable read-mostly cache built by atomic generation publication rather
 than in-place mutation. A refresh assembles a whole new generation off to the
@@ -35,8 +35,8 @@ _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 class SnapshotCache[K, V]:
     """A read-mostly cache with atomic snapshot publication.
 
-    ``replace`` builds and publishes a new generation. ``get``/``require``/
-    ``get_many`` read the current generation with no I/O. ``max_entries`` bounds
+    `replace` builds and publishes a new generation. `get`/`require`/
+    `get_many` read the current generation with no I/O. `max_entries` bounds
     a published generation; a violation raises before anything is published, so
     the previous generation survives intact.
     """
@@ -73,7 +73,7 @@ class SnapshotCache[K, V]:
         """Look up each key, preserving input order and duplicate positions.
 
         A duplicate key yields a value at each position it was requested; a
-        miss yields ``default`` at that position.
+        miss yields `default` at that position.
         """
         data = self._current.data
         return [data.get(key, default) for key in keys]
@@ -101,7 +101,7 @@ class SnapshotCache[K, V]:
     # --- publication -------------------------------------------------------
 
     def replace(self, entries: Mapping[K, V] | Iterable[tuple[K, V]]) -> int:
-        """Publish ``entries`` as a new generation and return its number.
+        """Publish `entries` as a new generation and return its number.
 
         The new generation is fully materialized and size-checked before it is
         published, so an oversized refresh fails without disturbing readers.
@@ -131,11 +131,11 @@ class SnapshotCache[K, V]:
         *args: object,
         **kwargs: object,
     ) -> int:
-        """Single-flight refresh: call ``loader`` and publish the result.
+        """Single-flight refresh: call `loader` and publish the result.
 
         Concurrent refreshes coalesce — while one is in flight, the others wait
         and observe the generation it publishes rather than each loading again.
-        ``loader`` may be a coroutine function or a plain callable returning the
+        `loader` may be a coroutine function or a plain callable returning the
         new entries. A loader failure leaves the previous generation in place.
         """
         starting_generation = self._current.generation

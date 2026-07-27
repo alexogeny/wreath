@@ -1,19 +1,19 @@
 """Prometheus text-exposition bridge for the Native Flight Recorder.
 
 The recorder aggregates request metrics off-path in the projector
-(:class:`wreath._projector.Projector`): a running total of assembled traces, a
+(`wreath._projector.Projector`): a running total of assembled traces, a
 pending gauge, categorized loss counters, and per-route counts/errors/duration
-(a base-2 log-bucket histogram). :func:`wreath.telemetry.activate_prometheus`
-wraps a snapshot source in a :class:`PrometheusBridge` that renders that state as
+(a base-2 log-bucket histogram). `wreath.telemetry.activate_prometheus`
+wraps a snapshot source in a `PrometheusBridge` that renders that state as
 Prometheus text exposition format 0.0.4 on demand — the same snapshot the OTLP
 metrics path reads, mapped to Prometheus instead of OTLP. Nothing here runs on
-the request path; a scrape calls :meth:`PrometheusBridge.render` and reads a
+the request path; a scrape calls `PrometheusBridge.render` and reads a
 consistent projector snapshot.
 
 Zero-dependency: the exposition text is hand-rolled to the format spec; there is
-no ``prometheus_client`` import. The renderer is duck-typed over the snapshot
-(``assembled``/``pending``/``routes``/``loss`` and per-route
-``route_id``/``count``/``errors``/``duration_us_sum``/``duration_us_max``/``buckets``),
+no `prometheus_client` import. The renderer is duck-typed over the snapshot
+(`assembled`/`pending`/`routes`/`loss` and per-route
+`route_id`/`count`/`errors`/`duration_us_sum`/`duration_us_max`/`buckets`),
 so it needs no native build to exercise.
 """
 
@@ -41,9 +41,9 @@ CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 #: The OpenMetrics 1.0.0 exposition media type.
 OPENMETRICS_CONTENT_TYPE = "application/openmetrics-text; version=1.0.0; charset=utf-8"
 
-#: base-2 log buckets, matching ``_flight_schema.HISTOGRAM_BUCKETS`` /
-#: ``histogram_bucket``: bucket ``i`` counts durations in ``[2**i, 2**(i+1))`` us
-#: (bucket 0 is ``<= 1`` us), the top bucket is the clamped overflow.
+#: base-2 log buckets, matching `_flight_schema.HISTOGRAM_BUCKETS` /
+#: `histogram_bucket`: bucket `i` counts durations in `[2**i, 2**(i+1))` us
+#: (bucket 0 is `<= 1` us), the top bucket is the clamped overflow.
 HISTOGRAM_BUCKETS = 64
 
 #: Human-readable reason for each projector loss field.
@@ -91,7 +91,7 @@ def _escape_label_value(value: str) -> str:
 
 
 def _format_value(value: float | int) -> str:
-    """A Prometheus-valid numeric literal (``+Inf`` for infinity, int-exact for
+    """A Prometheus-valid numeric literal (`+Inf` for infinity, int-exact for
     integers, round-trippable float otherwise)."""
     if isinstance(value, bool):  # bool is an int subclass; render as 0/1
         return "1" if value else "0"
@@ -117,8 +117,8 @@ def _render_labels(labels: Mapping[str, str]) -> str:
 
 
 def _le_seconds(bucket_index: int) -> float:
-    """Upper bound (inclusive ``le``) in seconds for cumulative-through-bucket
-    ``bucket_index``: the exclusive upper edge ``2**(i+1)`` microseconds."""
+    """Upper bound (inclusive `le`) in seconds for cumulative-through-bucket
+    `bucket_index`: the exclusive upper edge `2**(i+1)` microseconds."""
     return (2 ** (bucket_index + 1)) / 1_000_000.0
 
 
@@ -179,17 +179,17 @@ def render_exposition(
 ) -> str:
     """Render a projector snapshot as Prometheus text exposition (format 0.0.4).
 
-    With ``openmetrics=True`` the output is OpenMetrics 1.0.0 instead: counter
-    ``# TYPE``/``# HELP`` families drop the ``_total`` suffix (samples keep it),
-    and the text is terminated by ``# EOF``.
+    With `openmetrics=True` the output is OpenMetrics 1.0.0 instead: counter
+    `# TYPE`/`# HELP` families drop the `_total` suffix (samples keep it),
+    and the text is terminated by `# EOF`.
 
-    ``snapshot`` is any object exposing ``assembled`` (int), ``pending`` (int),
-    ``loss`` (with the projector loss fields), and ``routes`` (each with
-    ``route_id``/``count``/``errors``/``duration_us_sum``/``duration_us_max`` and
-    a 64-entry ``buckets`` list). ``recorder_loss`` maps a ``LossReason`` (or any
-    named/int reason) to its ring-drop count. ``route_labels`` turns a numeric
-    ``route_id`` into scrape labels (e.g. ``{"method": "GET", "path": "/x"}``);
-    without it, rows are labelled ``route_id="<n>"``.
+    `snapshot` is any object exposing `assembled` (int), `pending` (int),
+    `loss` (with the projector loss fields), and `routes` (each with
+    `route_id`/`count`/`errors`/`duration_us_sum`/`duration_us_max` and
+    a 64-entry `buckets` list). `recorder_loss` maps a `LossReason` (or any
+    named/int reason) to its ring-drop count. `route_labels` turns a numeric
+    `route_id` into scrape labels (e.g. `{"method": "GET", "path": "/x"}`);
+    without it, rows are labelled `route_id="<n>"`.
     """
     ns = _sanitize_metric_name(namespace).rstrip("_")
     w = _Writer()
@@ -271,8 +271,8 @@ def render_exposition(
 class PrometheusBridge:
     """Renders a snapshot source's metrics as Prometheus exposition on demand.
 
-    ``source`` is anything with ``snapshot()`` (returning a projector snapshot)
-    and, optionally, ``recorder_loss()`` — the :class:`wreath._projector.Projector`
+    `source` is anything with `snapshot()` (returning a projector snapshot)
+    and, optionally, `recorder_loss()` — the `wreath._projector.Projector`
     satisfies both. Rendering reads a consistent snapshot; it never touches the
     request path.
     """
@@ -316,7 +316,7 @@ class PrometheusBridge:
     def handler(self) -> Callable[[Any], Any]:
         """An async request handler that returns the exposition as a Response.
 
-        Mount it yourself, e.g. ``app.route("/metrics", methods=("GET",))(bridge.handler())``.
+        Mount it yourself, e.g. `app.route("/metrics", methods=("GET",))(bridge.handler())`.
         Left unmounted by default so the endpoint's exposure and any auth gating
         stay the app's decision.
         """
@@ -336,7 +336,7 @@ def prometheus_handler(
     namespace: str = "wreath",
     route_labels: RouteLabels = None,
 ) -> Callable[[Any], Any]:
-    """Convenience: a ready async ``/metrics`` handler for a snapshot source."""
+    """Convenience: a ready async `/metrics` handler for a snapshot source."""
     return PrometheusBridge(source, namespace=namespace, route_labels=route_labels).handler()
 
 
@@ -346,7 +346,7 @@ def openmetrics_handler(
     namespace: str = "wreath",
     route_labels: RouteLabels = None,
 ) -> Callable[[Any], Any]:
-    """Convenience: a ready async ``/metrics`` handler emitting OpenMetrics 1.0.0."""
+    """Convenience: a ready async `/metrics` handler emitting OpenMetrics 1.0.0."""
     return PrometheusBridge(
         source, namespace=namespace, route_labels=route_labels, openmetrics=True,
     ).handler()
@@ -359,10 +359,10 @@ def metrics_router(
     namespace: str = "wreath",
     route_labels: RouteLabels = None,
 ):
-    """Convenience: a :class:`wreath.router.Router` exposing ``GET <path>``.
+    """Convenience: a `wreath.router.Router` exposing `GET <path>`.
 
-    The consumer ``include_router``s it. Kept here (not wired into ``app.py``) so
-    a future ``app.metrics()`` convenience is an additive follow-up.
+    The consumer `include_router`s it. Kept here (not wired into `app.py`) so
+    a future `app.metrics()` convenience is an additive follow-up.
     """
     # TODO(app-wiring): an `app.metrics(path=..., auth=...)` convenience on the
     #   application factory would mirror `app.http_client`/`app.objects`; deferred

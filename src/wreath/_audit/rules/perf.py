@@ -1,8 +1,8 @@
 """Performance rules: HTML-surface budgets plus app-level checks derived by
 introspecting the loaded application's middleware stack and OpenAPI document.
 
-HTML rules are ``(root, html, surface) -> Iterator[Finding]`` in ``HTML_PERF_RULES``;
-app-level rules run once against the application in ``app_perf``.
+HTML rules are `(root, html, surface) -> Iterator[Finding]` in `HTML_PERF_RULES`;
+app-level rules run once against the application in `app_perf`.
 """
 from __future__ import annotations
 

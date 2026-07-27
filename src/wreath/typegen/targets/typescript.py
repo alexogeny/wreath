@@ -1,4 +1,4 @@
-"""Plan an :class:`ApiModel` into TypeScript output files.
+"""Plan an `ApiModel` into TypeScript output files.
 
 The planner normalizes the semantic model into the renderer's tuple contract,
 computes deterministic client identifiers (camelCase) while preserving wire
@@ -13,6 +13,8 @@ import json
 import re
 from typing import Any
 
+from ..._pure.typegen import GENERATOR_HEADER, TYPEGEN_CONTRACT, ts_type
+from ..inspect import _pascal
 from ..model import ApiModel, Operation, TypeRef
 from ..render import select_renderers
 
@@ -27,11 +29,6 @@ def _camel(text: str) -> str:
     return head[:1].lower() + head[1:] + "".join(
         part[:1].upper() + part[1:] for part in parts[1:]
     )
-
-
-def _pascal(text: str) -> str:
-    parts = [part for part in re.split(r"[_\-]", text) if part]
-    return "".join(part[:1].upper() + part[1:] for part in parts)
 
 
 def _tuplize(ref: TypeRef) -> tuple[Any, ...]:
@@ -88,10 +85,10 @@ def _operation_tuples(api: ApiModel) -> tuple[tuple[Any, ...], ...]:
 
 
 def permission_flag(action: str) -> str:
-    """``"Llama::force_sync"`` -> ``"canForceSync"``.
+    """`"Llama::force_sync"` -> `"canForceSync"`.
 
-    The verb only: a component destructuring ``{ canEdit }`` off a llama's
-    permissions already knows what it is looking at, and ``canLlamaEdit`` reads
+    The verb only: a component destructuring `{ canEdit }` off a llama's
+    permissions already knows what it is looking at, and `canLlamaEdit` reads
     like a stutter.
     """
     _resource, _separator, verb = action.rpartition("::")
@@ -102,10 +99,9 @@ def _permissions_module(api: ApiModel) -> str:
     """A typed client for the app's own authorization vocabulary.
 
     The unions come from the routes, so asking about an action the API does not
-    enforce is a compile error rather than a permanent ``false`` -- which is the
+    enforce is a compile error rather than a permanent `false` -- which is the
     failure mode of every hand-written copy of the rules.
     """
-    from ..._pure.typegen import GENERATOR_HEADER
 
     lines = [GENERATOR_HEADER, "\n"]
     for entry in api.permissions:
@@ -174,7 +170,6 @@ def _permissions_module(api: ApiModel) -> str:
 
 def _permissions_hook_module() -> str:
     """The React half: `usePermissions(resource, ids)` over the same call."""
-    from ..._pure.typegen import GENERATOR_HEADER
 
     return (
         GENERATOR_HEADER
@@ -212,17 +207,16 @@ def _series_module(api: ApiModel) -> str:
     """Typed envelopes for the app's calculated views.
 
     The shared interfaces are generic over the measure names, so a component
-    destructures ``point.started`` and the compiler knows whether it can be
-    ``null``. That is the whole return on measures being named: a positional
-    measure arrives here as ``value_0`` and the component names it again by
+    destructures `point.started` and the compiler knows whether it can be
+    `null`. That is the whole return on measures being named: a positional
+    measure arrives here as `value_0` and the component names it again by
     hand, which is a copy of the declaration that nothing checks.
 
-    ``values`` stays parallel to ``buckets`` rather than becoming
-    ``{bucket, value}`` pairs, because the two are the same length by
+    `values` stays parallel to `buckets` rather than becoming
+    `{bucket, value}` pairs, because the two are the same length by
     construction -- the spine guarantees a dense run -- and a charting library
     wants the two arrays.
     """
-    from ..._pure.typegen import GENERATOR_HEADER
 
     lines = [
         GENERATOR_HEADER,
@@ -351,7 +345,6 @@ def _index_module(
     permissions: bool,
     series: bool = False,
 ) -> str:
-    from ..._pure.typegen import GENERATOR_HEADER
 
     lines = [GENERATOR_HEADER, '\nexport * from "./models";\nexport * from "./client";\n']
     if series:
@@ -380,7 +373,6 @@ def _referenced_names(api: ApiModel) -> list[str]:
 
 
 def _react_query_module(api: ApiModel) -> str:
-    from ..._pure.typegen import GENERATOR_HEADER, ts_type
 
     names = _referenced_names(api)
     import_names = ",\n  ".join(names)
@@ -467,7 +459,6 @@ def _react_hook(operation: Operation, ts_type: Any) -> str:
 
 
 def _manifest(files: list[str], api: ApiModel, backend: str) -> str:
-    from ..._pure.typegen import TYPEGEN_CONTRACT
 
     document = {
         "generator": "wreath-typegen",
@@ -487,7 +478,7 @@ def render_typescript(
     base_url_env: str | None = None,
     pure: bool = False,
 ) -> dict[str, str]:
-    """Return ``{filename: contents}`` for the TypeScript target."""
+    """Return `{filename: contents}` for the TypeScript target."""
     render_models, render_client, backend = select_renderers(pure=pure)
     files: dict[str, str] = {}
     files["models.ts"] = render_models(_declarations(api), 0).decode("utf-8")

@@ -27,9 +27,9 @@ def _value(row: Any, index: int) -> Any:
 
 
 def aggregate_rows(declaration: Any, rows: list[Any]) -> list[tuple[Any, dict[str, Any]]]:
-    """``(key, {measure: value})`` per returned row.
+    """`(key, {measure: value})` per returned row.
 
-    The key is ``None`` for an ungrouped declaration, which has exactly one row.
+    The key is `None` for an ungrouped declaration, which has exactly one row.
     """
     grouped = declaration.group is not None
     offset = 1 if grouped else 0
@@ -47,13 +47,13 @@ def series_rows(declaration: Any, rows: list[Any], *, periods: bool = False) -> 
     """Split returned rows into the bucket run and a per-series value map.
 
     The bucket run comes from the spine, so it is dense and ordered even where
-    nothing matched; the map is sparse, and :func:`fill` is what reconciles
-    them. A series is keyed by ``(key, other)`` rather than by ``key`` alone so
-    that a grouping value which is genuinely ``NULL`` stays distinct from the
-    folded remainder, which also carries a ``NULL`` key.
+    nothing matched; the map is sparse, and `fill` is what reconciles
+    them. A series is keyed by `(key, other)` rather than by `key` alone so
+    that a grouping value which is genuinely `NULL` stays distinct from the
+    folded remainder, which also carries a `NULL` key.
 
-    With ``periods``, the statement carried a discriminator in column 1 and this
-    returns one ``(buckets, map)`` pair per period instead of one overall. Each
+    With `periods`, the statement carried a discriminator in column 1 and this
+    returns one `(buckets, map)` pair per period instead of one overall. Each
     period keeps its own bucket run: the two are legitimately different lengths,
     and a shared run would have to invent buckets for whichever period is
     shorter.
@@ -101,9 +101,9 @@ def series_rows(declaration: Any, rows: list[Any], *, periods: bool = False) -> 
 def fill(declaration: Any, name: str, value: Any) -> Any:
     """What an absent bucket reads as, for one measure.
 
-    An explicit ``.fill(name=...)`` wins. Otherwise the measure's own identity
+    An explicit `.fill(name=...)` wins. Otherwise the measure's own identity
     element decides: a count or a sum of no rows really is zero, while an
-    average, a minimum, or a maximum of no rows is undefined and stays ``None``
+    average, a minimum, or a maximum of no rows is undefined and stays `None`
     so the renderer draws a gap rather than a plunge to the floor.
     """
     if value is not None:

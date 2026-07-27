@@ -2,9 +2,9 @@
 
 This is the reason to own GraphQL in-tree rather than mount a library beside
 the app. A GraphQL type and a REST response body describing the same model are
-the same type, so they become **one** entry in ``ApiModel.models`` and one
-TypeScript interface. A consumer gets ``useGetUser()`` (REST) and
-``userQuery()`` (GraphQL) returning the identical ``User`` -- no duplicate
+the same type, so they become **one** entry in `ApiModel.models` and one
+TypeScript interface. A consumer gets `useGetUser()` (REST) and
+`userQuery()` (GraphQL) returning the identical `User` -- no duplicate
 generated types, no drift, no second codegen pipeline to keep in step.
 
 Models are contributed under the *same* names the REST inspector uses, and
@@ -101,7 +101,7 @@ def graphql_operations(schema: Schema, *, path: str = "/graphql") -> tuple[Opera
 
 
 def merge_into(api: ApiModel, schema: Schema, *, path: str = "/graphql") -> ApiModel:
-    """Return ``api`` with the GraphQL surface folded in.
+    """Return `api` with the GraphQL surface folded in.
 
     Models are merged **by name**: a type the REST inspector already emitted is
     kept as-is rather than duplicated, which is what keeps one `User` interface

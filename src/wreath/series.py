@@ -14,24 +14,26 @@ with zero for *every* measure, so an average collapses to the floor on the
 quietest day of the week. And it re-reads the whole history on every page load,
 because there is nowhere to put the answer.
 
-A declaration says the same thing once, and the database does the work::
+A declaration says the same thing once, and the database does the work:
 
-    from wreath.series import Series, count, sum_
-    from wreath.temporal import Day, zone
+```python
+from wreath.series import Series, count, sum_
+from wreath.temporal import Day, zone
 
-    activity = (
-        Series(Trek, at=Trek.started_at, bucket=Day, stored_in=zone("Pacific/Auckland"))
-            .where(Trek.herd_id == Param("herd"))
-            .measure(started=count(), distance=sum_(Trek.distance_km, unit="km"))
-            .by(Trek.paddock_id, top=7)
+activity = (
+    Series(Trek, at=Trek.started_at, bucket=Day, stored_in=zone("Pacific/Auckland"))
+        .where(Trek.herd_id == Param("herd"))
+        .measure(started=count(), distance=sum_(Trek.distance_km, unit="km"))
+        .by(Trek.paddock_id, top=7)
+)
+
+@app.get("/herds/{herd_id}/activity")
+@cached(ttl=300, invalidate_on=activity.sources)
+async def herd_activity(request, herd_id: int, session: Session):
+    return await activity.run(
+        session, herd=herd_id, range=Range(start, end), zone=request.zone,
     )
-
-    @app.get("/herds/{herd_id}/activity")
-    @cached(ttl=300, invalidate_on=activity.sources)
-    async def herd_activity(request, herd_id: int, session: Session):
-        return await activity.run(
-            session, herd=herd_id, range=Range(start, end), zone=request.zone,
-        )
+```
 
 Four things follow from declaring rather than building, and each of them is a
 bug that no longer has anywhere to happen:
@@ -39,7 +41,7 @@ bug that no longer has anywhere to happen:
 * **Every bucket in the range exists**, because the range generates a spine and
   the aggregate is joined onto it. An empty Tuesday is a zero, not an absence.
 * **Fill is per measure.** A count of nothing is zero; an average of nothing is
-  undefined, and stays ``None`` so the renderer draws a gap.
+  undefined, and stays `None` so the renderer draws a gap.
 * **Every series has a stable key**, taken from the grouping value rather than
   from its position, so a filter change cannot repaint the legend.
 * **Mistakes move to import time.** Bucketing by a column that holds no time,
@@ -49,10 +51,10 @@ bug that no longer has anywhere to happen:
 **What this is not.** It takes one source model, declared measures, and a
 bounded result. If you cannot name the model, name each measure and its unit,
 or state the largest the result can get, then what you have is a query rather
-than a chart, and ``session.raw()`` is the honest tool for it. This module
+than a chart, and `session.raw()` is the honest tool for it. This module
 refuses to become a way to express everything, which is SQL with worse syntax.
 
-Reference: :doc:`/reference/series`.
+Reference: `/reference/series`.
 """
 
 from __future__ import annotations
@@ -141,7 +143,7 @@ __all__ = [
 class SeriesError(DeclarationError):
     """A declaration cannot mean what it says, or its result will not fit.
 
-    A ``DeclarationError`` because that is what the ORM already raises when a
+    A `DeclarationError` because that is what the ORM already raises when a
     query is malformed at the point it is written, and a calculated view is a
     query. Cardinality refusals raise it too: a result too large to draw is a
     fact about the declaration, even when only the run discovers it.
@@ -152,7 +154,7 @@ class SeriesError(DeclarationError):
 #: the column has to hold one; anything else has no boundary to truncate to.
 _TEMPORAL_TYPES = frozenset({TimestampTz.name, Timestamp.name, Date.name})
 
-#: Columns a measure can aggregate. Deliberately no ``numeric``/``decimal``
+#: Columns a measure can aggregate. Deliberately no `numeric`/`decimal`
 #: entry yet: the ORM does not ship one, and listing a type nothing can declare
 #: would be a promise rather than a check.
 _NUMERIC_TYPES = frozenset(
@@ -165,7 +167,7 @@ _NUMERIC_TYPES = frozenset(
 #: so where a reviewer can see it.
 DEFAULT_TOP = 7
 
-#: The largest ``top=`` a declaration may raise the fold to. Not from the design
+#: The largest `top=` a declaration may raise the fold to. Not from the design
 #: document, which fixes only the default: this is a guard rail on the number
 #: being *raised*, chosen because two dozen lines is already past any legend and
 #: well into the territory where the answer is a table. Refusing here means a
@@ -174,7 +176,7 @@ MAX_TOP = 24
 
 #: How many markers an annotation layer carries before it refuses. A hundred
 #: markers is not an annotation layer, it is noise -- so the default is a
-#: quarter of that, and :data:`MAX_EVENTS` is where "annotation" stops being a
+#: quarter of that, and `MAX_EVENTS` is where "annotation" stops being a
 #: description of what you asked for.
 DEFAULT_EVENTS = 25
 MAX_EVENTS = 100
@@ -190,8 +192,8 @@ DEFAULT_GROUP_LIMIT = 50
 class Measure:
     """One aggregate, its unit, and how it behaves where there is no data.
 
-    Built by :func:`count`, :func:`sum_`, :func:`avg`, :func:`min_` and
-    :func:`max_` rather than directly, because the identity element and the
+    Built by `count`, `sum_`, `avg`, `min_` and
+    `max_` rather than directly, because the identity element and the
     rollup rule are properties of the function rather than choices.
     """
 
@@ -203,11 +205,11 @@ class Measure:
     unit: str | None = None
     #: The value an empty bucket takes, when the function has one.
     identity: Any = None
-    #: Whether :attr:`identity` means anything. ``sum`` of no rows is ``0``;
-    #: ``avg`` of no rows is undefined, and the difference is the whole of §3.1.
+    #: Whether `identity` means anything. `sum` of no rows is `0`;
+    #: `avg` of no rows is undefined, and the difference is the whole of §3.1.
     has_identity: bool = False
     #: Whether aggregating this measure's own output again gives the same answer
-    #: as aggregating the rows. False for ``avg``. Unused until coarser tiers
+    #: as aggregating the rows. False for `avg`. Unused until coarser tiers
     #: exist, and recorded now because it is a fact about the function, not
     #: about the stage that first needs it.
     rollup_safe: bool = True
@@ -218,17 +220,17 @@ class Measure:
 
 
 def count() -> Measure:
-    """How many rows fall in each bucket. Empty buckets read as ``0``."""
+    """How many rows fall in each bucket. Empty buckets read as `0`."""
     return Measure("COUNT", None, "count", None, 0, True)
 
 
 def sum_(column: Any, *, unit: str | None = None) -> Measure:
-    """The total of ``column``. Empty buckets read as ``0``."""
+    """The total of `column`. Empty buckets read as `0`."""
     return Measure("SUM", _numeric(column, "sum_"), "sum", unit, 0, True)
 
 
 def avg(column: Any, *, unit: str | None = None) -> Measure:
-    """The mean of ``column``. Empty buckets read as ``None``, never ``0``.
+    """The mean of `column`. Empty buckets read as `None`, never `0`.
 
     An average of no rows is undefined. Rendering it as zero draws a line
     plunging to the floor on every quiet day, which reads as a collapse in the
@@ -238,12 +240,12 @@ def avg(column: Any, *, unit: str | None = None) -> Measure:
 
 
 def min_(column: Any, *, unit: str | None = None) -> Measure:
-    """The smallest value of ``column``. Empty buckets read as ``None``."""
+    """The smallest value of `column`. Empty buckets read as `None`."""
     return Measure("MIN", _numeric(column, "min_"), "minimum", unit)
 
 
 def max_(column: Any, *, unit: str | None = None) -> Measure:
-    """The largest value of ``column``. Empty buckets read as ``None``."""
+    """The largest value of `column`. Empty buckets read as `None`."""
     return Measure("MAX", _numeric(column, "max_"), "maximum", unit)
 
 
@@ -262,7 +264,7 @@ def _numeric(column: Any, name: str) -> ColumnExpr:
 
 @dataclass(frozen=True, slots=True)
 class Range:
-    """A half-open span of time — ``start <= t < end``.
+    """A half-open span of time — `start <= t < end`.
 
     Half-open, stated once, and used for the filter, the spine bounds, and every
     boundary derived from them. The off-by-one in a chart comes from writing the
@@ -289,10 +291,10 @@ class Range:
 class SeriesData:
     """One plottable line: a stable identity, its unit, and its values.
 
-    ``key`` is the grouping value, never a rank — a series keeps its identity
-    when its neighbours come and go. ``other`` marks the folded remainder, which
-    also carries a ``None`` key, and is what tells it apart from a group whose
-    value genuinely is ``NULL``.
+    `key` is the grouping value, never a rank — a series keeps its identity
+    when its neighbours come and go. `other` marks the folded remainder, which
+    also carries a `None` key, and is what tells it apart from a group whose
+    value genuinely is `NULL`.
     """
 
     measure: str
@@ -320,9 +322,9 @@ class SeriesEvent:
     """One marker: when it happened, which bucket that was, and what to call it.
 
     Both times are carried because both are wanted and neither can be derived
-    from the other on the client. :attr:`at` puts the marker at its true
-    x-position; :attr:`bucket` says which column it annotates, computed by the
-    same ``date_trunc`` in the same zone as the series it sits over, so a
+    from the other on the client. `at` puts the marker at its true
+    x-position; `bucket` says which column it annotates, computed by the
+    same `date_trunc` in the same zone as the series it sits over, so a
     marker cannot land a bucket away from the bar it describes.
     """
 
@@ -356,7 +358,7 @@ class SeriesComparison:
     payload gives them what they need to make it rather than making it for them.
     """
 
-    #: The bucket width the range was shifted by — ``"month"`` for a
+    #: The bucket width the range was shifted by — `"month"` for a
     #: month-over-month comparison. What a legend calls it.
     previous: str
     buckets: tuple[Any, ...]
@@ -384,19 +386,19 @@ class SeriesResult:
     #: gaps. A renderer can use this as the x axis directly.
     buckets: tuple[Any, ...]
     series: tuple[SeriesData, ...]
-    #: The prior period, when the declaration asked for one. ``None`` otherwise,
+    #: The prior period, when the declaration asked for one. `None` otherwise,
     #: so a caller that never compares never has to check for it.
     comparison: SeriesComparison | None = None
     #: Markers over the same range, in the order they happened. Empty unless the
     #: declaration asked for them.
     events: tuple[SeriesEvent, ...] = ()
-    #: Where the watermark fell and what is known behind it. ``None`` for a view
+    #: Where the watermark fell and what is known behind it. `None` for a view
     #: that declares no seal, so a caller who never seals never has to check.
     state: Any = None
     #: Which tier answered for which part of the range, oldest first. Empty for
     #: a view with no ladder. Always reported rather than only when it is
     #: surprising: a chart drawn from two grains should be able to say so, and a
-    #: caller who passed ``allow_coarsening=True`` needs to know where it was
+    #: caller who passed `allow_coarsening=True` needs to know where it was
     #: taken up.
     segments: tuple[Any, ...] = ()
 
@@ -407,12 +409,12 @@ class SeriesResult:
         """The JSON body, with the field names the generated TypeScript expects.
 
         Written out rather than derived from the dataclass, because these keys
-        are a wire contract shared with ``wreath typegen`` and a field rename
+        are a wire contract shared with `wreath typegen` and a field rename
         should have to be made in both places on purpose.
 
         Needed because the JSON encoder does not know dataclasses: returning the
-        result object itself raises ``TypeError`` on the first request. Teaching
-        ``temporal.jsonable`` a hook would let the object go back directly and is
+        result object itself raises `TypeError` on the first request. Teaching
+        `temporal.jsonable` a hook would let the object go back directly and is
         the better long-term shape; it belongs to that module rather than here.
         """
         return {
@@ -461,7 +463,7 @@ class AggregateResult:
         return len(self.rows)
 
     def as_dict(self) -> dict[str, Any]:
-        """The JSON body, matching the generated ``AggregateResult<M>``."""
+        """The JSON body, matching the generated `AggregateResult<M>`."""
         return {
             "rows": [row.as_dict() for row in self.rows],
             "measures": list(self.measures),
@@ -487,7 +489,7 @@ class _Builder:
 
     Every builder method returns a new object, so a declaration written once at
     import time is safe to reuse per request without a defensive copy — the same
-    property ``Select`` has, for the same reason.
+    property `Select` has, for the same reason.
     """
 
     __slots__ = ("_d",)
@@ -513,7 +515,7 @@ class _Builder:
 
     @property
     def sources(self) -> tuple[type, ...]:
-        """Every model this declaration reads, for ``invalidate_on``.
+        """Every model this declaration reads, for `invalidate_on`.
 
         Derived from the query rather than restated beside it, so a predicate
         that starts filtering through a relationship cannot leave a cache
@@ -531,7 +533,7 @@ class _Builder:
     def predicates(self) -> tuple[Predicate, ...]:
         """The declared filters, for a reader that wants to inspect them.
 
-        Public for the same reason :attr:`sources` is: a declaration is a value,
+        Public for the same reason `sources` is: a declaration is a value,
         and a tool that has to know what this view touches should read it here
         rather than re-deriving it from source.
         """
@@ -541,14 +543,14 @@ class _Builder:
     def declared_columns(self) -> tuple[tuple[str, ColumnExpr], ...]:
         """Every column this view names, tagged with what it does to it.
 
-        ``("time", …)`` is the bucketing column, ``("aggregate", …)`` a column
-        summed or averaged, ``("group", …)`` the grouping key. Filters are
-        :attr:`predicates` instead, because for a filter the *operator* decides
+        `("time", …)` is the bucketing column, `("aggregate", …)` a column
+        summed or averaged, `("group", …)` the grouping key. Filters are
+        `predicates` instead, because for a filter the *operator* decides
         whether it is safe and a bare column would throw that away.
 
         This exists for a reader that does not exist yet, and the reason is
         worth writing down. Design 24 (deferred data migrations) refuses
-        ``SUM``, ``AVG``, ``MIN``, ``MAX``, ``GROUP BY`` and joins on a column
+        `SUM`, `AVG`, `MIN`, `MAX`, `GROUP BY` and joins on a column
         that is *mid-conversion* — a backfill rewriting values underneath a
         running application. Those are not exotic operations here; they are most
         of what a calculated view is made of, and a grouped chart over a
@@ -577,9 +579,9 @@ class _Builder:
     def where(self, *predicates: Predicate) -> Any:
         """Narrow this view; predicates combine with AND.
 
-        Takes the same predicates a ``Select`` does — not a parallel filter
-        language, the same one, compiled by the same code. A ``Param`` stands
-        where a value would and is supplied per call to :meth:`run`.
+        Takes the same predicates a `Select` does — not a parallel filter
+        language, the same one, compiled by the same code. A `Param` stands
+        where a value would and is supplied per call to `run`.
         """
         for item in predicates:
             if not isinstance(item, Predicate):
@@ -594,7 +596,7 @@ class _Builder:
 
         Named rather than positional because the name is the series key in the
         result and the field name in a generated client; positional measures
-        produce ``value_0``, which nobody wants in a component.
+        produce `value_0`, which nobody wants in a component.
 
         Two measures return two *separate* named series, each with its own unit
         and kind. They are never merged into one plottable line: two quantities
@@ -684,7 +686,7 @@ class _Builder:
     # -- running ----------------------------------------------------------
 
     def _bind(self, values: dict[str, Any]) -> tuple[Predicate, ...]:
-        """This view's predicates with each ``Param`` replaced by its value."""
+        """This view's predicates with each `Param` replaced by its value."""
         # Two passes, because binding a missing name raises a bare KeyError from
         # inside the placeholder and the caller needs to be told *which*
         # parameter they left out, not which dict lookup failed.
@@ -709,14 +711,16 @@ class _Builder:
 class Aggregate(_Builder):
     """Grouped totals with no time axis — a bar chart, a KPI, or a scatter.
 
-    The shared core, usable on its own::
+    The shared core, usable on its own:
 
-        by_paddock = (
-            Aggregate(Trek)
-                .where(Trek.started_at >= Param("since"))
-                .measure(treks=count(), distance=sum_(Trek.distance_km))
-                .by(Trek.paddock_id)
-        )
+    ```python
+    by_paddock = (
+        Aggregate(Trek)
+            .where(Trek.started_at >= Param("since"))
+            .measure(treks=count(), distance=sum_(Trek.distance_km))
+            .by(Trek.paddock_id)
+    )
+    ```
 
     Unlike a series it does not fold a long tail into a remainder: the bars are
     the answer, so a result past the ceiling refuses rather than drawing a chart
@@ -742,7 +746,7 @@ class Aggregate(_Builder):
         return self._limit
 
     def by(self, column: Any, *, limit: int = DEFAULT_GROUP_LIMIT) -> Aggregate:
-        """Group by ``column``, refusing beyond ``limit`` groups.
+        """Group by `column`, refusing beyond `limit` groups.
 
         The ceiling is declared rather than passed per request, so it lives
         where it is reviewed instead of in a query parameter a client can set to
@@ -758,7 +762,7 @@ class Aggregate(_Builder):
         )
 
     async def run(self, session: Any, **values: Any) -> AggregateResult:
-        """Run this declaration on ``session`` and assemble the result."""
+        """Run this declaration on `session` and assemble the result."""
         if not self._d.measures:
             raise SeriesError("this view declares no measures; there is nothing to compute")
         predicates = self._bind(values)
@@ -858,7 +862,7 @@ class Series(_Builder):
         """Every model this view reads, the annotation layer included.
 
         A new deploy changes the chart just as a new trek does, so a cache keyed
-        on ``sources`` has to know about both. Leaving the events model out is
+        on `sources` has to know about both. Leaving the events model out is
         the kind of omission that shows up as a marker missing for five minutes
         and gets blamed on the browser.
         """
@@ -875,10 +879,10 @@ class Series(_Builder):
         return tuple(found)
 
     def by(self, column: Any, *, top: int = DEFAULT_TOP) -> Series:
-        """Split into one series per value of ``column``, keeping the top ``top``.
+        """Split into one series per value of `column`, keeping the top `top`.
 
         Everything past the cut folds into a single remainder carrying the
-        reserved key ``None`` and ``other=True``. Folding is meaningful where
+        reserved key `None` and `other=True`. Folding is meaningful where
         refusing would not be: the remainder preserves the total, which is what
         a part-to-whole chart is for.
 
@@ -917,10 +921,10 @@ class Series(_Builder):
         )
 
     def compare(self, *, previous: Bucket) -> Series:
-        """Also compute the same range one ``previous`` earlier.
+        """Also compute the same range one `previous` earlier.
 
-        ``previous=Month`` answers "and what did this look like last month?".
-        The shift is a bucket width from :mod:`wreath.temporal` rather than a
+        `previous=Month` answers "and what did this look like last month?".
+        The shift is a bucket width from `wreath.temporal` rather than a
         duration, because the useful comparisons are calendar ones: a month is
         28 to 31 days depending on when you ask, and "the same days last month"
         is what a reader means even though no fixed number of hours expresses it.
@@ -975,11 +979,11 @@ class Series(_Builder):
         marker lands a column away from the event it describes.
 
         Each marker carries both its exact instant and the bucket it falls in,
-        computed by the same ``date_trunc`` in the same zone as the series, so
+        computed by the same `date_trunc` in the same zone as the series, so
         it can sit at its true x-position while still knowing what it annotates.
 
         This is a **second statement** on the same session rather than a tagged
-        ``UNION ALL`` of buckets and markers. The union would force two
+        `UNION ALL` of buckets and markers. The union would force two
         different row shapes into one, half the columns null in every row, with
         a discriminator the client has to switch on — a worse envelope and worse
         generated types, in exchange for a round trip the driver describes
@@ -987,7 +991,7 @@ class Series(_Builder):
         two is a question for a real server; the alignment does not depend on
         the answer.
 
-        With :meth:`compare`, markers cover the primary period only. An
+        With `compare`, markers cover the primary period only. An
         annotation layer answers "what happened during *this*", and drawing last
         month's deploys over this month's chart would need a second axis to be
         readable at all.
@@ -1040,17 +1044,17 @@ class Series(_Builder):
     def seal(self, *, after: Any, on_late: str = "correct") -> Series:
         """Declare when a bucket stops being able to change.
 
-        A bucket is **sealed** once ``after`` has elapsed since it *closed*, and
+        A bucket is **sealed** once `after` has elapsed since it *closed*, and
         a sealed bucket is computed once and then read. Before that it is open
         and every run recomputes it, because it can still move.
 
         Args:
-            after: the lateness allowance -- ``"2h"``, ``"30m"``, or a number of
+            after: the lateness allowance -- `"2h"`, `"30m"`, or a number of
                 seconds. How long you are willing to wait for a straggler.
-            on_late: what a :meth:`reconcile` does when it finds a sealed bucket
-                whose rows have since changed. ``"correct"`` keeps the settled
+            on_late: what a `reconcile` does when it finds a sealed bucket
+                whose rows have since changed. `"correct"` keeps the settled
                 value immutable and records the difference beside it.
-                ``"reopen"`` replaces it, which is only sound while the rows are
+                `"reopen"` replaces it, which is only sound while the rows are
                 still there to recompute from -- so it is never the default.
 
         A settled bucket is not a cache. It has no TTL, it is never evicted, and
@@ -1096,29 +1100,29 @@ class Series(_Builder):
 
     @property
     def sealed_after(self) -> float | None:
-        """The declared lateness allowance in seconds, or ``None`` if open."""
+        """The declared lateness allowance in seconds, or `None` if open."""
         return None if self._seal is None else self._seal.after
 
     def retain(self, **windows: Any) -> Series:
         """How long each grain stays warm, finest to coarsest.
 
-        ::
-
-            .seal(after="2h").retain(raw="3 days", day="1 year", month=None)
+        ```python
+        .seal(after="2h").retain(raw="3 days", day="1 year", month=None)
+        ```
 
         Read as: keep the source rows answering for three days, keep daily
-        buckets a year, keep monthly buckets forever. ``None`` means
+        buckets a year, keep monthly buckets forever. `None` means
         indefinitely.
 
         **Nothing here deletes anything, and this stage adds no way to.**
-        ``retain`` is a promise about what stays warm, not an instruction to
+        `retain` is a promise about what stays warm, not an instruction to
         expire. What it changes today is which tier a read prefers: a range
         older than raw's window is answered from the coarsest tier that still
         covers it, *even though raw happens to still be present*. Keeping that
         promise now is what stops a query changing shape on the day a later
         stage begins enforcing the window.
 
-        A tier coarser than ``raw`` requires :meth:`seal`, because a tier stores
+        A tier coarser than `raw` requires `seal`, because a tier stores
         a value on the understanding that it is final and only the seal says
         when a value is final. A measure that cannot be recombined from parts --
         an average -- is refused against a bounded raw window, because a coarse
@@ -1168,11 +1172,11 @@ class Series(_Builder):
     def _identity(
         self, zone_name: str, values: dict[str, Any], *, grain: Bucket | None = None
     ) -> tuple[str, str]:
-        """``(view, params)`` -- what a settled row is filed under.
+        """`(view, params)` -- what a settled row is filed under.
 
-        ``grain`` is how a tier gets its own key without a second table or a
-        second kind of identity: :func:`view_key` already folds the bucket into
-        the digest, so asking for the same declaration at ``Month`` yields the
+        `grain` is how a tier gets its own key without a second table or a
+        second kind of identity: `view_key` already folds the bucket into
+        the digest, so asking for the same declaration at `Month` yields the
         monthly tier's key. The daily tier of a view bucketed by day is
         therefore *literally* the rows sealing already writes -- which is the
         concrete form of §7.3's claim that rollup and settlement are one
@@ -1210,16 +1214,16 @@ class Series(_Builder):
         settled buckets under the zone they were computed in and reading it in
         another zone settles separately rather than lying.
 
-        ``now`` decides where the watermark falls and defaults to the present.
+        `now` decides where the watermark falls and defaults to the present.
         Passing one reads the range as of that instant, which is what makes a
         sealing test deterministic and a "what did this look like on Friday"
         question answerable.
 
-        ``allow_coarsening`` accepts a coarser grain for the part of a range no
+        `allow_coarsening` accepts a coarser grain for the part of a range no
         tier stores at the grain asked for. Off by default: returning monthly
         numbers labelled as days is a lie that survives review, so the honest
         default is to refuse and name the coarsest grain available.
-        :attr:`SeriesResult.segments` always reports the grain actually used.
+        `SeriesResult.segments` always reports the grain actually used.
         """
         if not self._d.measures:
             raise SeriesError("this view declares no measures; there is nothing to plot")
@@ -1261,7 +1265,7 @@ class Series(_Builder):
         end: Any,
         zone_name: str,
     ) -> dict[Any, dict[str, Any]]:
-        """``{bucket: {measure: value}}`` straight from the source rows."""
+        """`{bucket: {measure: value}}` straight from the source rows."""
         sql, args, _oids = compile_series(
             session.registry,
             self,
@@ -1321,7 +1325,7 @@ class Series(_Builder):
     ) -> tuple[dict[Any, dict[str, Any]], Any]:
         """One span at this view's own grain: settled behind the watermark, open ahead.
 
-        Split out from :meth:`_run_sealed` because a tiered read needs exactly
+        Split out from `_run_sealed` because a tiered read needs exactly
         this for the part of a range that raw still answers for, and having two
         copies of "what is sealed here" is how the watermark starts meaning two
         things.
@@ -1399,7 +1403,7 @@ class Series(_Builder):
         §7.4's promise is that the caller never knows there were tiers -- so the
         pieces are merged into one bucket run and one set of series, exactly as
         an untiered read produces. What the caller *can* see, in
-        :attr:`SeriesResult.segments`, is which grain answered where: that is
+        `SeriesResult.segments`, is which grain answered where: that is
         reporting, not something they have to handle.
         """
         assert self._tiers is not None
@@ -1470,8 +1474,8 @@ class Series(_Builder):
         """Read one materialised tier's stored rows for one piece of the range.
 
         One statement, and no contact with the source table at all. A tier is
-        the same ``series_buckets`` rows sealing writes, filed under the key
-        that grain hashes to -- so this is :func:`select_settled` again, asking
+        the same `series_buckets` rows sealing writes, filed under the key
+        that grain hashes to -- so this is `select_settled` again, asking
         a different question of the same table.
         """
         view, params = self._identity(zone_name, values, grain=segment.tier.grain)
@@ -1496,17 +1500,17 @@ class Series(_Builder):
         now: Any = None,
         **values: Any,
     ) -> dict[str, tuple[Any, ...]]:
-        """Materialise every coarser tier over the sealed part of ``range``.
+        """Materialise every coarser tier over the sealed part of `range`.
 
         The durable-job body §7.3 describes, written as an ordinary method so
-        the scheduling stays in :mod:`wreath.jobs` where it already
-        lives — ``jobs.schedule`` with a dedup key of declaration, tier and
+        the scheduling stays in `wreath.jobs` where it already
+        lives — `jobs.schedule` with a dedup key of declaration, tier and
         bucket makes a re-run a no-op, and the insert refuses to overwrite
         anyway, so at-least-once delivery costs nothing here.
 
         Two steps, in this order:
 
-        1. :meth:`reconcile` the range first, so a late write that landed behind
+        1. `reconcile` the range first, so a late write that landed behind
            the watermark is folded in before anything coarser is built from it.
            Running rollup without this would carve a stale number into a coarser
            grain, where it is harder to notice and no longer traceable to the
@@ -1600,10 +1604,10 @@ class Series(_Builder):
         chart would put per-row bookkeeping on every write in the application.
 
         So the application runs this: from a scheduled job, after an import,
-        after a backfill. It recomputes the sealed part of ``range`` from the
+        after a backfill. It recomputes the sealed part of `range` from the
         source rows, compares each bucket to what was settled, and writes a
         delta where they disagree — or replaces the settled value outright if
-        the view declared ``on_late="reopen"``.
+        the view declared `on_late="reopen"`.
 
         Returns the bucket starts it corrected, so a caller can log or alert on
         late data arriving rather than discovering it in a discrepancy later.
@@ -1748,7 +1752,7 @@ def _related_columns(node: Any) -> list[RelatedColumnExpr]:
     """Every related column a predicate or a grouping key reaches.
 
     A predicate is a tree, so the column that names another model is usually an
-    operand rather than the node itself -- which is what makes ``sources``
+    operand rather than the node itself -- which is what makes `sources`
     derived rather than restated. The shape mirrors the compiler's own path
     walk; it collects owners instead of join paths, and stops at the same node
     types for the same reason.
@@ -1792,17 +1796,17 @@ def _refuse_unrollable(
     late correction (§7.2). Additivity over disjoint sets is one property with
     two consequences: a measure that rolls up can take a delta, and a measure
     that cannot roll up cannot take one either. That is why it reads
-    :attr:`Measure.rollup_safe` -- one fact about the function -- rather than a
+    `Measure.rollup_safe` -- one fact about the function -- rather than a
     second list that could disagree with the first.
 
-    And it is deliberately conditional on ``raw`` being *bounded*. A coarse tier
+    And it is deliberately conditional on `raw` being *bounded*. A coarse tier
     is computed from the source rows today, so an average over one is correct
     right now; what makes it unsound is the retention window promising those
     rows will stop being there. §7.5 gives exactly two ways out and this enforces
-    both: pin raw retention across the whole query window (``raw=None``), or
+    both: pin raw retention across the whole query window (`raw=None`), or
     take the coarse tier off the ladder.
 
-    The third way out, which is not built: store ``avg`` decomposed as a sum and
+    The third way out, which is not built: store `avg` decomposed as a sum and
     a count and divide at read time, so it becomes additive after all. That is
     §7.5's own prescription, it is invisible to the caller, and it is a change to
     what a settled row holds rather than a check -- so it is named in the
@@ -1835,7 +1839,7 @@ def _refuse_unrollable(
 def _refuse_unreopenable(
     seal: Seal | None, ladder: Ladder | None, bucket: Bucket
 ) -> None:
-    """Refuse ``on_late="reopen"`` when raw cannot outlive the seal window.
+    """Refuse `on_late="reopen"` when raw cannot outlive the seal window.
 
     §7.2's rule. Reopening a sealed bucket means **recomputing it from the
     source rows and overwriting the stored value**. If those rows are gone, the
@@ -1844,33 +1848,35 @@ def _refuse_unreopenable(
     correction that would have shown something was wrong.
 
     The arithmetic is one bucket wider than the design's phrasing, and the extra
-    width is load-bearing. A bucket ``[start, end)`` seals at ``end + after``,
-    but recomputing it needs *every* row in it, and the oldest sits at ``start``
-    -- a whole bucket earlier. So raw has to promise::
+    width is load-bearing. A bucket `[start, end)` seals at `end + after`,
+    but recomputing it needs *every* row in it, and the oldest sits at `start`
+    -- a whole bucket earlier. So raw has to promise:
 
-        keep >= after + width(bucket)
+    ```text
+    keep >= after + width(bucket)
+    ```
 
     Keeping raw for exactly the seal window is not enough: at the instant the
     bucket sealed, its first row would already be past the edge.
 
-    **Equality is accepted, not refused.** :meth:`~wreath.\
-_series.tiers.Tier.covers` tests ``instant >= now - keep``, so a row sitting
+    **Equality is accepted, not refused.** `Tier.covers`
+    tests `instant >= now - keep`, so a row sitting
     exactly on the retention edge is still covered. Refusing at equality would
     contradict the coverage predicate one module over, and two rules disagreeing
     about the same boundary is worse than either rule being slightly loose.
 
-    **Two durations, two precisions, and why that is sound here.** ``after``
-    comes from :func:`_lateness`, which is exact -- it cannot even express
-    months or years. ``keep`` comes from ``retain()``, which reads ``"1 year"``
+    **Two durations, two precisions, and why that is sound here.** `after`
+    comes from `_lateness`, which is exact -- it cannot even express
+    months or years. `keep` comes from `retain()`, which reads `"1 year"`
     as a mean length on purpose. Comparing them is comparing an exact number
     against an approximate one, and the approximation would matter if anything
-    else read ``keep`` differently. Nothing does: ``Tier.covers`` uses the same
+    else read `keep` differently. Nothing does: `Tier.covers` uses the same
     seconds at runtime, so this check and the behaviour it predicts cannot
     disagree, whatever the calendar does.
 
     **What this cannot catch, stated rather than implied.** It is a necessary
     condition, not a sufficient one. It refuses a declaration under which reopen
-    could *never* be sound. It cannot refuse a :func:`reconcile` that runs a
+    could *never* be sound. It cannot refuse a `reconcile` that runs a
     month after a bucket sealed, by which time the rows may have aged out under
     a window that was ample at sealing time. That hazard belongs to *when* the
     operation runs rather than to what was declared, so the guide carries it and
@@ -1984,22 +1990,22 @@ def _instant(value: Any) -> Any:
     return Instant.of(value)
 
 
-#: ``2h``, ``30m``, ``90s``, ``250ms``, ``7d`` -- the same compact spelling
-#: ``ChunkedPass(within=...)`` takes, so one codebase has one duration syntax.
+#: `2h`, `30m`, `90s`, `250ms`, `7d` -- the same compact spelling
+#: `ChunkedPass(within=...)` takes, so one codebase has one duration syntax.
 #:
-#: That was aspirational until 2026-07-27: this accepted ``d`` and
-#: :mod:`wreath._passes.duration` did not, so ``seal(after="3d")`` parsed while
-#: ``Rows(within="3d")`` refused. The scales are the same set now, and
-#: ``tests/series/test_duration_syntax.py`` asserts it rather than trusting this
+#: That was aspirational until 2026-07-27: this accepted `d` and
+#: `wreath._passes.duration` did not, so `seal(after="3d")` parsed while
+#: `Rows(within="3d")` refused. The scales are the same set now, and
+#: `tests/series/test_duration_syntax.py` asserts it rather than trusting this
 #: comment -- a claim two modules apart is one edit from being false again.
 _COMPACT_DURATION = _re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*(ms|s|m|h|d)?\s*$")
 _COMPACT_SCALE = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
 
 
 def _lateness(value: Any) -> float:
-    """``seal(after=)`` as a number of seconds.
+    """`seal(after=)` as a number of seconds.
 
-    Takes the compact form (``"2h"``) or ISO-8601 (``"PT2H"``) or a plain number
+    Takes the compact form (`"2h"`) or ISO-8601 (`"PT2H"`) or a plain number
     of seconds. Neither spelling can express months or years, which is correct
     rather than a limitation: a lateness allowance is *elapsed* time, and "one
     month after the bucket closed" is not a fixed amount of it.
@@ -2034,7 +2040,7 @@ def _lateness(value: Any) -> float:
 def _as_mapping(value: Any) -> dict[str, Any]:
     """A stored JSONB column as a dict, however the driver handed it back.
 
-    A real driver decodes ``jsonb`` to a dict; a fake, and some configurations,
+    A real driver decodes `jsonb` to a dict; a fake, and some configurations,
     hand back the text. Accepting both here keeps the storage shape a fact about
     PostgreSQL rather than about which decoder is installed.
     """

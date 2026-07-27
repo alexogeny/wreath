@@ -1,27 +1,28 @@
 """GraphQL over the Wreath ORM, sharing everything the rest of the app uses.
 
 Point it at a registry and it derives the schema from your models -- the same
-``ModelSpec`` the SQL compiler, OpenAPI, and typegen read, so the GraphQL
-surface cannot drift from the REST one::
+`ModelSpec` the SQL compiler, OpenAPI, and typegen read, so the GraphQL
+surface cannot drift from the REST one:
 
-    from wreath.graphql import GraphQL
+```python
+from wreath.graphql import GraphQL
 
-    api = GraphQL(app.orm("main"), models=[User, Post])
-    app.include_router(api.router())
-
+api = GraphQL(app.orm("main"), models=[User, Post])
+app.include_router(api.router())
+```
 What owning this in-tree buys, none of which a bolt-on library can:
 
 * **No N+1 and no DataLoader.** A relationship selection resolves through the
   session's batched select-in loader -- one statement per relationship per
   level, deduplicated by the identity map.
 * **One authorization language.** Field access is checked against the app's
-  authorizer with ``Type.field`` as the resource, so a Cedar policy covers REST
+  authorizer with `Type.field` as the resource, so a Cedar policy covers REST
   and GraphQL at once.
-* **Per-field latency in the Flight Recorder**, as ``RESOLVER`` phases, without
+* **Per-field latency in the Flight Recorder**, as `RESOLVER` phases, without
   wiring an exporter.
-* **Typegen.** ``wreath typegen`` emits GraphQL operations alongside the REST
-  ones, sharing one TypeScript model set, so a client gets ``useGetUser()`` and
-  ``useUserQuery()`` returning the same ``User``.
+* **Typegen.** `wreath typegen` emits GraphQL operations alongside the REST
+  ones, sharing one TypeScript model set, so a client gets `useGetUser()` and
+  `useUserQuery()` returning the same `User`.
 
 Safety is not optional here. A public GraphQL endpoint is a denial-of-service
 surface, so depth, complexity, alias, and parse-step limits are enforced *while
@@ -134,22 +135,23 @@ class GraphQL:
         policy: str | None = None,
         cost: int = 1,
     ):
-        """Register a computed field on ``type_name``.
+        """Register a computed field on `type_name`.
 
         The resolver is **batched by default**: it receives the whole level as
         a list and returns one value per object. Per-parent resolvers are how
         application code reintroduces the N+1 the data layer just solved, so
-        the batched form is the easy one to write::
+        the batched form is the easy one to write:
 
-            @api.field("User", "postCount", returns="Int", requires=["posts"])
-            async def post_count(users, info):
-                return [len(user.posts) for user in users]
-
-        ``requires`` names sibling fields that must be resolved first. They are
+        ```python
+        @api.field("User", "postCount", returns="Int", requires=["posts"])
+        async def post_count(users, info):
+            return [len(user.posts) for user in users]
+        ```
+        `requires` names sibling fields that must be resolved first. They are
         resolved in batch, and if the client did not select them they stay
         hidden -- asking for a computed field never widens the response.
 
-        Pass ``batch=False`` for the one-object-at-a-time form when the work is
+        Pass `batch=False` for the one-object-at-a-time form when the work is
         genuinely per-object and cannot be batched.
         """
 
@@ -175,13 +177,15 @@ class GraphQL:
         """Register a custom root query field.
 
         Needs no backing table: use it for a search, an aggregate, or anything
-        assembled from more than one model::
+        assembled from more than one model:
 
-            @api.query("search", returns="User", is_list=True)
-            async def search(info):
-                return await info.session.fetch(
-                    User.select().where(User.email.like(info.arguments["term"]))
-                )
+        ```python
+        @api.query("search", returns="User", is_list=True)
+        async def search(info):
+            return await info.session.fetch(
+                User.select().where(User.email.like(info.arguments["term"]))
+            )
+        ```
         """
 
         def register(fn):
@@ -259,7 +263,7 @@ class GraphQL:
     def validate(self) -> None:
         """Check every resolver dependency resolves, and freeze the schema.
 
-        Called automatically by :meth:`router`. A missing or cyclic ``requires``
+        Called automatically by `router`. A missing or cyclic `requires`
         is a wiring mistake, and finding it on the first request that happens to
         select that field is far too late.
         """
@@ -274,9 +278,9 @@ class GraphQL:
         return self._schema.sdl()
 
     def parse(self, source: str) -> Any:
-        """Parse and cache ``source`` under the configured limits.
+        """Parse and cache `source` under the configured limits.
 
-        Documents past :data:`MAX_CACHED_QUERY_CHARS` are parsed and *not*
+        Documents past `MAX_CACHED_QUERY_CHARS` are parsed and *not*
         cached: the key is the client's own text, so caching by entry count
         alone let a few large documents hold far more memory than the count
         suggested, and a caller choosing the key is a caller choosing the size.
@@ -299,7 +303,7 @@ class GraphQL:
         variables: dict[str, Any] | None = None,
         request: Any = None,
     ) -> dict[str, Any]:
-        """Parse and execute ``source``, returning a GraphQL response body."""
+        """Parse and execute `source`, returning a GraphQL response body."""
         try:
             document = self.parse(source)
         except GraphQLSyntaxError as error:
@@ -342,9 +346,9 @@ class GraphQL:
         *,
         session_factory: Any = None,
     ) -> Router:
-        """A router serving POST ``path`` (and GET for the SDL, if enabled).
+        """A router serving POST `path` (and GET for the SDL, if enabled).
 
-        ``session_factory(request)`` supplies the ORM session. Without one, a
+        `session_factory(request)` supplies the ORM session. Without one, a
         read session is opened per request from the registry and closed after.
         """
         self.validate()
@@ -422,7 +426,7 @@ class GraphQL:
         return router
 
     def _is_mutation(self, source: str) -> bool:
-        """Whether ``source`` parses to a mutation. False for anything unparseable."""
+        """Whether `source` parses to a mutation. False for anything unparseable."""
         try:
             document = self.parse(source)
         except GraphQLSyntaxError:
@@ -445,7 +449,7 @@ class GraphQL:
         both are common, and which one the caller chose is not something the
         endpoint should care about.
 
-        ``mutating`` selects the write workload. Without it every request --
+        `mutating` selects the write workload. Without it every request --
         mutations included -- opened a *read* session, so a registered mutation
         ran against whatever the read pool points at, which on a replica is a
         failed write and on a single database is an invisible non-issue until

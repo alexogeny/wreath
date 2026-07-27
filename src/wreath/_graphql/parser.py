@@ -8,24 +8,24 @@ having already paid to construct the thing you are about to reject.
 
 Four bounds, all of them on attacker-controlled dimensions:
 
-``max_depth``
+`max_depth`
     Selection-set nesting. Deep nesting over a cyclic schema (``author ->
     posts -> author -> ...``) is the classic amplification.
-``max_complexity``
+`max_complexity`
     Total selected fields after fragment expansion. This is the one that
     catches width rather than depth.
-``max_aliases``
-    Aliases of the same field. ``a: user b: user c: user ...`` costs one
+`max_aliases`
+    Aliases of the same field. `a: user b: user c: user ...` costs one
     resolve each while the document stays small.
-``max_document_bytes``
+`max_document_bytes`
     Source length, checked **before** a single character is scanned. This is
     the cheapest and broadest of the five: parse cost scales with document
     length, so capping length caps the worst case for a fraction of the work
     the other limits do. It is also the only one an attacker cannot approach
     incrementally -- the document is rejected on `len()`.
-``max_steps``
-    A token budget, mirroring ``binding._VALIDATE_MAX_STEPS`` and
-    ``validate.c``. The backstop for anything the three shape limits do not
+`max_steps`
+    A token budget, mirroring `binding._VALIDATE_MAX_STEPS` and
+    `validate.c`. The backstop for anything the three shape limits do not
     describe -- a pathological token stream that is neither deep nor wide.
     Applied while tokenizing, which also bounds the descent that follows.
 
@@ -95,9 +95,9 @@ _IGNORED_HEAD = frozenset(" \t\r\n\f\v,\ufeff#")
 class GraphQLSyntaxError(Exception):
     """A document that could not be parsed, or that exceeded a safety limit.
 
-    ``code`` distinguishes a malformed document (``"syntax"``) from a
-    well-formed but abusive one (``"depth"``, ``"complexity"``, ``"aliases"``,
-    ``"steps"``, ``"fragment_cycle"``), so a server can log the two differently
+    `code` distinguishes a malformed document (`"syntax"`) from a
+    well-formed but abusive one (`"depth"`, `"complexity"`, `"aliases"`,
+    `"steps"`, `"fragment_cycle"`), so a server can log the two differently
     -- the second class is an attack signal, the first is usually a bug.
     """
 
@@ -576,7 +576,7 @@ def _spreads(selection_set: SelectionSet) -> list[str]:
 
 
 def parse(source: str, limits: Limits = DEFAULT_LIMITS) -> Document:
-    """Parse ``source``, enforcing ``limits`` as it goes."""
+    """Parse `source`, enforcing `limits` as it goes."""
     if not isinstance(source, str):
         raise GraphQLSyntaxError("a GraphQL document must be a string")
     if len(source) > limits.max_document_bytes:

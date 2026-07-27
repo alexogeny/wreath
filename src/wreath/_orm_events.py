@@ -93,12 +93,12 @@ class _OwnedSubscriber:
     """A subscription whose life is its owner's, not the process's.
 
     Some subscribers have an obvious moment to unsubscribe at and use
-    :func:`unsubscribe_writes` -- a live-doc stream closes, a snapshot cache's
-    handle is stopped. A ``@cached`` handler has none: it subscribes when it is
+    `unsubscribe_writes` -- a live-doc stream closes, a snapshot cache's
+    handle is stopped. A `@cached` handler has none: it subscribes when it is
     *decorated* and its only end is becoming unreachable. Registering a plain
     closure for it would mean `_subscribers` accumulates one entry per decorated
     handler for the life of the process, and -- worse than the memory --
-    :func:`has_subscribers` would stay true forever, so the session's "collect
+    `has_subscribers` would stay true forever, so the session's "collect
     nothing when nobody is listening" fast path would be dead in any application
     that caches at all.
 
@@ -135,12 +135,12 @@ def _reap(dead: weakref.ref[Any]) -> None:
 def subscribe_writes(
     callback: Callable[[frozenset[str]], None], *, owner: Any = None
 ) -> None:
-    """Call ``callback(model_names)`` after each committed flush that wrote.
+    """Call `callback(model_names)` after each committed flush that wrote.
 
-    ``owner`` binds the subscription's lifetime to an object instead of to the
+    `owner` binds the subscription's lifetime to an object instead of to the
     process, for a caller that has no later moment to unsubscribe at. It is
     held weakly and the subscription is dropped the moment it is collected, so
-    ``callback`` must not be the only thing keeping ``owner`` alive.
+    `callback` must not be the only thing keeping `owner` alive.
     """
     with _lock:
         if owner is None:
@@ -159,7 +159,7 @@ def subscribe_writes(
 
 
 def unsubscribe_writes(callback: Callable[[frozenset[str]], None]) -> None:
-    """Stop delivering to ``callback``, however it was registered."""
+    """Stop delivering to `callback`, however it was registered."""
     with _lock:
         _unsubscribe(callback)
 
@@ -174,13 +174,13 @@ def _unsubscribe(callback: Callable[[frozenset[str]], None]) -> None:
 
 
 def register_bridge(callback: Callable[[frozenset[str]], None]) -> None:
-    """Call ``callback(model_names)`` for **locally** originated writes only.
+    """Call `callback(model_names)` for **locally** originated writes only.
 
-    Under the same lock as :func:`subscribe_writes`: both are check-then-act on
+    Under the same lock as `subscribe_writes`: both are check-then-act on
     a module-level list, and free-threading is a supported execution mode rather
     than an assumption. Two threads registering the same bridge would otherwise
     both pass the membership test, and two unregistering it would leave one
-    calling ``remove`` on a list that no longer holds it.
+    calling `remove` on a list that no longer holds it.
     """
     with _lock:
         if callback not in _bridges:
@@ -194,9 +194,9 @@ def unregister_bridge(callback: Callable[[frozenset[str]], None]) -> None:
 
 
 def publish_write(model_names: frozenset[str], *, remote: bool = False) -> None:
-    """Announce that ``model_names`` were written.
+    """Announce that `model_names` were written.
 
-    ``remote`` marks an announcement that arrived from another worker: local
+    `remote` marks an announcement that arrived from another worker: local
     subscribers see it exactly as they see a local write, and bridges do not,
     so it stops here instead of bouncing around the fleet.
 
@@ -237,7 +237,7 @@ class WriteBroadcast:
 
     Local invalidation is exact -- the session knows what it wrote. Across a
     fleet it is exact too, but **at-most-once**, because the transport is an
-    ephemeral ``NOTIFY``: a worker whose listen connection was down for the
+    ephemeral `NOTIFY`: a worker whose listen connection was down for the
     moment keeps its stale entries until their TTL. So the TTL stops being the
     invalidation mechanism and becomes the backstop behind it, which is the
     right job for a guess.
@@ -245,10 +245,10 @@ class WriteBroadcast:
     **One channel, not one per model.** Every worker subscribes once and
     filters nothing -- the payload is a handful of model names, and a bus
     channel is a `LISTEN`, not free. Built through
-    :func:`wreath.cache.invalidate_across_workers`.
+    `wreath.cache.invalidate_across_workers`.
 
     The channel, the origin tag, and the deferred publish are
-    :class:`~wreath._busbridge.BusBridge`'s; what is local to this class is the
+    `BusBridge`'s; what is local to this class is the
     payload shape and the *bridge* registration below, which is what keeps a
     received announcement from going back out.
     """
@@ -284,7 +284,7 @@ class WriteBroadcast:
     async def _apply(self, payload: dict[str, Any]) -> None:
         """Replay another worker's write into this worker's subscribers.
 
-        ``remote=True`` is the half that matters: local subscribers see it
+        `remote=True` is the half that matters: local subscribers see it
         exactly as they see a local write, and bridges do not, so it stops here
         instead of bouncing around the fleet.
         """

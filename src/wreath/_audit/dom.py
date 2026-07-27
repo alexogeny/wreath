@@ -1,7 +1,7 @@
-"""A minimal, position-aware HTML tree over the standard-library ``html.parser``.
+"""A minimal, position-aware HTML tree over the standard-library `html.parser`.
 
 Not a spec-complete DOM — just enough structure (parent/children, attributes, direct
-text, and 1-based ``(line, col)`` from ``getpos()``) for the curated audit rules to
+text, and 1-based `(line, col)` from `getpos()`) for the curated audit rules to
 locate findings. Zero third-party dependencies by design.
 """
 from __future__ import annotations
@@ -93,7 +93,7 @@ class _Builder(HTMLParser):
 
 
 def parse_html(html: str) -> Node:
-    """Parse ``html`` into a :class:`Node` tree rooted at ``#document``."""
+    """Parse `html` into a `Node` tree rooted at `#document`."""
     builder = _Builder()
     builder.feed(html)
     builder.close()

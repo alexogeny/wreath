@@ -1,4 +1,4 @@
-"""Pure-Python authorization helpers mirrored by ``wreath._native._core``."""
+"""Pure-Python authorization helpers mirrored by `wreath._native._core`."""
 
 from __future__ import annotations
 

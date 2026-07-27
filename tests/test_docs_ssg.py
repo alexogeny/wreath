@@ -1086,3 +1086,179 @@ def test_a_tilde_fence_encloses_a_block_the_same_way() -> None:
 
     text, tokens = hero.extract("~~~~\n```hero\ntitle: Example\n```\n~~~~\n")
     assert not tokens and "title: Example" in text
+
+
+# --- reST markup: refused rather than silently mangled ----------------------
+
+
+def test_double_backticks_swallow_the_prose_between_two_literals() -> None:
+    """The failure this gate exists for, pinned as behaviour.
+
+    Markdown has no ``double backtick`` literal. Two of them on one line pair
+    the *closing* backtick of the first with the *opening* backtick of the
+    second, so the prose in between renders as code. Nothing errors; the
+    sentence just comes out wrong.
+    """
+    html = render("A ``pass`` entry and a ``fail`` entry both appear.\n").html
+    assert "<code> entry and a </code>" in html      # the prose, eaten
+
+
+def test_rest_roles_and_literal_blocks_render_as_damage() -> None:
+    # A role prints its own name into the sentence...
+    assert ":class:<code>" in render("See :class:`HealthCheck` now.\n").html
+    # ...and a `::` literal block loses the code formatting entirely.
+    block = render("Mount it::\n\n    app.health()\n").html
+    assert "<code" not in block and "::</p>" in block
+
+
+def test_rest_markup_finds_each_construct() -> None:
+    from wreath._docs import apidoc
+
+    found = apidoc.rest_markup(
+        "A ``literal`` and :class:`Thing` and a block::\n\n    x = 1\n"
+    )
+    assert "``literal``" in found
+    assert ":class:`" in found
+    assert "::" in found
+
+
+def test_rest_markup_ignores_fenced_examples() -> None:
+    """A docstring may legitimately *show* reST inside a fence."""
+    from wreath._docs import apidoc
+
+    assert apidoc.rest_markup("```text\nuse ``this`` in Sphinx\n```\n") == []
+
+
+def test_a_strict_build_refuses_rest_markup_in_a_rendered_docstring() -> None:
+    """The refusal is the half that matters: converting today's instances
+    without a gate just resets the clock."""
+    from wreath._docs import apidoc
+
+    class Fixture:
+        """Prose with a ``literal`` in it."""
+
+    module = type(apidoc)("fixture_module")
+    module.Fixture = Fixture
+    Fixture.__module__ = "fixture_module"
+    module.__all__ = ["Fixture"]
+    import sys
+
+    sys.modules["fixture_module"] = module
+    try:
+        sink: list[str] = []
+        apidoc.expand("::: fixture_module", "reference/fixture.md", sink)
+    finally:
+        del sys.modules["fixture_module"]
+
+    assert len(sink) == 1, sink
+    assert "reference/fixture.md" in sink[0]
+    assert "``literal``" in sink[0]
+    assert "single backticks" in sink[0]
+
+
+def test_the_rest_exemption_list_only_shrinks() -> None:
+    """`REST_PENDING` waives modules another agent held open when the gate went
+    in. It is pinned so it cannot quietly grow into a permanent excuse: adding a
+    module here must be a deliberate edit to this test as well."""
+    from wreath._docs import apidoc
+
+    assert set(apidoc.REST_PENDING) <= {"wreath.postgres"}
+
+
+def test_wreaths_own_reference_pages_are_free_of_rest_markup() -> None:
+    """The corpus itself, not a fixture -- so a docstring that regresses is red
+    here even if nobody runs `docs check`."""
+    import pathlib
+
+    from wreath._docs import apidoc
+
+    docs = _repo_docs()
+    if docs is None:
+        pytest.skip("docs/ not present")
+    offenders: dict[str, list[str]] = {}
+    for md in sorted(pathlib.Path(docs / "reference").glob("*.md")):
+        text = md.read_text(encoding="utf-8")
+        if not apidoc.has_directives(text):
+            continue
+        sink: list[str] = []
+        apidoc.expand(text, md.name, sink)
+        rest = [line for line in sink if "reST markup" in line]
+        if rest:
+            offenders[md.name] = rest
+    assert offenders == {}, offenders
+
+
+# --- apidoc renders the whole class surface ---------------------------------
+
+
+def test_apidoc_renders_properties() -> None:
+    """`Request.method`, `.path` and `.headers` are the most-used API in the
+    framework and are all properties. `vars(cls)` holds a `property` object,
+    which is not `inspect.isfunction`, so every one of them was absent."""
+    from wreath._docs import apidoc
+
+    out = apidoc.expand("::: wreath.request.Request")
+    for name in ("method", "path", "headers", "cookies", "query_string"):
+        assert f"#### `{name}` *(property)*" in out, name
+    # A property is read, not called: it shows its type, not a call signature.
+    assert "```python\nmethod: str\n```" in out
+
+
+def test_apidoc_renders_classmethods_and_marks_them() -> None:
+    from wreath._docs import apidoc
+
+    out = apidoc.expand("::: wreath.response.FileResponse")
+    assert "#### `from_descriptor` *(classmethod)*" in out
+    # `cls` is dropped the way `self` is -- a caller passes neither.
+    assert "from_descriptor(cls" not in out
+
+
+def test_apidoc_renders_inherited_members_and_names_the_base() -> None:
+    """Inherited methods are contract too, but a reader has to be able to tell
+    which class actually defines one."""
+    from wreath._docs import apidoc
+
+    out = apidoc.expand("::: wreath.orm.constraints.Ge")
+    assert "#### `source` *(inherited from `_Comparison`)*" in out
+    assert "#### `check_type` *(inherited from `Check`)*" in out
+
+
+def test_apidoc_stops_inheriting_at_classes_wreath_does_not_own() -> None:
+    """Walking the whole MRO would document `Exception.args` and `Enum.value`
+    on every subclass -- noise, not contract."""
+    from wreath._docs import apidoc
+
+    out = apidoc.expand("::: wreath.health.PassesUnhealthy")
+    assert "args" not in out.replace("Args", "")
+    assert "add_note" not in out
+
+
+def test_apidoc_marks_coroutine_functions_async() -> None:
+    """Without this a reader cannot tell an awaitable from a plain call, which
+    is exactly the confusion that put a broken probe in the health recipe."""
+    from wreath._docs import apidoc
+
+    out = apidoc.expand("::: wreath.postgres.Pool")
+    assert "async acquire()" in out
+    assert "async release(connection" in out
+    assert "async " not in out.split("#### `snapshot`")[1].split("```")[1]
+
+
+def test_apidoc_strips_annotation_repr_quotes() -> None:
+    """`from __future__ import annotations` stores annotations as strings, so
+    `inspect.signature` renders `x: 'int'`. The quotes are an artifact."""
+    from wreath._docs import apidoc
+
+    out = apidoc.expand("::: wreath.postgres.Pool")
+    assert "-> 'Any'" not in out and "-> Any" in out
+    assert ": 'int'" not in out
+
+
+def test_apidoc_skips_slots_and_non_members() -> None:
+    """A slotted dataclass exposes `member_descriptor` objects in `vars()`;
+    they are fields, already shown in the constructor signature."""
+    from wreath._docs import apidoc
+
+    out = apidoc.expand("::: wreath.health.HealthCheck")
+    assert "#### `name`" not in out          # a slot, not a method
+    assert "HealthCheck(" in out             # ...but the field is in the signature

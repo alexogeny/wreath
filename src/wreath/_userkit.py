@@ -2,7 +2,7 @@
 
 Kept dependency-free and import-light so the password hashing, signed action
 tokens, store protocol, and flow logic are unit-testable without the native
-package. The wreath-coupled router glue lives in :mod:`wreath.users`.
+package. The wreath-coupled router glue lives in `wreath.users`.
 
 Password hashing uses stdlib `hashlib.scrypt` (zero-dep, memory-hard). Action
 tokens (email verification, password reset) are HMAC-SHA256 signed and expiring;
@@ -119,7 +119,7 @@ def _frame(*fields: str) -> str:
 
 
 def _unframe(body: str, count: int) -> list[str]:
-    """The inverse of :func:`_frame`. Raises ValueError on anything malformed."""
+    """The inverse of `_frame`. Raises ValueError on anything malformed."""
     fields: list[str] = []
     position = 0
     for _ in range(count):
@@ -281,7 +281,7 @@ class SmtpEmailSender:
 
     STARTTLS by default (or implicit TLS on `port=465`). The blocking
     `smtplib` work runs in a worker thread so the event loop is never blocked.
-    Build from env with :meth:`from_env`
+    Build from env with `from_env`
     (`WREATH_SMTP_HOST`/`_FROM`/`_PORT`/`_USER`/`_PASSWORD`/`_TLS`).
     """
 
@@ -361,7 +361,7 @@ async def _hash_password_off_loop(password: str) -> str:
 
 
 async def _verify_password_off_loop(password: str, encoded: str) -> bool:
-    """`verify_password` in a worker thread. See :func:`_hash_password_off_loop`."""
+    """`verify_password` in a worker thread. See `_hash_password_off_loop`."""
     return await asyncio.to_thread(verify_password, password, encoded)
 
 

@@ -1,8 +1,8 @@
 """The built-in Cedar policy engine: parse and compile once, evaluate native.
 
 This module implements the Cedar policy language core with no dependencies:
-the policy grammar (``permit``/``forbid``, scope constraints, ``when``/
-``unless`` conditions), the strict expression language, the entity hierarchy,
+the policy grammar (`permit`/`forbid`, scope constraints, `when`/
+`unless` conditions), the strict expression language, the entity hierarchy,
 and the authorization algorithm (forbid overrides permit; default deny; an
 erroring policy is skipped and reported, never silently satisfied).
 
@@ -10,29 +10,29 @@ The split follows Wreath's usual shape. Parsing and compilation happen here,
 in Python, exactly once — at application startup, where a syntax error is an
 application bug and not a request-time surprise. The compiled program is a
 flat tuple tape; the per-request evaluator that walks it is native C
-(``wreath._native._core.cedar_is_authorized``) with a pure-Python twin of
-identical observable behavior in :mod:`wreath._pure.cedar`.
+(`wreath._native._core.cedar_is_authorized`) with a pure-Python twin of
+identical observable behavior in `wreath._pure.cedar`.
 
 Scope is deliberate and loud. The Cedar core — everything above — is
-implemented faithfully. Extension types (``ip``, ``decimal``, ``datetime``)
+implemented faithfully. Extension types (`ip`, `decimal`, `datetime`)
 and schema-based validation are not implemented yet; policies that use them
 fail at parse time with a clear error rather than evaluating differently from
 real Cedar. A policy set that parses is a policy set this engine evaluates by
 the book.
 
 The public surface is three names, re-exported from
-:mod:`wreath.authorization`:
+`wreath.authorization`:
 
-- :class:`EntityUid` — a typed entity reference, ``User::"alice"``.
-- :class:`CedarEntity` — one entity: uid, attributes, parents.
-- :class:`CedarPolicies` — a parsed policy set that is itself an engine: it
-  satisfies the :class:`~wreath._auth.cedar.CedarEngine` protocol, so
-  ``CedarAuthorizer(engine=CedarPolicies(source))`` needs nothing else.
+- `EntityUid` — a typed entity reference, `User::"alice"`.
+- `CedarEntity` — one entity: uid, attributes, parents.
+- `CedarPolicies` — a parsed policy set that is itself an engine: it
+  satisfies the `CedarEngine` protocol, so
+  `CedarAuthorizer(engine=CedarPolicies(source))` needs nothing else.
 
-Compiled value model (shared by both evaluators): ``bool``, i64 ``int``,
-``str``, an entity uid as a ``(type, id)`` string 2-tuple, a set as a
-duplicate-free ``list``, and a record as a ``dict``. Booleans are never
-integers — every check tests ``bool`` first, because Python's bool subclasses
+Compiled value model (shared by both evaluators): `bool`, i64 `int`,
+`str`, an entity uid as a `(type, id)` string 2-tuple, a set as a
+duplicate-free `list`, and a record as a `dict`. Booleans are never
+integers — every check tests `bool` first, because Python's bool subclasses
 int and Cedar's type system does not.
 """
 
@@ -105,7 +105,7 @@ class CedarParseError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class EntityUid:
-    """A Cedar entity reference: a type path and an id, ``User::"alice"``."""
+    """A Cedar entity reference: a type path and an id, `User::"alice"`."""
 
     type: str
     id: str
@@ -116,7 +116,7 @@ class EntityUid:
 
     @classmethod
     def parse(cls, text: str) -> EntityUid:
-        """Parse ``Type::"id"`` (Cedar syntax) or the bare ``Type::id`` form."""
+        """Parse `Type::"id"` (Cedar syntax) or the bare `Type::id` form."""
         try:
             tokens = _tokenize(text)
         except CedarParseError:
@@ -167,12 +167,12 @@ def _cedar_eq(a: Any, b: Any) -> bool:
 
 
 def _dedupe_key(value: Any) -> tuple[str, object] | None:
-    """A hashable identity for a converted value, or None if it needs ``_cedar_eq``.
+    """A hashable identity for a converted value, or None if it needs `_cedar_eq`.
 
-    The tag keeps kinds apart because :func:`_cedar_eq` does: ``True`` and ``1``
+    The tag keeps kinds apart because `_cedar_eq` does: `True` and `1`
     are *not* equal in Cedar's model, but in Python they compare equal and hash
     alike, so an untagged set would silently merge them. Values of different
-    kinds are never ``_cedar_eq``, so partitioning by kind loses nothing.
+    kinds are never `_cedar_eq`, so partitioning by kind loses nothing.
     """
     if type(value) is bool:
         return ("b", value)
@@ -317,7 +317,7 @@ _ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "0": "\0", '"': '"', "'": "'", "\\"
 
 
 def _lex_string(source: str, index: int, line: int, column: int) -> tuple[str, int]:
-    # ``\*`` survives as the two-character sequence so ``like`` patterns can
+    # `\*` survives as the two-character sequence so `like` patterns can
     # tell an escaped literal star from a wildcard; every other escape decodes.
     parts: list[str] = []
     index += 1
@@ -351,12 +351,12 @@ def _lex_string(source: str, index: int, line: int, column: int) -> tuple[str, i
 
 
 def _unescape_star(text: str) -> str:
-    """Decode the ``\\*`` sequence the lexer preserves for ``like`` patterns."""
+    """Decode the `\\*` sequence the lexer preserves for `like` patterns."""
     return text.replace("\\*", "*")
 
 
 def _pattern_segments(pattern: str) -> tuple[str, ...]:
-    """Split a ``like`` pattern on wildcards; ``\\*`` stays a literal star.
+    """Split a `like` pattern on wildcards; `\\*` stays a literal star.
 
     A single segment means no wildcard (exact match). Otherwise the first
     segment anchors the start, the last anchors the end, and the middle
@@ -718,7 +718,7 @@ def _build_store(
     """Compile entities into the evaluator's store: uid -> (attrs, ancestors).
 
     Ancestors are the *transitive* closure, precomputed here so neither
-    evaluator ever walks the hierarchy at request time — ``in`` is one set
+    evaluator ever walks the hierarchy at request time — `in` is one set
     membership test. Cycles are tolerated (an entity is never its own
     ancestor unless a cycle makes it one, matching a fixed-point closure).
     """
@@ -760,9 +760,9 @@ class CedarPolicies:
     """A parsed Cedar policy set that acts as the authorization engine.
 
     Parsing happens once, at construction — a syntax error is an application
-    bug and surfaces at startup, never during a request. ``entities`` given
+    bug and surfaces at startup, never during a request. `entities` given
     here are the static hierarchy (roles, groups, resource ownership); the
-    per-request entities handed to :meth:`is_authorized` are merged over them.
+    per-request entities handed to `is_authorized` are merged over them.
     """
 
     __slots__ = ("_entities", "_policies", "_source", "_store")
@@ -787,10 +787,10 @@ class CedarPolicies:
 
         Public because it identifies the policy set by content, and callers
         that cache a decision against it need a tag that is the same on every
-        worker and across a restart. ``id()`` is not that: CPython reuses
+        worker and across a restart. `id()` is not that: CPython reuses
         addresses, so an address-derived tag can survive a reload that replaced
-        the policies. Read-only — the parse happens once, in ``__init__``, and
-        a settable source would let the text drift from ``_policies``.
+        the policies. Read-only — the parse happens once, in `__init__`, and
+        a settable source would let the text drift from `_policies`.
         """
         return self._source
 

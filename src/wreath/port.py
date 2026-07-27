@@ -1,9 +1,9 @@
-"""Public entry point for the ``wreath port`` codemod (design 07).
+"""Public entry point for the `wreath port` codemod (design 07).
 
-``wreath port`` statically analyzes an existing FastAPI/Pydantic/ormar/SQLModel
+`wreath port` statically analyzes an existing FastAPI/Pydantic/ormar/SQLModel
 application and reports what maps 1:1 to wreath, what needs review, and what has no
 equivalent — never importing the target. Phase 0 (this cut) is report-only; code
-emission (Phase 1) is deferred (see ``wreath._port.emit``).
+emission (Phase 1) is deferred (see `wreath._port.emit`).
 
     from wreath.port import analyze, analyze_all
     report = analyze_all(["path/to/app"])

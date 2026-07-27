@@ -1,23 +1,23 @@
-"""JWT verification: a thin facade over the native ``jose`` accelerators.
+"""JWT verification: a thin facade over the native `jose` accelerators.
 
 The hot, non-crypto-inventing pieces (base64url, compact split, HS* HMAC, and
-registered-claim checks) run in ``wreath._native._core`` when it is present, with
-stdlib fallbacks so verification also works under ``WREATH_PURE=1``. RSA (RS*/PS*)
-verification is done here with CPython's bigint ``pow`` and the stdlib — RSA
+registered-claim checks) run in `wreath._native._core` when it is present, with
+stdlib fallbacks so verification also works under `WREATH_PURE=1`. RSA (RS*/PS*)
+verification is done here with CPython's bigint `pow` and the stdlib — RSA
 verify is a public-key operation whose only risk is correctness, not timing, and
 its padding checks are far safer read against the stdlib than hand-written in C.
 ES256 (ECDSA/P-256) and EdDSA (Ed25519) have no CPython path, so they are
-implemented as zero-dependency verify-only primitives in :mod:`._ecverify`.
+implemented as zero-dependency verify-only primitives in `._ecverify`.
 
 Algorithm confusion is prevented structurally: a verifier's algorithm allow-list
-is frozen at construction, the token ``alg`` may only *select from* that list
-(so ``alg=none`` or any unlisted alg is rejected before any verify runs), and
+is frozen at construction, the token `alg` may only *select from* that list
+(so `alg=none` or any unlisted alg is rejected before any verify runs), and
 each key is bound to exactly one algorithm *family* (HS / RSA / EC / OKP) — a
 symmetric secret can never satisfy an RS*/PS*/ES256/EdDSA check, and vice versa.
 
-Every family's verifier is differentially tested against the ``cryptography``
+Every family's verifier is differentially tested against the `cryptography`
 oracle plus RFC 8032 / NIST known-answer vectors in
-``tests/compliance/test_jwt_ec.py``. A byte-identical ``wreath._pure.jose`` twin
+`tests/compliance/test_jwt_ec.py`. A byte-identical `wreath._pure.jose` twin
 is still deferred per the C-first directive.
 """
 
@@ -172,7 +172,7 @@ JwtKey = SymmetricKey | RsaPublicKey | EcPublicKey | OkpPublicKey
 
 
 def key_from_jwk(jwk: Mapping[str, Any]) -> JwtKey:
-    """Build a key from a single JWK. Supports ``oct``/``RSA``/``EC``/``OKP``."""
+    """Build a key from a single JWK. Supports `oct`/`RSA`/`EC`/`OKP`."""
     kty = jwk.get("kty")
     if kty == "oct":
         return SymmetricKey(_b64url_decode(jwk["k"]))
@@ -204,8 +204,8 @@ def key_from_jwk(jwk: Mapping[str, Any]) -> JwtKey:
 
 
 def key_from_pem(pem: str | bytes) -> RsaPublicKey:
-    """Parse an RSA public key from a PEM ``PUBLIC KEY`` (SPKI) or
-    ``RSA PUBLIC KEY`` (PKCS#1) block, without a third-party dependency."""
+    """Parse an RSA public key from a PEM `PUBLIC KEY` (SPKI) or
+    `RSA PUBLIC KEY` (PKCS#1) block, without a third-party dependency."""
     text = pem.decode("ascii") if isinstance(pem, (bytes, bytearray)) else pem
     body = []
     kind = "spki"
@@ -233,7 +233,7 @@ def key_from_pem(pem: str | bytes) -> RsaPublicKey:
 
 
 def _der_read_tlv(data: bytes, pos: int) -> tuple[int, bytes, int]:
-    """Return (tag, value_bytes, next_pos) for the TLV at ``pos``."""
+    """Return (tag, value_bytes, next_pos) for the TLV at `pos`."""
     tag = data[pos]
     pos += 1
     length = data[pos]
@@ -317,10 +317,10 @@ def _parse_compact(token: str) -> tuple[dict[str, Any], dict[str, Any], bytes, b
 
 
 def peek_header(token: str) -> dict[str, Any] | None:
-    """Decode only the JOSE header (for ``kid``/``alg`` lookup before verify).
+    """Decode only the JOSE header (for `kid`/`alg` lookup before verify).
 
     Returns None on any malformation. Does not validate the signature — callers
-    must still run :func:`verify_jwt`.
+    must still run `verify_jwt`.
     """
     try:
         first = token.split(".", 1)[0]
@@ -447,10 +447,10 @@ def _verify_signature(
 
 
 def default_identity(claims: Mapping[str, Any]) -> Identity:
-    """Map standard/Cognito claims onto a wreath ``Identity``.
+    """Map standard/Cognito claims onto a wreath `Identity`.
 
-    ``sub`` -> id; ``roles``/``cognito:groups``/``groups`` -> roles;
-    space-delimited ``scope`` -> permissions; the full claim set is retained.
+    `sub` -> id; `roles`/`cognito:groups`/`groups` -> roles;
+    space-delimited `scope` -> permissions; the full claim set is retained.
     """
     subject = claims.get("sub")
     if not isinstance(subject, str) or not subject:
@@ -466,8 +466,8 @@ def default_identity(claims: Mapping[str, Any]) -> Identity:
 
 IdentityMapper = Callable[[Mapping[str, Any]], Identity]
 KeyResolver = Callable[[Mapping[str, Any]], "JwtKey | None"]
-#: ``revoked(claims) -> bool`` -- whether this token has been cancelled since it
-#: was issued. See :func:`verify_jwt`.
+#: `revoked(claims) -> bool` -- whether this token has been cancelled since it
+#: was issued. See `verify_jwt`.
 RevocationCheck = Callable[[Mapping[str, Any]], bool]
 
 
@@ -523,10 +523,10 @@ class _Malformed(Exception):
 
 
 class JwtVerifier:
-    """A callable ``Verifier`` for :class:`BearerTokenBackend`.
+    """A callable `Verifier` for `BearerTokenBackend`.
 
     Holds a fixed key (static-key case). The JWKS case uses the lower-level
-    :func:`verify_jwt` with a key resolver; see :mod:`wreath._auth.jwks`.
+    `verify_jwt` with a key resolver; see `wreath._auth.jwks`.
     """
 
     __slots__ = (
@@ -602,11 +602,11 @@ def verify_jwt(
     Returns None (never raises) for every authentication failure so the bearer
     backend can issue a challenge without leaking which check failed.
 
-    ``revoked(claims)`` is the seam for cancelling a token before it expires.
-    Nothing ships behind it -- no ``jti`` cache, no store -- because a real one
+    `revoked(claims)` is the seam for cancelling a token before it expires.
+    Nothing ships behind it -- no `jti` cache, no store -- because a real one
     is a lookup on the busiest path in the framework and that is the
     application's call to make. Without it a stolen token stays valid until
-    ``exp``, which is why short lifetimes remain the primary answer.
+    `exp`, which is why short lifetimes remain the primary answer.
 
     It runs **after** the signature and the registered claims, so a hook only
     ever sees claims that were genuinely issued; and a hook that *raises*

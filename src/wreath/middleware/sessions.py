@@ -4,15 +4,16 @@ The session is a plain dict on `request.state.session`. It is serialized to
 JSON, signed with HMAC-SHA256, and stored client-side in a cookie — nothing
 is kept on the server unless a `store` is given. Tampered or expired cookies
 yield a fresh empty session; the cookie is only (re)written when the session
-content changed::
+content changed:
 
-    app.add_middleware(SessionMiddleware(secret="…"))
+```python
+app.add_middleware(SessionMiddleware(secret="…"))
 
-    @app.get("/visit")
-    async def visit(request):
-        request.state.session["count"] = request.state.session.get("count", 0) + 1
-        return {"visits": request.state.session["count"]}
-
+@app.get("/visit")
+async def visit(request):
+    request.state.session["count"] = request.state.session.get("count", 0) + 1
+    return {"visits": request.state.session["count"]}
+```
 Call `rotate_session(request)` whenever the caller's privileges change. This is
 route middleware, not global, so it runs inside a matched route rather than
 around routing.

@@ -1,11 +1,11 @@
 """Pure-Python Cedar program evaluator; the reference twin of _core.cedar_is_authorized.
 
-The compiled program format is produced by :mod:`wreath._auth.cedar_engine`
+The compiled program format is produced by `wreath._auth.cedar_engine`
 and documented there: expressions are nested tuples headed by an integer
-opcode; values are ``bool``, i64 ``int``, ``str``, ``(type, id)`` uid tuples,
-duplicate-free ``list`` sets, and ``dict`` records. This module and
-``wreath/_native/cedar.c`` must agree observably — the differential tests in
-``tests/test_cedar_engine.py`` hold them to it.
+opcode; values are `bool`, i64 `int`, `str`, `(type, id)` uid tuples,
+duplicate-free `list` sets, and `dict` records. This module and
+`wreath/_native/cedar.c` must agree observably — the differential tests in
+`tests/test_cedar_engine.py` hold them to it.
 """
 
 from __future__ import annotations
@@ -40,13 +40,13 @@ def _type_name(value: Any) -> str:
 
 
 def _dedupe_key(value: Any) -> tuple[str, object] | None:
-    """A hashable identity for a Cedar value, or None if it needs ``_cedar_eq``.
+    """A hashable identity for a Cedar value, or None if it needs `_cedar_eq`.
 
-    The tag keeps kinds apart because :func:`_cedar_eq` does: ``True`` and ``1``
+    The tag keeps kinds apart because `_cedar_eq` does: `True` and `1`
     are not equal in Cedar's model, but Python compares them equal and hashes
-    them alike. Values of different kinds are never ``_cedar_eq``, so
-    partitioning by kind loses nothing. Mirrors ``cedar_dedupe_key`` in
-    ``_native/cedar.c`` and ``_dedupe_key`` in ``_auth/cedar_engine.py``.
+    them alike. Values of different kinds are never `_cedar_eq`, so
+    partitioning by kind loses nothing. Mirrors `cedar_dedupe_key` in
+    `_native/cedar.c` and `_dedupe_key` in `_auth/cedar_engine.py`.
     """
     if type(value) is bool:
         return ("b", value)
@@ -327,7 +327,7 @@ def cedar_is_authorized(
 ) -> tuple[bool, str, tuple[str, ...]]:
     """Evaluate a compiled policy set; forbid overrides permit, default deny.
 
-    Returns ``(allowed, reason, diagnostics)``. A policy that raises an
+    Returns `(allowed, reason, diagnostics)`. A policy that raises an
     evaluation error is skipped and reported in the diagnostics — it never
     silently satisfies, and it never turns into a deny by itself.
     """

@@ -1,30 +1,30 @@
 """Business rules, layered onto the column types inside the same single pass.
 
-A column type answers *what a value is*: an ``int8`` is a 64-bit integer, and
+A column type answers *what a value is*: an `int8` is a 64-bit integer, and
 nothing else gets in. It cannot answer *what a value is allowed to be here*: an
-intern's salary is an ``int8``, but an intern's salary above 50,000 is a
+intern's salary is an `int8`, but an intern's salary above 50,000 is a
 business mistake, not a type error.
 
 This module adds that second question without adding a second engine. A check
 is **fused into the column's own coercion**, so a column with rules is still one
 call on the write path -- the same one call a column without rules costs today.
-:func:`compile_column_validator` generates that fused function; the loop in
-``validation.py`` never learns that constraints exist.
+`compile_column_validator` generates that fused function; the loop in
+`validation.py` never learns that constraints exist.
 
 Three layers, in the order they run:
 
-1. the column's ``PgType.coerce`` -- the type, unchanged and still the single
+1. the column's `PgType.coerce` -- the type, unchanged and still the single
    source of the type rules;
-2. the column's :class:`Check` chain -- per-field business rules;
-3. the model's :class:`Rule` set -- whole-object rules over several fields.
+2. the column's `Check` chain -- per-field business rules;
+3. the model's `Rule` set -- whole-object rules over several fields.
 
 Layers 1 and 2 are fused together and run on *every* write: the constructor,
 attribute assignment, and the request body validator. Layer 3 needs an object
 that is finished, so it runs where a whole object is proven at once.
 
-Rules only ever accumulate. :func:`narrow` appends checks to a column inherited
-from a base class and cannot remove one, so every ``Intern`` that validates is
-by construction a valid ``Employee``. Widening is not expressible.
+Rules only ever accumulate. `narrow` appends checks to a column inherited
+from a base class and cannot remove one, so every `Intern` that validates is
+by construction a valid `Employee`. Widening is not expressible.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from typing import Any
 from .errors import DeclarationError
 from .types import PgType
 
-#: PostgreSQL type names that support ``<`` and friends in Python.
+#: PostgreSQL type names that support `<` and friends in Python.
 _ORDERED = frozenset(
     {"int2", "int4", "int8", "float4", "float8", "date", "timestamp", "timestamptz"}
 )
@@ -52,9 +52,9 @@ _TEXTUAL = frozenset({"text", "varchar"})
 class CheckViolation(ValueError):
     """A value of the right type that breaks a business rule.
 
-    This is a ``ValueError`` on purpose. Every seam that already handles a
-    rejected assignment -- the body validator's per-field ``except``, a
-    constructor call, a plain ``obj.field = value`` -- handles a broken business
+    This is a `ValueError` on purpose. Every seam that already handles a
+    rejected assignment -- the body validator's per-field `except`, a
+    constructor call, a plain `obj.field = value` -- handles a broken business
     rule the same way, with no new except clause anywhere.
     """
 
@@ -62,7 +62,7 @@ class CheckViolation(ValueError):
 
     def __init__(self, message: str, kind: str) -> None:
         super().__init__(message)
-        #: The error ``type`` tag reported for this failure, e.g. ``"le"``.
+        #: The error `type` tag reported for this failure, e.g. `"le"`.
         self.kind = kind
 
 
@@ -73,10 +73,10 @@ class Check:
     """One business rule over a single value that has already passed its type.
 
     A check never sees a value of the wrong type: coercion runs first, so
-    ``Le(50_000)`` on an ``Int64`` column compares two integers and can assume
+    `Le(50_000)` on an `Int64` column compares two integers and can assume
     it. That is why a check can compile down to a bare comparison.
 
-    Subclasses implement :meth:`source`, which returns a Python *expression* that
+    Subclasses implement `source`, which returns a Python *expression* that
     is true when the value is acceptable. Returning source rather than a
     predicate is what lets the whole chain fuse into one function with no call
     per rule.
@@ -84,7 +84,7 @@ class Check:
 
     __slots__ = ("kind", "message")
 
-    #: The error ``type`` tag this check reports, e.g. ``"le"``. Set by each
+    #: The error `type` tag this check reports, e.g. `"le"`. Set by each
     #: subclass; annotated rather than assigned, so it stays a slot.
     kind: str
     #: The message reported when the check fails. A constant, which is why the
@@ -95,11 +95,11 @@ class Check:
     supports: frozenset[str] | None = None
 
     def source(self, var: str, ns: dict[str, Any]) -> str:
-        """Python source for an expression that is true when ``var`` is valid.
+        """Python source for an expression that is true when `var` is valid.
 
-        ``ns`` is the namespace the generated function closes over; a check that
+        `ns` is the namespace the generated function closes over; a check that
         needs a value it cannot write as a literal binds it there with
-        :func:`_bind` and refers to it by the returned name.
+        `_bind` and refers to it by the returned name.
         """
         raise NotImplementedError
 
@@ -134,7 +134,7 @@ class _Comparison(Check):
 
 
 class Ge(_Comparison):
-    """``value >= bound``."""
+    """`value >= bound`."""
 
     __slots__ = ()
     _operator = ">="
@@ -142,7 +142,7 @@ class Ge(_Comparison):
 
 
 class Gt(_Comparison):
-    """``value > bound``."""
+    """`value > bound`."""
 
     __slots__ = ()
     _operator = ">"
@@ -150,7 +150,7 @@ class Gt(_Comparison):
 
 
 class Le(_Comparison):
-    """``value <= bound``."""
+    """`value <= bound`."""
 
     __slots__ = ()
     _operator = "<="
@@ -158,7 +158,7 @@ class Le(_Comparison):
 
 
 class Lt(_Comparison):
-    """``value < bound``."""
+    """`value < bound`."""
 
     __slots__ = ()
     _operator = "<"
@@ -166,7 +166,7 @@ class Lt(_Comparison):
 
 
 class Length(Check):
-    """Bound the length of a string or ``bytes`` value."""
+    """Bound the length of a string or `bytes` value."""
 
     __slots__ = ("maximum", "minimum")
 
@@ -208,8 +208,8 @@ class Length(Check):
 class Pattern(Check):
     """Require a string to contain a match for a regular expression.
 
-    The pattern is searched, not anchored: anchor it yourself with ``^`` and
-    ``$`` when that is what you mean.
+    The pattern is searched, not anchored: anchor it yourself with `^` and
+    `$` when that is what you mean.
     """
 
     __slots__ = ("regex",)
@@ -298,7 +298,7 @@ class Predicate(Check):
 class Narrow:
     """A subclass tightening a rule on a column it inherited.
 
-    Declared in a class body with :func:`narrow`. The base's checks still run,
+    Declared in a class body with `narrow`. The base's checks still run,
     first; these are appended. There is deliberately no way to drop an inherited
     check, so a narrowed model always satisfies the model it narrows.
     """
@@ -314,11 +314,12 @@ class Narrow:
 
 
 def narrow(field: str, *checks: Check) -> Narrow:
-    """Add checks to an inherited column, for this model only::
+    """Add checks to an inherited column, for this model only:
 
-        class Intern(Employee, table="interns"):
-            salary_cap = narrow("salary", Le(50_000))
-
+    ```python
+    class Intern(Employee, table="interns"):
+        salary_cap = narrow("salary", Le(50_000))
+    ```
     The attribute name is documentation; the metaclass finds these by type. The
     base's own checks are unaffected and still run first.
     """
@@ -337,7 +338,7 @@ def narrow(field: str, *checks: Check) -> Narrow:
 class Rule:
     """A business rule spanning more than one column.
 
-    Declared in a class body with :func:`rule`. Unlike a check, a rule needs an
+    Declared in a class body with `rule`. Unlike a check, a rule needs an
     object that is finished, so it runs once the fields are all in -- not on
     assignment, where the other fields may not have values yet.
     """
@@ -368,21 +369,22 @@ def rule(
     at: str | None = None,
     name: str | None = None,
 ) -> Callable[[Callable[..., bool]], Rule]:
-    """Declare a whole-object rule over several columns::
+    """Declare a whole-object rule over several columns:
 
-        class Intern(Employee, table="interns"):
-            @rule("salary", "tenure_months")
-            def pay_band(salary: int, tenure_months: int) -> bool:
-                "an intern past six months cannot be paid more than 40k"
-                return not (tenure_months > 6 and salary > 40_000)
-
+    ```python
+    class Intern(Employee, table="interns"):
+        @rule("salary", "tenure_months")
+        def pay_band(salary: int, tenure_months: int) -> bool:
+            "an intern past six months cannot be paid more than 40k"
+            return not (tenure_months > 6 and salary > 40_000)
+    ```
     The function takes the named columns' validated values, in the order named,
     and returns true when the object is acceptable. It is a plain function, not
     a method: it receives values rather than an instance, so it never touches a
     descriptor and cannot read a column it did not declare.
 
-    The docstring is the error message unless ``message`` is given. By default
-    the error is reported against the object; ``at="salary"`` reports it against
+    The docstring is the error message unless `message` is given. By default
+    the error is reported against the object; `at="salary"` reports it against
     one field instead, which is usually what a form wants.
     """
     if not fields:
@@ -418,7 +420,7 @@ _SEQUENCE = count()
 
 
 def _literal(value: Any) -> str | None:
-    """Source for ``value`` as an inline constant, or None if it needs a name."""
+    """Source for `value` as an inline constant, or None if it needs a name."""
     kind = type(value)
     if kind is bool or kind is int or kind is str or kind is bytes:
         return repr(value)
@@ -430,17 +432,17 @@ def _literal(value: Any) -> str | None:
 
 
 def _bind(ns: dict[str, Any], label: str, value: Any) -> str:
-    """Put ``value`` in the generated function's namespace under a fresh name."""
+    """Put `value` in the generated function's namespace under a fresh name."""
     name = f"_{label}_{len(ns)}"
     ns[name] = value
     return name
 
 
 def _constant(ns: dict[str, Any], value: Any, label: str) -> str:
-    """Source for ``value``: a literal where possible, otherwise a bound name.
+    """Source for `value`: a literal where possible, otherwise a bound name.
 
-    A literal becomes a ``LOAD_CONST``, which is why the common case -- an
-    integer bound like ``Le(50_000)`` -- costs nothing beyond the comparison.
+    A literal becomes a `LOAD_CONST`, which is why the common case -- an
+    integer bound like `Le(50_000)` -- costs nothing beyond the comparison.
     """
     return _literal(value) or _bind(ns, label, value)
 
@@ -448,9 +450,9 @@ def _constant(ns: dict[str, Any], value: Any, label: str) -> str:
 def _compile(source: str, name: str, ns: dict[str, Any], origin: str) -> Any:
     """Compile generated source, keeping it readable in a traceback.
 
-    Registering the source with ``linecache`` under a unique pseudo-filename is
+    Registering the source with `linecache` under a unique pseudo-filename is
     what makes a failure inside a generated validator show the generated line
-    rather than a bare ``<string>``.
+    rather than a bare `<string>`.
     """
     filename = f"<wreath.orm.constraints:{origin}:{next(_SEQUENCE)}>"
     linecache.cache[filename] = (
@@ -468,12 +470,12 @@ def _compile(source: str, name: str, ns: dict[str, Any], origin: str) -> Any:
 def coercer(pg_type: PgType) -> Callable[[Any], Any]:
     """The type's coercion as one call rather than two.
 
-    ``PgType.coerce`` is a wrapper whose whole body is ``self._coerce(value)``.
+    `PgType.coerce` is a wrapper whose whole body is `self._coerce(value)`.
     On the write path that wrapper is a Python call per field that does no work,
     and it was the single biggest cost in validating a body -- more than the
-    checks it wraps. When a type has not overridden ``coerce``, the wrapper is
+    checks it wraps. When a type has not overridden `coerce`, the wrapper is
     provably equivalent to the function inside it, so the inner one is used and
-    the rules are unchanged. A subclass that *does* override ``coerce`` keeps
+    the rules are unchanged. A subclass that *does* override `coerce` keeps
     its override, because then the wrapper is no longer just a wrapper.
     """
     if type(pg_type).coerce is PgType.coerce:
@@ -484,7 +486,7 @@ def coercer(pg_type: PgType) -> Callable[[Any], Any]:
 def compile_column_validator(column: Any, owner: str) -> Callable[[Any], Any]:
     """Fuse a column's type and its checks into one callable.
 
-    Returns ``pg_type.coerce`` itself when the column has no checks, so a plain
+    Returns `pg_type.coerce` itself when the column has no checks, so a plain
     column keeps costing exactly one call and this whole module stays off its
     path. With checks, the generated function is still one call: the checks
     become comparisons inside it rather than calls of their own.
@@ -549,7 +551,7 @@ def compile_rules(model: Any) -> tuple[CompiledRule, ...]:
 def check_rules(instance: Any) -> list[tuple[str, str, str | None]]:
     """Run a model's rules against a finished object.
 
-    Returns one ``(message, kind, at)`` per broken rule, empty when the object
+    Returns one `(message, kind, at)` per broken rule, empty when the object
     is acceptable. A rule whose columns are not all loaded is skipped rather
     than guessed at: a field that is absent has already been reported by
     whoever was proving the fields, and a rule cannot say anything useful about
@@ -569,7 +571,7 @@ def check_rules(instance: Any) -> list[tuple[str, str, str | None]]:
 
 
 def collect_checks(declared: Iterable[Check] | Check | None, where: str) -> tuple[Check, ...]:
-    """Normalize a ``check=`` argument into a tuple, rejecting junk early."""
+    """Normalize a `check=` argument into a tuple, rejecting junk early."""
     if declared is None:
         return ()
     if isinstance(declared, Check):

@@ -1,19 +1,20 @@
 """Immutable read-mostly application cache with atomic snapshot publication.
 
-Distinct from :class:`wreath.CacheControl` (HTTP response caching), this is an
+Distinct from `wreath.CacheControl` (HTTP response caching), this is an
 in-process store for configuration, reference data, and database-backed
-read-mostly datasets::
+read-mostly datasets:
 
-    cache: SnapshotCache[int, Widget] = SnapshotCache()
-    await cache.refresh(load_widgets)        # single-flight
-    widget = cache.get(widget_id)            # no I/O; explicit miss
-
+```python
+cache: SnapshotCache[int, Widget] = SnapshotCache()
+await cache.refresh(load_widgets)        # single-flight
+widget = cache.get(widget_id)            # no I/O; explicit miss
+```
 Readers always observe one complete generation; a refresh publishes a new one
 atomically and leaves the previous generation intact on failure.
 
 The read path is a dict lookup that CPython already services in C, so the pure
 implementation is the shipped one; the facade still selects a native
-``SnapshotCache`` if a measured one is ever added to ``_core``.
+`SnapshotCache` if a measured one is ever added to `_core`.
 """
 
 from __future__ import annotations
@@ -54,32 +55,33 @@ from ._pure.bounded import BoundedCache, CacheStats
 
 
 def invalidate_across_workers(bus: Any, *, channel: str = WRITE_CHANNEL) -> WriteBroadcast:
-    """Make ORM-driven cache invalidation fleet-wide, over the message bus::
+    """Make ORM-driven cache invalidation fleet-wide, over the message bus:
 
-        invalidate_across_workers(app.messaging("bus", database="app"))
+    ```python
+    invalidate_across_workers(app.messaging("bus", database="app"))
 
-        @app.get("/herd/report")
-        @cached(ttl=300, invalidate_on=[Llama])
-        async def herd_report(request): ...
-
+    @app.get("/herd/report")
+    @cached(ttl=300, invalidate_on=[Llama])
+    async def herd_report(request): ...
+    ```
     Without it, a write on worker A clears only worker A. With it, the model
     names the committing session announces are carried to every worker on one
     channel and applied there, so four workers behave like one -- and still no
     Redis, because the bus is the database you already have.
 
-    Returns the :class:`~wreath._orm_events.WriteBroadcast` carrying them, whose
-    ``close()`` stops it. Call once per process, before startup: the bus
+    Returns the `WriteBroadcast` carrying them, whose
+    `close()` stops it. Call once per process, before startup: the bus
     collects its subscriptions before it begins listening.
 
     Delivery is at-most-once, as ephemeral fan-out is. A worker that misses the
-    notification holds its entries until they expire, which is what the ``ttl``
+    notification holds its entries until they expire, which is what the `ttl`
     is now for -- a backstop rather than the mechanism.
     """
     return WriteBroadcast(bus, channel=channel)
 
 
 class RefreshWatch:
-    """The handle :func:`refresh_on` returns. Call it to stop watching.
+    """The handle `refresh_on` returns. Call it to stop watching.
 
     It also carries what an operator needs when reloads are failing. A snapshot
     cache degrades *upwards*: a broken loader leaves every read succeeding
@@ -96,7 +98,7 @@ class RefreshWatch:
         #: than the last write it was told about.
         self.refresh_errors = 0
         #: The most recent reload failure, kept so the cause is diagnosable
-        #: without reproducing it. ``None`` until one happens.
+        #: without reproducing it. `None` until one happens.
         self.last_error: BaseException | None = None
 
     def __call__(self) -> None:
@@ -109,18 +111,19 @@ def refresh_on(
     *,
     load: Callable[[], Any],
 ) -> RefreshWatch:
-    """Reload ``cache`` whenever one of ``models`` is written::
+    """Reload `cache` whenever one of `models` is written:
 
-        countries: SnapshotCache[str, Country] = SnapshotCache()
-        await countries.refresh(load_countries)
-        refresh_on(countries, [Country], load=load_countries)
-
+    ```python
+    countries: SnapshotCache[str, Country] = SnapshotCache()
+    await countries.refresh(load_countries)
+    refresh_on(countries, [Country], load=load_countries)
+    ```
     The snapshot cache holds reference data, so the right response to a write is
     to *reload* rather than to drop -- a dropped generation would leave readers
     with an explicit miss on data that has not gone anywhere.
 
     This is the same announcement the response cache listens to, so
-    :func:`invalidate_across_workers` makes it fleet-wide too: a write on any
+    `invalidate_across_workers` makes it fleet-wide too: a write on any
     worker reloads every worker's reference data, over one bus channel.
 
     Refresh is single-flight and a failing loader leaves the previous generation
@@ -128,8 +131,8 @@ def refresh_on(
     The reload is scheduled rather than awaited -- the write has already
     committed and must not wait on it.
 
-    Returns a :class:`RefreshWatch`: call it to stop watching, and read
-    ``refresh_errors`` to find out whether the reloads are actually working.
+    Returns a `RefreshWatch`: call it to stop watching, and read
+    `refresh_errors` to find out whether the reloads are actually working.
     """
     watched = frozenset(getattr(model, "__name__", str(model)) for model in models)
     inflight: set[Any] = set()

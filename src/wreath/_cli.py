@@ -1751,3 +1751,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"wreath: error: {error}", file=sys.stderr)
         return error.exit_code
     return 0
+
+
+# Without this guard `python -m wreath._cli docs check` imports the module,
+# runs nothing, and exits 0 in a fraction of a second -- indistinguishable from
+# a gate that passed. That misread a docs build as clean during development, so
+# the entry point is spelled out here rather than left to the console script.
+if __name__ == "__main__":
+    raise SystemExit(main())

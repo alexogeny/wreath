@@ -1,14 +1,16 @@
 """API versioning by URL prefix (default) or `Accept-Version` negotiation.
 
 Group per-version routes and mount them under `/v1`, `/v2`, ... composing
-with wreath's `Router`::
+with wreath's `Router`:
 
-    from wreath.versioning import VersionedRouter
+```python
+from wreath.versioning import VersionedRouter
 
-    api = VersionedRouter()
-    v1 = api.version("1"); v1.get("/llamas")(list_llamas_v1)
-    v2 = api.version("2"); v2.get("/llamas")(list_llamas_v2)
-    app.include_router(api.router())          # -> /v1/llamas and /v2/llamas
+api = VersionedRouter()
+v1 = api.version("1"); v1.get("/llamas")(list_llamas_v1)
+v2 = api.version("2"); v2.get("/llamas")(list_llamas_v2)
+app.include_router(api.router())          # -> /v1/llamas and /v2/llamas
+```
 
 Prefix versioning is the routed form and the default: the version is a path
 segment, so an unknown one matches no route and the app answers its ordinary 404,

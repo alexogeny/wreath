@@ -3,7 +3,7 @@
 Stage 0 of the Native Flight Recorder exposes *policy value types only*, all
 deny-by-default. No capture happens: these objects describe what a later
 Forensic-mode recorder would be allowed to retain, and validate that a policy
-stays inside its bounds. The capture engine and ``WFR1`` sink land in Stage 5.
+stays inside its bounds. The capture engine and `WFR1` sink land in Stage 5.
 
 Deny-by-default is structural here: the never-capture field classes below cannot
 be enabled through this API at all, and every budget is bounded.
@@ -124,7 +124,7 @@ class RedactionPolicy:
     header_mask: frozenset[str] = frozenset()
     #: Query-parameter names captured verbatim / hashed / length-only. Same
     #: deny-by-default, single-disposition model as headers, in their own
-    #: namespace (a param named ``authorization`` is not a header).
+    #: namespace (a param named `authorization` is not a header).
     query_allowlist: frozenset[str] = frozenset()
     query_hash: frozenset[str] = frozenset()
     query_mask: frozenset[str] = frozenset()
@@ -238,7 +238,7 @@ class Trigger:
     time, never as request-time string matches."""
 
     kind: TriggerKind
-    #: Numeric threshold / route id / status; meaning depends on ``kind``.
+    #: Numeric threshold / route id / status; meaning depends on `kind`.
     value: int = 0
     #: Deterministic sample rate for SAMPLE triggers.
     rate: float = 0.0
@@ -353,7 +353,7 @@ class CompiledRedaction:
     """An immutable, deny-by-default capture plan compiled from a RedactionPolicy.
 
     The request-path seam looks a header name up here to get its native capture
-    decision (or ``None`` to drop it), and reads a direction's body disposition
+    decision (or `None` to drop it), and reads a direction's body disposition
     and byte bound. This is the startup ceiling: a runtime arm resolves against
     the same plan and can only narrow it.
     """
@@ -371,15 +371,15 @@ class CompiledRedaction:
     query_names: tuple[str, ...] = ()
 
     def header(self, name: str) -> HeaderRule | None:
-        """The capture decision for a header, or ``None`` to drop it (default)."""
+        """The capture decision for a header, or `None` to drop it (default)."""
         return self.header_rules.get(name.lower())
 
     def query(self, name: str) -> HeaderRule | None:
-        """The capture decision for a query parameter, or ``None`` to drop it."""
+        """The capture decision for a query parameter, or `None` to drop it."""
         return self.query_rules.get(name.lower())
 
     def body(self, field_class: CaptureFieldClass) -> tuple[CaptureDisposition, int] | None:
-        """The (disposition, max_bytes) for a body field class, or ``None``."""
+        """The (disposition, max_bytes) for a body field class, or `None`."""
         if field_class is CaptureFieldClass.REQUEST_BODY:
             disposition = self.request_body
         elif field_class is CaptureFieldClass.RESPONSE_BODY:
@@ -389,7 +389,7 @@ class CompiledRedaction:
         return self._bound(disposition)
 
     def dependency(self) -> tuple[CaptureDisposition, int] | None:
-        """The (disposition, max_bytes) for dependency payloads, or ``None``.
+        """The (disposition, max_bytes) for dependency payloads, or `None`.
 
         One knob covers every dependency field class (DB_PARAM, OUTBOUND_REQUEST,
         OUTBOUND_RESPONSE): they are all opaque payloads redacted the same way.
@@ -495,7 +495,7 @@ class ActiveArm:
 class ArmRegistry:
     """Bounded set of live runtime capture arms, each inside the startup ceiling.
 
-    ``arm`` refuses anything the compiled :class:`RecordingPolicy` ceiling does
+    `arm` refuses anything the compiled `RecordingPolicy` ceiling does
     not permit, requires a positive expiry (no "retain forever" runtime arm), and
     caps the number of concurrent arms. Expired or match-exhausted arms are
     pruned lazily on every read. Owned by the event-loop thread.

@@ -1,12 +1,12 @@
 """Render a partial-index predicate in PostgreSQL's own normal form.
 
 A predicate is not stored as you wrote it. PostgreSQL parses it to a node tree,
-and ``pg_get_expr`` deparses that tree back to canonical text -- so
-``status = 'ready'``, ``(status = 'ready')``, ``status='ready'`` and
-``status = 'ready'::text`` all come back as ``(status = 'ready'::text)``.
+and `pg_get_expr` deparses that tree back to canonical text -- so
+`status = 'ready'`, `(status = 'ready')`, `status='ready'` and
+`status = 'ready'::text` all come back as `(status = 'ready'::text)`.
 
-That matters because ``detect`` compares the ORM's intent against the catalog by
-string. If the two spellings disagree, every ``detect`` run reports drift on an
+That matters because `detect` compares the ORM's intent against the catalog by
+string. If the two spellings disagree, every `detect` run reports drift on an
 index it just created, forever -- a far worse failure than a crash, because it
 never resolves and nothing is actually wrong.
 
@@ -14,28 +14,28 @@ So this module emits the normal form directly, and the declaration vocabulary is
 deliberately small enough that it can. The rules below were measured against
 PostgreSQL 17.10, not inferred:
 
-* the whole predicate is parenthesised, and each ``AND`` operand keeps its own
-  parentheses -- ``((status = 'ready'::text) AND (tries = 0))``
-* a text literal gains ``::text``; integers and booleans gain nothing
-* ``IN`` is deparsed as ``= ANY (ARRAY[...])``, never as ``IN``
+* the whole predicate is parenthesised, and each `AND` operand keeps its own
+  parentheses -- `((status = 'ready'::text) AND (tries = 0))`
+* a text literal gains `::text`; integers and booleans gain nothing
+* `IN` is deparsed as `= ANY (ARRAY[...])`, never as `IN`
 * an identifier is quoted only when it has to be, by the same rule
-  ``quote_ident`` uses
+  `quote_ident` uses
 
-Types outside :data:`_LITERAL` are refused rather than guessed at **wherever a
+Types outside `_LITERAL` are refused rather than guessed at **wherever a
 literal is rendered**, because their normal forms are not simply predictable: a
-``varchar`` comparison casts the *column* (``((vch)::text = 'x'::text)``),
-``double precision`` parenthesises and casts the literal, and ``timestamptz``
+`varchar` comparison casts the *column* (`((vch)::text = 'x'::text)`),
+`double precision` parenthesises and casts the literal, and `timestamptz`
 rewrites the literal's format. Each would be a permanent-drift bug. Widening
-:data:`_LITERAL` means measuring the new type's normal form first and pinning it
-in ``tests/postgres/test_partial_index_roundtrip.py``.
+`_LITERAL` means measuring the new type's normal form first and pinning it
+in `tests/postgres/test_partial_index_roundtrip.py`.
 
-``IS NULL`` and ``IS NOT NULL`` render **no literal**, and so accept any declared
+`IS NULL` and `IS NOT NULL` render **no literal**, and so accept any declared
 column type. That branch used to compute the type kind and then throw it away,
-which meant it refused ``timestamptz`` for a reason that only applies to the
-comparison branches -- and ``retired_at IS NULL`` is the archetypal partial index.
+which meant it refused `timestamptz` for a reason that only applies to the
+comparison branches -- and `retired_at IS NULL` is the archetypal partial index.
 Measured against PostgreSQL 17.10: every one of the 32 types
-``wreath.orm.types.BY_OID`` can declare (16 scalars and their array forms), in
-both polarities, deparses to exactly ``(<ident> IS [NOT] NULL)``. A ``NullTest``
+`wreath.orm.types.BY_OID` can declare (16 scalars and their array forms), in
+both polarities, deparses to exactly `(<ident> IS [NOT] NULL)`. A `NullTest`
 node carries no operand to coerce, so there is nothing for the type to change.
 """
 
@@ -48,7 +48,7 @@ from .errors import DeclarationError
 from .table import AllOf, Eq, InValues, IsNull
 
 #: Identifiers PostgreSQL always quotes because they are reserved words, from
-#: ``pg_get_keywords()`` where ``catcode IN ('R','T')``. Pinned by a test that
+#: `pg_get_keywords()` where `catcode IN ('R','T')`. Pinned by a test that
 #: re-reads them from the live server, so a version bump that adds one is caught
 #: rather than silently producing an unquoted identifier the catalog quotes.
 RESERVED_WORDS = frozenset(
@@ -80,7 +80,7 @@ _LITERAL = {
 
 
 def quote_identifier(name: str) -> str:
-    """Quote *name* exactly when PostgreSQL's ``quote_ident`` would."""
+    """Quote *name* exactly when PostgreSQL's `quote_ident` would."""
     if _BARE.match(name) and name not in RESERVED_WORDS:
         return name
     return '"' + name.replace('"', '""') + '"'

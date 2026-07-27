@@ -9,10 +9,10 @@ question. Two decisions:
 returns one value per parent. Per-parent resolvers are how GraphQL servers grow
 N+1 problems in application code even when the data layer is clean, so the
 batched form is the one that is easy to write and the per-parent form
-(``batch=False``) is the convenience wrapper -- not the other way round.
+(`batch=False`) is the convenience wrapper -- not the other way round.
 
 **Chaining is declared, not discovered.** A resolver that needs another field
-says so with ``requires=``. The executor topologically orders the level's fields
+says so with `requires=`. The executor topologically orders the level's fields
 so a dependency is resolved, in batch, before anything that reads it. That makes
 "this computed field needs the posts relationship loaded" a one-word
 declaration instead of a hidden `await` inside a loop.
@@ -113,15 +113,15 @@ def order_fields(
     *,
     type_name: str,
 ) -> list[Any]:
-    """Order one level's fields so every ``requires`` runs first.
+    """Order one level's fields so every `requires` runs first.
 
-    ``selected`` is the level's AST fields; ``resolvers`` maps a field name to
+    `selected` is the level's AST fields; `resolvers` maps a field name to
     its spec. Returns the same fields, reordered. A dependency the client did
     not select is *not* injected -- it is resolved as a hidden prerequisite by
     the executor instead, so asking for a computed field never silently widens
     the response.
 
-    Raises :class:`ResolverError` on a dependency cycle, naming the cycle.
+    Raises `ResolverError` on a dependency cycle, naming the cycle.
     """
     by_name: dict[str, Any] = {}
     for item in selected:
@@ -162,7 +162,7 @@ def order_fields(
 def validate_dependencies(
     registry: ResolverRegistry, known_fields: dict[str, set[str]]
 ) -> None:
-    """Check every ``requires`` names a real field, at schema-build time.
+    """Check every `requires` names a real field, at schema-build time.
 
     A dependency that does not exist is a wiring mistake, and finding it on the
     first request that happens to select that field is far too late.

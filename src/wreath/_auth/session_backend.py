@@ -1,9 +1,9 @@
 """Authentication backends for the SSO session bridge.
 
 After an OAuth2 login writes a principal into the signed session, the
-:class:`SessionIdentityBackend` turns it back into an :class:`Identity`, so a
+`SessionIdentityBackend` turns it back into an `Identity`, so a
 browser SSO session and an API bearer token converge on the same Identity shape
-— and therefore the same Cedar authorization path. :class:`CompositeBackend`
+— and therefore the same Cedar authorization path. `CompositeBackend`
 tries several backends in order (bearer first, then session).
 """
 

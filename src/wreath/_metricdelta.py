@@ -10,8 +10,8 @@ from __future__ import annotations
 
 
 class DeltaTracker:
-    """Per-key counter-delta tracker: ``delta(key, value)`` returns the increase
-    since the previous call for ``key`` (0 on first sight), or the raw ``value``
+    """Per-key counter-delta tracker: `delta(key, value)` returns the increase
+    since the previous call for `key` (0 on first sight), or the raw `value`
     if the counter went backwards (a reset), never a negative number."""
 
     __slots__ = ("_prev",)

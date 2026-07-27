@@ -2,14 +2,15 @@
 
 Assigns every request a stable id, echoes it on the response by default, and
 records it on request state so handlers and later observability layers can
-read it::
+read it:
 
-    app.add_middleware(RequestIDMiddleware(), priority=-5)
+```python
+app.add_middleware(RequestIDMiddleware(), priority=-5)
 
-    @app.get("/")
-    async def index(request):
-        return {"trace": request_id(request)}
-
+@app.get("/")
+async def index(request):
+    return {"trace": request_id(request)}
+```
 An inbound id is only reused when it survives validation, because it is echoed
 into a response header and will later be written into access logs and trace
 attributes. A rejected id is replaced rather than sanitized -- minting a fresh

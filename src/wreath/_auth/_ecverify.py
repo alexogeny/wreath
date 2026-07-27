@@ -1,16 +1,16 @@
 """Zero-dependency public-key signature verification for JWT ES256 and EdDSA.
 
-CPython's stdlib exposes hashes/HMAC (``hashlib``) and big-integer ``pow`` — enough
+CPython's stdlib exposes hashes/HMAC (`hashlib`) and big-integer `pow` — enough
 for HS/RS/PS — but no elliptic-curve signature verification. Rather than take a
 third-party runtime dependency (forbidden) these are implemented directly:
 
-* :func:`verify_es256` — ECDSA over NIST P-256 (secp256r1), FIPS 186-4 / SEC1.
-* :func:`verify_ed25519` — EdDSA over edwards25519, RFC 8032 §5.1.7.
+* `verify_es256` — ECDSA over NIST P-256 (secp256r1), FIPS 186-4 / SEC1.
+* `verify_ed25519` — EdDSA over edwards25519, RFC 8032 §5.1.7.
 
 Verify-only: no key generation or signing lives here, so there is no private-key
 or nonce-generation surface to get wrong. Correctness is pinned against the RFC
 8032 and NIST CAVP/Wycheproof known-answer vectors in
-``tests/compliance/test_jwt_ec.py``. These run in constant *code* paths but are
+`tests/compliance/test_jwt_ec.py`. These run in constant *code* paths but are
 not written for side-channel resistance; that is irrelevant for verifying a
 public signature with public inputs.
 """
@@ -72,7 +72,7 @@ def _p256_on_curve(x: int, y: int) -> bool:
 
 
 def on_p256_curve(x: int, y: int) -> bool:
-    """Whether ``(x, y)`` is a point on P-256 (and not the point at infinity).
+    """Whether `(x, y)` is a point on P-256 (and not the point at infinity).
 
     A public key is attacker-supplied whenever it comes from a JWKS, and a point
     that is not on the curve is not a public key -- it is a value that makes the
@@ -88,8 +88,8 @@ def on_p256_curve(x: int, y: int) -> bool:
 def verify_es256(x: int, y: int, signing_input: bytes, signature: bytes) -> bool:
     """Verify an ES256 (ECDSA/P-256/SHA-256) JWS signature.
 
-    ``x``/``y`` are the public-key affine coordinates; ``signature`` is the
-    fixed-width ``r || s`` (64 bytes) JOSE form.
+    `x`/`y` are the public-key affine coordinates; `signature` is the
+    fixed-width `r || s` (64 bytes) JOSE form.
     """
     if len(signature) != 64:
         return False

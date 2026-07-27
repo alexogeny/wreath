@@ -1,16 +1,16 @@
 """Find duplicated *structure* in the Python sources, not duplicated text.
 
 Copy-paste in this repository does not survive as copy-paste. It gets renamed:
-the same nine-line body appears as ``insert_settled`` and ``replace_settled``, as
-``_register_groups`` and ``_deregister_groups``, with different locals and
+the same nine-line body appears as `insert_settled` and `replace_settled`, as
+`_register_groups` and `_deregister_groups`, with different locals and
 different literals. A textual duplicate finder sees nothing; a reader sees it
 immediately and then has to fix the same bug twice.
 
 So this normalises before hashing. Every identifier, attribute name, argument
 name and constant collapses to a placeholder, leaving only the shape of the
 control and call structure, and bodies whose shapes hash equal are grouped. That
-is what found four byte-identical ``main()`` functions across the native lints
-after a shared ``_waivers`` helper had already been hoisted out of the same four
+is what found four byte-identical `main()` functions across the native lints
+after a shared `_waivers` helper had already been hoisted out of the same four
 files -- the second half of a de-duplication nobody finished.
 
     uv run wreath-dup-scan                       # the default report
@@ -19,9 +19,9 @@ files -- the second half of a de-duplication nobody finished.
     uv run wreath-dup-scan --path src/wreath/_devtools
 
 **This is a report, and deliberately not a gate.** Plenty of its findings are
-legitimate near-twins -- ``query``/``mutation``, ``insert_settled``/
-``upsert_correction`` -- where the shared shape is the point and collapsing them
-would cost more clarity than it saves. Wiring it into ``wreath-check`` would
+legitimate near-twins -- `query`/`mutation`, `insert_settled`/
+`upsert_correction` -- where the shared shape is the point and collapsing them
+would cost more clarity than it saves. Wiring it into `wreath-check` would
 train everyone to ignore it. Read it when a subsystem feels repetitive, and when
 it names something you did not know was duplicated, that is the finding.
 
@@ -42,7 +42,7 @@ from pathlib import Path
 
 from .native_lint import repo_root
 
-#: Where the scan runs when no ``--path`` is given.
+#: Where the scan runs when no `--path` is given.
 DEFAULT_ROOTS: tuple[str, ...] = ("src/wreath",)
 
 #: Bodies shorter than this are trivia. Two four-line functions that both unpack
@@ -112,12 +112,12 @@ class Group:
 def _shape(body: list[ast.stmt]) -> str:
     """A structural digest of a function body.
 
-    The statements are deep-copied before normalising: ``NodeTransformer``
+    The statements are deep-copied before normalising: `NodeTransformer`
     rewrites in place, and this walks the same tree the caller is still
     iterating. (An earlier form of this tool round-tripped through
-    ``ast.parse(ast.unparse(...))`` to get a fresh tree, which raised on any body
-    whose first statement cannot stand alone as a module -- a bare ``return`` --
-    and swallowed it in a blanket ``except``. Those functions were silently
+    `ast.parse(ast.unparse(...))` to get a fresh tree, which raised on any body
+    whose first statement cannot stand alone as a module -- a bare `return` --
+    and swallowed it in a blanket `except`. Those functions were silently
     absent from every scan.)
     """
     anonymised = [_Anonymise().visit(copy.deepcopy(stmt)) for stmt in body]

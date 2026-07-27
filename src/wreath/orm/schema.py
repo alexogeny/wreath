@@ -82,8 +82,8 @@ def _schema_identifier(value: str) -> str:
 class ColumnRef:
     """A resolved foreign-key target, with its referential actions.
 
-    ``on_delete``/``on_update`` are single PostgreSQL ``confdeltype``-style codes
-    (``a`` no action, ``r`` restrict, ``c`` cascade, ``n`` set null, ``d`` set
+    `on_delete`/`on_update` are single PostgreSQL `confdeltype`-style codes
+    (`a` no action, `r` restrict, `c` cascade, `n` set null, `d` set
     default) so the desired signature compares byte-for-byte with the catalog.
     """
 
@@ -169,7 +169,7 @@ class ModelSpec:
     #: Filled in by Registry.compile() once relationships resolve.
     by_relationship_name: dict[str, RelationshipSpec] = field(default_factory=dict)
     #: Table-level composite unique constraints and multi-column indexes,
-    #: declared with ``unique(...)`` / ``index(...)`` in the model body.
+    #: declared with `unique(...)` / `index(...)` in the model body.
     table_uniques: tuple[Any, ...] = ()
     table_indexes: tuple[Any, ...] = ()
     fingerprint: bytes = b""
@@ -237,8 +237,8 @@ def fingerprint_model(
 ) -> bytes:
     """A stable SHA-256 fingerprint of one compiled model.
 
-    The encoding is versioned and canonical: it never uses ``repr()`` or
-    Python's randomized ``hash()``, so a fingerprint is comparable across
+    The encoding is versioned and canonical: it never uses `repr()` or
+    Python's randomized `hash()`, so a fingerprint is comparable across
     processes and runs. Table-level constraints append nothing when a model
     declares none, so a model without them fingerprints exactly as before.
     """

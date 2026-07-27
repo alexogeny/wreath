@@ -6,7 +6,7 @@ once. There is no revalidate-then-reopen-by-name window (the file inspected is
 the file whose descriptor is returned), and no symlinked component can redirect
 the walk outside the root. Static files and the template loader both use this.
 
-On platforms without ``openat``/``dir_fd`` support (notably Windows) the walk
+On platforms without `openat`/`dir_fd` support (notably Windows) the walk
 cannot be made race-safe here, so it fails closed rather than silently falling
 back to name-based access.
 """
@@ -29,7 +29,7 @@ class ContainmentError(Exception):
 
 
 def open_root(directory: str | os.PathLike[str]) -> int:
-    """Open ``directory`` as a trusted root descriptor (caller closes it)."""
+    """Open `directory` as a trusted root descriptor (caller closes it)."""
     if not _HAVE_DIR_FD:
         raise ContainmentError("platform lacks openat/dir_fd support")
     return os.open(os.fspath(directory), os.O_RDONLY | _O_DIRECTORY | _O_CLOEXEC)
@@ -44,12 +44,12 @@ def _components(relative: str) -> list[str]:
 
 
 def open_beneath(root_fd: int, relative: str) -> tuple[int, os.stat_result]:
-    """Open ``relative`` for reading beneath ``root_fd``.
+    """Open `relative` for reading beneath `root_fd`.
 
-    Returns ``(fd, stat)`` where ``stat`` is the ``fstat`` of the opened
-    descriptor. Raises :class:`ContainmentError` if any component is a symlink or
-    the path would escape the root, and ``OSError`` (e.g. ``FileNotFoundError``)
-    if the target does not exist. The caller owns and must close ``fd``.
+    Returns `(fd, stat)` where `stat` is the `fstat` of the opened
+    descriptor. Raises `ContainmentError` if any component is a symlink or
+    the path would escape the root, and `OSError` (e.g. `FileNotFoundError`)
+    if the target does not exist. The caller owns and must close `fd`.
     """
     if not _HAVE_DIR_FD:
         raise ContainmentError("platform lacks openat/dir_fd support")

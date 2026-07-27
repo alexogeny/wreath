@@ -1,19 +1,19 @@
-"""``WFR1`` recording container + async recording sink (Stage 5, slice 5c).
+"""`WFR1` recording container + async recording sink (Stage 5, slice 5c).
 
-The ``WFR1`` container is the on-disk forensic recording: a fixed header (magic,
+The `WFR1` container is the on-disk forensic recording: a fixed header (magic,
 versions, the application metadata hash, a recording UUID, clock calibration, and
 a build id), a metadata chunk that gives the numeric ids meaning, and a stream of
-checksummed chunks -- capture slabs (``CAPT``) and optional completion cells
-(``EVNT``) -- terminated by a footer (``FOOT``) on a clean close. A reader rejects
+checksummed chunks -- capture slabs (`CAPT`) and optional completion cells
+(`EVNT`) -- terminated by a footer (`FOOT`) on a clean close. A reader rejects
 an unsupported major version or a metadata-hash mismatch outright, but recovers
 every complete, checksummed chunk from a file whose tail was torn off by an abrupt
 termination (it reports whether the footer was present, i.e. whether the close was
 clean).
 
-The :class:`RecordingSink` is the async, disk-facing consumer of capture slabs --
-the sibling of the Stage-4 :class:`~wreath._export.ExportPipeline`. It owns one
+The `RecordingSink` is the async, disk-facing consumer of capture slabs --
+the sibling of the Stage-4 `ExportPipeline`. It owns one
 background thread that drains the recorder's committed slabs (it is the *only*
-consumer of the capture commit ring) and appends them to an owner-only ``WFR1``
+consumer of the capture commit ring) and appends them to an owner-only `WFR1`
 file. Following the plan's rule that a recording is never written from request
 code and its failure never touches application work, a disk-full or write error
 drops the recording output and counts it; the sink keeps draining so the bounded
@@ -97,10 +97,10 @@ def _chunk(tag: bytes, payload: bytes) -> bytes:
 
 
 class WFR1Writer:
-    """Streams a ``WFR1`` recording to a binary file object.
+    """Streams a `WFR1` recording to a binary file object.
 
     Writes the header and metadata chunk on construction, appends capture/event
-    chunks as they arrive, and writes the footer on :meth:`close`. It performs no
+    chunks as they arrive, and writes the footer on `close`. It performs no
     buffering policy of its own beyond the file object's; the caller (the sink)
     decides how often to flush and owns the file's permissions and lifetime.
     """
@@ -135,7 +135,7 @@ class WFR1Writer:
         self._chunk_count += 1
 
     def write_captures(self, slabs: list[bytes]) -> int:
-        """Append one ``CAPT`` chunk holding the given slabs (already serialized by
+        """Append one `CAPT` chunk holding the given slabs (already serialized by
         the native capture core, self-delimited by each slab header's used_bytes).
         Returns the number of slabs written."""
         if not slabs:
@@ -145,7 +145,7 @@ class WFR1Writer:
         return len(slabs)
 
     def write_events(self, cells: bytes) -> int:
-        """Append one ``EVNT`` chunk of fixed 64-byte completion cells."""
+        """Append one `EVNT` chunk of fixed 64-byte completion cells."""
         if not cells:
             return 0
         if len(cells) % CELL_SIZE != 0:
@@ -168,9 +168,9 @@ class WFR1Writer:
 
 @dataclass(frozen=True, slots=True)
 class DecodedRecording:
-    """A parsed ``WFR1`` recording. ``clean`` is True only when a valid footer was
+    """A parsed `WFR1` recording. `clean` is True only when a valid footer was
     reached; a torn-off tail yields every complete chunk read so far with
-    ``clean=False``."""
+    `clean=False`."""
 
     image: MetadataImage
     slabs: tuple[CaptureSlab, ...]
@@ -186,12 +186,12 @@ class DecodedRecording:
 
 
 def read_recording(data: bytes) -> DecodedRecording:
-    """Parse a ``WFR1`` recording, recovering complete chunks from a torn tail.
+    """Parse a `WFR1` recording, recovering complete chunks from a torn tail.
 
     Rejects an unknown container/schema major version and a metadata-hash mismatch
     (a reader must not guess at an incompatible image). A chunk whose header or
     payload is truncated, or whose CRC fails, ends parsing: everything before it is
-    returned with ``clean=False``.
+    returned with `clean=False`.
     """
     if len(data) < _HEADER.size:
         raise SchemaError("recording is shorter than its header")
@@ -287,7 +287,7 @@ def _split_slabs(payload: bytes, out: list[CaptureSlab]) -> None:
 
 
 class RecordingSink:
-    """Drains committed capture slabs to a ``WFR1`` file on a background thread.
+    """Drains committed capture slabs to a `WFR1` file on a background thread.
 
     It is the sole consumer of the recorder's capture commit ring. A disk-full or
     write error is caught, counted, and degrades the sink to *drain-and-drop* so

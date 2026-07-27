@@ -1,7 +1,7 @@
-"""A per-principal document, its ``ETag``, and a stream saying when to refetch.
+"""A per-principal document, its `ETag`, and a stream saying when to refetch.
 
 Several features want the same shape: a document derived from *(principal,
-some server state)*, an ``ETag`` over the same inputs so the client stops
+some server state)*, an `ETag` over the same inputs so the client stops
 asking, and a change signal so it knows when to ask again. The permission
 manifest is the first caller. **Feature flags are the intended second one** --
 which flags are on for a user is the same document with a different body -- and
@@ -11,11 +11,11 @@ Without the third piece the first two are a poll in disguise: a client that
 cannot be told "your answer moved" either re-fetches on a timer or re-derives on
 every render. What makes the signal possible at all is that Wreath can *see*
 both things that move the answer -- its own policy set, and a committed write to
-the table the answer is derived from (:mod:`wreath._orm_events`). An external
+the table the answer is derived from (`wreath._orm_events`). An external
 service can see neither.
 
 **The correctness rule, and the reason this is safe.** Delivery is
-**at-most-once**: the transport is an ephemeral ``NOTIFY`` and a stream can be
+**at-most-once**: the transport is an ephemeral `NOTIFY` and a stream can be
 disconnected, so a *narrowing* change may arrive late or not at all. That is
 acceptable only because the document is **chrome, not enforcement**. A stale
 permission manifest can draw a button that then 403s -- a cosmetic bug -- and it
@@ -27,10 +27,10 @@ Three things this owes its callers, each of which is a way to be quietly wrong:
 
 * **Bounded subscriptions.** A registry keyed by principal that only ever grows
   is a leak, and one user with fifty tabs must not be able to fill it. Both
-  caps are enforced at :meth:`LiveDocument.subscribe`, which refuses rather
+  caps are enforced at `LiveDocument.subscribe`, which refuses rather
   than evicts -- evicting the oldest tab invites a reconnect that evicts the
   next one.
-* **Cleanup on disconnect.** The slot is released in the stream's ``finally``,
+* **Cleanup on disconnect.** The slot is released in the stream's `finally`,
   which runs when the client goes away and the generator is closed.
 * **No database connection.** A stream is mostly idle and may be open for
   hours. Everything here is in-process; the client's refetch is what talks to
@@ -70,13 +70,13 @@ DEFAULT_KEEPALIVE = 15.0
 #: second and a thousand string comparisons, not a thousand computations.
 _FINGERPRINT_TTL = 1.0
 
-#: Resolves the ``ETag`` to put on an event, given the reason. Returns ``None``
-#: when the tag it could compute would be a lie -- see :func:`change_events`.
+#: Resolves the `ETag` to put on an event, given the reason. Returns `None`
+#: when the tag it could compute would be a lie -- see `change_events`.
 TagFor = Callable[[str], str | None]
 
 
 def _model_name(model: Any) -> str:
-    """A model name as :mod:`wreath._orm_events` announces it: the class name."""
+    """A model name as `wreath._orm_events` announces it: the class name."""
     return model if isinstance(model, str) else getattr(model, "__name__", str(model))
 
 
@@ -89,9 +89,9 @@ def _as_text(data: Any) -> str:
 class Change:
     """"Your copy may be stale", with the new tag when one can be stated.
 
-    ``etag is None`` means *refetch, we cannot tell you the tag* -- which is an
+    `etag is None` means *refetch, we cannot tell you the tag* -- which is an
     honest answer rather than a degraded one, because the client refetches
-    conditionally and a ``304`` costs almost nothing.
+    conditionally and a `304` costs almost nothing.
     """
 
     reason: str
@@ -102,9 +102,9 @@ class Change:
 
 
 class Subscription:
-    """One open stream's slot in a :class:`LiveDocument`.
+    """One open stream's slot in a `LiveDocument`.
 
-    Holds a single pending :class:`Change` rather than a queue, because the
+    Holds a single pending `Change` rather than a queue, because the
     signal is idempotent: two "you are stale" notifications mean exactly what
     one means. A slow or paused client therefore costs O(1) memory and can
     never build a backlog to be delivered late.
@@ -138,9 +138,9 @@ class Subscription:
         """Mark this subscriber stale, from any loop or thread.
 
         A write commits wherever the ORM ran it, which is not necessarily the
-        loop this stream is waiting on -- and :meth:`asyncio.Event.set` only
+        loop this stream is waiting on -- and `asyncio.Event.set` only
         wakes a waiter on its own loop. Hopping through
-        ``call_soon_threadsafe`` is what keeps a background-thread commit from
+        `call_soon_threadsafe` is what keeps a background-thread commit from
         leaving the stream asleep until its next keep-alive.
         """
         if self._closed:
@@ -169,7 +169,7 @@ class Subscription:
         self._wake.set()
 
     async def wait(self) -> Change | None:
-        """The next change, or ``None`` once this subscription is closed.
+        """The next change, or `None` once this subscription is closed.
 
         A change accepted *before* the close is still delivered. Swallowing it
         would make a shutdown -- or a registry eviction -- the one way a client
@@ -197,26 +197,26 @@ class Subscription:
 class LiveDocument:
     """The change signal for one kind of per-principal document.
 
-    ``bus`` is optional and its absence is a supported configuration: a
+    `bus` is optional and its absence is a supported configuration: a
     single-worker deployment or a test wants the local half without a database
     behind it. With a bus, a notification raised on the worker that took the
     write reaches the worker holding the stream in one hop -- and never travels
-    a second one, because :class:`~wreath._busbridge.BusBridge` has no path from
+    a second one, because `BusBridge` has no path from
     receive to publish.
 
-    ``watch`` names the models whose writes make a document stale, as
-    :mod:`wreath._orm_events` announces them. Those announcements are
+    `watch` names the models whose writes make a document stale, as
+    `wreath._orm_events` announces them. Those announcements are
     **model-grained, not row-grained**, so a write to the roles model wakes
     *every* subscriber rather than the one user who was promoted. That is the
     right trade here: the cost is one conditional refetch each, and a
-    conditional refetch that finds nothing changed is a ``304``. Row-grained
+    conditional refetch that finds nothing changed is a `304`. Row-grained
     would mean recording a read set per request to save it.
 
-    ``fingerprint`` returns the part of every subscriber's tag that is *not*
+    `fingerprint` returns the part of every subscriber's tag that is *not*
     per-principal -- for permissions, the policy set and the route vocabulary.
     An open stream re-reads it on each keep-alive tick, so a policy set replaced
     in-process is noticed without anyone having to remember to call
-    :meth:`notify_all` from a reload hook.
+    `notify_all` from a reload hook.
     """
 
     __slots__ = (
@@ -284,10 +284,10 @@ class LiveDocument:
     # -- subscriptions ---------------------------------------------------------
 
     def subscribe(self, principal: str) -> Subscription | None:
-        """A slot for one stream, or ``None`` when the registry is full.
+        """A slot for one stream, or `None` when the registry is full.
 
         Refused rather than queued or evicted. A caller without a stream is not
-        broken -- it still revalidates the document with ``If-None-Match``,
+        broken -- it still revalidates the document with `If-None-Match`,
         which is this feature minus the push -- whereas evicting somebody
         else's tab invites a reconnect that evicts the next one.
         """
@@ -393,8 +393,8 @@ class LiveDocument:
     def fingerprint(self) -> str:
         """The non-per-principal part of the tag, cached for a moment.
 
-        ``""`` when the caller declared none, which turns the drift check in
-        :func:`change_events` off rather than making it lie.
+        `""` when the caller declared none, which turns the drift check in
+        `change_events` off rather than making it lie.
         """
         if self._fingerprint is None:
             return ""
@@ -421,15 +421,15 @@ async def change_events(
 ) -> AsyncGenerator[ServerSentEvent]:
     """Yield one event per change until the client or the document goes away.
 
-    ``tag_for(reason)`` supplies the ``ETag`` for a change that did not carry
-    one, and **must return ``None`` when it cannot state the tag truthfully**.
+    `tag_for(reason)` supplies the `ETag` for a change that did not carry
+    one, and **must return `None` when it cannot state the tag truthfully**.
     That is not a formality: the permission manifest's tag covers the caller's
     roles, so a stream that learns "the roles table was written" is holding an
     identity that may already be out of date, and a tag computed from it would
     tell the client to skip exactly the refetch it needs. Saying nothing costs
     one conditional request.
 
-    The slot is released in ``finally``, so a client that disconnects -- which
+    The slot is released in `finally`, so a client that disconnects -- which
     closes this generator -- frees it without anything else having to notice.
     """
     if keepalive is None:
@@ -472,7 +472,7 @@ def change_stream(
     event: str = "change",
     keepalive: float | None = None,
 ) -> SSEResponse:
-    """An SSE response over :func:`change_events`."""
+    """An SSE response over `change_events`."""
     return SSEResponse(
         change_events(
             subscription, tag_for=tag_for, event=event, keepalive=keepalive

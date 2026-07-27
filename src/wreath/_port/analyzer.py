@@ -1,7 +1,7 @@
 """Static (never-import-the-target) FastAPI/Pydantic/ormar/SQLModel analyzer.
 
 Design 07's load-bearing constraint: the source cannot be imported (private deps,
-import-time side effects), so this walks ``ast`` only. Two passes: (1) index every
+import-time side effects), so this walks `ast` only. Two passes: (1) index every
 module's classes by framework base across the whole tree so body-params and query
 targets resolve cross-module; (2) classify constructs into findings.
 """
@@ -103,12 +103,12 @@ _QUERY_EXACT_RULE = {
 
 
 def _eager_names_are_literal(call: ast.Call | None) -> bool:
-    """Whether ``select_related(...)`` names relations this analyzer can resolve.
+    """Whether `select_related(...)` names relations this analyzer can resolve.
 
-    ``select_related("llama")`` is ``.include(Model.llama.selectin())`` — a
-    rename. ``select_all()`` is not: it means "every relation", and wreath has
+    `select_related("llama")` is `.include(Model.llama.selectin())` — a
+    rename. `select_all()` is not: it means "every relation", and wreath has
     no such switch, so the set has to be written out by someone who knows which
-    ones the caller actually reads. A ``a__b`` trail is a nested include and a
+    ones the caller actually reads. A `a__b` trail is a nested include and a
     non-literal is a runtime name; neither is resolved here.
     """
     if call is None or not call.args or call.keywords:
@@ -131,15 +131,15 @@ _TAIL_NEEDS_HEAD: dict[str, frozenset[str]] = {
 
 
 def _lookup_is_mechanical(keyword: str) -> bool:
-    """Whether ``filter(<keyword>=v)`` becomes a predicate with ``v`` unchanged.
+    """Whether `filter(<keyword>=v)` becomes a predicate with `v` unchanged.
 
-    A bare column name is an equality test. A name with ``__`` is a column plus
+    A bare column name is an equality test. A name with `__` is a column plus
     a lookup *only* when the trailing segment is one wreath has an operator for;
-    otherwise it is a relation traversal (``owner__name``) or a container lookup
-    (``tags__jsonb_has_any``). The container lookup needs an operator someone
-    chooses. The relation does *not* need a join chosen — ``Model.owner.name``
-    is a ``RelatedColumnExpr`` and the compiler emits the INNER JOIN itself — it
-    needs the relation *resolved*, and ``owner``'s target model is usually
+    otherwise it is a relation traversal (`owner__name`) or a container lookup
+    (`tags__jsonb_has_any`). The container lookup needs an operator someone
+    chooses. The relation does *not* need a join chosen — `Model.owner.name`
+    is a `RelatedColumnExpr` and the compiler emits the INNER JOIN itself — it
+    needs the relation *resolved*, and `owner`'s target model is usually
     declared in another module. Reading the suffix is what separates them, and
     getting it wrong in the permissive direction would emit an attribute chain
     against a column that is not a relation at all.
@@ -151,10 +151,10 @@ def _lookup_is_mechanical(keyword: str) -> bool:
 
 
 def _call_is_mechanical(call: ast.Call | None) -> bool:
-    """Whether every argument of a ``.objects.<verb>(...)`` call maps across.
+    """Whether every argument of a `.objects.<verb>(...)` call maps across.
 
-    Positional arguments are never mechanical: in ormar they are ``Q`` objects
-    or raw clauses, and neither has a form this analyzer can read. ``**kwargs``
+    Positional arguments are never mechanical: in ormar they are `Q` objects
+    or raw clauses, and neither has a form this analyzer can read. `**kwargs`
     likewise — the keys are a runtime value, so there is nothing to check.
     """
     if call is None:
@@ -172,13 +172,13 @@ def query_rule(
     call: ast.Call | None = None,
     tail: tuple[tuple[str, ast.Call | None], ...] = (),
 ) -> str:
-    """The rule for a ``.objects.<verb>`` chain, or the generic one.
+    """The rule for a `.objects.<verb>` chain, or the generic one.
 
-    Shared with the emitter so the ``# TODO(wreath-port: …)`` it writes into the
+    Shared with the emitter so the `# TODO(wreath-port: …)` it writes into the
     source says exactly what the report said — a porter grepping one and reading
     the other must not find two different verdicts for the same line.
 
-    ``call`` and ``tail`` are what promote a verb from "here is the shape of the
+    `call` and `tail` are what promote a verb from "here is the shape of the
     rewrite" to "here is the rewrite": the arguments have to carry across
     unchanged, and every verb layered on top has to as well. Called without them
     the answer is the conservative one, so a caller that cannot see the chain
@@ -205,11 +205,11 @@ def query_rule(
 def _tail_step_is_mechanical(verb: str, call: ast.Call | None, head: str = "") -> bool:
     """Whether a verb chained after the head carries across with its arguments.
 
-    Checked rather than assumed: ``.all(name__icontains=x)`` is a filter wearing
+    Checked rather than assumed: `.all(name__icontains=x)` is a filter wearing
     a terminal's name, and treating the verb alone as safe would let the lookup
     the head check exists to catch through the back door.
 
-    ``head`` is what lets ``first`` be mechanical after ``order_by`` and nowhere
+    `head` is what lets `first` be mechanical after `order_by` and nowhere
     else — the verb alone does not decide it.
     """
     if verb in _TAIL_NEEDS_HEAD:
@@ -236,9 +236,9 @@ def _tail_step_is_mechanical(verb: str, call: ast.Call | None, head: str = "") -
 def chain_tail(
     head: ast.AST, parents: dict[int, ast.AST]
 ) -> tuple[tuple[str, ast.Call | None], ...]:
-    """The verbs applied after the head of a ``.objects.<head>(...)`` chain.
+    """The verbs applied after the head of a `.objects.<head>(...)` chain.
 
-    ``Model.objects.filter(x=1).all()`` bills once, at ``filter`` — so whether
+    `Model.objects.filter(x=1).all()` bills once, at `filter` — so whether
     that finding is honest depends on what came after it, and the head node
     cannot see downstream without walking back up the tree. Each verb comes back
     with its own call, because a tail verb's arguments decide as much as the
@@ -257,7 +257,7 @@ def chain_tail(
 
 
 def parent_map(tree: ast.AST) -> dict[int, ast.AST]:
-    """``id(child) -> parent`` for one module, built in a single walk."""
+    """`id(child) -> parent` for one module, built in a single walk."""
     return {
         id(child): parent
         for parent in ast.walk(tree)
@@ -445,9 +445,9 @@ _PRUNED_SUFFIXES = (".egg-info",)
 
 
 def _is_pruned_dir(dirpath: str, name: str) -> bool:
-    """Is ``dirpath/name`` infrastructure rather than application source?
+    """Is `dirpath/name` infrastructure rather than application source?
 
-    A virtualenv is detected by its **marker**, ``pyvenv.cfg``, not by its name:
+    A virtualenv is detected by its **marker**, `pyvenv.cfg`, not by its name:
     `.venv` is a convention and nothing more, and a venv walked as app code both
     inflates the coverage denominator with libraries the user is not porting and
     drags a few thousand unrelated files into a run they did not ask for.
@@ -461,11 +461,11 @@ def _is_pruned_dir(dirpath: str, name: str) -> bool:
 
 
 def _iter_py(root: Path, on_error=None):
-    """Yield every application ``.py`` under ``root``, pruning infrastructure.
+    """Yield every application `.py` under `root`, pruning infrastructure.
 
-    ``on_error`` receives the ``OSError`` for any directory that could not be
-    listed (``os.walk`` swallows those by default, which would silently shrink
-    the tree). Symlinked directories are not followed — ``os.walk``'s default —
+    `on_error` receives the `OSError` for any directory that could not be
+    listed (`os.walk` swallows those by default, which would silently shrink
+    the tree). Symlinked directories are not followed — `os.walk`'s default —
     so a link out of the tree cannot widen the walk beyond what was named.
     """
     if root.is_file():
@@ -480,7 +480,7 @@ def _iter_py(root: Path, on_error=None):
 
 
 class _Imports:
-    """Resolves local names to their dotted framework origin (honors ``as``)."""
+    """Resolves local names to their dotted framework origin (honors `as`)."""
 
     def __init__(self) -> None:
         self.names: dict[str, str] = {}
@@ -511,9 +511,9 @@ class _Imports:
 
 
 def _boto3_service(node: ast.Call) -> str | None:
-    """The AWS service named by ``boto3.client("s3")`` / ``.resource("s3")``.
+    """The AWS service named by `boto3.client("s3")` / `.resource("s3")`.
 
-    ``None`` when the name is not a literal — a service chosen at runtime is not
+    `None` when the name is not a literal — a service chosen at runtime is not
     one this analyzer can route, and guessing would put an S3 verdict on a call
     that talks to something else.
     """
@@ -694,8 +694,8 @@ class _Analyzer(ast.NodeVisitor):
         """Whether deleting this strawberry class is provably equivalent.
 
         Wreath derives the object type from the ORM model, so a class that is
-        nothing but ``strawberry.auto`` over a model's columns has no counterpart
-        to write — the same argument that makes an ``auto`` field emit nothing
+        nothing but `strawberry.auto` over a model's columns has no counterpart
+        to write — the same argument that makes an `auto` field emit nothing
         makes the enclosing class a deletion. It only holds when the class really
         is that model's full column set, and two things break it:
 
@@ -703,9 +703,9 @@ class _Analyzer(ast.NodeVisitor):
           field, so deleting a type that lists four of eight columns publishes the
           other four. That is a schema widening, and it must not happen quietly.
         * **snake_case is a rename on the wire.** Strawberry camel-cases field
-          names by default; wreath emits ``column.python_name`` verbatim
-          (``_graphql/schema.py``). ``fleece_kg`` is ``fleeceKg`` in the old
-          schema and ``fleece_kg`` in the new one, so every client sees it.
+          names by default; wreath emits `column.python_name` verbatim
+          (`_graphql/schema.py`). `fleece_kg` is `fleeceKg` in the old
+          schema and `fleece_kg` in the new one, so every client sees it.
         """
         if decorator != "type":
             return "graphql.type", f"a strawberry.{decorator} is not a derived object type"
@@ -843,14 +843,14 @@ class _Analyzer(ast.NodeVisitor):
             self._scan_params(node)
 
     def _scan_lifespan(self, node) -> None:
-        """Bill an ``@asynccontextmanager`` only if it is the app's lifespan.
+        """Bill an `@asynccontextmanager` only if it is the app's lifespan.
 
-        ``contextlib.asynccontextmanager`` is stdlib and wreath has no opinion
+        `contextlib.asynccontextmanager` is stdlib and wreath has no opinion
         about it: an advisory-lock or connection helper written with it needs no
         porting at all, and telling its author to "split at the yield into
         on_startup/on_shutdown" would be advice about a function that has no
         startup. So the decorator alone is not the signal — being handed to the
-        application as ``lifespan=`` is.
+        application as `lifespan=` is.
         """
         if not _is_lifespan(node, self.lifespan_names, self.imports):
             return
@@ -1030,7 +1030,7 @@ class _Analyzer(ast.NodeVisitor):
         """Whether a resolved name came from FastAPI/Starlette rather than a local.
 
         The corpus has application classes that share a name with a framework one
-        (its own ``TestClient`` wrapper, for instance), and reporting those would
+        (its own `TestClient` wrapper, for instance), and reporting those would
         be noise a porter has to dismiss by hand.
         """
         return origin.startswith(("fastapi", "starlette"))
@@ -1039,7 +1039,7 @@ class _Analyzer(ast.NodeVisitor):
         """Sort one Alembic operation into derivable, manual, or data-rewriting.
 
         Most revisions in a mature app are ordinary DDL that
-        ``wreath migrations generate`` produces from the model change, and for
+        `wreath migrations generate` produces from the model change, and for
         those there is nothing to hand-write at all. The ones that are not are
         the ones worth a porter's attention: raw SQL and a row rewrite, which no
         generator can derive, and a **rename**, which is the operation an image
@@ -1064,7 +1064,7 @@ class _Analyzer(ast.NodeVisitor):
         """The rule a derivable-*shaped* operation actually earns.
 
         The verb narrows the candidates; the arguments decide. An index is
-        derivable only while it stays btree-over-columns, an ``alter_column``
+        derivable only while it stays btree-over-columns, an `alter_column`
         only while every kwarg it sets is part of the column signature detection
         reads, and a table only while every column type has a wreath PgType.
         """
@@ -1088,7 +1088,7 @@ class _Analyzer(ast.NodeVisitor):
         return "mig.derived"
 
     def _table_body_verdict(self, node: ast.Call) -> str:
-        """Whether every column/constraint in a ``create_table``/``add_column`` is modelled."""
+        """Whether every column/constraint in a `create_table`/`add_column` is modelled."""
         verdict = "mig.derived"
         for argument in node.args:
             if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
@@ -1110,7 +1110,7 @@ class _Analyzer(ast.NodeVisitor):
         return verdict
 
     def _column_verdict(self, call: ast.Call) -> str:
-        """One ``sa.Column(...)``: modelled type, no referential action of its own."""
+        """One `sa.Column(...)`: modelled type, no referential action of its own."""
         for argument in call.args:
             if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
                 continue                      # the column name
@@ -1125,7 +1125,7 @@ class _Analyzer(ast.NodeVisitor):
         return "mig.derived"
 
     def _sa_type_is_modelled(self, node: ast.AST | None) -> bool:
-        """Whether ``sa.String(length=80)`` / ``postgresql.JSONB()`` has a wreath PgType."""
+        """Whether `sa.String(length=80)` / `postgresql.JSONB()` has a wreath PgType."""
         if isinstance(node, ast.Call):
             node = node.func
         if not isinstance(node, (ast.Name, ast.Attribute)):
@@ -1162,7 +1162,7 @@ class _Analyzer(ast.NodeVisitor):
         self._emit("exc.http_literal" if resolved else "exc.http_variable", node.lineno)
 
     def _status_constant(self, node: ast.AST | None) -> int | None:
-        """The integer behind ``fastapi.status.HTTP_404_NOT_FOUND``, if that is what this is."""
+        """The integer behind `fastapi.status.HTTP_404_NOT_FOUND`, if that is what this is."""
         return status_int(self.imports, node)
 
     # -- small predicates -----------------------------------------------------
@@ -1199,14 +1199,14 @@ def _is_false(node: ast.AST) -> bool:
 
 
 def _is_field_constraint(value: ast.AST | None, imports: _Imports) -> bool:
-    """A ``Field(...)`` carrying at least one value or string constraint."""
+    """A `Field(...)` carrying at least one value or string constraint."""
     if isinstance(value, ast.Call) and imports.origin(value.func).split(".")[-1] == "Field":
         return any(k.arg in _FIELD_CONSTRAINTS for k in value.keywords)
     return False
 
 
 def _config_extra(value: ast.AST | None) -> str | None:
-    """The ``extra=`` setting on a ``model_config``/``Config`` call, if any."""
+    """The `extra=` setting on a `model_config`/`Config` call, if any."""
     if isinstance(value, ast.Call):
         for kw in value.keywords:
             if kw.arg == "extra" and isinstance(kw.value, ast.Constant):
@@ -1220,12 +1220,12 @@ def _config_extra(value: ast.AST | None) -> str | None:
 
 def _is_lifespan(node, lifespan_names, imports: _Imports) -> bool:
     """Whether this function is *the app's* lifespan, and not merely an
-    ``@asynccontextmanager``.
+    `@asynccontextmanager`.
 
-    ``contextlib.asynccontextmanager`` is stdlib, and an advisory-lock or
+    `contextlib.asynccontextmanager` is stdlib, and an advisory-lock or
     connection helper written with it needs no porting at all. Recognized three
-    ways: registered as a lifespan on the app, named ``lifespan`` by convention,
-    or taking exactly one ``FastAPI``/``Starlette``-annotated parameter.
+    ways: registered as a lifespan on the app, named `lifespan` by convention,
+    or taking exactly one `FastAPI`/`Starlette`-annotated parameter.
     """
     if node.name in lifespan_names or node.name == "lifespan":
         return True
@@ -1241,17 +1241,17 @@ def _is_lifespan(node, lifespan_names, imports: _Imports) -> bool:
 def settings_field_shape(
     imports: _Imports, stmt: ast.AnnAssign, settings_names: set[str] | None = None
 ) -> str:
-    """``"nested"`` | ``"scalar"`` | ``"complex"`` for one ``BaseSettings`` field.
+    """`"nested"` | `"scalar"` | `"complex"` for one `BaseSettings` field.
 
-    ``scalar`` is the shape whose whole translation is decided by the source: one
-    of the four types ``load_env``'s ``dict[str, str]`` converts to, and either no
+    `scalar` is the shape whose whole translation is decided by the source: one
+    of the four types `load_env`'s `dict[str, str]` converts to, and either no
     default (a required variable) or a literal one. Anything else — a container,
-    an optional, a ``Field(...)`` marker, a computed default — needs someone to
+    an optional, a `Field(...)` marker, a computed default — needs someone to
     decide how the raw string becomes the value.
 
-    ``settings_names`` is what separates ``nested`` from ``complex``. A caller
-    without a tree index may omit it: a sub-group then reads as ``complex``, which
-    keeps the *class* verdict identical, since neither shape is ``scalar``.
+    `settings_names` is what separates `nested` from `complex`. A caller
+    without a tree index may omit it: a sub-group then reads as `complex`, which
+    keeps the *class* verdict identical, since neither shape is `scalar`.
     """
     annotation = imports.origin(stmt.annotation).split(".")[-1]
     known = settings_names or set()
@@ -1273,14 +1273,14 @@ def settings_field_shape(
 def settings_class_rule(
     imports: _Imports, node: ast.ClassDef, settings_names: set[str] | None = None
 ) -> str:
-    """Whether a whole ``BaseSettings`` class is a field-by-field mechanical rewrite.
+    """Whether a whole `BaseSettings` class is a field-by-field mechanical rewrite.
 
     Shared with the emitter, so the report and the annotation written into the
     source cannot disagree about one class. A class earns the translated verdict
     only when every field does and its configuration says nothing this analyzer
-    cannot read: ``env_prefix`` and ``extra`` change the target in a way that is
-    still fully determined, while an ``env_nested_delimiter``, a ``secrets_dir``
-    or a pydantic-v1 ``class Config`` do not, so they hold the class back rather
+    cannot read: `env_prefix` and `extra` change the target in a way that is
+    still fully determined, while an `env_nested_delimiter`, a `secrets_dir`
+    or a pydantic-v1 `class Config` do not, so they hold the class back rather
     than being quietly ignored.
     """
     shapes = [
@@ -1306,7 +1306,7 @@ def settings_class_rule(
 
 
 def settings_required(node: ast.ClassDef) -> str:
-    """The ``required_env=[...]`` list a settings class implies: fields with no default."""
+    """The `required_env=[...]` list a settings class implies: fields with no default."""
     prefix = _env_prefix(node)
     names = [
         f"{prefix}{stmt.target.id.upper()}"
@@ -1337,7 +1337,7 @@ def _env_prefix(node: ast.ClassDef) -> str:
 
 
 def lifespan_names(tree: ast.Module) -> frozenset[str]:
-    """Names handed to an application as ``lifespan=<name>`` anywhere in the module."""
+    """Names handed to an application as `lifespan=<name>` anywhere in the module."""
     return frozenset(
         keyword.value.id
         for node in ast.walk(tree)
@@ -1348,16 +1348,16 @@ def lifespan_names(tree: ast.Module) -> frozenset[str]:
 
 
 def lifespan_shape(node) -> tuple[str, str]:
-    """``(rule_id, reason)`` for one lifespan body.
+    """`(rule_id, reason)` for one lifespan body.
 
-    The split into ``@app.on_startup``/``@app.on_shutdown`` is determined exactly
-    when the body *is* a split: one bare ``yield`` as a top-level statement, with
+    The split into `@app.on_startup`/`@app.on_shutdown` is determined exactly
+    when the body *is* a split: one bare `yield` as a top-level statement, with
     the halves independent. Three things break that, and each is worth naming
     rather than lumping together, because they need different fixes:
 
     * the yield hands a value to the framework (FastAPI's lifespan-state dict),
-      which has to find a home on ``app.state``;
-    * the yield sits inside a ``try``/``async with``, so the shutdown half is
+      which has to find a home on `app.state`;
+    * the yield sits inside a `try`/`async with`, so the shutdown half is
       that block's exit rather than a suffix of the body;
     * a name made before the yield is used after it — the halves are separate
       functions, so that name needs somewhere to live.
@@ -1385,7 +1385,7 @@ def lifespan_shape(node) -> tuple[str, str]:
 
 
 def _names_crossing(before: list[ast.stmt], after: list[ast.stmt]) -> list[str]:
-    """Names bound in ``before`` and read in ``after``, in binding order."""
+    """Names bound in `before` and read in `after`, in binding order."""
     bound: list[str] = []
     for statement in before:
         for node in ast.walk(statement):
@@ -1400,9 +1400,9 @@ def _names_crossing(before: list[ast.stmt], after: list[ast.stmt]) -> list[str]:
 
 
 def status_int(imports: _Imports, node: ast.AST | None) -> int | None:
-    """The integer a status expression denotes, or ``None`` if it is not a literal.
+    """The integer a status expression denotes, or `None` if it is not a literal.
 
-    ``status.HTTP_404_NOT_FOUND`` is a literal wearing a name, and it is how a
+    `status.HTTP_404_NOT_FOUND` is a literal wearing a name, and it is how a
     real codebase spells the status far more often than a bare integer.
     """
     if isinstance(node, ast.Constant) and isinstance(node.value, int) \
@@ -1417,23 +1417,23 @@ def status_int(imports: _Imports, node: ast.AST | None) -> int | None:
 
 
 def status_code_rule(imports: _Imports, value: ast.expr, node) -> str:
-    """Which verdict ``status_code=`` earns on this handler.
+    """Which verdict `status_code=` earns on this handler.
 
-    Shared with the emitter for the reason ``query_rule`` is: the report and the
-    ``# TODO(wreath-port: …)`` written into the source have to agree about one
+    Shared with the emitter for the reason `query_rule` is: the report and the
+    `# TODO(wreath-port: …)` written into the source have to agree about one
     line, and the emitter must only perform the rewrite the report calls
     determined.
 
-    Wreath has no ``status_code`` slot on the decorator — the status lives on the
+    Wreath has no `status_code` slot on the decorator — the status lives on the
     response the handler returns. So the question is which response class this
     return becomes, and for a *literal* return wreath's own coercion answers it
-    (``app._to_response``: dict/list/tuple/number -> JSONResponse, str ->
+    (`app._to_response`: dict/list/tuple/number -> JSONResponse, str ->
     TextResponse). Wrapping such a return in the class wreath would have chosen
     anyway changes the status and nothing else.
 
-    A ``return some_name`` is where that stops. The runtime type picks the class,
-    and a dataclass is not JSON-serializable at all in wreath (``_json.dumps``
-    raises; ``dataclasses.asdict`` is the documented step) — so wrapping an
+    A `return some_name` is where that stops. The runtime type picks the class,
+    and a dataclass is not JSON-serializable at all in wreath (`_json.dumps`
+    raises; `dataclasses.asdict` is the documented step) — so wrapping an
     unknown value would emit code that fails on the first request, which is the
     silent conversion this tool exists to avoid.
     """
@@ -1465,9 +1465,9 @@ def _is_response_construction(imports: _Imports, call: ast.Call) -> bool:
 
 
 def _returns_in(node) -> list[ast.Return]:
-    """Every ``return`` belonging to this function, not to one nested inside it.
+    """Every `return` belonging to this function, not to one nested inside it.
 
-    A nested ``def``/``lambda`` has its own returns (the streaming-generator
+    A nested `def`/`lambda` has its own returns (the streaming-generator
     pattern puts one right inside a handler), and counting those would make a
     one-return handler look like several.
     """
@@ -1484,7 +1484,7 @@ def _returns_in(node) -> list[ast.Return]:
 
 
 def _model_config_value(stmt: ast.stmt) -> ast.expr | None:
-    """The right-hand side of ``model_config = SettingsConfigDict(...)``, if that is this."""
+    """The right-hand side of `model_config = SettingsConfigDict(...)`, if that is this."""
     if isinstance(stmt, ast.Assign):
         if any(isinstance(t, ast.Name) and t.id == "model_config" for t in stmt.targets):
             return stmt.value
@@ -1495,9 +1495,9 @@ def _model_config_value(stmt: ast.stmt) -> ast.expr | None:
 
 
 def _index_is_over_columns(node: ast.Call) -> bool:
-    """``create_index(name, table, ["a", "b"])`` — plain columns, not an expression.
+    """`create_index(name, table, ["a", "b"])` — plain columns, not an expression.
 
-    ``[sa.text("lower(name)")]`` and a runtime column list are both outside what
+    `[sa.text("lower(name)")]` and a runtime column list are both outside what
     detection reads, and both look the same from the verb alone.
     """
     columns = node.args[2] if len(node.args) > 2 else next(
@@ -1516,14 +1516,14 @@ def analyze(root) -> Report:
 
     **One bad file is recorded and skipped, never fatal.** A 3000-file tree
     reliably contains a broken symlink, a file whose permission bit says no, a
-    file deleted between the walk and the read, a null byte in a "``.py``" that
+    file deleted between the walk and the read, a null byte in a "`.py`" that
     is really a fixture, and an expression nested past the parser's limit. Each
     of those takes its own file out of the run and leaves the rest in, and each
-    lands in ``Report.skipped`` with a reason — a silently dropped file is
+    lands in `Report.skipped` with a reason — a silently dropped file is
     indistinguishable from a file with nothing in it, and the coverage number is
     computed from exactly this population.
 
-    ``KeyboardInterrupt`` and ``SystemExit`` derive from ``BaseException`` and
+    `KeyboardInterrupt` and `SystemExit` derive from `BaseException` and
     are deliberately *not* caught: a run the user asked to stop must stop.
     """
     root = Path(root)

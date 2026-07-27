@@ -7,18 +7,20 @@ the queries in the same field of view, and in most stacks nothing holds both --
 the ORM does not know what it is serving, and the server does not know what the
 ORM did.
 
-Wreath owns both layers, so it can say the useful sentence::
+Wreath owns both layers, so it can say the useful sentence:
 
-    GET /llamas issued 51 statements; 50 of them hydrated Trek
-
+```python
+GET /llamas issued 51 statements; 50 of them hydrated Trek
+```
 Two ways to hear it. In development, install the guard and the request fails at
-the query that crossed the line, with a traceback pointing at the loop::
+the query that crossed the line, with a traceback pointing at the loop:
 
-    app.add_middleware(NPlusOneGuard(limit=10))
-
+```python
+app.add_middleware(NPlusOneGuard(limit=10))
+```
 In production, the Flight Recorder already records what each request did, so
 `wreath doctor n-plus-one <socket>` reads it back out without reproducing
-anything -- and each finding carries the ``request_id`` that `wreath replay`
+anything -- and each finding carries the `request_id` that `wreath replay`
 needs to turn it into a regression test.
 """
 
@@ -54,7 +56,7 @@ async def diagnose_n_plus_one(
 ) -> list[Finding]:
     """Scan a running server's recorded traces through its Inspector.
 
-    ``client`` is a connected :class:`~wreath.inspector.InspectorClient`. Reads
+    `client` is a connected `InspectorClient`. Reads
     the recent timeline plus the route and model name tables, and returns
     findings worst first -- so a production N+1 is diagnosed from outside the
     process, without reproducing the request that caused it.
@@ -74,20 +76,21 @@ async def diagnose_n_plus_one(
 class NPlusOneGuard:
     """Fail (or report) a request that queries one model over and over.
 
-    ``limit`` is how many times a single model may be hydrated within one
+    `limit` is how many times a single model may be hydrated within one
     request before that is treated as a defect. Ten is a deliberate default:
     a handful of related lookups is ordinary, ten of the same model is a loop.
 
-    By default the ``limit``-th query raises :class:`NPlusOneDetected` from
+    By default the `limit`-th query raises `NPlusOneDetected` from
     inside the ORM call, which is the whole point -- the traceback names the
-    loop. Pass ``on_detect`` to log the :class:`Finding` instead and let the
-    request finish, which is what you want in staging::
+    loop. Pass `on_detect` to log the `Finding` instead and let the
+    request finish, which is what you want in staging:
 
-        app.add_middleware(NPlusOneGuard(limit=25, on_detect=log.warning))
-
+    ```python
+    app.add_middleware(NPlusOneGuard(limit=25, on_detect=log.warning))
+    ```
     Each model trips once per request, so a runaway loop yields one diagnosis
     rather than a thousand. Intended for development and staging: it costs one
-    ``ContextVar`` read per ORM query, which is nothing against a round trip,
+    `ContextVar` read per ORM query, which is nothing against a round trip,
     but a guard that fails production requests is a worse outage than the N+1.
     """
 

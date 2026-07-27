@@ -1,7 +1,7 @@
-"""``wreath port`` codemod internals (Phase 0: static analysis + report).
+"""`wreath port` codemod internals (Phase 0: static analysis + report).
 
-Pure-stdlib and import-light: nothing here imports the ``wreath`` package or the
-native ``_core``, so the analyzer runs standalone (design 07's "never import the
+Pure-stdlib and import-light: nothing here imports the `wreath` package or the
+native `_core`, so the analyzer runs standalone (design 07's "never import the
 target" constraint applies to the tool itself too — it must analyze source without
 importing wreath's own heavy runtime).
 """

@@ -1,7 +1,7 @@
 """Tier-3 runtime mode: audit a running server's live responses.
 
-One-shot, dependency-free — fetches with ``urllib.request`` (stdlib), so no lifespan or
-client wiring. The per-response logic (``audit_response``) is separated from the fetch so
+One-shot, dependency-free — fetches with `urllib.request` (stdlib), so no lifespan or
+client wiring. The per-response logic (`audit_response`) is separated from the fetch so
 it is testable against a synthetic or in-process response without a socket.
 """
 from __future__ import annotations
@@ -45,8 +45,8 @@ def audit_response(
 ) -> None:
     """Apply the a11y + perf + security rules to one live response.
 
-    ``headers`` is the collapsed single-value map; ``set_cookies`` carries every
-    ``Set-Cookie`` value separately, because a response often sets more than one
+    `headers` is the collapsed single-value map; `set_cookies` carries every
+    `Set-Cookie` value separately, because a response often sets more than one
     and a dict would hide all but the last.
     """
     content_type = next((v for k, v in headers.items() if k.lower() == "content-type"), "")

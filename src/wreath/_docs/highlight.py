@@ -3,11 +3,11 @@
 One scanner core plus a small per-language descriptor (a single alternation regex
 with named groups whose names are the token classes) emits a coarse vocabulary:
 comment / string / number / keyword / builtin / variable / operator. Tier-1 langs
-(python, bash, c, json) get a grammar; anything else — or plain ``text`` — is
+(python, bash, c, json) get a grammar; anything else — or plain `text` — is
 escaped and left alone. This mirrors the design's "ship our own bounded engine"
 call: good enough to read, no dependency, no scope creep into a full lexer.
 
-Each token's text is HTML-escaped, so the output is safe to drop into ``<pre>``.
+Each token's text is HTML-escaped, so the output is safe to drop into `<pre>`.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ def languages() -> tuple[str, ...]:
 
 
 def highlight(code: str, lang: str) -> str:
-    """Return HTML for ``code`` in ``lang``, with token spans; escaped throughout."""
+    """Return HTML for `code` in `lang`, with token spans; escaped throughout."""
     spec = _SPECS.get(_ALIASES.get(lang, lang))
     if spec is None:
         return _esc(code)

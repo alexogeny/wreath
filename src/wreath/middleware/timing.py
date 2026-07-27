@@ -1,10 +1,11 @@
 """Server-Timing response header.
 
 Nothing is timed unless this is mounted, because the duration it reports is
-visible to anyone who can read the response::
+visible to anyone who can read the response:
 
-    app.add_middleware(ServerTimingMiddleware(), priority=-1)
-
+```python
+app.add_middleware(ServerTimingMiddleware(), priority=-1)
+```
 The elapsed time is recorded on request state whether or not the header is
 emitted, so `elapsed(request)` is the single measurement an access log or a
 tracing exporter reads later rather than each timing its own span.

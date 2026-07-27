@@ -1,8 +1,8 @@
-"""One scanner for the build-time fenced blocks (```` ```chart ````, ``figure``, ``hero``).
+"""One scanner for the build-time fenced blocks (``` ``chart ```, `figure`, `hero``).
 
 These blocks are read out of the markdown *before* it is parsed, which is what
 lets them emit SVG the parser would otherwise escape. The catch is that a
-line-by-line search for ```` ```figure ```` also finds one written inside a
+line-by-line search for ``` ``figure ```` also finds one written inside a
 longer fence — which is exactly how a guide documents the syntax. The docs page
 for the generator rendered its own examples for real, and one of them failed the
 build's dead-link check.
@@ -26,10 +26,10 @@ _FENCE = re.compile(r"^(`{3,}|~{3,})")
 def extract(
     text: str, opener: str, render: Callable[[list[str]], str], label: str,
 ) -> tuple[str, dict[str, str]]:
-    """Replace each ``opener`` block with a token; return (text, {token: html}).
+    """Replace each `opener` block with a token; return (text, {token: html}).
 
-    ``render`` receives the block's body lines and returns the markup to splice
-    back in after the markdown pass. ``label`` only distinguishes one block
+    `render` receives the block's body lines and returns the markup to splice
+    back in after the markdown pass. `label` only distinguishes one block
     type's tokens from another's in the same document.
     """
     lines = text.splitlines()

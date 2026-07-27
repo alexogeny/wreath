@@ -123,15 +123,25 @@ def schedule_seams(schedule: FaultSchedule) -> frozenset[Any]:
     return frozenset(seams)
 
 
-async def observe(driver: Driver, schedule_name: str, schedule: FaultSchedule) -> Observation:
-    """Run one drive under the wall-clock bound, naming both coordinates."""
+async def observe(
+    driver: Driver,
+    schedule_name: str,
+    schedule: FaultSchedule,
+    *,
+    bound: float = BOUND,
+) -> Observation:
+    """Run one drive under the wall-clock bound, naming both coordinates.
+
+    ``bound`` is overridable only so the check can be *shown to fire* without
+    the proof costing :data:`BOUND` seconds; nothing else should pass it.
+    """
     try:
-        async with asyncio.timeout(BOUND):
+        async with asyncio.timeout(bound):
             return await driver.run(schedule)
     except TimeoutError:
         raise ReplayDriveTimeout(
             f"schedule {schedule_name!r} hung driver {driver.name!r}: no owned "
-            f"outcome within {BOUND:g}s. A fault must fail, degrade, or be "
+            f"outcome within {bound:g}s. A fault must fail, degrade, or be "
             "handled -- it may never leave a caller waiting."
         ) from None
 

@@ -2,24 +2,24 @@
 
 Every arrow in that sequence is a place where reversing the order loses data
 permanently, so the ledger records which stage the pass is in and every
-transition is a compare-and-swap. A process that dies between ``verifying`` and
-``verified`` re-verifies on restart rather than proceeding on trust, which is
+transition is a compare-and-swap. A process that dies between `verifying` and
+`verified` re-verifies on restart rather than proceeding on trust, which is
 always the right choice: verification is idempotent and cheap relative to the
 thing it guards.
 
-**Counters are progress, never proof.** ``rows_done == denominator`` is a
+**Counters are progress, never proof.** `rows_done == denominator` is a
 statement about the pass's own bookkeeping, and the failure it absorbs perfectly
 is a walk that skipped one range and double-counted another. So verification is
 always a question the *database* answers, independent of the walk -- and for the
 case wreath is unusually placed to handle, it is the constraint the database
-will go on enforcing afterwards (:class:`Constraint`), which is the one form
+will go on enforcing afterwards (`Constraint`), which is the one form
 where "did the check match the walk's own mistake?" cannot arise at all.
 
 The gate always writes a durable verified fact. Running an irreversible step is
 separate and opt-in, because the two callers need different things: a deferred
 migration's terminal step is *permission for a later migration someone else
 runs*, while a rollup owns the partition it is dropping. One mechanism covers
-both -- the fact is published either way, and ``then=`` is consumed only by the
+both -- the fact is published either way, and `then=` is consumed only by the
 caller that has something to run.
 """
 
@@ -31,14 +31,14 @@ from typing import Any
 from ..postgres import PostgresError
 from .keyset import PassDeclarationError
 
-#: Phases the gate owns. ``walking`` and ``done`` belong to the walk.
+#: Phases the gate owns. `walking` and `done` belong to the walk.
 VERIFYING = "verifying"
 VERIFIED = "verified"
 APPLYING = "applying"
 #: A verification that ran and answered "no". Deliberately its own phase rather
-#: than sharing ``blocked`` with a dead-lettered chunk: a hole is cleared by
+#: than sharing `blocked` with a dead-lettered chunk: a hole is cleared by
 #: retrying the chunk, and this is not retryable at all (§10.7), so letting
-#: ``wreath passes retry`` treat them alike would be the whole point missed.
+#: `wreath passes retry` treat them alike would be the whole point missed.
 UNVERIFIED = "unverified"
 
 
@@ -61,7 +61,7 @@ def _sqlstate(error: BaseException) -> str:
     return ""
 
 
-#: ``check_violation``. A constraint that failed to validate is an answer; every
+#: `check_violation`. A constraint that failed to validate is an answer; every
 #: other error is the check not having run.
 CHECK_VIOLATION = "23514"
 
@@ -81,9 +81,9 @@ class NoRowsMatch:
     """Verified when this predicate matches no rows.
 
     The plain form of "ask the table the question the irreversible step depends
-    on": ``NoRowsMatch("grade_text IS NULL")`` before a migration narrows the
-    column. It must not restate the walk's own ``where`` -- see
-    :func:`refuse_reused_predicate` -- because a walk whose predicate was subtly
+    on": `NoRowsMatch("grade_text IS NULL")` before a migration narrows the
+    column. It must not restate the walk's own `where` -- see
+    `refuse_reused_predicate` -- because a walk whose predicate was subtly
     wrong would then verify its own bug and report success.
     """
 
@@ -163,15 +163,15 @@ class Reconcile:
 class Constraint:
     """Verified by asking the database, in the terms it will hold you to.
 
-    ``NOT VALID`` is instant and checks nothing; ``VALIDATE CONSTRAINT`` scans
-    under ``SHARE UPDATE EXCLUSIVE``, which blocks neither reads nor writes, and
+    `NOT VALID` is instant and checks nothing; `VALIDATE CONSTRAINT` scans
+    under `SHARE UPDATE EXCLUSIVE`, which blocks neither reads nor writes, and
     names the offending row when it fails.
 
     This is the form §10.3's concern cannot arise in. The verification and the
     thing that will enforce the invariant afterwards are the *same predicate*,
     so there is no way for the check to agree with a walk that was wrong -- and
     it is available only because the same tool emits the DDL. A bolt-on backfill
-    library has to hand-write a ``SELECT`` and hope it matches the constraint
+    library has to hand-write a `SELECT` and hope it matches the constraint
     somebody adds later.
 
     The constraint is left in place on success, which is the point: the table
@@ -237,21 +237,21 @@ class Gate:
     """Verify, publish the fact, and only then run whatever is irreversible.
 
     Args:
-        verify: :class:`NoRowsMatch`, :class:`Reconcile` or :class:`Constraint`.
+        verify: `NoRowsMatch`, `Reconcile` or `Constraint`.
         publishes: the name of the fact this pass establishes, written into the
             ledger once verification passes. A later migration reads it -- see
-            :func:`published_facts` -- which is how a deferred migration's
+            `published_facts` -- which is how a deferred migration's
             terminal step becomes *permission for someone else's future step*
             rather than a statement this pass runs.
         then: an optional async callable run once, after the fact is published,
             under a phase compare-and-swap. Called as ``then(executor, walk,
-            unit)``, where *unit* is ``None`` for a whole-pass gate and the
-            chunk's ``(from, to)`` range for a per-unit one.
-        scope: ``"pass"`` verifies the whole table once the walk completes;
-            ``"unit"`` verifies each chunk as the walk passes it, for a
+            unit)`, where *unit* is `None`` for a whole-pass gate and the
+            chunk's `(from, to)` range for a per-unit one.
+        scope: `"pass"` verifies the whole table once the walk completes;
+            `"unit"` verifies each chunk as the walk passes it, for a
             recurring pass where one bad bucket must not freeze the ladder.
 
-    ``scope`` is the one place in this design where a flag changes control flow
+    `scope` is the one place in this design where a flag changes control flow
     rather than a value, and it is flagged in the design as the judgement call
     most wanting review. The defence is that the sequence, the verification
     grades, the publish and the opt-in-ness are identical in both; only the loop
@@ -297,13 +297,13 @@ class Gate:
 def refuse_reused_predicate(gate: Gate, work: Any) -> None:
     """Refuse a verification that just restates the walk's own predicate.
 
-    If the walk selected ``WHERE grade_text IS NULL`` and the verification asks
-    ``WHERE grade_text IS NULL``, a walk whose predicate was subtly wrong
+    If the walk selected `WHERE grade_text IS NULL` and the verification asks
+    `WHERE grade_text IS NULL`, a walk whose predicate was subtly wrong
     verifies its own bug and reports success -- the same defect as a check that
     silently had nothing to check.
 
     This is a weak check and does not pretend otherwise: it catches the literal
-    restatement, which is the one people write. :class:`Constraint` is the
+    restatement, which is the one people write. `Constraint` is the
     strong version, because there the verification *is* the invariant.
     """
     signature = getattr(gate.verify, "signature", None)

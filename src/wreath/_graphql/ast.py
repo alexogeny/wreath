@@ -28,7 +28,7 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class Variable:
-    """A ``$name`` reference, resolved against the request's variables."""
+    """A `$name` reference, resolved against the request's variables."""
 
     name: str
 
@@ -36,7 +36,7 @@ class Variable:
 @dataclass(frozen=True, slots=True)
 class Argument:
     name: str
-    #: A literal (str/int/float/bool/None/list/dict) or a :class:`Variable`.
+    #: A literal (str/int/float/bool/None/list/dict) or a `Variable`.
     value: Any
 
 

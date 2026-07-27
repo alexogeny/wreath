@@ -3,14 +3,15 @@
 Needed wherever the browser attaches credentials on its own -- a session cookie,
 HTTP basic auth -- because then a cross-site form post carries them too. An API
 authenticated by a bearer token the client has to attach deliberately is not
-exposed to this and does not need the middleware::
+exposed to this and does not need the middleware:
 
-    app.add_middleware(CSRFMiddleware(secret=SECRET, trusted_hosts=["app.example"]))
+```python
+app.add_middleware(CSRFMiddleware(secret=SECRET, trusted_hosts=["app.example"]))
 
-    @app.get("/whoami")
-    async def whoami(request):
-        return {"csrf": csrf_token(request)}
-
+@app.get("/whoami")
+async def whoami(request):
+    return {"csrf": csrf_token(request)}
+```
 The resubmitted token is read from a request *header* only -- `x-csrf-token` by
 default. A plain HTML form post cannot carry one, so this suits a script client
 that reads the cookie or calls `csrf_token` and sets the header itself.

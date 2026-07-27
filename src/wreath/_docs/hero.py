@@ -1,4 +1,4 @@
-"""The page opener — a ```` ```hero ```` block.
+"""The page opener — a ``` ``hero ```` block.
 
 Front matter for a page that has an argument to make rather than an API to
 document. It renders one band: a mono eyebrow naming what the page is organised
@@ -86,9 +86,9 @@ def _esc(text: str) -> str:
 
 
 def title_of(tokens: dict[str, str]) -> str:
-    """The headline of the first hero, for the page ``<title>``.
+    """The headline of the first hero, for the page `<title>`.
 
-    A page that opens with a hero has no markdown ``# heading`` to take a title
+    A page that opens with a hero has no markdown `# heading` to take a title
     from, and falling back to the nav label would put a different name in the
     browser tab than the one on the page.
     """

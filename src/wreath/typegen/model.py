@@ -29,12 +29,12 @@ TypeKind = Literal[
 
 @dataclass(frozen=True, slots=True)
 class TypeRef:
-    """A structural type. ``reference`` names a model in ``ApiModel.models``."""
+    """A structural type. `reference` names a model in `ApiModel.models`."""
 
     kind: TypeKind
     name: str | None = None
     arguments: tuple[TypeRef, ...] = ()
-    #: For ``literal`` kinds, the exact permitted values.
+    #: For `literal` kinds, the exact permitted values.
     literals: tuple[str | int | float | bool | None, ...] = ()
 
 
@@ -80,11 +80,11 @@ class SeriesMeasure:
 
     The name is load-bearing in three places at once: it keys the series in the
     envelope, it names the field in the generated TypeScript, and it is what a
-    ``fill=`` refers to. That is why measures are named rather than positional --
-    positional ones arrive in a component as ``value_0``.
+    `fill=` refers to. That is why measures are named rather than positional --
+    positional ones arrive in a component as `value_0`.
 
-    ``fills`` says whether an absent bucket reads as a number or as ``null``,
-    which is the difference between ``number[]`` and ``(number | null)[]`` on the
+    `fills` says whether an absent bucket reads as a number or as `null`,
+    which is the difference between `number[]` and `(number | null)[]` on the
     other side. A count fills with zero; an average of no rows is undefined and
     stays null, and a component that has to handle the gap should be made to.
     """
@@ -99,20 +99,20 @@ class SeriesMeasure:
 class SeriesShape:
     """A calculated view, typed for the client that will draw it.
 
-    In the IR for the same reason :class:`PermissionSet` is: the shape a chart
+    In the IR for the same reason `PermissionSet` is: the shape a chart
     endpoint returns is decided by a declaration on the server, and a component
-    indexing ``number[][]`` by hand is a copy of that declaration which nothing
+    indexing `number[][]` by hand is a copy of that declaration which nothing
     keeps honest.
     """
 
     name: str
-    #: ``"series"`` (a time axis) or ``"aggregate"`` (no time axis).
+    #: `"series"` (a time axis) or `"aggregate"` (no time axis).
     form: str
     measures: tuple[SeriesMeasure, ...]
-    #: The bucket unit for a series -- ``"day"``, ``"month"``. ``None`` for an
+    #: The bucket unit for a series -- `"day"`, `"month"`. `None` for an
     #: aggregate, which has no time axis.
     bucket: str | None = None
-    #: Whether ``.by(...)`` was declared: a grouped view returns several series
+    #: Whether `.by(...)` was declared: a grouped view returns several series
     #: per measure, an ungrouped one returns exactly one.
     grouped: bool = False
     #: Whether the declaration carries a prior period, and by which bucket.
@@ -127,7 +127,7 @@ class PermissionSet:
 
     In the IR because the generated client should be typed on the *server's*
     vocabulary: a UI asking about an action the API does not enforce is a bug
-    that ought to be a compile error, not a silent ``false``.
+    that ought to be a compile error, not a silent `false`.
     """
 
     resource_type: str
@@ -152,8 +152,8 @@ INTEGER = TypeRef("integer")
 NUMBER = TypeRef("number")
 STRING = TypeRef("string")
 
-#: ISO-8601 strings, tagged with their OpenAPI `format` in ``name``. A string
-#: is never a reference, so ``name`` is free to carry the format -- which is
+#: ISO-8601 strings, tagged with their OpenAPI `format` in `name`. A string
+#: is never a reference, so `name` is free to carry the format -- which is
 #: what lets one declaration reach the schema, the TypeScript, and the GraphQL
 #: scalar saying the same thing. Defined here so the REST and GraphQL sides of
 #: typegen cannot drift to two different spellings.

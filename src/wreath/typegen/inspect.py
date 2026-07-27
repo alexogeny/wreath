@@ -2,7 +2,7 @@
 
 This is the single place Python annotations are interpreted for client
 generation; OpenAPI consumes the same model. Nothing here emits target syntax
--- it produces the frozen records in :mod:`wreath.typegen.model`.
+-- it produces the frozen records in `wreath.typegen.model`.
 """
 
 from __future__ import annotations
@@ -65,15 +65,26 @@ _JS_KEYWORDS = frozenset(
 
 
 def _pascal(text: str) -> str:
+    """`"get_item"` -> `"GetItem"`. The one spelling for the whole layer.
+
+    Separators are word breaks, so a name made entirely of them has no words to
+    capitalize. Returning `""` there would emit a nameless
+    `export interface  {`, so the original is kept instead -- which is also
+    what `wreath._pure.typegen._pascal` does, and the two must agree: the
+    planner declares the parameter interface and the renderer references it, each
+    deriving the name from the operation id independently.
+    """
     parts = [part for part in text.replace("-", "_").split("_") if part]
+    if not parts:
+        return text
     return "".join(part[:1].upper() + part[1:] for part in parts)
 
 
 def derive_operation_id(method: str, path: str) -> str:
     """A deterministic camelCase id from method and path.
 
-    ``GET /widgets/{widget_id}`` becomes ``getWidgetsByWidgetId`` -- stable
-    across handler renames and reused handlers, unlike ``handler.__name__``.
+    `GET /widgets/{widget_id}` becomes `getWidgetsByWidgetId` -- stable
+    across handler renames and reused handlers, unlike `handler.__name__`.
     """
     words: list[str] = []
     for segment in path.split("/"):
@@ -142,7 +153,7 @@ def resolve_operation_ids(
 
 class _ModelRegistry:
     """Claims a generated name before descending, so recursive types terminate
-    and no two distinct Python types are merged by a shared ``__name__``."""
+    and no two distinct Python types are merged by a shared `__name__`."""
 
     def __init__(self) -> None:
         self._by_type: dict[int, str] = {}
@@ -343,9 +354,9 @@ def build_api_model(
     version: str = "0.1.0",
     allow_unknown: bool = False,
 ) -> ApiModel:
-    """Construct the canonical model for ``app``'s routes.
+    """Construct the canonical model for `app`'s routes.
 
-    Raises :class:`TypegenError` when strict (``allow_unknown=False``) and any
+    Raises `TypegenError` when strict (`allow_unknown=False`) and any
     annotation is unsupported, or on any operation-id collision regardless of
     strictness.
     """
@@ -423,20 +434,20 @@ def _permission_sets(app: Any) -> tuple[PermissionSet, ...]:
 def _series_shapes(routes: list[Any]) -> tuple[SeriesShape, ...]:
     """Calculated views reachable from the routes, typed for the client.
 
-    Read off the handlers the same way :func:`_permission_sets` reads off the
+    Read off the handlers the same way `_permission_sets` reads off the
     route declarations, and for the same reason: the shape a chart endpoint
     returns is decided by a declaration on the server, and a component that
     types it by hand is a second copy nothing keeps honest.
 
     A declaration is a value written once at import time next to the handler
     that runs it, which is the shape the guide teaches, so
-    ``activity = Series(...)`` used by a routed handler becomes ``ActivityResult``
+    `activity = Series(...)` used by a routed handler becomes `ActivityResult`
     in TypeScript. The variable name is the name because a declaration has no
-    other; requiring a separate ``name=`` would be a second spelling to keep in
+    other; requiring a separate `name=` would be a second spelling to keep in
     step with the first.
 
     A handler is matched to its declarations through the globals it actually
-    loads (``co_names``), not through everything its module can see. Module
+    loads (`co_names`), not through everything its module can see. Module
     scope alone was the first attempt and it was too loose: a handler in a
     module that merely *imports* a declaration for some other reason dragged it
     into the generated client. Typegen describes the API surface, and a view no

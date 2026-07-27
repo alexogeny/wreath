@@ -1,6 +1,6 @@
 """Build-time charts from external JSON — a ```chart fenced block.
 
-Point a page at a JSON file (a benchmark's ``latest.json``, any data you already
+Point a page at a JSON file (a benchmark's `latest.json`, any data you already
 emit) and get a bar chart rendered as inline, theme-aware SVG at build time — no
 runtime JavaScript, no chart library, no CDN. The whole point is that the data
 lives *outside* the docs and the chart stays in sync with it.
@@ -16,7 +16,7 @@ lives *outside* the docs and the chart stays in sync with it.
     limit: 12
     ```
 
-The SVG uses ``currentColor`` for text and ``var(--primary)`` for bars, so it
+The SVG uses `currentColor` for text and `var(--primary)` for bars, so it
 recolors with the active theme and light/dark automatically.
 """
 
@@ -39,7 +39,7 @@ def extract(
 ) -> tuple[str, dict[str, str]]:
     """Replace each ```chart block with a token; return (text, {token: svg-html}).
 
-    Every data file a chart successfully reads is added to ``sources`` (if given),
+    Every data file a chart successfully reads is added to `sources` (if given),
     so the caller can publish the raw JSON alongside the rendered chart.
     """
     return _fenced.extract(
@@ -95,15 +95,15 @@ def _render(config: dict[str, str], base_dir: Path, sources: set[Path] | None = 
 
 
 def _series_pairs(node: Any, config: dict[str, str]) -> list[tuple[str, float]] | None:
-    """Plottable pairs from a serialized ``SeriesResult`` or ``AggregateResult``.
+    """Plottable pairs from a serialized `SeriesResult` or `AggregateResult`.
 
     A calculated view already answers the question this block was written to ask
-    by hand: point ``source:`` at a file some job wrote with
-    ``result.as_dict()`` and the chart is the declaration's own numbers, bucket
-    labels and all. ``None`` means "not one of those envelopes", so the literal
+    by hand: point `source:` at a file some job wrote with
+    `result.as_dict()` and the chart is the declaration's own numbers, bucket
+    labels and all. `None` means "not one of those envelopes", so the literal
     JSON path below is reached exactly as before.
 
-    ``measure:`` picks one of several named measures and ``series:`` picks one
+    `measure:` picks one of several named measures and `series:` picks one
     of several grouped lines. Both default to the first, and a name that matches
     nothing is an error rather than a silent fallback -- a chart quietly drawing
     a different measure than the one asked for is worse than a chart that says
@@ -161,7 +161,7 @@ def _bucket_label(bucket: Any, unit: Any) -> str:
     """A bucket start as an axis label, trimmed to the width it represents.
 
     An ISO instant is exact and unreadable on an axis. A day bucket wants
-    ``2026-03-01``; anything sub-day keeps its time and drops the offset, which
+    `2026-03-01`; anything sub-day keeps its time and drops the offset, which
     is the same for every bucket in the run and so carries no information.
     """
     text = str(bucket)
@@ -293,9 +293,9 @@ def _fmt(value: float) -> str:
 
 
 def _is_num(value: Any) -> TypeIs[int | float]:
-    """A plottable number. ``TypeIs`` so callers narrow before ``float(...)``.
+    """A plottable number. `TypeIs` so callers narrow before `float(...)`.
 
-    ``bool`` is excluded deliberately: ``True`` is an ``int`` and would plot as
+    `bool` is excluded deliberately: `True` is an `int` and would plot as
     a bar of height one, which is never what a flag in the data meant.
     """
     return isinstance(value, (int, float)) and not isinstance(value, bool)

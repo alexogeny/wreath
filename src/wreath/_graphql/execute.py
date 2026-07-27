@@ -5,11 +5,11 @@ underneath rather than sitting on top of them:
 
 **No N+1, without a DataLoader.** A relationship selection is not resolved per
 parent. The whole level is collected and handed to
-``Session._load_relationship`` -- the same batched select-in loader the ORM uses
+`Session._load_relationship` -- the same batched select-in loader the ORM uses
 for eager loading, with the identity map deduplicating. Custom resolvers are
 batched by the same rule: a resolver sees the level, not one object.
 
-**Chained resolvers, ordered by declaration.** A resolver that ``requires`` a
+**Chained resolvers, ordered by declaration.** A resolver that `requires` a
 sibling field has that field resolved -- in batch -- before it runs, even if the
 client did not select it. Dependencies are a topological sort over the level,
 not an `await` buried in a loop.
@@ -18,7 +18,7 @@ not an `await` buried in a loop.
 authorizer with the field's policy resource, and decisions are cached per
 request, so a field selected under three aliases is authorized once.
 
-**Per-field timing.** Each resolve is a ``RESOLVER`` Flight phase carrying the
+**Per-field timing.** Each resolve is a `RESOLVER` Flight phase carrying the
 level's object count, so a slow field is distinguishable from a wide one.
 """
 
@@ -431,7 +431,7 @@ async def execute(
     max_page_size: int = 100,
     on_denied: str = "error",
 ) -> dict[str, Any]:
-    """Run ``document`` against ``schema`` on ``session``, returning the data map."""
+    """Run `document` against `schema` on `session`, returning the data map."""
     operation: Operation = document.operation(operation_name)
     if operation.operation not in ("query", "mutation"):
         raise ExecutionError("only query and mutation operations are served")

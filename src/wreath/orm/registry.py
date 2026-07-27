@@ -437,7 +437,7 @@ class Registry:
         keys: tuple[ColumnSpec, ...],
         side: ModelSpec,
     ) -> tuple[ColumnSpec, ...]:
-        """The columns ``keys`` point at, from references= or ``side``'s key."""
+        """The columns `keys` point at, from references= or `side`'s key."""
         referenced: list[ColumnSpec] = []
         for key in keys:
             reference = key.reference
@@ -493,7 +493,7 @@ class Registry:
         return spec
 
     def order_of(self, model: type[Model]) -> int:
-        """The model's position in ``specs``: its dependency order for writes."""
+        """The model's position in `specs`: its dependency order for writes."""
         index = self._model_order.get(model)
         if index is None:
             raise RegistryError(

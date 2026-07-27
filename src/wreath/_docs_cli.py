@@ -1,8 +1,8 @@
-"""Thin CLI facade for ``wreath docs`` — mirrors the migrations CLI.
+"""Thin CLI facade for `wreath docs` — mirrors the migrations CLI.
 
-``build`` renders the site, ``check`` builds strictly and reports orphan/dead-link
-issues with a ``migrations check``-style exit code (0 clean, 1 on findings, 2 on
-usage), and ``serve`` builds then serves the output for local preview.
+`build` renders the site, `check` builds strictly and reports orphan/dead-link
+issues with a `migrations check`-style exit code (0 clean, 1 on findings, 2 on
+usage), and `serve` builds then serves the output for local preview.
 """
 
 from __future__ import annotations

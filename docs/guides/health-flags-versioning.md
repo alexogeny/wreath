@@ -28,14 +28,20 @@ conveniences are below.
 Liveness answers "is the process up?"; readiness answers "should the load balancer send it traffic?". `app.health()` mounts both:
 
 ```python
-from wreath.health import database_check
+from wreath.health import postgres_check
 
-app.health(checks=[database_check("db", ping=lambda: db.ping())])
+app.health(checks=[postgres_check(db)])
 # GET /health -> 200 (or 503 while draining)
 # GET /ready  -> runs every check concurrently -> 200, or 503 with per-check JSON
 ```
 
-`callable_check(name, fn)` wraps any async probe; a failing check flips `/ready` to `503` and reports which one failed. Pass `is_live=` to make `/health` report draining during shutdown.
+`postgres_check(db)` probes the reserved `security_read` pool, so a merely busy
+instance is not reported unready. For anything else, `callable_check(name, fn)`
+wraps any async probe and `database_check(name, ping)` takes a bound coroutine
+function — `db.statement("health_ping", "SELECT 1").fetchval`, registered once at
+startup. A failing check flips `/ready` to `503` and reports which one failed.
+Pass `is_live=` to make `/health` report draining during shutdown. See
+[the recipe](../cookbook/recipes/health-checks.md) for the whole shape.
 
 ## Feature flags
 

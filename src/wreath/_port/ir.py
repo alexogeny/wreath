@@ -1,9 +1,9 @@
 """Port intermediate representation: findings, tags, and the coverage report.
 
-Phase 0 is a pure-stdlib static analyzer, so ``_port`` defines its OWN lightweight
-frozen records here rather than importing ``wreath.typegen.model`` at runtime — the
-analyzer must be runnable without importing the ``wreath`` package (or its native
-``_core``). # TODO: converge with the typegen IR (Diagnostic/TypeRef) once the tool
+Phase 0 is a pure-stdlib static analyzer, so `_port` defines its OWN lightweight
+frozen records here rather than importing `wreath.typegen.model` at runtime — the
+analyzer must be runnable without importing the `wreath` package (or its native
+`_core`). # TODO: converge with the typegen IR (Diagnostic/TypeRef) once the tool
 runs inside a built wreath, per design 07 §1.
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ UNSUPPORTED = "unsupported"
 
 VALID_TAGS = frozenset({TRANSLATED, NEEDS_REVIEW, UNSUPPORTED})
 
-# JSON ``counts`` keys are underscored (a stable machine contract).
+# JSON `counts` keys are underscored (a stable machine contract).
 _COUNT_KEY = {TRANSLATED: "translated", NEEDS_REVIEW: "needs_review", UNSUPPORTED: "unsupported"}
 
 
@@ -52,8 +52,8 @@ class SkippedFile:
     A silently skipped file is how a coverage number becomes a lie: the coverage
     denominator counts constructs found in files that *were* analyzed, so every
     file missing from that population has to be visible next to the number.
-    ``reason`` is a stable machine code (see ``analyzer._SKIP_REASONS``);
-    ``detail`` is the exception's own message, for a human.
+    `reason` is a stable machine code (see `analyzer._SKIP_REASONS`);
+    `detail` is the exception's own message, for a human.
     """
 
     file: str
@@ -67,9 +67,9 @@ class SkippedFile:
 class Report:
     """Aggregate of findings with coverage math and JSON/markdown renderings.
 
-    **Coverage is undefined, not 1.0, when nothing was recognized.** ``coverage``
-    and ``coverage_overall`` return ``None`` for an empty denominator, and every
-    rendering here prints ``n/a`` for it. A tree the analyzer understood nothing
+    **Coverage is undefined, not 1.0, when nothing was recognized.** `coverage`
+    and `coverage_overall` return `None` for an empty denominator, and every
+    rendering here prints `n/a` for it. A tree the analyzer understood nothing
     of is the case where the tool has failed hardest, and "100% auto-translatable"
     is the single most misleading thing it could say there.
 
@@ -77,7 +77,7 @@ class Report:
     to neither numerator nor denominator — a file that could not be parsed has no
     constructs to classify, and inventing a verdict for it would be a guess. So
     coverage answers "of what I could read, how much carries across", and
-    ``files_analyzed``/``skipped`` say how much of the tree that sentence covers.
+    `files_analyzed`/`skipped` say how much of the tree that sentence covers.
     """
 
     __slots__ = ("findings", "roots", "skipped", "files_analyzed")
@@ -109,11 +109,11 @@ class Report:
 
     # -- coverage -------------------------------------------------------------
     def coverage(self, category: str) -> float | None:
-        """translated / recognized within ``category``; ``None`` if none recognized.
+        """translated / recognized within `category`; `None` if none recognized.
 
-        ``None`` rather than ``1.0``: an empty denominator means the analyzer
+        `None` rather than `1.0`: an empty denominator means the analyzer
         recognized nothing here, which is the absence of an answer and not a
-        perfect score. Callers must render it as "n/a" (see ``_percent``).
+        perfect score. Callers must render it as "n/a" (see `_percent`).
         """
         in_cat = [f for f in self.findings if f.category == category]
         if not in_cat:
@@ -122,19 +122,19 @@ class Report:
         return translated / len(in_cat)
 
     def coverage_overall(self) -> float | None:
-        """translated / recognized across every category; ``None`` if none recognized."""
+        """translated / recognized across every category; `None` if none recognized."""
         if not self.findings:
             return None
         return self._count(TRANSLATED) / len(self.findings)
 
     def rule_counts(self) -> list[tuple[str, str, str, int]]:
-        """``(rule_id, category, tag, count)`` for the non-translated findings.
+        """`(rule_id, category, tag, count)` for the non-translated findings.
 
         The report lists findings one per line, in file order. That answers "what
         does this file need" and hides "what does this *codebase* need" -- a rule
         firing forty times across thirty files reads as forty unrelated problems.
         Clustering by rule is how the ported-app population gets prioritised, and
-        it is the view that kept getting rewritten by hand against ``--json``.
+        it is the view that kept getting rewritten by hand against `--json`.
 
         Translated findings are excluded: they are the part that needs no
         decision, so ranking them ranks work nobody has to do. Heaviest first,
@@ -166,7 +166,7 @@ class Report:
             "roots": self.roots,
             "files_analyzed": self.files_analyzed,
             "counts": self.counts(),
-            # ``null`` when nothing was recognized. A consumer that formats this
+            # `null` when nothing was recognized. A consumer that formats this
             # blindly gets "None"/"null" in its output, which is loud; the old
             # 1.0 was silently wrong, which is worse.
             "coverage_overall": None if overall is None else round(overall, 4),
@@ -244,7 +244,7 @@ class Report:
 
 
 def _percent(value: float | None) -> str:
-    """Render a coverage fraction, or ``n/a`` when its denominator was empty."""
+    """Render a coverage fraction, or `n/a` when its denominator was empty."""
     return "n/a" if value is None else f"{value * 100:.0f}%"
 
 

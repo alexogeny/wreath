@@ -960,7 +960,17 @@ async def _send_from_descriptor(
                     return
             asyncio.run_coroutine_threadsafe(queue.put(_EOF), loop).result()
         except BaseException as exc:  # noqa: BLE001 - relayed to the sender
-            with contextlib.suppress(Exception):
+            # A worker thread is not a task: there is no cancellation to honour
+            # and `KeyboardInterrupt` reaches only the main thread, so breadth
+            # here is a relay rather than a swallow -- the sender re-raises
+            # whatever arrives on the queue.
+            #
+            # `RuntimeError` is the single way that relay can fail:
+            # `run_coroutine_threadsafe` raises it once the loop is closed, and a
+            # closed loop means the sender is already gone, so there is nobody
+            # left to tell. Anything else belongs on the executor future rather
+            # than in a suppression.
+            with contextlib.suppress(RuntimeError):
                 asyncio.run_coroutine_threadsafe(queue.put(exc), loop).result()
         finally:
             os.close(fd)

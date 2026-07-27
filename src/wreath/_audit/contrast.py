@@ -1,10 +1,10 @@
 """WCAG 1.4.3 (text) and 1.4.11 (non-text) contrast over a design-token stylesheet.
 
 Tokens are declared as CSS custom properties in up to three theme contexts — light
-``:root``, ``@media (prefers-color-scheme: dark)``, and ``:root[data-theme=...]`` — and
-each theme is resolved independently (``var()`` chains included). Only *unambiguous*
-foreground/background pairs are checked: a ``color`` and ``background`` in the same rule,
-or a semantic ``var()`` text colour on the base surface. That keeps the check conservative
+`:root`, `@media (prefers-color-scheme: dark)`, and `:root[data-theme=...]` — and
+each theme is resolved independently (`var()` chains included). Only *unambiguous*
+foreground/background pairs are checked: a `color` and `background` in the same rule,
+or a semantic `var()` text colour on the base surface. That keeps the check conservative
 — it reports genuine failures without the cascade false-positives a full browser would
 need to avoid. Findings are WARN (advisory): a static check cannot know a run's text size
 or opacity, both of which change the applicable threshold, so contrast is surfaced for
@@ -61,7 +61,7 @@ def contrast_ratio(hex1: str, hex2: str) -> float | None:
 
 # --- token + rule parsing ---------------------------------------------------------
 def _extract(css: str, brace_idx: int) -> tuple[str, int]:
-    """Body of the brace group opening at ``brace_idx`` and the index past its close."""
+    """Body of the brace group opening at `brace_idx` and the index past its close."""
     depth = 0
     for j in range(brace_idx, len(css)):
         if css[j] == "{":
@@ -88,7 +88,7 @@ def _resolve_token(name: str, raw: dict[str, str], seen: frozenset[str]) -> str:
 
 
 def parse_tokens(css: str) -> dict[str, dict[str, str]]:
-    """``{"light": {"--ink": "#..."}, "dark": {...}}`` with ``var()`` chains resolved."""
+    """`{"light": {"--ink": "#..."}, "dark": {...}}` with `var()` chains resolved."""
     light_raw: dict[str, str] = {}
     dark_raw: dict[str, str] = {}
     rest = css
@@ -210,7 +210,7 @@ def _border_pairs(css: str) -> list[tuple[str, str]]:
 def nontext_contrast_findings(css: str, surface: str) -> Iterator[Finding]:
     """WCAG 1.4.11 — a UI component's boundary needs 3:1 against its surface.
 
-    Conservative like :func:`contrast_findings`: only form-control and focus-state
+    Conservative like `contrast_findings`: only form-control and focus-state
     borders/outlines (the boundaries a component's identity depends on) are
     checked, against the base surface, at the 3:1 non-text threshold.
     """

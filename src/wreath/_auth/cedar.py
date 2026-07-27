@@ -1,15 +1,15 @@
 """Cedar authorization: the built-in engine's adapter, open to outside engines.
 
 Wreath bundles its own Cedar engine —
-:class:`~wreath._auth.cedar_engine.CedarPolicies`, written in-house with no
-dependencies — and ``CedarAuthorizer(engine=CedarPolicies(source))`` is the
-whole setup. The :class:`CedarEngine` protocol stays public so a different
+`CedarPolicies`, written in-house with no
+dependencies — and `CedarAuthorizer(engine=CedarPolicies(source))` is the
+whole setup. The `CedarEngine` protocol stays public so a different
 evaluator can be swapped in without touching the adapter.
 
 The default mappers model the common case: the principal is the authenticated
-identity (``User::"alice"`` from ``Identity.type``/``id``), the action is
-``Action::"<name>"``, the resource passes through to the engine, the identity's
-roles become ``Role::"..."`` parents so ``principal in Role::"admin"`` works
+identity (`User::"alice"` from `Identity.type`/`id`), the action is
+`Action::"<name>"`, the resource passes through to the engine, the identity's
+roles become `Role::"..."` parents so `principal in Role::"admin"` works
 out of the box, and the context carries the request method and path. Every one
 of them can be overridden individually.
 """
@@ -34,7 +34,7 @@ def _default_principal(identity: Identity) -> object:
 
 def _default_action(action: str, request: Request) -> object:
     # The action name from @authorize(action=...) is the id, verbatim, of an
-    # ``Action::`` entity — never parsed, never split. An application whose
+    # `Action::` entity — never parsed, never split. An application whose
     # actions are entities of another type overrides this mapper.
     return EntityUid("Action", action)
 

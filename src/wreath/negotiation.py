@@ -70,7 +70,7 @@ def _to_bytes(data: Any) -> bytes:
 JSON = Serializer("application/json", _to_bytes)
 MSGPACK = Serializer("application/msgpack", _msgpack)
 
-#: JSON first, so it wins ties and is the default when Accept is absent/``*/*``.
+#: JSON first, so it wins ties and is the default when Accept is absent/`*/*`.
 DEFAULT_SERIALIZERS: tuple[Serializer, ...] = (JSON, MSGPACK)
 
 

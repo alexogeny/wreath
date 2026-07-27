@@ -1,8 +1,8 @@
-"""The ``wreath typegen`` command: build the model and emit consumer files.
+"""The `wreath typegen` command: build the model and emit consumer files.
 
 Generation renders every file in memory first, then writes through temporary
 files replaced atomically, so a failure never leaves a half-written tree. Only
-paths recorded in ``wreath-typegen.json`` are ever removed, and only inside the
+paths recorded in `wreath-typegen.json` are ever removed, and only inside the
 selected output directory.
 """
 
@@ -81,7 +81,7 @@ def _previous_owned(output_dir: Path) -> set[str]:
 
 
 def check(files: dict[str, str], output_dir: Path) -> list[str]:
-    """Return the reasons ``--check`` should fail; empty means up to date."""
+    """Return the reasons `--check` should fail; empty means up to date."""
     problems: list[str] = []
     for name, contents in files.items():
         path = output_dir / name

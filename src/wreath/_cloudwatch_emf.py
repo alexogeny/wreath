@@ -1,14 +1,14 @@
 """CloudWatch Embedded Metric Format (EMF) bridge for the Native Flight Recorder.
 
-Renders the same ``Projector.snapshot()`` aggregates the Prometheus/OTLP bridges
+Renders the same `Projector.snapshot()` aggregates the Prometheus/OTLP bridges
 read as EMF structured-JSON log lines. Written to stdout (or a sink), CloudWatch
 Logs parses them into metrics with **zero infrastructure** — ideal for ECS/Lambda.
 
 EMF carries metric *values* at the JSON root alongside dimension values, and one
 blob is one dimension-value combination, so per-route metrics are emitted as one
 blob per route plus a global blob. Counters are emitted as **deltas** since the
-previous emit (CloudWatch SUMs over the period) unless ``cumulative=True``; gauges
-are absolute. Zero-dependency: stdlib ``json`` only (no ``boto3``).
+previous emit (CloudWatch SUMs over the period) unless `cumulative=True`; gauges
+are absolute. Zero-dependency: stdlib `json` only (no `boto3`).
 """
 
 from __future__ import annotations
@@ -35,8 +35,8 @@ _MAX_METRICS_PER_BLOB = 100
 class EmfBridge:
     """Renders projector metrics as CloudWatch EMF blobs.
 
-    ``source`` exposes ``snapshot()`` (and optionally ``recorder_loss()``).
-    ``dimensions`` is a static dimension mapping (e.g. ``{"Service": "trailhead"}``)
+    `source` exposes `snapshot()` (and optionally `recorder_loss()`).
+    `dimensions` is a static dimension mapping (e.g. `{"Service": "trailhead"}`)
     applied to every blob; per-route blobs add the route labels as dimensions.
     """
 
@@ -126,7 +126,7 @@ class EmfBridge:
         return "\n".join(json.dumps(b, separators=(",", ":")) for b in blobs)
 
     def emit(self, *, timestamp_ms: int | None = None, sink: Any = None) -> None:
-        """Write the EMF blobs to ``sink`` (default stdout), newline-terminated."""
+        """Write the EMF blobs to `sink` (default stdout), newline-terminated."""
         (sink or sys.stdout).write(self.render(timestamp_ms=timestamp_ms) + "\n")
 
 

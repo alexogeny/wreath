@@ -5,7 +5,7 @@ future native spine writes cells; this module encodes/decodes the metadata image
 container and validates the fixed cell records so tests have an independent,
 byte-exact reference. It never records runtime telemetry.
 
-The container is a small chunked binary format (a Stage-0 subset of the ``WFR1``
+The container is a small chunked binary format (a Stage-0 subset of the `WFR1`
 recording container described in the plan): a fixed header, a metadata chunk, and
 an optional event chunk of fixed cells, each length-prefixed and checksummed so a
 truncated or corrupted stream is rejected rather than guessed.
@@ -283,10 +283,10 @@ _HEXCHARS = frozenset(b"0123456789abcdef")
 
 
 def parse_traceparent(data: bytes) -> tuple[int, int, int, bool] | None:
-    """Strict W3C ``traceparent`` parse, the pure twin of the C parser.
+    """Strict W3C `traceparent` parse, the pure twin of the C parser.
 
-    Returns ``(trace_hi, trace_lo, parent_span, sampled)`` or ``None`` for any
-    malformed value. Lowercase hex only; rejects an ``ff`` version and all-zero
+    Returns `(trace_hi, trace_lo, parent_span, sampled)` or `None` for any
+    malformed value. Lowercase hex only; rejects an `ff` version and all-zero
     trace/parent ids; never raises on bad input.
     """
     data = bytes(data)
@@ -454,7 +454,7 @@ class _PureRequest:
 
 
 class PureRecorder:
-    """Pure twin of ``wreath._native._flight.Recorder`` (observable behavior)."""
+    """Pure twin of `wreath._native._flight.Recorder` (observable behavior)."""
 
     def __init__(self, mode: int, worker_id: int = 0, ring_records: int = 16384,
                  active_requests: int = 2048, histogram_count: int = 1,

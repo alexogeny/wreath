@@ -6,20 +6,20 @@ an optional native renderer explicit and makes parity fixtures compact. Output
 assembly is linear: a list builder with one final join, no output-proportional
 string concatenation.
 
-Normalized tuple contract (version ``TYPEGEN_CONTRACT``):
+Normalized tuple contract (version `TYPEGEN_CONTRACT`):
 
-``type_tuple``
+`type_tuple`
     ``(kind: str, name: str | None, args: tuple[type_tuple, ...],
       literals: tuple[str | int | float | bool | None, ...])``
 
-``declaration`` (an interface)
-    ``(name: str, fields: tuple[(wire_name: str, type_tuple, required: bool), ...])``
+`declaration` (an interface)
+    `(name: str, fields: tuple[(wire_name: str, type_tuple, required: bool), ...])`
 
-``operation`` (a client method)
-    ``(id, method, path, params, request_body, request_media, response)`` where
-    ``params`` is ``((client_name, wire_name, location, type_tuple, required), ...)``,
-    ``request_body`` is a ``type_tuple`` or ``None``, and ``response`` is a
-    ``type_tuple``.
+`operation` (a client method)
+    `(id, method, path, params, request_body, request_media, response)` where
+    `params` is `((client_name, wire_name, location, type_tuple, required), ...)`,
+    `request_body` is a `type_tuple` or `None`, and `response` is a
+    `type_tuple`.
 """
 
 from __future__ import annotations
@@ -296,8 +296,8 @@ def _path_expression(path: str, path_params: list[Any]) -> str:
 
 
 def render_client(payload: tuple[Any, ...], flags: int = 0) -> bytes:
-    """``payload`` is ``(import_names, operations)``. ``import_names`` are the
-    model/parameter interface names to import as types from ``./models``."""
+    """`payload` is `(import_names, operations)`. `import_names` are the
+    model/parameter interface names to import as types from `./models`."""
     import_names, operations = payload
     parts: list[str] = [GENERATOR_HEADER]
     if import_names:

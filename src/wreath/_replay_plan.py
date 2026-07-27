@@ -8,18 +8,18 @@ the application in-process.
 Handler modes decide what happens at the one boundary that is *not* owned — the
 Python handler:
 
-- ``INVOKE`` runs the real handler. Because that is arbitrary Python, the run is
+- `INVOKE` runs the real handler. Because that is arbitrary Python, the run is
   labelled **best effort**: the owned pipeline around it is real, but the result
   is only as reproducible as the handler.
-- ``REPLACE`` supplies a recorded return value or exception instead of running
+- `REPLACE` supplies a recorded return value or exception instead of running
   the handler, then drives the owned response coercion, exception mapping, and
   serialization. No arbitrary Python handler runs, so the owned portion is
   deterministic.
-- ``SKIP`` resolves the route and reports whether the owned router matched,
+- `SKIP` resolves the route and reports whether the owned router matched,
   without producing a response body.
 
-This is a first cut: ``INVOKE`` exercises the whole owned pipeline end to end;
-``REPLACE``/``SKIP`` exercise the owned response/exception/serialization and
+This is a first cut: `INVOKE` exercises the whole owned pipeline end to end;
+`REPLACE`/`SKIP` exercise the owned response/exception/serialization and
 routing boundaries. Re-running binding/validation with a *substituted* handler
 is a later increment (it requires recompiling the route with the stub endpoint).
 """
@@ -57,8 +57,8 @@ class CanonicalRequest:
     """A canonical semantic request: the owned inputs to the request pipeline.
 
     Deliberately free of transport detail — no framing, no connection. Headers
-    are policy-selected/redacted ``(name, value)`` byte pairs; the body is the
-    already-assembled request body. ``path`` selects the route; ``path_params``
+    are policy-selected/redacted `(name, value)` byte pairs; the body is the
+    already-assembled request body. `path` selects the route; `path_params`
     may be supplied when replaying without re-parsing the path.
     """
 
@@ -157,12 +157,12 @@ async def replay_endpoint_plan(
 ) -> PlanReplayResult:
     """Replay a canonical request through the owned endpoint pipeline.
 
-    See the module docstring for the mode semantics. ``adapters`` installs
-    request-scoped boundary doubles (PostgreSQL / HTTP) so an ``INVOKE`` run can
+    See the module docstring for the mode semantics. `adapters` installs
+    request-scoped boundary doubles (PostgreSQL / HTTP) so an `INVOKE` run can
     reach those seams deterministically or under an injected fault; it is a
-    :class:`wreath._replay_adapters.ReplayAdapters`. Raises nothing for a normal
+    `wreath._replay_adapters.ReplayAdapters`. Raises nothing for a normal
     owned error path (it becomes a status like any request); only a misuse (e.g.
-    ``REPLACE`` without a recorded result) raises ``ValueError``.
+    `REPLACE` without a recorded result) raises `ValueError`.
     """
     from ._replay_adapters import installed_adapters
 
@@ -232,7 +232,7 @@ def _substituted_endpoints(
     """Swap every route's handler for a signature-preserving stub that returns the
     recorded result, and force a recompile so the owned binder runs against it.
 
-    ``functools.wraps`` copies the original endpoint's signature/annotations, so
+    `functools.wraps` copies the original endpoint's signature/annotations, so
     binding and validation still infer and check exactly what the real handler
     declared -- only the leaf body is replaced. Restored on exit."""
     original = list(app._routes)

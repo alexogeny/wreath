@@ -187,10 +187,10 @@ assert _FLEET_ROW.size == 32
 class TenantState:
     """One tenant's recorded migration state, as the directory knows it.
 
-    ``status`` is one of the ``HISTORY_*`` codes. ``VERIFIED`` means the
+    `status` is one of the `HISTORY_*` codes. `VERIFIED` means the
     checksummed history was proven and can be trusted as the fast readiness
-    authority; ``UNKNOWN`` forces catalog verification; ``AMBIGUOUS`` and
-    ``BLOCKED`` are terminal operational states the resolver never treats as
+    authority; `UNKNOWN` forces catalog verification; `AMBIGUOUS` and
+    `BLOCKED` are terminal operational states the resolver never treats as
     current. Applications build these from their own tenant directory; the
     runner never invents tenant identity.
     """
@@ -252,13 +252,13 @@ def resolve_fleet(
     This is the managed fleet runner: it packs the caller's tenant directory
     into the native snapshot and resolves it with a single Wreath-metal call,
     returning bounded per-bucket counts rather than one Python object per
-    tenant. A tenant is ``current`` only when its trusted, verified history is
+    tenant. A tenant is `current` only when its trusted, verified history is
     at the target migration and checksum for the current directory generation;
-    unknown, stale, or wrong-generation tenants fall to ``verify`` (catalog
-    audit), and ``ambiguous``/``blocked`` stay terminal.
+    unknown, stale, or wrong-generation tenants fall to `verify` (catalog
+    audit), and `ambiguous`/`blocked` stay terminal.
 
     The runner reads no live database and acquires no DDL authority. Turning a
-    ``verify`` count into per-tenant catalog audits is a separate, explicitly
+    `verify` count into per-tenant catalog audits is a separate, explicitly
     privileged step; classification is deliberately side-effect free.
     """
     if not isinstance(target_migration, int) or target_migration < 0:
@@ -516,8 +516,8 @@ class RecodedColumnHazard:
     tenant: str
     phase: str
     finished: bool
-    #: ``False`` when only the append-only record survives. See
-    #: :class:`wreath._passes.ledger.RewrittenColumn`.
+    #: `False` when only the append-only record survives. See
+    #: `wreath._passes.ledger.RewrittenColumn`.
     ledger_row_present: bool = True
 
     def describe(self) -> str:
@@ -540,14 +540,14 @@ class RecodedColumnHazard:
 class DowngradeWouldStrandRecodedData(RuntimeError):
     """A downgrade was refused because a re-encode has changed the values under it.
 
-    The counterpart to :class:`DowngradeWouldStrandCode`, one layer down: that
+    The counterpart to `DowngradeWouldStrandCode`, one layer down: that
     one refuses when the *code* would be stranded by the reverse DDL, this one
     when the *data* already has been.
 
     The reason it has to exist is that nothing else notices. A re-encode changes
     values in place and touches no schema, so the reverse DDL applies cleanly and
     the catalog fingerprint returns to the artifact's source exactly as it
-    should -- every check :func:`revert_single_artifact` already performs passes
+    should -- every check `revert_single_artifact` already performs passes
     while the column holds values the reverted schema was never written for. It
     reports success. That is the whole defect.
     """
@@ -574,7 +574,7 @@ class DowngradeWouldStrandRecodedData(RuntimeError):
 class TransitionalContractUnproven(RuntimeError):
     """A deferred migration whose reads could not be proven safe for the window.
 
-    The mirror of :class:`MigrationBlockedByPass`, one step earlier: that one
+    The mirror of `MigrationBlockedByPass`, one step earlier: that one
     refuses a migration for narrowing a column a pass has not finished, this one
     refuses to *start* the pass while a read of that column would silently mean
     something else while it runs.
@@ -621,10 +621,10 @@ def scan_transitional_reads(
     """Classify every read of the column *declaration* converts.
 
     Returns the report. With *strict*, raises
-    :class:`TransitionalContractUnproven` when anything is unproven -- including
+    `TransitionalContractUnproven` when anything is unproven -- including
     when nothing was scanned at all, because a scan that reports "clean" after
     looking at nothing is the empty-denominator bug doc 19 found in
-    ``coverage_overall()``, and it must not come back here.
+    `coverage_overall()`, and it must not come back here.
     """
     report = declaration.scan(registry=registry, queries=queries, views=views)
     if strict and (report.blocking or report.scanned_nothing):
@@ -683,8 +683,8 @@ def _resolve_managed_snapshot(
 def _predicate_digest(predicate: str) -> str:
     """A short, stable tag distinguishing partial indexes on the same columns.
 
-    ``md5`` because PostgreSQL's catalog query must compute the identical value
-    and ``md5()`` is the one digest built into every server; it is a name, not a
+    `md5` because PostgreSQL's catalog query must compute the identical value
+    and `md5()` is the one digest built into every server; it is a name, not a
     security boundary.
     """
     return hashlib.md5(
@@ -1143,7 +1143,7 @@ def unpack_named_plan(tape: bytes) -> list[dict[str, Any]]:
     """Decode a native named plan into one dict per operation.
 
     Lives here rather than in the CLI because two readers need it now: the CLI
-    renders it for review, and :func:`_pending_pass_hazards` asks it which
+    renders it for review, and `_pending_pass_hazards` asks it which
     columns an artifact narrows.
     """
     if len(tape) < 12 or tape[:4] != b"WMP1":
@@ -1181,7 +1181,7 @@ def unpack_named_plan(tape: bytes) -> list[dict[str, Any]]:
 
 
 def _narrowed_columns(named_plan: bytes) -> tuple[tuple[str, str, str, str], ...]:
-    """``(schema, table, column, action)`` for each column this plan narrows.
+    """`(schema, table, column, action)` for each column this plan narrows.
 
     "Narrows" is deliberately both a drop and a retype. Dropping the old column
     is the obvious half; changing its type is the same hazard wearing a
@@ -1214,14 +1214,14 @@ async def _pending_pass_hazards(
 ) -> tuple[PendingPassHazard, ...]:
     """Columns this plan narrows that a chunked pass has not finished converting.
 
-    Shaped after :func:`_downgrade_hazards`: read live state, return what is
+    Shaped after `_downgrade_hazards`: read live state, return what is
     wrong, and let the caller decide to refuse. The state read here is the pass
     ledger rather than the ORM registry, because the question is not "does code
     still reference this" but "is something still writing it".
 
     A database that has never run a pass has no ledger table, and that is not an
     error -- it is the answer "nothing is converting anything". Checked with
-    ``to_regclass`` rather than by catching a failure, so a real error from the
+    `to_regclass` rather than by catching a failure, so a real error from the
     read is still a real error.
     """
     from ._passes import ledger as _pass_ledger
@@ -1259,14 +1259,14 @@ async def _pending_pass_hazards(
 
 
 def _column_fact(schema: str, table: str, column: str) -> str:
-    """The spelling :func:`wreath.passes.column_fact` produces, without the import."""
+    """The spelling `wreath.passes.column_fact` produces, without the import."""
     return f"column:{schema}.{table}.{column}"
 
 
 def _touched_columns(named_plan: bytes) -> tuple[tuple[str, str, str, str], ...]:
-    """``(schema, table, column, action)`` for every column operation in a plan.
+    """`(schema, table, column, action)` for every column operation in a plan.
 
-    Wider than :func:`_narrowed_columns` on purpose. That one asks "would this
+    Wider than `_narrowed_columns` on purpose. That one asks "would this
     lose rows a pass has not converted yet", which only drops and retypes can
     do. This one asks "does this change the definition a re-encode's values were
     written under", and *adding* a constraint or a default is as capable of
@@ -1290,7 +1290,7 @@ async def _recoded_column_hazards(
     """Columns this reverse plan touches whose values a re-encode has changed.
 
     Read with **no** filter on whether the pass finished, which is the one thing
-    that distinguishes this from :func:`_pending_pass_hazards`. That function
+    that distinguishes this from `_pending_pass_hazards`. That function
     refuses while a pass is unfinished and relents once it publishes, because a
     published pass has converted every row and the narrowing is then safe. Here
     publication is not a release: a finished re-encode is the case where *no*
@@ -1359,7 +1359,7 @@ async def revert_single_artifact(
     allow_destructive: bool = False,
     force: bool = False,
 ) -> MigrationRevertResult:
-    """Undo one authoritative artifact: the exact inverse of ``apply_single_artifact``.
+    """Undo one authoritative artifact: the exact inverse of `apply_single_artifact`.
 
     The named plan is inverted in metal (every add becomes a drop, every
     signature swaps), so the downgrade tape is derived from the same authority
@@ -1368,10 +1368,10 @@ async def revert_single_artifact(
     runs the reverse DDL block, requires the catalog to return to the artifact
     source, deletes the tip history row, and commits — or rolls everything back.
 
-    Unless ``force`` is set, the downgrade is refused when the running ORM still
+    Unless `force` is set, the downgrade is refused when the running ORM still
     maps a column or table the reverse would drop (or a type it would change):
     downgrading production under code that still references those objects strands
-    the deployed code. ``force`` exists for the legitimate case of rewinding a
+    the deployed code. `force` exists for the legitimate case of rewinding a
     local stack to re-migrate.
     """
     artifact = _load_native_artifact(artifact_data)

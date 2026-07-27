@@ -1,7 +1,7 @@
-"""Thin CLI facade for ``wreath audit`` — mirrors the migrations CLI: human or
-``--json`` report, and a ``migrations check``-style exit code (0 clean, 1 on findings,
-2 on usage). ``static`` audits generated + static HTML; ``runtime`` audits a live server;
-``--fix`` applies the safe remediation subset.
+"""Thin CLI facade for `wreath audit` — mirrors the migrations CLI: human or
+`--json` report, and a `migrations check`-style exit code (0 clean, 1 on findings,
+2 on usage). `static` audits generated + static HTML; `runtime` audits a live server;
+`--fix` applies the safe remediation subset.
 """
 from __future__ import annotations
 

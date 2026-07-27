@@ -8,10 +8,11 @@ is the proxy's. Middleware downstream believes it, and two things fail quietly:
 sends `https://host` and rejects every unsafe request.
 
 This middleware restores the truth, but only from proxies that were explicitly
-configured::
+configured:
 
-    app.add_middleware(ProxyHeadersMiddleware(trusted=["10.0.0.0/8"]), priority=-30)
-
+```python
+app.add_middleware(ProxyHeadersMiddleware(trusted=["10.0.0.0/8"]), priority=-30)
+```
 Forwarding headers are trivially forged by any client, so nothing is trusted by
 default and the allow-list has no wildcard: `trusted` is required and must name
 the proxy networks. Run this before anything that reads scheme, host, or client

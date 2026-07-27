@@ -1,13 +1,13 @@
-"""Check and regenerate the ``wreath port`` golden emitter output.
+"""Check and regenerate the `wreath port` golden emitter output.
 
-``tests/port/golden/<app>/<module>.py.expected`` pins the byte-for-byte result of
-the declarative emitter for ``tests/port/corpus/<app>/<module>.py``, and
-``tests/port/test_golden_output.py`` compares against it. Regenerating those
+`tests/port/golden/<app>/<module>.py.expected` pins the byte-for-byte result of
+the declarative emitter for `tests/port/corpus/<app>/<module>.py`, and
+`tests/port/test_golden_output.py` compares against it. Regenerating those
 files after an intentional emitter change had no entry point: the procedure was a
-copy-pasteable snippet in ``tests/port/golden/README.md``.
+copy-pasteable snippet in `tests/port/golden/README.md`.
 
 **That snippet had already drifted, and silently.** It carried a hardcoded list of
-four ``tumbleweed_api`` modules; a fifth golden, ``summit_ops/intake.py.expected``,
+four `tumbleweed_api` modules; a fifth golden, `summit_ops/intake.py.expected`,
 had since been added under a different app. Following the documented procedure
 regenerated four of five files and said nothing about the one it skipped, so an
 emitter change could land with a stale golden that the next unrelated run would
@@ -17,14 +17,14 @@ this walks the golden tree rather than naming its members.
 Regeneration is also the moment the cheap emitter invariants are free to check,
 so the same pass runs them and refuses to write when one fails:
 
-* **Determinism.** ``emit_module`` is pure, so emitting twice must give the same
+* **Determinism.** `emit_module` is pure, so emitting twice must give the same
   bytes. A golden written from a non-deterministic emitter pins one of several
   possible outputs and fails intermittently forever after.
-* **The output compiles.** ``compile()``, not ``ast.parse()`` -- parsing accepts
-  a module that ``compile`` rejects (a ``return`` outside a function, a duplicate
+* **The output compiles.** `compile()`, not `ast.parse()` -- parsing accepts
+  a module that `compile` rejects (a `return` outside a function, a duplicate
   argument name), and the emitter reassembles bodies, which is exactly the shape
   of edit that produces one.
-* **No orphans.** A ``.expected`` whose corpus source has been renamed or deleted
+* **No orphans.** A `.expected` whose corpus source has been renamed or deleted
   is dead weight that still passes its own test, because the test parametrizes
   over the goldens and would simply stop generating a case for it.
 
@@ -32,15 +32,15 @@ so the same pass runs them and refuses to write when one fails:
     uv run wreath-port-golden --update     # rewrite the drifted goldens
     uv run wreath-port-golden --format json
 
-**The pinned set is the golden tree**, so ``--update`` fills in the goldens that
+**The pinned set is the golden tree**, so `--update` fills in the goldens that
 exist rather than deciding which corpus modules deserve one. To pin a new module,
-create the empty ``.expected`` beside its siblings and run ``--update``:
+create the empty `.expected` beside its siblings and run `--update`:
 
     touch tests/port/golden/summit_ops/intake.py.expected
     uv run wreath-port-golden --update
 
-Exit codes follow ``wreath port``'s convention: ``0`` clean, ``1`` ran and has
-something to report, ``2`` never ran over anything (no goldens found).
+Exit codes follow `wreath port`'s convention: `0` clean, `1` ran and has
+something to report, `2` never ran over anything (no goldens found).
 """
 
 from __future__ import annotations
@@ -60,10 +60,10 @@ CORPUS_DIR = "tests/port/corpus"
 EXIT_OK = 0
 #: Ran, and something needs attention: drift, an orphan, or a failed invariant.
 EXIT_WORK_REMAINS = 1
-#: Never ran over anything -- no ``*.py.expected`` was found.
+#: Never ran over anything -- no `*.py.expected` was found.
 EXIT_NOT_RUN = 2
 
-#: What can be wrong with one golden. ``drift`` is the only one ``--update``
+#: What can be wrong with one golden. `drift` is the only one `--update`
 #: repairs; the rest need a person, so writing over them would hide the problem.
 DRIFT = "drift"
 MISSING_SOURCE = "missing-source"
@@ -95,7 +95,7 @@ class GoldenFinding:
 
 
 def _sources_for(root: Path) -> list[tuple[Path, Path]]:
-    """Every ``(golden, corpus source)`` pair, found by walking -- never a list.
+    """Every `(golden, corpus source)` pair, found by walking -- never a list.
 
     Sorted so a run is reproducible and a diff of two runs is readable.
     """

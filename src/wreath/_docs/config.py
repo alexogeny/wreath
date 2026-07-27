@@ -1,7 +1,7 @@
 """Typed configuration for the static-site generator — Python, not YAML.
 
 Wreath has no YAML dependency and no desire for one; a docs site is described by
-a ``wreath_docs.py`` module that exposes a :class:`Site` (mirroring how the
+a `wreath_docs.py` module that exposes a `Site` (mirroring how the
 migrations and server layers take typed config, not stringly files). Everything
 here is a frozen dataclass, so a config is validated once and cheap to pass
 around.
@@ -64,7 +64,7 @@ class Nav:
         object.__setattr__(self, "items", tuple(items))
 
     def pages(self) -> tuple[Page, ...]:
-        """Every :class:`Page` in the tree, depth-first in nav order."""
+        """Every `Page` in the tree, depth-first in nav order."""
         out: list[Page] = []
         _collect_pages(self.items, out)
         return tuple(out)
@@ -84,7 +84,7 @@ class Palette:
 
     Defaults are wreath's pressed-viridian look — an evergreen structural colour
     on a faintly green-cast paper, with brass reserved for state. Pick a
-    ready-made one from :data:`THEMES` (``palette=THEMES["sepia"]``) or tweak any
+    ready-made one from `THEMES` (`palette=THEMES["sepia"]`) or tweak any
     field.
     """
 
@@ -103,14 +103,14 @@ class Palette:
     dark_border: str = "#26302a"
     dark_surface: str = "#161d18"
     #: Body-link colours. Empty means "derive": light links fall back to
-    #: ``primary``, dark links to an auto-lightened ``primary`` so they stay
+    #: `primary`, dark links to an auto-lightened `primary` so they stay
     #: legible on a dark background instead of inheriting a too-dark brand colour.
     link: str = ""
     dark_link: str = ""
     #: Dark-mode brand fills. A brand colour tuned to read on paper is usually
     #: too dark to *fill* anything on a near-black surface — a viridian chart bar
     #: or a brass rule disappears into the ground. Empty means "derive" by
-    #: lightening, the same trick ``dark_link`` uses for text.
+    #: lightening, the same trick `dark_link` uses for text.
     dark_primary: str = ""
     dark_accent: str = ""
     #: "system" (sans), "serif", or "mono" reading stack for body copy.
@@ -123,7 +123,7 @@ class Palette:
     radius: str = "8px"
 
 
-#: Coherent, ready-made themes. Pass one as ``Site(palette=THEMES["nord"])``.
+#: Coherent, ready-made themes. Pass one as `Site(palette=THEMES["nord"])`.
 THEMES: dict[str, Palette] = {
     # Pressed viridian: an evergreen structural colour on faintly green-cast
     # paper, brass held back for state. The dark mode grounds on a pine ink
@@ -173,30 +173,30 @@ class Site:
     """A whole documentation site: sources, output, nav, and theme.
 
     Args:
-        name: site/brand name, shown in the header and ``<title>`` suffix.
+        name: site/brand name, shown in the header and `<title>` suffix.
         source: directory holding the markdown sources.
         output: directory the built HTML is written to.
         nav: the navigation tree (also the page-ordering source of truth).
         palette: theme colours.
-        strict: fail the build on an orphan page (a ``.md`` not in ``nav``), a
-            dead internal link, or a broken ``#anchor``. On by default — a docs
+        strict: fail the build on an orphan page (a `.md` not in `nav`), a
+            dead internal link, or a broken `#anchor`. On by default — a docs
             build should not rot.
-        base_url: canonical site URL (e.g. ``https://docs.trailhead.example``). When set,
-            a ``sitemap.xml`` and absolute URLs in ``llms.txt`` are generated.
-        description: one-line site description (used in ``llms.txt`` and page
-            ``<meta>`` when a page has none of its own).
-        exclude: glob patterns (matched against each source-relative ``.md`` path)
-            for files that live under ``source`` but are deliberately unpublished —
+        base_url: canonical site URL (e.g. `https://docs.trailhead.example`). When set,
+            a `sitemap.xml` and absolute URLs in `llms.txt` are generated.
+        description: one-line site description (used in `llms.txt` and page
+            `<meta>` when a page has none of its own).
+        exclude: glob patterns (matched against each source-relative `.md` path)
+            for files that live under `source` but are deliberately unpublished —
             working notes, ADRs, agent manifests. Matching files never raise an
-            orphan warning. Mirrors mkdocs' ``exclude_docs``.
+            orphan warning. Mirrors mkdocs' `exclude_docs`.
         source_url: base URL each page's "Edit this page" link is built from, e.g.
-            ``https://github.com/you/proj/edit/main/docs``. Empty means no edit
+            `https://github.com/you/proj/edit/main/docs`. Empty means no edit
             links. The page's source-relative path is appended to it.
-        tabs: promote the top level of ``nav`` into a row of section tabs in the
+        tabs: promote the top level of `nav` into a row of section tabs in the
             header, leaving the sidebar to show only the section you are in. The
-            default, ``"auto"``, does this once the nav has at least three
+            default, `"auto"`, does this once the nav has at least three
             top-level entries — below that a tab row is chrome around nothing.
-            ``"never"`` keeps the whole tree in one sidebar.
+            `"never"` keeps the whole tree in one sidebar.
     """
 
     name: str

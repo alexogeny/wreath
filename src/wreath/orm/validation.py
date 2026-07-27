@@ -2,7 +2,7 @@
 
 Without this there are two validation engines on the write path: request
 binding checks a JSON payload against a dataclass, and then every assignment to
-a model re-checks the same value through its column's ``PgType``. The value is
+a model re-checks the same value through its column's `PgType`. The value is
 proven twice and copied twice.
 
 Here a body is validated *by the columns themselves*, once, directly into the
@@ -17,7 +17,7 @@ at import: what the field is called, whether it is nullable, whether it has a
 default. Generating the source unrolls all of that into straight-line code, and
 lets a cross-field rule read the values out of local variables instead of
 loading them back out of the cells they were just written to. See
-``constraints.py`` for the same technique applied to a single column's checks.
+`constraints.py` for the same technique applied to a single column's checks.
 
 The database still enforces its own structural constraints (types, NOT NULL,
 keys). That is deliberate: it is the backstop, not the validator. Application
@@ -38,7 +38,7 @@ from .model import Model
 def compile_model_validator(
     model: type[Model],
 ) -> Callable[[Any, tuple[Any, ...]], Any]:
-    """Build the validator for ``model``; generated once, run per request."""
+    """Build the validator for `model`; generated once, run per request."""
     if not isinstance(model, type) or not issubclass(model, Model):
         raise TypeError(f"expected a wreath.orm Model, got {model!r}")
     if model.__wreath_table__ is None:
@@ -127,14 +127,14 @@ def _checks(
 ) -> list[str]:
     """The column's business rules, inlined here rather than called.
 
-    ``Column.validate`` fuses the same checks into a callable that *raises*,
-    because that is what an assignment needs: ``intern.salary = 60_000`` has one
+    `Column.validate` fuses the same checks into a callable that *raises*,
+    because that is what an assignment needs: `intern.salary = 60_000` has one
     value and one way to refuse it. A body is the other case -- it reports every
     bad field at once, so a violation here is an expected outcome rather than an
     exceptional one, and raising through it means building an exception and a
-    traceback only to call ``str()`` on a message that was a constant all along.
+    traceback only to call `str()` on a message that was a constant all along.
 
-    Both are emitted from the same :meth:`Check.source`, so this is one set of
+    Both are emitted from the same `Check.source`, so this is one set of
     rules with two ways of answering, not two sets that can disagree. The tests
     pin them together: what a body is refused for, an assignment is refused for.
 
@@ -233,9 +233,9 @@ def _rules(rules: tuple[Any, ...], ns: dict[str, Any]) -> list[str]:
 
 
 def _kind(error: Exception, column: Any) -> str:
-    """The error ``type`` tag: the broken rule's name, or the column's type.
+    """The error `type` tag: the broken rule's name, or the column's type.
 
-    A business rule names itself (``le``, ``length``, ``one_of``) so a client
+    A business rule names itself (`le`, `length`, `one_of`) so a client
     can tell "that is not an integer" from "that integer is too large" without
     parsing the message.
     """

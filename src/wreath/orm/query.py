@@ -1,6 +1,6 @@
 """Immutable query objects.
 
-Every builder method returns a new ``Select``; nothing mutates in place, so a
+Every builder method returns a new `Select`; nothing mutates in place, so a
 query can be built once at import time and reused per request without a
 defensive copy.
 """
@@ -79,7 +79,7 @@ class Select:
 
         Every other builder method adds to a query; this one swaps one set of
         predicates for another, which is what a declared query in
-        :mod:`wreath.queries` needs — it fixes a shape once and substitutes each
+        `wreath.queries` needs — it fixes a shape once and substitutes each
         call's values into it. The caller owes the invariant that the
         replacements have the same tree structure and column types as the
         originals; anything else changes the plan-cache key, and a declared
@@ -117,10 +117,10 @@ class Select:
         return self._replace(offset_=_check_bound(value, "offset"))
 
     def paginate(self, page: int, size: int) -> Select:
-        """Shape this query for one page: ``LIMIT size OFFSET (page - 1) * size``.
+        """Shape this query for one page: `LIMIT size OFFSET (page - 1) * size`.
 
         Pure query-shaping; execution and the total count live in
-        ``wreath.pagination``.
+        `wreath.pagination`.
         """
         if isinstance(page, bool) or not isinstance(page, int) or page < 1:
             raise ValueError(f"page must be an integer >= 1, got {page!r}")

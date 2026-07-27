@@ -1,9 +1,9 @@
 """Renderer facade: select the pure reference renderer or an optional native
-one, honouring ``--pure`` and ``WREATH_PURE`` exactly like Wreath's other accelerators.
+one, honouring `--pure` and `WREATH_PURE` exactly like Wreath's other accelerators.
 
 The native renderer is gated behind a benchmark decision and is not built today,
 so this always resolves to the pure implementation. The selection contract is
-kept explicit so a future ``_core.typegen_*`` drops in without touching callers.
+kept explicit so a future `_core.typegen_*` drops in without touching callers.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ Renderer = Callable[[tuple[Any, ...], int], bytes]
 
 
 def select_renderers(*, pure: bool = False) -> tuple[Renderer, Renderer, str]:
-    """Return ``(render_models, render_client, backend_name)``."""
+    """Return `(render_models, render_client, backend_name)`."""
     force_pure = pure or os.environ.get("WREATH_PURE") == "1"
     native_models = None if force_pure or _core is None else getattr(
         _core, "typegen_render_models", None

@@ -2,14 +2,14 @@
 
 This module is the single source of truth for the NFR wire format: cell sizes,
 field layouts, event kinds, modes, loss reasons, and the deterministic metadata
-image. The pure reference codec in ``wreath._pure.flight`` and the future
-``wreath._native._flight`` C extension must agree with the constants here
+image. The pure reference codec in `wreath._pure.flight` and the future
+`wreath._native._flight` C extension must agree with the constants here
 byte-for-byte; a parity test enforces that once the extension exists.
 
 Nothing here performs runtime telemetry. Stage 0 defines the schema and the
 deterministic metadata image only -- there is no recorder, ring, or request-path
-behavior. See ``docs/plans/native-flight-recorder-stage-1.md`` and
-``docs/decisions/0021-native-flight-recorder-provisional-parameters.md``.
+behavior. See `docs/plans/native-flight-recorder-stage-1.md` and
+`docs/decisions/0021-native-flight-recorder-provisional-parameters.md`.
 
 The provisional sizes below are acceptance decisions to be tuned by the Stage 3
 benchmark matrix, not frozen guarantees (ADR 0021).
@@ -57,7 +57,7 @@ PHASE_RECORDS_PER_BATCH: Final = 3
 
 
 class EventKind(IntEnum):
-    """The ``kind`` byte of a 64-byte cell."""
+    """The `kind` byte of a 64-byte cell."""
 
     INVALID = 0
     COMPLETION = 1  # one per request in Pulse
@@ -143,7 +143,7 @@ class LossReason(IntEnum):
     BODY_TRUNCATED = 7
 
 
-#: Completion-cell ``flags`` bits.
+#: Completion-cell `flags` bits.
 FLAG_SAMPLED: Final = 1 << 0  # W3C sampled
 FLAG_DETAILED_ARMED: Final = 1 << 1
 FLAG_FORENSIC_ARMED: Final = 1 << 2
@@ -527,7 +527,7 @@ _CAPTURE_SLAB_HEADER = struct.Struct(BYTE_ORDER + "QIHBBBBHI")
 CAPTURE_SLAB_HEADER_SIZE: Final = _CAPTURE_SLAB_HEADER.size
 assert CAPTURE_SLAB_HEADER_SIZE == 24, CAPTURE_SLAB_HEADER_SIZE
 
-# 12-byte capture-field header (little-endian), followed by ``stored_length``
+# 12-byte capture-field header (little-endian), followed by `stored_length`
 # payload bytes padded up to CAPTURE_FIELD_ALIGN:
 #   0  u16  field_class (CaptureFieldClass)
 #   2  u16  descriptor_id  (compiled metadata id: header/column/client, 0 = none)
@@ -714,8 +714,8 @@ class MetadataImage:
     def canonical_bytes(self) -> bytes:
         """A deterministic byte serialization for hashing and equality.
 
-        Only stable descriptor content enters here: no addresses, no ``repr()``,
-        no ``PYTHONHASHSEED``-dependent hashing. Rows are emitted in ascending
+        Only stable descriptor content enters here: no addresses, no `repr()`,
+        no `PYTHONHASHSEED`-dependent hashing. Rows are emitted in ascending
         ID order so registration order that is not semantic cannot change it.
         """
         parts: list[bytes] = [

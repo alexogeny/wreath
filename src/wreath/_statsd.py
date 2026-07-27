@@ -1,15 +1,15 @@
 """StatsD / DogStatsD push bridge for the Native Flight Recorder.
 
-Where :mod:`wreath._prometheus` exposes the projector's aggregates for *scrape*,
-this bridge *pushes* the same ``Projector.snapshot()`` state as StatsD lines over
+Where `wreath._prometheus` exposes the projector's aggregates for *scrape*,
+this bridge *pushes* the same `Projector.snapshot()` state as StatsD lines over
 UDP. Counters are sent as **deltas** since the previous flush (StatsD aggregates
 increments); gauges are sent absolute. Because the recorder aggregates off-path,
-per-route durations are emitted as sum/max aggregates (``|c``/``|g``), not raw
-``|ms`` samples we do not retain.
+per-route durations are emitted as sum/max aggregates (`|c`/`|g`), not raw
+`|ms` samples we do not retain.
 
-Plain StatsD folds labels into the metric name (``wreath.http.requests.7``);
-DogStatsD keeps them as ``|#route_id:7`` tags. Zero-dependency: UDP via stdlib
-``socket``; sends are non-blocking and errors are swallowed (telemetry must never
+Plain StatsD folds labels into the metric name (`wreath.http.requests.7`);
+DogStatsD keeps them as `|#route_id:7` tags. Zero-dependency: UDP via stdlib
+`socket`; sends are non-blocking and errors are swallowed (telemetry must never
 break the app).
 """
 
@@ -56,9 +56,9 @@ def _fmt(value: float | int) -> str:
 class StatsDBridge:
     """Pushes projector metrics to a StatsD/DogStatsD agent over UDP.
 
-    ``source`` is a :class:`wreath._projector.Projector` (anything with
-    ``snapshot()`` and optionally ``recorder_loss()``). Call :meth:`flush`
-    periodically (or drive :meth:`run_periodic` from a supervised task).
+    `source` is a `wreath._projector.Projector` (anything with
+    `snapshot()` and optionally `recorder_loss()`). Call `flush`
+    periodically (or drive `run_periodic` from a supervised task).
     """
 
     __slots__ = (
@@ -175,8 +175,8 @@ class StatsDBridge:
     async def run_periodic(self, interval: float = 10.0) -> None:
         """Flush on a fixed cadence. Drive from a supervised task.
 
-        TODO(app-wiring): an ``app.statsd(...)`` factory that owns this loop in
-        the lifespan would mirror ``app.http_client``/``app.objects``.
+        TODO(app-wiring): an `app.statsd(...)` factory that owns this loop in
+        the lifespan would mirror `app.http_client`/`app.objects`.
         """
         import asyncio
 

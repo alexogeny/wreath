@@ -2,15 +2,24 @@
 
 Exposes `/health` (liveness -- is the process up) and `/ready` (readiness --
 can it serve, i.e. its dependencies answer). Mount the router the app already
-knows how to include::
+knows how to include:
 
-    from wreath.health import health_router, callable_check, postgres_check
+```python
+from wreath.health import health_router, postgres_check
 
-    app.include_router(health_router([postgres_check(db)]))
+app.include_router(health_router([postgres_check(db)]))
+```
 
 `postgres_check` wires a Wreath `Database` for you. For a connection that is
 not one, `database_check` takes a ping you write, and `callable_check` wraps
 any `async` callable at all.
+
+A probe is a callable that is *awaited*, so pass a bound coroutine function --
+`db.statement("health_ping", "SELECT 1").fetchval`, registered once at startup.
+`db.pool("read")` hands back the `Pool`, which leases connections and has no
+query methods on it; a probe written against it fails on every request, and the
+symptom is not a crash but a readiness endpoint answering 503 forever with the
+`AttributeError` buried in its JSON body.
 
 Liveness is always 200 unless `is_live()` says the process is draining.
 
@@ -18,12 +27,14 @@ Readiness runs every check concurrently, under a per-check timeout, and reports
 one of three states. `ready` (200) is everything passing. `degraded` (200) is
 a **non-critical** check failing -- an operator should look, but the instance
 still serves. `unready` (503) is a critical check failing; take it out of the
-load balancer::
+load balancer:
 
-    checks = [
-        postgres_check(db),
-        callable_check("analytics", ping_sink, critical=False, timeout=0.25),
-    ]
+```python
+checks = [
+    postgres_check(db),
+    callable_check("analytics", ping_sink, critical=False, timeout=0.25),
+]
+```
 
 Every check reports its own `duration_ms`, so a readiness endpoint that got
 slow says which dependency did it. A probe that overruns its `timeout` is

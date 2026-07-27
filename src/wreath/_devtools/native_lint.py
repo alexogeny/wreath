@@ -230,9 +230,9 @@ def _waivers(
     rarely fits beside the statement.
 
     Every native lint spells its waiver the same way and differs only in the
-    rule-code prefix, so ``pattern`` is the whole difference between them --
+    rule-code prefix, so `pattern` is the whole difference between them --
     which is why the five identical copies this replaces could collapse into
-    one. It is required rather than defaulted to this module's :data:`WAIVER`:
+    one. It is required rather than defaulted to this module's `WAIVER`:
     a caller that forgot it would match no waiver at all, and a lint that
     silently waives nothing reports findings someone already justified.
     """
@@ -461,12 +461,12 @@ def run_lint(
     identical across four copies.
 
     An unreadable source **names the file on stderr and returns 1**. That is a
-    deliberate choice rather than the analyser shape used in ``_port``: these are
-    gates, ``wreath-check`` trusts the exit code, and a lint that skipped a file
+    deliberate choice rather than the analyser shape used in `_port`: these are
+    gates, `wreath-check` trusts the exit code, and a lint that skipped a file
     and still printed "0 finding(s)" would report a clean bill of health over
     files it never opened. Ending the run loudly is the honest failure. Three of
-    the five already did this; ``native-error-lint`` and ``native-gil-lint``
-    raised ``FileNotFoundError`` out of ``main`` instead, which ended the run
+    the five already did this; `native-error-lint` and `native-gil-lint`
+    raised `FileNotFoundError` out of `main` instead, which ended the run
     anyway but without naming the file.
     """
     parser = argparse.ArgumentParser(prog=prog, description=description)

@@ -5,7 +5,7 @@ Two rules carry this module, and both of them are about a boundary.
 **Exactly one transaction per chunk**, opened once the chunk's range is known and
 committed before the next range is computed -- never one transaction for the
 walk. A transaction held open for an hour holds its snapshot open for an hour,
-so ``VACUUM`` reclaims nothing any other transaction updated in that hour, the
+so `VACUUM` reclaims nothing any other transaction updated in that hour, the
 write-ahead log grows, and a hot standby inherits the same bloat or cancels
 queries instead. The application does not slow down during the backfill; it
 slows down for as long as the bloat takes to work back out, which is the part
@@ -31,8 +31,8 @@ chunks rather than a cancellation.
 
 A chunk that keeps failing becomes a **hole**: a row in the dead-letter table
 carrying its range, its attempt count, and the predicate that reproduces it. What
-happens next is declared, because no default suits both callers -- ``halt`` stops
-the pass where it is, and ``skip`` moves past and bars the terminal gate until
+happens next is declared, because no default suits both callers -- `halt` stops
+the pass where it is, and `skip` moves past and bars the terminal gate until
 the hole is cleared. Skipping buys throughput; it never buys the irreversible
 step.
 """
@@ -56,7 +56,7 @@ RETRY_CAP_SECONDS = 2.0
 
 
 class Binds:
-    """Accumulates bind values so every fragment lands on the right ``$n``.
+    """Accumulates bind values so every fragment lands on the right `$n`.
 
     The cursor is always a bind and never interpolated. That is the injection
     answer, and it is also what keeps the chunk SQL textually identical from the
@@ -77,10 +77,10 @@ class Binds:
         return [self.add(value) for value in values]
 
     def splice(self, text: str, values: Any = ()) -> str:
-        """Bind *values* into a fragment whose placeholders are written ``?``.
+        """Bind *values* into a fragment whose placeholders are written `?`.
 
-        A fragment written by a caller cannot know which ``$n`` it will end up
-        at, so it writes ``?`` and this renumbers -- the same reason a query
+        A fragment written by a caller cannot know which `$n` it will end up
+        at, so it writes `?` and this renumbers -- the same reason a query
         builder never lets a caller pick placeholder numbers.
         """
         parts = text.split("?")
@@ -105,7 +105,7 @@ class Binds:
 class Chunk:
     """One chunk of a pass: a half-open range over the pass's ordered domain.
 
-    The range is ``(cursor_from, cursor_to]`` -- open at the low end so the row
+    The range is `(cursor_from, cursor_to]` -- open at the low end so the row
     the last chunk finished on is not seen twice, closed at the high end so the
     cursor is always a key that really exists. Row counts belong to the report,
     never to the range.
@@ -116,7 +116,7 @@ class Chunk:
     cursor_from: tuple[Any, ...] | None
     cursor_to: tuple[Any, ...]
     #: The model this pass walks, when it walks one, so declared work can render
-    #: a model predicate. ``None`` for a table the ORM does not own.
+    #: a model predicate. `None` for a table the ORM does not own.
     model: Any = None
     #: The name a model predicate qualifies its columns with.
     alias: str = ""
@@ -129,8 +129,8 @@ class ShiftResult:
     chunks: int = 0
     rows: int = 0
     complete: bool = False
-    #: ``complete`` | ``budget`` | ``stopping`` | ``lost`` | ``pool`` | ``failed``
-    #: | ``blocked``
+    #: `complete` | `budget` | `stopping` | `lost` | `pool` | `failed`
+    #: | `blocked`
     stopped: str = "complete"
     error: str | None = None
     #: Chunks given up on during this shift and written to the dead-letter table.
@@ -149,7 +149,7 @@ def range_predicate(
     cursor: tuple[Any, ...] | None,
     frontier: str | None,
 ) -> str:
-    """``key > $cursor AND <frontier>``, as one row comparison and the frontier.
+    """`key > $cursor AND <frontier>`, as one row comparison and the frontier.
 
     The frontier is carried even where the upper key bound already implies it.
     It costs the planner nothing (it is the same index range) and it means every
@@ -192,10 +192,10 @@ def reproduce_predicate(
     cursor_from: tuple[Any, ...] | None,
     cursor_to: tuple[Any, ...],
 ) -> str:
-    """A statement an operator can paste into ``psql`` to see the real error.
+    """A statement an operator can paste into `psql` to see the real error.
 
     This is what turns a hole into a task. A dead-letter row holding a truncated
-    ``repr`` from three weeks ago tells nobody what to do; one holding the exact
+    `repr` from three weeks ago tells nobody what to do; one holding the exact
     range, with the values inlined, can be run by hand in a transaction and
     rolled back.
     """
@@ -677,8 +677,8 @@ async def _finish(
 async def _run_gate(walk: Any, connection: Any, *, row: Any) -> ShiftResult:
     """Verify, publish, and run the irreversible step -- each exactly once.
 
-    Re-entrant on purpose. A process that dies between ``verifying`` and
-    ``verified`` re-verifies on restart rather than proceeding on trust, which
+    Re-entrant on purpose. A process that dies between `verifying` and
+    `verified` re-verifies on restart rather than proceeding on trust, which
     is always the right trade: verification is idempotent and cheap relative to
     the thing it guards.
     """
@@ -732,7 +732,7 @@ async def _gate_unit(
     cursor_from: tuple[Any, ...] | None,
     cursor_to: tuple[Any, ...],
 ) -> str | None:
-    """Verify one unit and run its terminal step. Returns an error, or ``None``.
+    """Verify one unit and run its terminal step. Returns an error, or `None`.
 
     There is no whole-pass phase to compare-and-swap on here, and there should
     not be: a recurring pass has no completion, and one bad bucket must not

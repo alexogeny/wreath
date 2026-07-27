@@ -2,19 +2,19 @@
 
 A replacement for Celery/arq for teams already running Postgres: enqueue jobs
 (transactionally, in the same commit as your business writes), and a supervised
-pool of workers claims them with ``FOR UPDATE SKIP LOCKED`` + fencing tokens,
-retries with backoff, and dead-letters on exhaustion. ``NOTIFY`` is used only as
+pool of workers claims them with `FOR UPDATE SKIP LOCKED` + fencing tokens,
+retries with backoff, and dead-letters on exhaustion. `NOTIFY` is used only as
 a latency doorbell — correctness never depends on a notification arriving, the
 workers also poll.
 
 **Delivery is at-least-once.** A crash between a job's side effect and its
-completion ``UPDATE`` yields a re-run on lease expiry. Make handlers idempotent;
-pass ``key=`` to :meth:`JobRunner.enqueue` for exactly-once *enqueue* (a unique
+completion `UPDATE` yields a re-run on lease expiry. Make handlers idempotent;
+pass `key=` to `JobRunner.enqueue` for exactly-once *enqueue* (a unique
 index drops duplicates) and use it to guard non-idempotent side effects.
 
 Multi-tenancy note (design 01 §5): jobs live in one dedicated system schema with
-a ``tenant`` column, never relying on ``search_path`` for isolation — a
-database-global ``NOTIFY`` name would otherwise wake the wrong tenant's workers.
+a `tenant` column, never relying on `search_path` for isolation — a
+database-global `NOTIFY` name would otherwise wake the wrong tenant's workers.
 """
 
 from __future__ import annotations
@@ -42,22 +42,22 @@ from .postgres import PostgresError
 JobHandler = Callable[..., Awaitable[None]]
 
 
-# The bounded SQL-safe identifier rule lives in ``_jobcore`` so jobs and
+# The bounded SQL-safe identifier rule lives in `_jobcore` so jobs and
 # messaging share one definition; kept as a module-local alias for readability.
 _validate_identifier = validate_identifier
 
 #: Reconnect backoff for the NOTIFY doorbell, re-exported from
-#: :mod:`wreath._doorbell`, which the bus shares. Matching `messaging.MessageBus`
+#: `wreath._doorbell`, which the bus shares. Matching `messaging.MessageBus`
 #: is no longer a thing to keep true by hand: both hold the same supervisor.
 
 
 class JobVanished(RuntimeError):
-    """A deduplicated :meth:`JobRunner.launch` found no row to hand back.
+    """A deduplicated `JobRunner.launch` found no row to hand back.
 
     The insert conflicted -- so the work *was* already enqueued -- but the
     surviving row was gone by the time it was read, which is what a retention
     sweep over completed jobs looks like from here. There is no id to watch, and
-    inventing one is worse than saying so: a task id of ``"None"`` 404s on the
+    inventing one is worse than saying so: a task id of `"None"` 404s on the
     status endpoint and streams forever on the SSE one, and the client cannot
     tell that from a job that failed. Re-launch (nothing is holding the key any
     more) or treat the earlier run as finished.
@@ -92,7 +92,7 @@ class JobContext:
     fence: int
     tenant: str
     key: str | None
-    #: The runner's :class:`~wreath.progress.ProgressRegistry`, or None.
+    #: The runner's `ProgressRegistry`, or None.
     progress: Any = None
 
     @property
@@ -104,8 +104,8 @@ class JobContext:
         """Tell whoever is watching how far along this job is.
 
         A no-op when the runner has no progress registry, so a handler can
-        report unconditionally. Only *progress* -- the runner sets ``done`` and
-        ``failed`` itself, because it is the thing that actually knows whether
+        report unconditionally. Only *progress* -- the runner sets `done` and
+        `failed` itself, because it is the thing that actually knows whether
         the job finished, is about to retry, or was dead-lettered.
         """
         if self.progress is not None:
@@ -114,7 +114,7 @@ class JobContext:
 
 @dataclass(frozen=True, slots=True)
 class TaskHandle:
-    """What a caller gets back from :meth:`JobRunner.launch`.
+    """What a caller gets back from `JobRunner.launch`.
 
     Small on purpose: an id to watch and the state at hand-back time. Everything
     after that comes from the progress stream.
@@ -167,9 +167,9 @@ class _Claimed:
 class JobRunner:
     """A named queue of durable jobs on one application database.
 
-    Obtain via :meth:`wreath.Wreath.jobs`. Register handlers with
-    :meth:`task`, enqueue with :meth:`enqueue`, and schedule recurring work with
-    :meth:`schedule`. The runner is a supervised service — its workers, sweeper,
+    Obtain via `wreath.Wreath.jobs`. Register handlers with
+    `task`, enqueue with `enqueue`, and schedule recurring work with
+    `schedule`. The runner is a supervised service — its workers, sweeper,
     and scheduler run for the process lifetime.
     """
 
@@ -298,7 +298,7 @@ class JobRunner:
         backoff_cap: float = 3600.0,
         backoff_jitter: float = 0.2,
     ) -> Callable[[JobHandler], JobHandler]:
-        """Decorator registering an async ``handler(ctx, *args)`` under ``name``."""
+        """Decorator registering an async `handler(ctx, *args)` under `name`."""
         _validate_identifier(name, "task name")
         if name in self._tasks:
             raise ValueError(f"duplicate task: {name!r}")
@@ -330,10 +330,10 @@ class JobRunner:
         tenant: str = "",
         misfire: str = "skip",
     ) -> None:
-        """Enqueue ``task`` on a cron schedule (UTC). Idempotent across instances.
+        """Enqueue `task` on a cron schedule (UTC). Idempotent across instances.
 
         Every app instance runs the scheduler, but each minute's enqueue carries a
-        deterministic ``key`` so the unique index makes exactly one row win — no
+        deterministic `key` so the unique index makes exactly one row win — no
         leader election needed.
         """
         if misfire != "skip":
@@ -344,18 +344,19 @@ class JobRunner:
         )
 
     def drive(self, walk: Any, *, cron: str | None = None) -> str:
-        """Run a :class:`~wreath.passes.ChunkedPass` on this queue. Returns its task name.
+        """Run a `ChunkedPass` on this queue. Returns its task name.
 
         One registration path rather than a registry the runner has to reconcile
         at startup: this registers the task that runs a shift, arranges for the
         ledger row to be seeded on first contact with the database, adds the
         schedule when one is given, and enqueues the first shift when the runner
         starts. The dependency is visible at the call site because the job runner
-        is literally the thing that drives the walk::
+        is literally the thing that drives the walk:
 
-            jobs.drive(normalize_grades)
-            jobs.drive(purge_replays, cron="*/5 * * * *")
-
+        ```python
+        jobs.drive(normalize_grades)
+        jobs.drive(purge_replays, cron="*/5 * * * *")
+        ```
         **A shift must be shorter than the lease**, and this is where that is
         checked. There is no heartbeat: a handler still running when its lease
         expires is reclaimed by the sweeper, picked up by a second worker, and
@@ -364,7 +365,7 @@ class JobRunner:
         duplicates -- but it must not *rely* on surviving something it can simply
         not do.
 
-        A recurring pass needs ``cron=``: nothing else would start its next
+        A recurring pass needs `cron=`: nothing else would start its next
         cycle, and a pass that quietly stops after one cycle is worse than one
         that refuses to be declared.
         """
@@ -414,15 +415,15 @@ class JobRunner:
         return task
 
     async def _enqueue_next_shift(self, task: str, walk: Any) -> None:
-        """Queue the next shift of ``walk``. Raises if it cannot.
+        """Queue the next shift of `walk`. Raises if it cannot.
 
-        Deliberately *not* suppressed. Called from inside ``run_shift`` this is
+        Deliberately *not* suppressed. Called from inside `run_shift` this is
         the handler's own failure, so letting it propagate hands the problem to
         the retry machinery that already exists — the shift is re-run from
         wherever the ledger says it got to, and the pass carries on. Swallowing
         it instead stalled the pass until the next cron tick, and a
         non-recurring pass has no next tick: it simply stopped, at whatever
-        percentage it had reached, with the ledger still reading ``walking``.
+        percentage it had reached, with the ledger still reading `walking`.
         """
         # A fresh dedup key per shift, bucketed by the minute so a pass that
         # cannot make progress re-enqueues at most once a minute instead of
@@ -462,8 +463,8 @@ class JobRunner:
 
         Best-effort by necessity: if the database is what failed, this cannot
         record that it failed. The counter still moved, and the ledger's
-        ``driven_at`` going stale is itself the signal -- a pass nothing has
-        driven for five minutes reads as ``blocked`` whether or not the reason
+        `driven_at` going stale is itself the signal -- a pass nothing has
+        driven for five minutes reads as `blocked` whether or not the reason
         was written.
         """
         with contextlib.suppress(PostgresError, TimeoutError, OSError):
@@ -487,12 +488,12 @@ class JobRunner:
         tenant: str = "",
         max_attempts: int | None = None,
     ) -> int | None:
-        """Insert a job. Returns its id, or ``None`` if a ``key`` deduplicated it.
+        """Insert a job. Returns its id, or `None` if a `key` deduplicated it.
 
-        Pass ``tx`` (an open ``connection.transaction()``) to enqueue atomically
+        Pass `tx` (an open `connection.transaction()`) to enqueue atomically
         with your business writes — the job becomes visible only if that
-        transaction commits (exactly-once *enqueue*). ``key`` sets an idempotency
-        key: a second enqueue with the same ``(queue, key)`` is dropped.
+        transaction commits (exactly-once *enqueue*). `key` sets an idempotency
+        key: a second enqueue with the same `(queue, key)` is dropped.
         """
         if task not in self._tasks:
             raise KeyError(f"unknown task: {task!r} (register with @runner.task)")
@@ -529,31 +530,32 @@ class JobRunner:
         tenant: str = "",
         max_attempts: int | None = None,
     ) -> TaskHandle:
-        """Enqueue ``task`` and return a handle the client can watch.
+        """Enqueue `task` and return a handle the client can watch.
 
         The long-mutation shape: a request that cannot finish in a request
-        enqueues durable work and hands back an id instead of a timeout::
+        enqueues durable work and hands back an id instead of a timeout:
 
-            @app.post("/herd/imports")
-            async def start_import(request, path: str):
-                return (await jobs.launch("import_herd", path)).as_dict()
+        ```python
+        @app.post("/herd/imports")
+        async def start_import(request, path: str):
+            return (await jobs.launch("import_herd", path)).as_dict()
 
-            @app.get("/herd/imports/{task_id}/stream")
-            async def watch(request):
-                return progress_stream(jobs.progress, request.path_params["task_id"])
-
+        @app.get("/herd/imports/{task_id}/stream")
+        async def watch(request):
+            return progress_stream(jobs.progress, request.path_params["task_id"])
+        ```
         The **job id is the task id**, so there is one identifier rather than
         two to correlate. With a progress registry configured the task is seeded
-        as ``queued`` right here, so a client that starts polling immediately
+        as `queued` right here, so a client that starts polling immediately
         sees a pending task rather than a 404 it will read as a failure.
 
-        A ``key`` that deduplicates does not lose the caller: the surviving row
+        A `key` that deduplicates does not lose the caller: the surviving row
         is looked up and its handle returned, so submitting the same work twice
         yields the same task to watch rather than nothing at all. If that row is
         gone by the time it is read -- purged after completing, in the window
         between the conflict and the lookup -- there is nothing to watch and
-        :class:`JobVanished` is raised rather than a handle whose id is the
-        string ``"None"``.
+        `JobVanished` is raised rather than a handle whose id is the
+        string `"None"`.
         """
         job_id = await self.enqueue(
             task, *args, tx=tx, run_at=run_at, key=key, tenant=tenant,
@@ -673,15 +675,15 @@ class JobRunner:
         await self._doorbell.release()
 
     async def purge(self, *, older_than: float) -> None:
-        """Delete finished rows older than ``older_than`` seconds.
+        """Delete finished rows older than `older_than` seconds.
 
         Nothing calls this for you, for the same reason nothing purges
-        :mod:`wreath.store`: a background sweep duplicates across workers and
+        `wreath.store`: a background sweep duplicates across workers and
         swallows its own failures. Run it from a scheduled job.
 
-        Only ``done`` and ``dead`` rows go: a ``dead`` one has exhausted its
+        Only `done` and `dead` rows go: a `dead` one has exhausted its
         attempts and is a record rather than work, and keeping either forever is
-        what makes `launch(key=...)` eventually raise :class:`JobVanished` --
+        what makes `launch(key=...)` eventually raise `JobVanished` --
         the retention this table always assumed and never had.
         """
         if older_than <= 0:
@@ -699,7 +701,7 @@ class JobRunner:
         """Wake parked workers until the connection's stream ends.
 
         Returning is the ordinary end of a dropped connection, and
-        :class:`~wreath._doorbell.Doorbell` reopens on it.
+        `Doorbell` reopens on it.
 
         **Unlike the bus's pump there is no user code on this path** — a
         notification only sets an event — so there is nothing here that could
@@ -754,7 +756,7 @@ class JobRunner:
                     await self._park(wake)
 
     def _discard_claim(self, job: _Claimed) -> None:
-        """Stop tracking ``job`` as claimed-but-unstarted."""
+        """Stop tracking `job` as claimed-but-unstarted."""
         for index, pending in enumerate(self._claimed_not_started):
             if pending is job:
                 del self._claimed_not_started[index]
@@ -828,7 +830,7 @@ class JobRunner:
     ) -> None:
         """Record a failed attempt, retrying unless the failure cannot succeed.
 
-        ``permanent`` dead-letters on the first attempt. It is for failures that
+        `permanent` dead-letters on the first attempt. It is for failures that
         are structural rather than transient -- a job whose arguments no longer
         bind to its handler will not bind on the fourth try either, and spending
         a retry budget on it only delays the diagnosis and hides the real error
@@ -940,10 +942,10 @@ class JobRunner:
         """Return expired leases to the queue, counting the attempt.
 
         The fence is bumped so the previous owner's completion UPDATE (WHERE
-        fence=old) can no longer land. ``attempts`` is bumped for the same
+        fence=old) can no longer land. `attempts` is bumped for the same
         reason a handler exception bumps it: the job *was* attempted. Reclaiming
         without counting meant the one failure mode that never reaches
-        :meth:`_fail` -- a handler that kills its worker, or a process that dies
+        `_fail` -- a handler that kills its worker, or a process that dies
         mid-run -- was redelivered forever and could never dead-letter, so a
         poison job outlived every other kind.
         """

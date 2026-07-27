@@ -1,6 +1,6 @@
 """Decode-only HTTP/2 frame + HPACK reader for replay.
 
-Transport replay drives the *real* native ``Http2Protocol`` and needs to read the
+Transport replay drives the *real* native `Http2Protocol` and needs to read the
 frames it wrote back so the owned response can be compared across builds. That
 requires decoding HPACK (RFC 7541) and the frame layer (RFC 9113) — but only the
 *decode* direction: replay never encodes HTTP/2. The server owns encoding; this
@@ -57,7 +57,7 @@ class Frame:
 
 
 def parse_frames(data: bytes) -> list[Frame]:
-    """Parse every complete frame in ``data``; a trailing partial frame is left
+    """Parse every complete frame in `data`; a trailing partial frame is left
     out (replay reads a settled buffer, but this stays robust to a torn tail)."""
     frames: list[Frame] = []
     pos = 0

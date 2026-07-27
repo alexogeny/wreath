@@ -2,13 +2,13 @@
 
 The language is deliberately tiny and evaluates no arbitrary Python:
 
-* ``{{ path }}`` — escaped interpolation of a dotted lookup path.
-* ``{% if path %}`` / ``{% else %}`` / ``{% endif %}``.
-* ``{% for name in path %}`` / ``{% endfor %}``.
-* ``{% include "other.html" %}`` — spliced in at compile time.
+* `{{ path }}` — escaped interpolation of a dotted lookup path.
+* `{% if path %}` / `{% else %}` / `{% endif %}`.
+* `{% for name in path %}` / `{% endfor %}`.
+* `{% include "other.html" %}` — spliced in at compile time.
 
 Lookup resolves each dotted segment by subscript first (mapping keys) then by
-attribute. Values are HTML-escaped unless wrapped in :class:`Markup`; plain
+attribute. Values are HTML-escaped unless wrapped in `Markup`; plain
 strings are always untrusted. Parsing and jump resolution happen once, at
 compile time, producing a flat opcode tape that both this reference VM and the
 native engine execute identically.
@@ -139,10 +139,10 @@ def compile_tape(
     resolver: Resolver | None = None,
     _stack: frozenset[str] = frozenset(),
 ) -> tuple[tuple[Any, ...], ...]:
-    """Compile ``source`` into a flat opcode tape.
+    """Compile `source` into a flat opcode tape.
 
-    ``resolver`` maps an include name to its source; ``None`` rejects includes.
-    ``_stack`` guards against include cycles.
+    `resolver` maps an include name to its source; `None` rejects includes.
+    `_stack` guards against include cycles.
     """
     # Instructions are built as mutable lists so jump targets can be backpatched,
     # then frozen into tuples at the end.

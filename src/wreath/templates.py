@@ -1,19 +1,20 @@
 """Wreath's small, safe server-side template system.
 
 Templates compile once (at startup) into a flat opcode tape and render escaped
-HTML by default::
+HTML by default:
 
-    templates = TemplateDirectory("templates")
-    table = templates.compile("table.html")
-    return HTMLResponse(table.render(rows=rows))
-
-The language escapes ``{{ value }}`` unless the value is :class:`Markup`, and
-supports ``{% if %}``/``{% else %}``/``{% endif %}``, ``{% for x in xs %}``/
-``{% endfor %}``, and compile-time ``{% include "other.html" %}``. It evaluates
+```python
+templates = TemplateDirectory("templates")
+table = templates.compile("table.html")
+return HTMLResponse(table.render(rows=rows))
+```
+The language escapes `{{ value }}` unless the value is `Markup`, and
+supports `{% if %}`/`{% else %}`/`{% endif %}`, `{% for x in xs %}`/
+`{% endfor %}`, and compile-time `{% include "other.html" %}`. It evaluates
 no arbitrary Python.
 
 Rendering is the request-time hot path, so it is the native target: the C
-engine in ``_native/templates.c`` executes the same tape and produces
+engine in `_native/templates.c` executes the same tape and produces
 byte-identical UTF-8. Parsing stays in Python.
 """
 
@@ -65,11 +66,11 @@ class Template:
 
     @classmethod
     def from_string(cls, source: str, name: str = "<string>") -> Template:
-        """Compile ``source`` directly. Includes are not resolvable here."""
+        """Compile `source` directly. Includes are not resolvable here."""
         return cls(compile_tape(source, name), name)
 
     def render(self, /, max_output: int = MAX_OUTPUT_BYTES, **context: Any) -> str:
-        """Render to a ``str``. Keyword arguments form the template context."""
+        """Render to a `str`. Keyword arguments form the template context."""
         return self.render_bytes(context, max_output=max_output).decode("utf-8")
 
     def render_bytes(
@@ -84,8 +85,8 @@ class Template:
 class TemplateDirectory:
     """Compiles templates from a filesystem directory, resolving includes.
 
-    Sources are read at compile time; ``compile`` returns a ready
-    :class:`Template`. Nothing touches disk on the render path.
+    Sources are read at compile time; `compile` returns a ready
+    `Template`. Nothing touches disk on the render path.
     """
 
     __slots__ = ("_encoding", "_root_fd", "root")

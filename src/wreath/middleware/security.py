@@ -3,12 +3,13 @@
 Two independent global middlewares. `TrustedHostMiddleware` refuses a request
 whose `Host` is not one this application serves, before routing.
 `SecurityHeadersMiddleware` adds the browser hardening headers to every response
-that does not already declare them::
+that does not already declare them:
 
-    app.add_middleware(TrustedHostMiddleware(["app.example", "*.app.example"]))
-    app.add_middleware(SecurityHeadersMiddleware(hsts_max_age=31_536_000,
-                                                 hsts_include_subdomains=True))
-
+```python
+app.add_middleware(TrustedHostMiddleware(["app.example", "*.app.example"]))
+app.add_middleware(SecurityHeadersMiddleware(hsts_max_age=31_536_000,
+                                             hsts_include_subdomains=True))
+```
 Both read the request scheme and `Host`, so behind a proxy both belong after
 `ProxyHeadersMiddleware`.
 """

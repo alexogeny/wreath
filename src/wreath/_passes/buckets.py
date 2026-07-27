@@ -11,11 +11,11 @@ What does carry over is the index requirement, because the chunk's *predicate*
 is still a range scan, and the half-open rule, because a bucket that both
 contains its end and starts the next one double-counts every boundary row.
 
-The calendar arithmetic is :class:`wreath.temporal.Bucket`'s, deliberately. A
+The calendar arithmetic is `wreath.temporal.Bucket`'s, deliberately. A
 second implementation here would be a second place for the trap the series work
-found the hard way: subtracting two aware datetimes that share a ``tzinfo``
+found the hard way: subtracting two aware datetimes that share a `tzinfo`
 gives the *naive* difference, so "a day" is 24 hours on every day but the two a
-year that a zone changes offset. ``Bucket.end_of`` steps on the local wall clock
+year that a zone changes offset. `Bucket.end_of` steps on the local wall clock
 and converts back, which is the answer, and it is already written.
 """
 
@@ -42,9 +42,9 @@ class BucketRange:
 
 
 def resolve_bucket(step: Any) -> Bucket:
-    """The declared step as a :class:`~wreath.temporal.Bucket`, or a refusal.
+    """The declared step as a `Bucket`, or a refusal.
 
-    Routed through :func:`wreath.temporal.bucket` so the SQL fragments a chunk
+    Routed through `wreath.temporal.bucket` so the SQL fragments a chunk
     interpolates come from that module's table and never from a caller.
     """
     if isinstance(step, Bucket):
@@ -98,15 +98,15 @@ class Buckets:
 
     Args:
         on: the timestamp column that assigns a row to a bucket. A model column
-            or a :class:`Key` for a table the ORM does not own.
-        step: the bucket width -- :data:`wreath.temporal.Day`, or its name.
+            or a `Key` for a table the ORM does not own.
+        step: the bucket width -- `wreath.temporal.Day`, or its name.
         zone: the wall clock the buckets are cut on. **Not** a runtime argument:
             a materialised Auckland day cannot be re-cut into a London day
             afterwards, so it is part of the declaration.
         since: where the first cycle starts. Omit it and the anchor is read from
             the earliest row -- one query per *cycle*, not per chunk.
         per_chunk: how many buckets one chunk covers.
-        within: the chunk's time budget, as for :class:`~wreath.passes.Rows`.
+        within: the chunk's time budget, as for `Rows`.
     """
 
     on: Any
@@ -183,7 +183,7 @@ class Buckets:
         cursor_to: tuple[Any, ...],
         frontier: str | None,
     ) -> str:
-        """``col >= start AND col < end``, half-open, stated once.
+        """`col >= start AND col < end`, half-open, stated once.
 
         Closed at the bottom and open at the top -- the opposite anchoring to a
         keyset chunk, which is open at the bottom so the row it resumed from is
@@ -208,7 +208,7 @@ class Buckets:
         cursor_from: tuple[Any, ...] | None,
         cursor_to: tuple[Any, ...],
     ) -> str:
-        """The statement an operator pastes into ``psql`` to see the real error."""
+        """The statement an operator pastes into `psql` to see the real error."""
         from .driver import literal
 
         column = self.keys[0].name
@@ -227,7 +227,7 @@ class Buckets:
         ceiling: Any,
         frontier_sql: Any,
     ) -> tuple[tuple[Any, ...] | None, tuple[Any, ...]] | None:
-        """The next bucket, or ``None`` when the frontier has been reached.
+        """The next bucket, or `None` when the frontier has been reached.
 
         Computed, never queried: given a boundary, the next one is arithmetic on
         a calendar whether or not a single row falls between them.

@@ -2,35 +2,35 @@
 
 A chunked pass moves through a table by remembering the last key it finished and
 asking for the next few rows *after* it. That is keyset paging, and it is the
-whole reason a pass stays fast at ten million rows: ``LIMIT c OFFSET k`` must
-produce and discard ``k`` rows before it returns any, so a walk of ``N`` rows in
-chunks of ``c`` touches ``N**2 / (2c)`` rows in total, while ``WHERE key > $1
-ORDER BY key LIMIT c`` is an index descent plus ``c`` rows per chunk --
-``(N/c)*log N + N``. At ten million rows in ten-thousand-row chunks that is
+whole reason a pass stays fast at ten million rows: `LIMIT c OFFSET k` must
+produce and discard `k` rows before it returns any, so a walk of `N` rows in
+chunks of `c` touches `N**2 / (2c)` rows in total, while ``WHERE key > $1
+ORDER BY key LIMIT c` is an index descent plus `c`` rows per chunk --
+`(N/c)*log N + N`. At ten million rows in ten-thousand-row chunks that is
 5e12 against 1e7. This is a complexity argument and it needs no benchmark; what
 it does need are two correctness conditions, and they are the refusals below.
 
 **The index must exist.** Without one the database sorts the whole table once
-per chunk, which is ``N/c`` sorts of ``N`` rows -- worse than the ``OFFSET`` this
+per chunk, which is `N/c` sorts of `N` rows -- worse than the `OFFSET` this
 was avoiding. So a key whose leading column has no index is refused rather than
 silently degraded.
 
-**A composite key is one row comparison.** ``(herd_id, id) > ($1, $2)`` is
-answered by a single index scan on ``(herd_id, id)``. The hand-expanded
-``herd_id > $1 OR (herd_id = $1 AND id > $2)`` means the same thing and is
+**A composite key is one row comparison.** `(herd_id, id) > ($1, $2)` is
+answered by a single index scan on `(herd_id, id)`. The hand-expanded
+`herd_id > $1 OR (herd_id = $1 AND id > $2)` means the same thing and is
 planned as a bitmap-or over two scans followed by a sort. So the row-comparison
 form is the only one this module emits. A row comparison also has no
-mixed-direction form, so ``(a ASC, b DESC)`` is refused with that as the reason.
+mixed-direction form, so `(a ASC, b DESC)` is refused with that as the reason.
 
 **The boundary must identify one row.** The cursor stores a key value, so if two
-rows share the value that lands on a chunk boundary then ``>`` skips the
-siblings (silent data loss whose counters still add up) and ``>=`` re-processes
+rows share the value that lands on a chunk boundary then `>` skips the
+siblings (silent data loss whose counters still add up) and `>=` re-processes
 them forever once one value has more rows than the chunk limit. There is no
 third option, so a key that cannot be proven unique is refused, and the message
 names the fix, which is always the same: append the primary key as a tiebreaker.
 
 This module is deliberately free of any pass machinery -- no ledger, no
-transaction, no job runner -- because ``wreath.pagination`` will want exactly
+transaction, no job runner -- because `wreath.pagination` will want exactly
 this when cursor pages land (design 20 §5.6), and it should inherit the
 uniqueness refusal and the row-comparison rule rather than rediscover them.
 """
@@ -59,28 +59,28 @@ _CLOCK_TYPES = frozenset(
 #: SQL type names a cursor does not yet survive.
 #:
 #: The original reason was that nothing could read a decimal back, so a cursor
-#: returned through ``float()``: ``1.0000000000000000001`` and ``...002`` both
-#: decoded to ``1.0``, two adjacent boundaries became one, and ``>`` skipped
+#: returned through `float()`: `1.0000000000000000001` and `...002` both
+#: decoded to `1.0`, two adjacent boundaries became one, and `>` skipped
 #: every row between them. **That reason expired when the numeric codec landed**
-#: -- ``orm.types.BY_OID`` carries one now -- and the ordering property was
-#: swept over the real ledger path (``Decimal`` -> ``str`` -> jsonb ->
-#: ``Decimal``): 403 values, 81,001 ordered pairs, zero value failures and zero
+#: -- `orm.types.BY_OID` carries one now -- and the ordering property was
+#: swept over the real ledger path (`Decimal` -> `str` -> jsonb ->
+#: `Decimal`): 403 values, 81,001 ordered pairs, zero value failures and zero
 #: ordering failures, against 229 value failures and 5 collapsed pairs for the
 #: float path it replaces.
 #:
 #: It stays refused for a different reason, found while measuring that one.
-#: :func:`wreath._passes.progress.position` places a key value on a line for
-#: ``progress=Keyspace()`` and handles ``int`` and ``float`` but not ``Decimal``,
-#: while ``_EXAMPLE`` already maps ``numeric`` to ``0.0``. So a numeric key would
-#: pass ``Keyspace.refuse`` at declaration and then silently measure nothing at
+#: `wreath._passes.progress.position` places a key value on a line for
+#: `progress=Keyspace()` and handles `int` and `float` but not `Decimal`,
+#: while `_EXAMPLE` already maps `numeric` to `0.0`. So a numeric key would
+#: pass `Keyspace.refuse` at declaration and then silently measure nothing at
 #: runtime -- a check with nothing to check, which is worse than the refusal.
 #:
 #: Lifting this needs three coordinated changes, not one: empty this set, route
-#: ``numeric`` to ``Decimal`` in :func:`_decode_one`, and teach ``position`` about
-#: ``Decimal`` *including the non-finites*. PostgreSQL orders ``NaN`` above every
-#: other numeric and ``Decimal("NaN") > x`` **raises** rather than returning
-#: ``False``, so ``float(Decimal("NaN"))`` would hand the percentage arithmetic a
-#: ``nan`` instead of an error. The walk itself is unaffected -- it never orders
+#: `numeric` to `Decimal` in `_decode_one`, and teach `position` about
+#: `Decimal` *including the non-finites*. PostgreSQL orders `NaN` above every
+#: other numeric and `Decimal("NaN") > x` **raises** rather than returning
+#: `False`, so `float(Decimal("NaN"))` would hand the percentage arithmetic a
+#: `nan` instead of an error. The walk itself is unaffected -- it never orders
 #: in Python, and a NaN cursor correctly leaves zero rows remaining -- but the
 #: progress path is, and that is the piece to design rather than bolt on.
 _INEXACT_TYPES = frozenset({"numeric", "decimal"})
@@ -142,10 +142,10 @@ class Key:
 
 
 def key_from_column(expression: Any) -> Key:
-    """Read a :class:`Key` off an ORM column expression, or an ``.asc()``/``.desc()``.
+    """Read a `Key` off an ORM column expression, or an `.asc()`/`.desc()`.
 
     Everything the refusals ask about is already in the model declaration, so a
-    caller writing ``key=Trek.id`` never restates it.
+    caller writing `key=Trek.id` never restates it.
     """
     direction = False
     node = expression
@@ -178,7 +178,7 @@ def _monotone(column: Any) -> bool:
 
 
 def normalise(key: Any) -> tuple[Key, ...]:
-    """Turn whatever a caller passed as ``key=`` into an ordered tuple of keys."""
+    """Turn whatever a caller passed as `key=` into an ordered tuple of keys."""
     items = key if isinstance(key, (tuple, list)) else (key,)
     if not items:
         raise PassDeclarationError("a Rows key needs at least one column")
@@ -231,8 +231,8 @@ def refuse_unmonotone_key(keys: tuple[Key, ...], *, table: str, reason: str | No
     """Refuse a fixed ceiling over a key whose values are not assigned in order.
 
     A ceiling captured at launch is only sound when a row written afterwards
-    cannot land beneath it. With an identity primary key or a ``now()`` default
-    that holds; with ``gen_random_uuid()`` a new row can land anywhere, including
+    cannot land beneath it. With an identity primary key or a `now()` default
+    that holds; with `gen_random_uuid()` a new row can land anywhere, including
     behind the cursor, where the pass will never see it.
 
     *reason* is the escape, and it is a sentence rather than a flag on purpose:
@@ -262,7 +262,7 @@ def refuse_unclocked_key(keys: tuple[Key, ...], *, table: str) -> None:
 
 
 def order_clause(keys: tuple[Key, ...], *, reverse: bool = False) -> str:
-    """``ORDER BY`` for this key, in the one direction it is allowed to have.
+    """`ORDER BY` for this key, in the one direction it is allowed to have.
 
     *reverse* walks the same index from the other end, which is how the last key
     still inside a range is found in one descent.
@@ -273,16 +273,16 @@ def order_clause(keys: tuple[Key, ...], *, reverse: bool = False) -> str:
 
 
 def row_reference(keys: tuple[Key, ...]) -> str:
-    """The key as a row constructor: ``(herd_id, id)``, or ``id`` for one column."""
+    """The key as a row constructor: `(herd_id, id)`, or `id` for one column."""
     if len(keys) == 1:
         return keys[0].name
     return "(" + ", ".join(item.name for item in keys) + ")"
 
 
 def row_comparison(keys: tuple[Key, ...], operator: str, placeholders: list[str]) -> str:
-    """One row comparison against a bound key: ``(a, b) > ($1, $2)``.
+    """One row comparison against a bound key: `(a, b) > ($1, $2)`.
 
-    Never the hand-expanded ``a > $1 OR (a = $1 AND b > $2)``. Both mean the same
+    Never the hand-expanded `a > $1 OR (a = $1 AND b > $2)`. Both mean the same
     thing; only this one is reliably a single index scan.
     """
     if len(placeholders) != len(keys):
@@ -303,7 +303,7 @@ def upto_operator(keys: tuple[Key, ...]) -> str:
 
 
 def encode_cursor(keys: tuple[Key, ...], values: tuple[Any, ...]) -> list[Any]:
-    """A JSON-safe encoding of one key value, for the ledger's ``jsonb`` cursor."""
+    """A JSON-safe encoding of one key value, for the ledger's `jsonb` cursor."""
     if len(values) != len(keys):
         raise PassDeclarationError("a cursor carries one value per key column")
     return [_encode_one(value) for value in values]
@@ -324,22 +324,22 @@ def _encode_one(value: Any) -> Any:
 def decode_cursor(keys: tuple[Key, ...], encoded: Any) -> tuple[Any, ...] | None:
     """Read a ledger cursor back into values the driver can bind.
 
-    The placeholders carry no ``::cast``, so the value handed to the driver has
+    The placeholders carry no `::cast`, so the value handed to the driver has
     to be the right Python type; the key's declared SQL type is what says which.
 
     **A timestamp comes back on a fixed offset, not the zone it went in on.**
-    ``isoformat`` writes ``+13:00``, not ``Pacific/Auckland``, so the instant is
-    exact and the ordering is exact but the ``tzinfo`` object is not the original.
+    `isoformat` writes `+13:00`, not `Pacific/Auckland`, so the instant is
+    exact and the ordering is exact but the `tzinfo` object is not the original.
     Nothing here depends on it: PostgreSQL compares absolute instants, the
     compare-and-swap compares the encoded JSON rather than the decoded value, and
-    :meth:`Buckets.advance` re-anchors on its own declared zone before doing any
-    calendar arithmetic. Do not start depending on ``tzinfo`` identity, and do not
+    `Buckets.advance` re-anchors on its own declared zone before doing any
+    calendar arithmetic. Do not start depending on `tzinfo` identity, and do not
     "fix" this by dropping the offset -- that would lose the instant.
 
     One consequence worth knowing: inside an ambiguous local hour the decoded
-    value compares *unequal* to the original under ``==`` while naming the same
-    instant, because PEP 495 ignores ``fold`` in interzone comparison. Compare
-    instants (``astimezone(utc)``), not datetimes, if you ever need to.
+    value compares *unequal* to the original under `==` while naming the same
+    instant, because PEP 495 ignores `fold` in interzone comparison. Compare
+    instants (`astimezone(utc)`), not datetimes, if you ever need to.
     """
     if encoded is None:
         return None

@@ -26,7 +26,7 @@ from dataclasses import dataclass
 class DutyCycle:
     """Let the pass have *fraction* of wall time, and sleep for the rest.
 
-    After a chunk that took ``d`` seconds, sleep ``d * (1/fraction - 1)``. At the
+    After a chunk that took `d` seconds, sleep `d * (1/fraction - 1)`. At the
     default 0.25 that is three seconds of rest per second of work.
 
     It needs no measurement to justify, which is the point of choosing it first:
