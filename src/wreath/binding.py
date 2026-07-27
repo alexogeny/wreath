@@ -53,6 +53,7 @@ import asyncio
 import dataclasses
 import datetime as _datetime
 import inspect
+import sys as _sys
 import types
 import typing
 from collections.abc import Awaitable, Callable, Mapping
@@ -332,7 +333,8 @@ _DATACLASS_SPECS: dict[type, tuple[tuple[str, Any, bool], ...]] = {}
 def _dataclass_spec(cls: type) -> tuple[tuple[str, Any, bool], ...]:
     spec = _DATACLASS_SPECS.get(cls)
     if spec is None:
-        hints = typing.get_type_hints(cls)
+        label = f"body model {getattr(cls, '__qualname__', cls)!s}"
+        hints = _resolve_hints(cls, label, extras=False)
         spec = tuple(
             (
                 field.name,
@@ -1102,9 +1104,12 @@ def _form_model_fields(annotation: Any) -> tuple[tuple[str, Any, bool], ...]:
     """`(field_name, python_type, required)` for each scalar field of a
     dataclass or ORM model bound from multipart form fields. File parts are not
     model fields — bind an upload with a separate `File()` parameter."""
+    label = f"form model {getattr(annotation, '__qualname__', annotation)!s}"
     try:
-        hints = typing.get_type_hints(annotation)
-    except (TypeError, ValueError):
+        hints = _resolve_hints(annotation, label, extras=False)
+    except (TypeError, ValueError) as error:
+        if error.__cause__ is not None:  # an unresolvable name, diagnosed
+            raise
         hints = {}
     if _is_model(annotation):
         model_fields: list[tuple[str, Any, bool]] = []
@@ -1267,6 +1272,50 @@ class BindingSpec:
     form_model: tuple[str, Any] | None = None
 
 
+def _blame_unresolvable(obj: Any, label: str, error: NameError) -> str:
+    """Name the parameter whose annotation could not be resolved.
+
+    `get_type_hints` evaluates every annotation together and reports only the
+    first name that failed, so its `NameError` says nothing about *which*
+    parameter carried it. Resolving each annotation on its own attributes the
+    failure, and costs nothing on the path that matters: this runs only after
+    the whole-signature attempt has already raised.
+    """
+    globalns = getattr(_sys.modules.get(getattr(obj, "__module__", ""), None), "__dict__", {})
+    for name, annotation in getattr(obj, "__annotations__", {}).items():
+        probe = types.SimpleNamespace(__annotations__={name: annotation})
+        try:
+            typing.get_type_hints(probe, globalns, None, include_extras=True)
+        except NameError:
+            return f"{label} annotates {name!r} with an unresolvable name"
+    # The whole-signature call failed but no single annotation reproduces it --
+    # a forward reference that only resolves in combination. Blame the callable
+    # rather than guessing at a parameter.
+    return f"{label} carries an annotation with an unresolvable name"
+
+
+def _resolve_hints(obj: Any, label: str, *, extras: bool = True) -> dict[str, Any]:
+    """Resolve `obj`'s annotations, or refuse naming what could not be resolved.
+
+    Annotations are evaluated once, when the route table compiles, in the module
+    the callable was defined in. A name visible only inside a function body, or
+    imported under `if TYPE_CHECKING:`, is not in that namespace -- and the bare
+    `NameError` names neither the callable nor the parameter, so a startup
+    failure arrives with nothing to act on. Refused here with all three facts,
+    per `docs/decisions/0019-refuse-rather-than-half-wire.md`.
+    """
+    try:
+        return typing.get_type_hints(obj, include_extras=extras)
+    except NameError as error:
+        raise TypeError(
+            f"{_blame_unresolvable(obj, label, error)}: {error}. Annotations are "
+            "resolved at route-compile time in the module the callable was "
+            "defined in, so a name local to a function or imported only under "
+            "`if TYPE_CHECKING:` is not visible. Import it at module scope, or "
+            "annotate with a type that is."
+        ) from error
+
+
 def inspect_handler(handler: Handler, path: str) -> BindingSpec | None:
     """Read a handler signature once and resolve every parameter to a source.
 
@@ -1299,9 +1348,15 @@ def inspect_handler(handler: Handler, path: str) -> BindingSpec | None:
     parameters = tuple(signature.parameters.values())
     if len(parameters) <= 1:
         return None
+    label = f"handler {getattr(handler, '__qualname__', handler)!s}"
     try:
-        hints = typing.get_type_hints(handler, include_extras=True)
-    except (TypeError, ValueError):
+        hints = _resolve_hints(handler, label)
+    except (TypeError, ValueError) as error:
+        # A refusal from `_resolve_hints` carries the diagnosis and must reach
+        # the caller; the bare TypeError/ValueError `get_type_hints` raises for
+        # an uninspectable object still means "not a bindable signature".
+        if error.__cause__ is not None:
+            raise
         return None
 
     placeholders = _path_placeholders(path)
@@ -1445,6 +1500,14 @@ def inspect_handler(handler: Handler, path: str) -> BindingSpec | None:
         raise TypeError(
             "a handler cannot combine a form-model with individual Form() fields"
         )
+    # Resolve the body and form models here rather than on the first request
+    # that carries one. Both cache, so this is the same work moved earlier --
+    # and an unresolvable annotation inside a model is a declaration error,
+    # which belongs at compile time and not in a 500 the caller cannot place.
+    if body_spec is not None and dataclasses.is_dataclass(body_spec[1]):
+        _dataclass_spec(body_spec[1])
+    if form_model_spec is not None:
+        _form_model_fields(form_model_spec[1])
     return BindingSpec(
         tuple(path_specs),
         tuple(query_specs),
@@ -1585,11 +1648,30 @@ def compile_binder(
     )
 
     def _extract_scalars(request: Request, kwargs: dict[str, Any]) -> None:
-        """Path, query, header, and cookie parameters. Synchronous by nature."""
+        """Path, query, header, and cookie parameters. Synchronous by nature.
+
+        **Fail-complete, like the body validator.** `?limit=nope&offset=nope`
+        reports both, not the first -- a caller fixing a form one field per
+        round trip was the only thing the old fail-fast shape bought, and the
+        `errors` list has always been able to carry more than one.
+
+        It costs nothing on the path that matters. `errors` is allocated only
+        once something has already failed, and under CPython's zero-cost
+        exceptions an untaken `try` is free -- so a request that binds cleanly
+        does exactly the work it did before. The extra comparisons happen only
+        on a request that was going to be a 422 anyway. Every conversion here is
+        pure (parse a string, compare two numbers), so collecting them all has
+        no side effect and no I/O; that is what makes continuing safe rather
+        than merely cheap.
+        """
+        errors: list[dict[str, Any]] | None = None
         for name, alias, annotation in path_specs:
-            kwargs[name] = _convert_scalar(
-                annotation, request.path_params[alias], ("path", alias)
-            )
+            try:
+                kwargs[name] = _convert_scalar(
+                    annotation, request.path_params[alias], ("path", alias)
+                )
+            except ValidationError as invalid:
+                errors = invalid.errors if errors is None else [*errors, *invalid.errors]
         if query_specs:
             # `request.query_string`, not `request.scope[...]`: on the native
             # server the scope is a lazily materialized dict over
@@ -1603,40 +1685,56 @@ def compile_binder(
                 raw = values.get(alias)
                 if raw is None:
                     if default is inspect.Parameter.empty:
-                        raise ValidationError(
-                            [_error(("query", alias), "parameter is required", "missing")]
-                        )
+                        error = _error(("query", alias), "parameter is required", "missing")
+                        errors = [error] if errors is None else [*errors, error]
+                        continue
                     kwargs[name] = default
                 else:
-                    converted = _convert_scalar(annotation, raw, ("query", alias))
-                    constraint = query_constraints.get(name)
-                    if constraint is not None:
-                        converted = _apply_constraint(
-                            converted, constraint, ("query", alias)
+                    try:
+                        converted = _convert_scalar(annotation, raw, ("query", alias))
+                        constraint = query_constraints.get(name)
+                        if constraint is not None:
+                            converted = _apply_constraint(
+                                converted, constraint, ("query", alias)
+                            )
+                    except ValidationError as invalid:
+                        errors = (
+                            invalid.errors if errors is None else [*errors, *invalid.errors]
                         )
+                        continue
                     kwargs[name] = converted
         for name, alias, annotation, default in header_specs:
             raw = request.header(alias)
             if raw is None:
                 if default is inspect.Parameter.empty:
-                    raise ValidationError(
-                        [_error(("header", alias), "parameter is required", "missing")]
-                    )
+                    error = _error(("header", alias), "parameter is required", "missing")
+                    errors = [error] if errors is None else [*errors, error]
+                    continue
                 kwargs[name] = default
             else:
-                kwargs[name] = _convert_scalar(annotation, raw, ("header", alias))
+                try:
+                    kwargs[name] = _convert_scalar(annotation, raw, ("header", alias))
+                except ValidationError as invalid:
+                    errors = invalid.errors if errors is None else [*errors, *invalid.errors]
         if cookie_specs:
             cookies = request.cookies
             for name, alias, annotation, default in cookie_specs:
                 raw = cookies.get(alias)
                 if raw is None:
                     if default is inspect.Parameter.empty:
-                        raise ValidationError(
-                            [_error(("cookie", alias), "parameter is required", "missing")]
-                        )
+                        error = _error(("cookie", alias), "parameter is required", "missing")
+                        errors = [error] if errors is None else [*errors, error]
+                        continue
                     kwargs[name] = default
                 else:
-                    kwargs[name] = _convert_scalar(annotation, raw, ("cookie", alias))
+                    try:
+                        kwargs[name] = _convert_scalar(annotation, raw, ("cookie", alias))
+                    except ValidationError as invalid:
+                        errors = (
+                            invalid.errors if errors is None else [*errors, *invalid.errors]
+                        )
+        if errors is not None:
+            raise ValidationError(errors)
 
     async def _decode_body(request: Request, kwargs: dict[str, Any]) -> None:
         """Multipart, form-model, and JSON body parameters."""

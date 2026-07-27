@@ -11,12 +11,20 @@ the declaration is *for* — the dense axis, the per-measure fill, the reader's
 own calendar — and would fail if the framework quietly stopped providing it
 while still returning a plausible-looking chart.
 
-**No sealing here, and that is not an omission.** ``camera_trap.views`` says why:
-the settled-bucket write binds a Python ``dict`` into a ``jsonb`` parameter and
-the driver's type inference has no ``dict`` case, so the first bucket that seals
-raises. ``test_sealing_is_blocked_on_a_driver_defect`` below pins that, so the
-day it is fixed this file goes red and somebody comes back and finishes the
-story rather than discovering the gap from the docs.
+**Sealing is not exercised here, and that is a boundary rather than a gap.**
+Sealing works -- `tests/postgres/test_series_integration.py::TestSealingPersists`
+drives a bucket through settling, reading back, and a correction against a real
+server. What these tests own is the *application's* two views, which declare no
+seal, so a seal assertion here would be testing the framework through the
+example instead of testing the example.
+
+This file briefly carried a pin asserting sealing was broken. It was written
+while the defect was live and left behind after a concurrent fix landed, and it
+had been aimed at the wrong subject anyway: it asserted the *driver* refuses a
+mapping, which is permanently true and always will be, because the fix converts
+the mapping to a JSON string before binding rather than teaching the driver to
+bind mappings. It would have passed forever while describing something that no
+longer existed. See `docs/decisions/0024-*`.
 """
 
 from __future__ import annotations
@@ -254,26 +262,102 @@ async def test_the_mix_and_the_series_agree_on_the_total(client) -> None:
 
 
 @skip_without_database
-async def test_sealing_is_blocked_on_a_driver_defect() -> None:
-    """Pins the defect ``camera_trap.views`` documents, so the fix is noticed.
+async def test_a_card_pulled_late_records_a_correction() -> None:
+    """The late-SD-card story, on the example's own schema.
 
-    ``insert_settled`` binds the measures as a Python ``dict`` into a ``jsonb``
-    parameter. The driver infers a parameter's type from the value and has no
-    ``dict`` case, so the first bucket that seals raises on the *write* — which
-    means no sealed series has ever stored a bucket against a real PostgreSQL.
+    A card collected a year after its photos were taken carries sightings for a
+    day that sealed long ago. The settled count is not rewritten -- the
+    difference is recorded beside it and folded in on read, so late data reads
+    as late data arriving rather than as a number that quietly changed.
 
-    This asserts the defect rather than the fix. When the driver learns to bind
-    a mapping, this test fails, and that failure is the reminder to delete it and
-    write the late-data story the design asks for.
+    Driven through ``camera_trap.views.sealed_activity`` rather than a bare
+    ``Series``, so this asserts the declaration the docs describe rather than a
+    reconstruction of it. The framework-level round trip -- that a settled bucket
+    survives storage at all -- is proved in
+    ``tests/postgres/test_series_integration.py``.
     """
-    from wreath._pure.postgres import _infer_oid
+    from _camera_trap import build_schema, drop_schema
+    from camera_trap.models import MODELS, SCHEMA
+    from camera_trap.views import sealed_activity
 
-    with pytest.raises(TypeError, match="unsupported PostgreSQL value type: dict"):
-        _infer_oid({"sightings": 3})
+    from wreath._series.settle import schema_sql
+    from wreath.orm.registry import Registry
+    from wreath.orm.session import Session
+    from wreath.postgres import Database, connect
+    from wreath.series import Range
+    from wreath.temporal import zone as tz
 
-    # Not a quirk of one helper: every settled write binds a mapping the same
-    # way, so the whole persistence half of sealing is behind this.
-    from wreath._series import settle
+    connection = await connect(_DSN)
+    try:
+        await build_schema(connection, seed_rows=SAMPLE)
+        # The settled tables are wreath's own furniture and are deliberately
+        # absent from the example's migration artifact, so the application
+        # applies them itself. `execute` prepares, and a prepared statement
+        # cannot carry several commands, so they go one at a time.
+        for part in schema_sql().split(";\n"):
+            if part.strip():
+                await connection.execute(part.strip())
+        station = await connection.fetchval(
+            f'SELECT station_id FROM "{SCHEMA}"."sightings" '
+            "GROUP BY station_id ORDER BY count(*) DESC LIMIT 1"
+        )
+    finally:
+        await connection.close()
 
-    for builder in (settle.insert_settled, settle.replace_settled):
-        assert "$4" in builder(), "the jsonb parameter moved; re-check this pin"
+    database = Database("main", _DSN, pools={"write": {"min_size": 1, "max_size": 2}})
+    await database.start()
+    try:
+        session = Session(
+            Registry(database, list(MODELS), validate_schema="off"), "write"
+        )
+        view = sealed_activity(ZONE)
+
+        # A local day well inside the seed, and a `now` a year later so the
+        # fortnight of lateness has long since elapsed.
+        day = datetime.datetime(2025, 6, 2, tzinfo=tz(ZONE))
+        window = Range(day, day + datetime.timedelta(days=1))
+        now = datetime.datetime(2026, 6, 2, tzinfo=datetime.UTC)
+
+        first = await view.run(session, range=window, now=now, station=station)
+        settled = first.series[0].values[0]
+        assert first.state is not None and first.state.settled, (
+            "a day a year old must be sealed at a fortnight's lateness"
+        )
+
+        # The card comes out of the camera a year late, carrying that day.
+        connection = await database.acquire("write")
+        try:
+            await connection.execute(
+                f'INSERT INTO "{SCHEMA}"."sightings" '
+                "(station_id, camera_id, species_id, captured_at, uploaded_at, "
+                " confidence, image_key, review_state, tags) "
+                "SELECT station_id, camera_id, species_id, captured_at, now(), "
+                " confidence, image_key || '-late', review_state, tags "
+                f'FROM "{SCHEMA}"."sightings" '
+                "WHERE station_id = $1 AND captured_at >= $2 AND captured_at < $3 "
+                "LIMIT 1",
+                station,
+                window.start,
+                window.end,
+            )
+        finally:
+            await database.release("write", connection)
+
+        moved = await view.reconcile(session, range=window, now=now, station=station)
+        assert moved, "reconcile did not notice the late card"
+
+        after = await view.run(session, range=window, now=now, station=station)
+        assert after.series[0].values[0] == settled + 1, (
+            "the correction did not fold in on read"
+        )
+        assert after.state.corrections, (
+            "the envelope must say which bucket carries a correction, or late "
+            "data is indistinguishable from a number that changed on its own"
+        )
+    finally:
+        await database.stop()
+        connection = await connect(_DSN)
+        try:
+            await drop_schema(connection)
+        finally:
+            await connection.close()

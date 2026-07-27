@@ -89,7 +89,14 @@ class LoadPlan:
     selectin: tuple[SelectinStep, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
+#: Not `frozen`. A frozen dataclass builds every field through
+#: `object.__setattr__`, and at eight fields that cost 0.65us of an 8.7us ORM
+#: read -- the single largest item inside `compile_select`. Nothing hashes a
+#: `CompiledQuery`, stores one, or compares two: `compile_select` builds it and
+#: the session reads it within the same call. `slots=True` still refuses a
+#: field nobody declared, which is the mistake that actually happens here;
+#: freezing was buying the rest at request-path prices.
+@dataclass(slots=True)
 class CompiledQuery:
     sql: str
     bind_values: tuple[Any, ...]

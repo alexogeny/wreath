@@ -50,6 +50,12 @@ class Select:
 
     @classmethod
     def build(cls, model: type, fields: tuple[Any, ...]) -> Select:
+        # `Model.select()` with no arguments -- every column -- is the common
+        # case and the one on the request path. Guarding it skips building and
+        # draining a generator whose only job would be to produce the empty
+        # tuple the caller already has.
+        if not fields:
+            return cls(model, (), (), (), (), None, None, False)
         projection = tuple(_check_field(model, item) for item in fields)
         return cls(model, projection, (), (), (), None, None, False)
 

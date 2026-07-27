@@ -13,21 +13,43 @@ envelope's rules; these prove the things only a real ``date_trunc`` and a real
 * **The spine steps a calendar day, not 86400 seconds.** This is the DST bug the
   whole ordering in the design exists to prevent, and it manifests twice a year,
   in one bucket, in a way nobody traces back to the chart.
+* **A sealed bucket survives the round trip to storage.** `TestSealingPersists`
+  drives a declaration through `run` and `reconcile` against the server. Until it
+  existed, two files both *looked* like sealing coverage and the persistence path
+  fell between them: `tests/series/test_sealing.py` proves the arithmetic against
+  a fake, and the check above proves the *DDL applies* -- so a settled write the
+  driver refused outright passed every test in the repository, for as long as
+  sealing had existed. Anything that changes how a measure is bound belongs here
+  rather than in the fake suite, because the fake is the thing that failed to
+  notice.
 
-Both are asserted against a zone with a large offset and a southern-hemisphere
-transition (Auckland), because a bug that cancels out in UTC or in Europe shows
-up there.
+The first two are asserted against a zone with a large offset and a
+southern-hemisphere transition (Auckland), because a bug that cancels out in UTC
+or in Europe shows up there.
 """
 
 from __future__ import annotations
 
 import datetime
+import json
 import os
 
 import pytest
 
-from wreath._series.settle import schema_sql, watermark
+from wreath._series.settle import (
+    BUCKET_TABLE,
+    CORRECTION_TABLE,
+    SCHEMA,
+    schema_sql,
+    watermark,
+)
+from wreath.orm import Mapped, Model, column
+from wreath.orm.registry import Registry
+from wreath.orm.session import Session
+from wreath.orm.types import Float64, Int64, Text, TimestampTz
 from wreath.postgres import Database
+from wreath.queries import Param
+from wreath.series import Range, Series, count, sum_
 from wreath.temporal import Day, Hour, Instant, Month, Week, from_wall_clock, zone
 
 pytestmark = pytest.mark.skipif(
@@ -468,3 +490,241 @@ async def _fetch(database, sql: str, *args):
         return await connection.fetch(sql, *args)
     finally:
         await database.release("read", connection)
+
+
+# -- sealing, end to end against the server -----------------------------------
+
+#: Each xdist worker owns a source schema, so the rows one test aggregates are
+#: never another's. The settled tables cannot be separated the same way --
+#: `_series.settle` hard-codes the `wreath` schema and nothing threads an
+#: override through `run` -- so isolation there comes from `params` instead, via
+#: a `Param` bound to the worker name. That is `params`' actual job: one settled
+#: value per declaration, per set of bound parameters, per bucket.
+WORKER = os.environ.get("PYTEST_XDIST_WORKER", "solo")
+SEAL_SCHEMA = f"wreath_seal_{WORKER}"
+
+
+class SealTrek(Model, table="treks", schema=SEAL_SCHEMA):
+    """A minimal source table: one timestamp to bucket by, one number to sum."""
+
+    id: Mapped[int] = column(Int64, primary_key=True)
+    grade: Mapped[str] = column(Text)
+    distance_km: Mapped[float] = column(Float64)
+    started_at: Mapped[object] = column(TimestampTz)
+
+
+def sealed_view() -> Series:
+    """One declaration, shared by every test here so they agree on `view_key`.
+
+    Deliberately no `avg()`: `avg` over an integer column is `numeric`, which
+    the driver decodes to `Decimal`, which `json.dumps` cannot serialise -- so a
+    settled average would fail on the *write* for a reason that has nothing to do
+    with sealing. That is a real and separate defect; `count` and `sum` keep this
+    test pointed at the thing it is here to prove.
+    """
+    return (
+        Series(SealTrek, at=SealTrek.started_at, bucket=Day, stored_in=zone("UTC"))
+        .where(SealTrek.grade == Param("grade"))
+        .measure(treks=count(), distance=sum_(SealTrek.distance_km))
+        .seal(after="2h")
+    )
+
+
+#: The bucket every test settles, and a `now` well past its watermark.
+SEAL_DAY = datetime.datetime(2026, 3, 1, tzinfo=datetime.UTC)
+SEAL_RANGE = Range(SEAL_DAY, datetime.datetime(2026, 3, 2, tzinfo=datetime.UTC))
+WELL_AFTER = datetime.datetime(2026, 3, 4, tzinfo=datetime.UTC)
+
+
+async def _execute(database, sql: str, *args) -> None:
+    connection = await database.acquire("write")
+    try:
+        await connection.execute(sql, *args)
+    finally:
+        await database.release("write", connection)
+
+
+async def _settled_rows(database) -> list:
+    return await _fetch(
+        database,
+        f'SELECT bucket, measures FROM "{SCHEMA}"."{BUCKET_TABLE}" '
+        "WHERE params = $1 ORDER BY bucket",
+        _params_key(),
+    )
+
+
+async def _correction_rows(database) -> list:
+    return await _fetch(
+        database,
+        f'SELECT bucket, delta FROM "{SCHEMA}"."{CORRECTION_TABLE}" '
+        "WHERE params = $1 ORDER BY bucket",
+        _params_key(),
+    )
+
+
+def _params_key() -> str:
+    """The `params` column this worker's rows are filed under.
+
+    Derived through the shipped helper rather than restated, so a change to how
+    parameters are keyed moves the assertions with it instead of leaving them
+    reading a column nothing writes.
+    """
+    from wreath._series.settle import params_key
+
+    return params_key({"grade": WORKER})
+
+
+@pytest.fixture
+async def sealing(database):
+    """A source table for this worker, the settled tables, and a clean slate.
+
+    The settled tables are created under an advisory lock: `CREATE SCHEMA IF NOT
+    EXISTS` is not atomic against a concurrent creator, and PostgreSQL reports
+    the race as a `pg_namespace_nspname_index` unique violation, which reads like
+    anything except a test-isolation bug.
+    """
+    await _execute(database, f'DROP SCHEMA IF EXISTS "{SEAL_SCHEMA}" CASCADE')
+    await _execute(database, f'CREATE SCHEMA "{SEAL_SCHEMA}"')
+    await _execute(
+        database,
+        f'CREATE TABLE "{SEAL_SCHEMA}"."treks" ('
+        "  id bigint PRIMARY KEY,"
+        "  grade text NOT NULL,"
+        "  distance_km double precision NOT NULL,"
+        "  started_at timestamptz NOT NULL)",
+    )
+
+    connection = await database.acquire("write")
+    try:
+        await connection.execute("SELECT pg_advisory_lock(8_675_309)")
+        try:
+            for part in schema_sql().split(";\n"):
+                if part.strip():
+                    await connection.execute(part.strip())
+        finally:
+            await connection.execute("SELECT pg_advisory_unlock(8_675_309)")
+    finally:
+        await database.release("write", connection)
+
+    # A killed run leaves settled rows behind, and a settled row is exactly the
+    # thing these tests are trying to observe appearing.
+    for table in (BUCKET_TABLE, CORRECTION_TABLE):
+        await _execute(
+            database,
+            f'DELETE FROM "{SCHEMA}"."{table}" WHERE params = $1',
+            _params_key(),
+        )
+
+    registry = Registry(database, [SealTrek], validate_schema="off")
+    yield database, Session(registry, "write")
+
+    await _execute(database, f'DROP SCHEMA IF EXISTS "{SEAL_SCHEMA}" CASCADE')
+    for table in (BUCKET_TABLE, CORRECTION_TABLE):
+        await _execute(
+            database,
+            f'DELETE FROM "{SCHEMA}"."{table}" WHERE params = $1',
+            _params_key(),
+        )
+
+
+async def _add_treks(database, *rows: tuple[int, float, int]) -> None:
+    """Insert `(id, distance_km, hour)` treks into this worker's source table."""
+    for identifier, distance, hour in rows:
+        await _execute(
+            database,
+            f'INSERT INTO "{SEAL_SCHEMA}"."treks" '
+            "(id, grade, distance_km, started_at) VALUES ($1, $2, $3, $4)",
+            identifier,
+            WORKER,
+            distance,
+            SEAL_DAY.replace(hour=hour),
+        )
+
+
+class TestSealingPersists:
+    """A sealed bucket is written, read back, and corrected -- on the server.
+
+    Every assertion here is about the *round trip*. The arithmetic these
+    numbers come from is already proved against a fake in
+    `tests/series/test_sealing.py`; what could not be proved there is that the
+    value survives being stored, because a fake accepts a shape the driver
+    refuses.
+    """
+
+    async def test_a_sealed_bucket_is_stored(self, sealing):
+        """The write the whole persistence half of sealing depends on."""
+        database, session = sealing
+        await _add_treks(database, (1, 4.0, 9), (2, 6.0, 11))
+
+        result = await sealed_view().run(
+            session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
+        )
+
+        assert result.series[0].values == (2,), "two treks in the sealed day"
+        assert result.state is not None and result.state.settled == (SEAL_DAY,)
+
+        stored = await _settled_rows(database)
+        assert len(stored) == 1, "the sealed bucket reached the table"
+        bucket, measures = stored[0]
+        assert bucket == SEAL_DAY
+        assert json.loads(measures) == {"treks": 2, "distance": 10.0}
+
+    async def test_the_stored_value_is_read_without_the_source_rows(self, sealing):
+        """Proof it came from storage, not from recomputation.
+
+        Deleting the source rows between the two reads is a stronger claim than
+        watching which statements ran: if the second read still answers 2, the
+        only place that number can have come from is the settled table.
+        """
+        database, session = sealing
+        await _add_treks(database, (1, 4.0, 9), (2, 6.0, 11))
+        await sealed_view().run(
+            session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
+        )
+
+        await _execute(database, f'DELETE FROM "{SEAL_SCHEMA}"."treks"')
+
+        result = await sealed_view().run(
+            session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
+        )
+        assert result.series[0].values == (2,), (
+            "a settled bucket must not need the rows it was computed from"
+        )
+
+    async def test_a_card_pulled_late_becomes_a_correction(self, sealing):
+        """The late-data story, end to end.
+
+        A card is pulled weeks after its photos were taken. Its sightings belong
+        to a day that sealed long ago, so the settled value is not rewritten --
+        the difference is recorded beside it and folded in on read, and the
+        envelope says which bucket carries one.
+        """
+        database, session = sealing
+        await _add_treks(database, (1, 4.0, 9), (2, 6.0, 11))
+        await sealed_view().run(
+            session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
+        )
+
+        # The card comes out of the camera in April, carrying March's rows.
+        await _add_treks(database, (3, 5.0, 14))
+        moved = await sealed_view().reconcile(
+            session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
+        )
+        assert moved == (SEAL_DAY,), "reconcile names the bucket it corrected"
+
+        corrections = await _correction_rows(database)
+        assert len(corrections) == 1
+        assert json.loads(corrections[0][1]) == {"treks": 1, "distance": 5.0}
+
+        settled = await _settled_rows(database)
+        assert json.loads(settled[0][1]) == {"treks": 2, "distance": 10.0}, (
+            "the settled value stays immutable; the delta lives beside it"
+        )
+
+        result = await sealed_view().run(
+            session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
+        )
+        assert result.series[0].values == (3,), "the correction folds in on read"
+        assert result.state.corrections == (SEAL_DAY,), (
+            "late data looks like late data arriving, not like a discrepancy"
+        )

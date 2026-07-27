@@ -16,26 +16,39 @@ reserves would be comparing different wall clocks without being told. So the
 handler passes `zone=reserve.timezone` and the framework cuts the days in the
 reader's own calendar.
 
-**What is deliberately not here: `seal()`.** The design for this stage is the
-late-SD-card story — a card collected on the 20th carries images from the 1st, so
-a bucket that looked settled acquires rows weeks later, and sealing plus
-corrections is how that is supposed to be reported rather than discovered in a
-spreadsheet. That story cannot be told against a real PostgreSQL today:
-`wreath._series.settle.insert_settled` binds the measures as a Python `dict` into
-a `jsonb` parameter, and the driver's parameter-type inference has no `dict`
-case, so the first bucket that seals raises
-``TypeError: unsupported PostgreSQL value type: dict`` on the write. The example
-does not paper over that with a smaller claim — the declarations below are honest
-about computing every read, and the sealing story lands when the write path does.
+**The late-SD-card story, and why sealing takes the zone into the declaration.**
+A card collected on the 20th carries images from the 1st, so a bucket that looked
+finished acquires rows weeks later. `sealed_activity` below is how that is
+*reported* rather than discovered in a spreadsheet: past the lateness allowance a
+day stops being recomputed and becomes a stored answer, and a card arriving after
+that records a correction beside the settled value instead of rewriting it.
+
+`sealed_activity` is a function where `station_activity` is a constant, and that
+is the design showing through rather than an inconsistency. An open view takes
+its zone per request, because a day is only a day once you say whose. A sealed
+one cannot: a materialised Nairobi day cannot be re-cut into an Adelaide day
+afterwards, so the zone a bucket was settled in is part of what that bucket *is*.
+The zone therefore moves into the declaration, and a deployment spanning
+timezones declares one sealed view per zone. That costs nothing — the stored zone
+is part of the view's identity, so the two sets of rows cannot collide — but it
+has to be a choice the application makes rather than a default it inherits.
 """
 
 from __future__ import annotations
 
 from wreath.queries import Param
 from wreath.series import Aggregate, Series, avg, count
-from wreath.temporal import Day
+from wreath.temporal import Day, zone
 
 from .models import Sighting
+
+#: How long after a day ends its count can still change.
+#:
+#: Fourteen days because that is roughly how often somebody walks out to a
+#: camera. It is a claim about *this* network's field logistics, not a framework
+#: default, which is why it is declared here and not inherited: a reserve that
+#: services its cameras weekly would seal sooner and see corrections less often.
+CARD_COLLECTION_LATENESS = "14d"
 
 #: Sightings per day at one station, with the mean identification confidence
 #: beside it.
@@ -73,3 +86,40 @@ station_species = (
     .measure(sightings=count())
     .by(Sighting.species_id)
 )
+
+
+def sealed_activity(timezone: str) -> Series:
+    """`station_activity`, sealed in one reserve's calendar.
+
+    A function rather than a constant because a sealed view stores its zone --
+    see the module docstring. Callers pass `reserve.timezone`, and the two
+    reserves' settled rows never meet: the zone is part of the view's identity,
+    so a Nairobi day and an Adelaide day are different buckets of different
+    views rather than two spellings of one.
+
+    Only `sightings` is measured. `avg` over an integer column is `numeric`,
+    which the driver decodes to `Decimal`, which `json.dumps` cannot serialise --
+    so a settled *average* fails on the write. `camera_trap.wire.chart_json`
+    works around that for the open view by rounding at the edge, but a settled
+    row is stored rather than rendered and there is no edge to round at. Sealing
+    the count and recomputing the confidence is the honest split until the
+    encoder learns `Decimal`.
+
+    Args:
+        timezone: an IANA zone name, from the reserve that owns the station.
+
+    Returns:
+        A declaration whose sealed buckets are stored on first read and
+        thereafter answered from storage.
+    """
+    return (
+        Series(
+            Sighting,
+            at=Sighting.captured_at,
+            bucket=Day,
+            stored_in=zone(timezone),
+        )
+        .where(Sighting.station_id == Param("station"))
+        .measure(sightings=count())
+        .seal(after=CARD_COLLECTION_LATENESS)
+    )

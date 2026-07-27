@@ -37,6 +37,7 @@ from .errors import (
     UnloadedRelationshipError,
 )
 from .fields import MISSING, Column, resolve_default
+from .query import Select
 from .relations import Relationship
 from .schema import SchemaRef
 from .table import Index, Unique
@@ -278,8 +279,6 @@ class ModelMeta(_MetaBase):
 
     def select(cls, *fields: Any) -> Any:
         """Begin a SELECT for this model; no arguments selects every column."""
-        from .query import Select
-
         return Select.build(cls, fields)
 
     def __repr__(cls) -> str:

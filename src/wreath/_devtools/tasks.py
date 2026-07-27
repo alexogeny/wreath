@@ -33,8 +33,10 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from .native_lint import repo_root
+from .quiet import split_cores
 
 
 def _uv() -> str:
@@ -266,16 +268,50 @@ def bench(argv: list[str] | None = None) -> int:
                         help="run only the framework matrix (skip webhook and database benches)")
     parser.add_argument("--no-db", action="store_true",
                         help="skip the benchmarks that need podman/PostgreSQL")
+    parser.add_argument("--quiet", type=int, default=0, choices=(0, 1, 2), metavar="TIER",
+                        help="quiet the machine first: 0 pinning only (default), "
+                             "1 governor and named services (needs root), "
+                             "2 also freeze desktop applications. Tiers 1 and 2 "
+                             "print a plan and refuse unless --quiet-apply is given.")
+    parser.add_argument("--quiet-apply", action="store_true",
+                        help="actually apply --quiet (without this, tiers 1 and 2 dry-run)")
     args, forwarded = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
 
-    # Pin the server and the load generator to *disjoint* P-cores. If they share
-    # cores they steal cycles from each other, and on a hybrid CPU the loser can
-    # land on a slow E-core -- worth ~2x and the dominant source of run-to-run
-    # noise. We reserve one P-core (two HT threads) for the server via
-    # WREATH_BENCH_SERVER_CPUS and pin this process (which hosts the generator)
-    # to the rest.
+    quiet_journal = None
+    if args.quiet >= 1:
+        from . import quiet as _quiet
+
+        if not args.quiet_apply:
+            _quiet._print_plan(_quiet.plan(args.quiet), args.quiet)
+            print("\nwreath-bench: dry run -- nothing was changed and no benchmark ran. "
+                  "Add --quiet-apply to proceed.")
+            return 0
+        try:
+            quiet_journal = _quiet.apply(args.quiet)
+        except _quiet.QuietRefused as error:
+            print(f"wreath-bench: REFUSED to quiet the machine -- {error}")
+            return 2
+        print(f"[quiet] tier {args.quiet}: {len(quiet_journal.changes)} change(s) "
+              f"applied; watchdog {quiet_journal.watchdog} restores unconditionally.")
+        noise = _quiet.measure_noise()
+        print(f"[quiet] A/A spread after quieting: {noise['spread_pct']:.2f}%")
+
+    # Pin the server and the load generator to *disjoint whole physical cores*.
+    # Disjoint logical CPUs is not enough: taking CPUs 0 and 1 for the server on
+    # a uniform SMT machine hands it one thread each of two different cores and
+    # gives their siblings to the generator, so the two sides contend inside a
+    # core and the benchmark measures that contention. `split_cores` allocates by
+    # `thread_siblings_list`, so a core belongs entirely to one side or the
+    # other. On a hybrid part the E-core exclusion still comes from `--pin`.
     pcores = sorted(_resolve_pin(args.pin))
-    if len(pcores) >= 4 and "WREATH_BENCH_SERVER_CPUS" not in os.environ:
+    split = split_cores() if args.pin == "pcores" else None
+    if split is not None and split.whole_cores and "WREATH_BENCH_SERVER_CPUS" not in os.environ:
+        os.environ["WREATH_BENCH_SERVER_CPUS"] = ",".join(str(c) for c in split.server)
+        pinned = _apply_pin(set(split.client))
+        if pinned:
+            print(f"[pin] server -> CPUs {list(split.server)}; generator -> "
+                  f"{list(split.client)} ({split.reason})")
+    elif len(pcores) >= 4 and "WREATH_BENCH_SERVER_CPUS" not in os.environ:
         server_cpus, client_cpus = pcores[:2], set(pcores[2:])
         os.environ["WREATH_BENCH_SERVER_CPUS"] = ",".join(str(c) for c in server_cpus)
         pinned = _apply_pin(client_cpus)
@@ -345,7 +381,25 @@ def bench(argv: list[str] | None = None) -> int:
 
         _report_main([*(str(path) for path in report_inputs), "-o", str(combined)])
         print(f"\nwreath-bench: combined report written to {combined}")
+    _unquiet(quiet_journal)
     return 0
+
+
+def _unquiet(journal: Any) -> None:
+    """Restore the machine and cancel the watchdog, if `--quiet` changed anything.
+
+    The watchdog is disarmed only *after* the restore succeeds, so a failure
+    here leaves the timer to finish the job rather than leaving the machine
+    quieted with nothing scheduled to undo it.
+    """
+    if journal is None:
+        return
+    from . import quiet as _quiet
+
+    for line in _quiet.restore():
+        print(f"[quiet] {line}")
+    _quiet.disarm_watchdog(journal.watchdog)
+    print("[quiet] machine restored; watchdog disarmed.")
 
 
 def _pytest_command() -> list[str]:
