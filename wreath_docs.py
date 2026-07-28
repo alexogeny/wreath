@@ -247,7 +247,17 @@ nav = Nav(
         "Explorations",
         Page("The timer that wouldn't settle", "explorations/the-timer-that-wouldnt-settle.md"),
     ),
-    Page("Release notes", "release_notes/index.md"),
+    Section(
+        "Release notes",
+        # Each version page must be listed here, not merely linked from the
+        # index. The generator withholds an orphan page's output "because
+        # nothing links to it" (_docs/site.py), so a page that IS linked but
+        # is NOT in the nav is never written and the docs gate fails on a
+        # dead link. The release-notes skill adds a line here as well as to
+        # the index.
+        Page("Overview", "release_notes/index.md"),
+        Page("v0.1.0a1", "release_notes/0.1.0a1.md"),
+    ),
 )
 
 site = Site(
@@ -263,12 +273,16 @@ site = Site(
         "and native server."
     ),
     # Working notes, ADRs, and agent manifests live under docs/ but aren't
-    # published — mirrors mkdocs' exclude_docs / not_in_nav. Per-version release
-    # notes are generated and linked from release_notes/index.md, not the nav.
+    # published — mirrors mkdocs' exclude_docs / not_in_nav.
+    #
+    # Per-version release notes are deliberately NOT excluded and ARE in the
+    # nav above: they are user-facing, the index lists them, and publish.yml
+    # uses the same file as the GitHub Release body. Excluding them left the
+    # index pointing at pages that were never built, so the first release to
+    # follow the documented workflow failed the docs gate on a dead link.
     exclude=(
         "plans/",
         "decisions/",
         "agents/",
-        "release_notes/[0-9]*.md",
     ),
 )

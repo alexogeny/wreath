@@ -3,9 +3,9 @@ name: publish
 # Cut a versioned release when a commit on main bumps the version in
 # pyproject.toml.
 #
-#   1. detect  - Is the pyproject version valid semver, greater than the version
-#                at the commit this push STARTED from, and does it have release
-#                notes? Emits `bumped` + `version`.
+#   1. detect  - Is the pyproject version a valid PEP 440 version, greater than
+#                the last published one, and does it have release notes?
+#                Emits `bumped` + `version`.
 #
 #                The baseline is `github.event.before`, not `HEAD~1`. A push
 #                carrying several commits that bumps the version in any but the
@@ -60,6 +60,17 @@ jobs:
           # from (`github.event.before`), which can be many commits back, and a
           # shallow clone cannot read pyproject.toml out of it.
           fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Install the version parser
+        # `packaging` is the reference PEP 440 implementation. This check used a
+        # semver regex and `sort -V`, and the index this guards speaks neither:
+        # `0.1.0a1` is a legal Python version the regex rejected outright, and
+        # `sort -V` orders `0.1.0 < 0.1.0-alpha` where PEP 440 -- and PyPI --
+        # order it the other way. Both errors point at publishing the wrong
+        # thing, so the guard now uses the same rules as the index.
+        run: python -m pip install --quiet packaging
       - id: check
         env:
           FORCED: ${{ inputs.force }}
@@ -73,9 +84,15 @@ jobs:
           version="$(extract < pyproject.toml)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-          if ! printf '%s' "$version" \
-            | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
-            echo "::error::version '$version' is not valid semver"
+          if ! python -c '
+          import sys
+          from packaging.version import InvalidVersion, Version
+          try:
+              Version(sys.argv[1])
+          except InvalidVersion as error:
+              sys.exit(str(error))
+          ' "$version"; then
+            echo "::error::version '$version' is not a valid PEP 440 version"
             exit 1
           fi
 
@@ -123,12 +140,24 @@ jobs:
             exit 0
           fi
 
-          if [ -n "$prev" ]; then
-            greater="$(printf '%s\n%s\n' "$prev" "$version" | sort -V | tail -n1)"
-            if [ "$greater" != "$version" ]; then
-              echo "::error::version '$version' does not increase previous '$prev'"
-              exit 1
-            fi
+          # Compare against the last *published* version, not against whatever
+          # pyproject said a commit ago. Those differ exactly once, and it is
+          # now: pyproject carried `0.1.0` from the first commit without a
+          # release ever being cut, so the first prerelease of it -- `0.1.0a1`,
+          # which PEP 440 correctly orders BELOW `0.1.0` -- would be rejected as
+          # a downgrade from a version nobody can install. You cannot go
+          # backwards from something that was never published.
+          released="$(git tag --list 'v*' --sort=-v:refname | head -n1 | sed 's/^v//')"
+          if [ -z "$released" ]; then
+            note "No \`v*\` tag exists, so **$version** is the first release; the"
+            note "increase check is skipped (no published version to regress from)."
+          elif ! python -c '
+          import sys
+          from packaging.version import Version
+          sys.exit(0 if Version(sys.argv[2]) > Version(sys.argv[1]) else 1)
+          ' "$released" "$version"; then
+            echo "::error::version '$version' does not increase last released '$released'"
+            exit 1
           fi
 
           # Checked here as well as in `release`, because `release` sits behind

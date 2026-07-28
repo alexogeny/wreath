@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wreath"
-version = "0.1.0"
+version = "0.1.0a1"
 description = "A Python 3.14-first, dependency-free ASGI framework core"
 readme = "README.md"
 requires-python = ">=3.14"

@@ -88,17 +88,35 @@ _Released <YYYY-MM-DD>._
 Use today's date. Match the terse, precise tone of the existing docs (see
 `docs/index.md` and the guides).
 
-## 4. Link it from the index
+## 4. Link it from the index AND add it to the nav
 
-In `docs/release_notes/index.md`, insert a newest-first link just below the
-`<!-- releases:start -->` marker:
+Both, not either. In `docs/release_notes/index.md`, insert a newest-first link
+just below the `<!-- releases:start -->` marker:
 
 ```markdown
 - [v<version>](<version>.md) — <YYYY-MM-DD>
 ```
 
-Do not add the version page to the `wreath_docs.py` nav — `exclude` already exempts
-`release_notes/[0-9]*.md`, and the index links each release.
+Then add the page to the `Release notes` section in `wreath_docs.py`, newest
+first:
+
+```python
+    Section(
+        "Release notes",
+        Page("Overview", "release_notes/index.md"),
+        Page("v<version>", "release_notes/<version>.md"),
+        ...
+    ),
+```
+
+**This step used to say the opposite** — that the nav entry was unnecessary
+because `exclude` exempted `release_notes/[0-9]*.md`. That was wrong in a way
+nothing could catch until a release was actually cut: the site generator
+withholds an orphan page's *output* on the stated grounds that nothing links to
+it (`_docs/site.py`), so a page that **is** linked from the index but **is not**
+in the nav is never written, and `wreath docs check` fails with a dead link. The
+first release to follow this skill hit exactly that. If you are tempted to drop
+the nav entry again, run `wreath docs check` before believing it.
 
 ## 5. Report
 
