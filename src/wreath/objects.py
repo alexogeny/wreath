@@ -26,9 +26,9 @@ where it is not say so.** Reading from S3 streams back in ranged windows; writin
 switches to a real multipart upload once the data passes the part size;
 `zip_stream` emits a Zip64 archive without ever holding an object or the
 archive. What buffers, deliberately and by necessity, is `unzip_stream`
-(the stdlib `zipfile` reader needs a seekable archive), `file_chunks`
-(its argument is already bytes in hand), and each individual S3 request
-(the HTTP client is buffered per operation).
+(the stdlib `zipfile` reader needs a seekable archive, bounded by
+`ZipExtractionLimits`), `file_chunks` (its argument is already bytes in hand),
+and each individual S3 request (the HTTP client is buffered per operation).
 
 Wire a store into an application with `wreath.app.Wreath.objects`, which
 gives an S3 store a pinned outbound client started and stopped with the app, and
@@ -97,11 +97,41 @@ __all__ = [
     "MemoryObjectStore",
     "LocalObjectStore",
     "S3ObjectStore",
+    "ZipExtractionLimits",
     "normalize_key",
     "zip_stream",
     "unzip_stream",
     "file_chunks",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class ZipExtractionLimits:
+    """Hard resource ceilings for one `unzip_stream` extraction.
+
+    The archive and each entry are buffered because the stdlib ZIP reader needs
+    seekable input and verifies an entry after decompression. These limits make
+    both allocations explicit and also bound entry-count work and total output.
+    """
+
+    max_archive_bytes: int = 16 * 1024 * 1024
+    max_entries: int = 1024
+    max_entry_bytes: int = 16 * 1024 * 1024
+    max_total_bytes: int = 64 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        for name in (
+            "max_archive_bytes",
+            "max_entries",
+            "max_entry_bytes",
+            "max_total_bytes",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+
+
+_DEFAULT_ZIP_EXTRACTION_LIMITS = ZipExtractionLimits()
 
 
 class ObjectError(Exception):
@@ -1262,49 +1292,137 @@ async def zip_stream(storage: ObjectStore, keys: Iterable[str]) -> AsyncIterator
     )
 
 
-async def unzip_stream(storage: ObjectStore, key: str, *, prefix: str = "") -> list[str]:
-    """Expand a zip object already in `storage` into one object per entry.
+def _zip_entry_count(raw: bytes, limit: int) -> int | None:
+    """Count central-directory entries without constructing `ZipInfo` objects.
 
-    The inverse of `zip_stream`, and **not its equal in memory**. A zip's
-    directory lives at the end of the file, so a reader has to seek; the stdlib
-    `zipfile.ZipFile` therefore needs the whole archive in hand, and each entry
-    is decompressed whole before it is written. Peak memory is the archive plus
-    its largest entry. That is a real limitation, not a detail: this is safe for
-    an archive an operator uploaded and not for one an anonymous caller did,
-    where a small compressed upload can expand to an arbitrary amount of memory.
-    Nothing here bounds the expansion ratio.
+    A hostile archive can fit hundreds of thousands of empty-entry records into
+    the archive-byte budget. Counting the fixed records first prevents the
+    stdlib reader from materializing that object graph before `max_entries` is
+    checked. Malformed framing is left for `zipfile` to diagnose.
+    """
+    eocd = raw.rfind(b"PK\x05\x06", max(0, len(raw) - 65_557))
+    if eocd < 0 or eocd + 22 > len(raw):
+        return None
+    comment_bytes = struct.unpack_from("<H", raw, eocd + 20)[0]
+    if eocd + 22 + comment_bytes != len(raw):
+        return None
+
+    directory_size = struct.unpack_from("<I", raw, eocd + 12)[0]
+    directory_end = eocd
+    locator = eocd - 20
+    if locator >= 0 and raw[locator : locator + 4] == b"PK\x06\x07":
+        zip64 = raw.rfind(b"PK\x06\x06", 0, locator)
+        if zip64 < 0 or zip64 + 56 > locator:
+            return None
+        record_size = struct.unpack_from("<Q", raw, zip64 + 4)[0]
+        if zip64 + 12 + record_size != locator:
+            return None
+        directory_size = struct.unpack_from("<Q", raw, zip64 + 40)[0]
+        directory_end = zip64
+    elif directory_size == 0xFFFFFFFF:
+        return None
+
+    directory_start = directory_end - directory_size
+    if directory_start < 0:
+        return None
+    cursor = directory_start
+    count = 0
+    while cursor < directory_end:
+        if cursor + 46 > directory_end or raw[cursor : cursor + 4] != b"PK\x01\x02":
+            return None
+        name_bytes, extra_bytes, comment_bytes = struct.unpack_from(
+            "<HHH", raw, cursor + 28
+        )
+        cursor += 46 + name_bytes + extra_bytes + comment_bytes
+        if cursor > directory_end:
+            return None
+        count += 1
+        if count > limit:
+            return count
+    return count if cursor == directory_end else None
+
+
+async def unzip_stream(
+    storage: ObjectStore,
+    key: str,
+    *,
+    prefix: str = "",
+    limits: ZipExtractionLimits = _DEFAULT_ZIP_EXTRACTION_LIMITS,
+) -> list[str]:
+    """Expand a bounded zip object into one object per entry.
+
+    The stdlib ZIP reader needs a seekable archive and verifies each entry after
+    decompression, so this function buffers the archive and one entry at a time.
+    `limits` bounds both allocations, the number of entries parsed, and the
+    cumulative output before any destination is written.
 
     Directory entries are skipped -- an object store has no directories, so a
-    zero-byte object named after one would be noise.
-
-    Refusing an entry's name is the defence against a zip crafted with `../`
-    names: the write normalises, so a hostile entry cannot land outside the
-    store. Entries before it in the archive will already have been written.
+    zero-byte object named after one would be noise. Every destination key and
+    every declared size is validated before extraction starts, so a refused
+    archive leaves no partial output behind.
 
     Args:
         storage: where the archive is read from and the entries are written back.
         key: the archive object.
         prefix: prepended verbatim to each entry's name. Not a path join.
+        limits: hard ceilings for archive bytes, entries, one entry, and total output.
 
     Returns:
         The normalised keys written, in archive order.
 
     Raises:
-        ObjectError: when the archive is absent or an entry's name is refused.
+        ObjectError: when a resource limit or destination-key check is refused.
         zipfile.BadZipFile: when the object is not a readable zip.
     """
     import io
     import zipfile
 
-    raw = await storage.read(key)
+    raw_buffer = bytearray()
+    async for chunk in storage.read_stream(key):
+        if len(chunk) > limits.max_archive_bytes - len(raw_buffer):
+            raise ObjectError(
+                f"zip archive exceeds {limits.max_archive_bytes} bytes"
+            )
+        raw_buffer += chunk
+    raw = bytes(raw_buffer)
+
+    declared_entries = _zip_entry_count(raw, limits.max_entries)
+    if declared_entries is not None and declared_entries > limits.max_entries:
+        raise ObjectError(
+            f"zip archive has {declared_entries} entries; limit is {limits.max_entries}"
+        )
+
     written: list[str] = []
     with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-        for info in zf.infolist():
+        infos = zf.infolist()
+        if len(infos) > limits.max_entries:
+            raise ObjectError(
+                f"zip archive has {len(infos)} entries; limit is {limits.max_entries}"
+            )
+
+        planned: list[tuple[Any, str]] = []
+        total = 0
+        for info in infos:
             if info.is_dir():
                 continue
             dest = f"{prefix}{info.filename}" if prefix else info.filename
-            await storage.write(dest, zf.read(info.filename))
-            written.append(normalize_key(dest))
+            normalized = normalize_key(dest)
+            if info.file_size > limits.max_entry_bytes:
+                raise ObjectError(
+                    f"zip entry {info.filename!r} expands to {info.file_size} bytes; "
+                    f"per-entry limit is {limits.max_entry_bytes}"
+                )
+            if info.file_size > limits.max_total_bytes - total:
+                raise ObjectError(
+                    f"zip output exceeds {limits.max_total_bytes} bytes at "
+                    f"entry {info.filename!r}"
+                )
+            total += info.file_size
+            planned.append((info, normalized))
+
+        for info, dest in planned:
+            await storage.write(dest, zf.read(info))
+            written.append(dest)
     return written
 
 

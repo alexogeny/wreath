@@ -51,7 +51,7 @@ from wreath.response import JSONResponse, Response
 from ..media import ARCHIVE_CONTENT_TYPE, UPLOAD_URL_TTL, card_key, mint_upload_url
 from ..models import Deployment, Station
 from ..policies import ADMINISTER
-from ..tasks import INGEST_CARD
+from ..tasks import INGEST_CARD, MAX_CARD_BYTES
 
 ReadSession = Annotated[Session, FromORM("main", workload="read")]
 
@@ -61,17 +61,6 @@ ReadSession = Annotated[Session, FromORM("main", workload="read")]
 #: entity for both would make a policy that admits an ecologist to the species
 #: list also admit them to every card.
 CARD_REGISTRY = 'Registry::"cards"'
-
-#: The largest card archive the example accepts, in bytes.
-#:
-#: `unzip_stream` reads the whole archive into memory and decompresses each
-#: entry whole, so peak memory is the archive plus its largest entry — its own
-#: docstring says so, and says it is safe for an operator's archive and not for
-#: an anonymous caller's. This ceiling is what makes "an operator's archive"
-#: true here: minting requires a ranger, and this bounds what even a ranger can
-#: make an ingest worker allocate. 64 MiB is one real card.
-MAX_CARD_BYTES = 64 * 1024 * 1024
-
 
 def mount(application: Any, store: Any, runner: Any) -> None:
     """Attach the upload, ingest and progress routes to `application`.

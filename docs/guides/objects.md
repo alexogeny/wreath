@@ -223,10 +223,29 @@ out to be missing raises *mid-stream*, after bytes have already gone out, so the
 receives a truncated archive; check the keys first if that matters.
 
 `unzip_stream` goes the other way and is **not** its equal in memory: a zip's directory
-lives at the end of the file, so the stdlib `zipfile` reader needs the whole archive in
-hand and each entry is decompressed whole. Peak memory is the archive plus its largest
-entry, and nothing bounds the expansion ratio — safe for an archive an operator uploaded,
-not for one an anonymous caller did.
+lives at the end of the file, so the stdlib `zipfile` reader needs a seekable archive and
+each entry is decompressed whole. `ZipExtractionLimits` bounds archive bytes, entry count,
+one expanded entry, and cumulative expanded bytes. Conservative defaults apply; pass an
+explicit budget when the application has a narrower or deliberately larger workload:
+
+```python
+from wreath.objects import ZipExtractionLimits, unzip_stream
+
+written = await unzip_stream(
+    store,
+    "uploads/card.zip",
+    limits=ZipExtractionLimits(
+        max_archive_bytes=8 * 1024 * 1024,
+        max_entries=512,
+        max_entry_bytes=4 * 1024 * 1024,
+        max_total_bytes=32 * 1024 * 1024,
+    ),
+)
+```
+
+The archive is refused while it is being buffered, and all names and declared expanded
+sizes are checked before the first output is written. A refusal therefore leaves no
+partially extracted prefix behind.
 
 ## Gotchas
 
