@@ -96,6 +96,7 @@ class EventKind(IntEnum):
     PHASE = 3  # a promoted detail phase (Detailed mode)
     CONTROL = 4  # bounded arm/disarm/export control event
     CAPTURE = 5  # a forensic capture slab (Forensic mode; off the completion ring)
+    LOG = 6  # one application log record, joined to its trace by request_id
 
 
 class Mode(IntEnum):
@@ -172,6 +173,18 @@ class LossReason(IntEnum):
     ENTROPY_EXHAUSTED = 5
     PROPAGATION_INVALID = 6
     BODY_TRUNCATED = 7
+    #: A request's buffered log scratch was exhausted before promotion.
+    LOG_SCRATCH_FULL = 8
+    #: A record's arguments did not fit the cell's inline area and were clipped.
+    LOG_ARGS_TRUNCATED = 9
+    #: A call site could not be interned; its records take the uninterned path.
+    LOG_SITE_TABLE_FULL = 10
+    #: The per-call-site limiter dropped a record (INFO and below only).
+    LOG_SAMPLED = 11
+    #: A record was emitted off the recorder's writer thread and took the slow
+    #: path. Counted separately because it is a *shape* problem in the caller,
+    #: not backpressure: the fix is to move the call, not to raise a budget.
+    LOG_OFF_LOOP = 12
 
 
 #: Completion-cell `flags` bits.
@@ -501,6 +514,454 @@ _COVERAGES = frozenset(int(c) for c in PhaseCoverage)
 
 class SchemaError(ValueError):
     """A cell or metadata image failed to decode against this schema."""
+
+
+# --- log records ------------------------------------------------------------
+#
+# One application log record is one 64-byte ring cell, published by the same
+# writer as a completion and joined to its trace by request_id -- so a record
+# never carries a trace or span id of its own. Duplicating 24 bytes of
+# correlation onto every record would buy nothing the projector cannot already
+# reconstruct from the correlation carrier, and log records outnumber
+# completions by one to two orders of magnitude.
+#
+# The static half of a log statement -- template, severity, module, line, field
+# names, argument types, redaction dispositions -- is interned once into the
+# metadata image and addressed by `site_id`. Only the dynamic arguments travel
+# per record. That is the static/dynamic split NanoLog gets from a compile-time
+# pass; Python has none, so the binding happens at import instead.
+#
+# =========================================================================
+# DEFERRED BY DECISION -- this packing is Python, and that is not an oversight
+# =========================================================================
+#
+# Every log record is currently packed *here*, in Python, then handed to the
+# ring as bytes:
+#
+#     _logsite.pack_value()   PyObject*  -> LogArg      (per argument)
+#     LogCell.encode()        LogArg...  -> 64 bytes    (this module)
+#     Recorder.publish_log()  bytes      -> ring        (_flightmodule.c)
+#
+# The native emitter that replaces the first two steps -- `wreath_nfr_log`,
+# packing straight into a ring slot from C -- is **not built**. The layout,
+# the declared argument types, and the level check that precedes marshalling
+# all exist to make that swap mechanical rather than a redesign, but nobody
+# has done it. Until then:
+#
+#   * No performance claim may be made about logging. None is made in the
+#     docs, the ADR, or these docstrings, and none should be added.
+#   * `wreath_nfr_publish_cell` (flight.c) is the seam. A C emitter replaces
+#     what happens *above* that call, not the call itself.
+#
+# Also deferred, each decided rather than forgotten -- see
+# docs/plans/first-class-logging.md for the full list and ADR 0025 for why:
+#
+#   * **Benchmarks.** Six of them, none run. The load-bearing one is the cost
+#     of a *disabled* `DEBUG(...)` call: failure-triggered logging assumes
+#     verbose instrumentation is affordable, and that assumption is exactly
+#     that number.
+#   * **Crash forensics (stage 7).** The ring is anonymous memory, so a
+#     segfault takes the last records with it. The framing is ready for a
+#     file-backed ring -- every cell is versioned and every decode validates
+#     lengths against the buffer -- so adding it is not a format break.
+#   * **Off-loop emission.** The ring is single-writer. `wreath.jobs` and
+#     thread-pool work have no fast path; `LossReason.LOG_OFF_LOOP` is
+#     reserved for the counted slow path that is not built, because nothing
+#     yet emits from off the loop.
+#   * **`wreath.audit`.** Keeps its own `logging.getLogger` path. "Never
+#     blocks the request path" and "never loses a record" are incompatible
+#     promises; audit needs the second and must not inherit the first.
+#
+# =========================================================================
+
+
+class Severity(IntEnum):
+    """OpenTelemetry SeverityNumber, at the base of each band.
+
+    The OTel data model gives each band four values (TRACE 1-4, DEBUG 5-8, INFO
+    9-12, WARN 13-16, ERROR 17-20, FATAL 21-24). Wreath emits the band base; the
+    extra granularity exists so a bridged record from another system can keep
+    its own gradation without inventing a parallel scheme.
+    """
+
+    TRACE = 1
+    DEBUG = 5
+    INFO = 9
+    WARN = 13
+    ERROR = 17
+    FATAL = 21
+
+
+#: Band names indexed by `(severity - 1) // 4`.
+_SEVERITY_BANDS: Final = ("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL")
+
+#: stdlib level -> band base, descending so a level between bands rounds down.
+_STDLIB_TO_SEVERITY: Final = (
+    (50, Severity.FATAL),
+    (40, Severity.ERROR),
+    (30, Severity.WARN),
+    (20, Severity.INFO),
+    (10, Severity.DEBUG),
+)
+
+#: Band base -> the stdlib level it round-trips to. TRACE has no stdlib name;
+#: 5 is the conventional "below DEBUG" level.
+_SEVERITY_TO_STDLIB: Final = {
+    Severity.TRACE: 5,
+    Severity.DEBUG: 10,
+    Severity.INFO: 20,
+    Severity.WARN: 30,
+    Severity.ERROR: 40,
+    Severity.FATAL: 50,
+}
+
+
+def severity_text(severity: int) -> str:
+    """The band name for a severity number, derived rather than stored.
+
+    Storing a severity *string* per record would cost more bytes than the whole
+    fixed header; the name is a function of the number, so records carry the
+    number and readers compute the name. Values outside 1..24 clamp to the
+    nearest band rather than raising: a bridged record with a nonsense level is
+    still worth reading.
+    """
+    band = (int(severity) - 1) // 4
+    if band < 0:
+        return _SEVERITY_BANDS[0]
+    if band >= len(_SEVERITY_BANDS):
+        return _SEVERITY_BANDS[-1]
+    return _SEVERITY_BANDS[band]
+
+
+def severity_from_stdlib(level: int) -> Severity:
+    """Map a `logging` level onto a band base, rounding down between bands."""
+    for threshold, severity in _STDLIB_TO_SEVERITY:
+        if level >= threshold:
+            return severity
+    return Severity.TRACE
+
+
+def severity_to_stdlib(severity: int) -> int:
+    """Map a band base back onto its `logging` level."""
+    band = (int(severity) - 1) // 4
+    band = min(max(band, 0), len(_SEVERITY_BANDS) - 1)
+    return _SEVERITY_TO_STDLIB[Severity(1 + band * 4)]
+
+
+class LogArgType(IntEnum):
+    """The type tag leading each packed argument.
+
+    Arguments are self-describing even though the call site already declares
+    their types, because the decoder must survive a stale metadata image and a
+    torn record: one byte per argument buys a decode that validates instead of
+    trusting. That property is what lets this layout become an on-disk format
+    later without a second framing pass.
+    """
+
+    NONE = 0  # no payload
+    BOOL = 1  # u8 0/1
+    INT = 2  # i64
+    FLOAT = 3  # f64 (IEEE 754 binary64)
+    STR = 4  # u8 byte length, then that many UTF-8 bytes
+    HASH = 5  # u64 keyed SipHash of a redacted value; never the bytes
+    LENGTH = 6  # u32 original length of a value whose bytes were dropped
+
+
+#: Payload width for the fixed-size argument types, tag byte excluded.
+_LOG_ARG_FIXED_WIDTH: Final = {
+    LogArgType.NONE: 0,
+    LogArgType.BOOL: 1,
+    LogArgType.INT: 8,
+    LogArgType.FLOAT: 8,
+    LogArgType.HASH: 8,
+    LogArgType.LENGTH: 4,
+}
+
+_LOG_ARG_INT = struct.Struct(BYTE_ORDER + "q")
+_LOG_ARG_FLOAT = struct.Struct(BYTE_ORDER + "d")
+_LOG_ARG_HASH = struct.Struct(BYTE_ORDER + "Q")
+_LOG_ARG_LENGTH = struct.Struct(BYTE_ORDER + "I")
+
+#: Bytes of a log cell given over to packed arguments. Three 64-bit arguments
+#: (9 bytes each with their tag) fit, which covers the common shape.
+LOG_INLINE_ARG_BYTES: Final = 32
+
+#: Arguments retained per record. A site declaring more is a design smell; the
+#: excess is clipped and counted rather than spilled to a slab.
+LOG_MAX_ARGS: Final = 8
+
+#: Log-cell `flags` bits. Deliberately a separate namespace from the completion
+#: cell's FLAG_*: these describe a record, not a request.
+LOG_FLAG_PROMOTED: Final = 1 << 0  # buffered, then published by a promotion
+LOG_FLAG_TRUNCATED: Final = 1 << 1  # an argument was clipped or dropped
+LOG_FLAG_REDACTED: Final = 1 << 2  # an argument was hashed or reduced to a length
+LOG_FLAG_OFF_LOOP: Final = 1 << 3  # emitted off the recorder's writer thread
+#: The record carries application fields for its request's canonical log line
+#: rather than a message of its own. Its arguments are the wide event's
+#: attributes; a reader folds them into the completion rather than printing them
+#: as a line.
+LOG_FLAG_EVENT_FIELDS: Final = 1 << 4
+
+
+@dataclass(frozen=True, slots=True)
+class LogArg:
+    """One packed log argument.
+
+    Constructed through the named classmethods rather than positionally, so a
+    call site cannot accidentally pass a hash where a length belongs.
+    """
+
+    type: LogArgType
+    number: int = 0  # BOOL / INT / HASH / LENGTH payload
+    fraction: float = 0.0  # FLOAT payload
+    payload: bytes = b""  # STR payload, UTF-8
+
+    @classmethod
+    def none(cls) -> LogArg:
+        return cls(LogArgType.NONE)
+
+    @classmethod
+    def boolean(cls, value: bool) -> LogArg:
+        return cls(LogArgType.BOOL, number=1 if value else 0)
+
+    @classmethod
+    def integer(cls, value: int) -> LogArg:
+        return cls(LogArgType.INT, number=value)
+
+    @classmethod
+    def real(cls, value: float) -> LogArg:
+        return cls(LogArgType.FLOAT, fraction=value)
+
+    @classmethod
+    def text(cls, value: str) -> LogArg:
+        return cls(LogArgType.STR, payload=value.encode("utf-8"))
+
+    @classmethod
+    def hashed(cls, fingerprint: int) -> LogArg:
+        return cls(LogArgType.HASH, number=fingerprint)
+
+    @classmethod
+    def length(cls, original_length: int) -> LogArg:
+        return cls(LogArgType.LENGTH, number=original_length)
+
+    @property
+    def text_value(self) -> str:
+        """The decoded string of a STR argument, empty for every other type."""
+        return self.payload.decode("utf-8")
+
+    @property
+    def redacted(self) -> bool:
+        """True when the argument carries a fingerprint or a length, not a value."""
+        return self.type in (LogArgType.HASH, LogArgType.LENGTH)
+
+
+def _clip_utf8(raw: bytes, limit: int) -> bytes:
+    """The longest prefix of `raw` that fits `limit` bytes and still decodes.
+
+    Clipping mid-sequence would produce a record that raises on read, which is
+    the one failure a log line must never have.
+    """
+    if len(raw) <= limit:
+        return raw
+    end = limit
+    while end > 0 and (raw[end] & 0xC0) == 0x80:
+        end -= 1
+    return raw[:end]
+
+
+def _encode_log_arg(arg: LogArg, budget: int) -> tuple[bytes, bool] | None:
+    """Pack one argument into at most `budget` bytes.
+
+    Returns the bytes and whether the value was clipped, or None when even a
+    clipped form does not fit and the argument must be dropped.
+    """
+    if arg.type is LogArgType.STR:
+        if budget < 3:  # tag + length + at least one byte
+            return None
+        clipped = _clip_utf8(arg.payload, min(budget - 2, 0xFF))
+        return (
+            bytes((LogArgType.STR, len(clipped))) + clipped,
+            len(clipped) != len(arg.payload),
+        )
+    width = _LOG_ARG_FIXED_WIDTH[arg.type]
+    if budget < 1 + width:
+        return None
+    if arg.type is LogArgType.NONE:
+        return bytes((LogArgType.NONE,)), False
+    if arg.type is LogArgType.BOOL:
+        return bytes((LogArgType.BOOL, 1 if arg.number else 0)), False
+    if arg.type is LogArgType.INT:
+        return bytes((LogArgType.INT,)) + _LOG_ARG_INT.pack(arg.number), False
+    if arg.type is LogArgType.FLOAT:
+        return bytes((LogArgType.FLOAT,)) + _LOG_ARG_FLOAT.pack(arg.fraction), False
+    if arg.type is LogArgType.HASH:
+        return bytes((LogArgType.HASH,)) + _LOG_ARG_HASH.pack(arg.number), False
+    return bytes((LogArgType.LENGTH,)) + _LOG_ARG_LENGTH.pack(arg.number), False
+
+
+def _decode_log_args(blob: memoryview) -> tuple[LogArg, ...]:
+    """Decode packed arguments, validating every length against the buffer."""
+    args: list[LogArg] = []
+    offset = 0
+    end = len(blob)
+    while offset < end:
+        tag = blob[offset]
+        offset += 1
+        if tag not in _LOG_ARG_TYPES:
+            raise SchemaError(f"unknown log argument type {tag}")
+        kind = LogArgType(tag)
+        if kind is LogArgType.STR:
+            if offset >= end:
+                raise SchemaError("log cell truncated reading an argument length")
+            size = blob[offset]
+            offset += 1
+            if offset + size > end:
+                raise SchemaError("log cell truncated reading an argument payload")
+            args.append(LogArg(kind, payload=bytes(blob[offset : offset + size])))
+            offset += size
+            continue
+        width = _LOG_ARG_FIXED_WIDTH[kind]
+        if offset + width > end:
+            raise SchemaError("log cell truncated reading an argument payload")
+        chunk = blob[offset : offset + width]
+        offset += width
+        if kind is LogArgType.NONE:
+            args.append(LogArg(kind))
+        elif kind is LogArgType.BOOL:
+            args.append(LogArg(kind, number=1 if chunk[0] else 0))
+        elif kind is LogArgType.INT:
+            args.append(LogArg(kind, number=_LOG_ARG_INT.unpack(chunk)[0]))
+        elif kind is LogArgType.FLOAT:
+            args.append(LogArg(kind, fraction=_LOG_ARG_FLOAT.unpack(chunk)[0]))
+        elif kind is LogArgType.HASH:
+            args.append(LogArg(kind, number=_LOG_ARG_HASH.unpack(chunk)[0]))
+        else:
+            args.append(LogArg(kind, number=_LOG_ARG_LENGTH.unpack(chunk)[0]))
+    return tuple(args)
+
+
+_LOG_ARG_TYPES = frozenset(int(t) for t in LogArgType)
+
+# 64-byte little-endian log cell:
+#   0  u8   schema_version
+#   1  u8   kind (EventKind.LOG)
+#   2  u16  flags (LOG_FLAG_*)
+#   4  u32  site_id           (interned call site; 0 = uninterned)
+#   8  u64  request_id        (0 when the record is not request-scoped)
+#  16  u32  offset_ms         (monotonic, from the worker clock epoch --
+#                              the same basis as CompletionCell.end_offset_ms)
+#  20  u32  dropped_siblings  (records the limiter dropped for this site since
+#                              the last one it let through)
+#  24  u8   severity          (OTel SeverityNumber)
+#  25  u8   worker_id
+#  26  u8   arg_count
+#  27  u8   arg_bytes         (packed argument bytes, <= LOG_INLINE_ARG_BYTES)
+#  28  u32  reserved (zero)
+#  32  32B  packed arguments
+_LOG = struct.Struct(BYTE_ORDER + "BBHIQIIBBBBI32s")
+_require_layout(_LOG.size, CELL_SIZE, "the log cell")
+
+
+@dataclass(frozen=True, slots=True)
+class LogCell:
+    """A decoded log record.
+
+    `args` carries only the dynamic half of the statement. Names, template,
+    module and line live in the metadata image under `site_id`; the record is
+    meaningless without it, and deliberately so.
+    """
+
+    request_id: int
+    site_id: int
+    severity: Severity | int
+    offset_ms: int = 0
+    worker_id: int = 0
+    args: tuple[LogArg, ...] = ()
+    flags: int = 0
+    dropped_siblings: int = 0
+
+    def encode(self) -> bytes:
+        packed = bytearray()
+        flags = self.flags
+        count = 0
+        for index, arg in enumerate(self.args):
+            if index >= LOG_MAX_ARGS:
+                flags |= LOG_FLAG_TRUNCATED
+                break
+            result = _encode_log_arg(arg, LOG_INLINE_ARG_BYTES - len(packed))
+            if result is None:
+                flags |= LOG_FLAG_TRUNCATED
+                break
+            chunk, clipped = result
+            packed += chunk
+            count += 1
+            if clipped:
+                flags |= LOG_FLAG_TRUNCATED
+            if arg.redacted:
+                flags |= LOG_FLAG_REDACTED
+        return _LOG.pack(
+            SCHEMA_VERSION,
+            EventKind.LOG,
+            flags & 0xFFFF,
+            self.site_id & 0xFFFFFFFF,
+            self.request_id & 0xFFFFFFFFFFFFFFFF,
+            self.offset_ms & 0xFFFFFFFF,
+            self.dropped_siblings & 0xFFFFFFFF,
+            int(self.severity) & 0xFF,
+            self.worker_id & 0xFF,
+            count & 0xFF,
+            len(packed) & 0xFF,
+            0,
+            bytes(packed).ljust(LOG_INLINE_ARG_BYTES, b"\0"),
+        )
+
+    @classmethod
+    def decode(cls, data: bytes) -> LogCell:
+        if len(data) < CELL_SIZE:
+            raise SchemaError(f"log cell needs {CELL_SIZE} bytes, got {len(data)}")
+        (
+            version,
+            kind,
+            flags,
+            site_id,
+            request_id,
+            offset_ms,
+            dropped_siblings,
+            severity,
+            worker_id,
+            arg_count,
+            arg_bytes,
+            _reserved,
+            blob,
+        ) = _LOG.unpack(data[:CELL_SIZE])
+        if version != SCHEMA_VERSION:
+            raise SchemaError(f"unsupported schema version {version}")
+        if kind != EventKind.LOG:
+            raise SchemaError(f"expected log kind, got {kind}")
+        if arg_bytes > LOG_INLINE_ARG_BYTES:
+            raise SchemaError(
+                f"log cell declares {arg_bytes} argument bytes, but a cell holds "
+                f"at most {LOG_INLINE_ARG_BYTES}"
+            )
+        args = _decode_log_args(memoryview(blob)[:arg_bytes])
+        if len(args) != arg_count:
+            raise SchemaError(
+                f"log cell declares {arg_count} arguments but its payload holds "
+                f"{len(args)}"
+            )
+        return cls(
+            request_id=request_id,
+            site_id=site_id,
+            severity=Severity(severity) if severity in _SEVERITIES else severity,
+            offset_ms=offset_ms,
+            worker_id=worker_id,
+            args=args,
+            flags=flags,
+            dropped_siblings=dropped_siblings,
+        )
+
+
+_SEVERITIES = frozenset(int(s) for s in Severity)
 
 
 # --- forensic capture (Stage 5) --------------------------------------------

@@ -104,6 +104,7 @@ nav = Nav(
             Page("Health, flags, and versioning", "guides/health-flags-versioning.md"),
             Page("GraphQL", "guides/graphql.md"),
             Page("Observability bridges", "guides/observability.md"),
+            Page("Logging", "guides/logging.md"),
             Page("Native server and protocols", "guides/server.md"),
         ),
         Section(
@@ -234,6 +235,7 @@ nav = Nav(
         Page("Configuration", "reference/config.md"),
         Page("Inspector", "reference/inspector.md"),
         Page("Telemetry", "reference/telemetry.md"),
+        Page("Logging", "reference/logging.md"),
         Page("Recording policies", "reference/recording.md"),
         Page("Replay and fault injection", "reference/replay.md"),
         Page("State", "reference/state.md"),

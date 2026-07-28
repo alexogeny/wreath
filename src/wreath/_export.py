@@ -18,7 +18,8 @@ touches a request stack and its failures never stall anything:
 
 The default `OtlpHttpExporter` speaks OTLP/HTTP+JSON over the standard
 library (`urllib`), so enabling export pulls in **no** third-party dependency;
-any object with `export_traces`/`export_metrics` methods can stand in.
+any object with `export_traces`/`export_metrics` methods can stand in, and one
+that also has `export_logs` gets the logs signal too.
 """
 
 from __future__ import annotations
@@ -31,12 +32,14 @@ from collections.abc import Callable
 from typing import Any, Final
 from typing import Protocol as _Protocol
 
+from ._logsink import BoundedLogQueue
 from ._otlp import (
     BoundedExportQueue,
+    build_logs_request,
     build_metrics_request,
     build_trace_request,
 )
-from ._projector import ProjectedTrace, ProjectorSnapshot
+from ._projector import ProjectedLog, ProjectedTrace, ProjectorSnapshot
 
 __all__ = [
     "TraceMetricTransport",
@@ -50,7 +53,12 @@ _DEFAULT_BATCH: Final = 512
 
 
 class TraceMetricTransport(_Protocol):
-    """The transport the pipeline pushes OTLP request dicts through."""
+    """The transport the pipeline pushes OTLP request dicts through.
+
+    `export_logs` is optional: a transport written before the logs signal still
+    satisfies this protocol, and the pipeline counts rather than crashes when it
+    is missing.
+    """
 
     def export_traces(self, request: dict[str, Any]) -> None: ...
     def export_metrics(self, request: dict[str, Any]) -> None: ...
@@ -59,13 +67,13 @@ class TraceMetricTransport(_Protocol):
 class OtlpHttpExporter:
     """A minimal OTLP/HTTP+JSON exporter over `urllib` (no third-party dep).
 
-    Posts to `{endpoint}/v1/traces` and `{endpoint}/v1/metrics` with a bounded
+    Posts to `{endpoint}/v1/traces`, `/v1/logs` and `/v1/metrics` with a bounded
     timeout. Any transport-level failure raises, which the pipeline isolates and
     counts -- this class deliberately holds no retry/backoff policy of its own so
     that the single "drop and count" backpressure story stays in one place.
     """
 
-    __slots__ = ("_traces_url", "_metrics_url", "_timeout", "_headers")
+    __slots__ = ("_headers", "_logs_url", "_metrics_url", "_timeout", "_traces_url")
 
     def __init__(
         self,
@@ -77,6 +85,7 @@ class OtlpHttpExporter:
         base = endpoint.rstrip("/")
         self._traces_url = f"{base}/v1/traces"
         self._metrics_url = f"{base}/v1/metrics"
+        self._logs_url = f"{base}/v1/logs"
         self._timeout = timeout
         self._headers = {"content-type": "application/json", **(headers or {})}
 
@@ -91,6 +100,10 @@ class OtlpHttpExporter:
     def export_traces(self, request: dict[str, Any]) -> None:
         if request.get("resourceSpans"):
             self._post(self._traces_url, request)
+
+    def export_logs(self, request: dict[str, Any]) -> None:
+        if request.get("resourceLogs"):
+            self._post(self._logs_url, request)
 
     def export_metrics(self, request: dict[str, Any]) -> None:
         if request.get("resourceMetrics"):
@@ -118,7 +131,11 @@ class ExportPipeline:
         "_lock",
         "_trace_errors",
         "_metric_errors",
+        "_log_errors",
         "_exported_traces",
+        "_exported_logs",
+        "_log_queue",
+        "_log_registry",
         "_thread",
         "_stop",
     )
@@ -133,6 +150,7 @@ class ExportPipeline:
         batch_size: int = _DEFAULT_BATCH,
         interval: float = _DEFAULT_INTERVAL,
         snapshot_provider: Callable[[], ProjectorSnapshot | None] | None = None,
+        log_registry: Any = None,
     ) -> None:
         if interval <= 0:
             raise ValueError("interval must be positive")
@@ -149,7 +167,14 @@ class ExportPipeline:
         self._lock = threading.Lock()
         self._trace_errors = 0
         self._metric_errors = 0
+        self._log_errors = 0
         self._exported_traces = 0
+        self._exported_logs = 0
+        # Logs get their own bounded queue rather than sharing the trace one:
+        # they arrive one to two orders of magnitude more often, so a shared
+        # queue would let a log burst evict the traces an operator came for.
+        self._log_queue: BoundedLogQueue = BoundedLogQueue(queue_capacity)
+        self._log_registry = log_registry
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
 
@@ -158,6 +183,19 @@ class ExportPipeline:
     def on_trace(self, trace: ProjectedTrace) -> None:
         """The projector's export hook: enqueue, dropping if the queue is full."""
         self._queue.offer(trace)
+
+    def on_log(self, record: ProjectedLog) -> None:
+        """The projector's log hook: enqueue, dropping if the queue is full.
+
+        Only enqueues, exactly like `on_trace`, so the projector thread never
+        blocks on the network.
+        """
+        if self._log_registry is not None:
+            self._log_queue.offer(record)
+
+    def set_log_registry(self, registry: Any) -> None:
+        """Attach the call-site registry the OTLP mapping renders against."""
+        self._log_registry = registry
 
     def set_snapshot_provider(
         self, provider: Callable[[], ProjectorSnapshot | None]
@@ -194,6 +232,7 @@ class ExportPipeline:
 
     def _tick(self) -> None:
         self._export_traces()
+        self._export_logs()
         self._export_metrics()
 
     # -- export steps -------------------------------------------------------
@@ -215,6 +254,35 @@ class ExportPipeline:
             else:
                 with self._lock:
                     self._exported_traces += len(batch)
+
+    def _export_logs(self) -> None:
+        registry = self._log_registry
+        if registry is None:
+            return
+        pending = self._log_queue.drain()
+        if not pending:
+            return
+        exporter = getattr(self._transport, "export_logs", None)
+        if exporter is None:
+            # A transport predating the logs signal. Counted, not silent: an
+            # operator who configured logs export and gets nothing needs a
+            # rising number, not a mystery.
+            with self._lock:
+                self._log_errors += 1
+            return
+        for start in range(0, len(pending), self._batch_size):
+            batch = pending[start : start + self._batch_size]
+            request = build_logs_request(
+                batch, registry=registry, resource_attributes=self._resource
+            )
+            try:
+                exporter(request)
+            except Exception:  # noqa: BLE001 -- isolate exporter failure to a counter
+                with self._lock:
+                    self._log_errors += 1
+            else:
+                with self._lock:
+                    self._exported_logs += len(batch)
 
     def _export_metrics(self) -> None:
         provider = self._snapshot_provider
@@ -247,6 +315,9 @@ class ExportPipeline:
         with self._lock:
             return {
                 "exported_traces": self._exported_traces,
+                "exported_logs": self._exported_logs,
+                "log_errors": self._log_errors,
+                "log_dropped": self._log_queue.dropped,
                 "trace_errors": self._trace_errors,
                 "metric_errors": self._metric_errors,
                 "dropped": self._queue.dropped,

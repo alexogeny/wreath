@@ -289,7 +289,33 @@ def test_memory_budget_components_are_exact() -> None:
         + budget.phase_scratch
         + budget.capture
         + budget.export_queue
+        + budget.logging
     )
+
+
+def test_memory_budget_counts_the_logging_tables() -> None:
+    """A budget that silently omits a component is worse than one that names
+    what it estimates -- `logging` is the Python-object half."""
+    from wreath.telemetry import LoggingConfig
+
+    on = TelemetryConfig(mode=Mode.PULSE, logging=LoggingConfig()).memory_budget()
+    off = TelemetryConfig(
+        mode=Mode.PULSE, logging=LoggingConfig(enabled=False)
+    ).memory_budget()
+    assert off.logging == 0
+    assert on.logging > 0
+    assert on.total - off.total == on.logging
+
+
+def test_logging_config_rejects_unbounded_tables() -> None:
+    from wreath.telemetry import LoggingConfig
+
+    with pytest.raises(TelemetryConfigError):
+        LoggingConfig(site_capacity=0)
+    with pytest.raises(TelemetryConfigError):
+        LoggingConfig(writer_queue=-1)
+    with pytest.raises(TelemetryConfigError):
+        LoggingConfig(scratch_budget=1 << 20)
 
 
 # --- recording policy (deny-by-default) -------------------------------------
@@ -501,3 +527,24 @@ def test_python_struct_sizes_are_sixty_four() -> None:
         + fs.PHASE_RECORDS_PER_BATCH * struct.calcsize(fs._PHASE_RECORD.format)
         == fs.CELL_SIZE
     )
+
+
+def test_logging_config_rejects_a_floor_above_the_publish_level() -> None:
+    """A capture floor above `level` would buffer records that can never be
+    published -- a configuration with no correct interpretation."""
+    from wreath._flight_schema import Severity
+    from wreath.telemetry import LoggingConfig
+
+    with pytest.raises(TelemetryConfigError, match="capture_level"):
+        LoggingConfig(level=Severity.DEBUG, capture_level=Severity.WARN)
+    LoggingConfig(level=Severity.WARN, capture_level=Severity.DEBUG)  # the useful shape
+
+
+def test_logging_config_defaults_buffer_verbose_records() -> None:
+    """The shipped default has to make failure-triggered logging work at all."""
+    from wreath._flight_schema import Severity
+    from wreath.telemetry import LoggingConfig
+
+    config = LoggingConfig()
+    assert config.level == Severity.INFO
+    assert config.capture_level < config.level

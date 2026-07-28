@@ -34,7 +34,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Final
 from typing import Protocol as _Protocol
 
@@ -45,6 +45,7 @@ from ._flight_schema import (
     CompletionCell,
     CorrelationCell,
     EventKind,
+    LogCell,
     LossReason,
     PhaseBatchCell,
     PhaseRecord,
@@ -55,6 +56,7 @@ from ._flight_schema import (
 )
 
 __all__ = [
+    "ProjectedLog",
     "ProjectedTrace",
     "RouteMetric",
     "ProjectorSnapshot",
@@ -85,10 +87,45 @@ class ProjectorLoss:
 
     orphan_phase: int = 0
     orphan_correlation: int = 0
+    orphan_log: int = 0
     pending_evicted: int = 0
     decode_error: int = 0
     export_error: int = 0
     recent_evicted: int = 0
+
+
+def _mix64(value: int) -> int:
+    """A splitmix64 finalizer: a stateless, well-dispersed map used to synthesize
+    stable ids from a request id (mirrors the recorder's own arming mixer)."""
+    value &= (1 << 64) - 1
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & ((1 << 64) - 1)
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & ((1 << 64) - 1)
+    return value ^ (value >> 31)
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectedLog:
+    """One log record with whatever correlation the projector could join to it.
+
+    Lives here rather than in `_logsink` for the same reason `ProjectedTrace`
+    does: the projector produces it and the sinks consume it, so the dependency
+    points one way.
+
+    A record that is not request-scoped (startup, shutdown, a background job)
+    carries zeros and is delivered as soon as it is drained -- it must never be
+    held waiting for a completion that will not arrive.
+    """
+
+    cell: LogCell
+    trace_id: int = 0
+    span_id: int = 0
+    route_id: int = 0
+    #: Wall-clock time (Unix nanoseconds) the projector observed this record.
+    observed_unix_nano: int = 0
+
+    @property
+    def has_correlation(self) -> bool:
+        return self.trace_id != 0 or self.span_id != 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +150,9 @@ class ProjectedTrace:
     span_id: int = 0
     parent_span_id: int = 0
     phases: tuple[PhaseRecord, ...] = ()
+    #: Log records emitted during this request, joined by request id. Ordered as
+    #: the ring published them.
+    logs: tuple[LogCell, ...] = ()
     #: Wall-clock time (Unix nanoseconds) the projector finalized this trace.
     #: The completion cell carries only a duration, so this observation time is
     #: the anchor an exporter uses to place the span on a wall clock:
@@ -123,6 +163,24 @@ class ProjectedTrace:
     @property
     def has_correlation(self) -> bool:
         return self.trace_id != 0 or self.span_id != 0
+
+    @property
+    def effective_ids(self) -> tuple[int, int]:
+        """The (trace_id, span_id) every consumer should use for this request.
+
+        A propagated request carries real ids. An unpropagated one has none, so
+        deterministic non-zero ids are synthesized from its request and worker
+        id: OTLP forbids all-zero ids, and more importantly a log record and the
+        span for the same request must agree, which they only do if both ask
+        here rather than each inventing an answer.
+        """
+        if self.has_correlation:
+            return self.trace_id, self.span_id
+        seed = (self.request_id << 8) ^ self.worker_id
+        lo = _mix64(seed)
+        hi = _mix64(seed ^ 0xD1B54A32D192ED03)
+        span = _mix64(seed ^ 0x9E3779B97F4A7C15) or 1
+        return ((hi << 64) | lo) or 1, span
 
     @property
     def is_failure(self) -> bool:
@@ -172,6 +230,7 @@ class _Assembly:
     completion: CompletionCell | None = None
     correlation: CorrelationCell | None = None
     phases: list[PhaseRecord] = field(default_factory=list)
+    logs: list[LogCell] = field(default_factory=list)
     cycle: int = -1
 
 
@@ -191,6 +250,7 @@ class Projector:
         "_interval",
         "_max_cells",
         "_on_trace",
+        "_on_log",
         "_max_routes",
         "_lock",
         "_pending",
@@ -216,6 +276,7 @@ class Projector:
         pending: int = _DEFAULT_PENDING,
         max_routes: int = _DEFAULT_ROUTES,
         on_trace: Callable[[ProjectedTrace], None] | None = None,
+        on_log: Callable[[ProjectedLog], None] | None = None,
     ) -> None:
         if interval <= 0:
             raise ValueError("interval must be positive")
@@ -231,6 +292,7 @@ class Projector:
         self._interval = interval
         self._max_cells = max_cells
         self._on_trace = on_trace
+        self._on_log = on_log
         self._max_routes = max_routes
         # Guards every mutable buffer below: the drain thread writes under it,
         # snapshot()/metrics() read under it. Held only for O(batch) work.
@@ -306,6 +368,8 @@ class Projector:
                     self._ingest_correlation(CorrelationCell.decode(cell))
                 elif kind == EventKind.PHASE:
                     self._ingest_phase(PhaseBatchCell.decode(cell))
+                elif kind == EventKind.LOG:
+                    self._ingest_log(LogCell.decode(cell))
                 else:
                     # CONTROL/INVALID carry no trace payload for the projector.
                     continue
@@ -340,6 +404,18 @@ class Projector:
     def _ingest_phase(self, cell: PhaseBatchCell) -> None:
         self._slot(cell.request_id).phases.extend(cell.records)
 
+    def _ingest_log(self, cell: LogCell) -> None:
+        """Attach a record to its request, or deliver it now if it has none.
+
+        A record with request_id 0 -- startup, shutdown, a background job -- can
+        never be joined to a completion, so holding it in the pending table
+        would only delay it until the slot was evicted as an orphan.
+        """
+        if cell.request_id == 0:
+            self._emit_log(ProjectedLog(cell=cell, observed_unix_nano=time.time_ns()))
+            return
+        self._slot(cell.request_id).logs.append(cell)
+
     def _settle(self) -> int:
         """Finalize completions first seen in an earlier cycle (their tail has
         had a full cycle to arrive) and retire stale partials as orphans."""
@@ -358,6 +434,8 @@ class Projector:
                     self._loss.orphan_correlation += 1
                 if entry.phases:
                     self._loss.orphan_phase += 1
+                if entry.logs:
+                    self._loss.orphan_log += 1
                 del self._pending[request_id]
         return emitted
 
@@ -374,6 +452,8 @@ class Projector:
                 self._loss.orphan_correlation += 1
             if entry.phases:
                 self._loss.orphan_phase += 1
+            if entry.logs:
+                self._loss.orphan_log += 1
 
     def _finalize(self, request_id: int, entry: _Assembly) -> None:
         completion = entry.completion
@@ -399,6 +479,7 @@ class Projector:
             span_id=corr.span_id if corr is not None else 0,
             parent_span_id=corr.parent_span_id if corr is not None else 0,
             phases=phases,
+            logs=tuple(entry.logs),
             # Precise, drift-free wall time from the recorder's calibration and
             # the cell's monotonic end offset; fall back to stamping now.
             observed_unix_nano=(
@@ -415,6 +496,7 @@ class Projector:
         if trace.is_failure:
             self._failures.append(trace)
         self._export(trace)
+        self._export_logs(trace)
 
     def _record_metric(self, trace: ProjectedTrace) -> None:
         metric = self._routes.get(trace.route_id)
@@ -446,6 +528,42 @@ class Projector:
             # silence -- the `MessageBus` shape.
             self._loss.export_error += 1
 
+    def _export_logs(self, trace: ProjectedTrace) -> None:
+        """Offer each of a settled request's records with its correlation.
+
+        Called after `_export` so a consumer that reads both sees the trace
+        before the records that belong to it.
+        """
+        if self._on_log is None or not trace.logs:
+            return
+        # `effective_ids`, not the raw fields: an unpropagated request has no
+        # correlation cell, and a record that reported zeros while the span
+        # export reported synthesized ids would make the two signals disagree
+        # about the same request -- worse than either being absent.
+        trace_id, span_id = trace.effective_ids
+        for cell in trace.logs:
+            self._emit_log(
+                ProjectedLog(
+                    cell=cell,
+                    trace_id=trace_id,
+                    span_id=span_id,
+                    route_id=trace.route_id,
+                    observed_unix_nano=trace.observed_unix_nano,
+                )
+            )
+
+    def _emit_log(self, record: ProjectedLog) -> None:
+        hook = self._on_log
+        if hook is None:
+            return
+        try:
+            hook(record)
+        except Exception:  # noqa: BLE001 - user sink; counted in loss.export_error
+            # Same shape and same reasoning as `_export`: the record already
+            # happened, and a sink that raises must not stop the drain that
+            # feeds the trace pipeline alongside it.
+            self._loss.export_error += 1
+
     # --- snapshots ---------------------------------------------------------
 
     def snapshot(
@@ -470,14 +588,12 @@ class Projector:
                 )
                 for m in self._routes.values()
             )
-            loss = ProjectorLoss(
-                orphan_phase=self._loss.orphan_phase,
-                orphan_correlation=self._loss.orphan_correlation,
-                pending_evicted=self._loss.pending_evicted,
-                decode_error=self._loss.decode_error,
-                export_error=self._loss.export_error,
-                recent_evicted=self._loss.recent_evicted,
-            )
+            # `replace` with no changes copies *every* field, including ones
+            # added later. The field-by-field copy this used to be silently
+            # dropped `orphan_log` when it was introduced -- the counter rose
+            # and the snapshot reported zero, which is the exact failure mode a
+            # loss counter exists to prevent.
+            loss = replace(self._loss)
             return ProjectorSnapshot(
                 assembled=self._assembled,
                 recent=recent_items,

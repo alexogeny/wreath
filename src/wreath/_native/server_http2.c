@@ -1706,7 +1706,7 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
             );
             wreath_request_context_set_armed(st->scope);
         }
-        else if (PyDict_SetItemString(st->scope, "_wreath_flight", Py_None) < 0) {
+        else if (wreath_request_scope_seed_flight(st->scope, &st->nfr_ctx) < 0) {
             PyErr_Clear();
         }
         for (Py_ssize_t i = 0; i < PyList_GET_SIZE(header_list); i++) {

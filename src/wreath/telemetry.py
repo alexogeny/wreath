@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     # Type-only: the exporter bridges are imported lazily inside each activate_*
     # function so importing telemetry stays cheap. Borrowing just the alias keeps
     # that property while giving the wrappers below the real parameter contract.
+    from ._logscratch import LogSamplingPolicy
     from ._prometheus import RouteLabels
 
 from ._flight_schema import (
@@ -34,6 +35,7 @@ from ._flight_schema import (
     PHASE_CELL_BUDGET,
     PHASE_RECORDS_PER_BATCH,
     Mode,
+    Severity,
 )
 
 #: One phase-scratch block holds a request's whole phase budget laid out as
@@ -46,6 +48,7 @@ __all__ = [
     "HistogramConfig",
     "SamplingPolicy",
     "PropagationConfig",
+    "LoggingConfig",
     "OTLPConfig",
     "TelemetryConfig",
     "MemoryBudget",
@@ -69,10 +72,33 @@ _MAX_ROUTE_HISTOGRAMS = 1 << 16
 _MAX_CAPTURE_SLABS = 1 << 16
 _MAX_CAPTURE_BYTES = 1 << 30  # 1 GiB per recorder/worker
 _MAX_EXPORT_QUEUE = 1 << 20
+#: Ceilings on logging's tables, in the same spirit: generous provisional bounds
+#: so a misconfiguration cannot ask for unbounded memory (ADR 0021).
+_MAX_LOG_SITES = 1 << 20
+_MAX_LOG_SCRATCH = 1 << 16
+_MAX_LOG_QUEUE = 1 << 22
 #: Per-active-slot bookkeeping (context + generation/seqlock), provisional.
 _ACTIVE_SLOT_BYTES = 128
 #: A single log2 histogram is HISTOGRAM_BUCKETS 64-bit counters.
 _HISTOGRAM_BYTES = HISTOGRAM_BUCKETS * 8
+
+# --- logging's fixed tables (provisional, Python-object estimates) ----------
+#
+# Measured shapes, not guesses at nothing: an interned `LogSite` is a slots
+# dataclass holding six attributes plus a tuple of `LogField`s; a limiter slot
+# is three ints; a queued record is a slots dataclass around one `LogCell`.
+# They are estimates because CPython object overhead is not a wire format --
+# see `MemoryBudget.logging`.
+
+#: One interned call site: the site object, its template and event-name strings,
+#: and a couple of declared fields.
+_LOG_SITE_BYTES = 512
+#: One limiter slot: tick, count, dropped.
+_LOG_LIMITER_SLOT_BYTES = 96
+#: One queued record awaiting the writer.
+_LOG_QUEUED_RECORD_BYTES = 256
+#: One buffered TRACE/DEBUG record held for a possible promotion.
+_LOG_SCRATCH_RECORD_BYTES = 256
 
 
 class TelemetryConfigError(ValueError):
@@ -159,8 +185,76 @@ class OTLPConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class LoggingConfig:
+    """Fixed sizes for `wreath.logging`'s tables.
+
+    Every one is a ceiling with counted overflow, never a growth trigger: a full
+    site table degrades to uninterned records, a full scratch buffer drops the
+    record, a full writer queue drops and counts. See
+    `docs/reference/logging.md`.
+    """
+
+    enabled: bool = True
+    #: Severity at and above which a record is published immediately.
+    level: Severity = Severity.INFO
+    #: Severity floor. Below it a call does nothing at all; between it and
+    #: `level` a record is buffered for promotion when a request is in flight,
+    #: and dropped when one is not. The two thresholds are separate because
+    #: failure-triggered logging needs verbose records to be *created* while
+    #: staying unpublished -- a single level cannot express that.
+    capture_level: Severity = Severity.DEBUG
+    #: Per-call-site rate limiting. None uses the default policy; disable it
+    #: with `LogSamplingPolicy(enabled=False)`.
+    sampling: LogSamplingPolicy | None = None
+    #: Interned call sites. Overflow -> LossReason.LOG_SITE_TABLE_FULL.
+    site_capacity: int = 4096
+    #: Sites the per-call-site limiter tracks. Beyond it, records pass.
+    limiter_capacity: int = 4096
+    #: TRACE/DEBUG records held per request awaiting a promotion.
+    scratch_budget: int = 64
+    #: Records queued for the writer thread. Overflow -> a counted drop.
+    writer_queue: int = 8192
+
+    def __post_init__(self) -> None:
+        _require(self.site_capacity >= 1, "site_capacity must be >= 1")
+        _require(self.site_capacity <= _MAX_LOG_SITES, "site_capacity is too large")
+        _require(self.limiter_capacity >= 0, "limiter_capacity must be >= 0")
+        _require(self.limiter_capacity <= _MAX_LOG_SITES, "limiter_capacity is too large")
+        _require(self.scratch_budget >= 0, "scratch_budget must be >= 0")
+        _require(self.scratch_budget <= _MAX_LOG_SCRATCH, "scratch_budget is too large")
+        _require(self.writer_queue >= 0, "writer_queue must be >= 0")
+        _require(self.writer_queue <= _MAX_LOG_QUEUE, "writer_queue is too large")
+        _require(
+            self.capture_level <= self.level,
+            "capture_level must not exceed level; a floor above the publish "
+            "threshold would buffer records that can never be published",
+        )
+
+    def memory_bytes(self, active_requests: int) -> int:
+        """Approximate fixed footprint. Zero when logging is disabled.
+
+        `active_requests` bounds how many per-request scratch buffers can be
+        live at once, so the worst case is every in-flight request holding a
+        full buffer.
+        """
+        if not self.enabled:
+            return 0
+        return (
+            self.site_capacity * _LOG_SITE_BYTES
+            + self.limiter_capacity * _LOG_LIMITER_SLOT_BYTES
+            + self.writer_queue * _LOG_QUEUED_RECORD_BYTES
+            + active_requests * self.scratch_budget * _LOG_SCRATCH_RECORD_BYTES
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryBudget:
-    """The exact fixed bytes a configuration reserves, by component."""
+    """The fixed bytes a configuration reserves, by component.
+
+    Every component but `logging` is exact -- native code reserves precisely
+    that many bytes. `logging` is an estimate over Python objects; its field
+    documents why.
+    """
 
     active_slots: int
     ring: int
@@ -168,6 +262,17 @@ class MemoryBudget:
     phase_scratch: int
     capture: int
     export_queue: int
+    #: Logging's fixed tables: the interned call sites, the per-call-site
+    #: limiter, and the writer hand-off queue.
+    #:
+    #: **This one is an estimate, and the others are not.** The recorder's
+    #: reservations above are exact because native code allocates exactly that
+    #: many bytes; logging's tables are Python objects, so this is their
+    #: approximate footprint from the provisional per-entry constants below. It
+    #: is here rather than absent because a budget that silently omits a
+    #: component is worse than one that says which part it is estimating -- and
+    #: it becomes exact when the emitter moves to C.
+    logging: int = 0
 
     @property
     def total(self) -> int:
@@ -178,6 +283,7 @@ class MemoryBudget:
             + self.phase_scratch
             + self.capture
             + self.export_queue
+            + self.logging
         )
 
 
@@ -201,6 +307,8 @@ class TelemetryConfig:
     histograms: HistogramConfig = field(default_factory=HistogramConfig)
     detailed: SamplingPolicy = field(default_factory=SamplingPolicy)
     forensic: SamplingPolicy = field(default_factory=SamplingPolicy)
+    #: Fixed sizes for `wreath.logging`'s tables.
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
     #: A Detailed completion at or beyond this many microseconds is flagged
     #: SLOW_PROMOTED; 0 disables the latency trigger. Errors/timeouts are always
     #: flagged ERROR_PROMOTED in Detailed mode. Promotion flags the completion
@@ -265,6 +373,7 @@ class TelemetryConfig:
                 else 0
             ),
             export_queue=(self.otlp.export_queue * CELL_SIZE if self.otlp.enabled else 0),
+            logging=self.logging.memory_bytes(self.active_requests),
         )
         # Guard against a computed budget that is itself implausible.
         if budget.total > (1 << 40):

@@ -758,6 +758,16 @@ ring_publish(wreath_nfr_worker *worker, const void *cell)
     return 1;
 }
 
+/* The log emitter's publish seam. Python packs a KIND_LOG cell and hands it
+ * here so records ride the same single-writer ring, the same one capacity check
+ * and release store, and the same RING_FULL accounting as a completion. A
+ * native emitter would replace the packing above this line, not this call. */
+int
+wreath_nfr_publish_cell(wreath_nfr_worker *worker, const void *cell)
+{
+    return ring_publish(worker, cell);
+}
+
 Py_ssize_t
 wreath_nfr_ring_drain(wreath_nfr_worker *worker, uint8_t *out, Py_ssize_t max_cells)
 {

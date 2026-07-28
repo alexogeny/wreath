@@ -66,6 +66,17 @@ typedef struct {
 /* Opaque recorder worker; layout lives in flight.c. */
 typedef struct wreath_nfr_worker wreath_nfr_worker;
 
+/* Publish a pre-packed 64-byte cell into the worker's ring.
+ *
+ * The log emitter's provisional path: Python packs a WREATH_NFR_KIND_LOG cell
+ * and hands it here, so records ride the same single-writer ring, the same
+ * capacity check, and the same RING_FULL accounting as a completion. A native
+ * emitter that packs the cell in C replaces the packing, not this publish.
+ *
+ * Returns 1 when published, 0 when the ring was full (counted as RING_FULL).
+ * Must be called from the worker's own thread, like every other writer. */
+int wreath_nfr_publish_cell(wreath_nfr_worker *worker, const void *cell);
+
 /* --- worker lifecycle (control plane, not the request path) --------------- */
 
 /* Create a worker. ring_records must be a power of two (or 0 for Off-only).

@@ -52,6 +52,10 @@ from .exceptions import (
     NotFound,
     Unauthorized,
 )
+from .logging import begin_request_for as _log_begin_request
+from .logging import begin_request_seeded as _log_begin_seeded
+from .logging import finish_request_for as _log_finish_request
+from .logging import finish_session as _log_finish_session
 from .middleware.base import Middleware, MiddlewareRoute, compile_middleware
 from .request import DEFAULT_LIMITS, Request, RequestLimits
 from .response import (
@@ -1648,6 +1652,15 @@ class Wreath:
         if native_response:
             flight = scope.flight
             if flight:
+                # One log scope per request, keyed on the recorder's own request
+                # id so a record joins the completion the projector will
+                # assemble. The context goes in rather than the id: reading the
+                # id crosses into C, and `begin_request_for` checks for an
+                # installed runtime first, so a recorder without logging pays a
+                # call and a branch and no crossing. `_finish_http` closes the
+                # scope -- every exit from this method funnels through there,
+                # error paths included.
+                _log_begin_request(scope)
                 ids = self._flight_route_ids or self._build_flight_route_ids()
                 attribution = ids.get(handler)
                 if attribution is not None:
@@ -1663,6 +1676,13 @@ class Wreath:
                     flight_phase = scope._flight_phase
                     _phase_marker.set(flight_phase)
         elif "_wreath_flight" in scope:
+            # HTTP/2 and HTTP/3 dispatch through a dict scope with no request
+            # context, so their protocols seed the recorder's request id into
+            # `_wreath_flight`. The seeded id opens this request's log scope
+            # before the line below overwrites it with route attribution; the
+            # helper reads the key itself, so a server without a logging runtime
+            # pays a Python call and no crossing.
+            _log_begin_seeded(scope)
             ids = self._flight_route_ids or self._build_flight_route_ids()
             attribution = ids.get(handler)
             if attribution is not None:
@@ -1778,6 +1798,14 @@ class Wreath:
                 except Exception as error:  # noqa: BLE001 -- see _handle_exception
                     response = await self._handle_exception(request, error)
 
+        # Close this request's log scope before the response goes out, so its
+        # records are published while the recorder still holds the context they
+        # will be joined to. The response goes in rather than a verdict: reading
+        # a native response's status is a crossing, and `finish_request_for`
+        # checks for a bound scope first, so a request with no logging runtime
+        # pays one `ContextVar.get(None)` and no crossing.
+        _log_finish_request(response)
+
         extensions = None if native_response else scope.get("extensions")
         if method == "HEAD":
             await response(_head_send(send))
@@ -1828,6 +1856,11 @@ class Wreath:
         # recorder is attached, so a pure ASGI server pays one membership test and
         # no crossing; C reads the tuple off the retained scope at completion.
         if "_wreath_flight" in scope:
+            # A WebSocket session is one recorder context for its whole life, so
+            # its log scope spans the session too: records made while the socket
+            # is open belong to it, and a session that ends badly promotes the
+            # verbose ones exactly as a failed request does.
+            _log_begin_seeded(scope)
             ids = self._flight_route_ids or self._build_flight_route_ids()
             attribution = ids.get(handler)
             if attribution is not None:
@@ -1860,8 +1893,18 @@ class Wreath:
         try:
             await cast("WebSocketHandler", handler)(websocket)
         except WebSocketDisconnect:
-            # The peer left; nothing further to send.
+            # The peer left; nothing further to send. Not a failure, so the
+            # session's buffered records are discarded like a healthy request's.
+            _log_finish_session(promoted=False)
             return
+        except BaseException:
+            # Anything else ended the session badly -- a handler that raised, or
+            # a cancellation tearing the task down. Publish the verbose records
+            # for exactly this session, then let it propagate: the promotion is
+            # a side effect of the failure, never a substitute for reporting it.
+            _log_finish_session(promoted=True)
+            raise
+        _log_finish_session(promoted=False)
 
     async def _handle_exception(
         self, request: Request, error: Exception

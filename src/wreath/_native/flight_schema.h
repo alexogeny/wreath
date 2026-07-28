@@ -45,7 +45,8 @@ enum {
     WREATH_NFR_KIND_CORRELATION = 2,
     WREATH_NFR_KIND_PHASE = 3,
     WREATH_NFR_KIND_CONTROL = 4,
-    WREATH_NFR_KIND_CAPTURE = 5
+    WREATH_NFR_KIND_CAPTURE = 5,
+    WREATH_NFR_KIND_LOG = 6
 };
 
 /* CaptureFieldClass: the boundary a captured field came from. */
@@ -107,7 +108,12 @@ enum {
     WREATH_NFR_LOSS_ENTROPY_EXHAUSTED = 5,
     WREATH_NFR_LOSS_PROPAGATION_INVALID = 6,
     WREATH_NFR_LOSS_BODY_TRUNCATED = 7,
-    WREATH_NFR_LOSS_REASON_COUNT = 8
+    WREATH_NFR_LOSS_LOG_SCRATCH_FULL = 8,
+    WREATH_NFR_LOSS_LOG_ARGS_TRUNCATED = 9,
+    WREATH_NFR_LOSS_LOG_SITE_TABLE_FULL = 10,
+    WREATH_NFR_LOSS_LOG_SAMPLED = 11,
+    WREATH_NFR_LOSS_LOG_OFF_LOOP = 12,
+    WREATH_NFR_LOSS_REASON_COUNT = 13
 };
 
 /* Completion-cell flag bits. */
@@ -181,6 +187,65 @@ typedef struct {
     wreath_nfr_phase_cell records[WREATH_NFR_PHASE_RECORDS_PER_BATCH]; /* 16,32,48 */
 } wreath_nfr_phase_batch_cell;
 
+/* --- log records ---------------------------------------------------------- */
+
+/* Bytes of a log cell given over to packed arguments, and the retained argument
+ * count. Mirrors LOG_INLINE_ARG_BYTES / LOG_MAX_ARGS in _flight_schema.py. */
+#define WREATH_NFR_LOG_INLINE_ARG_BYTES 32
+#define WREATH_NFR_LOG_MAX_ARGS 8
+
+/* Log-cell flag bits. A separate namespace from WREATH_NFR_FLAG_*: these
+ * describe one record, not the request it belongs to. */
+#define WREATH_NFR_LOG_FLAG_PROMOTED (1u << 0)
+#define WREATH_NFR_LOG_FLAG_TRUNCATED (1u << 1)
+#define WREATH_NFR_LOG_FLAG_REDACTED (1u << 2)
+#define WREATH_NFR_LOG_FLAG_OFF_LOOP (1u << 3)
+#define WREATH_NFR_LOG_FLAG_EVENT_FIELDS (1u << 4)
+
+/* OpenTelemetry SeverityNumber, at the base of each band. */
+enum {
+    WREATH_NFR_SEVERITY_TRACE = 1,
+    WREATH_NFR_SEVERITY_DEBUG = 5,
+    WREATH_NFR_SEVERITY_INFO = 9,
+    WREATH_NFR_SEVERITY_WARN = 13,
+    WREATH_NFR_SEVERITY_ERROR = 17,
+    WREATH_NFR_SEVERITY_FATAL = 21
+};
+
+/* The type tag leading each packed argument. Arguments stay self-describing
+ * even though the interned call site already declares their types: one byte
+ * apiece buys a decode that validates a stale or torn record instead of
+ * trusting it. Mirrors LogArgType in _flight_schema.py. */
+enum {
+    WREATH_NFR_LOG_ARG_NONE = 0,   /* no payload                              */
+    WREATH_NFR_LOG_ARG_BOOL = 1,   /* uint8_t 0/1                             */
+    WREATH_NFR_LOG_ARG_INT = 2,    /* int64_t                                 */
+    WREATH_NFR_LOG_ARG_FLOAT = 3,  /* double (IEEE 754 binary64)              */
+    WREATH_NFR_LOG_ARG_STR = 4,    /* uint8_t length, then UTF-8 bytes        */
+    WREATH_NFR_LOG_ARG_HASH = 5,   /* uint64_t keyed SipHash; never the bytes */
+    WREATH_NFR_LOG_ARG_LENGTH = 6  /* uint32_t original length, bytes dropped */
+};
+
+/* A 64-byte ring cell carrying one application log record. Mirrors LogCell in
+ * _flight_schema.py. Deliberately carries no trace or span id: the projector
+ * joins a record to its trace by request_id, exactly as it joins a phase batch,
+ * and log records outnumber completions by one to two orders of magnitude. */
+typedef struct {
+    uint8_t schema_version;  /* offset 0                                      */
+    uint8_t kind;            /* offset 1  (WREATH_NFR_KIND_LOG)               */
+    uint16_t flags;          /* offset 2  (WREATH_NFR_LOG_FLAG_*)             */
+    uint32_t site_id;        /* offset 4  (interned call site; 0 = none)      */
+    uint64_t request_id;     /* offset 8  (0 = not request-scoped)            */
+    uint32_t offset_ms;      /* offset 16 (from the worker clock epoch)       */
+    uint32_t dropped_siblings; /* offset 20 (limiter drops since the last)    */
+    uint8_t severity;        /* offset 24 (OTel SeverityNumber)               */
+    uint8_t worker_id;       /* offset 25                                     */
+    uint8_t arg_count;       /* offset 26                                     */
+    uint8_t arg_bytes;       /* offset 27 (<= WREATH_NFR_LOG_INLINE_ARG_BYTES)*/
+    uint32_t reserved;       /* offset 28                                     */
+    uint8_t args[WREATH_NFR_LOG_INLINE_ARG_BYTES]; /* offset 32               */
+} wreath_nfr_log_cell;
+
 /* A capture-slab header. Mirrors CaptureSlab's header in _flight_schema.py.
  * A slab holds one armed Forensic request's retained fields; used_bytes covers
  * this header plus every field record, so the sink copies exactly that much. */
@@ -223,6 +288,10 @@ _Static_assert(sizeof(wreath_nfr_capture_slab_header) == WREATH_NFR_CAPTURE_SLAB
                "capture slab header must be 24 bytes");
 _Static_assert(sizeof(wreath_nfr_capture_field) == WREATH_NFR_CAPTURE_FIELD_HEADER_SIZE,
                "capture field header must be 12 bytes");
+_Static_assert(sizeof(wreath_nfr_log_cell) == WREATH_NFR_CELL_SIZE,
+               "log cell must be 64 bytes");
+_Static_assert(WREATH_NFR_LOG_INLINE_ARG_BYTES == WREATH_NFR_CELL_SIZE - 32,
+               "the log cell's inline argument area must fill the cell");
 #endif
 
 /* Histogram bucket for a microsecond duration: log2, clamped to a valid bin.

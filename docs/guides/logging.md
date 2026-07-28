@@ -1,0 +1,307 @@
+# Logging
+
+Most logging libraries are a separate world from the rest of your observability.
+The logger knows a message; the tracer knows a request; joining them is your
+problem, usually solved by threading a correlation id through every function
+that might want to say something.
+
+Wreath does not have that seam, because it does not have a separate logger. A
+log record here is one 64-byte cell on the ring the Native Flight Recorder
+already uses for request completions, published by the same writer, and joined
+to its trace by request id when the projector reassembles it. The trace and span
+ids were already sitting in the native request context before your handler ran.
+Nothing has to be threaded anywhere.
+
+That single decision is what the rest of this guide is downstream of.
+
+## The two tiers
+
+Writing a log line well and writing one quickly pull in different directions, so
+there are two ways to do it and the difference is stated rather than hidden.
+
+### The registration tier
+
+A log statement is mostly constant. The message template, the severity, the
+field names, their types, and how each should be redacted never change between
+calls — only the values do. So declare all of that once, at import, and let the
+request path carry only what actually varies:
+
+```python
+from wreath import logging as log
+
+DENIED = log.event(
+    "auth.denied",
+    "user {user} denied access to {resource}",
+    level=log.WARN,
+    fields=(log.field("user", int), log.field("resource", str, log.RAW)),
+)
+
+
+@app.get("/orders/{order_id}")
+async def get_order(order_id: int, viewer: Viewer) -> Order:
+    if not allowed(viewer, order_id):
+        DENIED(viewer.id, "orders")
+        raise Forbidden()
+```
+
+The call packs two arguments into a cell and returns. No dictionary, no format
+string, no walk up the stack to find the file and line — those came from the
+registration. Registration also *validates*: a template naming a field you did
+not declare, a declared field the template never uses, or a type the packer
+cannot handle all fail at import, which is a much better time to find out than
+during an incident.
+
+The `event_name` is not decoration. It is a stable identity for this class of
+event, carried through to OTLP as `EventName`, so "how many `auth.denied` today"
+is a lookup rather than an exercise in clustering message text.
+
+### The ergonomic tier
+
+For everywhere else, the shape you already expect:
+
+```python
+log.info("cache miss for {key}", key=cache_key)
+log.warn("retrying {attempt} of {limit}", attempt=n, limit=3)
+```
+
+This interns lazily on the template text and works out argument types as it
+goes, so it costs a keyword dictionary and a table lookup that the registration
+tier does not. It lands in the same ring, renders the same way, and exports the
+same way. Use it freely; reach for the registration tier on paths where you have
+measured that the difference matters.
+
+## Redaction is deny-by-default
+
+Logging is where secrets leak. A token gets interpolated into a debug message,
+the message goes to disk, and the disk goes to a log aggregator with a broader
+audience than anyone intended.
+
+So `wreath.logging` follows the same posture as
+[`wreath.recording`](../reference/recording.md): a scalar is written as-is, and anything
+string-shaped is replaced by a keyed, process-local fingerprint unless you
+declare otherwise.
+
+```python
+log.info("charging {attempt} via {gateway}", attempt=2, gateway="stripe")
+# attempt=2 verbatim; gateway becomes #4f3a1c... — a stable fingerprint
+```
+
+The fingerprint still correlates: the same string yields the same value within a
+process, so "how many records mention this gateway" survives even though the
+gateway's name does not appear. To read a string in cleartext, say so where a
+reviewer will see it:
+
+```python
+ROUTE = log.event(
+    "http.slow", "slow {route}", fields=(log.field("route", str, log.RAW)),
+)
+```
+
+This does make the ergonomic tier slightly annoying for string-heavy debugging,
+and that gradient is deliberate — it pushes anything that really needs cleartext
+toward a declaration someone can review.
+
+## Verbose logs that cost nothing until something breaks
+
+The most useful thing in this module is also the oldest idea in it.
+
+`TRACE` and `DEBUG` records made during a request are not published. They
+accumulate in a small per-request buffer, and when the request finishes one of
+two things happens: if it failed, ran slow, or was explicitly promoted, the whole
+buffer is published; otherwise it is discarded and the slot reused.
+
+```python
+STEP = log.event("checkout.step", "step {name}", level=log.DEBUG,
+                 fields=(log.field("name", str, log.RAW),))
+
+async def checkout(cart: Cart) -> Receipt:
+    STEP("validate")
+    STEP("reserve_stock")
+    STEP("charge")
+```
+
+In the steady state those three calls produce no output at all and cost a buffer
+append each. When a checkout raises, you get all three, correlated to that
+request's trace, showing exactly what led up to it.
+
+This means you can instrument generously — the usual argument against verbose
+logging is its steady-state cost, and here there isn't one. For the case the
+framework cannot detect, a request that returned 200 and was nonetheless wrong,
+promote it yourself:
+
+```python
+if total != expected:
+    log.set_field("expected_total", expected)
+    scope.promote()
+```
+
+## The canonical log line
+
+Rather than a scatter of partial lines per request, Wreath emits one wide
+structured record: route, plan, protocol, status, error class, timings, trace
+and span ids — everything the recorder already knew — plus whatever your code
+attached:
+
+```python
+async def get_order(order_id: int, viewer: Viewer) -> Order:
+    log.set_field("tenant_id", viewer.tenant_id)
+    log.set_field("cache", "miss")
+    ...
+```
+
+```json
+{"request_id":7,"route_id":12,"status":200,"duration_us":12400,
+ "protocol":"HTTP2","terminal":"OK","trace_id":"...","span_id":"...",
+ "attributes":{"tenant_id":42,"cache":"miss"}}
+```
+
+Inside a handler the same thing reads more naturally through the request:
+
+```python
+request.event.set("tenant_id", viewer.tenant_id)
+request.event.promote()          # publish this request's buffered records
+```
+
+Outside a configured recorder that accessor returns an inert stand-in, so the
+call is always safe and never needs a guard.
+
+One record to find, no join across interleaved lines, and high-cardinality
+fields you can query without having pre-aggregated them. For most services this
+replaces the majority of hand-written log lines. `log.set_field` works from
+anywhere inside the request, including helpers several frames down, and is a
+no-op outside one — so a shared helper does not have to know whether it is
+serving a request.
+
+Fields follow the same redaction rule as arguments, because a wide event is
+exactly where a tenant name and an access token end up side by side.
+
+## Rate limiting, and what it will never suppress
+
+One pathological call site — a cache-miss log in a tight loop, a retry storm —
+can drown out everything else. Within each tick the first N records from a site
+pass, then every Mth, and the rest are dropped:
+
+```python
+from wreath.telemetry import LoggingConfig
+from wreath.logging import LogSamplingPolicy
+```
+
+```python
+TelemetryConfig(
+    logging=LoggingConfig(sampling=LogSamplingPolicy(first=100, thereafter=100)),
+)
+```
+
+**This applies to `INFO` and below only. `WARN`, `ERROR` and `FATAL` are never
+sampled.** An error nobody sees is the worst thing an observability system can
+produce, so the asymmetry is deliberate and worth remembering.
+
+Nothing is dropped silently. Suppressed records are counted per site and carried
+on the next record that gets through, so one line tells you how many like it
+were held back:
+
+```text
+INFO   cache miss for key=…   (+147 sampled out)
+```
+
+## Where the work happens
+
+Everything readable about a record happens somewhere your handler is not:
+
+- The request path packs a cell and returns.
+- The projector thread drains the ring, joins each record to its trace, and
+  offers it onward.
+- A dedicated writer thread renders the template and writes the bytes.
+
+Each hand-off is a bounded queue that drops and counts when full, so a stalled
+disk or a slow collector shows up as a rising number rather than as latency in a
+handler. Logs get their own writer thread and their own export queue rather than
+sharing the projector's, because they outnumber request completions by one to
+two orders of magnitude and a log burst must not evict the traces you came for.
+
+Both a text renderer and JSON lines ship from the start — text on a terminal,
+JSON everywhere else — so choosing between them is a flag and never a break in
+what your pipeline parses.
+
+## Third-party libraries
+
+Wreath does not install itself on the root logger. A framework that seizes
+global logging state fights `dictConfig`, surprises anyone with handlers of
+their own, and either double-emits or quietly discards their configuration.
+
+So bridging is something you ask for:
+
+```python
+import logging
+from wreath import logging as log
+
+with log.stdlib_bridge(logging.getLogger("asyncpg")):
+    ...
+```
+
+Be aware of what the bridge can and cannot do. By the time a `logging.Handler`
+runs, CPython has already built a `LogRecord`, walked the stack, and formatted
+the message — none of the cost the registration tier avoids has been avoided.
+It is the *compatible* path, not the fast one. Its value is that records from
+libraries you did not write land in the same correlated stream as everything
+else.
+
+The restraint has a cost — two disjoint streams — so it is paired with a check
+that notices when that is actually the situation:
+
+```python
+from wreath.doctor import check_logging_streams
+
+for finding in check_logging_streams():
+    print(finding)
+```
+
+## Turning it on
+
+Logging needs a recorder — without one there is no ring for a record to ride and
+no projector to correlate it — so it comes up with telemetry:
+
+```python
+from wreath.server import ServerConfig, serve
+from wreath.telemetry import Mode, TelemetryConfig
+
+config = ServerConfig(
+    telemetry=TelemetryConfig(mode=Mode.DETAILED),
+    # log_writer=my_collector.write   # defaults to stdout
+)
+```
+
+That installs the runtime, starts the writer thread, and gives every request a
+scope — on HTTP/1.1, HTTP/2, HTTP/3, and for the whole life of a WebSocket
+session, which is one recorder context and therefore one log scope.
+
+**Two thresholds, not one.** `level` is what gets published; `capture_level` is
+the floor below which a call does nothing at all. Between them a record is
+buffered for promotion. They are separate because failure-triggered logging
+needs verbose records to be *created* while staying unpublished, and one level
+cannot express that:
+
+```python
+LoggingConfig(level=log.INFO, capture_level=log.TRACE)   # the useful shape
+LoggingConfig(level=log.WARN)                            # capture_level follows
+```
+
+Leave `capture_level` alone and it follows `level`, collapsing back to the one
+threshold you would expect if you never asked for buffering. With `Mode.OFF` nothing is installed and every `log.*` call stays the
+no-op it is before a server boots — and, because the request path checks a plain
+module global before it touches anything native, a server with a recorder but no
+logging adds no boundary crossings at all.
+
+## What is deliberately not here
+
+- **`wreath.audit` is not built on this.** An audit trail needs "never lose a
+  record"; application logging promises "never block the request path". Those
+  are incompatible, and the audit logger keeps its own path until it gets a
+  durability contract designed on its own terms rather than inheriting one.
+- **Records do not survive a hard crash yet.** The ring is anonymous memory, so
+  a segfault takes the last records with it. The cell layout is versioned and
+  every decode validates rather than trusts, specifically so a file-backed
+  forensic ring can be added later without a format break.
+
+Reference: [`wreath.logging`](../reference/logging.md), and
+[`wreath.telemetry`](../reference/telemetry.md) for the fixed-size budgets.

@@ -339,6 +339,12 @@ extern PyTypeObject ValueAwaitableType;
 
 int wreath_request_context_ready(PyObject *module);
 int wreath_request_context_check(PyObject *object);
+/* Seed a dict scope's `_wreath_flight` slot with the recorder's request id, for
+ * the protocols that dispatch without a request-context object (HTTP/2, HTTP/3,
+ * WebSocket). See the definition in server_request.c for why the id can share
+ * the slot Python later overwrites with route attribution. */
+int wreath_request_scope_seed_flight(PyObject *scope,
+                                     const wreath_nfr_context *nfr_ctx);
 PyObject *wreath_request_context_new(
     PyObject *type, PyObject *asgi, PyObject *http_version, PyObject *method,
     PyObject *scheme, PyObject *path, PyObject *raw_path, PyObject *query_string,

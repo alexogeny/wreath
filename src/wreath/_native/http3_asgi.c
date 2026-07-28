@@ -1046,7 +1046,7 @@ start_request(WreathH3Stream *s)
             wreath_h3_request_capi->set_flight(scope, &s->nfr_ctx, w);
             wreath_h3_request_capi->set_armed(scope);
         }
-        else if (PyDict_SetItemString(scope, "_wreath_flight", Py_None) < 0) {
+        else if (wreath_h3_request_capi->seed_flight(scope, &s->nfr_ctx) < 0) {
             PyErr_Clear();
         }
         /* Correlate with the incoming W3C traceparent captured above, if any. */

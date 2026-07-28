@@ -37,8 +37,12 @@ from ._flight_schema import (
     MetadataImage,
     PhaseKind,
     Protocol,
+    severity_text,
 )
-from ._projector import ProjectedTrace, ProjectorSnapshot, RouteMetric
+from ._logsite import SiteRegistry
+from ._logsite import attributes as log_attributes
+from ._logsite import render as log_render
+from ._projector import ProjectedLog, ProjectedTrace, ProjectorSnapshot, RouteMetric, _mix64
 
 __all__ = [
     "SpanExporter",
@@ -98,26 +102,14 @@ def _hex_span(span_id: int) -> str:
     return format(span_id & ((1 << 64) - 1), "016x")
 
 
-def _mix64(value: int) -> int:
-    """A splitmix64 finalizer: a stateless, well-dispersed map used to synthesize
-    stable IDs from a request id (mirrors the recorder's own arming mixer)."""
-    value &= (1 << 64) - 1
-    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & ((1 << 64) - 1)
-    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & ((1 << 64) - 1)
-    return value ^ (value >> 31)
-
-
 def _trace_ids(trace: ProjectedTrace) -> tuple[int, int]:
-    """The (trace_id, span_id) to export. A propagated request carries real IDs;
-    an unpropagated one has none, so synthesize deterministic, non-zero IDs from
-    its request/worker id (OTLP forbids all-zero IDs)."""
-    if trace.has_correlation:
-        return trace.trace_id, trace.span_id
-    seed = (trace.request_id << 8) ^ trace.worker_id
-    lo = _mix64(seed)
-    hi = _mix64(seed ^ 0xD1B54A32D192ED03)
-    span = _mix64(seed ^ 0x9E3779B97F4A7C15) or 1
-    return ((hi << 64) | lo) or 1, span
+    """The (trace_id, span_id) to export.
+
+    Delegates to `ProjectedTrace.effective_ids` so spans and log records for one
+    request cannot disagree about its identity -- they used to be able to,
+    because the synthesis for an unpropagated request lived only here.
+    """
+    return trace.effective_ids
 
 
 def _phase_span_id(parent_span_id: int, sequence: int) -> int:
@@ -435,3 +427,85 @@ class BoundedExportQueue:
     def __len__(self) -> int:
         with self._lock:
             return len(self._items)
+
+
+# --- log mapping ------------------------------------------------------------
+#
+# Logs are the third signal on the transport that already carries traces and
+# metrics. The mapping is a projection rather than a translation because the log
+# cell was laid out against the OTel data model in the first place: severity is
+# already a SeverityNumber, the interned site is already an EventName, and
+# correlation comes from the projector's join rather than from a context lookup.
+
+
+def _log_attributes(registry: SiteRegistry, record: ProjectedLog) -> list[dict[str, Any]]:
+    """A record's declared arguments as OTLP attributes.
+
+    Redacted arguments arrive already reduced to a fingerprint or a length, so
+    there is no disclosure decision left to make here -- the value the exporter
+    sees is the only value that ever existed off the request path.
+    """
+    attributes: list[dict[str, Any]] = []
+    for key, value in log_attributes(registry, record.cell).items():
+        if isinstance(value, bool):
+            attributes.append({"key": key, "value": {"boolValue": value}})
+        elif isinstance(value, int):
+            attributes.append(_int(key, value))
+        elif isinstance(value, float):
+            attributes.append({"key": key, "value": {"doubleValue": value}})
+        else:
+            attributes.append(_str(key, str(value)))
+    if record.cell.dropped_siblings:
+        attributes.append(
+            _int("wreath.dropped_siblings", record.cell.dropped_siblings)
+        )
+    if record.route_id:
+        attributes.append(_int("wreath.route_id", record.route_id))
+    return attributes
+
+
+def build_logs_request(
+    records: Iterable[ProjectedLog],
+    *,
+    registry: SiteRegistry,
+    resource_attributes: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Map projected log records to an OTLP `ExportLogsServiceRequest` dict.
+
+    Returns an empty request (no `resourceLogs`) when there is nothing to
+    export. Records are grouped under one shared scope entry rather than
+    repeating scope metadata per record, as the protocol intends.
+    """
+    log_records: list[dict[str, Any]] = []
+    for record in records:
+        cell = record.cell
+        site = registry.get(cell.site_id)
+        stamp = str(record.observed_unix_nano)
+        item: dict[str, Any] = {
+            "timeUnixNano": stamp,
+            "observedTimeUnixNano": stamp,
+            "severityNumber": int(cell.severity),
+            "severityText": severity_text(cell.severity),
+            "body": {"stringValue": log_render(registry, cell)},
+        }
+        if site is not None:
+            item["eventName"] = site.event_name
+        # OTLP forbids an all-zero id; a record with no correlation omits both
+        # rather than exporting zeros that mean "unset" to nobody.
+        if record.has_correlation:
+            item["traceId"] = _hex_trace(record.trace_id)
+            item["spanId"] = _hex_span(record.span_id)
+        attributes = _log_attributes(registry, record)
+        if attributes:
+            item["attributes"] = attributes
+        log_records.append(item)
+    if not log_records:
+        return {"resourceLogs": []}
+    return {
+        "resourceLogs": [
+            {
+                "resource": resource(resource_attributes),
+                "scopeLogs": [{"scope": _SCOPE, "logRecords": log_records}],
+            }
+        ]
+    }

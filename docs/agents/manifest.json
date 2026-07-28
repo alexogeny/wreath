@@ -568,19 +568,25 @@
     {
       "name": "observability",
       "guides": [
-        "docs/guides/observability.md"
+        "docs/guides/observability.md",
+        "docs/guides/logging.md"
       ],
       "reference": [
         "docs/reference/telemetry.md",
+        "docs/reference/logging.md",
         "docs/reference/recording.md",
         "docs/reference/replay.md",
         "docs/reference/inspector.md"
       ],
       "sources": [
         "src/wreath/telemetry.py",
+        "src/wreath/logging.py",
         "src/wreath/recording.py",
         "src/wreath/replay.py",
         "src/wreath/inspector.py",
+        "src/wreath/_logsite.py",
+        "src/wreath/_logsink.py",
+        "src/wreath/_logscratch.py",
         "src/wreath/_flight_markers.py",
         "src/wreath/_flight_metadata.py",
         "src/wreath/_flight_schema.py",
@@ -597,6 +603,12 @@
       ],
       "tests": [
         "tests/test_flight_schema.py",
+        "tests/test_logging_schema.py",
+        "tests/test_logging_sites.py",
+        "tests/test_logging_sink.py",
+        "tests/test_logging_policy.py",
+        "tests/test_logging_canonical.py",
+        "tests/test_logging_export.py",
         "tests/test_flight_capture.py",
         "tests/test_flight_projector.py",
         "tests/test_flight_inspector.py",
@@ -615,12 +627,15 @@
         "tests/test_replay_live_faults.py",
         "tests/test_prometheus.py",
         "tests/test_statsd.py",
-        "tests/test_cloudwatch_emf.py"
+        "tests/test_cloudwatch_emf.py",
+        "tests/test_logging_live.py",
+        "tests/http2/test_logging.py"
       ],
       "policy": "Recording is deny-by-default: `wreath.recording` decides what may be captured, and capture itself ships -- the native recorder arms, triggers, redacts, and writes WFR1 (tests/test_flight_capture_live.py drives an armed forensic request end to end and reads the capture back). The projector drains the recorder's ring off the request path. `replay.generate_test` turns a WTR1 transport recording into a runnable pytest over TestClient: it parses the request out of the recorded bytes (request line + headers + Content-Length body only -- chunked or truncated is refused by name, never guessed), replays it now, and asserts what it observes. That makes it a *characterisation* test, and the generated docstring says so -- generated against a broken build it encodes the bug, generated after the fix it locks the fix in. Host/content-length/connection headers are dropped from the generated call because they are the test client's business, not the behaviour under test.",
       "decisions": [
         "docs/decisions/0005-c-first-with-a-pure-twin.md",
-        "docs/decisions/0022-complexity-is-a-contract.md"
+        "docs/decisions/0022-complexity-is-a-contract.md",
+        "docs/decisions/0025-a-log-record-is-a-ring-cell.md"
       ]
     },
     {

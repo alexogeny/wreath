@@ -26,6 +26,7 @@ needs to turn it into a regression test.
 
 from __future__ import annotations
 
+import logging as _stdlib_logging
 from collections.abc import Callable
 from typing import Any
 
@@ -41,6 +42,7 @@ from ._nplusone import (
 
 __all__ = [
     "Finding",
+    "check_logging_streams",
     "NPlusOneDetected",
     "NPlusOneGuard",
     "Repetition",
@@ -129,3 +131,61 @@ class NPlusOneGuard:
 
 def _raise(finding: Finding) -> None:
     raise NPlusOneDetected(finding)
+
+
+# --- split logging streams ---------------------------------------------------
+
+
+def check_logging_streams(*, active: bool | None = None) -> list[str]:
+    """Report stdlib loggers that will bypass wreath's log stream.
+
+    `wreath.logging` deliberately does not install itself on the root logger:
+    a framework that seizes global logging state fights `dictConfig`, surprises
+    anyone with handlers of their own, and either double-emits or silently
+    discards their configuration. The cost of that restraint is that a library
+    logging to `logging.getLogger(...)` produces a second, disjoint stream --
+    which an operator discovers at 3am while correlating by hand.
+
+    So the restraint is paired with a check. This is the check: it names the
+    loggers holding their own handlers while wreath logging is active, so the
+    split is something tooling reports rather than something a human trips over.
+
+    Args:
+        active: Whether wreath logging is running. Defaults to asking the
+            installed runtime; pass it explicitly to diagnose a configuration
+            that is not the current process's.
+
+    Returns:
+        One human-readable line per logger that will not reach wreath's stream.
+        Empty when there is nothing to say -- including when wreath logging is
+        inactive, because then there is no second stream to be split from.
+    """
+    from . import logging as wreath_logging
+
+    if active is None:
+        active = wreath_logging.installed().sink is not None
+    if not active:
+        return []
+    bridged = wreath_logging.bridged_loggers()
+    if "root" in bridged or "" in bridged:
+        return []  # the root bridge catches everything that propagates
+    findings: list[str] = []
+    manager = _stdlib_logging.Logger.manager
+    for name, logger in sorted(manager.loggerDict.items()):
+        if not isinstance(logger, _stdlib_logging.Logger) or not logger.handlers:
+            continue
+        if name in bridged:
+            continue
+        if all(
+            isinstance(h, _stdlib_logging.NullHandler) for h in logger.handlers
+        ) and not logger.propagate:
+            # A NullHandler on a non-propagating logger is a library silencing
+            # itself, not a stream competing with wreath's.
+            continue
+        findings.append(
+            f"logger {name!r} has {len(logger.handlers)} handler(s) of its own, so "
+            f"its records will not reach wreath's log stream; bridge it with "
+            f"wreath.logging.stdlib_bridge(logging.getLogger({name!r})) or accept "
+            f"two streams deliberately"
+        )
+    return findings

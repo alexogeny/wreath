@@ -304,6 +304,42 @@ recorder_record(RecorderObject *self, PyObject *args, PyObject *kwds)
     Py_RETURN_NONE;
 }
 
+/* Publish one pre-packed log cell into the ring.
+ *
+ * The buffer must be exactly one cell and must carry the log kind byte: this is
+ * the one place Python can put bytes directly into the ring, so it refuses
+ * anything that is not a log record rather than trusting the caller. A
+ * completion forged from Python would corrupt the projector's assembly, and
+ * "the caller would not do that" is not a check.
+ *
+ * Returns True when published, False when the ring was full -- a full ring is a
+ * counted drop, not an error, exactly as it is for a completion. */
+static PyObject *
+recorder_publish_log(RecorderObject *self, PyObject *arg)
+{
+    Py_buffer view;
+    if (PyObject_GetBuffer(arg, &view, PyBUF_SIMPLE) < 0) {
+        return NULL;
+    }
+    if (view.len != WREATH_NFR_CELL_SIZE) {
+        PyBuffer_Release(&view);
+        PyErr_Format(PyExc_ValueError,
+                     "a log cell is exactly %d bytes, got %zd",
+                     WREATH_NFR_CELL_SIZE, view.len);
+        return NULL;
+    }
+    const unsigned char *bytes = (const unsigned char *)view.buf;
+    if (bytes[0] != WREATH_NFR_SCHEMA_VERSION || bytes[1] != WREATH_NFR_KIND_LOG) {
+        PyBuffer_Release(&view);
+        PyErr_SetString(PyExc_ValueError,
+                        "publish_log accepts only a current-schema log cell");
+        return NULL;
+    }
+    int published = wreath_nfr_publish_cell(self->worker, view.buf);
+    PyBuffer_Release(&view);
+    return PyBool_FromLong(published);
+}
+
 static PyObject *
 recorder_drain(RecorderObject *self, PyObject *args)
 {
@@ -494,6 +530,7 @@ static PyMethodDef recorder_methods[] = {
     {"active_snapshot", (PyCFunction)recorder_active_snapshot, METH_NOARGS, NULL},
     {"begin", (PyCFunction)recorder_begin, METH_VARARGS | METH_KEYWORDS, NULL},
     {"record", (PyCFunction)recorder_record, METH_VARARGS | METH_KEYWORDS, NULL},
+    {"publish_log", (PyCFunction)recorder_publish_log, METH_O, NULL},
     {"drain", (PyCFunction)recorder_drain, METH_VARARGS, NULL},
     {"drain_captures", (PyCFunction)recorder_drain_captures, METH_VARARGS, NULL},
     {"worker_capsule", (PyCFunction)recorder_worker_capsule, METH_NOARGS, NULL},

@@ -507,6 +507,32 @@ class Request:
         self._limits = limits
 
     @property
+    def event(self) -> Any:
+        """This request's canonical log line, for attaching your own fields.
+
+        One structured record per request carries what the recorder already
+        knows -- route, status, timings, trace and span ids -- and this is how
+        application code adds to it:
+
+        ```python
+        request.event.set("tenant_id", tenant.id)
+        request.event.set("cache", "miss", raw=True)
+        ```
+
+        Fields follow the same deny-by-default rule as log arguments: a scalar
+        is written, a string is fingerprinted unless `raw=True`. `promote()`
+        publishes this request's buffered TRACE/DEBUG records even though it
+        succeeded, for an anomaly the framework cannot see.
+
+        Outside a configured recorder this returns an inert stand-in, so the
+        call is always safe and never needs a guard. See
+        `wreath.logging` and `docs/guides/logging.md`.
+        """
+        from .logging import current_scope
+
+        return current_scope()
+
+    @property
     def identity(self) -> Identity | None:
         """Who the pipeline authenticated this request as, or None.
 

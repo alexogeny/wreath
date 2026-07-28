@@ -101,7 +101,9 @@ def _create_recorder(config: ServerConfig) -> Any:
     )
 
 
-def _create_projector(recorder: Any, config: ServerConfig, app: Any) -> tuple[Any, Any]:
+def _create_projector(
+    recorder: Any, config: ServerConfig, app: Any, on_log: Any = None
+) -> tuple[Any, Any]:
     """Build the off-path projector for a run (and its OTLP export pipeline).
 
     Returns `(projector, export)` where either may be None. The projector is
@@ -135,10 +137,67 @@ def _create_projector(recorder: Any, config: ServerConfig, app: Any) -> tuple[An
             batch_size=telemetry.otlp.batch_size or 512,
         )
         on_trace = export.on_trace
-    projector = Projector(recorder, on_trace=on_trace)
+    projector = Projector(recorder, on_trace=on_trace, on_log=on_log)
     if export is not None:
         export.set_snapshot_provider(projector.snapshot)
     return projector, export
+
+
+def _create_logging(recorder: Any, config: ServerConfig) -> tuple[Any, Any]:
+    """Install the logging runtime and build its writer pipeline for a run.
+
+    Returns `(pipeline, previous_runtime)`, both None when logging is not
+    running. Logging needs a recorder: without one there is no ring for a record
+    to ride and no projector to join it to a trace, so `Mode.OFF` leaves the
+    process's runtime untouched and every `log.*` call stays the no-op it is
+    before a server boots.
+
+    The previous runtime is returned so shutdown can put it back. A server that
+    starts and stops inside a process -- which every test does -- must not leave
+    a dead sink installed behind it.
+    """
+    telemetry = config.telemetry
+    if recorder is None or telemetry is None or not telemetry.logging.enabled:
+        return None, None
+    import sys
+
+    from . import logging as wreath_logging
+    from ._logsink import LogPipeline, default_renderer
+
+    settings = telemetry.logging
+    runtime = wreath_logging.LogRuntime(
+        wreath_logging.recorder_sink(recorder),
+        level=settings.level,
+        capture_level=settings.capture_level,
+        site_capacity=settings.site_capacity,
+        sampling=settings.sampling,
+        limiter_capacity=settings.limiter_capacity,
+        scratch_budget=settings.scratch_budget,
+    )
+    # Carry the sites the application registered at import into the new runtime,
+    # *keeping the configured capacity*. Without the adoption a module-level
+    # `log.event(...)` would be interned in the boot-time runtime and unknown to
+    # this one, so every record it produced would render as an unreadable
+    # uninterned cell; without re-applying the capacity, `site_capacity` would
+    # be silently ignored because the adopted table has its own.
+    runtime.registry = wreath_logging.installed().registry
+    runtime.registry.set_capacity(settings.site_capacity)
+    previous = wreath_logging.install(runtime)
+    writer = config.log_writer
+    if writer is None:
+        def writer(line: str) -> None:
+            print(line, file=sys.stdout)
+        is_tty = sys.stdout.isatty()
+    else:
+        # A caller-supplied writer is a collector, not a terminal.
+        is_tty = False
+    pipeline = LogPipeline(
+        runtime.registry,
+        write=writer,
+        renderer=default_renderer(is_tty=is_tty),
+        capacity=settings.writer_queue,
+    )
+    return pipeline, previous
 
 
 def _create_recording(recorder: Any, config: ServerConfig, app: Any) -> tuple[Any, Any]:
@@ -439,6 +498,11 @@ class ServerConfig:
     #: Where the async recording sink writes the owner-only WFR1 file. None keeps
     #: capture in memory only (drained slabs are still recycled, just not stored).
     recording_path: str | None = None
+    #: Where rendered log lines go, one call per line, no trailing newline. Only
+    #: honored when telemetry created a recorder -- without one there is no ring
+    #: for records to ride and no projector to correlate them. Defaults to
+    #: writing to stdout: text on a terminal, JSON lines otherwise.
+    log_writer: Any = None
     _default_response_headers: _DefaultResponseHeaders = field(
         init=False, repr=False, compare=False
     )
@@ -878,6 +942,8 @@ class Server:
         self._loop = loop
         self._recorder = _create_recorder(config)
         self._projector: Any = None
+        self._log_pipeline: Any = None
+        self._log_previous_runtime: Any = None
         self._export: Any = None
         self._recording_sink: Any = None
         self._arm_registry: Any = None
@@ -975,13 +1041,29 @@ class Server:
                 assert tls is not None  # enforced by _resolve_tls
                 self._datagram_transport = await self._bind_datagram(tls, port)
             if self._recorder is not None:
-                self._projector, self._export = _create_projector(
-                    self._recorder, config, self._app
+                self._log_pipeline, self._log_previous_runtime = _create_logging(
+                    self._recorder, config
                 )
+                on_log = (
+                    self._log_pipeline.on_log
+                    if self._log_pipeline is not None
+                    else None
+                )
+                self._projector, self._export = _create_projector(
+                    self._recorder, config, self._app, on_log
+                )
+                if self._log_pipeline is not None:
+                    self._log_pipeline.start()
                 if self._projector is not None:
                     self._projector.start()
                 if self._export is not None:
                     self._export.start()
+                if self._export is not None and self._log_pipeline is not None:
+                    from . import logging as wreath_logging
+
+                    self._export.set_log_registry(
+                        wreath_logging.installed().registry
+                    )
                 self._recording_sink, self._arm_registry = _create_recording(
                     self._recorder, config, self._app
                 )
@@ -1127,9 +1209,19 @@ class Server:
         export, self._export = self._export, None
         if export is not None:
             await self._loop.run_in_executor(None, export.stop)
+        pipeline, self._log_pipeline = self._log_pipeline, None
+        previous, self._log_previous_runtime = self._log_previous_runtime, None
+        if previous is not None:
+            from . import logging as wreath_logging
+
+            wreath_logging.install(previous)
         projector, self._projector = self._projector, None
         if projector is not None:
             await self._loop.run_in_executor(None, projector.stop)
+        # After the projector's final drain, so records it settles on the way
+        # out are rendered rather than stranded in the writer's queue.
+        if pipeline is not None:
+            await self._loop.run_in_executor(None, pipeline.stop)
         # Clear the app's capture seam first so no request captures into a slab
         # pool that is about to be torn down.
         clearer = getattr(self._app, "_set_flight_recording", None)

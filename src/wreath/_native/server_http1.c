@@ -2453,7 +2453,7 @@ begin_websocket(WreathHttpProtocol *self, PyObject *method, long minor, PyObject
          * into it; apply_app_outcome reads it back before it emits the cell. */
         Py_INCREF(scope);
         Py_XSETREF(self->nfr_ws_scope, scope);
-        if (PyDict_SetItemString(scope, "_wreath_flight", Py_None) < 0) {
+        if (wreath_request_scope_seed_flight(scope, &self->nfr_ctx) < 0) {
             PyErr_Clear();
         }
         /* Correlate with an incoming W3C traceparent, if the client sent one. */

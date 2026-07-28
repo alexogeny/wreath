@@ -295,12 +295,27 @@ context_flight_server_span(WreathRequestContext *self, PyObject *Py_UNUSED(ignor
                          (unsigned long long)self->nfr_ctx->span_id);
 }
 
+/* The recorder's own request id for this request, or 0 when no recorder context
+ * is attached. Logging keys its per-request scope on this so a record joins the
+ * completion the projector will assemble -- the join is by id, exactly as it is
+ * for a phase batch, so the two never have to agree on anything else. */
+static PyObject *
+context_flight_request_id(WreathRequestContext *self, PyObject *Py_UNUSED(ignored))
+{
+    if (self->nfr_ctx == NULL) {
+        return PyLong_FromUnsignedLongLong(0ULL);
+    }
+    return PyLong_FromUnsignedLongLong(
+        (unsigned long long)self->nfr_ctx->request_id);
+}
+
 static PyMethodDef context_methods[] = {
     {"_asgi_scope", (PyCFunction)context_scope, METH_NOARGS, NULL},
     {"_flight_stamp", (PyCFunction)context_flight_stamp, METH_FASTCALL, NULL},
     {"_flight_phase", (PyCFunction)context_flight_phase, METH_FASTCALL, NULL},
     {"_flight_capture", (PyCFunction)context_flight_capture, METH_FASTCALL, NULL},
     {"_flight_server_span", (PyCFunction)context_flight_server_span, METH_NOARGS, NULL},
+    {"_flight_request_id", (PyCFunction)context_flight_request_id, METH_NOARGS, NULL},
     {"_set_client", (PyCFunction)context_set_client, METH_O, NULL},
     {"_set_scheme", (PyCFunction)context_set_scheme, METH_O, NULL},
     {NULL, NULL, 0, NULL},
@@ -357,6 +372,41 @@ int
 wreath_request_context_check(PyObject *object)
 {
     return PyObject_TypeCheck(object, request_context_type);
+}
+
+/* Seed the dict-scope `_wreath_flight` slot with the recorder's request id.
+ *
+ * The three protocols that dispatch through a *dict* scope -- HTTP/2, HTTP/3,
+ * and a WebSocket session -- have no request-context object to hang the id on,
+ * and Python needs it to open a per-request log scope. They already write this
+ * key (as None) to signal "a recorder is attached"; writing the id instead
+ * carries the value at no extra dictionary operation.
+ *
+ * Python overwrites the slot with a (route_id, plan_id) tuple when it attributes
+ * the route, and every completion path already requires an exact 2-tuple before
+ * it stamps attribution, so an id left in place reads as "unattributed" exactly
+ * as None did. Falls back to None if the id cannot be boxed. */
+int
+wreath_request_scope_seed_flight(PyObject *scope, const wreath_nfr_context *nfr_ctx)
+{
+    /* An Off worker's context_start sets `mode` and returns *without*
+     * initializing the rest, so `request_id` is uninitialized stack there.
+     * `mode` is the one field that is always written, and it is the same
+     * discriminator `set_armed` relies on for the same reason. Reading the id
+     * without this check published garbage ids on an Off recorder -- caught by
+     * tests/http2/test_logging.py, which is why that test exists. */
+    PyObject *value = NULL;
+    if (nfr_ctx != NULL && nfr_ctx->mode != WREATH_NFR_MODE_OFF) {
+        value = PyLong_FromUnsignedLongLong(
+            (unsigned long long)nfr_ctx->request_id);
+    }
+    if (value == NULL) {
+        PyErr_Clear();
+        return PyDict_SetItemString(scope, "_wreath_flight", Py_None);
+    }
+    int rc = PyDict_SetItemString(scope, "_wreath_flight", value);
+    Py_DECREF(value);
+    return rc;
 }
 
 PyObject *

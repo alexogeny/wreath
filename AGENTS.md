@@ -285,8 +285,9 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
 Wreath ships HTTP/1.1, HTTP/2, and an optional HTTP/3 build; binding and
 validation; OpenAPI and typed client generation; dependencies; the middleware
 pipeline and its built-ins; the PostgreSQL driver, ORM, and migration stack;
-durable jobs and messaging; authentication and a built-in Cedar authorizer; and
-a native documentation site generator. Treat those as current features.
+durable jobs and messaging; authentication and a built-in Cedar authorizer;
+first-class structured logging on the Flight Recorder's ring; and a native
+documentation site generator. Treat those as current features.
 
 **What is genuinely not shipped is listed in `docs/reference/roadmap.md`**, which
 is the single place that answer lives — the recording capture engine, isolated
