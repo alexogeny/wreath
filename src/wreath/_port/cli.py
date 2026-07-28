@@ -143,6 +143,7 @@ def execute(namespace) -> int:
     in_place = bool(getattr(namespace, "in_place", False))
     output = getattr(namespace, "output", None)
     force = bool(getattr(namespace, "force", False))
+    opinionated = bool(getattr(namespace, "opinionated", False))
 
     # Emit mode (Phase 1): --output <dir> or --in-place. Otherwise report-only.
     if in_place or output:
@@ -150,7 +151,8 @@ def execute(namespace) -> int:
         touched = 0
         failed = []
         for root in roots:
-            result = port_tree(root, output, in_place=in_place, force=force)
+            result = port_tree(root, output, in_place=in_place, force=force,
+                               opinionated=opinionated)
             total += len(result.written_files) + len(result.regenerated)
             touched += (len(result.written_files) + len(result.regenerated)
                         + len(result.skipped) + len(result.failed))

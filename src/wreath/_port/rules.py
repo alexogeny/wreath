@@ -12,15 +12,15 @@ from .ir import NEEDS_REVIEW, TRANSLATED, UNSUPPORTED
 # rule_id -> (construct, category, tag, message)
 RULES: dict[str, tuple[str, str, str, str]] = {
     # -- routing --------------------------------------------------------------
-    "route.app": ("app", "routing", TRANSLATED, "FastAPI() -> Wreath()"),
-    "route.router": ("router", "routing", TRANSLATED, "APIRouter(prefix=, tags=) -> Router(prefix=, tags=)"),
-    "route.method": ("route", "routing", TRANSLATED, "@router.<method> maps 1:1; handler gains a `request: Request` param"),
-    "route.include_static": ("include_router", "routing", TRANSLATED, "include_router() maps 1:1"),
-    "route.include_dynamic": ("include_router", "routing", UNSUPPORTED, "dynamic include_router in a loop — static analysis cannot unroll; wire routers explicitly"),
-    "route.websocket": ("route", "routing", NEEDS_REVIEW, "WebSocket handler: wreath registers WS via @app.websocket (Router has no .websocket) — move a router-level handler to the app; WebSocket/WebSocketDisconnect import from wreath.websocket; path params via ws.path_params"),
-    "ws.json_method": ("websocket", "other", NEEDS_REVIEW, "WebSocket.send_json/receive_json has no wreath equivalent — use send_text/receive_text with json.dumps/loads"),
+    "route.app": ("app", "routing", TRANSLATED, "FastAPI() becomes Wreath()."),
+    "route.router": ("router", "routing", TRANSLATED, "APIRouter(prefix=..., tags=...) becomes Router(prefix=..., tags=...)."),
+    "route.method": ("route", "routing", TRANSLATED, "The route decorator is unchanged. The handler takes request: Request as its first parameter."),
+    "route.include_static": ("include_router", "routing", TRANSLATED, "include_router() is unchanged."),
+    "route.include_dynamic": ("include_router", "routing", UNSUPPORTED, "The routers here are wired up in a loop, so this tool cannot tell which ones get included. Write out an include_router call for each router by hand."),
+    "route.websocket": ("route", "routing", NEEDS_REVIEW, "Move this websocket handler onto the app itself: wreath registers websockets with @app.websocket, and a Router has no .websocket. Import WebSocket and WebSocketDisconnect from wreath.websocket, and read path parameters from ws.path_params."),
+    "ws.json_method": ("websocket", "other", NEEDS_REVIEW, "Wreath's websocket sends and receives text, not JSON. Replace send_json(x) with send_text(json.dumps(x)) and receive_json() with json.loads(await receive_text())."),
     # -- route options (not floor-checked; counted in overall) ----------------
-    "route.response_model": ("route_option", "other", TRANSLATED, "response_model -> drop the kwarg; the handler return annotation is wreath's schema source (runtime response-filtering is not replicated)"),
+    "route.response_model": ("route_option", "other", TRANSLATED, "Drop response_model=. wreath reads the schema from the handler's return annotation instead. Note that FastAPI also *filtered* the response through that model at runtime; wreath does not, so return only what you mean to publish."),
     # `status_code=` has no wreath slot: the status lives on the response the
     # handler returns. Whether that is a mechanical change depends on what the
     # handler returns, and for a *literal* return wreath's own coercion table
@@ -28,45 +28,57 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     # (app._to_response). Wrapping such a return in the class wreath would have
     # picked anyway changes the status and nothing else, which is why these are
     # determined and a `return some_name` is not.
-    "route.status_code": ("route_option", "other", NEEDS_REVIEW, "status_code -> the status belongs on the response the handler returns, and this return's runtime type is not visible here: wreath picks the response class by type (dict/list/number -> JSONResponse, str -> TextResponse, a dataclass needs dataclasses.asdict first), so choose the wrapper that matches what this actually returns"),
-    "route.status_code_return": ("route_option", "other", TRANSLATED, "status_code with one return of a JSON literal -> return JSONResponse(<expr>, status=<int>) and drop the kwarg; wreath already routes a dict/list/number return through JSONResponse, so only the status changes"),
-    "route.status_code_text": ("route_option", "other", TRANSLATED, "status_code with one return of a str literal -> return TextResponse(<expr>, status=<int>) and drop the kwarg; a str return is text/plain in wreath, so JSONResponse would change the content type as well as the status"),
-    "route.status_code_response": ("route_option", "other", TRANSLATED, "status_code on a handler that already returns a response object -> drop the route kwarg and pass status= to that response (fastapi's status_code= becomes wreath's status=); the route-level value was already dead, since the returned response's own status wins"),
-    "route.status_code_empty": ("route_option", "other", TRANSLATED, "status_code=204/304 on a handler with no return -> return Response(status=<int>); wreath coerces a bare `None` return to a 200 JSON `null`, and Response omits content-length for a bodiless status"),
-    "route.status_code_empty_body": ("route_option", "other", NEEDS_REVIEW, "status_code=204/304 but the handler returns a value — a bodiless status with a body is a contradiction the source got away with; decide which one is wrong before porting it"),
-    "route.include_in_schema": ("route_option", "other", NEEDS_REVIEW, "include_in_schema=False -> exclude from app.enable_docs() surface"),
+    "route.status_code": ("route_option", "other", NEEDS_REVIEW, "Wreath puts the status on the response the handler returns, not on the route. This handler's return value could be anything, so pick the wrapper that matches it: JSONResponse for a dict, list or number, TextResponse for a string, and dataclasses.asdict first if it returns a dataclass."),
+    "route.status_code_return": ("route_option", "other", TRANSLATED, "Return JSONResponse(<value>, status=<number>) and drop status_code= from the route. wreath already sends a dict, list or number as JSON, so only the status changes."),
+    "route.status_code_text": ("route_option", "other", TRANSLATED, "Return TextResponse(<value>, status=<number>) and drop status_code= from the route. A string is text/plain in wreath, so JSONResponse would change the content type as well as the status."),
+    "route.status_code_response": ("route_option", "other", TRANSLATED, "Drop status_code= from the route and pass status= to the response this handler already returns. The route-level value was doing nothing: the returned response's own status wins."),
+    "route.status_code_empty": ("route_option", "other", TRANSLATED, "Return Response(status=<number>). A handler that returns nothing would otherwise answer 200 with a JSON null, and Response leaves out content-length for a status that carries no body."),
+    "route.status_code_empty_body": ("route_option", "other", NEEDS_REVIEW, "This route says 204 or 304, which must have no body, but the handler returns one. FastAPI let that through. Decide which is right before porting: drop the return, or use a status that allows a body."),
+    "route.include_in_schema": ("route_option", "other", NEEDS_REVIEW, "This route was hidden from the API docs. Wreath has no per-route switch for that: leave it out of what app.enable_docs() publishes, or accept that it will now be listed."),
     # -- params ---------------------------------------------------------------
     "param.query": ("param", "params", TRANSLATED, "Query(default, ge=, le=) -> Annotated[T, Query(minimum=, maximum=)] = default"),
-    "param.query_strconstraint": ("param", "params", NEEDS_REVIEW, "Query string-constraint (min_length/regex) has no wreath scalar slot; move to a body model"),
+    "param.query_strconstraint": ("param", "params", NEEDS_REVIEW, "Wreath's Query marker carries a minimum and a maximum for numbers and nothing else, so a length or pattern rule on a query parameter has no home. Either check it in the handler and raise UnprocessableEntity, or move the value into a request body where a model can validate it."),
     "param.path": ("param", "params", TRANSLATED, "Path(...) -> Annotated[T, Path()]"),
     "param.header": ("param", "params", TRANSLATED, "Header(...) -> Annotated[T, Header(alias=)]"),
     "param.cookie": ("param", "params", TRANSLATED, "Cookie(...) -> Annotated[T, Cookie()]"),
     "param.form": ("param", "params", TRANSLATED, "Form(...) -> Annotated[T, Form()]"),
     "param.file": ("param", "params", TRANSLATED, "File()/UploadFile -> Annotated[UploadFile, File()]"),
-    "param.body": ("param", "params", TRANSLATED, "Pydantic-typed body param -> dataclass/ORM-typed param (no Body())"),
-    "param.body_embed": ("param", "params", NEEDS_REVIEW, "Body(..., embed=True) wraps the value in a single-key object and wreath has no switch for that — give the DTO the wrapping field, or drop `embed` and change the client"),
+    "param.body": ("param", "params", TRANSLATED, "A parameter annotated with a model is the request body, with no marker needed. The model becomes a dataclass."),
+    "param.body_embed": ("param", "params", NEEDS_REVIEW, "embed=True wraps the body in a single key named after the parameter, and wreath has no switch for it. Either add that wrapping field to the model, or drop embed and send the object unwrapped."),
     # -- pydantic models ------------------------------------------------------
     "pydantic.model": ("model", "pydantic_models", TRANSLATED, "class X(BaseModel) -> @dataclass"),
-    "pydantic.field": ("field", "pydantic_models", TRANSLATED, "plain field maps 1:1 (list default -> field(default_factory=list))"),
-    "pydantic.field_constraint": ("field", "pydantic_models", NEEDS_REVIEW, "Field(ge=/le=) on a DTO has no dataclass slot — wreath's `Body`/`Form` markers carry only `alias`, so the constraint has three possible homes and they do not behave alike: `column(..., check=Ge(...))` if this DTO mirrors a table (guards the API and the database, one definition), `Annotated[int, Query(minimum=, maximum=)]` if the value is really a scalar parameter, or a handler guard raising UnprocessableEntity. Only the first two keep it a 422 at the boundary"),
+    # A dataclass has one slot per field -- the default -- so a `Field(...)`
+    # translates when everything it carries either is that default or is
+    # documentation wreath has nowhere to keep. `description=`/`title=`/
+    # `examples=` are the second kind: `openapi.py` documents operations, not
+    # properties, so they are dropped, which costs schema prose and no behaviour.
+    "pydantic.field": ("field", "pydantic_models", TRANSLATED, "plain field maps 1:1: `Field(default=x)`/`Field(x)` -> `= x`, `Field(default_factory=f)` -> `= field(default_factory=f)`, a required `Field(...)`/`Field(description=...)` -> a bare annotation, and a list/dict/set default -> field(default_factory=...). Any `description`/`title`/`examples` is dropped -- wreath's OpenAPI describes operations, not properties"),
+    # Pydantic does not care what order defaulted and required fields are
+    # declared in. `@dataclass` does, and raises at class-creation time -- which
+    # `ast.parse` and `compile` both accept, so this port used to fail only when
+    # the module was first imported, and it is an ordinary shape to write.
+    "pydantic.model_kw_only": ("model", "pydantic_models", NEEDS_REVIEW, "A field with no default is declared after one that has a default. Pydantic does not mind; a dataclass refuses to be built at all. This is now @dataclass(kw_only=True), which fixes it and is how wreath builds request bodies anyway. The one thing to check: anything that constructs this model with positional arguments has to switch to keywords."),
+    "pydantic.field_marker": ("field", "pydantic_models", NEEDS_REVIEW, "This Field() carries something a plain dataclass field cannot hold. alias= is the one that matters -- wreath reads a body field by the field's own name, so dropping the alias renames it for every client. Rename the field to match the wire, or keep converting by hand. discriminator=, exclude= and strict= have no equivalent either."),
+    "pydantic.field_constraint": ("field", "pydantic_models", NEEDS_REVIEW, "This field has a limit on its value, and wreath keeps limits where they can be enforced rather than on the model. Three places to choose from: put it on the database column as column(..., check=Ge(1)) if this model mirrors a table, which guards the API and the database at once; write it as Annotated[int, Query(minimum=1, maximum=100)] if the value really arrives as a query parameter; or check it in the handler and raise UnprocessableEntity. Only the first two still answer 422 automatically."),
     # -- pydantic extras (not floor-checked) ----------------------------------
-    "pydantic.config_forbid": ("config", "other", TRANSLATED, "extra='forbid' is always-on in wreath; drop it"),
-    "pydantic.config_ignore": ("config", "other", NEEDS_REVIEW, "extra='ignore' has no wreath equivalent (wreath always forbids extras)"),
-    "pydantic.config_class": ("config", "other", NEEDS_REVIEW, "pydantic v1 `class Config` — remove it (wreath forbids extras by default; any other Config options are manual)"),
-    "pydantic.validator": ("validator", "other", NEEDS_REVIEW, "field_validator/model_validator -> narrow()/@rule() with custom logic (manual)"),
-    "pydantic.get_pydantic": ("get_pydantic", "other", UNSUPPORTED, "Model.get_pydantic() metaprogramming -> a hand-written DTO / column subset"),
+    "pydantic.config_forbid": ("config", "other", TRANSLATED, "Drop extra='forbid'. Rejecting unknown fields is already what wreath does."),
+    "pydantic.config_ignore": ("config", "other", NEEDS_REVIEW, "extra='ignore' means unknown fields were dropped quietly. Wreath always rejects them with a 422 and cannot be told otherwise, so any client sending extra keys will start getting errors. Either stop sending them or add the fields to the model."),
+    "pydantic.config_class": ("config", "other", NEEDS_REVIEW, "This is pydantic v1's nested Config class. Delete it. Rejecting unknown fields is already wreath's behaviour; anything else it set has to be moved by hand."),
+    "pydantic.validator": ("validator", "other", NEEDS_REVIEW, "A validator is code, so it has to be moved by hand. For a rule about one field, use narrow() on the column; for a rule spanning fields, use @rule(). Both run once when the app starts rather than on every request."),
+    "pydantic.get_pydantic": ("get_pydantic", "other", UNSUPPORTED, "get_pydantic() builds a model at runtime from another model, and wreath has nothing that does that. Write out the dataclass with the fields you actually want to expose."),
     # -- dependencies ---------------------------------------------------------
-    "depends.use": ("depends", "dependencies", TRANSLATED, "Depends(...) maps 1:1; the dependency callable gains a `request` param"),
-    "depends.router_call": ("depends_wiring", "other", NEEDS_REVIEW, "router dependencies=<call> is not a literal list; inline the Depends(...)"),
+    "depends.use": ("depends", "dependencies", TRANSLATED, "Depends(...) is unchanged. The function it points at takes request as its first parameter, like a handler."),
+    "depends.router_call": ("depends_wiring", "other", NEEDS_REVIEW, "The router's dependencies= is a call rather than a plain list, so this tool cannot see what is in it. Write the Depends(...) entries out as a list."),
     # -- ORM models -----------------------------------------------------------
-    "orm.model": ("orm_model", "orm_models", TRANSLATED, "ormar.Model/SQLModel -> wreath.orm.Model(table=...)"),
-    "orm.column": ("column", "orm_models", TRANSLATED, "column type maps via the ORM table (note: wreath is NOT NULL by default — verify nullability)"),
-    "orm.fk": ("column", "orm_models", NEEDS_REVIEW, "ForeignKey -> column(references=) + relationship(load='raise'); FK column type unresolved (referenced PK not found in-module) — set it by hand"),
-    "orm.fk_typed": ("column", "orm_models", TRANSLATED, "ForeignKey -> column(<PK type inferred from the referenced model>, references=) + relationship(load='raise')"),
+    "orm.model": ("orm_model", "orm_models", TRANSLATED, "This model becomes wreath.orm.Model with table=\"<name>\" on the class header, and each field an annotated column()."),
+    "orm.column": ("column", "orm_models", TRANSLATED, "Column types map onto wreath.orm.types. The one thing to check is emptiness: ormar allowed a column to be empty unless told otherwise, wreath requires a value unless told otherwise."),
+    "orm.fk": ("column", "orm_models", NEEDS_REVIEW, "This foreign key points at a model this tool could not find, so the column type is a guess (Uuid). Open the model it references and set the column to the same type as its primary key."),
+    "orm.fk_typed": ("column", "orm_models", TRANSLATED, "The foreign key becomes two lines: a column() holding the id, typed to match the primary key it points at, and a relationship() for the object. load=\"raise\" means wreath will not fetch it behind your back -- include it in the query when you need it."),
     # -- exceptions -----------------------------------------------------------
-    "exc.http_literal": ("httpexception", "exceptions", TRANSLATED, "HTTPException(status_code=<int>) -> the matching wreath exception class"),
-    "exc.http_variable": ("httpexception", "exceptions", NEEDS_REVIEW, "HTTPException with a non-literal status_code -> map by hand"),
-    "exc.handler": ("exception_handler", "exceptions", TRANSLATED, "@app.exception_handler(...) maps 1:1"),
+    "exc.http_literal": ("httpexception", "exceptions", TRANSLATED, "HTTPException(status_code=<int>) -> the matching wreath exception class, with the detail as its first positional argument. A 500 becomes `HTTPException(detail)` itself: wreath's base class declares `status = 500`"),
+    "exc.http_variable": ("httpexception", "exceptions", NEEDS_REVIEW, "The status here is computed, so the right wreath exception cannot be chosen for you. If the value has a small set of possibilities, raise the matching class (NotFound, Forbidden, Conflict, ...); otherwise raise HTTPException(detail) from wreath.exceptions and set status on a subclass."),
+    "exc.http_unmapped": ("httpexception", "exceptions", NEEDS_REVIEW, "Two things can land here. Either wreath ships no exception class for this status -- subclass HTTPException and set status = <the number> -- or the call passes headers=, which wreath takes as a list of lowercase byte pairs ([(b'retry-after', b'30')]) rather than a dict of strings. Both matter: a 401 without its challenge header and a 429 without Retry-After are broken responses, so nothing was dropped for you."),
+    "exc.handler": ("exception_handler", "exceptions", TRANSLATED, "@app.exception_handler(...) is unchanged."),
     # -- settings -------------------------------------------------------------
     #
     # Split by *field shape*, the same way `.objects.filter()` is split by
@@ -78,16 +90,16 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     # `dict[str, str]` needs. It stops being mechanical at a validator, a
     # container type, a computed default, or a sub-group — so the class-level
     # verdict is "every field is mechanical", not "it is a BaseSettings".
-    "settings.class": ("settings", "settings", NEEDS_REVIEW, "BaseSettings class -> load_env + a plain dataclass; this one is not field-by-field mechanical, so map the env names and defaults by hand"),
-    "settings.class_env": ("settings", "settings", TRANSLATED, "BaseSettings of plain scalars -> `env = load_env('.env', apply=True)` plus a @dataclass whose fields read `env[<PREFIX><FIELD_NAME upper-cased>]`, with each literal default as the dataclass default and each field that has none listed in `run(app, required_env=[...])`"),
-    "settings.field": ("settings", "settings", TRANSLATED, "scalar env field -> one `env[...]` lookup: `str` verbatim, `int`/`float` through the constructor, and `bool` through `value.lower() in {'1','true','t','yes','y','on'}` — pydantic-settings' own truthy set, spelled out because `load_env` returns strings and `bool('false')` is True"),
-    "settings.field_complex": ("settings", "settings", NEEDS_REVIEW, "env field with a container/optional type, a Field(...) marker or a computed default -> pydantic-settings would JSON-decode or build this value; `load_env` hands you the raw string, so the parse is yours to write"),
-    "settings.nested": ("settings", "settings", NEEDS_REVIEW, "composed BaseSettings sub-group: the sub-group's own fields still read their own env names, so the *values* carry across, but two things do not — pydantic-settings will also accept the whole group as one JSON object (and, with env_nested_delimiter set, as `PARENT__CHILD`), and flattening changes every `settings.<group>.<field>` read. Decide whether the port keeps the group as a nested dataclass or flattens it"),
+    "settings.class": ("settings", "settings", NEEDS_REVIEW, "Replace this settings class with load_env('.env', apply=True) and a plain dataclass that reads env['NAME'] for each field. It could not be done automatically because at least one field is more than a plain string, number or flag with a fixed default -- see the note on that field."),
+    "settings.class_env": ("settings", "settings", TRANSLATED, "This becomes env = load_env('.env', apply=True) and a plain dataclass whose fields read env['NAME']. Each field's literal default stays as the dataclass default; each field without one has to be listed in run(app, required_env=[...]) so the app refuses to start without it."),
+    "settings.field": ("settings", "settings", TRANSLATED, "One env[...] lookup: a string as it comes, a number through int() or float(), and a flag through value.lower() in {'1','true','t','yes','y','on'} -- environment variables are always strings, and bool('false') is True."),
+    "settings.field_complex": ("settings", "settings", NEEDS_REVIEW, "pydantic-settings would parse this value out of the environment variable for you (a list, a dict, an optional, or something a Field() built). load_env hands over the raw string, so write the parsing yourself -- usually a split on commas or a json.loads."),
+    "settings.nested": ("settings", "settings", NEEDS_REVIEW, "This settings class contains another one as a group. The inner fields still read their own environment variables, so the values carry across, but two habits do not: pydantic-settings would also accept the whole group as one JSON value, and every settings.<group>.<field> read changes if you flatten it. Decide whether to keep the group as a nested dataclass or flatten it, then update the readers."),
     # -- queries ---------------------------------------------------------------
     #
-    # `.objects.` is the largest single construct in a real ormar codebase — a
-    # third of every framework token in the corpus this catalog was measured
-    # against. One generic verdict for all of it reports the *size* of the job
+    # `.objects.` is the largest single construct in a real ormar codebase — of
+    # the order of a third of every framework token in one.
+    # One generic verdict for all of it reports the *size* of the job
     # and nothing about its *shape*, so each verb names the call it becomes.
     #
     # The split within a verb is by *argument*, not by verb alone. `filter(id=x)`
@@ -107,46 +119,55 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     # gain a tree-wide index first. Same verb, three verdicts, and the argument
     # list is what tells them apart — so the analyzer reads it rather than
     # guessing from the name.
-    "orm.query": ("orm_query", "queries", UNSUPPORTED, "ormar .objects. query -> session.fetch(Model.select().where(...)); rewrite by hand (design 07 §6)"),
-    "orm.query.filter": ("orm_query", "queries", NEEDS_REVIEW, "filter(**kw) -> Model.select().where(Model.col == value); run it with session.fetch() for a list. This one needs a decision: a `__icontains`/`__startswith` lookup rewrites the *value* (wrap it in wildcards for .ilike()), a `__isnull` has no negated form, a relation lookup (`owner__name`) is `Model.owner.name` — wreath plans that INNER JOIN itself, but resolving `owner` to its target model is cross-module and this tool works one module at a time — and a jsonb lookup needs the container operator by hand"),
-    "orm.query.filter_exact": ("orm_query", "queries", TRANSLATED, "filter(**kw) -> Model.select().where(Model.col == value, ...) — every keyword here maps to a wreath predicate with the value unchanged (`__gte` -> >=, `__in` -> .in_()). Run it with session.fetch() for a list, session.count() for a count"),
-    "orm.query.get_or_none": ("orm_query", "queries", NEEDS_REVIEW, "get_or_none(**kw) -> await session.fetch_one(Model.select().where(...)) — same contract, None on no match. This call's lookups do not map straight across; see the filter note"),
-    "orm.query.get_or_none_exact": ("orm_query", "queries", TRANSLATED, "get_or_none(**kw) -> await session.fetch_one(Model.select().where(...)) — the contract matches exactly: None on no match, and both raise when more than one row matches"),
-    "orm.query.get": ("orm_query", "queries", NEEDS_REVIEW, "get(pk) -> await session.get(Model, pk); get(**kw) -> session.fetch_one(...). Left for review even when the arguments are simple, because the *miss* changes: ormar raises NoMatch, wreath returns None, so the caller's error branch has to move"),
-    "orm.query.create": ("orm_query", "queries", NEEDS_REVIEW, "create(**values) -> instance = Model(**values); session.add(instance); await session.flush(). The rewrite is mechanical but the transaction boundary is not: ormar writes immediately, wreath writes when the session flushes, so where the flush goes is yours to choose"),
-    "orm.query.all": ("orm_query", "queries", TRANSLATED, "all() -> await session.fetch(Model.select())"),
-    "orm.query.eager": ("orm_query", "queries", NEEDS_REVIEW, "select_related/select_all/prefetch_related -> Model.select().include(Model.rel.selectin()). Wreath never lazy-loads, so a relationship you forget to include raises instead of silently N+1-ing; NPlusOneGuard catches the ones that slip through a handler. This call does not name its relations as plain literals — `select_all()` means *every* relation and wreath has no such switch, so write out the ones this caller actually reads"),
-    "orm.query.eager_exact": ("orm_query", "queries", TRANSLATED, "select_related('rel')/prefetch_related('rel') -> Model.select().include(Model.rel.selectin()), one include per name, run with session.fetch(). Wreath never lazy-loads, so the include is mandatory rather than an optimisation — a relationship you forget raises instead of silently N+1-ing, and NPlusOneGuard catches the ones that slip through a handler"),
-    "orm.query.values": ("orm_query", "queries", NEEDS_REVIEW, "values([...]) -> narrow the projection with Model.select(Model.a, Model.b); rows come back as models, not dicts"),
-    "orm.query.bulk": ("orm_query", "queries", NEEDS_REVIEW, "bulk_create/bulk_update -> session.add() each instance and flush once; the flush batches by model"),
-    "orm.query.count": ("orm_query", "queries", TRANSLATED, "count() -> await session.count(Model.select().where(...))"),
-    "orm.query.exists": ("orm_query", "queries", TRANSLATED, "exists() -> await session.count(Model.select().where(...)) > 0 — wreath has no separate exists(); the count is the same round trip"),
-    "orm.query.delete": ("orm_query", "queries", NEEDS_REVIEW, "delete() -> session.delete(instance) + flush for a loaded row; a bulk delete has no query form — issue it through postgres"),
-    "orm.query.first": ("orm_query", "queries", NEEDS_REVIEW, "first() -> await session.fetch_one(Model.select().order_by(...).limit(1)); add the order_by, since 'first' without one is not deterministic"),
-    "orm.query.get_or_create": ("orm_query", "queries", UNSUPPORTED, "get_or_create/update_or_create is a read-then-write race in one call — no wreath equivalent by design; write the upsert explicitly (ON CONFLICT) or guard it with a unique index"),
-    "orm.query.order": ("orm_query", "queries", NEEDS_REVIEW, "order_by(...) -> Model.select().order_by(Model.col) / .desc(); this chain's columns are not literal strings, so the column each name resolves to is a lookup only you can do"),
-    "orm.query.order_exact": ("orm_query", "queries", TRANSLATED, "order_by('col')/order_by('-col') -> Model.select().order_by(Model.col) / Model.col.desc(), run with session.fetch(). A trailing first() becomes session.fetch_one(...limit(1)) — the usual objection to first() is that an unordered 'first' is not deterministic, and this chain states the order, so there is nothing left to decide"),
+    "orm.query": ("orm_query", "queries", UNSUPPORTED, "This is an ormar query and it was left as written. Queries become Model.select() with .where(...) on it, run through a session: await session.fetch(...) for a list, fetch_one(...) for one row, count(...) for a number."),
+    # The emitter writes the determined queries out in full, and can only do that
+    # where a session is in scope. Inside a route handler wreath supplies one;
+    # anywhere else the function has to take one, and that is a change to every
+    # caller — so it is one note on the function rather than one per query.
+    # What `--opinionated` does instead of leaving `orm.query.needs_session`.
+    # Still needs-review, and for a reason that has nothing to do with the query:
+    # the signature changed, so the callers have to catch up.
+    "orm.query.session_added": ("orm_query", "queries", NEEDS_REVIEW, "this function now takes a session, because it runs queries or calls something that does. Every call to it inside the ported tree was updated to pass one; anything calling it from outside has to be updated by hand."),
+    "orm.query.needs_session": ("orm_query", "queries", NEEDS_REVIEW, "Queries in this function were left alone because wreath runs them through a session and there is none here. Add a session: Session parameter to this function and pass one in from each caller -- a route handler gets one for free by declaring session: Annotated[Session, FromORM()]. Once it is in scope, each query below becomes the Model.select() form its own note describes."),
+    "orm.query.filter": ("orm_query", "queries", NEEDS_REVIEW, "This filter was left as written because one of its lookups needs a decision. A lookup across a relation (owner__name) becomes Model.owner.name -- wreath adds the join itself, but it has to be told which model owner points at, and that model is usually in another file. A JSON lookup needs you to pick the containment operator. Everything else about the query is mechanical: Model.select().where(...), run with session.fetch()."),
+    "orm.query.filter_exact": ("orm_query", "queries", TRANSLATED, "Every lookup here carries straight across: filter(...) becomes Model.select().where(Model.col == value), with __gte as >= and __in as .in_(...). Run it with await session.fetch(...) for a list or session.count(...) for a number. Pass --opinionated and this is written out for you."),
+    "orm.query.get_or_none": ("orm_query", "queries", NEEDS_REVIEW, "Same as the filter note: one of the lookups here does not carry across on its own. The call itself becomes await session.fetch_one(Model.select().where(...)), which returns None on no match exactly as get_or_none did."),
+    "orm.query.get_or_none_exact": ("orm_query", "queries", TRANSLATED, "await session.fetch_one(Model.select().where(...)). It behaves the same as get_or_none: None when nothing matches, an error when more than one row does. Pass --opinionated and this is written out for you."),
+    "orm.query.get": ("orm_query", "queries", NEEDS_REVIEW, "get(pk) becomes await session.get(Model, pk), and get(name=...) becomes session.fetch_one(...). The rewrite is easy; the behaviour on a miss is not. ormar raises NoMatch, wreath returns None -- so the except NoMatch branch around this call has to become an if row is None check."),
+    "orm.query.create": ("orm_query", "queries", NEEDS_REVIEW, "create(**values) becomes three lines: row = Model(**values), session.add(row), await session.flush(). The lines are mechanical; where the flush goes is not. ormar wrote to the database immediately, wreath writes when the session flushes, so decide whether this write should land here or with the rest of the request's work."),
+    "orm.query.all": ("orm_query", "queries", TRANSLATED, "await session.fetch(Model.select()). Pass --opinionated and this is written out for you."),
+    "orm.query.eager": ("orm_query", "queries", NEEDS_REVIEW, "This call does not name the relations to load as plain strings -- select_all() means every relation, and wreath has no such switch. Write out the ones this code actually reads, one .include(Model.rel.selectin()) each. It matters more than it did: wreath never loads a relation behind your back, so one you forget raises instead of quietly running an extra query per row."),
+    "orm.query.eager_exact": ("orm_query", "queries", TRANSLATED, "One .include(Model.rel.selectin()) per relation named here, on a Model.select() run with session.fetch(). The include is not optional in wreath the way select_related was an optimisation: a relation you do not include raises when touched, instead of quietly running an extra query per row. Pass --opinionated and this is written out for you."),
+    "orm.query.values": ("orm_query", "queries", NEEDS_REVIEW, "values([...]) returned dictionaries. The wreath equivalent, Model.select(Model.a, Model.b), returns model objects with only those columns filled in -- so the code reading these rows has to use attributes instead of keys."),
+    "orm.query.bulk": ("orm_query", "queries", NEEDS_REVIEW, "bulk_create/bulk_update becomes session.add() for each row followed by a single await session.flush(). The flush batches the inserts by model, so this is still one round trip per model rather than one per row."),
+    "orm.query.count": ("orm_query", "queries", TRANSLATED, "await session.count(Model.select().where(...)). Pass --opinionated and this is written out for you."),
+    "orm.query.exists": ("orm_query", "queries", TRANSLATED, "wreath has no exists(); count the rows instead -- await session.count(Model.select().where(...)) > 0. It is the same single round trip. Pass --opinionated and this is written out for you."),
+    "orm.query.delete": ("orm_query", "queries", NEEDS_REVIEW, "For a row you already loaded, session.delete(row) then await session.flush(). A delete that matches many rows at once has no query form in wreath -- issue it as SQL through the database connection."),
+    "orm.query.first": ("orm_query", "queries", NEEDS_REVIEW, "first() becomes await session.fetch_one(Model.select().order_by(...).limit(1)) -- and you have to supply the order_by. Without one, 'the first row' is whatever the database happens to return, which is why wreath makes you say it."),
+    "orm.query.get_or_create": ("orm_query", "queries", UNSUPPORTED, "get_or_create looks up a row and creates it if it is missing, in one call. Two requests can run that at the same time and both create. Wreath has no equivalent on purpose: write the insert with ON CONFLICT, or add a unique index and catch the violation."),
+    "orm.query.order": ("orm_query", "queries", NEEDS_REVIEW, "The columns to order by are not plain strings here, so this tool cannot tell which columns they are. Written out, order_by('name') is .order_by(Model.name) and order_by('-created') is .order_by(Model.created.desc())."),
+    "orm.query.order_exact": ("orm_query", "queries", TRANSLATED, "order_by('name') becomes .order_by(Model.name) and order_by('-created') becomes .order_by(Model.created.desc()), on a Model.select() run with session.fetch(). Pass --opinionated and this is written out for you."),
     # -- middleware / lifespan / infra (not floor-checked) --------------------
     "mw.cors": ("middleware", "other", TRANSLATED, "add_middleware(CORSMiddleware, ...) -> add_middleware(CORSMiddleware(...)) (instance form)"),
     "mw.trustedhost": ("middleware", "other", TRANSLATED, "TrustedHostMiddleware -> wreath security middleware (instance form)"),
-    "mw.custom": ("middleware", "other", NEEDS_REVIEW, "custom BaseHTTPMiddleware -> wreath's fused middleware base (rework); check built-ins first"),
+    "mw.custom": ("middleware", "other", NEEDS_REVIEW, "This is a custom BaseHTTPMiddleware. Check wreath's built-in middleware first, since much of what apps write by hand is already there. If it is genuinely yours, rework it onto wreath's middleware base -- the shape is different: wreath fuses the whole chain at startup instead of nesting one call per layer."),
     # The split at `yield` is determined only when it really is a split: a bare
     # `yield` at the top of the body partitions the statements in two, and each
     # half becomes a hook. It stops being a partition when a name made before
     # the yield is used after it (the halves are separate functions, so that name
     # needs a home), when the yield hands a value to the framework, or when it
     # sits inside a `try`/`async with` whose exit is the shutdown.
-    "lifespan.ctx": ("lifespan", "other", NEEDS_REVIEW, "@asynccontextmanager lifespan -> @app.on_startup / @app.on_shutdown, but this body does not simply split at the yield"),
-    "lifespan.split": ("lifespan", "other", TRANSLATED, "@asynccontextmanager lifespan with a bare top-level yield -> the statements before it become an `@app.on_startup` handler and the statements after it an `@app.on_shutdown` handler, in order; each takes the app. Nothing crosses the yield, so the split is a partition of the body"),
+    "lifespan.ctx": ("lifespan", "other", NEEDS_REVIEW, "Startup and shutdown become two functions, @app.on_startup and @app.on_shutdown. This body does not split cleanly at the yield, so the division is yours to make -- the note in brackets says what is in the way."),
+    "lifespan.split": ("lifespan", "other", TRANSLATED, "This body splits cleanly at the yield: everything before it becomes an @app.on_startup function and everything after it an @app.on_shutdown one, in the same order. Each takes the app."),
     # Now portable to a SHIPPED wreath subsystem (was unsupported): reviewable, not
     # auto-translatable (the task/loop body is bespoke) — needs-review with a real target.
-    "bg.celery": ("background", "other", NEEDS_REVIEW, "Celery task -> wreath jobs: app.jobs()/@jobs.task + jobs.schedule(cron=) (built); port the task body by hand"),
-    "bg.asyncio_loop": ("background", "other", NEEDS_REVIEW, "asyncio background loop -> a supervised wreath service or app.jobs() (built)"),
-    "bg.multiprocessing": ("background", "other", NEEDS_REVIEW, "multiprocessing.Process worker -> jobs.launch() + ProgressRegistry (both built): the job runner owns the worker, and progress reports replace the shared state file a client polls -- jobs.launch() returns a TaskHandle whose task_id *is* the job id, so the status endpoint and the SSE stream need no second identifier. Port the worker body by hand"),
+    "bg.celery": ("background", "other", NEEDS_REVIEW, "Celery has a replacement built in: app.jobs() with @jobs.task, and jobs.schedule(cron=...) for anything periodic. The wiring is a rename; the body of the task moves across as it is."),
+    "bg.asyncio_loop": ("background", "other", NEEDS_REVIEW, "A loop started with asyncio.create_task has nothing supervising it -- if it raises, it stops and nothing says so. Move the work into app.jobs() or a supervised wreath service, which restarts it and reports failures."),
+    "bg.multiprocessing": ("background", "other", NEEDS_REVIEW, "Replace the worker process with jobs.launch(), and the shared file or table the client polls with progress reports. jobs.launch() hands back a task whose id is the job id, so the status endpoint and the progress stream need no second identifier. The body of the worker moves across as it is."),
     # `wreath.graphql` shipped after this catalog was first written; leaving the
     # old "no equivalent" verdict in place told porters to keep a dependency
     # they can now delete, which is the specific way a porting tool goes stale.
-    "graphql.mount": ("graphql", "other", NEEDS_REVIEW, "strawberry/GraphQL server -> wreath.graphql GraphQL(registry, models=[...]) mounted with .router(); the schema derives from the ORM registry rather than from declared types"),
+    "graphql.mount": ("graphql", "other", NEEDS_REVIEW, "Wreath ships GraphQL: GraphQL(registry, models=[...]) mounted with .router(). The difference is where the schema comes from -- wreath builds it from the ORM models you name, instead of from types you declare."),
     # A strawberry type that mirrors a model is a *deletion* — wreath derives the
     # object type from the ORM registry. But "mirrors a model" has to be proved,
     # not assumed, and two things break it. A type that lists a subset of the
@@ -155,27 +176,27 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     # And strawberry camel-cases field names by default while wreath emits the
     # column name verbatim (`_graphql/schema.py` uses `column.python_name`), so a
     # snake_case field is a wire rename every client would see.
-    "graphql.type": ("graphql", "other", NEEDS_REVIEW, "@strawberry.type/@strawberry.input -> wreath.graphql derives the type from the ORM model, so the class is usually deleted; `strawberry.auto` fields have no counterpart to write. Expose the model via GraphQL(models=[...]) — exposure is opt-in"),
-    "graphql.type_mirror": ("graphql", "other", TRANSLATED, "@strawberry.type whose `strawberry.auto` fields are exactly the columns of the ORM model of the same name -> delete the class and name the model in GraphQL(models=[...]); the derived type is field-for-field the same, with the same names on the wire"),
-    "graphql.resolver": ("graphql", "other", NEEDS_REVIEW, "@strawberry.field computed field -> @api.field(\"Type\", \"name\", returns=...); the resolver sees the whole level (batched), not one object"),
+    "graphql.type": ("graphql", "other", NEEDS_REVIEW, "Wreath builds the GraphQL type from the ORM model, so this class usually just goes away; name the model in GraphQL(models=[...]) instead. It was not deleted for you because deleting it here would change the schema -- the note in brackets says how."),
+    "graphql.type_mirror": ("graphql", "other", TRANSLATED, "This class lists exactly the columns of the model of the same name, so it can be deleted -- name the model in GraphQL(models=[...]) instead and wreath builds the same type, with the same field names on the wire."),
+    "graphql.resolver": ("graphql", "other", NEEDS_REVIEW, "A computed field becomes api.field(\"Type\", \"name\", returns=...). One difference to plan for: your resolver is called once for the whole level with every parent object, not once per object, so it returns a list."),
     # boto3 is not one verdict. Object storage became a framework feature when
     # `wreath.objects` shipped (design 09), so an S3 client now has a real target
     # and reporting it as "keep the external library" tells a porter to keep a
     # dependency they can delete. Every other AWS service still has none, so the
     # service name is what splits them — read it rather than judging the import.
-    "ext.boto3": ("external", "other", UNSUPPORTED, "boto3/AWS SDK is not a framework feature; keep the external library"),
-    "ext.boto3_s3": ("external", "other", NEEDS_REVIEW, "boto3 S3 client/resource -> wreath.objects ObjectStore: S3ObjectStore(bucket=, region=) with ObjectPath for keys, put/get/stat/delete and zip_stream (built, design 09). Signing is SigV4 either way; what changes is that the store is declared once on the app and drained by lifespan rather than constructed at import. A presigned-URL flow has a recipe"),
-    "webhook.hmac": ("webhook", "other", NEEDS_REVIEW, "hand-rolled HMAC webhook signature verify -> wreath.webhooks HMACWebhookVerifier.verify(), which checks the digest with compare_digest *and* the timestamp against a replay window, and refuses an envelope whose relay path it has already seen. The hand-rolled form here compares the digest only, so a captured request replays forever — port the secret and the header names, not the comparison (built)"),
-    "ext.aiometer": ("external", "other", NEEDS_REVIEW, "aiometer/tenacity outbound throttle+retry -> app.http_client(rate=, retries=) (built)"),
-    "ext.s3path": ("external", "other", NEEDS_REVIEW, "s3path.S3Path -> wreath.objects ObjectStore/ObjectPath (built, design 09)"),
-    "ext.gql": ("external", "other", UNSUPPORTED, "gql GraphQL client has no wreath equivalent; keep the external library"),
-    "form.as_form": ("form_binding", "other", TRANSLATED, "as_form decorator deleted; consuming `Depends(Model.as_form)` -> `Annotated[Model, Form()]` whole-model multipart binding (built)"),
-    "lock.dlock": ("advisory_lock", "other", NEEDS_REVIEW, "sqlalchemy-dlock -> wreath advisory locks db.lock()/db.try_lock()/Session.lock() (built, design 03)"),
-    "auth.jwt": ("auth", "other", NEEDS_REVIEW, "manual JWT/JWKS verify -> app.oidc_provider()/BearerTokenBackend/JwtVerifier (built, design 02)"),
-    "auth.oauth": ("auth", "other", NEEDS_REVIEW, "authlib OAuth2/client-credentials -> wreath oauth2_login()/ClientCredentials (built, design 02)"),
-    "mig.manual": ("migration_op", "other", UNSUPPORTED, "a `postgresql_using=` cast (or index method) is a MANUAL op — the generator cannot derive it from a model; keep Alembic (design 07 Alembic posture)"),
-    # Alembic operations are the single biggest file count in a mature app (~1400
-    # in the corpus). Most are ordinary DDL that `wreath migrations generate`
+    "ext.boto3": ("external", "other", UNSUPPORTED, "This talks to an AWS service wreath has no equivalent for. Keep boto3 and this code as it is."),
+    "ext.boto3_s3": ("external", "other", NEEDS_REVIEW, "S3 has a replacement built in: S3ObjectStore(bucket=..., region=...) from wreath.objects, with put, get, stat, delete and zip_stream, and ObjectPath for keys. Signing works the same way. What changes is the lifecycle -- the store is declared once on the app and closed for you, instead of being built at import time. There is a recipe for presigned URLs."),
+    "webhook.hmac": ("webhook", "other", NEEDS_REVIEW, "This checks a webhook signature by hand, and it only compares the digest -- so anyone who captures a valid request can replay it forever. HMACWebhookVerifier.verify() from wreath.webhooks compares the digest safely, checks the timestamp against a replay window, and refuses an envelope it has already seen. Port the secret and the header names; do not port the comparison."),
+    "ext.aiometer": ("external", "other", NEEDS_REVIEW, "Rate limiting and retries around outbound calls are built into the HTTP client: app.http_client(rate=..., retries=...). Drop aiometer and tenacity and set them there."),
+    "ext.s3path": ("external", "other", NEEDS_REVIEW, "S3Path becomes ObjectPath with an ObjectStore from wreath.objects."),
+    "ext.gql": ("external", "other", UNSUPPORTED, "This is a GraphQL *client*. Wreath serves GraphQL but does not consume it, so keep the gql library."),
+    "form.as_form": ("form_binding", "other", TRANSLATED, "Delete the as_form decorator. A parameter written Annotated[Model, Form()] binds a whole multipart form to the model."),
+    "lock.dlock": ("advisory_lock", "other", NEEDS_REVIEW, "Advisory locks are built in: db.lock() and db.try_lock() on the database, or session.lock() inside a transaction. Drop sqlalchemy-dlock."),
+    "auth.jwt": ("auth", "other", NEEDS_REVIEW, "Verifying a JWT by hand is easy to get subtly wrong. Wreath does it for you: app.oidc_provider() for a standard provider, or BearerTokenBackend with JwtVerifier for a token you issue. Both fetch and cache signing keys and check the claims."),
+    "auth.oauth": ("auth", "other", NEEDS_REVIEW, "OAuth is built in: oauth2_login() for a user sign-in flow, ClientCredentials for machine-to-machine. Drop authlib."),
+    "mig.manual": ("migration_op", "other", UNSUPPORTED, "postgresql_using= is a cast that only you can write -- nothing about the model says how the old values become the new ones. Keep this revision in Alembic."),
+    # Alembic operations are the single biggest file count in a mature app.
+    # Most are ordinary DDL that `wreath migrations generate`
     # derives from the models; the ones that are not are worth separating,
     # because they are the ones that make a deploy slow, risky, or wrong.
     #
@@ -188,44 +209,44 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     # that set is a function of the model change the porter is already making,
     # so there is nothing left to decide at the revision. What is NOT in that
     # set gets its own verdict below rather than riding along on this one.
-    "mig.derived": ("migration_op", "other", TRANSLATED, "ordinary DDL over objects wreath models -> nothing to hand-write: `wreath migrations detect` reads this off the model change and `generate` emits the artifact. Confirm the ported model declares the end state (wreath is NOT NULL by default), then let the generator own the revision; a drop needs --allow-destructive when it is applied"),
-    "mig.schema_op": ("migration_op", "other", NEEDS_REVIEW, "a schema operation over an object wreath's ORM does not model yet (a check/exclusion constraint, an unnamed constraint kind, a non-literal argument) — the generator has no model attribute to derive it from, so decide whether the object moves onto the model or stays in Alembic"),
-    "mig.rename": ("migration_op", "other", NEEDS_REVIEW, "a RENAME is the one ordinary-looking op a model differ gets wrong: `detect` compares images, so a renamed table or column reads as one object dropped and another created — which would move no data. Keep this revision in Alembic, or rename in the database first and let detect see a matching image"),
-    "mig.index_manual": ("migration_op", "other", UNSUPPORTED, "an expression, partial, covering or non-btree index is emitted as a MANUAL operation that cannot be applied (and therefore cannot be downgraded) — keep it in Alembic; wreath's detection covers btree indexes only today"),
-    "mig.unmodelled_type": ("migration_op", "other", NEEDS_REVIEW, "this DDL names a column type wreath's ORM has no PgType for (Numeric/Decimal, Time, Interval, Enum, INET, TSVECTOR, ...), so the generator cannot derive the column; pick a modelled type or keep the table in Alembic"),
-    "mig.raw_sql": ("migration_op", "other", UNSUPPORTED, "op.execute(<raw SQL>) is a MANUAL op — the generator cannot derive it from a model; keep it in Alembic (design 07 Alembic posture)"),
+    "mig.derived": ("migration_op", "other", TRANSLATED, "There is nothing to write here. wreath compares the models with the database and produces this migration itself: check the ported model declares the end state, then run `wreath migrations generate`. A migration that drops something needs --allow-destructive when it is applied."),
+    "mig.schema_op": ("migration_op", "other", NEEDS_REVIEW, "This changes something wreath's models cannot describe yet (a check or exclusion constraint, a constraint whose kind the call does not name, or an argument that is not a literal). Either move the object onto the model, or leave this revision in Alembic."),
+    "mig.rename": ("migration_op", "other", NEEDS_REVIEW, "A rename is the one ordinary-looking migration that goes wrong on its own. wreath compares the shape of the models with the shape of the database, and a renamed table or column looks exactly like one thing dropped and another created -- which would throw the data away. Keep this revision in Alembic, or do the rename directly in the database first."),
+    "mig.index_manual": ("migration_op", "other", UNSUPPORTED, "wreath's migrations cover plain btree indexes. This one is an expression, partial, covering or non-btree index, and it would be written out as an operation that cannot actually be applied. Keep it in Alembic."),
+    "mig.unmodelled_type": ("migration_op", "other", NEEDS_REVIEW, "This column's type has no equivalent in wreath's ORM (Time, Interval, Enum, INET, TSVECTOR and a fixed-width CHAR are the usual ones), so nothing on the model can produce it. Either pick a type wreath does model, or keep this table in Alembic."),
+    "mig.raw_sql": ("migration_op", "other", UNSUPPORTED, "op.execute() runs SQL nobody can derive from a model. Keep this revision in Alembic."),
     # Deferred data migrations shipped (design 24), so "keep it in Alembic" stopped
     # being true. The verdict stays needs-review because the *body* is bespoke —
     # a Recode wants the old->new mapping written out, which is the thing the
     # `op.execute(UPDATE ...)` in this revision encodes and a differ cannot read.
-    "mig.data": ("migration_op", "other", NEEDS_REVIEW, "op.get_bind() means this revision rewrites *rows*, not just schema — the migration that blocks a deploy for an hour on a large table. Wreath now ships deferred data migrations: declare a `Recode(Model.col, mapping={...})` beside the model (same column, new values) or a `Retype` (new column, backfill, verify, swap) and drive it with jobs.drive(). Startup applies the DDL and serves immediately while a chunked pass converts rows, and `wreath migrations check` refuses a later migration that narrows the column before the pass has published. The mapping is yours to write — that is what makes this needs-review rather than automatic"),
+    "mig.data": ("migration_op", "other", NEEDS_REVIEW, "op.get_bind() means this revision rewrites rows, not just the schema -- the kind of migration that holds a deploy open for an hour on a large table. Wreath does this without the outage: declare Recode(Model.col, mapping={...}) next to the model for a change of values in place, or Retype for a change of type (new column, backfill, verify, swap), and drive it with jobs.drive(). The app starts and serves immediately while the rows convert in chunks, and wreath refuses a later migration that would narrow the column too early. The mapping is the part only you can write."),
     # -- caching --------------------------------------------------------------
-    "cache.store": ("cache", "other", TRANSLATED, "cachetools TTLCache(maxsize=, ttl=)/LRUCache(maxsize=) -> wreath.cache.BoundedCache(max_entries=, ttl=) — the same bounded LRU with the same eviction, under the framework's own budget. (A read-mostly reference table is better served by SnapshotCache + refresh_on, but that is a change of shape, not a rename.)"),
-    "cache.decorator": ("cache", "other", NEEDS_REVIEW, "@cachetools.cached -> @wreath.response_cache.cached(ttl=, invalidate_on=[Model]). A TTL is a guess; naming the models makes it exact — the ORM announces its committed writes and the cache clears. Add cache.invalidate_across_workers(bus) to make that fleet-wide, and cache.refresh_on() for a SnapshotCache (built)"),
+    "cache.store": ("cache", "other", TRANSLATED, "TTLCache and LRUCache become BoundedCache(max_entries=..., ttl=...) from wreath.cache: the same bounded cache with the same eviction, counted against the framework's memory budget. If this caches a table that rarely changes, SnapshotCache with refresh_on() fits better -- but that is a change of approach, not a rename."),
+    "cache.decorator": ("cache", "other", NEEDS_REVIEW, "@cachetools.cached becomes @cached(ttl=..., invalidate_on=[Model]) from wreath.response_cache. Naming the models is worth doing: a TTL is a guess, but the ORM announces its writes, so the cache can clear the moment the data changes. cache.invalidate_across_workers(bus) extends that to every worker."),
     # -- time -----------------------------------------------------------------
     #
     # `wreath.temporal` shipped, so arrow stops being a dependency you have to
     # replace with hand-rolled stdlib and becomes a rename. The catalog said "do
     # not wait for it" while it was designed-not-shipped; leaving that in place
     # once it landed would tell porters to write the code wreath now owns.
-    "time.arrow": ("time", "other", TRANSLATED, "arrow -> wreath.temporal, a rename per call: arrow.utcnow()/arrow.now() -> temporal.now(); arrow.get(s) -> temporal.parse(s); .humanize() -> temporal.relative(value). An Instant is a datetime subclass, so it stores, compares, and serializes without a conversion at the edges — and it refuses to be naive, which is the bug arrow's implicit UTC hides"),
-    "time.arrow_other": ("time", "other", NEEDS_REVIEW, "an arrow construct with no straight rename (Arrow(...), .range()/.interval(), a `.shift(months=)`) -> temporal covers the clock, parsing, and relative formatting; a calendar shift by months or years is not a fixed number of seconds and temporal will not pretend otherwise, so pick the behaviour you meant"),
+    "time.arrow": ("time", "other", TRANSLATED, "arrow becomes wreath.temporal, one call at a time: arrow.utcnow() and arrow.now() are temporal.now(), arrow.get(s) is temporal.parse(s), and .humanize() is temporal.relative(value). What you get back is a datetime subclass, so it stores, compares and serializes with no conversion -- and it refuses to be timezone-naive, which is the bug arrow's implicit UTC hides."),
+    "time.arrow_other": ("time", "other", NEEDS_REVIEW, "This arrow call has no direct replacement. wreath.temporal covers the clock, parsing and relative wording. What it will not do is shift by months or years, because that is not a fixed number of seconds -- so if that is what this does, say which behaviour you meant."),
     # -- responses ------------------------------------------------------------
-    "resp.class": ("response", "other", TRANSLATED, "fastapi.responses.<X> -> wreath.response.<X> (JSON/HTML/Redirect/PlainText/Streaming/File all exist)"),
-    "resp.status_const": ("response", "other", TRANSLATED, "fastapi.status.HTTP_* -> the plain int, or the matching wreath exception class when it is raised"),
-    "resp.jsonable": ("response", "other", TRANSLATED, "jsonable_encoder(x) -> drop it; wreath's JSON codec serializes dataclasses, ORM rows, UUIDs, and datetimes directly"),
-    "route.response_class": ("route_option", "other", NEEDS_REVIEW, "response_class= -> return the wreath response type from the handler instead of declaring it on the route"),
+    "resp.class": ("response", "other", TRANSLATED, "The response class becomes the wreath one of the same name (PlainTextResponse is TextResponse). Two argument names differ: content= is the first argument, and status_code= is status=."),
+    "resp.status_const": ("response", "other", TRANSLATED, "status.HTTP_404_NOT_FOUND is just 404. Where it is raised, the wreath exception class says it better: raise NotFound()."),
+    "resp.jsonable": ("response", "other", TRANSLATED, "Delete the jsonable_encoder() wrapper. wreath's JSON encoder already handles dataclasses, database rows, UUIDs and datetimes."),
+    "route.response_class": ("route_option", "other", NEEDS_REVIEW, "Delete response_class= and return that response type from the handler instead. Wreath picks the response from what you return."),
     # -- auth schemes ---------------------------------------------------------
-    "auth.security_scheme": ("auth", "other", NEEDS_REVIEW, "declarative security scheme (HTTPBearer/HTTPBasic/APIKeyHeader/OAuth2PasswordBearer) -> configure_auth(BearerTokenBackend(...)/ApiKeyBackend(...)); wreath authenticates once at the route boundary rather than per dependency (built, design 02)"),
-    "auth.security": ("auth", "other", NEEDS_REVIEW, "Security(scheme, scopes=[...]) -> Depends() plus @permissions(...)/@roles(...); wreath has no scope slot on the dependency itself"),
+    "auth.security_scheme": ("auth", "other", NEEDS_REVIEW, "Wreath authenticates once at the route boundary rather than through a dependency on each route. Configure it with configure_auth(BearerTokenBackend(...)) or ApiKeyBackend(...), and delete the scheme object -- routes stop declaring it."),
+    "auth.security": ("auth", "other", NEEDS_REVIEW, "Security(scheme, scopes=[...]) splits in two: the dependency becomes a plain Depends(), and the scopes become @permissions(...) or @roles(...) on the route. Wreath has no scope slot on the dependency itself."),
     # -- the test suite -------------------------------------------------------
-    "test.client": ("test", "other", NEEDS_REVIEW, "fastapi.testclient.TestClient -> wreath.testing.TestClient, which is **async**: `async with TestClient(app) as client:` and `await client.get(...)`; responses expose .status (not .status_code)"),
-    "test.dependency_override": ("test", "other", NEEDS_REVIEW, "app.dependency_overrides[dep] = ... has no wreath equivalent. For the common case (swapping the auth dependency) use TestClient.acting_as(\"rider\", roles=[...]) instead; for a swapped repository/session, inject it through app.state or a factory the test controls (built)"),
+    "test.client": ("test", "other", NEEDS_REVIEW, "wreath.testing.TestClient is async. Three changes: open it with `async with TestClient(app) as client`, await every request, and read response.status instead of response.status_code."),
+    "test.dependency_override": ("test", "other", NEEDS_REVIEW, "There is no dependency_overrides in wreath. For the usual case -- pretending to be a signed-in user -- use client.acting_as(\"rider\", roles=[...]). For a swapped repository or database session, put the replacement on app.state or behind a factory the test controls."),
     # -- libraries that are not framework features ----------------------------
-    "ext.pandas": ("external", "other", UNSUPPORTED, "pandas/numpy analysis code is not a framework feature; keep the library and the module as-is"),
-    "ext.httpx": ("external", "other", NEEDS_REVIEW, "httpx.AsyncClient -> app.http_client(base_url=, rate=, retries=), a managed pool with native codecs started and drained by lifespan (built)"),
+    "ext.pandas": ("external", "other", UNSUPPORTED, "This is data analysis, not framework code. Keep pandas and leave the module as it is."),
+    "ext.httpx": ("external", "other", NEEDS_REVIEW, "app.http_client(base_url=..., rate=..., retries=...) is a managed pool: it is opened and closed with the app, and it uses wreath's own codecs. Rate limits and retries are settings on it rather than another library."),
     # -- confidence -----------------------------------------------------------
-    "resolve.star_import": ("star_import", "other", NEEDS_REVIEW, "`from x import *` reduces name-resolution confidence for this module"),
+    "resolve.star_import": ("star_import", "other", NEEDS_REVIEW, "This module uses `from ... import *`, so this tool cannot always tell where a name came from. Anything it reported here is less certain than usual; the quickest fix is to import the names you use."),
 }
 
 

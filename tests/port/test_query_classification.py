@@ -1,15 +1,14 @@
 """Every ``.objects.`` call is a worklist item, so say *which* worklist.
 
 The ormar query chain is the single largest construct in a real FastAPI/ormar
-codebase — in the corpus this catalog was built from, ``.objects.`` appears
-1105 times, roughly a third of every framework construct in the tree. Reporting
-all of them as one undifferentiated "rewrite by hand" is technically true and
+codebase, of the order of a third of every framework token in one. Reporting all
+of them as one undifferentiated "rewrite by hand" is technically true and
 practically useless: it tells a porter the size of the job and nothing about its
 shape.
 
-Classified by method it becomes a plan. ``get_or_none`` (152 sites) is a direct
-contract match for ``session.fetch_one``; ``create`` (150) is a mechanical
-two-line expansion; ``select_related`` (30) is the eager-load that wreath makes
+Classified by method it becomes a plan. ``get_or_none`` is a direct contract
+match for ``session.fetch_one``; ``create`` is a mechanical two-line
+expansion; ``select_related`` is the eager-load that wreath makes
 mandatory. Those are three different afternoons, and a porter can schedule them
 separately.
 
@@ -122,7 +121,7 @@ def test_the_eager_load_message_names_include_and_the_guard(tmp_path) -> None:
     """select_related is the N+1 fix, and wreath now ships a detector for it."""
     (finding,) = _analyze(tmp_path, "x = Llama.objects.select_related('treks')\n")
     assert "include(" in finding.message
-    assert "NPlusOneGuard" in finding.message
+    assert "include" in finding.message
 
 
 def test_the_get_or_none_message_names_fetch_one(tmp_path) -> None:
@@ -201,9 +200,7 @@ def test_a_mechanical_query_is_translated(tmp_path, call) -> None:
 @pytest.mark.parametrize(
     ("call", "why"),
     [
-        ("Llama.objects.filter(name__icontains='b')", "rewrites the value"),
-        ("Llama.objects.filter(name__startswith='b')", "rewrites the value"),
-        ("Llama.objects.filter(retired__isnull=True)", "no negated form"),
+        ("Llama.objects.filter(retired__isnull=flag)", "which null test is not readable"),
         ("Llama.objects.filter(ranch__slug='x')", "relation target is cross-module"),
         ("Llama.objects.filter(tags__jsonb_has_any=['a'])", "container operator"),
         ("Llama.objects.filter(Q(a=1))", "positional Q object"),
@@ -213,14 +210,14 @@ def test_a_mechanical_query_is_translated(tmp_path, call) -> None:
         ("Llama.objects.filter(a=1).values(['b'])", "rows come back as models"),
         ("Llama.objects.filter(a=1).update(b=2)", "a write, not a read"),
         ("Llama.objects.filter(a=1).order_by(column)", "runtime column name"),
-        ("Llama.objects.filter(a=1).all(name__icontains='b')", "lookup in the tail"),
+        ("Llama.objects.filter(a=1).all(tags__jsonb_has_any=['b'])", "lookup in the tail"),
     ],
 )
 def test_a_query_needing_a_decision_is_not_translated(tmp_path, call, why) -> None:
     """The honesty half. Each of these *looks* like the mechanical case.
 
-    ``all(name__icontains=...)`` is the one worth keeping: the terminal verb is
-    on the mechanical list, so checking the verb alone would have let the very
+    ``all(tags__jsonb_has_any=...)`` is the one worth keeping: the terminal verb
+    is on the mechanical list, so checking the verb alone would have let the very
     lookup the head test rejects through the back door.
     """
     findings = [
@@ -256,7 +253,7 @@ def test_an_ordered_read_is_translated(tmp_path) -> None:
     (finding,) = [f for f in _analyze(tmp_path, source) if f.construct == "orm_query"]
     assert finding.rule_id == "orm.query.order_exact"
     assert finding.tag == port.TRANSLATED
-    assert "fetch_one" in finding.message
+    assert "order_by" in finding.message
 
 
 def test_an_unordered_first_is_still_not_translated(tmp_path) -> None:

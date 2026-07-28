@@ -15,9 +15,39 @@ wreath port ./app --output ../app-wreath
 
 # Rewrite in place (refuses on a dirty tree unless --force).
 wreath port ./app --in-place
+
+# Make the calls that reach past one file, instead of leaving a note.
+wreath port ./app --output ../app-wreath --opinionated
 ```
 
 `--report-only` is the place to start. It walks the tree, resolves which framework symbol every name refers to, classifies each construct, and prints counts plus a `file:line` list of what will translate cleanly and what needs review.
+
+## `--opinionated`
+
+The default emit stops at the edge of the file it is writing. Some translations
+cannot: a query needs a session to run it, a session has to come from the
+function's caller, and adding a parameter changes code the emitter is not looking
+at. Left alone, those become a note — "add a `session` parameter and pass one in
+from each caller".
+
+`--opinionated` makes those decisions for you. For a session, that means the
+whole chain: the route handler declares `session: Annotated[Session, FromORM()]`,
+which wreath fills in; every function between the handler and the query gains a
+`session: Session`; every call along the way passes it; and the queries are
+written out as `await session.fetch(Llama.select().where(…))` rather than
+described. It also settles the smaller hedges — `extra="ignore"` is dropped,
+because wreath always rejects unknown fields, and so is a route's
+`include_in_schema=False`, because there is no per-route switch to carry it to.
+
+Two things to know before you turn it on:
+
+- **A method is matched by name.** Knowing that `repo.llamas_in(...)` is
+  `LlamaRepository.llamas_in` needs type inference this tool does not have, so a
+  name is followed only when it can mean one thing: defined exactly once in the
+  tree, and not a name a built-in type also answers to. A repository method
+  called `all` or `get` is therefore left alone.
+- **Callers outside the tree you pointed at are yours.** Every function whose
+  signature changed carries a note saying so.
 
 ## What it translates vs. annotates
 
@@ -27,7 +57,9 @@ Translated automatically:
 
 - `FastAPI()`/`APIRouter()` → `Wreath()`/`Router()`, the five method decorators, and `request: Request` inserted as the first handler parameter.
 - `Query(20, ge=1, le=100)` → `Annotated[int, Query(minimum=1, maximum=100)] = 20` (the marker-as-default split, `ge`/`le` → `minimum`/`maximum`).
-- `class X(BaseModel)` → `@dataclass` (pydantic v1 and v2); `= []` → `field(default_factory=list)`.
+- `class X(BaseModel)` → `@dataclass` (pydantic v1 and v2); `= []` → `field(default_factory=list)`. A `Field(...)` holding only a default and documentation becomes the plain default — `Field(default=3, description="…")` is `= 3`, `Field(default_factory=list)` is `= field(default_factory=list)`, and a required `Field(...)` leaves a bare annotation. A class that declares a required field *after* a defaulted one becomes `@dataclass(kw_only=True)`: pydantic ignores declaration order and a dataclass refuses to be built, and the failure is at import time where neither `ast.parse` nor `compile` would have caught it.
+- `fastapi.responses.<X>` → `wreath.response.<X>`, with `content=` and `status_code=` renamed to what wreath calls them; `status.HTTP_404_NOT_FOUND` → `404`; `jsonable_encoder(x)` → `x`; `arrow.utcnow()` → `temporal.now()`; `TTLCache(maxsize=…)` → `BoundedCache(max_entries=…)`. Each dead import goes with the last use of it.
+- A `.objects.` chain inside a route handler, when every lookup carries across: `Llama.objects.filter(herd=h).order_by("-age").all()` → `await session.fetch(Llama.select().where(Llama.herd == h).order_by(Llama.age.desc()))`, with the session parameter added to the handler. Outside a handler this needs `--opinionated` (see below).
 - `class X(ormar.Model)` → `class X(Model, table="…")` with per-column type mapping; a `ForeignKey` splits into a `column(<pk-type>, references=…)` plus a `relationship(…)`, with the FK type **inferred from the referenced model's primary key**.
 - `HTTPException(status_code=404, …)` → `raise NotFound(…)`; `add_middleware(CORSMiddleware, …)` → the instance form.
 - A model bound from a form (`as_form`) → `Annotated[Model, Form()]`.
@@ -41,8 +73,7 @@ Left untouched and flagged `unsupported` (no wreath equivalent — keep the libr
 ## The ORM query chain, verb by verb
 
 In a mature ormar codebase `.objects.` is not one construct among many — it is
-*the* construct. In the production tree this catalog was measured against it
-appears 1105 times, about a third of every framework token in the repository.
+*the* construct, easily a third of every framework token in the tree.
 
 Reporting all of that as one line ("rewrite by hand") tells you the size of the
 job and nothing about its shape, so the report classifies each chain by its
@@ -50,7 +81,7 @@ verb:
 
 | ormar | wreath | notes |
 | --- | --- | --- |
-| `.objects.filter(**kw)` | `Model.select().where(...)` + `session.fetch()` | `__gte`/`__in` carry across; `__icontains`/relation lookups need a decision |
+| `.objects.filter(**kw)` | `Model.select().where(...)` + `session.fetch()` | `__gte`, `__in`, `__isnull` and the pattern lookups all carry across; a relation lookup does not |
 | `.objects.get_or_none(**kw)` | `await session.fetch_one(...)` | same contract, `None` on no match |
 | `.objects.get(pk)` | `await session.get(Model, pk)` | **ormar raises `NoMatch`, wreath returns `None`** — port the miss branch |
 | `.objects.create(**values)` | `session.add(Model(**values))` + `flush()` | |
@@ -61,19 +92,19 @@ verb:
 
 **The verdict depends on the arguments, not just the verb.** `filter(id=x)` is
 `translated`: every keyword maps to a wreath predicate with the value carried
-across untouched, so the target is fully determined. `filter(name__icontains=x)`
-is not — the value has to be wrapped in wildcards, and choosing that is a
-decision. Neither is `filter(ranch__slug=x)` — though the join is *not* yours to
-write: `Model.ranch.slug` is a related column and wreath plans the `INNER JOIN`
-for you. What the tool cannot do is resolve `ranch` to its target model when that
-model is declared in another file, so it hands you the rewrite rather than
-performing it. Same verb, different verdicts; sort the JSON report by `rule_id`
-to get each list.
+across untouched. So is `filter(name__icontains=x)` — ormar's own `icontains`
+compiles to `ILIKE '%' || value || '%'`, so writing that is a translation of what
+you wrote and not a guess about it. `filter(ranch__slug=x)` is not, though the
+join is *not* yours to write: `Model.ranch.slug` is a related column and wreath
+plans the `INNER JOIN` for you. What the tool cannot do is resolve `ranch` to its
+target model when that model is declared in another file, so it hands you the
+rewrite rather than performing it. Same verb, different verdicts; sort the JSON
+report by `rule_id` to get each list.
 
-A `translated` query still gets a `# TODO` comment rather than a rewrite. The
-tag says the target is determined, not that the emitter performs it: Phase 1
-transpiles declarations and copies function bodies byte-for-byte, and a query
-lives in a body.
+A `translated` query is **written out** wherever a session is in scope — inside a
+route handler always, and everywhere else under `--opinionated`. Where it is not,
+the note describes the target instead: the tag says the target is determined, not
+that this file was the right place to change a signature.
 
 ## Things wreath grew an answer for
 

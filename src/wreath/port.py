@@ -19,6 +19,7 @@ from ._port import (
     PortResult,
     Report,
     SkippedFile,
+    TreeContext,
     analyze,
     analyze_all,
     emit_module,
@@ -28,6 +29,7 @@ from ._port import (
 __all__ = [
     "analyze",
     "analyze_all",
+    "TreeContext",
     "emit_module",
     "port_tree",
     "PortResult",

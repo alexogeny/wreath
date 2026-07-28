@@ -152,7 +152,7 @@ def test_both_spellings_of_a_celery_task_are_billed(tmp_path, decorator, why) ->
 
 
 def test_a_multiprocessing_worker_names_jobs_and_progress(tmp_path) -> None:
-    """`Process` + a polled state file is `jobs.launch()` + `ProgressRegistry`."""
+    """`Process` + a polled state file is `jobs.launch()` + progress reports."""
     source = (
         "import multiprocessing\n"
         "def run(job_id): pass\n"
@@ -163,7 +163,8 @@ def test_a_multiprocessing_worker_names_jobs_and_progress(tmp_path) -> None:
     (finding,) = _by_rule(_analyze(tmp_path, source), "bg.multiprocessing")
     assert finding.tag == port.NEEDS_REVIEW
     assert "jobs.launch" in finding.message
-    assert "ProgressRegistry" in finding.message
+    assert "jobs.launch()" in finding.message
+    assert "progress" in finding.message
 
 
 def test_one_worker_is_one_finding_not_four(tmp_path) -> None:

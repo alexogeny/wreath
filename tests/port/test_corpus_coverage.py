@@ -17,7 +17,7 @@ CATEGORY_FLOORS = {
     "exceptions": 0.80,
     # Raised from 0.50 once `BaseSettings` was split by field shape: a class of
     # plain scalars with literal defaults is `load_env` plus a dataclass with
-    # nothing left to choose, and six of the corpus's seven classes are that. The
+    # nothing left to choose, and most settings classes are that. The
     # floor sits below the achieved 0.89 on purpose — it guards the gain without
     # pinning it, so adding a fixture with a validator or a sub-group does not
     # fail a test that was measuring something else.

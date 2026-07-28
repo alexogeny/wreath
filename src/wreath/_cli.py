@@ -381,6 +381,12 @@ def build_parser() -> argparse.ArgumentParser:
                            help="write ported code to a sister tree (Phase 1 declarative emit)")
     port_parser.add_argument("--force", action="store_true",
                              help="allow --in-place and overwrite hand-edited outputs")
+    port_parser.add_argument(
+        "--opinionated", action="store_true",
+        help="make the changes that reach past one file, instead of leaving a note: "
+             "give a function that runs queries the session parameter it needs "
+             "(its callers then have to pass one)",
+    )
     audit_parser = commands.add_parser(
         "audit",
         help="audit generated HTML + responses for accessibility (WCAG 2.1) and performance",

@@ -7,13 +7,14 @@ importing wreath's own heavy runtime).
 """
 from __future__ import annotations
 
-from .analyzer import analyze, analyze_all
+from .analyzer import TreeContext, analyze, analyze_all
 from .emit import PortResult, emit_module, port_tree
 from .ir import NEEDS_REVIEW, TRANSLATED, UNSUPPORTED, Finding, Report, SkippedFile
 
 __all__ = [
     "analyze",
     "analyze_all",
+    "TreeContext",
     "emit_module",
     "port_tree",
     "PortResult",

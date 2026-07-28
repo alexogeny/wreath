@@ -8,7 +8,10 @@ targets resolve cross-module; (2) classify constructs into findings.
 from __future__ import annotations
 
 import ast
+import builtins
 import os
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 
 from .ir import Finding, Report, SkippedFile
@@ -28,11 +31,21 @@ _STR_CONSTRAINTS = frozenset({"min_length", "max_length", "regex", "pattern"})
 #: `_STR_CONSTRAINTS` rather than spelled out again, so the string constraints
 #: cannot be extended in one place and missed in the other.
 _FIELD_CONSTRAINTS = _STR_CONSTRAINTS | frozenset({"ge", "le", "gt", "lt", "multiple_of"})
+#: `Field(...)` keywords that carry the field's *default*, which a dataclass has
+#: a slot for: `= <value>` or `= field(default_factory=...)`.
+_FIELD_DEFAULTS = frozenset({"default", "default_factory"})
+#: `Field(...)` keywords that describe the field for a schema generator rather
+#: than change its value. Wreath's OpenAPI has no per-field description slot
+#: (`openapi.py` documents operations, not properties), so these are dropped —
+#: which is a documentation loss, never a runtime one, and so does not hold the
+#: field back. Every *other* keyword does: see `pydantic_field_rule`.
+_FIELD_DOC_ONLY = frozenset({
+    "description", "title", "examples", "example", "json_schema_extra", "deprecated",
+})
 
 # ormar QuerySet verb -> rule. The verb immediately after `.objects.` is the one
 # that names the shape of the rewrite; a trailing `.all()`/`.get_or_none()` is
 # just how ormar spells "now run it", which wreath spells `session.fetch(...)`.
-# Frequencies in the corpus this was measured against are in the rule messages.
 _QUERY_RULE = {
     "filter": "orm.query.filter",
     "exclude": "orm.query.filter",
@@ -63,11 +76,31 @@ _QUERY_RULE = {
 }
 
 
-# ormar keyword lookups whose wreath predicate is a plain operator over the
-# value as written. `__icontains` and friends are deliberately absent: they
-# rewrite the *value* (wrapping it in wildcards), which is a decision about what
-# the author meant by "contains", not a translation of what they wrote.
-_MECHANICAL_LOOKUPS = frozenset({"exact", "gt", "gte", "lt", "lte", "in"})
+# ormar keyword lookup -> the wreath comparison it becomes, as an operator.
+LOOKUP_OPERATOR: dict[str, str] = {
+    "": "==", "exact": "==", "gt": ">", "gte": ">=", "lt": "<", "lte": "<=",
+}
+# ormar keyword lookup -> the column method it becomes, and how the value is
+# spelled inside it. `%s` is the value as written.
+#
+# The pattern lookups were held back for a long time on the grounds that
+# wrapping a value in wildcards is "a decision about what the author meant".
+# It is not: ormar's own `icontains` compiles to `ILIKE '%' || value || '%'`,
+# so writing the same thing is a translation of what they wrote and nothing
+# more. Holding them back left 170 ordinary searches for a human to redo.
+LOOKUP_METHOD: dict[str, tuple[str, str]] = {
+    "in": ("in_", "%s"),
+    "contains": ("like", 'f"%%{%s}%%"'),
+    "icontains": ("ilike", 'f"%%{%s}%%"'),
+    "startswith": ("like", 'f"{%s}%%"'),
+    "istartswith": ("ilike", 'f"{%s}%%"'),
+    "endswith": ("like", 'f"%%{%s}"'),
+    "iendswith": ("ilike", 'f"%%{%s}"'),
+}
+# `__isnull` is the odd one: which method it becomes depends on the *value*,
+# so it only translates when that value is written out.
+_NULL_METHOD = {True: "is_null", False: "is_not_null"}
+_MECHANICAL_LOOKUPS = frozenset(LOOKUP_OPERATOR) | frozenset(LOOKUP_METHOD) | {"isnull"}
 
 # Chain verbs that keep a mechanical head mechanical, and how their own
 # arguments have to look. `first`/`last` are absent because wreath makes the
@@ -75,17 +108,29 @@ _MECHANICAL_LOOKUPS = frozenset({"exact", "gt", "gte", "lt", "lte", "in"})
 # bulk delete has no query form; `values` because the rows come back as models
 # rather than dicts, which the caller sees; `update` because it is a write.
 #
-#   "kwargs"  — keyword filters, checked the same way the head's are
-#   "value"   — one argument carried across untouched (limit/offset)
-#   "columns" — string literals naming columns, which resolve to `Model.<col>`
+#   "kwargs"   — keyword filters, checked the same way the head's are
+#   "value"    — one argument carried across untouched (limit/offset)
+#   "columns"  — string literals naming columns, which resolve to `Model.<col>`
+#   "relations" — string literals naming relations, one `.include(...)` each
 _MECHANICAL_TAIL: dict[str, str] = {
     "all": "kwargs",
     "count": "kwargs",
     "exists": "kwargs",
     "get_or_none": "kwargs",
+    # A second `filter` is another `.where(...)`; wreath ands them together the
+    # same way ormar does. `exclude` is deliberately absent — it negates, which
+    # is a different call, and the translated message does not describe it.
+    "filter": "kwargs",
     "limit": "value",
     "offset": "value",
     "order_by": "columns",
+    # `filter(a=1).select_related("owner")` is two rewrites that are each
+    # already determined on their own — a `.where(...)` and an `.include(...)`.
+    # Leaving them off this table meant that putting two translatable calls next
+    # to each other produced a verdict neither of them earns, and putting them
+    # next to each other is how a query chain is usually written.
+    "select_related": "relations",
+    "prefetch_related": "relations",
 }
 
 # Head verb -> the rule to use when the arguments are mechanical. A verb absent
@@ -130,11 +175,19 @@ _TAIL_NEEDS_HEAD: dict[str, frozenset[str]] = {
 }
 
 
-def _lookup_is_mechanical(keyword: str) -> bool:
-    """Whether `filter(<keyword>=v)` becomes a predicate with `v` unchanged.
+def split_lookup(keyword: str) -> tuple[str, str]:
+    """`("name", "icontains")` for `name__icontains`; `("name", "")` for `name`."""
+    column, separator, suffix = keyword.rpartition("__")
+    if not separator or suffix not in _MECHANICAL_LOOKUPS:
+        return keyword, ""
+    return column, suffix
+
+
+def _lookup_is_mechanical(keyword: str, value: ast.expr | None = None) -> bool:
+    """Whether `filter(<keyword>=v)` becomes a wreath predicate on its own.
 
     A bare column name is an equality test. A name with `__` is a column plus
-    a lookup *only* when the trailing segment is one wreath has an operator for;
+    a lookup *only* when the trailing segment is one wreath has a spelling for;
     otherwise it is a relation traversal (`owner__name`) or a container lookup
     (`tags__jsonb_has_any`). The container lookup needs an operator someone
     chooses. The relation does *not* need a join chosen — `Model.owner.name`
@@ -143,11 +196,18 @@ def _lookup_is_mechanical(keyword: str) -> bool:
     declared in another module. Reading the suffix is what separates them, and
     getting it wrong in the permissive direction would emit an attribute chain
     against a column that is not a relation at all.
+
+    `__isnull` is the one lookup whose *value* decides the answer: `is_null()`
+    and `is_not_null()` are different calls, so a variable there is unreadable.
     """
-    column, separator, suffix = keyword.rpartition("__")
-    if not separator:
-        return True                       # a plain column: equality
-    return bool(column) and suffix in _MECHANICAL_LOOKUPS
+    column, suffix = split_lookup(keyword)
+    if not suffix:
+        return "__" not in keyword       # a plain column: equality
+    if not column:
+        return False
+    if suffix == "isnull":
+        return isinstance(value, ast.Constant) and value.value in _NULL_METHOD
+    return True
 
 
 def _call_is_mechanical(call: ast.Call | None) -> bool:
@@ -162,7 +222,7 @@ def _call_is_mechanical(call: ast.Call | None) -> bool:
     if call.args:
         return False
     return all(
-        keyword.arg is not None and _lookup_is_mechanical(keyword.arg)
+        keyword.arg is not None and _lookup_is_mechanical(keyword.arg, keyword.value)
         for keyword in call.keywords
     )
 
@@ -224,6 +284,8 @@ def _tail_step_is_mechanical(verb: str, call: ast.Call | None, head: str = "") -
     if kind == "value":
         # `limit(n)`/`offset(n)`: one argument, whatever it is, carried across.
         return len(call.args) == 1 and not call.keywords
+    if kind == "relations":
+        return _eager_names_are_literal(call)
     # `order_by("name")` / `order_by("-created")` resolve to `Model.<col>` and
     # `.desc()`. A non-literal is a runtime column name, which is a lookup this
     # analyzer cannot do.
@@ -287,6 +349,23 @@ _EXTRA_RESPONSE_CLASSES = frozenset({"Response", "TextResponse", "SSEResponse"})
 # Statuses that must not carry a body (wreath.response._STATUS_WITHOUT_BODY).
 _STATUS_WITHOUT_BODY = frozenset({204, 304})
 
+#: HTTP status literal -> the `wreath.exceptions` class a `HTTPException(...)`
+#: with that status becomes. Shared with the emitter so the report cannot call a
+#: status translated that the emitter then annotates: 502/503/501 and the rest
+#: have no class, and earn `exc.http_unmapped` instead.
+#:
+#: 500 maps to the *base* class deliberately — `wreath.exceptions.HTTPException`
+#: declares `status = 500`, so `HTTPException(status_code=500, detail=x)` is
+#: `HTTPException(x)` and nothing is left to decide. It is the single most common
+#: spelling of a 500 by some distance, and it used to fall through to a
+#: needs-review annotation over a name whose import the emitter had dropped.
+STATUS_EXCEPTION: dict[int, str] = {
+    400: "BadRequest", 401: "Unauthorized", 403: "Forbidden", 404: "NotFound",
+    405: "MethodNotAllowed", 409: "Conflict", 413: "PayloadTooLarge",
+    422: "UnprocessableEntity", 429: "TooManyRequests",
+    431: "RequestHeaderFieldsTooLarge", 500: "HTTPException",
+}
+
 # Declarative fastapi.security schemes, all of which become an auth backend.
 _SECURITY_SCHEMES = frozenset({
     "HTTPBearer", "HTTPBasic", "HTTPDigest", "APIKeyHeader", "APIKeyQuery",
@@ -311,14 +390,32 @@ _MIG_REVIEW_OPS = frozenset({
     "create_check_constraint", "drop_constraint", "create_exclude_constraint",
 })
 # `sa.<T>` / `postgresql.<T>` column types that have a wreath PgType
-# (wreath/orm/types.py). Numeric/Decimal, Time, Interval, Enum, INET, TSVECTOR,
-# HSTORE and MONEY are absent on purpose: there is no PgType to derive them from.
+# (wreath/orm/types.py). Time, Interval, Enum, INET, TSVECTOR, HSTORE, MONEY and
+# a bare `CHAR(n)` are absent on purpose: there is no PgType to derive them from.
+#
+# Numeric/DECIMAL used to be on that absent list and no longer belong there —
+# `wreath.orm.types.Numeric` ships, so every money column was being told to stay
+# in Alembic over a type wreath has had all along. That is the specific way this
+# table goes stale, and it is why each entry is a name that was checked against
+# `orm/types.py` rather than remembered.
 _SA_MODELLED_TYPES = frozenset({
     "Integer", "INTEGER", "BigInteger", "BIGINT", "SmallInteger", "SMALLINT",
     "String", "VARCHAR", "Text", "TEXT", "Unicode", "UnicodeText",
     "Boolean", "BOOLEAN", "Float", "REAL", "DOUBLE_PRECISION",
+    "Numeric", "NUMERIC", "DECIMAL",
     "Date", "DATE", "DateTime", "TIMESTAMP", "LargeBinary", "BYTEA",
     "UUID", "JSON", "JSONB", "ARRAY",
+})
+# Fully-qualified column types that are a wreath type wearing a foreign name.
+# `ormar.fields.sqlalchemy_uuid.CHAR` is ormar's own UUID column — the module
+# exists only to store a UUID as text on backends without a uuid type — and it
+# is how every Alembic revision generated from an ormar model spells a UUID
+# primary key, so it is by far the most common column type in a generated
+# revision. Reading it as "an unmodelled CHAR" keeps a large share of the
+# migrations in Alembic over what is really a `Uuid` column. A plain `sa.CHAR`
+# is *not* here: `character(n)` pads, and wreath has no type for that.
+_MODELLED_TYPE_ORIGINS = frozenset({
+    "ormar.fields.sqlalchemy_uuid.CHAR",
 })
 # Table-level constraint objects inside a `create_table(...)` that detection
 # reads. CheckConstraint/Index/ExcludeConstraint are deliberately absent.
@@ -374,8 +471,10 @@ def _is_true(node: ast.AST) -> bool:
 def module_pk_types(tree: ast.Module, imports: _Imports) -> dict[str, str]:
     """{ORM model name -> wreath PgType of its primary key}, resolved within one module.
 
-    Used to give a ForeignKey its real column type instead of a guess. Cross-module
-    references (target not in this module) resolve to nothing -> the FK stays needs-review.
+    Used to give a ForeignKey its real column type instead of a guess. See
+    `tree_pk_types` for the whole-tree version, which is what actually resolves
+    most of them — a model is usually declared in a different file from the one
+    that points at it.
     """
     out: dict[str, str] = {}
     for node in ast.walk(tree):
@@ -389,6 +488,36 @@ def module_pk_types(tree: ast.Module, imports: _Imports) -> dict[str, str]:
                     if pg:
                         out[node.name] = pg
                     break
+    return out
+
+
+def tree_pk_types(files: list[Path], on_skip=None) -> dict[str, str]:
+    """{ORM model name -> primary key type} across every file in the tree.
+
+    A foreign key names a model, and that model almost never lives in the same
+    file — almost every foreign key points out of its own module — and each one
+    was emitted with a guessed `Uuid` column and a note asking a human to look up
+    a type this walk can just read.
+
+    **A name declared twice with two different key types resolves to neither.**
+    Two apps in one tree can both own a `Vehicle`, and picking whichever was
+    walked first would silently give one of them the other's key type. Dropping
+    the name puts it back where it was: flagged, with the type left to a human.
+    """
+    out: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for path in files:
+        try:
+            tree = _parse_file(path)
+        except _SKIPPABLE as exc:
+            if on_skip is not None:
+                on_skip(path, exc)
+            continue
+        for name, pg in module_pk_types(tree, _Imports().visit(tree)).items():
+            if out.setdefault(name, pg) != pg:
+                ambiguous.add(name)
+    for name in ambiguous:
+        del out[name]
     return out
 
 
@@ -666,8 +795,8 @@ class _Analyzer(ast.NodeVisitor):
             ):
                 # One finding per GraphQL type, not per field: wreath derives
                 # fields from the ORM model, so `strawberry.auto` (the single
-                # most common GraphQL token in the corpus) is deleted rather
-                # than ported. 300 findings for a no-op would bury the rest.
+                # most common GraphQL token there is) is deleted rather
+                # than ported. A finding per field for a no-op would bury the rest.
                 rule_id, reason = self._graphql_type_shape(node, origin.split(".")[-1])
                 self._emit(rule_id, node.lineno, reason)
         kind = _base_kind(self.imports, node)
@@ -675,6 +804,12 @@ class _Analyzer(ast.NodeVisitor):
             self._emit("mw.custom", node.lineno)
         elif kind == "pydantic":
             self._emit("pydantic.model", node.lineno)
+            offenders = dataclass_needs_kw_only(self.imports, node)
+            if offenders:
+                self._emit(
+                    "pydantic.model_kw_only", node.lineno,
+                    "required after a defaulted field: " + ", ".join(offenders),
+                )
             self._scan_pydantic_body(node)
         elif kind == "settings":
             # The class verdict follows its fields, so bill the fields first.
@@ -750,11 +885,7 @@ class _Analyzer(ast.NodeVisitor):
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 if stmt.target.id == "model_config":
                     continue
-                if (_is_field_constraint(stmt.value, self.imports)
-                        or self._annotation_is_constrained(stmt.annotation)):
-                    self._emit("pydantic.field_constraint", stmt.lineno)
-                else:
-                    self._emit("pydantic.field", stmt.lineno)
+                self._emit(pydantic_field_rule(self.imports, stmt), stmt.lineno)
             elif isinstance(stmt, ast.Assign) and any(
                 isinstance(t, ast.Name) and t.id == "model_config" for t in stmt.targets
             ):
@@ -1029,9 +1160,9 @@ class _Analyzer(ast.NodeVisitor):
     def _from_framework(self, origin: str) -> bool:
         """Whether a resolved name came from FastAPI/Starlette rather than a local.
 
-        The corpus has application classes that share a name with a framework one
-        (its own `TestClient` wrapper, for instance), and reporting those would
-        be noise a porter has to dismiss by hand.
+        Applications routinely have a class sharing a name with a framework one
+        — their own `TestClient` wrapper, for instance — and reporting those
+        would be noise a porter has to dismiss by hand.
         """
         return origin.startswith(("fastapi", "starlette"))
 
@@ -1130,7 +1261,8 @@ class _Analyzer(ast.NodeVisitor):
             node = node.func
         if not isinstance(node, (ast.Name, ast.Attribute)):
             return False
-        return self.imports.origin(node).split(".")[-1] in _SA_MODELLED_TYPES
+        origin = self.imports.origin(node)
+        return origin in _MODELLED_TYPE_ORIGINS or origin.split(".")[-1] in _SA_MODELLED_TYPES
 
     def _scan_add_middleware(self, node: ast.Call) -> None:
         first = node.args[0] if node.args else None
@@ -1149,21 +1281,7 @@ class _Analyzer(ast.NodeVisitor):
                 self._emit("depends.router_call", node.lineno)
 
     def _scan_http_exception(self, node: ast.Call) -> None:
-        status = None
-        for kw in node.keywords:
-            if kw.arg == "status_code":
-                status = kw.value
-        if status is None and node.args:
-            status = node.args[0]
-        # `status.HTTP_404_NOT_FOUND` is a literal wearing a name. Treating it as
-        # unresolvable would push the most common spelling in a real codebase (72
-        # sites in the corpus) into needs-review for no reason.
-        resolved = self._status_constant(status) is not None
-        self._emit("exc.http_literal" if resolved else "exc.http_variable", node.lineno)
-
-    def _status_constant(self, node: ast.AST | None) -> int | None:
-        """The integer behind `fastapi.status.HTTP_404_NOT_FOUND`, if that is what this is."""
-        return status_int(self.imports, node)
+        self._emit(http_exception_rule(self.imports, node), node.lineno)
 
     # -- small predicates -----------------------------------------------------
     def _annotation_is_model(self, ann: ast.AST) -> bool:
@@ -1173,15 +1291,6 @@ class _Analyzer(ast.NodeVisitor):
         elif isinstance(ann, ast.Attribute):
             name = ann.attr
         return name in self.index["pydantic"] or name in self.index["orm"]
-
-    def _annotation_is_constrained(self, ann: ast.AST | None) -> bool:
-        """pydantic v1 constrained-type annotation (confloat/conint/constr/...)."""
-        if isinstance(ann, ast.Call):
-            return self.imports.origin(ann.func).split(".")[-1] in (
-                "confloat", "conint", "constr", "condecimal", "conbytes", "conlist",
-                "conset", "condate",
-            )
-        return False
 
     def _has_kw(self, call: ast.Call, name: str) -> bool:
         return any(kw.arg == name for kw in call.keywords)
@@ -1203,6 +1312,118 @@ def _is_field_constraint(value: ast.AST | None, imports: _Imports) -> bool:
     if isinstance(value, ast.Call) and imports.origin(value.func).split(".")[-1] == "Field":
         return any(k.arg in _FIELD_CONSTRAINTS for k in value.keywords)
     return False
+
+
+def _is_constrained_annotation(annotation: ast.AST | None, imports: _Imports) -> bool:
+    """A pydantic v1 constrained-type annotation (`confloat`, `constr`, ...)."""
+    if isinstance(annotation, ast.Call):
+        return imports.origin(annotation.func).split(".")[-1] in _CONSTRAINED_TYPES
+    return False
+
+
+#: pydantic v1 `con*` factory names, which are a constraint wearing a type's
+#: clothes. Shared with `_Analyzer._annotation_is_constrained` and the emitter.
+_CONSTRAINED_TYPES = frozenset({
+    "confloat", "conint", "constr", "condecimal", "conbytes", "conlist", "conset", "condate",
+})
+
+
+def pydantic_field_rule(imports: _Imports, stmt: ast.AnnAssign) -> str:
+    """The verdict one `BaseModel` field earns, by the *shape* of its `Field(...)`.
+
+    Shared with the emitter, for the reason `query_rule` and `status_code_rule`
+    are: the report and the `# TODO(wreath-port: …)` written into the source must
+    not disagree about one line, and the emitter must only rewrite what the
+    report calls determined.
+
+    A dataclass field has exactly one slot — the default — so a `Field(...)`
+    translates when everything it carries either *is* the default or is
+    documentation wreath has nowhere to put:
+
+    * `pydantic.field` — a bare annotation, a plain default, or a `Field(...)`
+      holding only `default=`/`default_factory=` and doc keywords. The marker is
+      deleted and the default written as an ordinary Python default.
+    * `pydantic.field_constraint` — `ge=`/`max_length=`/a `con*` annotation. The
+      constraint has three possible homes and they do not behave alike, so it
+      stays for a human.
+    * `pydantic.field_marker` — anything else the marker carries. `alias=` is
+      the one that matters: wreath binds a body field by its own name, so
+      dropping the alias silently renames it on the wire.
+    """
+    if _is_field_constraint(stmt.value, imports) or _is_constrained_annotation(
+        stmt.annotation, imports
+    ):
+        return "pydantic.field_constraint"
+    value = stmt.value
+    if not (
+        isinstance(value, ast.Call)
+        and imports.origin(value.func).split(".")[-1] == "Field"
+    ):
+        return "pydantic.field"
+    # `Field(default, ...)` takes the default positionally and nothing else; a
+    # second positional is pydantic v1's `default_factory` slot, which this does
+    # not read rather than guess at.
+    if len(value.args) > 1:
+        return "pydantic.field_marker"
+    if any(
+        keyword.arg is None or keyword.arg not in _FIELD_DEFAULTS | _FIELD_DOC_ONLY
+        for keyword in value.keywords
+    ):
+        return "pydantic.field_marker"
+    return "pydantic.field"
+
+
+def field_has_default(imports: _Imports, stmt: ast.AnnAssign) -> bool:
+    """Whether the *ported* field still has an `=` after it.
+
+    Pydantic does not care what order defaulted and required fields are declared
+    in; a dataclass does, and `@dataclass` raises `TypeError` at class-creation
+    time for a required field that follows a defaulted one. So the order has to
+    be read before the class header is written — see `dataclass_needs_kw_only`.
+
+    What counts is the text that comes out, not what pydantic meant. A marker
+    the emitter leaves alone (a constraint, an `alias=`) is still written as
+    `= Field(...)`, so it occupies the defaulted position even though pydantic
+    read it as required.
+    """
+    value = stmt.value
+    if value is None:
+        return False
+    if isinstance(value, ast.Call) and imports.origin(value.func).split(".")[-1] == "Field":
+        if pydantic_field_rule(imports, stmt) != "pydantic.field":
+            return True                       # left in place, `=` and all
+        if any(keyword.arg in _FIELD_DEFAULTS for keyword in value.keywords):
+            return True
+        # `Field(...)` with an Ellipsis first argument is pydantic's spelling of
+        # "required"; `Field(0)` is a default.
+        return bool(value.args) and not (
+            isinstance(value.args[0], ast.Constant) and value.args[0].value is Ellipsis
+        )
+    return True
+
+
+def dataclass_needs_kw_only(imports: _Imports, node: ast.ClassDef) -> list[str]:
+    """The fields that would make this class an illegal `@dataclass`, in order.
+
+    Empty when the declaration order is already legal. Non-empty means a
+    required field follows a defaulted one, which pydantic accepts and
+    `@dataclass` refuses — `TypeError: non-default argument 'x' follows default
+    argument`, raised when the module is *imported*, so neither `ast.parse` nor
+    `compile` sees it, and writing the fields in that order is perfectly
+    ordinary as long as pydantic is the one reading them.
+    """
+    offenders: list[str] = []
+    defaulted = False
+    for stmt in node.body:
+        if not (isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)):
+            continue
+        if stmt.target.id == "model_config":
+            continue
+        if field_has_default(imports, stmt):
+            defaulted = True
+        elif defaulted:
+            offenders.append(stmt.target.id)
+    return offenders
 
 
 def _config_extra(value: ast.AST | None) -> str | None:
@@ -1402,8 +1623,8 @@ def _names_crossing(before: list[ast.stmt], after: list[ast.stmt]) -> list[str]:
 def status_int(imports: _Imports, node: ast.AST | None) -> int | None:
     """The integer a status expression denotes, or `None` if it is not a literal.
 
-    `status.HTTP_404_NOT_FOUND` is a literal wearing a name, and it is how a
-    real codebase spells the status far more often than a bare integer.
+    `status.HTTP_404_NOT_FOUND` is a literal wearing a name, and applications
+    spell the status that way far more often than as a bare integer.
     """
     if isinstance(node, ast.Constant) and isinstance(node.value, int) \
             and not isinstance(node.value, bool):
@@ -1414,6 +1635,39 @@ def status_int(imports: _Imports, node: ast.AST | None) -> int | None:
         return None
     digits = node.attr.split("_")[1]
     return int(digits) if digits.isdigit() else None
+
+
+def http_exception_status(node: ast.Call) -> ast.expr | None:
+    """The `status_code` expression of an `HTTPException(...)`, however spelled."""
+    for keyword in node.keywords:
+        if keyword.arg == "status_code":
+            return keyword.value
+    return node.args[0] if node.args else None
+
+
+def http_exception_rule(imports: _Imports, node: ast.Call) -> str:
+    """The verdict one `HTTPException(...)` earns.
+
+    Shared with the emitter so a status the emitter cannot rewrite is never
+    reported as translated. Three outcomes:
+
+    * `exc.http_literal` — the status resolves to an int `STATUS_EXCEPTION` has
+      a class for, so the call becomes that class. `status.HTTP_404_NOT_FOUND`
+      counts: it is a literal wearing a name, and applications spell the status
+      that way far more often than as a bare integer.
+    * `exc.http_unmapped` — the status is a literal wreath ships no class for
+      (502/503/501/…), or the call carries `headers=`, whose wreath spelling is
+      a sequence of lowercase byte pairs rather than fastapi's `dict[str, str]`.
+    * `exc.http_variable` — the status is not readable here at all.
+    """
+    status = status_int(imports, http_exception_status(node))
+    if status is None:
+        return "exc.http_variable"
+    if status not in STATUS_EXCEPTION:
+        return "exc.http_unmapped"
+    if any(keyword.arg == "headers" for keyword in node.keywords):
+        return "exc.http_unmapped"
+    return "exc.http_literal"
 
 
 def status_code_rule(imports: _Imports, value: ast.expr, node) -> str:
@@ -1511,6 +1765,204 @@ def _index_is_over_columns(node: ast.Call) -> bool:
     )
 
 
+def query_chain_runs(head: ast.AST, parents: dict[int, ast.AST]) -> bool:
+    """Whether a `Model.objects.…` chain *executes*, rather than only building.
+
+    A chain that ends at `filter(...)` is a query object and needs nothing to
+    make it; one that ends at `all()`, `count()`, `exists()` or `get_or_none()`
+    has to be run, and in wreath that means a session. Only the second kind
+    forces a session onto the function it sits in.
+    """
+    verbs = {head.attr if isinstance(head, ast.Attribute) else ""}
+    verbs.update(verb for verb, _ in chain_tail(head, parents))
+    return bool(verbs & _RUNNING_VERBS)
+
+
+#: The chain verbs that execute a query.
+_RUNNING_VERBS = frozenset({"all", "get_or_none", "count", "exists"})
+
+
+def _function_query_names(tree: ast.Module, imports: _Imports) -> tuple[set[str], set[str]]:
+    """`(functions that run a query, every function name defined here)`.
+
+    Only the *determined* queries count: a chain this tool would not rewrite
+    anyway is no reason to change a signature.
+    """
+    parents = parent_map(tree)
+    runs: set[str] = set()
+    defined: set[str] = set()
+    enclosing: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defined.add(node.name)
+            if isinstance(node, ast.AsyncFunctionDef):
+                for child in ast.walk(node):
+                    enclosing.setdefault(id(child), node.name)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "objects"):
+            continue
+        call = parents.get(id(node))
+        rule_id = query_rule(
+            node.attr, call if isinstance(call, ast.Call) else None,
+            chain_tail(node, parents),
+        )
+        owner = enclosing.get(id(node))
+        if owner is not None and rule_id in QUERY_TRANSLATED and query_chain_runs(node, parents):
+            runs.add(owner)
+    return runs, defined
+
+
+def _called_names(tree: ast.Module) -> dict[str, set[str]]:
+    """`{async function name -> the plain function/method names it calls}`."""
+    out: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        called: set[str] = set()
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            func = inner.func
+            if isinstance(func, ast.Name):
+                called.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                called.add(func.attr)
+        out.setdefault(node.name, set()).update(called)
+    return out
+
+
+#: Query verdicts the emitter writes out in full. Defined here rather than in
+#: `emit` because `TreeContext` has to agree with it while deciding which
+#: functions need a session, and a second copy of the list would drift.
+QUERY_TRANSLATED = frozenset({
+    "orm.query.filter_exact", "orm.query.get_or_none_exact", "orm.query.all",
+    "orm.query.count", "orm.query.exists", "orm.query.order_exact",
+    "orm.query.eager_exact",
+})
+
+
+#: Names a call site can carry without meaning the function of that name: every
+#: builtin, plus the methods `dict`, `list`, `str`, `set` and a file answer to.
+#: A repository is very likely to have its own `get`, `count` or `update`, and
+#: matching by name would then rewrite every `payload.get(...)` in the tree.
+_AMBIGUOUS_CALL_NAMES = frozenset(dir(builtins)) | frozenset({
+    "get", "keys", "values", "items", "update", "copy", "pop", "setdefault",
+    "append", "extend", "insert", "remove", "discard", "clear", "add",
+    "count", "index", "sort", "reverse", "join", "split", "strip", "format",
+    "encode", "decode", "read", "write", "close", "flush", "send", "seek",
+    "startswith", "endswith", "replace", "lower", "upper", "title",
+    "first", "last", "all", "any", "one", "run", "execute", "save", "delete",
+})
+
+
+def session_functions(files: list[Path], on_skip=None) -> frozenset[str]:
+    """Every function name that has to take a session, once it has spread.
+
+    A function that runs a query needs one. So does anything that calls such a
+    function, and anything that calls *that* — the requirement climbs the call
+    graph until it reaches a route handler, where wreath supplies it. This is
+    what `--opinionated` needs in order to finish the job: adding the parameter
+    without updating the callers leaves a tree that imports and then fails on
+    the first call.
+
+    **Names, not resolved targets.** Working out that `repo.by_herd(...)` is
+    `LlamaRepository.by_herd` needs type inference this tool does not have, so a
+    method name is matched by name across the tree. The over-approximation is
+    deliberate and it is one-directional: a name that matches gains a keyword
+    argument, and since *every* definition of that name gains the parameter too,
+    the pair stays consistent. What it cannot know is a same-named method on a
+    third-party object, which is why this is opt-in and why the report says which
+    functions were changed.
+    """
+    runs: set[str] = set()
+    calls: dict[str, set[str]] = {}
+    definitions: dict[str, int] = {}
+    for path in files:
+        try:
+            tree = _parse_file(path)
+        except _SKIPPABLE as exc:
+            if on_skip is not None:
+                on_skip(path, exc)
+            continue
+        imports = _Imports().visit(tree)
+        module_runs, module_defined = _function_query_names(tree, imports)
+        runs |= module_runs
+        for name in module_defined:
+            definitions[name] = definitions.get(name, 0) + 1
+        for name, called in _called_names(tree).items():
+            calls.setdefault(name, set()).update(called)
+    # A name is only followed when it can only mean one thing: defined exactly
+    # once in the tree, and not something a built-in type also answers to. The
+    # tree has an `async def all(self)` in a repository, and without this guard
+    # every `all(...)` in it — the built-in — was handed a session.
+    def usable(name: str) -> bool:
+        return definitions.get(name) == 1 and name not in _AMBIGUOUS_CALL_NAMES
+    needs = {name for name in runs if usable(name)}
+    changed = True
+    while changed:                            # climb the call graph to a fixed point
+        changed = False
+        for name, called in calls.items():
+            if name not in needs and usable(name) and called & needs:
+                needs.add(name)
+                changed = True
+    return frozenset(needs)
+
+
+@dataclass(frozen=True)
+class TreeContext:
+    """What one module needs to know about the rest of the tree to be ported well.
+
+    A module on its own cannot see that `Vehicle`'s primary key is a UUID, that
+    `NewLlama` is a body model rather than a query parameter, or that a GraphQL
+    type lists exactly the columns of the model it shadows. Every one of those
+    changes the verdict, so `port_tree` reads the tree once and hands the answers
+    to each file.
+    """
+
+    pk_types: dict[str, str] = dataclass_field(default_factory=dict)
+    index: dict[str, set[str]] = dataclass_field(
+        default_factory=lambda: {"pydantic": set(), "settings": set(), "orm": set()}
+    )
+    orm_columns: dict[str, set[str]] = dataclass_field(default_factory=dict)
+    #: Function names that have to take a session once the requirement has
+    #: climbed the call graph. Only `--opinionated` acts on it, because acting on
+    #: it changes signatures and call sites across the whole tree.
+    session_functions: frozenset[str] = frozenset()
+
+    @classmethod
+    def of(cls, files: list[Path], on_skip=None, *, opinionated: bool = False) -> TreeContext:
+        index, orm_columns = _index_tree(files, on_skip=on_skip)
+        return cls(
+            tree_pk_types(files, on_skip=on_skip), index, orm_columns,
+            session_functions(files, on_skip=on_skip) if opinionated else frozenset(),
+        )
+
+
+def module_findings(
+    path: Path, root: Path, tree: ast.Module, imports: _Imports, context: TreeContext
+) -> list[Finding]:
+    """Every finding for one already-parsed module.
+
+    Shared with the emitter. The emitter used to carry its own copy of each
+    detector, and the two drifted apart exactly as you would expect: 23 rules
+    and 794 findings appeared in the report and nowhere in the ported files, so
+    a porter reading their own code saw no sign of 160 hand-written SQL
+    migrations or 87 pandas modules. Deriving both from this makes that class of
+    gap impossible rather than merely fixed.
+    """
+    analyzer = _Analyzer(
+        path, root, imports, context.index,
+        {**context.pk_types, **module_pk_types(tree, imports)},
+        context.orm_columns,
+    )
+    if imports.has_star:
+        analyzer._emit("resolve.star_import", 1)
+    analyzer.visit(tree)
+    return analyzer.findings
+
+
 def analyze(root) -> Report:
     """Analyze a single app root (directory or file) and return its Report.
 
@@ -1536,25 +1988,20 @@ def analyze(root) -> Report:
         skipped.setdefault(key, SkippedFile(key, _skip_reason(exc), _skip_detail(exc)))
 
     files = list(_iter_py(root, on_error=lambda exc: record(exc.filename or root, exc)))
-    index, orm_columns = _index_tree(files, on_skip=record)
+    context = TreeContext.of(files, on_skip=record)
     findings: list[Finding] = []
     analyzed = 0
     for path in files:
         try:
             tree = _parse_file(path)
-            imports = _Imports().visit(tree)
-            analyzer = _Analyzer(path, root, imports, index, module_pk_types(tree, imports),
-                                 orm_columns)
-            if imports.has_star:
-                analyzer._emit("resolve.star_import", 1)
-            analyzer.visit(tree)
+            found = module_findings(path, root, tree, _Imports().visit(tree), context)
         except _SKIPPABLE as exc:
             # Partial findings from a half-visited file are discarded with it:
             # half a module's constructs is a worse denominator than none.
             record(path, exc)
             continue
         analyzed += 1
-        findings.extend(analyzer.findings)
+        findings.extend(found)
     return Report(findings, roots=[str(root)], skipped=list(skipped.values()),
                   files_analyzed=analyzed)
 
