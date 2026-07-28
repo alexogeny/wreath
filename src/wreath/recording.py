@@ -1,12 +1,17 @@
-"""Wreath recording — request capture and recording policies.
+"""Wreath recording — request capture, recording policies, and crash forensics.
 
-Stage 0 of the Native Flight Recorder exposes *policy value types only*, all
-deny-by-default. No capture happens: these objects describe what a later
-Forensic-mode recorder would be allowed to retain, and validate that a policy
-stays inside its bounds. The capture engine and `WFR1` sink land in Stage 5.
+Most of this module is *policy value types*, all deny-by-default: they describe
+what a Forensic-mode recorder is allowed to retain and validate that a policy
+stays inside its bounds. Deny-by-default is structural rather than a default
+setting — the never-capture field classes below cannot be enabled through this
+API at all, and every budget is bounded.
 
-Deny-by-default is structural here: the never-capture field classes below cannot
-be enabled through this API at all, and every budget is bounded.
+`read_ring_file` is the other side of the subsystem, and the only part of it
+meant to be reached for *after* something has gone wrong. Given a path,
+`TelemetryConfig.ring_path` maps the recorder's ring from a file rather than the
+heap, so a process that dies badly leaves its last records readable; this reads
+them back. It reports what it could not recover instead of raising, because a
+file recovered from a crash is where a strict reader is least useful.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from ._flight_schema import CaptureDisposition, CaptureFieldClass
+from ._ring_file import DecodedRing, RingRecord, read_ring_file
 
 __all__ = [
     "BodyCapture",
@@ -32,6 +38,9 @@ __all__ = [
     "compile_redaction",
     "ActiveArm",
     "ArmRegistry",
+    "DecodedRing",
+    "RingRecord",
+    "read_ring_file",
 ]
 
 #: Header/field classes that are never captured, regardless of policy. This set

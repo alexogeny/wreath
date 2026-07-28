@@ -43,9 +43,12 @@ import argparse
 import asyncio
 import json
 import logging as stdlib_logging
+import os
 import platform
+import shutil
 import statistics
 import sys
+import tempfile
 import tracemalloc
 from logging.handlers import QueueHandler
 from pathlib import Path
@@ -594,9 +597,12 @@ def suite_publish(trials: int, ring: int) -> dict[str, Any]:
     )
     encoded = template.encode()
 
-    def make_recorder() -> Any:
+    def make_recorder(ring_path: str | None = None) -> Any:
         return _flight.Recorder(
-            _flight.MODE_PULSE, ring_records=ring, active_requests=2048
+            _flight.MODE_PULSE,
+            ring_records=ring,
+            active_requests=2048,
+            ring_path=ring_path,
         )
 
     def encode_only(_i: int) -> None:
@@ -640,10 +646,17 @@ def suite_publish(trials: int, ring: int) -> dict[str, Any]:
         return cycle
 
     recorders = [make_recorder() for _ in range(6)]
+    # The forensic ring, in the same round as the heap one: what does it cost a
+    # publish to write into a MAP_SHARED file rather than PyMem memory? The
+    # question an operator actually asks before turning it on, and the only way
+    # to answer it without the between-run drift a separate run would carry.
+    mapped_dir = tempfile.mkdtemp(prefix="wreath-bench-ring-")
+    mapped = make_recorder(os.path.join(mapped_dir, "flight.wfrr"))
     specs = [
         ("noop", lambda _i: None, recorders[0]),
         ("LogCell.encode() only", encode_only, recorders[0]),
         ("publish_log(pre-encoded)", publish_only(recorders[1]), recorders[1]),
+        ("publish_log -> mapped ring file", publish_only(mapped), mapped),
         ("encode + publish_log", encode_and_publish(recorders[2]), recorders[2]),
         ("native pack + publish", native(recorders[3]), recorders[3]),
         ("completion (begin/route/finish)", completion(recorders[4]), recorders[4]),
@@ -662,6 +675,10 @@ def suite_publish(trials: int, ring: int) -> dict[str, Any]:
     document = measure.report(arms, "noop", "noop (A/A)", unit="ns")
     document["batch"] = batch
     document["trials"] = trials
+    document["ring_file_bytes"] = os.path.getsize(
+        os.path.join(mapped_dir, "flight.wfrr")
+    )
+    shutil.rmtree(mapped_dir, ignore_errors=True)
     return document
 
 

@@ -572,10 +572,6 @@ class SchemaError(ValueError):
 # Still deferred, each decided rather than forgotten -- see
 # docs/plans/first-class-logging.md for the full list and ADR 0025 for why:
 #
-#   * **Crash forensics (stage 7).** The ring is anonymous memory, so a
-#     segfault takes the last records with it. The framing is ready for a
-#     file-backed ring -- every cell is versioned and every decode validates
-#     lengths against the buffer -- so adding it is not a format break.
 #   * **`wreath.audit`.** Keeps its own `logging.getLogger` path. "Never
 #     blocks the request path" and "never loses a record" are incompatible
 #     promises; audit needs the second and must not inherit the first.
@@ -1007,6 +1003,217 @@ class LogCell:
 
 
 _SEVERITIES = frozenset(int(s) for s in Severity)
+
+
+# --- the ring file (crash forensics) ----------------------------------------
+#
+# The ring is normally `PyMem_Calloc` memory, which the process owns and which a
+# segfault therefore takes with it -- along with every record since the
+# projector's last drain, which is the window a post-mortem is actually about.
+# Given a path, the recorder maps the ring from a file with MAP_SHARED instead,
+# so the pages belong to the kernel and outlive the process that was writing to
+# them.
+#
+# **This is not durability, and the distinction has to stay sharp.** MAP_SHARED
+# pages survive the *process* -- SIGSEGV, SIGKILL, abort -- because the kernel
+# writes them back on its own schedule. They do not survive a machine losing
+# power or a kernel panicking, unless they were written back first. Shutdown
+# msyncs; nothing else does. Documenting it the other way round would make the
+# whole feature a lie in exactly the situation someone reaches for it.
+#
+# The file is self-describing because the process that wrote it is, by
+# assumption, gone: a decoder gets the geometry, the clock calibration and the
+# provenance out of the header rather than from a live recorder. The cells that
+# follow are the cells that were on the ring, byte for byte -- this adds a
+# header in front of the format, it does not re-frame it.
+
+#: Ring-file magic. Distinct from `WFR1`, the recording *container*: that is a
+#: chunked stream someone chose to write, this is a live mapping of the ring.
+RING_FILE_MAGIC: Final = b"WFRR"
+
+#: Container version for the header below, independent of the cell schema.
+RING_FILE_VERSION: Final = 1
+
+#: Bytes reserved before the first cell. One page, so the cell area is
+#: page-aligned and the header's own writes never share a page with a cell.
+RING_FILE_HEADER_BYTES: Final = 4096
+
+#: Offset of the head/tail pair inside the header. Its own cache line, away from
+#: the fixed fields: those are written once at creation, these move constantly.
+RING_FILE_CURSOR_OFFSET: Final = 64
+
+#: Offset of the mirrored loss counters, one per `LossReason`.
+#:
+#: A crash file without these is a file you cannot draw a conclusion from: "the
+#: last thing it did was serve /orders" means something different when the ring
+#: was also full four thousand times. The counters are already maintained on the
+#: drop path, so mirroring them costs a store somewhere that was never fast.
+RING_FILE_LOSS_OFFSET: Final = 128
+
+# Fixed provenance (little-endian), at offset 0:
+#   0  4s   magic (RING_FILE_MAGIC)
+#   4  u8   container version
+#   5  u8   schema version (SCHEMA_VERSION)
+#   6  u16  flags (reserved)
+#   8  u32  ring_records (power of two)
+#  12  u32  cell_size (CELL_SIZE; a reader refuses anything else)
+#  16  u32  worker_id
+#  20  u32  reserved
+#  24  u64  epoch_mono_ns     (the origin a cell's offset_ms is measured from)
+#  32  u64  epoch_unix_ns     (... and its wall-clock pair)
+#  40  u64  created_unix_nano
+#  48  u64  pid               (whose crash this was)
+#  56  u64  reserved2
+_RING_FILE_HEADER = struct.Struct(BYTE_ORDER + "4sBBHIIIIQQQQQ")
+_require_layout(_RING_FILE_HEADER.size, RING_FILE_CURSOR_OFFSET, "the ring file header")
+
+# The moving pair, at RING_FILE_CURSOR_OFFSET:
+#  64  u64  head  (the writer's publish cursor)
+#  72  u64  tail  (the reader's consume cursor)
+_RING_FILE_CURSOR = struct.Struct(BYTE_ORDER + "QQ")
+_require_layout(_RING_FILE_CURSOR.size, 16, "the ring file cursor pair")
+
+#: Loss counters mirrored at RING_FILE_LOSS_OFFSET, one u64 per `LossReason`,
+#: in enum order.
+_RING_FILE_LOSSES = struct.Struct(BYTE_ORDER + f"{len(LossReason)}Q")
+if RING_FILE_LOSS_OFFSET + _RING_FILE_LOSSES.size > RING_FILE_HEADER_BYTES:
+    raise RuntimeError(
+        "the mirrored loss counters do not fit the ring file's header page"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RingFileHeader:
+    """The provenance a decoder needs when the process that wrote it is gone."""
+
+    ring_records: int
+    cell_size: int
+    worker_id: int
+    epoch_mono_ns: int
+    epoch_unix_ns: int
+    created_unix_nano: int
+    pid: int
+    head: int
+    tail: int
+    flags: int = 0
+    #: Every drop the worker counted, by reason. A crash file without these is
+    #: one you cannot draw a conclusion from: "the last thing it served was
+    #: /orders" means something different when the ring was also full 4,000
+    #: times and the real last thing is not in the file at all.
+    losses: tuple[int, ...] = ()
+
+    @classmethod
+    def decode(cls, data: bytes) -> RingFileHeader:
+        """Read a header, refusing what cannot be read rather than guessing.
+
+        A ring file is by definition produced by a process that is no longer
+        available to ask, so every field that could make a reader misparse the
+        cells -- the magic, both versions, the cell size -- is a refusal rather
+        than a best effort.
+        """
+        if len(data) < RING_FILE_HEADER_BYTES:
+            raise SchemaError(
+                f"a ring file header is {RING_FILE_HEADER_BYTES} bytes, got {len(data)}"
+            )
+        (
+            magic,
+            container_version,
+            schema_version,
+            flags,
+            ring_records,
+            cell_size,
+            worker_id,
+            _reserved,
+            epoch_mono_ns,
+            epoch_unix_ns,
+            created_unix_nano,
+            pid,
+            _reserved2,
+        ) = _RING_FILE_HEADER.unpack(data[: _RING_FILE_HEADER.size])
+        if magic != RING_FILE_MAGIC:
+            raise SchemaError(
+                f"not a wreath ring file: magic is {magic!r}, expected "
+                f"{RING_FILE_MAGIC!r}"
+            )
+        if container_version != RING_FILE_VERSION:
+            raise SchemaError(
+                f"unsupported ring file version {container_version}; this build "
+                f"reads {RING_FILE_VERSION}"
+            )
+        if schema_version != SCHEMA_VERSION:
+            raise SchemaError(
+                f"ring file carries schema version {schema_version}; this build "
+                f"reads {SCHEMA_VERSION}"
+            )
+        if cell_size != CELL_SIZE:
+            raise SchemaError(
+                f"ring file declares {cell_size}-byte cells; this build reads "
+                f"{CELL_SIZE}"
+            )
+        if ring_records == 0 or ring_records & (ring_records - 1):
+            raise SchemaError(
+                f"ring file declares {ring_records} records, which is not a "
+                "positive power of two"
+            )
+        head, tail = _RING_FILE_CURSOR.unpack(
+            data[RING_FILE_CURSOR_OFFSET : RING_FILE_CURSOR_OFFSET + 16]
+        )
+        losses = _RING_FILE_LOSSES.unpack(
+            data[
+                RING_FILE_LOSS_OFFSET : RING_FILE_LOSS_OFFSET
+                + _RING_FILE_LOSSES.size
+            ]
+        )
+        return cls(
+            ring_records=ring_records,
+            cell_size=cell_size,
+            worker_id=worker_id,
+            epoch_mono_ns=epoch_mono_ns,
+            epoch_unix_ns=epoch_unix_ns,
+            created_unix_nano=created_unix_nano,
+            pid=pid,
+            head=head,
+            tail=tail,
+            flags=flags,
+            losses=losses,
+        )
+
+    def loss(self, reason: LossReason) -> int:
+        """One mirrored loss counter, or 0 for a file that carried none."""
+        index = int(reason)
+        return self.losses[index] if index < len(self.losses) else 0
+
+    def encode(self) -> bytes:
+        """The full header page, for tests and for the pure twin."""
+        fixed = _RING_FILE_HEADER.pack(
+            RING_FILE_MAGIC,
+            RING_FILE_VERSION,
+            SCHEMA_VERSION,
+            self.flags,
+            self.ring_records,
+            self.cell_size,
+            self.worker_id,
+            0,
+            self.epoch_mono_ns,
+            self.epoch_unix_ns,
+            self.created_unix_nano,
+            self.pid,
+            0,
+        )
+        cursor = _RING_FILE_CURSOR.pack(self.head, self.tail)
+        counters = list(self.losses[: len(LossReason)])
+        counters.extend([0] * (len(LossReason) - len(counters)))
+        losses = _RING_FILE_LOSSES.pack(*counters)
+        page = bytearray(RING_FILE_HEADER_BYTES)
+        page[: len(fixed)] = fixed
+        page[RING_FILE_CURSOR_OFFSET : RING_FILE_CURSOR_OFFSET + len(cursor)] = cursor
+        page[RING_FILE_LOSS_OFFSET : RING_FILE_LOSS_OFFSET + len(losses)] = losses
+        return bytes(page)
+
+
+def ring_file_bytes(ring_records: int) -> int:
+    """The size a ring file must be for this geometry, header included."""
+    return RING_FILE_HEADER_BYTES + ring_records * CELL_SIZE
 
 
 # --- forensic capture (Stage 5) --------------------------------------------

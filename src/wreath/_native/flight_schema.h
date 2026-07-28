@@ -274,6 +274,57 @@ typedef struct {
     uint8_t args[WREATH_NFR_LOG_INLINE_ARG_BYTES]; /* offset 32               */
 } wreath_nfr_log_cell;
 
+/* --- the ring file (crash forensics) -------------------------------------- */
+
+/* Given a path, the recorder maps its ring from a file with MAP_SHARED rather
+ * than allocating it, so the pages belong to the kernel and outlive the process
+ * writing to them. A SIGSEGV, a SIGKILL or an abort() therefore leaves the last
+ * records -- the ones a post-mortem is about -- readable on disk.
+ *
+ * This is not durability. MAP_SHARED survives the *process*; it does not
+ * survive a machine losing power unless the pages were written back first.
+ * Shutdown msyncs, nothing else does, and no doc claims otherwise.
+ *
+ * Mirrors the ring-file section of _flight_schema.py. The header is one page so
+ * the cells that follow start page-aligned, and so the two moving cursors never
+ * share a page with a cell. */
+#define WREATH_NFR_RING_FILE_MAGIC "WFRR"
+#define WREATH_NFR_RING_FILE_VERSION 1
+#define WREATH_NFR_RING_FILE_HEADER_BYTES 4096
+#define WREATH_NFR_RING_FILE_CURSOR_OFFSET 64
+
+/* Mirrored loss counters, one uint64_t per LossReason, in enum order. A crash
+ * file without them is one you cannot draw a conclusion from: "the last thing
+ * it served was /orders" means something else when the ring was also full four
+ * thousand times and the real last thing never reached the file. */
+#define WREATH_NFR_RING_FILE_LOSS_OFFSET 128
+
+/* Fixed provenance, written once when the mapping is made. A decoder reads the
+ * geometry and the clock calibration from here because the process that could
+ * have answered is, by assumption, gone. */
+typedef struct {
+    char magic[4];             /* offset 0  (WREATH_NFR_RING_FILE_MAGIC)      */
+    uint8_t container_version; /* offset 4                                    */
+    uint8_t schema_version;    /* offset 5                                    */
+    uint16_t flags;            /* offset 6  (reserved)                        */
+    uint32_t ring_records;     /* offset 8  (power of two)                    */
+    uint32_t cell_size;        /* offset 12 (WREATH_NFR_CELL_SIZE)            */
+    uint32_t worker_id;        /* offset 16                                   */
+    uint32_t reserved;         /* offset 20                                   */
+    uint64_t epoch_mono_ns;    /* offset 24 (origin of a cell's offset_ms)    */
+    uint64_t epoch_unix_ns;    /* offset 32 (its wall-clock pair)             */
+    uint64_t created_unix_nano;/* offset 40                                   */
+    uint64_t pid;              /* offset 48 (whose crash this was)            */
+    uint64_t reserved2;        /* offset 56                                   */
+} wreath_nfr_ring_file_header;
+
+/* The two cursors, on their own cache line: the fixed fields above are written
+ * once, these move on every publish and every drain. */
+typedef struct {
+    uint64_t head; /* offset 64 -- the writer's publish cursor */
+    uint64_t tail; /* offset 72 -- the reader's consume cursor */
+} wreath_nfr_ring_file_cursor;
+
 /* A capture-slab header. Mirrors CaptureSlab's header in _flight_schema.py.
  * A slab holds one armed Forensic request's retained fields; used_bytes covers
  * this header plus every field record, so the sink copies exactly that much. */
@@ -318,6 +369,22 @@ _Static_assert(sizeof(wreath_nfr_capture_field) == WREATH_NFR_CAPTURE_FIELD_HEAD
                "capture field header must be 12 bytes");
 _Static_assert(sizeof(wreath_nfr_log_cell) == WREATH_NFR_CELL_SIZE,
                "log cell must be 64 bytes");
+_Static_assert(sizeof(wreath_nfr_ring_file_header)
+                   == WREATH_NFR_RING_FILE_CURSOR_OFFSET,
+               "the ring file header must fill the bytes before the cursors");
+_Static_assert(sizeof(wreath_nfr_ring_file_cursor) == 16,
+               "the ring file cursor pair must be two u64s");
+_Static_assert(WREATH_NFR_RING_FILE_HEADER_BYTES % WREATH_NFR_CELL_SIZE == 0,
+               "the ring file header must be a whole number of cells, so the "
+               "cell area stays aligned");
+_Static_assert(WREATH_NFR_RING_FILE_LOSS_OFFSET
+                   + WREATH_NFR_LOSS_REASON_COUNT * 8
+                   <= WREATH_NFR_RING_FILE_HEADER_BYTES,
+               "the mirrored loss counters must fit the ring file header page");
+_Static_assert(WREATH_NFR_RING_FILE_LOSS_OFFSET
+                   >= WREATH_NFR_RING_FILE_CURSOR_OFFSET
+                          + (int)sizeof(wreath_nfr_ring_file_cursor),
+               "the loss mirror must not overlap the cursor pair");
 _Static_assert(WREATH_NFR_LOG_INLINE_ARG_BYTES == WREATH_NFR_CELL_SIZE - 32,
                "the log cell's inline argument area must fill the cell");
 #endif

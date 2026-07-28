@@ -37,12 +37,13 @@ projector thread          drain, join to trace by request_id, settle on a quiet 
 | — | The six measurements | landed |
 | — | Native emitter `wreath_nfr_log`, with a byte-for-byte parity corpus | landed |
 | — | Off-loop emission: bounded stage, loop drain, `LOG_FLAG_OFF_LOOP` | landed |
-| 7 | mmap-backed forensic ring, binary archival stream, decoder | deferred |
+| 7 | mmap-backed forensic ring, binary archival stream, decoder | landed — [plan](native-flight-recorder-crash-forensics.md) |
 
-Stage 7 is deferred but **not designed out**: the cell carries its schema version
-in byte 0 and every decode validates lengths against the buffer, so a file-backed
-ring can be added without a format break. That framing was a constraint on the
-stage 1 commit, not a later task.
+Stage 7 landed on the framing stage 1 built for it, which is the whole point of
+having built it: the cell carries its schema version in byte 0 and every decode
+validates lengths against the buffer, so a file-backed ring needed a header in
+front of the cells rather than a format break. See
+[crash forensics](native-flight-recorder-crash-forensics.md).
 
 ## Files
 
@@ -308,11 +309,6 @@ these numbers in hand, rather than inherit it. Reproduce with
 `uv run python -m benchmarks.bench_logging --suite disabled publish drain`.
 
 ## Not done, and why
-
-**Crash forensics (stage 7).** The ring is anonymous memory, so a segfault takes
-the last records with it. The framing is ready for a file-backed ring — every
-cell is versioned and every decode validates lengths against the buffer — so
-adding it is not a format break.
 
 **`wreath.audit`.** Keeps its own `logging.getLogger` path. "Never blocks the
 request path" and "never loses a record" are incompatible promises; audit needs

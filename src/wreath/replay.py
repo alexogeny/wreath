@@ -79,6 +79,8 @@ __all__ = [
     "ReplayError",
     "generate_test",
     "recorded_request",
+    "RingReproduction",
+    "reproduce_from_ring",
 ]
 
 
@@ -1270,6 +1272,118 @@ def _test_name(request: CanonicalRequest) -> str:
         character if character.isalnum() else "_" for character in request.path
     ).strip("_")
     return f"test_{request.method.lower()}_{slug}".rstrip("_").replace("__", "_")
+
+
+@dataclass(frozen=True, slots=True)
+class RingReproduction:
+    """Whether re-driving a recording retraces the path a crash file recorded.
+
+    A ring file names the request that was in flight when a process died, and
+    the log records it had emitted by then. It does not hold the request's
+    bytes -- a completion cell carries a route and a status, never a payload --
+    so reproducing the crash needs a transport recording of that request from
+    somewhere else. What joins the two is the *sequence of log call sites*: if
+    replaying the recording emits the same sites in the same order, the replay
+    went where the dead process went.
+
+    Attributes:
+        request_id: The request from the ring file this was checked against.
+        expected: Its call sites, in the order the ring published them.
+        observed: The call sites the replay emitted.
+        diverged_at: Index of the first site that differs, or None when the
+            replay retraced the whole recorded prefix.
+        reproduced: True when `observed` begins with `expected` -- the replay
+            got at least as far as the dead process did. A replay that goes
+            *further* still reproduces: the crash file stops where the process
+            stopped, not where the request would have.
+        result: The transport replay's own outcome, for the response bytes.
+    """
+
+    request_id: int
+    expected: tuple[int, ...]
+    observed: tuple[int, ...]
+    diverged_at: int | None
+    reproduced: bool
+    result: TransportReplayResult
+
+
+async def reproduce_from_ring(
+    app: Any,
+    ring: Any,
+    recording: TransportRecording,
+    *,
+    request_id: int | None = None,
+    config: ServerConfig | None = None,
+) -> RingReproduction:
+    """Replay `recording` and check it retraces the crash file's last request.
+
+    Args:
+        app: The application to drive. It must be the build that crashed --
+            see the warning below.
+        ring: A `DecodedRing` from `wreath.recording.read_ring_file`.
+        recording: The transport recording believed to hold that request.
+        request_id: Which request from the ring to check against. Defaults to
+            the one that was in flight, and raises when the ring shows no such
+            request or shows several, because guessing which crash to reproduce
+            is the wrong kind of helpful.
+        config: Passed through to `replay_transport`.
+
+    Raises:
+        ReplayError: If the ring names no in-flight request, names more than one
+            and the caller did not choose, or the chosen request has no records.
+
+    **This compares call-site ids, so it is only meaningful against the build
+    that produced the file.** A site's id is its position in the process's
+    interned table, which is import order -- stable for one build and entirely
+    unrelated across two. Replaying against a different build does not fail
+    loudly here; it produces a divergence at index 0 that means nothing. Run it
+    against the build that crashed.
+    """
+    from . import logging as wreath_logging
+
+    if request_id is None:
+        candidates = ring.in_flight()
+        if not candidates:
+            raise ReplayError(
+                "the ring file shows no request in flight: every request that "
+                "logged also completed, so there is no crash here to reproduce"
+            )
+        if len(candidates) > 1:
+            raise ReplayError(
+                f"the ring file shows {len(candidates)} requests in flight "
+                f"({', '.join(str(c) for c in candidates)}); name one with "
+                "request_id rather than having this pick"
+            )
+        request_id = candidates[0]
+
+    expected = tuple(
+        record.decode().site_id for record in ring.logs_for(request_id)
+    )
+    if not expected:
+        raise ReplayError(
+            f"request {request_id} has no log records in the ring file, so there "
+            "is no path to compare a replay against"
+        )
+
+    # Capture rather than publish: the replay must not need a recorder, and its
+    # records must not reach whatever this process has installed.
+    with wreath_logging.testing_runtime(level=wreath_logging.TRACE) as captured:
+        result = await replay_transport(app, recording, config=config)
+    observed = tuple(cell.site_id for cell in captured)
+
+    diverged_at: int | None = None
+    for index, site in enumerate(expected):
+        if index >= len(observed) or observed[index] != site:
+            diverged_at = index
+            break
+    return RingReproduction(
+        request_id=request_id,
+        expected=expected,
+        observed=observed,
+        diverged_at=diverged_at,
+        reproduced=diverged_at is None,
+        result=result,
+    )
 
 
 async def generate_test(

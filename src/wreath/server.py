@@ -98,6 +98,12 @@ def _create_recorder(config: ServerConfig) -> Any:
         detailed_slow_us=telemetry.detailed_slow_us,
         capture_slabs=capture_slabs,
         slab_bytes=telemetry.slab_bytes,
+        # When set, the ring is a MAP_SHARED file rather than heap memory, so a
+        # process that dies badly leaves its last cells readable. A path that
+        # cannot be opened raises out of here rather than degrading: a forensic
+        # ring nobody notices is missing is worth nothing at the moment it is
+        # needed.
+        ring_path=telemetry.ring_path,
     )
 
 
@@ -1082,6 +1088,14 @@ class Server:
                 )
                 if self._recording_sink is not None:
                     self._recording_sink.start()
+                    # The archival half of crash forensics: every cell the
+                    # projector drains is appended to the recording, so history
+                    # survives past the point where the ring refuses. The ring
+                    # file holds what was still in flight; this holds the rest.
+                    if self._projector is not None:
+                        self._projector.set_cell_archive(
+                            self._recording_sink.archive_cells
+                        )
                 # Install the compiled capture plan + arm registry on the app so
                 # its request-path seam can capture per policy. Only a Wreath app
                 # carries the seam; a bare ASGI app simply lacks the method.

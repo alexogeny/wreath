@@ -58,10 +58,11 @@ Consequences of that framing, each of which is a decision in its own right:
   `FLAG_ERROR_PROMOTED` / `FLAG_SLOW_PROMOTED`, or an explicit `promote()`.
 - **`WARN` and above are never sampled.** The per-call-site limiter covers INFO
   and below only.
-- **The framing is designed for a file-backed ring it does not yet have.** Every
-  cell is versioned and every decode validates lengths against the buffer, so an
-  mmap-backed forensic ring can be added later without a format break. Doing
-  this now costs a little discipline; retrofitting it would be a compatibility
+- **The framing is designed for a file-backed ring.** Every cell is versioned
+  and every decode validates lengths against the buffer, so an mmap-backed
+  forensic ring could be added without a format break. It since has been, and
+  it needed a header in front of the cells rather than a re-framing -- which is
+  what the discipline bought. Retrofitting it would have been a compatibility
   event on a format operators' tooling already reads.
 
 Two things are deliberately excluded. **`wreath.audit` keeps its own path**,

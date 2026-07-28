@@ -11,6 +11,11 @@
 #include <string.h>
 #include <time.h>
 
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #if defined(__linux__)
 #include <sys/random.h>
 #endif
@@ -243,6 +248,25 @@ struct wreath_nfr_worker {
     _Alignas(CACHELINE) _Atomic uint64_t ring_tail;  /* reader consumes */
     _Atomic uint64_t ring_high_water;
 
+    /* --- crash forensics: the ring as a file-backed mapping ---
+     * When a path is configured the ring lives in a MAP_SHARED file, so its
+     * pages are the kernel's and a process that dies badly leaves them
+     * readable. `ring_map` is the whole mapping (header page + cells) and
+     * `ring` points at the cells inside it; when there is no file, `ring` is
+     * PyMem memory and `ring_map` is NULL.
+     *
+     * `cursor_mirror` always points somewhere writable -- into the mapped
+     * header when there is a file, at `cursor_scratch` when there is not -- so
+     * publishing mirrors the cursor with an unconditional store and no branch.
+     * A branch would look cheaper and be the wrong trade: it puts a test on
+     * every publish to save one store to a line that is already hot. */
+    void *ring_map;
+    size_t ring_map_bytes;
+    wreath_nfr_ring_file_cursor *cursor_mirror;
+    wreath_nfr_ring_file_cursor cursor_scratch;
+    uint64_t *loss_mirror;
+    uint64_t loss_scratch[WREATH_NFR_LOSS_REASON_COUNT];
+
     /* --- counters (cache-line separated from the ring indices) --- */
     _Alignas(CACHELINE) _Atomic uint64_t requests;
     _Atomic uint64_t completions;
@@ -311,12 +335,88 @@ static void
 note_loss(wreath_nfr_worker *worker, int reason)
 {
     if (reason >= 0 && reason < WREATH_NFR_LOSS_REASON_COUNT) {
-        atomic_fetch_add_explicit(&worker->losses.reason[reason], 1,
-                                  memory_order_relaxed);
+        uint64_t total = atomic_fetch_add_explicit(&worker->losses.reason[reason], 1,
+                                                   memory_order_relaxed) + 1;
+        /* Mirror into the ring file, so a post-mortem knows what it is *not*
+         * looking at. Always a store, never a branch, for the same reason the
+         * cursor mirror is: `loss_mirror` points at worker-local scratch when
+         * no file is mapped. This is the drop path, which was never fast. */
+        worker->loss_mirror[reason] = total;
     }
 }
 
 /* --- lifecycle ------------------------------------------------------------ */
+
+/* Map the ring from `path`, creating and sizing the file.
+ *
+ * Owner-only (0600) like the WFR1 recording, and for the same reason: a ring
+ * file holds whatever the application logged, which is application data. The
+ * file is truncated to exactly one header page plus the cell area, so a stale
+ * file from a differently-sized run cannot leave a tail of cells behind that a
+ * decoder would read as this run's.
+ *
+ * On failure it sets a Python exception and returns -1. Failing loudly is right
+ * here: the caller asked for a forensic ring by configuring a path, and a
+ * server that silently ran without one would produce no file to notice.
+ */
+static int
+map_ring_file(wreath_nfr_worker *worker, const char *path, uint32_t ring_records)
+{
+    size_t bytes = (size_t)WREATH_NFR_RING_FILE_HEADER_BYTES
+                   + (size_t)ring_records * WREATH_NFR_CELL_SIZE;
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        PyErr_SetFromErrnoWithFilename(PyExc_OSError, path);
+        return -1;
+    }
+    if (ftruncate(fd, (off_t)bytes) != 0) {
+        PyErr_SetFromErrnoWithFilename(PyExc_OSError, path);
+        close(fd);
+        return -1;
+    }
+    void *map = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    /* The mapping keeps the pages alive on its own; the descriptor has done its
+     * job. Holding it open would only be one more thing to leak on teardown. */
+    close(fd);
+    if (map == MAP_FAILED) {
+        PyErr_SetFromErrnoWithFilename(PyExc_OSError, path);
+        return -1;
+    }
+    memset(map, 0, WREATH_NFR_RING_FILE_HEADER_BYTES);
+    wreath_nfr_ring_file_header *header = (wreath_nfr_ring_file_header *)map;
+    memcpy(header->magic, WREATH_NFR_RING_FILE_MAGIC, 4);
+    header->container_version = WREATH_NFR_RING_FILE_VERSION;
+    header->schema_version = WREATH_NFR_SCHEMA_VERSION;
+    header->flags = 0;
+    header->ring_records = ring_records;
+    header->cell_size = WREATH_NFR_CELL_SIZE;
+    header->worker_id = worker->worker_id;
+    header->reserved = 0;
+    header->epoch_mono_ns = worker->epoch_mono_ns;
+    header->epoch_unix_ns = worker->epoch_unix_ns;
+    header->pid = (uint64_t)getpid();
+    header->reserved2 = 0;
+    {
+        struct timespec wall;
+        clock_gettime(CLOCK_REALTIME, &wall);
+        header->created_unix_nano =
+            (uint64_t)wall.tv_sec * 1000000000ULL + (uint64_t)wall.tv_nsec;
+    }
+    worker->ring_map = map;
+    worker->ring_map_bytes = bytes;
+    worker->cursor_mirror = (wreath_nfr_ring_file_cursor *)((uint8_t *)map
+                            + WREATH_NFR_RING_FILE_CURSOR_OFFSET);
+    worker->loss_mirror =
+        (uint64_t *)((uint8_t *)map + WREATH_NFR_RING_FILE_LOSS_OFFSET);
+    /* Carry over anything already counted: a worker can drop before its ring
+     * file exists only if creation were reordered, but copying is one memcpy
+     * and it removes the question. */
+    for (int i = 0; i < WREATH_NFR_LOSS_REASON_COUNT; i++) {
+        worker->loss_mirror[i] = worker->loss_scratch[i];
+    }
+    worker->ring = (uint8_t *)map + WREATH_NFR_RING_FILE_HEADER_BYTES;
+    return 0;
+}
 
 wreath_nfr_worker *
 wreath_nfr_worker_new(uint8_t mode, uint32_t worker_id, uint32_t ring_records,
@@ -324,7 +424,8 @@ wreath_nfr_worker_new(uint8_t mode, uint32_t worker_id, uint32_t ring_records,
                       int completion_summaries, uint64_t detailed_sample_threshold,
                       uint32_t phase_slots, uint64_t slow_threshold_us,
                       uint32_t capture_slabs, uint32_t slab_bytes,
-                      uint64_t hash_key0, uint64_t hash_key1)
+                      uint64_t hash_key0, uint64_t hash_key1,
+                      const char *ring_path)
 {
     if (ring_records != 0 && (ring_records & (ring_records - 1)) != 0) {
         PyErr_SetString(PyExc_ValueError, "ring_records must be a power of two");
@@ -375,10 +476,24 @@ wreath_nfr_worker_new(uint8_t mode, uint32_t worker_id, uint32_t ring_records,
         atomic_init(&worker->losses.reason[i], 0);
     }
 
+    /* Always somewhere writable, so publish mirrors the cursor with a store and
+     * no branch. `map_ring_file` repoints both into the mapped header. */
+    worker->cursor_mirror = &worker->cursor_scratch;
+    worker->loss_mirror = worker->loss_scratch;
     if (ring_records) {
-        worker->ring = PyMem_Calloc((size_t)ring_records, WREATH_NFR_CELL_SIZE);
-        if (worker->ring == NULL) {
-            goto no_memory;
+        if (ring_path != NULL) {
+            if (map_ring_file(worker, ring_path, ring_records) != 0) {
+                /* The exception is already set: a configured forensic ring that
+                 * cannot be opened is a startup failure, not a silent downgrade
+                 * to a ring nobody can read after the crash. */
+                wreath_nfr_worker_free(worker);
+                return NULL;
+            }
+        } else {
+            worker->ring = PyMem_Calloc((size_t)ring_records, WREATH_NFR_CELL_SIZE);
+            if (worker->ring == NULL) {
+                goto no_memory;
+            }
         }
     }
     worker->histograms =
@@ -461,6 +576,21 @@ wreath_nfr_worker_free(wreath_nfr_worker *worker)
 {
     if (worker == NULL) {
         return;
+    }
+    if (worker->ring_map != NULL) {
+        /* The one place anything is msync'd. MAP_SHARED already survives the
+         * process without it -- the kernel owns the pages -- so this is for the
+         * other failure: a machine that goes away before writeback. On a clean
+         * close it costs nothing anyone notices and makes the file coherent. */
+        msync(worker->ring_map, worker->ring_map_bytes, MS_SYNC);
+        munmap(worker->ring_map, worker->ring_map_bytes);
+        worker->ring_map = NULL;
+        worker->ring = NULL;  /* it pointed into the mapping, not to PyMem */
+        /* Both mirrors pointed into the mapping that has just gone. Repoint
+         * them at the scratch they started on: teardown is not instantaneous,
+         * and a note_loss racing the unmap must not write to a dead page. */
+        worker->cursor_mirror = &worker->cursor_scratch;
+        worker->loss_mirror = worker->loss_scratch;
     }
     PyMem_Free(worker->ring);
     PyMem_Free(worker->histograms);
@@ -749,6 +879,12 @@ ring_publish(wreath_nfr_worker *worker, const void *cell)
     memcpy(worker->ring + (size_t)index * WREATH_NFR_CELL_SIZE, cell,
            WREATH_NFR_CELL_SIZE);
     atomic_store_explicit(&worker->ring_head, head + 1, memory_order_release);
+    /* Mirror the cursor for a decoder that will only ever see the file. Plain,
+     * because nothing in this process reads it and the ordering that matters --
+     * cell before head -- is the release store above. Unconditional: the mirror
+     * points at worker-local scratch when no file is mapped, so an unmapped
+     * ring pays a store to a hot line rather than a branch on every publish. */
+    worker->cursor_mirror->head = head + 1;
     uint64_t new_occupancy = occupancy + 1;
     uint64_t hw = atomic_load_explicit(&worker->ring_high_water, memory_order_relaxed);
     if (new_occupancy > hw) {
@@ -800,6 +936,10 @@ wreath_nfr_ring_drain(wreath_nfr_worker *worker, uint8_t *out, Py_ssize_t max_ce
         copied++;
     }
     atomic_store_explicit(&worker->ring_tail, tail, memory_order_release);
+    /* The reader's half of the mirror. Off the request path, so its cost is
+     * nobody's concern; without it a decoder cannot tell how far behind the
+     * projector was when the process died, which is often the whole story. */
+    worker->cursor_mirror->tail = tail;
     return copied;
 }
 

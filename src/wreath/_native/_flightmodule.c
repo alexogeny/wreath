@@ -26,6 +26,23 @@ typedef struct {
 static PyTypeObject RecorderType;
 static PyTypeObject RequestType;
 
+/* `PyUnicode_FSConverter` that also accepts None, for an optional path.
+ *
+ * `ring_path=None` is the normal way to say "no forensic ring", and callers
+ * build kwargs without branching on it, so the converter has to take it. The
+ * plain FS converter rejects None, which would make `ring_path=None` a
+ * TypeError -- the one spelling every caller reaches for first. */
+static int
+path_or_none(PyObject *object, void *address)
+{
+    PyObject **target = (PyObject **)address;
+    if (object == Py_None) {
+        *target = NULL;
+        return 1;
+    }
+    return PyUnicode_FSConverter(object, target);
+}
+
 /* --- _Request ------------------------------------------------------------- */
 
 static void
@@ -197,7 +214,7 @@ recorder_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
                              "histogram_count", "completion_summaries",
                              "detailed_sample_rate", "phase_slots",
                              "detailed_slow_us", "capture_slabs", "slab_bytes",
-                             "capture_hash_key", NULL};
+                             "capture_hash_key", "ring_path", NULL};
     unsigned int mode, worker_id = 0, ring_records = 16384, active_requests = 2048,
                        histogram_count = 1, phase_slots = 256, capture_slabs = 0,
                        slab_bytes = 65536;
@@ -205,16 +222,18 @@ recorder_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     double detailed_sample_rate = 0.0;
     unsigned long long detailed_slow_us = 0;
     PyObject *hash_key = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "I|IIIIpdIKIIO:Recorder", kwlist,
+    PyObject *ring_path_obj = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "I|IIIIpdIKIIOO&:Recorder", kwlist,
                                      &mode, &worker_id, &ring_records, &active_requests,
                                      &histogram_count, &completion_summaries,
                                      &detailed_sample_rate, &phase_slots,
                                      &detailed_slow_us, &capture_slabs, &slab_bytes,
-                                     &hash_key)) {
+                                     &hash_key, path_or_none, &ring_path_obj)) {
         return NULL;
     }
     if (detailed_sample_rate < 0.0 || detailed_sample_rate > 1.0) {
         PyErr_SetString(PyExc_ValueError, "detailed_sample_rate must be in [0, 1]");
+        Py_XDECREF(ring_path_obj);
         return NULL;
     }
     /* An optional (k0, k1) key makes HASHED capture reproducible for tests; the
@@ -225,6 +244,7 @@ recorder_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
             !PyArg_ParseTuple(hash_key, "KK", &hash_key0, &hash_key1)) {
             PyErr_SetString(PyExc_TypeError,
                             "capture_hash_key must be a (k0, k1) tuple");
+            Py_XDECREF(ring_path_obj);
             return NULL;
         }
     }
@@ -234,14 +254,18 @@ recorder_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         (uint64_t)(detailed_sample_rate * 4294967296.0 + 0.5);
     RecorderObject *self = (RecorderObject *)type->tp_alloc(type, 0);
     if (self == NULL) {
+        Py_XDECREF(ring_path_obj);
         return NULL;
     }
+    const char *ring_path =
+        ring_path_obj == NULL ? NULL : PyBytes_AS_STRING(ring_path_obj);
     self->worker = wreath_nfr_worker_new((uint8_t)mode, worker_id, ring_records,
                                          active_requests, histogram_count,
                                          completion_summaries,
                                          detailed_sample_threshold, phase_slots,
                                          detailed_slow_us, capture_slabs, slab_bytes,
-                                         hash_key0, hash_key1);
+                                         hash_key0, hash_key1, ring_path);
+    Py_XDECREF(ring_path_obj);
     if (self->worker == NULL) {
         Py_DECREF(self);
         return NULL;

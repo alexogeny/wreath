@@ -336,6 +336,16 @@ class TelemetryConfig:
     #: Preallocated forensic capture, only meaningful in Forensic mode.
     capture_slabs: int = 0
     slab_bytes: int = 64 * 1024
+    #: Map the ring from this file instead of the heap, so the records survive a
+    #: process that dies badly. Deliberately **not** tied to Forensic mode: a
+    #: crash is worth reconstructing whether or not anyone armed request
+    #: capture, and requiring `Mode.FORENSIC` would mean paying for slab pools
+    #: and redaction machinery to answer "what was it doing when it died".
+    #:
+    #: This is not durability. The mapping survives the *process*; it does not
+    #: survive a machine losing power before the pages are written back. Read it
+    #: with `wreath.recording.read_ring_file`, or `wreath flight read`.
+    ring_path: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.mode, Mode):
@@ -358,6 +368,11 @@ class TelemetryConfig:
         _require(self.capture_slabs >= 0, "capture_slabs must be >= 0")
         _require(self.capture_slabs <= _MAX_CAPTURE_SLABS, "capture_slabs is too large")
         _require(self.slab_bytes >= 0, "slab_bytes must be >= 0")
+
+        _require(
+            self.ring_path is None or self.ring_records > 0,
+            "ring_path maps the ring from a file, so it needs a non-empty ring",
+        )
 
         if self.mode is Mode.OFF:
             return
