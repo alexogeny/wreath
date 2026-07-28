@@ -211,14 +211,29 @@ jobs:
           # release permanently unfinishable, because the tag it already pushed
           # is what blocks the retry. Ask for a re-run, not a version bump.
           tag="v$VERSION"
-          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            existing="$(git rev-list -n1 "$tag")"
-            if [ "$existing" != "$GITHUB_SHA" ]; then
-              echo "::error::tag $tag already exists at $existing, not $GITHUB_SHA; bump the version"
-              exit 1
-            fi
-            echo "Tag $tag already exists at this commit; resuming a partial release."
+          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            exit 0
           fi
+          existing="$(git rev-list -n1 "$tag")"
+          if [ "$existing" = "$GITHUB_SHA" ]; then
+            echo "Tag $tag already at this commit; resuming a partial release."
+            exit 0
+          fi
+          # The tag names a different commit. Whether that is a reused version or
+          # an unfinished attempt is decided by whether anything ever consumed
+          # it: `pypi` runs only after this job succeeds, so no GitHub Release
+          # means nothing was published either.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::$tag is already released, at $existing; bump the version"
+            exit 1
+          fi
+          # Nothing consumed it, so the tag is a leftover from a run that failed
+          # after pushing it -- which is exactly what happens when the failure is
+          # in CI and the fix is another commit. Moving it is correct: the sdist
+          # is built from HEAD, so a tag left behind would name a tree the
+          # published artifact does not match.
+          echo "::warning::$tag exists at $existing but was never released; moving it to $GITHUB_SHA"
+          echo "RETAG=1" >> "$GITHUB_ENV"
 
       - name: Require release notes
         run: |
@@ -245,8 +260,11 @@ jobs:
           # tag present on the remote.
           git branch -f "$branch" HEAD
           git push --force origin "$branch"
-          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            echo "Tag $tag already pushed; leaving it."
+          if [ "${RETAG:-0}" = "1" ]; then
+            git tag -f -a "$tag" -m "wreath v$VERSION"
+            git push --force origin "refs/tags/$tag"
+          elif git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "Tag $tag already pushed at this commit; leaving it."
           else
             git tag -a "$tag" -m "wreath v$VERSION"
             git push origin "refs/tags/$tag"
