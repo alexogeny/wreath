@@ -1353,6 +1353,7 @@ def run(
     tls: TLSConfig | None = None,
     loop_factory: Callable[[], asyncio.AbstractEventLoop] | None = None,
     required_env: Iterable[str] = (),
+    ready: Callable[[Server], None] | None = None,
 ) -> None:
     """Serve `app` until interrupted, then gracefully shut down.
 
@@ -1377,6 +1378,14 @@ def run(
         config: Built from the environment when omitted.
         loop_factory: Passed to `asyncio.run`, e.g. `uvloop.new_event_loop`.
         required_env: Boot-critical variable names to warn about when unset.
+        ready: Called once with the running `Server` after every listener is
+            bound and lifespan startup has completed, before the first request
+            can be accepted. `wreath run` uses it to print its startup line,
+            which is why it fires after the bind rather than before: a
+            `port=0` listener only knows its port by then, and a bind that
+            fails must not have announced itself. Exceptions propagate --
+            the server is torn down rather than left running behind a hook
+            nobody saw fail.
     """
     if config is None:
         config, _ = configure_from_env(required=required_env)
@@ -1385,19 +1394,23 @@ def run(
 
     async def _main() -> None:
         server = await serve(app, config, ssl=ssl, tls=tls)
-        ready_fd_text = os.environ.pop("_WREATH_WORKER_READY_FD", None)
-        if ready_fd_text is not None:
-            ready_fd = int(ready_fd_text)
+        try:
+            # Inside the `close()` guard: a `ready` hook that raises must not
+            # leave a bound listener behind with nothing serving it.
+            if ready is not None:
+                ready(server)
+            ready_fd_text = os.environ.pop("_WREATH_WORKER_READY_FD", None)
+            if ready_fd_text is not None:
+                ready_fd = int(ready_fd_text)
+                try:
+                    os.write(ready_fd, b"1")
+                finally:
+                    os.close(ready_fd)
             try:
-                os.write(ready_fd, b"1")
-            finally:
-                os.close(ready_fd)
-        try:
-            server._install_signal_handlers()
-        except ValueError:
-            # Not on the main thread; skip signal handling.
-            pass
-        try:
+                server._install_signal_handlers()
+            except ValueError:
+                # Not on the main thread; skip signal handling.
+                pass
             await server.serve_forever()
         except asyncio.CancelledError:
             pass

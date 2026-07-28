@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import importlib
+import json
+import os
+import subprocess
 import sys
+import threading
+from http.client import HTTPConnection
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from wreath import cli
-from wreath._cli import CliError, build_parser, load_application, options_from_namespace
+from wreath._cli import (
+    CliError,
+    _ensure_cwd_importable,
+    build_parser,
+    load_application,
+    options_from_namespace,
+)
 
 
 def _write_app(tmp_path: Path, body: str) -> str:
@@ -214,7 +225,9 @@ def test_main_loads_the_target_and_delegates_to_the_server(
     importlib.invalidate_caches()
     calls: list[tuple[Any, Any, Any, Any]] = []
 
-    def fake_run(app: Any, config: Any, *, tls: Any, loop_factory: Any) -> None:
+    def fake_run(
+        app: Any, config: Any, *, tls: Any, loop_factory: Any, announce: Any = None
+    ) -> None:
         calls.append((app, config, tls, loop_factory))
 
     monkeypatch.setattr("wreath._cli.run_server", fake_run)
@@ -237,8 +250,8 @@ def test_main_routes_multiple_metal_workers_to_the_supervisor(
     importlib.invalidate_caches()
     calls: list[int] = []
 
-    def fake_group(app: Any, config: Any, *, tls: Any, workers: int) -> None:
-        del app, config, tls
+    def fake_group(app: Any, config: Any, *, tls: Any, workers: int, target: str) -> None:
+        del app, config, tls, target
         calls.append(workers)
 
     monkeypatch.setattr("wreath._cli._run_metal_worker_group", fake_group)
@@ -279,6 +292,107 @@ def test_version_is_available_without_an_application(capsys: Any) -> None:
 
     assert stopped.value.code == 0
     assert "wreath" in capsys.readouterr().out.lower()
+
+
+QUICKSTART_APP = """\
+from wreath import Request, Wreath
+
+app = Wreath()
+
+
+@app.get("/hello/{name}")
+async def hello(request: Request, name: str) -> dict:
+    return {"hello": name}
+"""
+
+
+def _console_script() -> Path:
+    script = Path(sys.executable).parent / "wreath"
+    if not script.exists():
+        pytest.skip("the wreath console script is not installed in this environment")
+    return script
+
+
+def _read_line(stream: Any, timeout: float) -> str:
+    """One line, or "" if the process stayed silent for `timeout` seconds."""
+    box: list[str] = []
+    reader = threading.Thread(target=lambda: box.append(stream.readline()), daemon=True)
+    reader.start()
+    reader.join(timeout)
+    return box[0] if box else ""
+
+
+@pytest.mark.parametrize("loop", ["asyncio", "metal"])
+def test_the_console_script_serves_an_app_from_the_working_directory(
+    tmp_path: Path, loop: str
+) -> None:
+    """`wreath run app:app` works where the README says it does.
+
+    Deliberately a subprocess driving the installed console script rather than
+    an in-process call: the defect this covers is that a console script's
+    `sys.path[0]` is the virtualenv's `bin`, not the working directory, and
+    every in-process test already runs with the repository importable. Running
+    `python -m wreath` would pass this test with the fix reverted, so it must
+    not be used here, and `PYTHONPATH` is scrubbed for the same reason.
+
+    Asserts on a served response, not just on a clean start: an app that
+    imports but never binds is not what the quickstart promises.
+    """
+    script = _console_script()
+    (tmp_path / "app.py").write_text(QUICKSTART_APP)
+    env = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
+
+    process = subprocess.Popen(
+        [str(script), "run", "app:app", "--port", "0", "--loop", loop],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        line = _read_line(process.stdout, 30.0)
+        if loop == "metal" and "io_uring" in line.lower():
+            pytest.skip("io_uring unavailable")
+        assert "No module named" not in line, line
+        assert line.startswith("\N{HERB} wreath "), line
+        assert "serving app:app on http://127.0.0.1:" in line, line
+        assert f"{loop} loop" in line, line
+
+        port = int(line.split("http://127.0.0.1:")[1].split()[0])
+        assert port != 0, "the startup line must name the bound port, not the requested one"
+
+        connection = HTTPConnection("127.0.0.1", port, timeout=10)
+        connection.request("GET", "/hello/world")
+        response = connection.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read()) == {"hello": "world"}
+        connection.close()
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+
+
+def test_loading_an_application_leaves_an_already_importable_cwd_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The empty `sys.path` entry already means the working directory.
+
+    A second, absolute entry for the same directory would be harmless but
+    untrue to what the interpreter was handed, and it would grow `sys.path` once
+    per CLI command in a long-lived process.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "path", ["", *sys.path])
+
+    _ensure_cwd_importable()
+
+    assert sys.path.count(str(tmp_path)) == 0
+    assert sys.path[0] == ""
 
 
 def teardown_module() -> None:

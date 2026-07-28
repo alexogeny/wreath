@@ -772,9 +772,31 @@ def _split_target(target: str) -> tuple[str, str]:
     return module_name, attribute
 
 
+def _ensure_cwd_importable() -> None:
+    """Put the working directory on `sys.path`, the way `python -m` does.
+
+    A console script starts with `sys.path[0]` naming the directory the script
+    itself lives in -- inside the virtualenv's `bin` -- so a project's own
+    `app.py` sitting in the directory the user is standing in is not importable.
+    `wreath run app:app`, the line the README and the getting-started guide both
+    open with, therefore failed with `No module named 'app'` on a fresh install.
+    `wreath dev` never had the bug because it re-executes `python -m wreath`, and
+    `-m` prepends the working directory for us; that inconsistency is what makes
+    this a defect in `run` rather than a documented requirement.
+
+    An empty entry means the working directory too, so a caller that already
+    arranged for it (`python -m`, an interactive interpreter) is left alone.
+    """
+    cwd = os.getcwd()
+    if any(entry in ("", ".", cwd) for entry in sys.path):
+        return
+    sys.path.insert(0, cwd)
+
+
 def load_application(target: str, *, factory: bool = False) -> ASGIApplication:
     """Import one ASGI application or explicit zero-argument factory."""
     module_name, attribute = _split_target(target)
+    _ensure_cwd_importable()
     try:
         module = importlib.import_module(module_name)
     except Exception as error:  # target imports can fail arbitrarily
@@ -819,14 +841,57 @@ def _loop_factory(name: LoopName) -> Callable[[], Any] | None:
     return cast(Callable[[], Any], uvloop.new_event_loop)
 
 
+def _protocol_tier() -> str:
+    """Whether this process will serve requests from C or from Python.
+
+    Reads the same selector the server itself uses rather than re-deriving it,
+    so the startup line cannot claim `native` for a process that silently fell
+    back to the pure reference because no extension was built.
+    """
+    from .server import _select_protocol
+
+    return "pure" if _select_protocol().__module__.startswith("wreath._pure") else "native"
+
+
+def _listening_address(server: Any) -> str:
+    """`host:port` for the first listener, asked of the bound socket.
+
+    Never taken from the configuration: `--port 0` only learns its port from the
+    kernel, and printing the requested value would announce a port nothing is
+    listening on. An `h3`-only server binds no stream socket, so its address
+    comes from the datagram side.
+    """
+    addresses = server.sockets or server.datagram_addresses
+    if not addresses:
+        return "an unknown address"
+    first = addresses[0]
+    host, port = (first.getsockname() if hasattr(first, "getsockname") else first)[:2]
+    return f"[{host}]:{port}" if ":" in str(host) else f"{host}:{port}"
+
+
+def _startup_line(
+    target: str, address: str, *, tls: bool, protocols: Sequence[str], loop: str, workers: int
+) -> str:
+    details = [", ".join(protocols), _protocol_tier(), f"{loop} loop"]
+    if workers > 1:
+        details.append(f"{workers} workers")
+    scheme = "https" if tls else "http"
+    return (
+        # `_version()` is argparse's version string and already says "wreath".
+        f"\N{HERB} {_version()} serving {target} "
+        f"on {scheme}://{address}  ({', '.join(details)})"
+    )
+
+
 def run_server(
     app: ASGIApplication,
     config: ServerConfig,
     *,
     tls: TLSConfig | None,
     loop_factory: Callable[[], Any] | None,
+    announce: Callable[[Any], None] | None = None,
 ) -> None:
-    run(app, config, tls=tls, loop_factory=loop_factory)
+    run(app, config, tls=tls, loop_factory=loop_factory, ready=announce)
 
 
 def _apply_metal_worker_affinity(worker_id: int) -> int | None:
@@ -964,6 +1029,7 @@ def _run_metal_worker_group(
     *,
     tls: TLSConfig | None,
     workers: int,
+    target: str,
 ) -> None:
     import signal
     import time
@@ -1004,6 +1070,24 @@ def _run_metal_worker_group(
             )
             current.clear()
             raise CliError("metal worker generation failed to become ready")
+
+        # One line for the group, printed by the supervisor once every worker
+        # has signalled ready. The workers themselves pass no announcer, so a
+        # `--workers 8` boot does not print the same address eight times. The
+        # port is `config.port` rather than a socket's: workers share an
+        # SO_REUSEPORT listener the supervisor never binds, and `--workers`
+        # already refuses port 0 for exactly that reason.
+        print(
+            _startup_line(
+                target,
+                f"{config.host}:{config.port}",
+                tls=tls is not None,
+                protocols=config.protocols,
+                loop="metal",
+                workers=workers,
+            ),
+            flush=True,
+        )
 
         while not state["stop"]:
             if state["restart"]:
@@ -1085,10 +1169,26 @@ def execute(options: RunOptions) -> None:
     config = options.server_config()
     tls = options.tls_config()
     if options.workers > 1:
-        _run_metal_worker_group(app, config, tls=tls, workers=options.workers)
+        _run_metal_worker_group(
+            app, config, tls=tls, workers=options.workers, target=options.target
+        )
         return
     loop_factory = _loop_factory(options.loop)
-    run_server(app, config, tls=tls, loop_factory=loop_factory)
+
+    def announce(server: Any) -> None:
+        print(
+            _startup_line(
+                options.target,
+                _listening_address(server),
+                tls=tls is not None,
+                protocols=options.protocols,
+                loop=options.loop,
+                workers=1,
+            ),
+            flush=True,
+        )
+
+    run_server(app, config, tls=tls, loop_factory=loop_factory, announce=announce)
 
 
 def execute_typegen(namespace: argparse.Namespace) -> int:
