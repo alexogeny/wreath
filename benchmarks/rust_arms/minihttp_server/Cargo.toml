@@ -1,0 +1,16 @@
+[package]
+name = "wreath-bench-minihttp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "may-minihttp floor arm for the Wreath framework matrix. Benchmark only."
+
+[[bin]]
+name = "wreath-bench-minihttp"
+path = "src/main.rs"
+
+[dependencies]
+bench_common = { path = "../bench_common" }
+may = "0.3"
+may_minihttp = "0.1"
+serde_json = "1"

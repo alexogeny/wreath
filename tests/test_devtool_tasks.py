@@ -28,6 +28,16 @@ def recorded(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
 
     monkeypatch.setattr(tasks.subprocess, "run", fake_run)
     monkeypatch.setattr(tasks.shutil, "which", lambda _name: "/usr/bin/uv")
+    # `wreath-bench` refuses to start beside a competing workload, because a
+    # number taken next to four other processes is worthless. Nothing here takes
+    # a number -- `subprocess.run` is stubbed above, so no benchmark ever runs --
+    # and under `pytest -n` the sibling xdist workers are themselves competing
+    # workloads, so the guard failed every bench task test in this file whenever
+    # the suite was run in parallel. Neutralise it for the fixture that cannot
+    # measure anything; `tests/test_bench_quiet.py` covers the guard itself.
+    from wreath._devtools import quiet
+
+    monkeypatch.setattr(quiet, "competing_workloads", lambda: [])
     return calls
 
 
@@ -81,7 +91,65 @@ def test_bench_forwards_unknown_arguments_to_the_matrix(recorded: list[list[str]
     matrix = next(c for c in recorded if c[1:3] == ["-m", "benchmarks.run"])
     assert matrix[3:] == [
         "--framework", "wreath", "starlette", "wreath-native", "--protocol", "h2", "h3",
+        # Always stated, never inferred: an arm left on its own defaults takes
+        # whatever parallelism its runtime prefers, and the row then compares
+        # deployments instead of frameworks.
+        "--workers", "1",
     ]
+
+
+def test_bench_holds_every_arm_to_one_worker_by_default(recorded: list[list[str]]) -> None:
+    tasks.bench(["--pin", "none", "--matrix-only", "--passes", "1"])
+    matrix = next(c for c in recorded if c[1:3] == ["-m", "benchmarks.run"])
+    assert matrix[-2:] == ["--workers", "1"]
+
+
+def test_bench_multi_gives_every_arm_the_same_worker_count(
+    recorded: list[list[str]],
+) -> None:
+    tasks.bench(["--pin", "none", "--matrix-only", "--passes", "1", "--multi", "4"])
+    matrix = next(c for c in recorded if c[1:3] == ["-m", "benchmarks.run"])
+    assert matrix[-2:] == ["--workers", "4"]
+
+
+def test_bench_multi_does_not_overrule_an_explicit_worker_count(
+    recorded: list[list[str]],
+) -> None:
+    # `--multi 4 --workers 2` is a legitimate ask -- four server cores, two
+    # workers -- and the harness must not quietly rewrite it.
+    tasks.bench(["--pin", "none", "--matrix-only", "--passes", "1",
+                 "--multi", "4", "--workers", "2"])
+    matrix = next(c for c in recorded if c[1:3] == ["-m", "benchmarks.run"])
+    assert "--workers" in matrix
+    assert matrix[matrix.index("--workers") + 1] == "2"
+    assert matrix.count("--workers") == 1
+
+
+def test_bench_multi_auto_leaves_the_generator_more_cores_than_the_server(
+    recorded: list[list[str]],
+) -> None:
+    """The generator must outrun what it measures, so it gets two cores per one.
+
+    Measured: one h2load thread saturates near 133k req/s and one metal worker
+    serves near 120k, so an even split stands the generator up at parity with
+    the server -- the case where a plateau reads as the server's ceiling when it
+    is really the client's.
+    """
+    from wreath._devtools.quiet import physical_cores
+
+    cores = len(physical_cores())
+    if cores < 6:
+        pytest.skip(f"needs >= 6 physical cores to have headroom, found {cores}")
+    server = tasks._resolve_multi("auto")
+    assert cores - server >= 2 * server
+
+
+def test_bench_multi_rejects_a_nonsense_core_count(
+    recorded: list[list[str]],
+) -> None:
+    for bad in ("0", "-1", "many"):
+        with pytest.raises(SystemExit):
+            tasks.bench(["--pin", "none", "--matrix-only", "--multi", bad])
 
 
 def test_bench_matrix_only_skips_the_database_battery(recorded: list[list[str]]) -> None:

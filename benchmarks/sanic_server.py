@@ -23,6 +23,10 @@ def main() -> None:
     )
     parser.add_argument("--tls-cert", default=None)
     parser.add_argument("--tls-key", default=None)
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="server processes; the matrix gives every arm the same count",
+    )
     args = parser.parse_args()
     os.environ["WREATH_BENCH_FRAMEWORK"] = "sanic"
     app = importlib.import_module(args.app).app
@@ -32,8 +36,13 @@ def main() -> None:
         "port": args.port,
         "access_log": False,
         "motd": False,
-        "single_process": True,
     }
+    if args.workers > 1:
+        # `single_process` and `workers` are mutually exclusive in Sanic: the
+        # first bypasses its process manager entirely, the second is the manager.
+        options["workers"] = args.workers
+    else:
+        options["single_process"] = True
     if "h2" in args.protocol:
         # Sanic's own HTTP enum is VERSION_1 and VERSION_3: it never
         # implemented HTTP/2. Refuse rather than start an HTTP/1.1 server that

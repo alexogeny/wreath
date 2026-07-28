@@ -1,0 +1,15 @@
+[package]
+name = "wreath-bench-xitca"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "xitca-web reference arm for the Wreath framework matrix. Benchmark only."
+
+[[bin]]
+name = "wreath-bench-xitca"
+path = "src/main.rs"
+
+[dependencies]
+bench_common = { path = "../bench_common" }
+serde_json = "1"
+xitca-web = "0.8"

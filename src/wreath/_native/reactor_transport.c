@@ -1483,7 +1483,7 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
     t->server = Py_NewRef(server);
     t->extra = (extra == Py_None) ? PyDict_New() : PyDict_Copy(extra);
     if (t->extra == NULL) {
-        return -1;
+        goto error;
     }
     if (known_fd >= 0) {
         /* The native accept path already holds the fd; skip the fileno()
@@ -1492,12 +1492,12 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
     } else {
         PyObject *fdobj = PyObject_CallMethod(sock, "fileno", NULL);
         if (fdobj == NULL) {
-            return -1;
+            goto error;
         }
         t->fd = (int)PyLong_AsLong(fdobj);
         Py_DECREF(fdobj);
         if (t->fd < 0 && PyErr_Occurred()) {
-            return -1;
+            goto error;
         }
         /* The accept path above gets O_NONBLOCK from accept4(SOCK_NONBLOCK); a
          * socket handed in from Python has only asyncio's convention behind it,
@@ -1528,7 +1528,7 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
 
     t->wbuf = PyByteArray_FromStringAndSize("", 0);
     if (t->wbuf == NULL) {
-        return -1;
+        goto error;
     }
     t->whead = 0;
     t->cork_obj = NULL;
@@ -1557,7 +1557,7 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
 
     /* populate get_extra_info like asyncio does */
     if (PyDict_SetItemString(t->extra, "socket", sock) < 0) {
-        return -1;
+        goto error;
     }
     /* Native accepts (inline_activate) defer sockname/peername: two syscalls
      * plus tuple conversions per connection that most protocols never read.
@@ -1567,7 +1567,7 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
         if (sn != NULL) {
             if (PyDict_SetItemString(t->extra, "sockname", sn) < 0) {
                 Py_DECREF(sn);
-                return -1;
+                goto error;
             }
             Py_DECREF(sn);
         } else {
@@ -1578,7 +1578,7 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
             if (pn != NULL) {
                 if (PyDict_SetItemString(t->extra, "peername", pn) < 0) {
                     Py_DECREF(pn);
-                    return -1;
+                    goto error;
                 }
                 Py_DECREF(pn);
             } else {
@@ -1606,13 +1606,13 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
             PyObject *connected = PyObject_CallOneArg(cm, op);
             Py_DECREF(cm);
             if (connected == NULL) {
-                return -1;
+                goto error;
             }
             Py_DECREF(connected);
         }
         PyObject *started = st_start_reading(op, NULL);
         if (started == NULL) {
-            return -1;
+            goto error;
         }
         Py_DECREF(started);
     } else {
@@ -1642,6 +1642,13 @@ st_init(PyObject *op, PyObject *args, PyObject *kwds)
         }
     }
     return 0;
+
+error:
+    /* A half-built transport must not stay registered: the poller owns a
+     * reference to everything in its connection slab, and would both leak
+     * this one and keep delivering completions to it. */
+    metal_detach_transport(t);
+    return -1;
 }
 
 static int

@@ -8,10 +8,78 @@ from dataclasses import dataclass, field
 ALL_PROTOCOLS: frozenset[str] = frozenset({"http/1.1", "h2", "h3"})
 HTTP1_ONLY: frozenset[str] = frozenset({"http/1.1"})
 
-# Litestar is intentionally absent: its route registration is O(n^2) (it
-# re-validates the whole routing trie on every add), so the suite's standard
-# 10,000-route app takes ~30s to build and races the readiness deadline. See
-# the note beside ROUTE_COUNT in apps.py.
+# This 10,000-route table is what the routing-* scenarios measure against. It
+# lives here rather than in apps.py because two consumers need it and only one of
+# them wants an app: every Python arm registers it at import, and run.py hands
+# the same table to the Rust arm as JSON (see _axum_route_table). Importing
+# apps.py to read it would build a whole framework app as a side effect.
+ROUTE_COUNT = 10_000
+ROUTE_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
+
+
+def _route_spec(index: int) -> tuple[str, str]:
+    method = ROUTE_METHODS[index % len(ROUTE_METHODS)]
+    match index % 5:
+        case 0:
+            path = f"/status/leaf-{index}"
+        case 1:
+            path = f"/api/v1/items/category-{index % 97}/leaf-{index}"
+        case 2:
+            path = f"/api/v2/groups/group-{index}/members/"
+        case 3:
+            path = f"/tenants/{{tenant_id}}/collections/collection-{index}/items/{{item_id}}"
+        case _:
+            path = f"/api/internal/v3/regions/region-{index}/zones/primary/nodes/current/status"
+    return method, path
+
+
+def route_path(path: str, style: str) -> str:
+    """Rewrite the shared `{param}` syntax into one framework's dialect.
+
+    Axum 0.8 takes `{param}` unchanged, which is why the Rust arm can consume
+    ROUTE_SPECS as written.
+    """
+    if style == "sanic":
+        return path.replace("{tenant_id}", "<tenant_id:str>").replace(
+            "{item_id}", "<item_id:str>"
+        )
+    if style == "django":
+        return path.replace("{tenant_id}", "<str:tenant_id>").replace(
+            "{item_id}", "<str:item_id>"
+        )
+    if style == "flask":
+        return path.replace("{tenant_id}", "<tenant_id>").replace("{item_id}", "<item_id>")
+    return path
+
+
+ROUTE_SPECS = tuple(_route_spec(index) for index in range(ROUTE_COUNT))
+
+# Litestar is intentionally absent: its route registration is O(n^2) --
+# construct_routing_trie/validate_node re-walks the entire trie on every add
+# (~n^2/2 validate_node calls; measured 8.0M for 4,000 routes) -- so building the
+# table above takes ~30s and flakily loses the race with the 30s readiness probe.
+# It is a Litestar-internal cost we cannot fix from here, and bumping the timeout
+# would just mask a boot cost that is part of what the routing benchmark
+# compares. Every other framework builds this table in well under a second. Cap
+# ROUTE_COUNT far lower only if you also re-add a framework that cannot take it.
+
+#: Three arms in here are not frameworks in the sense the others are, and reading
+#: a result without knowing which is which will mislead you:
+#:
+#: * `blacksheep-granian` is the *same BlackSheep app* as `blacksheep`, served by
+#:   Granian instead of Uvicorn. The matrix otherwise holds the server fixed so
+#:   the framework is the only variable; this pair inverts that, and is only
+#:   meaningful read against `blacksheep` -- alone it says nothing.
+#: * `granian-rsgi` is no framework at all -- a raw RSGI handler on the same
+#:   server as `blacksheep-granian` (benchmarks/rsgi_app.py). It is the floor a
+#:   Python framework's cost is measured *from*.
+#: * `axum` is Rust. It is a ceiling, not a competitor: the same scenarios with
+#:   no interpreter in the request path, so a Python row can be read as a
+#:   fraction of what the hardware will do at all. See
+#:   benchmarks/rust_arms/axum_server/.
+#:
+#: Candidates that were considered and rejected, with reasons, are recorded in
+#: benchmarks/README.md -- add to that list rather than deleting a name here.
 FRAMEWORKS = (
     "wreath",
     "wreath-native", "wreath-metal",
@@ -19,16 +87,46 @@ FRAMEWORKS = (
     "fastapi",
     "sanic",
     "blacksheep",
+    "blacksheep-granian",
+    "granian-rsgi",
+    "panther",
+    "axum",
     "django",
     "flask",
 )
 
+#: Arms that `--framework` accepts but a bare run does not select, because their
+#: dependencies cannot be resolved alongside the rest of the `benchmark` group.
+#: Naming one explicitly still works, once it is installed.
+#:
+#: `panther` pins `httptools~=0.7.1` where `uvicorn[standard]>=0.51` needs
+#: `>=0.8`. Resolving both downgrades the HTTP parser under every Uvicorn-hosted
+#: arm, which is the shared baseline -- so it is installed on its own
+#: (`uv pip install --no-deps panther`, see the `benchmark-panther` group) and
+#: left out of the default sweep rather than allowed to move that baseline.
+OPT_IN_FRAMEWORKS = frozenset({"panther"})
+
+#: What `--framework` defaults to: everything installable in one environment.
+DEFAULT_FRAMEWORKS = tuple(f for f in FRAMEWORKS if f not in OPT_IN_FRAMEWORKS)
+
 _ALL = frozenset(FRAMEWORKS)
 _WREATH_ONLY = frozenset({"wreath", "wreath-native", "wreath-metal"})
+#: Everything with a real router. The raw RSGI arm dispatches on an exact-path
+#: dict plus one prefix test -- no parameter extraction, no method resolution, no
+#: ordering -- so putting it in the 10,000-route scenarios would post the best
+#: number in the table for work every other arm has to do.
+_ROUTED_FRAMEWORKS = _ALL - {"granian-rsgi"}
 _REQUEST_FEATURE_FRAMEWORKS = frozenset(
     {
         "wreath", "wreath-native", "wreath-metal",
-        "starlette", "fastapi", "sanic", "django", "flask",
+        "starlette", "fastapi", "sanic", "django", "flask", "panther",
+        # Rust: implemented in benchmarks/rust_arms/axum_server/, response for response
+        # against the Starlette arm. BlackSheep is absent here (both arms of it),
+        # so the granian pair stays comparable to the uvicorn one.
+        "axum",
+        # Raw RSGI: these endpoints are exact-path, so the no-router arm can
+        # serve them honestly. Only the routing scenarios are beyond it.
+        "granian-rsgi",
     }
 )
 _STREAMING_FRAMEWORKS = frozenset(
@@ -40,7 +138,7 @@ _BACKGROUND_FRAMEWORKS = frozenset(
 _WEBSOCKET_FRAMEWORKS = frozenset(
     {
         "wreath", "wreath-native", "wreath-metal",
-        "starlette", "fastapi", "sanic", "blacksheep",
+        "starlette", "fastapi", "sanic", "blacksheep", "blacksheep-granian",
     }
 )
 # Template rendering and HTTP caching are expressible in every ASGI-tier
@@ -49,10 +147,15 @@ _WEBSOCKET_FRAMEWORKS = frozenset(
 _TEMPLATE_FRAMEWORKS = frozenset(
     {
         "wreath", "wreath-native", "wreath-metal",
-        "starlette", "fastapi", "sanic", "blacksheep",
+        "starlette", "fastapi", "sanic", "blacksheep", "blacksheep-granian",
+        "panther",
     }
 )
-_CACHE_FRAMEWORKS = _TEMPLATE_FRAMEWORKS
+#: No longer an alias for the template set. The Rust arm sets one response header
+#: on a fixed body, which is the whole cache-control scenario, but it renders no
+#: templates -- pulling in a Jinja-equivalent engine would make it a comparison
+#: of template libraries rather than of frameworks.
+_CACHE_FRAMEWORKS = _TEMPLATE_FRAMEWORKS | {"axum", "granian-rsgi"}
 _WEBHOOK_FRAMEWORKS = _WREATH_ONLY
 
 JSON_REQUEST_BODY = b'{"message":"hello","values":[1,2,3,4]}'
@@ -200,14 +303,24 @@ SCENARIOS = {
         protocols=HTTP1_ONLY,
         background=True,
     ),
-    "routing-shallow-get": Scenario("GET", "/status/leaf-9995"),
-    "routing-versioned-post": Scenario("POST", "/api/v1/items/category-5/leaf-9996"),
-    "routing-trailing-put": Scenario("PUT", "/api/v2/groups/group-9997/members/"),
+    "routing-shallow-get": Scenario(
+        "GET", "/status/leaf-9995", frameworks=_ROUTED_FRAMEWORKS
+    ),
+    "routing-versioned-post": Scenario(
+        "POST", "/api/v1/items/category-5/leaf-9996", frameworks=_ROUTED_FRAMEWORKS
+    ),
+    "routing-trailing-put": Scenario(
+        "PUT", "/api/v2/groups/group-9997/members/", frameworks=_ROUTED_FRAMEWORKS
+    ),
     "routing-params-patch": Scenario(
-        "PATCH", "/tenants/acme/collections/collection-9998/items/42"
+        "PATCH",
+        "/tenants/acme/collections/collection-9998/items/42",
+        frameworks=_ROUTED_FRAMEWORKS,
     ),
     "routing-deep-delete": Scenario(
-        "DELETE", "/api/internal/v3/regions/region-9999/zones/primary/nodes/current/status"
+        "DELETE",
+        "/api/internal/v3/regions/region-9999/zones/primary/nodes/current/status",
+        frameworks=_ROUTED_FRAMEWORKS,
     ),
     "validated-body": Scenario(
         "POST",

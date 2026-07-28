@@ -636,3 +636,67 @@ async def _ok_app(scope, receive, send) -> None:
         return
     await send({"type": "http.response.start", "status": 200, "headers": []})
     await send({"type": "http.response.body", "body": b"ok"})
+
+
+# --- pre-arming -------------------------------------------------------------
+# The first request a process serves costs multiples of the steady state, and on
+# a single-threaded loop everything arriving alongside it queues behind that.
+# Pre-arming pays it at boot instead. Measured on the metal loop: ~2.1 ms first
+# request without it, ~0.5 ms with, for ~2 ms of startup.
+
+@pytest.mark.asyncio
+async def test_prearm_is_off_unless_asked_for() -> None:
+    server = await _serve(minimal_asgi)
+    try:
+        assert server.prearmed_connections == 0
+    finally:
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_prearm_warms_the_stack_without_running_the_application() -> None:
+    """The safety property, and the reason pre-arm requests ask for a missing route.
+
+    Warming is worth nothing if it costs a handler side effect at every boot --
+    a counter incremented, a row written, a webhook sent. Pre-arm requests go to
+    a path no route can match, so they exercise ingress, parsing, routing and
+    egress and stop at the framework's own 404.
+    """
+    app = make_wreath_app()
+    seen: list[str] = []
+
+    @app.get("/counted")
+    async def counted(request: Any) -> str:
+        seen.append("hit")
+        return "counted"
+
+    server = await _serve(app, prearm=3)
+    try:
+        assert server.prearmed_connections == 3
+        assert seen == [], "a pre-arm request reached an application handler"
+        # ... and the warmed server still serves normally.
+        resp = await _raw_request(
+            _port(server), b"GET /counted HTTP/1.1\r\nHost: x\r\n\r\n")
+        assert b"HTTP/1.1 200" in resp
+        assert seen == ["hit"]
+    finally:
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_the_prearm_path_is_not_routable() -> None:
+    from wreath.server import Server
+
+    server = await _serve(make_wreath_app(), prearm=1)
+    try:
+        resp = await _raw_request(
+            _port(server),
+            f"GET {Server.PREARM_PATH} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+        assert b"HTTP/1.1 404" in resp
+    finally:
+        await server.close()
+
+
+def test_prearm_rejects_a_negative_count() -> None:
+    with pytest.raises(ValueError, match="prearm"):
+        ServerConfig(host="127.0.0.1", port=0, prearm=-1)

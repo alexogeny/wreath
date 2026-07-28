@@ -497,6 +497,145 @@ As with the rest of the suite, run several iterations and compare medians before
 drawing conclusions; the single-machine client/server/database sharing applies
 even more here.
 
+## Which arms are in the matrix, and which are not
+
+`FRAMEWORKS` in `scenarios.py` is the list. Three arms in it are not competitors
+and should never be read as one:
+
+| Arm | What it is | Read it against |
+| --- | --- | --- |
+| `blacksheep-granian` | The **same BlackSheep app** as `blacksheep`, on Granian's Rust server instead of Uvicorn | `blacksheep` — the pair isolates the server |
+| `granian-rsgi` | **No framework at all**: a raw RSGI handler (`rsgi_app.py`) on that same server | Every Python arm — it is the floor their framework cost is measured *from* |
+| `axum` | **Rust**, no interpreter in the request path (`rust_arms/axum_server/`) | Everything — it is the ceiling |
+
+Without a floor and a ceiling, a matrix whose fastest and slowest rows are both
+Python cannot tell you whether a spread is the framework or the runtime.
+
+Two rules keep these honest, and both were learned by getting them wrong first:
+
+- **Every arm gets the same CPUs and configures itself as it would in
+  production.** The Rust arm was initially forced to a single thread, reasoning
+  that one thread matched the single event loop each Python arm runs. Granian
+  turns out to use two OS threads even at `--runtime-threads 1
+  --blocking-threads 1` (counted in `/proc/<pid>/task`, not assumed), so the
+  "fair" rule handed a Python server an extra core and put the Rust *ceiling*
+  ~40% below it. Tokio's default worker count follows the `taskset` affinity the
+  harness applies, which is the rule that actually holds every arm to the same
+  cores.
+- **An arm that cannot do the work is excluded from that scenario, never given a
+  shortcut.** `granian-rsgi` dispatches on an exact-path dict plus one prefix
+  test. That is not routing — no parameter extraction, no method resolution, no
+  ordering — so it is out of the five `routing-*` scenarios (`_ROUTED_FRAMEWORKS`)
+  rather than posting the best number in the table for work nobody else may skip.
+
+### Candidates considered and not added
+
+Mostly from the TechEmpower leaderboards. Recorded here so the same names do not
+get re-litigated from scratch, and so "it is not in the matrix" never has to mean
+"nobody looked at it".
+
+The recurring blocker is the **10,000-route table**. Five of this suite's
+scenarios address paths deep inside it, and a TechEmpower entry does not have to
+route at all — those benchmarks define six fixed endpoints, so their fastest
+entries hand-match a handful of paths. That is a legitimate way to win
+TechEmpower and a poor fit here.
+
+| Candidate | Language | Status |
+| --- | --- | --- |
+| `starlite` / `litestar` | Python | **Excluded, and it is the one to know about.** Starlite was renamed Litestar in 2023, so both names mean this. Route registration is O(n²): `construct_routing_trie`/`validate_node` re-walks the whole trie on every add — ~n²/2 `validate_node` calls, measured 8.0M for 4,000 routes. Building the 10,000-route table takes ~30s and flakily loses the race with the 30s readiness probe. Internal to Litestar and not fixable from here; raising the timeout would mask a boot cost the routing benchmark is partly there to compare. It is installed as a benchmark dependency, so re-testing it after a Litestar release is a one-line change. |
+| `granian [rsgi]` | Python | **Added** as `granian-rsgi`. |
+| `fastwsgi` | Python (C server) | Not added. It is a WSGI server, not ASGI — the TechEmpower "[asgi]" tag is wrong. It could host the existing Flask app as a `flask-fastwsgi` pair, exactly like `blacksheep-granian`, and that is a cheap and worthwhile addition; it just is not done yet. |
+| `panther` | Python | **Added.** A genuine peer arm — real router, builds the 10,000-route table in 0.30s. It takes every scenario except streaming, background tasks, WebSockets and `validated-body`. One trap worth knowing: Panther injects the request by filtering `func.__annotations__` with `v in {BaseRequest, Request, bool, int}`, an identity check against the real classes. `apps.py` has `from __future__ import annotations`, so annotations are strings, no annotation ever matches, and the handler is called without its `request` — a 500 on every request-reading endpoint, each logging a full traceback. The class is bound onto `__annotations__` before `API()` reads it; writing `request: Request` in the signature cannot work in that module however it is spelled. |
+| `ntex` (+ `sailfish`) | Rust | Not added. Has a real router, so the route table is not a blocker — this is the strongest remaining candidate. `sailfish` is a *template engine*, not a framework, and would only matter if the Rust arms took part in the `template` scenario, which they do not. |
+| `xitca-web` | Rust | Not added. Same position as `ntex`: a real router, a straightforward port of `rust_arms/axum_server/src/main.rs`. |
+| `may-minihttp` | Rust | Not added, and needs a decision first. It has **no router** — you match the path by hand — so it would land where `granian-rsgi` is: a floor arm excluded from the routing scenarios, not a framework. Worth having as the absolute ceiling, but it should be labelled as one. |
+| `h2o` | C | Not added. h2o is a server; the TechEmpower entry is a bespoke C handler built against `libh2o`, which is not packaged here and would have to be built from source as part of the benchmark build. Large cost for a ceiling `axum` already establishes. |
+| `lithium-postgres` | C++ | Not added. Needs the Lithium framework and its C++ toolchain, and the entry is database-shaped — it belongs with the PostgreSQL battery rather than the framework matrix, where it would have no counterpart to be compared against. |
+
+Adding a Python arm means a branch in `apps.py`, an entry in `FRAMEWORKS`, the
+capability sets it belongs to, and a `REQUEST_TIERS` entry. A compiled arm also
+needs a crate under `rust_arms/` (a member of that workspace, so it shares the
+one `target/`) and a `_server_command` branch in `run.py`;
+build it **before** quieting the machine, never during a run — `tools/bench-quiet.sh`
+does that.
+
+## The generator has to be faster than what it measures
+
+`h2load` ran with **one thread** for the whole life of this harness, and one
+h2load thread saturates near 130k req/s on a six-core desktop. Every arm faster
+than that was reporting the generator's ceiling as its own throughput, and the
+reading did not move however much faster the server got. Against one unchanged
+two-worker metal server:
+
+```
+h2load -t 1: 133,423 req/s
+h2load -t 2: 174,874 req/s
+h2load -t 4: 222,064 req/s
+```
+
+That also made a multi-worker measurement impossible: server workers 1, 2 and 4
+all read ~118k req/s, because the generator was the bottleneck in all three.
+With one thread per generator core the same sweep reads 121k / 196k / 225k, and
+p99 drops from 0.457 ms to 0.194 ms.
+
+The default is now one h2load thread per physical core the generator process
+actually has, capped by the connection count; `--generator-threads N` overrides
+it, and `generator_threads` is recorded in the result metadata. **Throughput
+rows recorded before this are suspect above ~130k req/s** — treat them as a
+lower bound on the server and a measurement of h2load.
+
+A generator can still be the ceiling if it has too few cores: a plateau that
+does not move when the server gets more workers is the signature, and the
+metadata is there so you can check what drove the run before believing it.
+
+## Workers: one column or the other, never a mixture (`--multi`)
+
+Every arm is given exactly the same number of workers, and the harness pins the
+whole tree to that many physical cores. There are two columns and they are not
+comparable to each other:
+
+```console
+uv run wreath-bench                 # one worker, one core, every arm
+uv run wreath-bench --multi         # half the physical cores; one worker each
+uv run wreath-bench --multi 4       # four server cores, four workers per arm
+uv run python -m benchmarks.run --workers 4     # the matrix on its own
+```
+
+`--multi` on its own gives the server a *third* of the physical cores, so the
+generator keeps two cores for every one the server gets. One h2load thread
+saturates near 133k req/s and one metal worker serves near 120k -- they cost
+about the same per core -- so an even split would stand the generator up at
+parity with the thing it is measuring, and a plateau would read as the server's
+ceiling when it is really the client's. `--multi N --workers M` is allowed and
+means what it says: N server cores, M workers.
+
+On a six-core machine that is `--multi` -> 2 workers with 4 generator cores.
+Asking for more (`--multi 3` -> 3 and 3) puts you back at parity: still worth
+running, but read it as a lower bound and check `generator_threads` in the
+metadata before believing a plateau.
+
+**This exists because two arms used to size themselves.** Tokio derives its
+worker count from the CPU affinity unless told otherwise, so on one SMT core the
+axum arm quietly ran two worker threads against every other arm's one; Granian
+defaults to more than one worker. Both are now pinned in both directions, at one
+worker as much as at eight — `--threads 1` gives axum a genuine current-thread
+runtime (one OS thread, verifiable in `/proc/<pid>/task`). Rows recorded before
+that are not like-for-like at the single-worker end.
+
+How each arm expresses a worker:
+
+| arm | mechanism |
+| --- | --- |
+| `wreath`, `starlette`, `fastapi`, … | uvicorn's supervisor: one shared socket across worker processes |
+| `wreath-native`, `wreath-metal` | one process per worker on an `SO_REUSEPORT` listener group, each pinned to its own core |
+| `granian-rsgi`, `blacksheep-granian` | Granian workers, one runtime thread each |
+| `sanic` | Sanic's process manager |
+| `axum` | Tokio worker threads (`--threads`), not processes |
+
+The `server` column in the report records the worker count and the CPU set, and
+`workers_per_arm` is in the result metadata, so two runs cannot be compared by
+accident.
+
 ## Interpretation rules
 
 - The bundled client and server share a machine and event loop resources. It is a fast feedback tool, not independent proof.

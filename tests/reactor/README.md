@@ -78,6 +78,26 @@ Native-only mechanism specs:
 - `test_tls.py`             — OpenSSL memory-BIO handshake/data/close, ALPN, SNI
 - `test_backpressure.py`    — pause/resume reading & writing, high/low water
 
+Heap and connection ownership:
+- `test_metal_gc.py`        — loop-driven collection (freeze, threshold, idle gaps) and the
+                              ownership rule it depends on
+
+**The poller owns every connection in its slab, and that is load-bearing.** A
+stock asyncio loop keeps an accepted transport alive through the bound
+`_read_ready` it handed to `_add_reader`. Metal registers no reader — ingress is
+an io_uring multishot receive — so the connection slab is the only thing holding
+it. That slab held a *borrowed* pointer until July 2026, which made every
+accepted connection a transport↔protocol cycle reachable from no root: any
+`gc.collect()` reaped it out from under a live socket and the peer waited
+forever. Wreath's own `Server` tracks its protocols and so hid this; every other
+protocol on the loop (`wreath.postgres`, `wreath.http_client`, any third-party
+`loop.create_server`) did not, which is what made the `e2e` benchmark scenario
+hang once the loop started collecting in its idle gaps. If you touch
+`metal_attach_transport` / `metal_detach_transport`, the pairing is:
+attach INCREFs, detach DECREFs and is idempotent, `rp_traverse` visits the slab
+so a dead loop with live connections stays collectable, and `rp_close`/`rp_clear`
+release what is left.
+
 Protocol integration on the reactor (real loopback I/O):
 - `test_reactor_h1.py`      — HTTP/1.1 request/response, keep-alive, pipelining, deadlines
 - `test_reactor_h2.py`      — HTTP/2 preface, multiplexing, flow control, fused body, frame budget

@@ -1,0 +1,16 @@
+[package]
+name = "wreath-bench-axum"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Axum reference arm for the Wreath framework matrix. Benchmark only."
+
+[[bin]]
+name = "wreath-bench-axum"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+bench_common = { path = "../bench_common" }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "signal"] }

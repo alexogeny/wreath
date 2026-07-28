@@ -9,10 +9,13 @@ from typing import Any, cast
 
 from .scenarios import (
     LARGE_RESPONSE_BODY,
+    ROUTE_METHODS,
+    ROUTE_SPECS,
     STREAM_CHUNKS,
     TEMPLATE_ROW_COUNT,
     WEBHOOK_KEY_ID,
     WEBHOOK_SECRET,
+    route_path,
 )
 
 # One HTML row per record, with cells that need escaping so the template
@@ -30,52 +33,6 @@ JINJA_TABLE_SOURCE = (
 CACHE_CONTROL_VALUE = "public, max-age=60"
 
 FRAMEWORK = os.environ.get("WREATH_BENCH_FRAMEWORK", "wreath")
-
-# This 10,000-route table is what the routing-* scenarios measure against, and
-# it is why Litestar is not in the suite (see FRAMEWORKS in scenarios.py).
-# Litestar's route registration is O(n^2) -- construct_routing_trie/validate_node
-# re-walks the entire trie on every add (~n^2/2 validate_node calls; measured
-# 8.0M for 4,000 routes) -- so building this app takes ~30s and flakily loses the
-# race with the 30s readiness probe. It is a Litestar-internal cost we can't fix
-# from here, and bumping the timeout would just mask a boot cost that is part of
-# what the routing benchmark compares. Every other framework builds this table
-# in well under a second. Cap this far lower only if you also re-add a framework
-# that cannot tolerate it.
-ROUTE_COUNT = 10_000
-ROUTE_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
-
-
-def _route_spec(index: int) -> tuple[str, str]:
-    method = ROUTE_METHODS[index % len(ROUTE_METHODS)]
-    match index % 5:
-        case 0:
-            path = f"/status/leaf-{index}"
-        case 1:
-            path = f"/api/v1/items/category-{index % 97}/leaf-{index}"
-        case 2:
-            path = f"/api/v2/groups/group-{index}/members/"
-        case 3:
-            path = f"/tenants/{{tenant_id}}/collections/collection-{index}/items/{{item_id}}"
-        case _:
-            path = f"/api/internal/v3/regions/region-{index}/zones/primary/nodes/current/status"
-    return method, path
-
-
-def _route_path(path: str, style: str) -> str:
-    if style == "sanic":
-        return path.replace("{tenant_id}", "<tenant_id:str>").replace(
-            "{item_id}", "<item_id:str>"
-        )
-    if style == "django":
-        return path.replace("{tenant_id}", "<str:tenant_id>").replace(
-            "{item_id}", "<str:item_id>"
-        )
-    if style == "flask":
-        return path.replace("{tenant_id}", "<tenant_id>").replace("{item_id}", "<item_id>")
-    return path
-
-
-ROUTE_SPECS = tuple(_route_spec(index) for index in range(ROUTE_COUNT))
 
 if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     from dataclasses import dataclass
@@ -587,7 +544,7 @@ elif FRAMEWORK == "sanic":
     for index, (method, path) in enumerate(ROUTE_SPECS):
         app.add_route(
             routing_leaf,
-            _route_path(path, "sanic"),
+            route_path(path, "sanic"),
             methods=[method],
             name=f"tree_{index}",
         )
@@ -600,7 +557,10 @@ elif FRAMEWORK == "sanic":
                 return
             await ws.send(message)
 
-elif FRAMEWORK == "blacksheep":
+elif FRAMEWORK in {"blacksheep", "blacksheep-granian"}:
+    # One app, two servers. `blacksheep-granian` differs from `blacksheep` only
+    # in what boots it (see _server_command in run.py), which is what makes the
+    # pair a controlled measurement of the server rather than of the framework.
     from blacksheep import Application
     from blacksheep.server.responses import json, text
 
@@ -656,6 +616,100 @@ elif FRAMEWORK == "blacksheep":
         except WebSocketDisconnectError:
             pass
 
+elif FRAMEWORK == "panther":
+    from panther import Panther
+    from panther.app import API
+    from panther.request import Request
+    from panther.response import HTMLResponse, PlainTextResponse, Response
+
+    @API()
+    async def plaintext():
+        return PlainTextResponse("hello, world")
+
+    @API()
+    async def json_response():
+        return Response({"message": "hello"})
+
+    @API()
+    async def parameter(user_id: str):
+        return Response({"user_id": user_id})
+
+    async def _header_lookup(request):
+        return PlainTextResponse(request.headers.x_benchmark or "")
+
+    async def _request_body(request):
+        return PlainTextResponse(str(len(await request.read_body())))
+
+    async def _request_json(request):
+        return Response(stdlib_json.loads(await request.read_body()))
+
+    # Panther injects the request by filtering `func.__annotations__` with
+    # `v in {BaseRequest, Request, bool, int}` -- an identity check against the
+    # real classes. `from __future__ import annotations` at the top of this module
+    # makes every annotation a *string*, which satisfies no such check, so the
+    # annotation is dropped, the handler is called without `request`, and all
+    # three of these endpoints answer 500. Writing `request: Request` in the
+    # signature cannot work here however it is spelled; the class has to be bound
+    # before `API()` reads it.
+    for _handler in (_header_lookup, _request_body, _request_json):
+        _handler.__annotations__["request"] = Request
+
+    header_lookup = API()(_header_lookup)
+    request_body = API(methods=["POST"])(_request_body)
+    request_json = API(methods=["POST"])(_request_json)
+
+    @API()
+    async def large_response():
+        return PlainTextResponse(LARGE_RESPONSE_BODY)
+
+    from jinja2 import Template as JinjaTemplate
+
+    _jinja_table = JinjaTemplate(JINJA_TABLE_SOURCE, autoescape=True)
+
+    @API()
+    async def template_render():
+        return HTMLResponse(_jinja_table.render(rows=TEMPLATE_ROWS))
+
+    @API()
+    async def cached():
+        return PlainTextResponse(
+            "cacheable", headers={"Cache-Control": CACHE_CONTROL_VALUE}
+        )
+
+    async def _leaf():
+        return PlainTextResponse("route-hit")
+
+    async def _param_leaf(tenant_id: str, item_id: str):
+        return PlainTextResponse("route-hit")
+
+    # Panther declares the method on the handler rather than beside the path, so
+    # the shared table needs one handler object per method rather than one
+    # handler and five registrations.
+    _leaves = {method: API(methods=[method])(_leaf) for method in ROUTE_METHODS}
+    _param_leaves = {
+        method: API(methods=[method])(_param_leaf) for method in ROUTE_METHODS
+    }
+
+    _urls = {
+        "": plaintext,
+        "json": json_response,
+        "users/<user_id>": parameter,
+        "headers": header_lookup,
+        "body": request_body,
+        "json-body": request_json,
+        "response-64k": large_response,
+        "template": template_render,
+        "cached": cached,
+    }
+    for method, path in ROUTE_SPECS:
+        # Panther's path-variable syntax is Flask's, so the Flask rewrite serves
+        # both; `urls` keys carry no leading slash.
+        table = _param_leaves if "{tenant_id}" in path else _leaves
+        _urls[route_path(path, "flask").lstrip("/")] = table[method]
+
+    URLs = _urls
+    app = Panther(__name__, configs=__name__, urls=_urls)
+
 elif FRAMEWORK == "django":
     from django.conf import settings
     from django.core.asgi import get_asgi_application
@@ -703,8 +757,8 @@ elif FRAMEWORK == "django":
         path("json-body", request_json),
         path("response-64k", large_response),
         *(
-            path(_route_path(route_path, "django").lstrip("/"), routing_leaf)
-            for _, route_path in ROUTE_SPECS
+            path(route_path(spec_path, "django").lstrip("/"), routing_leaf)
+            for _, spec_path in ROUTE_SPECS
         ),
     ]
     app = get_asgi_application()
@@ -748,7 +802,7 @@ elif FRAMEWORK == "flask":
 
     for index, (method, path) in enumerate(ROUTE_SPECS):
         flask_app.add_url_rule(
-            _route_path(path, "flask"),
+            route_path(path, "flask"),
             endpoint=f"tree_{index}",
             view_func=routing_leaf,
             methods=[method],

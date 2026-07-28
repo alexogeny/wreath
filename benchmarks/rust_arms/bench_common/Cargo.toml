@@ -1,0 +1,9 @@
+[package]
+name = "bench_common"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Argument parsing and the shared route table for the compiled benchmark arms."
+
+[dependencies]
+serde_json = "1"

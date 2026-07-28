@@ -94,3 +94,4 @@ flamegraph*.svg
 .vscode/
 .DS_Store
 Thumbs.db
+benchmarks/rust_arms/target

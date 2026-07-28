@@ -120,9 +120,10 @@ def test_a_one_letter_multipart_header_name_does_not_corrupt_bytes() -> None:
     )
 
     assert bytes([ord("Q")]) == b"Q"
-    # noqa: UP012 -- `str.encode()` is the assertion, not an oversight. It goes
-    # through the cache; the `b"A"` literal ruff would substitute does not, and
-    # the check would then compare a literal to itself and never fail again.
+    # UP012 is waived on the next line: `str.encode()` is the assertion, not
+    # an oversight. It goes through the cache; the `b"A"` literal ruff would
+    # substitute does not, and the check would then compare a literal to
+    # itself and never fail again.
     assert "A".encode() == b"A"  # noqa: UP012
     # And the parse still did its job: names lowercased, body intact.
     assert len(parts) == 1
@@ -145,7 +146,8 @@ async def test_an_ordinary_upload_route_cannot_corrupt_the_interpreter() -> None
     app = Wreath()
 
     @app.post("/upload")
-    async def upload(request) -> dict:  # noqa: ANN001 - matches the app's own style
+    # `request` is deliberately unannotated: it matches the app's own style.
+    async def upload(request) -> dict:
         form = await request.form()
         return {"title": form["title"]}
 

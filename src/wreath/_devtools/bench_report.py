@@ -367,6 +367,19 @@ _SERVER_PROTOCOLS: tuple[tuple[str, frozenset[str], str], ...] = (
         frozenset({"http/1.1"}),
         "Uvicorn speaks HTTP/1.1 only, so every framework it hosts does too",
     ),
+    # Both of these can serve more than HTTP/1.1 -- Granian takes `--http 2` and
+    # hyper speaks h2 -- but neither is *configured* to here, and this table
+    # records what the suite runs rather than what a library advertises.
+    (
+        "granian",
+        frozenset({"http/1.1"}),
+        "Granian is configured for HTTP/1.1 in this suite",
+    ),
+    (
+        "axum",
+        frozenset({"http/1.1"}),
+        "The Rust reference arm is configured for HTTP/1.1 in this suite",
+    ),
 )
 
 

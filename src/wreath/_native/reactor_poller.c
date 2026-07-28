@@ -208,6 +208,19 @@ typedef struct {
     double clock_res;       /* loop._clock_resolution */
     int direct_task_steps;  /* bypass Handle._run for C Task step callbacks */
     int closed;             /* poller closed: fast call_soon must reject */
+    /* Loop-driven cycle collection. NULL leaves CPython's allocation-triggered
+     * collector entirely in charge, which is the behaviour of every tier that
+     * does not install one here. */
+    PyObject *gc_collect;           /* gc.collect */
+    PyObject *gc_young_generation;  /* the cached literal 0 argument */
+    uint64_t gc_idle_ns;            /* arrival gap above which a wait is idle */
+    uint64_t gc_full_idle_ns;       /* ... and idle enough for a full collection */
+    uint64_t gc_min_interval_ns;    /* floor between two loop collections */
+    uint64_t gc_last_collect_ns;
+    int gc_dirty;                   /* work ran since the last loop collection */
+    uint64_t gc_young_collections;
+    uint64_t gc_full_collections;
+    uint64_t gc_collect_nanoseconds;
     uint64_t generation_wraps;
     MetalRuntime metal;
 } ReactorPoller;
@@ -219,6 +232,23 @@ static void rp_report_callback_error(ReactorPoller *);
 static int rp_submit_receive(ReactorPoller *, SocketTransport *);
 static uint64_t rp_poll_token(uint32_t, int);
 
+/* Register a live connection with this poller, which OWNS it until it is
+ * detached.
+ *
+ * The owning reference is not bookkeeping: it is the metal equivalent of the
+ * one asyncio's selector registration provides. A stock loop keeps an accepted
+ * transport alive through the bound `_read_ready` it stored in `_add_reader`;
+ * metal drives ingress from an io_uring multishot receive instead and registers
+ * no reader, so without this reference an accepted connection is nothing but a
+ * transport<->protocol cycle -- reachable from no root, and therefore free for
+ * any collection to reap out from under a live socket. Wreath's own `Server`
+ * tracks its protocols and so happened to be safe; every other protocol on this
+ * loop (`wreath.postgres`, `wreath.http_client`, any third-party
+ * `loop.create_server`) was not.
+ *
+ * A borrowed pointer here is also why the slab could hand `slot->owner` to the
+ * completion path at all: that path re-INCREFs for the duration of delivery,
+ * which protects the callback but not the connection between callbacks. */
 static int
 metal_attach_transport(SocketTransport *transport, PyObject *poller_obj)
 {
@@ -237,17 +267,50 @@ metal_attach_transport(SocketTransport *transport, PyObject *poller_obj)
     transport->poller_obj = Py_NewRef(poller_obj);
     transport->metal = &poller->metal;
     transport->connection_token = token;
+    Py_INCREF(transport);  /* released by metal_detach_transport */
     return 0;
 }
 
+/* Give the connection back. Idempotent: `st_call_connection_lost` detaches on
+ * the ordinary lifecycle, `st_clear` detaches again on teardown, and the poller
+ * detaches everything still registered when it closes. */
 static void
 metal_detach_transport(SocketTransport *transport)
 {
-    if (transport->metal != NULL && transport->connection_token != 0) {
-        metal_slab_release(&transport->metal->connections,
-                           transport->connection_token, transport);
+    MetalRuntime *runtime = transport->metal;
+    uint64_t token = transport->connection_token;
+    if (runtime == NULL || token == 0) {
+        transport->connection_token = 0;
+        return;
     }
+    /* Clear the token before releasing: dropping the poller's reference can run
+     * this transport's own teardown, which detaches again. */
     transport->connection_token = 0;
+    metal_slab_release(&runtime->connections, token, transport);
+    Py_DECREF(transport);
+}
+
+/* Release every connection this poller still owns. Reached from teardown only:
+ * a live loop detaches through the transport's own lifecycle. */
+static void
+metal_connections_clear(MetalRuntime *runtime)
+{
+    for (uint32_t index = 0; index < runtime->connections.capacity; index++) {
+        MetalSlot *slot = &runtime->connections.slots[index];
+        if (!metal_slot_live(slot) || slot->owner == NULL) {
+            continue;
+        }
+        SocketTransport *transport = (SocketTransport *)slot->owner;
+        uint64_t token =
+            ((uint64_t)metal_slot_generation(slot) << 32) | index;
+        /* Detach by hand rather than through metal_detach_transport: the
+         * runtime is going away, so the transport must stop pointing at it
+         * before its own teardown can try to use it. */
+        transport->connection_token = 0;
+        transport->metal = NULL;
+        metal_slab_release(&runtime->connections, token, transport);
+        Py_DECREF(transport);
+    }
 }
 
 static void
@@ -970,6 +1033,12 @@ rp_drain_completions(ReactorPoller *p, unsigned budget)
     if (available > budget) {
         available = budget;
     }
+    if (available > 0) {
+        /* Something ran this turn, so there is plausibly garbage to reclaim.
+         * The flag keeps an idle loop from re-collecting a heap it already
+         * cleaned on every wakeup. */
+        p->gc_dirty = 1;
+    }
     ring->cached_cq_head = head;
     int status = 0;
     unsigned drained = 0;
@@ -1599,6 +1668,68 @@ rp_spin_for_completions(ReactorPoller *p, uint64_t *spin_ns_out)
     return hit;
 }
 
+/* --- loop-driven cycle collection --------------------------------------- */
+/* CPython triggers the cycle collector off an allocation counter, so on a
+ * request-serving loop it fires wherever the Nth container allocation happens
+ * to land -- which is inside a request batch. That cost is invisible in a
+ * throughput average and is exactly what a p99 is made of. The loop knows one
+ * thing the allocator cannot: when it is about to stop working. Collecting
+ * there costs no request anything.
+ *
+ * "About to block" is NOT the same as "block_ms is large". A saturated loop
+ * still computes a multi-second keep-alive deadline and then returns from the
+ * enter immediately, so gating on block_ms would collect on every batch under
+ * full load -- the precise opposite of the intent. The gate is the arrival
+ * EWMA, the same estimator the adaptive spin reads: it measures how long this
+ * loop actually waits between completions. A saturated loop therefore never
+ * collects here and falls back to the (raised) automatic threshold, which is
+ * why the Python side raises that threshold modestly rather than disabling the
+ * collector outright.
+ *
+ * Returns the collection's cost in nanoseconds, 0 when none ran, or -1 with the
+ * exception set. */
+static int64_t
+rp_collect_idle(ReactorPoller *p, int block_ms)
+{
+    if (p->gc_collect == NULL || !p->gc_dirty || block_ms == 0) {
+        return 0;
+    }
+    const MetalRuntime *metal = &p->metal;
+    if (metal->arrival_samples < METAL_SPIN_MIN_SAMPLES ||
+        metal->arrival_ewma_ns < (double)p->gc_idle_ns) {
+        return 0;
+    }
+    /* One request wakes the loop several times -- a receive completion, a send
+     * completion, a ready-queue turn -- and each one is genuinely "work ran".
+     * Without a floor a lightly loaded server therefore collects several times
+     * per request, every time into a young generation it just emptied. The
+     * floor bounds that churn without weakening the guarantee: the gap between
+     * two collections is idle time either way. */
+    uint64_t started = metal_now_ns();
+    if (started - p->gc_last_collect_ns < p->gc_min_interval_ns) {
+        return 0;
+    }
+    int full = metal->arrival_ewma_ns >= (double)p->gc_full_idle_ns;
+    PyObject *result = full
+        ? PyObject_CallNoArgs(p->gc_collect)
+        : PyObject_CallOneArg(p->gc_collect, p->gc_young_generation);
+    if (result == NULL) {
+        return -1;
+    }
+    Py_DECREF(result);
+    uint64_t finished = metal_now_ns();
+    uint64_t elapsed = finished - started;
+    p->gc_last_collect_ns = finished;
+    p->gc_collect_nanoseconds += elapsed;
+    if (full) {
+        p->gc_full_collections++;
+    } else {
+        p->gc_young_collections++;
+    }
+    p->gc_dirty = 0;
+    return (int64_t)elapsed;
+}
+
 static PyObject *
 rp_run_once(PyObject *op, PyObject *Py_UNUSED(ignored))
 {
@@ -1663,6 +1794,28 @@ rp_run_once(PyObject *op, PyObject *Py_UNUSED(ignored))
                         }
                     }
                 }
+            }
+        }
+        int64_t gc_ns = rp_collect_idle(p, block_ms);
+        if (gc_ns < 0) {
+            return NULL;
+        }
+        if (gc_ns > 0) {
+            blocked = 1;  /* time advanced; re-read the clock below */
+            /* Spend the collection out of the wait rather than on top of it: a
+             * deadline computed before the collection must not slip by its
+             * cost. */
+            if (block_ms > 0) {
+                int spent_ms = (int)(gc_ns / 1000000);
+                block_ms = spent_ms >= block_ms ? 0 : block_ms - spent_ms;
+            }
+            /* A finalizer can schedule work. Never sleep on top of it. */
+            Py_ssize_t rescheduled = PyObject_Length(p->ready);
+            if (rescheduled < 0) {
+                return NULL;
+            }
+            if (rescheduled > 0) {
+                block_ms = 0;
             }
         }
         if (block_ms != 0) {
@@ -1776,6 +1929,9 @@ rp_run_once(PyObject *op, PyObject *Py_UNUSED(ignored))
     if (ntodo < 0) {
         return NULL;
     }
+    if (ntodo > 0) {
+        p->gc_dirty = 1;
+    }
     for (Py_ssize_t i = 0; i < ntodo; i++) {
         PyObject *handle = PyObject_CallNoArgs(p->ready_popleft);
         if (handle == NULL) {
@@ -1855,6 +2011,62 @@ rp_set_signal_reader(PyObject *op, PyObject *args)
     Py_RETURN_NONE;
 }
 
+/* Hand the poller the collector it drives from its idle gaps, or None to give
+ * the heap back to CPython's automatic trigger. Both thresholds are arrival-gap
+ * seconds; see rp_collect_idle for why the gate is the arrival estimator rather
+ * than the computed block deadline. */
+static PyObject *
+rp_set_gc_collector(PyObject *op, PyObject *args)
+{
+    ReactorPoller *p = (ReactorPoller *)op;
+    PyObject *collect;
+    double idle_seconds;
+    double full_idle_seconds;
+    double min_interval_seconds;
+    if (!PyArg_ParseTuple(args, "Oddd:_set_gc_collector", &collect,
+                          &idle_seconds, &full_idle_seconds,
+                          &min_interval_seconds)) {
+        return NULL;
+    }
+    if (collect == Py_None) {
+        Py_CLEAR(p->gc_collect);
+        p->gc_dirty = 0;
+        Py_RETURN_NONE;
+    }
+    if (!PyCallable_Check(collect)) {
+        PyErr_SetString(PyExc_TypeError, "gc collector must be callable");
+        return NULL;
+    }
+    if (!(idle_seconds > 0.0) || !(full_idle_seconds >= idle_seconds)) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "idle threshold must be positive and no greater than the "
+            "full-collection threshold");
+        return NULL;
+    }
+    if (!(min_interval_seconds >= 0.0)) {
+        PyErr_SetString(PyExc_ValueError,
+                        "minimum collection interval must not be negative");
+        return NULL;
+    }
+    if (p->gc_young_generation == NULL) {
+        p->gc_young_generation = PyLong_FromLong(0);
+        if (p->gc_young_generation == NULL) {
+            return NULL;
+        }
+    }
+    p->gc_idle_ns = (uint64_t)(idle_seconds * 1e9);
+    p->gc_full_idle_ns = (uint64_t)(full_idle_seconds * 1e9);
+    p->gc_min_interval_ns = (uint64_t)(min_interval_seconds * 1e9);
+    /* Not 0: the floor is a "time since" comparison, and starting from zero
+     * would read as "collected at the epoch" and let the first gap through
+     * before the loop has run anything. */
+    p->gc_last_collect_ns = metal_now_ns();
+    Py_XSETREF(p->gc_collect, Py_NewRef(collect));
+    p->gc_dirty = 0;
+    Py_RETURN_NONE;
+}
+
 static PyObject *
 rp_wake(PyObject *op, PyObject *Py_UNUSED(ignored))
 {
@@ -1888,11 +2100,18 @@ rp_close(PyObject *op, PyObject *Py_UNUSED(i))
 {
     ReactorPoller *p = (ReactorPoller *)op;
     p->closed = 1;
+    /* A closed poller drives nothing; the counters stay readable for a caller
+     * inspecting the run it just finished. */
+    Py_CLEAR(p->gc_collect);
     if (p->wake_fd >= 0) {
         close(p->wake_fd);
         p->wake_fd = -1;
     }
     metal_send_operations_clear(&p->metal);
+    /* Before the ring and the slabs go: a connection still registered here
+     * holds this poller's reference, and the ring it would be driven by is
+     * about to stop existing. */
+    metal_connections_clear(&p->metal);
     metal_provided_buffers_clear(&p->metal.uring,
                                  &p->metal.receive_buffers);
     metal_uring_clear(&p->metal.uring);
@@ -1985,6 +2204,18 @@ rp_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwds))
     }
     p->direct_task_steps = direct_task_steps;
     p->closed = 0;
+    /* The loop installs a collector explicitly (_set_gc_collector) or not at
+     * all; a freshly initialised poller leaves the heap to CPython. */
+    Py_CLEAR(p->gc_collect);
+    Py_CLEAR(p->gc_young_generation);
+    p->gc_idle_ns = 0;
+    p->gc_full_idle_ns = 0;
+    p->gc_min_interval_ns = 0;
+    p->gc_last_collect_ns = 0;
+    p->gc_dirty = 0;
+    p->gc_young_collections = 0;
+    p->gc_full_collections = 0;
+    p->gc_collect_nanoseconds = 0;
     p->generation_wraps = 0;
     memset(&p->metal, 0, sizeof(p->metal));
     /* Restore the sentinel the memset just wiped, before the trace allocation
@@ -2134,6 +2365,17 @@ rp_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(p->exc_handler);
     Py_VISIT(p->wheel_obj);
     Py_VISIT(p->signal_callback);
+    Py_VISIT(p->gc_collect);
+    Py_VISIT(p->gc_young_generation);
+    /* The connections this poller owns. Visiting them is what keeps the
+     * poller<->transport reference from turning a dead loop with live
+     * connections into an uncollectable cycle. */
+    for (uint32_t i = 0; i < p->metal.connections.capacity; i++) {
+        MetalSlot *slot = &p->metal.connections.slots[i];
+        if (metal_slot_live(slot) && slot->owner != NULL) {
+            Py_VISIT((PyObject *)slot->owner);
+        }
+    }
     for (int i = 0; i < p->fdcap; i++) {
         Py_VISIT(p->fds[i].reader);
         Py_VISIT(p->fds[i].reader_args);
@@ -2156,6 +2398,11 @@ rp_clear(PyObject *op)
     Py_CLEAR(p->exc_handler);
     Py_CLEAR(p->wheel_obj);
     Py_CLEAR(p->signal_callback);
+    Py_CLEAR(p->gc_collect);
+    Py_CLEAR(p->gc_young_generation);
+    if (p->metal.connections.slots != NULL) {
+        metal_connections_clear(&p->metal);
+    }
     p->signal_fd = -1;
     p->wheel = NULL;
     if (p->fds != NULL) {
@@ -2514,6 +2761,37 @@ rp_get_arrival_deviation_ns(PyObject *op, void *closure)
 }
 
 static PyObject *
+rp_get_gc_loop_driven(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyBool_FromLong(((ReactorPoller *)op)->gc_collect != NULL);
+}
+
+static PyObject *
+rp_get_gc_young_collections(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->gc_young_collections);
+}
+
+static PyObject *
+rp_get_gc_full_collections(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->gc_full_collections);
+}
+
+static PyObject *
+rp_get_gc_collect_nanoseconds(PyObject *op, void *closure)
+{
+    (void)closure;
+    return PyLong_FromUnsignedLongLong(
+        ((ReactorPoller *)op)->gc_collect_nanoseconds);
+}
+
+static PyObject *
 rp_completion_trace(PyObject *op, PyObject *Py_UNUSED(ignored))
 {
     ReactorPoller *p = (ReactorPoller *)op;
@@ -2672,6 +2950,15 @@ static PyGetSetDef rp_getset[] = {
      PyDoc_STR("EWMA empty-CQ-to-arrival nanoseconds."), NULL},
     {"arrival_deviation_ns", rp_get_arrival_deviation_ns, NULL,
      PyDoc_STR("EWMA absolute arrival-gap deviation."), NULL},
+    {"gc_loop_driven", rp_get_gc_loop_driven, NULL,
+     PyDoc_STR("Whether the loop drives cycle collection from its idle gaps."),
+     NULL},
+    {"gc_young_collections", rp_get_gc_young_collections, NULL,
+     PyDoc_STR("Young-generation collections run in an idle gap."), NULL},
+    {"gc_full_collections", rp_get_gc_full_collections, NULL,
+     PyDoc_STR("Full collections run in an idle gap."), NULL},
+    {"gc_collect_nanoseconds", rp_get_gc_collect_nanoseconds, NULL,
+     PyDoc_STR("Total measured time spent in loop-driven collection."), NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
@@ -2688,6 +2975,7 @@ static PyMethodDef rp_methods[] = {
     {"_call_soon", (PyCFunction)(void (*)(void))rp_call_soon,
      METH_FASTCALL | METH_KEYWORDS, NULL},
     {"_set_signal_reader", rp_set_signal_reader, METH_VARARGS, NULL},
+    {"_set_gc_collector", rp_set_gc_collector, METH_VARARGS, NULL},
     {"_wake", rp_wake, METH_NOARGS, NULL},
     {"completion_trace", rp_completion_trace, METH_NOARGS, NULL},
     {"close", rp_close, METH_NOARGS, NULL},

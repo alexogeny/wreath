@@ -66,6 +66,7 @@ async def build_schema(connection, *, seed_rows: int | None = None) -> None:
     # by the driver, which refuses `BEGIN` on a connection with an operation
     # already in flight.
     from camera_trap.tasks import QUEUE
+
     from wreath.jobs import JobRunner
 
     queue = JobRunner(None, name=QUEUE, schema=SCHEMA)

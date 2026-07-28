@@ -166,6 +166,108 @@ Completion-trace capture is separately opt-in through
 per-completion trace write, avoiding diagnostic cache and RSS cost on production
 workers.
 
+### Ablating the metal runtime
+
+Metal's three optional mechanisms each have an environment switch, so any of
+them can be measured against its own absence without a rebuild. A tier that
+cannot be ablated cannot be defended.
+
+| Switch | Off restores | Measured |
+| --- | --- | --- |
+| `WREATH_METAL_ASYNC_SEND=0` | one `send()` per response instead of an io_uring SEND | Async wins the median at every response size from 16 B to 256 KB; the p99 differences flip sign with no relation to size. Async is the right default — a size threshold was proposed, measured, and found to have no crossover. |
+| `WREATH_METAL_ADAPTIVE_POLL=0` | blocking waits only, no userspace spin | p99 0.091 ms off against 0.092 ms on: the spin is not a tail contributor either way. |
+| `WREATH_METAL_GC=stock`, `WREATH_METAL_GC_FREEZE=0` | CPython's automatic collector, traceable startup heap | Neither moves a saturated benchmark: no collection occurs on the request path at all (see below). |
+
+Each was added because something looked like it might be costing tail latency.
+In all three cases the measurement said no, which is the point of having the
+switch — the alternative is a runtime carrying optimizations nobody can
+disprove.
+
+### Pre-arming the first request
+
+The first request a process serves costs multiples of the steady state: cold
+interpreter paths, the first parse, the first timer arm, the accept path's first
+trip through Python. On the metal loop that measures ~2.1 ms against a ~0.07 ms
+steady state — and because the loop is single-threaded, everything arriving
+alongside that request waits behind it, so eight simultaneous connections all
+see ~2.8 ms rather than one seeing it and seven seeing normal.
+
+`ServerConfig(prearm=N)` drives N synthetic connections through the server's own
+listener after it binds and before `serve()` returns. Measured with four:
+first-request latency drops from ~2.1 ms to ~0.5 ms for ~2 ms of extra startup.
+Almost all of the win is in the first connection; past that the numbers are
+noise, and more than a handful only lengthens boot.
+
+Each pre-arm request asks for `Server.PREARM_PATH` — a path no route can match —
+so the response is the framework's own 404 and **none of your handlers run**.
+That is not a limitation: warming ingress, parsing, routing and egress is where
+the cost is, and a guaranteed miss measures the same as a route hit. Everything
+else about them is ordinary, so global middleware does see them and metrics or
+rate-limit counters will record them. That is why this is opt-in rather than the
+default, and why `server.prearmed_connections` reports how many actually
+completed — a TLS-only listener or a sandbox without a loopback route leaves a
+correct server that simply started cold, and that should be a number you can
+read rather than something you infer from a latency graph.
+
+It does not touch the *per-connection* cost. Even against a fully warm process a
+brand-new connection's first request runs ~0.25 ms against a ~0.07 ms steady
+state, because that connection still constructs its own socket, protocol, and
+transport objects and arms its own first deadline. Pre-arming connection four
+does nothing for connection five; only pooling those objects would.
+
+### The loop owns its collector
+
+CPython triggers cycle collection from an allocation counter, so on a
+request-serving loop it fires wherever the two-thousandth container allocation
+lands — inside a request batch. That cost does not show up in a throughput
+average; it shows up as tail latency, on roughly one request in a hundred, which
+is exactly where a p99 sits. Metal takes the heap over in three separable steps.
+
+`Server` calls `loop.freeze_heap()` as the last step of startup, the one moment
+where "everything reachable" and "everything long-lived" are the same set:
+modules imported, route table compiled, lifespan run, listeners bound. Those
+objects move to the permanent generation, which no collection traverses again.
+This is the step that makes collections cheaper rather than merely rarer, and its
+cost is that a reference cycle created during startup is retained for the life of
+the process. Closing the loop restores the heap: the trigger goes back to
+CPython's and the permanent generation is released.
+
+The gen-0 trigger is raised from 2000 to 20000. That does not reduce total
+collector time — a young collection costs what the young generation it scans
+costs, so rarer collections are proportionally larger — it moves that time off
+p99 and onto p999. It is raised modestly rather than removed because it stays the
+backstop for a loop that never idles.
+
+Collection then runs from the poller's idle gap, immediately before it waits.
+The gate is the arrival EWMA, the same estimator adaptive polling reads, not the
+computed block deadline: a saturated loop still computes a multi-second
+keep-alive deadline and then returns from the enter immediately, so gating on the
+deadline would collect on every batch under full load. Above 250 microseconds of
+measured arrival gap the loop runs a young collection; above 20 milliseconds, a
+full one; a floor of 10 milliseconds between collections keeps a lightly loaded
+server from re-collecting a young generation it just emptied several times per
+request. Any collection time is subtracted from the wait that follows, so a
+deadline computed before the collection does not slip by its cost, and work a
+finalizer scheduled is run rather than slept on. A saturated loop therefore
+collects here never, by design, and defers to the raised trigger.
+
+One ownership rule makes this safe, and it is the loop's, not the policy's. A
+stock asyncio loop keeps an accepted transport alive through the bound reader it
+registered; metal registers no reader, because ingress is an io_uring multishot
+receive, so the poller's connection slab owns every live connection outright.
+Without that, an accepted connection is a transport-and-protocol cycle reachable
+from nothing, and any collection is free to reap it out from under a live socket.
+Wreath's own `Server` tracks its protocols and was never exposed; `wreath.postgres`,
+`wreath.http_client`, and any third-party `loop.create_server` on this loop were.
+
+Both halves are ablatable without code changes, so the four combinations can be
+measured against each other: `WREATH_METAL_GC=stock` returns the heap to
+CPython's automatic trigger entirely, and `WREATH_METAL_GC_FREEZE=0` keeps the
+startup heap traceable. `loop.gc_stats()` reports the raised threshold, the
+frozen object count, and what the policy actually did — idle young and full
+collections and the nanoseconds they took — so a run that claims a tail
+improvement can say which step earned it.
+
 Each loop is one ownership domain. `worker_id` labels that domain and operations
 from another OS thread are rejected rather than reaching its connection table.
 Metal allocates its hot ownership tables once, before serving, and never grows

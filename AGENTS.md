@@ -51,6 +51,29 @@ while a sibling is running tests produces failures nobody can attribute.
 - Use safe, understandable Python first. Document any generated code or interpreter-specific trick.
 - Treat free-threading and the optional JIT as separately tested execution modes, not assumptions.
 - Add focused tests for every behavior change and regression.
+- **"Pre-existing" is a diagnosis, not a disposition.** When a test or a lint is
+  already failing before you touched anything, say so — attributing it correctly
+  matters — and then spend a minute finding out whether it is *fixable*. Most
+  are: a stale `noqa` for a rule nobody enabled, an import ruff wants regrouped,
+  a test that fails only under `pytest -n` because it was written before the
+  suite went parallel. Fix those in passing. Establishing that a failure is not
+  yours is the beginning of the job, not the end of it.
+
+  Leave one alone when fixing it is a real change — a behaviour decision, a
+  risky refactor, or something the human should weigh — and then **say what you
+  found and why you left it**, so the next agent inherits a diagnosis instead of
+  repeating the investigation. What is not acceptable is a green-except-for-the-
+  usual-two gate that everyone routes around: that is how a suite stops being
+  read, and then a real regression hides in the noise nobody looks at any more.
+
+  This rule exists because a `wreath-check` run reported the same two failing
+  gates for a long time. One was five bench-task tests that fail only under
+  `pytest -n`, because `wreath-bench` refuses to run beside competing workloads
+  and the sibling xdist workers *are* competing workloads — the tests stub
+  `subprocess.run` and never benchmark anything, so the guard was pure noise
+  there and one fixture line fixed all five. The other was three lint findings,
+  every one a dead directive or a misgrouped import. Both were mistaken for
+  scenery for months.
 - Know what a request costs at the boundary. The native linters read one C
   function at a time and cannot see a crossing that spans modules, so
   `uv run wreath-request-trace` counts them for a whole request against a

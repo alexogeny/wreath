@@ -21,7 +21,7 @@ from typing import Any
 from . import h2load
 from .load import LOAD_GENERATOR, LOAD_GENERATOR_VERSION, measure
 from .report import generate_report
-from .scenarios import FRAMEWORKS, SCENARIOS
+from .scenarios import DEFAULT_FRAMEWORKS, FRAMEWORKS, SCENARIOS
 
 #: What each server can actually serve. Uvicorn is HTTP/1.1-only, which bounds
 #: every framework it hosts; Sanic's own server implements HTTP/1 and HTTP/3 and
@@ -134,6 +134,10 @@ REQUEST_TIERS = {
     "fastapi": 1_000,
     "sanic": 1_000,
     "blacksheep": 1_000,
+    "blacksheep-granian": 1_000,
+    "granian-rsgi": 1_000,
+    "panther": 1_000,
+    "axum": 1_000,
     "django": 100,
     "flask": 100,
 }
@@ -217,10 +221,119 @@ async def _run_framework(
     return ok
 
 
+#: Where `cargo build --release` leaves the Rust arm. The arms are one cargo
+#: workspace, so every binary lands in the workspace's shared `target/` --
+#: not under the crate that declares it.
+RUST_ARMS = Path(__file__).resolve().parent / "rust_arms"
+AXUM_CRATE = RUST_ARMS / "axum_server"
+AXUM_BINARY = RUST_ARMS / "target" / "release" / "wreath-bench-axum"
+
+_AXUM_ROUTE_TABLE: Path | None = None
+
+
+def _axum_binary() -> Path:
+    """The compiled Rust arm, or a refusal that says how to produce it.
+
+    Deliberately not built on demand. A `cargo build` is minutes of every core at
+    full tilt, and starting one inside a benchmark run would land that load on
+    whichever arm happened to be measuring at the time -- a contaminated number
+    that looks like a result. Build it before quieting the machine;
+    `tools/bench-quiet.sh` does exactly that.
+    """
+    if not AXUM_BINARY.exists():
+        raise SystemExit(
+            f"benchmark framework 'axum' needs its server built first:\n"
+            f"    cargo build --release --manifest-path {AXUM_CRATE / 'Cargo.toml'}\n"
+            f"  (or drop 'axum' from --framework)"
+        )
+    return AXUM_BINARY
+
+
+def _axum_route_table() -> Path:
+    """Write the shared 10,000-route table for the Rust arm to read at boot.
+
+    Written from `ROUTE_SPECS` rather than re-derived in Rust so both sides
+    register provably the same paths; a second implementation of the spec is a
+    second thing to keep correct. Imported here rather than at module scope
+    because importing `apps` builds a whole framework app as a side effect.
+    """
+    global _AXUM_ROUTE_TABLE
+    if _AXUM_ROUTE_TABLE is None:
+        import tempfile
+
+        from .apps import ROUTE_SPECS
+
+        handle, name = tempfile.mkstemp(prefix="wreath-bench-routes-", suffix=".json")
+        with os.fdopen(handle, "w") as stream:
+            json.dump([list(spec) for spec in ROUTE_SPECS], stream)
+        _AXUM_ROUTE_TABLE = Path(name)
+    return _AXUM_ROUTE_TABLE
+
+
+def scenario_runnable(framework: str, scenario: str, workers: int) -> bool:
+    """Whether this (framework, scenario) can be measured at this worker count.
+
+    Framework support is the usual reason to skip. The worker count is a second
+    one: a background scenario reconciles the app's task counters against the
+    requests handed over, and those counters are per process. With more than one
+    worker `/background-stats` is answered by whichever worker the stats
+    connection happens to hash to, so the tally is one worker's share measured
+    against the whole run's total and the check can only fail. Verifying that
+    the work was really done is the entire point of those scenarios, so they are
+    skipped rather than reported unverified.
+    """
+    spec = SCENARIOS[scenario]
+    if not spec.supports(framework):
+        return False
+    return not (spec.background and workers > 1)
+
+
+def _generator_threads(requested: int | None, connections: int) -> int:
+    """How many threads h2load drives one measurement with.
+
+    This defaulted to one for the whole life of the harness, and one h2load
+    thread saturates around 130k req/s on this class of machine -- below several
+    of the arms it is supposed to be measuring. Anything above that ceiling was
+    reporting the generator's throughput rather than the server's, and the
+    reading stayed flat however many workers the server ran, which makes a
+    single-threaded generator unable to measure a multi-worker server at all.
+    Measured against one unchanged two-worker metal server: `-t 1` 133k req/s,
+    `-t 2` 175k, `-t 4` 222k.
+
+    One thread per physical core the generator actually has, never more than the
+    connection count (h2load spreads connections across threads, so a thread
+    with no connection is only overhead).
+    """
+    if requested is not None:
+        return max(1, min(requested, connections))
+    try:
+        from wreath._devtools.quiet import physical_cores
+    except ImportError:
+        return 1
+    if not hasattr(os, "sched_getaffinity"):
+        return 1
+    available = os.sched_getaffinity(0)
+    cores = sum(
+        1 for siblings in physical_cores().values()
+        if any(cpu in available for cpu in siblings)
+    )
+    return max(1, min(cores or 1, connections))
+
+
 def _server_command(
     args: argparse.Namespace, framework: str, protocol: str, port: int, tls: bool
 ) -> tuple[list[str], str]:
-    """Build one server invocation and its display label for a single boot."""
+    """Build one server invocation and its display label for a single boot.
+
+    Every arm is given exactly `args.workers` workers, and the harness pins the
+    whole tree to `args.workers` physical cores. That symmetry is the point: a
+    server left on its own defaults takes whatever parallelism its runtime
+    prefers, and then the row compares deployments rather than frameworks. Two
+    arms used to do exactly that -- Tokio sizes its pool from the CPU affinity,
+    and Granian defaults to more than one worker -- so both are pinned here in
+    both directions, at one worker as much as at eight.
+    """
+    workers = getattr(args, "workers", 1)
     if framework in ("wreath-native", "wreath-metal"):
         if framework == "wreath-metal":
             # The metal tier is defined by its loop; it always runs on the reactor.
@@ -247,11 +360,63 @@ def _server_command(
             str(port),
             "--loop",
             native_loop,
+            "--workers",
+            str(workers),
+            "--prearm",
+            str(args.prearm),
         ]
         if tls:
             command += ["--protocol", protocol, "--tls-cert", args.tls_cert,
                         "--tls-key", args.tls_key]
         server = f"{framework} ({native_loop})"
+    elif framework == "axum":
+        command = [
+            str(_axum_binary()),
+            "--host",
+            args.host,
+            "--port",
+            str(port),
+            "--routes",
+            str(_axum_route_table()),
+            # Tokio sizes its worker pool from the CPU affinity unless told
+            # otherwise, so on one SMT core this arm quietly ran two workers
+            # against every other arm's one. `--threads` is now always passed,
+            # which is what makes the single-worker column a like-for-like
+            # comparison. See rust_arms/axum_server/src/main.rs.
+            "--threads",
+            str(workers),
+        ]
+        server = "axum (hyper/tokio)"
+    elif framework in ("blacksheep-granian", "granian-rsgi"):
+        rsgi = framework == "granian-rsgi"
+        command = [
+            sys.executable,
+            "-m",
+            "granian",
+            "--interface",
+            "rsgi" if rsgi else "asgi",
+            "benchmarks.rsgi_app:app" if rsgi else "benchmarks.apps:app",
+            "--host",
+            args.host,
+            "--port",
+            str(port),
+            "--workers",
+            str(workers),
+            # One runtime thread and one blocking thread per worker: parallelism
+            # is expressed as workers here, the same unit every other arm uses,
+            # and Granian's defaults would otherwise hand this arm a second axis
+            # of it. Granian's --loop choices are a superset of uvicorn's, so
+            # args.loop passes straight through and the Python side of both
+            # servers runs the same event loop.
+            "--runtime-threads",
+            "1",
+            "--blocking-threads",
+            "1",
+            "--loop",
+            args.loop,
+            "--no-access-log",
+        ]
+        server = "granian (rsgi)" if rsgi else "granian"
     elif framework == "sanic":
         command = [
             sys.executable,
@@ -261,6 +426,8 @@ def _server_command(
             args.host,
             "--port",
             str(port),
+            "--workers",
+            str(workers),
         ]
         if tls:
             command += ["--protocol", protocol, "--tls-cert", args.tls_cert,
@@ -284,6 +451,12 @@ def _server_command(
             "off",
             "--no-access-log",
         ]
+        if workers > 1:
+            # uvicorn's supervisor binds one socket and shares it across worker
+            # processes rather than using SO_REUSEPORT. That is a different
+            # accept discipline from the wreath and granian arms, and it is the
+            # one uvicorn actually ships -- so it is what gets measured.
+            command += ["--workers", str(workers)]
         if tls:
             command += ["--ssl-certfile", args.tls_cert, "--ssl-keyfile", args.tls_key]
         server = "uvicorn"
@@ -296,6 +469,8 @@ def _server_command(
     if server_cpus:
         command = ["taskset", "-c", server_cpus, *command]
         server = f"{server} [cpus {server_cpus}]"
+    if workers > 1:
+        server = f"{server} [{workers} workers]"
     return command, server
 
 
@@ -341,7 +516,7 @@ async def _run_protocol(
         return True
     for scenario in args.scenario:
         spec = SCENARIOS[scenario]
-        if not spec.supports(framework):
+        if not scenario_runnable(framework, scenario, args.workers):
             continue
         method, path = spec.method, spec.path
         # h2load measures GET and body-backed POST, and speaks no WebSocket.
@@ -419,6 +594,9 @@ async def _run_protocol(
                             requests=request_count,
                             connections=args.connections or args.concurrency,
                             streams_per_connection=args.streams_per_connection,
+                            threads=_generator_threads(
+                                args.generator_threads,
+                                args.connections or args.concurrency),
                             warmup_requests=args.warmup_requests,
                             method=method,
                             body=spec.body,
@@ -533,10 +711,10 @@ async def run(args: argparse.Namespace) -> None:
         f"{framework}/{scenario}"
         for framework in args.framework
         for scenario in args.scenario
-        if not SCENARIOS[scenario].supports(framework)
+        if not scenario_runnable(framework, scenario, args.workers)
     ]
     runnable_scenarios = sum(
-        SCENARIOS[scenario].supports(framework)
+        scenario_runnable(framework, scenario, args.workers)
         for framework in args.framework
         for scenario in args.scenario
     )
@@ -545,17 +723,33 @@ async def run(args: argparse.Namespace) -> None:
         "status": "running",
         "python": sys.version,
         "platform": platform.platform(),
-        "server": "uvicorn except wreath-native and sanic-native",
+        "server": (
+            "uvicorn, except wreath-native/wreath-metal (own server), "
+            "sanic-native, blacksheep-granian (granian), and axum (hyper)"
+        ),
         "loop": args.loop,
         "http": args.http,
         "host": args.host,
         "port": args.port or "ephemeral-per-trial",
         "concurrency": args.concurrency,
+        # A row taken at one worker and a row taken at eight are not comparable,
+        # so the count that produced them is recorded rather than inferred.
+        "workers_per_arm": args.workers,
+        "prearm": args.prearm,
+        # A run driven by a saturated generator measures the generator. Record
+        # what drove it so a throughput number can be trusted or dismissed.
+        "generator_threads": _generator_threads(
+            args.generator_threads, args.connections or args.concurrency),
+        "server_cpus": os.environ.get("WREATH_BENCH_SERVER_CPUS", "unpinned"),
         "request_tiers": {
             framework: args.requests if args.requests is not None else REQUEST_TIERS[framework]
             for framework in args.framework
         },
         "warmup_requests_per_scenario": args.warmup_requests,
+        # Metal's heap policy is ablatable by environment, so a result file that
+        # did not record which way it ran cannot be compared against another one.
+        "metal_gc": os.environ.get("WREATH_METAL_GC", "idle"),
+        "metal_gc_freeze": os.environ.get("WREATH_METAL_GC_FREEZE", "1"),
         "suite_end_to_end_seconds": 0.0,
         "completed_scenarios": 0,
         "total_scenarios": runnable_scenarios * max(1, args.trials),
@@ -601,7 +795,10 @@ async def run(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--framework", nargs="+", choices=FRAMEWORKS, default=list(FRAMEWORKS))
+    parser.add_argument("--framework", nargs="+", choices=FRAMEWORKS,
+                        default=list(DEFAULT_FRAMEWORKS),
+                        help="arms to run; defaults to every arm installable in "
+                             "one environment (see OPT_IN_FRAMEWORKS in scenarios.py)")
     parser.add_argument("--scenario", nargs="+", choices=SCENARIOS, default=list(SCENARIOS))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument(
@@ -616,6 +813,26 @@ def main() -> None:
         help="override tiered request counts for every selected framework",
     )
     parser.add_argument("--warmup-requests", type=int, default=10)
+    parser.add_argument(
+        "--prearm", type=int, default=0, metavar="N",
+        help="wreath arms only: synthetic connections each worker drives "
+             "through its own stack before serving. The h2load warmup runs on "
+             "separate connections, so it cannot warm a worker its connections "
+             "never landed on.",
+    )
+    parser.add_argument(
+        "--generator-threads", type=int, default=None, metavar="N",
+        help="h2load threads (default: one per physical core the generator "
+             "has). One thread saturates near 130k req/s, below several arms "
+             "in this matrix, and cannot measure a multi-worker server at all.",
+    )
+    parser.add_argument(
+        "--workers", type=int, default=1, metavar="N",
+        help="workers per server arm (default 1). Every arm gets the same "
+             "count, including the ones whose runtimes would otherwise size "
+             "themselves; pair with a server CPU set of the same size "
+             "(wreath-bench --multi does both).",
+    )
     parser.add_argument("--loop", choices=("auto", "asyncio", "uvloop"), default="auto")
     parser.add_argument("--http", choices=("auto", "h11", "httptools"), default="auto")
     parser.add_argument("--output", default="benchmark-results")

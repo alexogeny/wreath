@@ -54,16 +54,38 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-#: Where the journal of applied changes lives. Deliberately under `/tmp` rather
-#: than the repository: it describes machine state, not project state, and a
-#: stale one left in a working tree would be committed by accident.
-JOURNAL = Path(os.environ.get("WREATH_QUIET_JOURNAL", "/tmp/wreath-quiet.json"))
+
+def _default_journal() -> Path:
+    """Where the journal lives: `/run` as root, `/tmp` otherwise.
+
+    Not the repository, either way -- it describes machine state, not project
+    state, and a stale one left in a working tree would be committed by accident.
+
+    The split exists because `/tmp` cannot hold a file two uids take turns
+    writing. It is world-writable and sticky, and under `fs.protected_regular`
+    (2 on Debian) the kernel refuses to open a file there that the opener does
+    not own -- *including* for root, which gets no capability exemption from that
+    check. So a tier-0 run as you, followed by the `sudo` run tier 1 requires,
+    failed on the second one with a bare `PermissionError` and a traceback. `/run`
+    is root-owned and not sticky, so the process that writes the journal is
+    always the one that owns it, and both are tmpfs cleared on reboot -- which is
+    when every change here would have been undone anyway.
+    """
+    override = os.environ.get("WREATH_QUIET_JOURNAL")
+    if override:
+        return Path(override)
+    return Path("/run/wreath-quiet.json" if os.geteuid() == 0 else "/tmp/wreath-quiet.json")
+
+
+#: The journal of applied changes. See `_default_journal()` for the location.
+JOURNAL = _default_journal()
 
 #: The watchdog restores after this long unless the benchmark disarms it first.
 #: Long enough for a full battery, short enough that a forgotten freeze thaws
@@ -899,30 +921,58 @@ def _service_state(unit: str) -> str:
 # --- the watchdog -----------------------------------------------------------
 
 
+def watchdog_scope() -> str:
+    """`--system` when running as root, `--user` otherwise.
+
+    Tier 1 needs root, and root is normally reached through `sudo`, which is
+    exactly the case where `--user` cannot work: root has no user manager of its
+    own, and `sudo -E` hands it an `XDG_RUNTIME_DIR` belonging to uid 1000 whose
+    bus refuses a connection from another uid. The watchdog therefore refused to
+    arm in the one situation it was written for, and `apply()` -- correctly --
+    refused to change anything.
+
+    System scope is the stronger guarantee, not a concession: a system transient
+    timer outlives the login session as well as the process, so closing the
+    laptop lid on a frozen desktop still thaws it. The scope follows the euid
+    rather than a flag because the two are the same question -- a non-root caller
+    cannot create a system unit without polkit, and a root caller cannot reach
+    the calling user's bus.
+    """
+    return "--system" if os.geteuid() == 0 else "--user"
+
+
 def arm_watchdog(
     deadline_seconds: int = DEFAULT_DEADLINE_SECONDS,
     *,
     journal: Path = JOURNAL,
     run: Any = subprocess.run,
+    reason: list[str] | None = None,
 ) -> str:
     """Schedule an unconditional restore, and return the unit that will do it.
 
     This runs *before* the first change, and `apply()` refuses to proceed if it
-    returns empty. The timer is a user-scope transient unit, so it survives this
+    returns empty. The timer is a transient systemd unit, so it survives this
     process dying by any means -- the failure mode it exists for is the
     benchmark being `SIGKILL`ed with the desktop frozen.
+
+    On failure the return is empty and `reason`, if given, collects systemd's own
+    explanation. The caller reports it verbatim: "systemd-run unavailable or
+    refused" is a guess, and an operator staring at a refusal needs the sentence
+    systemd actually printed.
     """
     if shutil.which("systemd-run") is None:
+        if reason is not None:
+            reason.append("systemd-run is not installed")
         return ""
     unit = f"wreath-quiet-restore-{os.getpid()}"
     command = [
         "systemd-run",
-        "--user",
+        watchdog_scope(),
         f"--unit={unit}",
         f"--on-active={deadline_seconds}",
         "--timer-property=AccuracySec=1s",
         "--",
-        os.environ.get("WREATH_QUIET_PYTHON", "/home/alex/private/neo/.venv/bin/python"),
+        os.environ.get("WREATH_QUIET_PYTHON", sys.executable),
         "-m",
         "wreath._devtools.quiet",
         "--restore",
@@ -931,6 +981,13 @@ def arm_watchdog(
     ]
     result = run(command, capture_output=True, text=True, check=False)
     if getattr(result, "returncode", 1) != 0:
+        if reason is not None:
+            output = (getattr(result, "stderr", "") or "").strip()
+            reason.append(
+                f"`{' '.join(command[:3])} ...` exited "
+                f"{getattr(result, 'returncode', '?')}"
+                + (f": {output}" if output else "")
+            )
         return ""
     return unit
 
@@ -939,7 +996,7 @@ def disarm_watchdog(unit: str, *, run: Any = subprocess.run) -> None:
     """Cancel the timer once the benchmark has restored the machine itself."""
     if not unit or shutil.which("systemctl") is None:
         return
-    run(["systemctl", "--user", "stop", f"{unit}.timer"], check=False,
+    run(["systemctl", watchdog_scope(), "stop", f"{unit}.timer"], check=False,
         capture_output=True)
 
 
@@ -948,7 +1005,7 @@ def watchdog_armed(unit: str, *, run: Any = subprocess.run) -> bool:
     if not unit or shutil.which("systemctl") is None:
         return False
     result = run(
-        ["systemctl", "--user", "is-active", f"{unit}.timer"],
+        ["systemctl", watchdog_scope(), "is-active", f"{unit}.timer"],
         capture_output=True,
         text=True,
         check=False,
@@ -961,6 +1018,41 @@ def watchdog_armed(unit: str, *, run: Any = subprocess.run) -> bool:
 
 class QuietRefused(RuntimeError):
     """Raised when the machine cannot be quieted safely, so it was not touched."""
+
+
+def _refuse_unless_journalable(path: Path) -> None:
+    """Prove the journal can be written *before* anything is armed or changed.
+
+    A change that cannot be recorded is one nothing can undo, so an unwritable
+    journal has to refuse on the same ground the watchdog does. Checking it here
+    rather than at the first write is what makes the refusal a sentence instead
+    of a `PermissionError` traceback out of `pathlib`, and what keeps the failure
+    from happening *after* the watchdog is armed -- five orphaned timers
+    accumulated on one machine from repeated failures at exactly that point.
+    """
+    existed = path.exists()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a"):
+            pass
+    except OSError as error:
+        hint = ""
+        if existed:
+            hint = (
+                f" A journal from an earlier run is already there and belongs to "
+                f"another user; `sudo rm {path}` clears it."
+            )
+        raise QuietRefused(
+            f"cannot write the journal at {path}: {error.strerror}; refusing to "
+            f"change anything, because a change that is not recorded is one nothing "
+            f"can undo.{hint}"
+        ) from error
+    if not existed:
+        # Leave the tree exactly as it was found. `apply()` promises that a run
+        # which refuses has written nothing, and a probe is not an exception to
+        # that -- an empty journal on disk reads as a run that quieted nothing and
+        # would send `--restore` looking for changes that were never made.
+        path.unlink(missing_ok=True)
 
 
 def apply(
@@ -1000,26 +1092,46 @@ def apply(
     steps = [step for step in plan(tier, pid=pid) if step.change is not None]
     journal = Journal(deadline=time.time() + deadline_seconds, armed_at=time.time())
     if tier >= 1 and steps:
-        unit = arm_watchdog(deadline_seconds, journal=journal_path)
+        _refuse_unless_journalable(journal_path)
+        reason: list[str] = []
+        unit = arm_watchdog(deadline_seconds, journal=journal_path, reason=reason)
         if not unit:
+            detail = f" -- {reason[0]}" if reason else ""
             raise QuietRefused(
-                "could not arm the restore watchdog (systemd-run unavailable or "
-                "refused); refusing to change anything, because a change this "
-                "process cannot guarantee to undo is not one it should make"
+                f"could not arm the restore watchdog{detail}; refusing to change "
+                "anything, because a change this process cannot guarantee to undo "
+                "is not one it should make"
             )
         if not watchdog_armed(unit):
+            disarm_watchdog(unit)
             raise QuietRefused(
                 f"armed {unit}.timer but systemd does not report it active; "
                 "refusing to change anything"
             )
         journal.watchdog = unit
-    for step in steps:
-        change = step.change
-        if change is None:  # pragma: no cover - filtered above, guarded not asserted
-            continue
-        journal.changes.append(change)
-        journal.write(journal_path)
-        _apply_one(change)
+    applied = 0
+    try:
+        for step in steps:
+            change = step.change
+            if change is None:  # pragma: no cover - filtered above, guarded not asserted
+                continue
+            journal.changes.append(change)
+            journal.write(journal_path)
+            _apply_one(change)
+            applied += 1
+    except OSError as error:
+        # Nothing was changed, so nothing needs undoing -- and a timer left armed
+        # over an empty machine is litter that accrues one unit per failed attempt.
+        # Past the first change the opposite holds: the watchdog stays, because a
+        # half-quieted machine is precisely what it exists to recover.
+        if applied == 0:
+            disarm_watchdog(journal.watchdog)
+            journal_path.unlink(missing_ok=True)
+            raise QuietRefused(
+                f"could not apply the first change ({error.strerror}); the machine "
+                f"is untouched and the watchdog has been disarmed"
+            ) from error
+        raise
     return journal
 
 

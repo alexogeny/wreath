@@ -309,6 +309,7 @@ _SERVER_ENV_REGISTRY: tuple[_EnvSpec, ...] = (
     _EnvSpec("WREATH_MAX_HEADER_BYTES", "max_header_bytes", int),
     _EnvSpec("WREATH_MAX_BODY_BYTES", "max_body_bytes", int),
     _EnvSpec("WREATH_LIFESPAN", "lifespan", _env_lifespan),
+    _EnvSpec("WREATH_PREARM", "prearm", int),
     _EnvSpec("WREATH_PROTOCOLS", "protocols", _env_protocols),
 )
 
@@ -398,6 +399,22 @@ class ServerConfig:
     # real clients use, and is a pre-1.0 default that may tighten.
     max_ws_fragments: int = 4096
     lifespan: Literal["auto", "on", "off"] = "auto"
+    #: Synthetic connections driven through the server's own stack after the
+    #: listeners bind and before `serve()` returns, so the first real request
+    #: does not pay for warming the path it arrives on.
+    #:
+    #: Measured on the metal loop: without it the first request of a process
+    #: costs ~2.3 ms against a ~0.07 ms steady state, and on a single-threaded
+    #: loop everything that arrives alongside it queues behind that. Four
+    #: pre-armed connections cut it to ~0.47 ms for ~2.5 ms of startup. Almost
+    #: all of the win is in the first connection; the rest is measurement noise.
+    #:
+    #: Each pre-arm request asks for a path no route can match, so the response
+    #: is a 404 and no handler of yours runs -- warming ingress, parsing,
+    #: routing, and egress is where the cost is, not in the handler. They are
+    #: ordinary requests otherwise: global middleware sees them, so metrics and
+    #: rate-limit counters will too. That is why this is opt-in.
+    prearm: int = 0
     protocols: tuple[HttpProtocolName, ...] = ("http/1.1",)
     max_concurrent_streams: int = 64
     initial_stream_window: int = 65_535
@@ -460,6 +477,8 @@ class ServerConfig:
                 raise ValueError(f"{low} must be less than {high}")
         if self.lifespan not in ("auto", "on", "off"):
             raise ValueError("lifespan must be 'auto', 'on', or 'off'")
+        if self.prearm < 0:
+            raise ValueError("prearm must be non-negative")
         self._validate_protocols()
         # All limits are positive except the compression table sizes and the
         # blocked-stream count, which may be zero.
@@ -867,9 +886,23 @@ class Server:
         self._asyncio_server: asyncio.AbstractServer | None = None
         self._datagram_transport: asyncio.DatagramTransport | None = None
         self._lifespan: _LifespanManager | None = None
+        #: Pre-arm connections that actually completed. Below `config.prearm`
+        #: means the warming did not fully apply -- a fact worth being able to
+        #: read rather than infer from a latency graph.
+        self._prearmed = 0
         self._closed = loop.create_future()
         self._closing = False
         self._date_timer: asyncio.TimerHandle | None = None
+
+    @property
+    def prearmed_connections(self) -> int:
+        """Pre-arm connections that completed, of `config.prearm` requested.
+
+        Fewer than requested means the warming did not fully apply -- a
+        TLS-only listener or a sandbox with no loopback route. The server is
+        correct either way; this is how you find out it ran cold.
+        """
+        return self._prearmed
 
     @property
     def sockets(self) -> tuple[Any, ...]:
@@ -969,6 +1002,11 @@ class Server:
                     projector=self._projector,
                     arm_registry=self._arm_registry,
                 )
+            await self._prearm()
+            # After the pre-arm, never before: whatever warming it allocated is
+            # long-lived by the same argument as everything else here, and
+            # freezing first would leave it traceable.
+            self._freeze_startup_heap()
         except BaseException:  # re-raised; cleanup must be total
             # Broad *and* re-raised. A half-bound server -- listener up, lifespan
             # not, or an inspector serving against a recorder that never started
@@ -977,6 +1015,81 @@ class Server:
             # and leak the sockets. Nothing is swallowed.
             await self._abort_startup()
             raise
+
+    #: Asked for by every pre-arm request. A leading dot keeps it out of the way
+    #: of ordinary routes, and nothing is registered on it, so the response is
+    #: the framework's own 404 and none of the application's handlers run.
+    PREARM_PATH = "/.wreath-prearm"
+    #: Requests per pre-armed connection. Three is past the knee: the first
+    #: warms the path, the rest let CPython's specializing interpreter see a
+    #: code object more than once.
+    _PREARM_REQUESTS_PER_CONNECTION = 3
+
+    async def _prearm(self) -> None:
+        """Drive synthetic connections through this server before it serves.
+
+        The first request a process handles costs multiples of the steady state
+        -- cold interpreter paths, first parse, first timer arm, the accept
+        path's first trip through Python -- and on a single-threaded loop
+        everything arriving alongside it waits behind that. Paying it here, at a
+        moment nobody is timing, is the whole idea.
+
+        Deliberately over the real listener rather than a synthetic transport:
+        the point is to warm the path a request actually takes, and anything
+        that bypasses the accept path stops warming the part that costs the
+        most.
+
+        Nothing here raises. Every way this can fail -- a listener that only
+        speaks TLS, a sandbox without a loopback route, a peer that hangs up --
+        still leaves a correct server, so a failed pre-arm must not fail a
+        start. It is not silent either: `prearmed_connections` says how many
+        actually completed, so "the optimization did not apply" is a number
+        rather than a guess.
+        """
+        if self._config.prearm < 1 or not self.sockets:
+            return
+        host, port = self.sockets[0].getsockname()[:2]
+        if host in ("0.0.0.0", "::", ""):
+            host = "::1" if ":" in host else "127.0.0.1"
+        request = (
+            f"GET {self.PREARM_PATH} HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()
+        )
+        for _ in range(self._config.prearm):
+            try:
+                reader, writer = await asyncio.open_connection(host, port)
+            except OSError:
+                return  # cannot reach our own listener; serve without warming
+            try:
+                for _ in range(self._PREARM_REQUESTS_PER_CONNECTION):
+                    writer.write(request)
+                    await writer.drain()
+                    if not await reader.read(65536):
+                        break
+                self._prearmed += 1
+            except OSError:
+                pass  # counted by omission: this connection did not complete
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except OSError:
+                    pass
+
+    def _freeze_startup_heap(self) -> None:
+        """Tell a loop that owns its collector that startup is over.
+
+        This is the one moment where "everything reachable" and "everything
+        long-lived" are the same set: modules are imported, the route table is
+        compiled, the lifespan has run, and every listener is bound. A loop that
+        leaves the heap to CPython has no such method, and this does nothing.
+
+        Deliberately the last thing `_start` does, and inside its atomic block: a
+        start that fails after this point tears down through `_abort_startup`,
+        and the loop's own `close()` restores the heap policy.
+        """
+        freeze = getattr(self._loop, "freeze_heap", None)
+        if freeze is not None:
+            freeze()
 
     async def _bind_datagram(
         self, tls: TLSConfig, port: int

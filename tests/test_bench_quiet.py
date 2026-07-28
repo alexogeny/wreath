@@ -222,6 +222,127 @@ def test_apply_refuses_when_the_watchdog_cannot_be_armed(
     assert not journal.exists(), "a journal was written before the refusal"
 
 
+def test_the_watchdog_uses_system_scope_as_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tier 1 arrives via sudo, and `--user` cannot work there.
+
+    Root has no user manager of its own, and `sudo -E` hands it the calling
+    user's `XDG_RUNTIME_DIR`, whose bus refuses another uid. Arming with `--user`
+    therefore failed exactly when tier 1 was asked for, and `apply()` refused to
+    quiet anything -- the watchdog was unarmable in the only case it exists for.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_: object) -> object:
+        calls.append(command)
+        return type("R", (), {"returncode": 0, "stdout": "active", "stderr": ""})()
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    assert quiet.watchdog_scope() == "--system"
+    unit = quiet.arm_watchdog(60, run=fake_run)
+    assert unit, "arming as root produced no unit"
+    assert calls[0][1] == "--system"
+    assert "--user" not in calls[0]
+
+    quiet.disarm_watchdog(unit, run=fake_run)
+    assert quiet.watchdog_armed(unit, run=fake_run)
+    for command in calls[1:]:
+        assert command[1] == "--system", f"scope split across calls: {command}"
+
+
+def test_the_watchdog_uses_user_scope_unprivileged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without root there is no system bus to write to, so user scope stands."""
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    assert quiet.watchdog_scope() == "--user"
+
+
+def test_a_failed_arming_reports_what_systemd_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal carries systemd's sentence, not a guess about it.
+
+    "systemd-run unavailable or refused" describes two unrelated causes with
+    different fixes, and left an operator with nothing to act on.
+    """
+
+    def fake_run(_command: list[str], **_kwargs: object) -> object:
+        return type(
+            "R", (), {"returncode": 1, "stdout": "", "stderr": "Failed to connect to bus"}
+        )()
+
+    reason: list[str] = []
+    assert quiet.arm_watchdog(60, run=fake_run, reason=reason) == ""
+    assert "Failed to connect to bus" in reason[0]
+
+    monkeypatch.setattr(quiet, "arm_watchdog", lambda *a, **k: "")
+    with pytest.raises(quiet.QuietRefused, match="could not arm the restore watchdog"):
+        quiet.apply(1, journal_path=tmp_path / "journal.json", allow_competing=True)
+
+
+def test_the_journal_avoids_tmp_when_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`/tmp` cannot hold a file two uids take turns writing.
+
+    It is world-writable and sticky, and `fs.protected_regular` forbids opening a
+    file there that the opener does not own -- root included, with no capability
+    exemption. A tier-0 run as the user left a journal that the `sudo` run tier 1
+    requires could not reopen, and the failure was a raw `PermissionError`.
+    """
+    monkeypatch.delenv("WREATH_QUIET_JOURNAL", raising=False)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    assert quiet._default_journal() == Path("/run/wreath-quiet.json")
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    assert quiet._default_journal() == Path("/tmp/wreath-quiet.json")
+    monkeypatch.setenv("WREATH_QUIET_JOURNAL", "/somewhere/else.json")
+    assert quiet._default_journal() == Path("/somewhere/else.json")
+
+
+def test_an_unwritable_journal_refuses_before_arming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No journal, no changes -- and the refusal must precede the watchdog.
+
+    Refusing *after* arming leaves a live timer behind on every attempt; five of
+    them accumulated on one machine from a repeated failure at this point.
+    """
+    armed: list[object] = []
+    monkeypatch.setattr(quiet, "arm_watchdog", lambda *a, **k: armed.append(a) or "unit")
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("")
+
+    with pytest.raises(quiet.QuietRefused, match="cannot write the journal"):
+        quiet.apply(1, journal_path=blocker / "journal.json", allow_competing=True)
+    assert not armed, "a watchdog was armed for a run that could not be journalled"
+
+
+def test_a_failed_first_change_disarms_the_watchdog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing changed means nothing to undo, so the timer must not be left armed."""
+    step = quiet.Step(
+        tier=1,
+        description="synthetic",
+        command="true",
+        change=quiet.Change(kind="sysfs", target=str(tmp_path / "knob"),
+                            previous="powersave", desired="performance"),
+    )
+    disarmed: list[str] = []
+    monkeypatch.setattr(quiet, "plan", lambda *a, **k: [step])
+    monkeypatch.setattr(quiet, "arm_watchdog", lambda *a, **k: "unit")
+    monkeypatch.setattr(quiet, "watchdog_armed", lambda *a, **k: True)
+    monkeypatch.setattr(quiet, "disarm_watchdog", lambda unit, **k: disarmed.append(unit))
+    monkeypatch.setattr(
+        quiet, "_apply_one",
+        lambda _change: (_ for _ in ()).throw(PermissionError(13, "Permission denied")),
+    )
+    journal = tmp_path / "journal.json"
+
+    with pytest.raises(quiet.QuietRefused, match="machine is untouched"):
+        quiet.apply(1, journal_path=journal, allow_competing=True)
+    assert disarmed == ["unit"], "the watchdog outlived a run that changed nothing"
+    assert not journal.exists(), "a journal survived a run that changed nothing"
+
+
 def test_apply_refuses_when_the_armed_watchdog_is_not_active(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import dataclasses
+import gc
 import selectors
 import socket
 from asyncio import events as _events
@@ -77,6 +78,129 @@ __all__ = [
     "EventLoop",
     "WreathTask",
 ]
+
+
+#: Defaults for ``gc_mode="idle"``. `threshold` is CPython's gen-0 allocation
+#: trigger (stock is 2000); `idle`/`full_idle` are arrival-gap seconds -- the
+#: poller's own estimate of how long it waits between completions -- above which
+#: a wait is idle enough to spend on a young or a full collection.
+_GC_THRESHOLD = 20_000
+_GC_IDLE_SECONDS = 250e-6
+_GC_FULL_IDLE_SECONDS = 20e-3
+#: Floor between two loop-driven collections. One request wakes the loop several
+#: times, so without it a lightly loaded server re-collects a young generation it
+#: just emptied, several times per request.
+_GC_MIN_INTERVAL_SECONDS = 10e-3
+
+
+class _LoopCollector:
+    """Moves cycle collection out of request batches and into the loop's idle gaps.
+
+    Three separable pieces. They are separable on purpose: each can be measured
+    on its own, and only the first of them removes work rather than moving it.
+
+    **Freeze.** Everything alive when the server finishes starting -- imported
+    modules, the route table, the ORM registry, the app's own state -- is
+    long-lived by construction. ``gc.freeze()`` moves it into the permanent
+    generation, which no collection ever traverses again. This is the piece that
+    makes collections *cheaper* rather than *rarer*.
+
+    **Threshold.** CPython triggers on an allocation counter, so a
+    request-serving loop collects every few hundred requests -- roughly 1% of
+    them, which is exactly where a p99 lives. Raising the trigger does not
+    reduce total collector time: the cost of a young collection scales with the
+    young generation it scans, so rarer collections are proportionally bigger.
+    It moves that time off p99 and onto p999, which is the whole point when the
+    goal is consistency. It is raised modestly rather than removed because it
+    remains the backstop for a loop that never goes idle.
+
+    **Idle collection.** The poller calls the collector when its arrival
+    estimator says the loop is about to wait (see ``rp_collect_idle``). Under
+    sustained saturation that never fires, by design -- there is no idle gap to
+    spend -- and the raised threshold carries it.
+
+    Two consequences worth stating rather than discovering. ``gc.freeze()``
+    makes any reference cycle created during startup permanently
+    unreachable-but-uncollected; that is the intended trade, and ``release()``
+    undoes it. And ``gc.unfreeze()`` is process-global, so ``release()`` calls it
+    only when this collector is the one that froze.
+    """
+
+    __slots__ = ("_poller", "_previous_threshold", "_frozen", "_threshold",
+                 "_idle_seconds", "_full_idle_seconds", "_freeze_enabled",
+                 "_min_interval_seconds")
+
+    def __init__(self, *, threshold: int = _GC_THRESHOLD,
+                 idle_seconds: float = _GC_IDLE_SECONDS,
+                 full_idle_seconds: float = _GC_FULL_IDLE_SECONDS,
+                 min_interval_seconds: float = _GC_MIN_INTERVAL_SECONDS,
+                 freeze_enabled: bool = True) -> None:
+        if threshold < 1:
+            raise ValueError("gc threshold must be positive")
+        if not idle_seconds > 0.0 or full_idle_seconds < idle_seconds:
+            raise ValueError(
+                "idle_seconds must be positive and no greater than "
+                "full_idle_seconds")
+        if min_interval_seconds < 0.0:
+            raise ValueError("min_interval_seconds must not be negative")
+        self._threshold = threshold
+        self._idle_seconds = idle_seconds
+        self._full_idle_seconds = full_idle_seconds
+        self._min_interval_seconds = min_interval_seconds
+        self._freeze_enabled = freeze_enabled
+        self._poller: Any = None
+        self._previous_threshold: tuple[int, ...] | None = None
+        self._frozen = 0
+
+    def attach(self, poller: Any) -> None:
+        """Raise the automatic trigger and hand the poller the collector."""
+        if self._previous_threshold is None:
+            self._previous_threshold = gc.get_threshold()
+            gc.set_threshold(self._threshold, *self._previous_threshold[1:])
+        self._poller = poller
+        poller._set_gc_collector(
+            gc.collect, self._idle_seconds, self._full_idle_seconds,
+            self._min_interval_seconds)
+
+    def freeze(self) -> int:
+        """Collect once, then move everything still alive out of the collector's reach.
+
+        Collecting first matters: freezing garbage would keep it for the life of
+        the process. Returns the number of objects now in the permanent
+        generation, or 0 when freezing is ablated off.
+        """
+        if not self._freeze_enabled:
+            return 0
+        gc.collect()
+        gc.freeze()
+        self._frozen = gc.get_freeze_count()
+        return self._frozen
+
+    def release(self) -> None:
+        """Give the heap back to CPython: restore the trigger and unfreeze."""
+        if self._poller is not None:
+            # A poller closed before its loop has already dropped the collector;
+            # clearing it twice is harmless and keeps teardown order free.
+            self._poller._set_gc_collector(None, 1.0, 1.0, 0.0)
+            self._poller = None
+        if self._previous_threshold is not None:
+            gc.set_threshold(*self._previous_threshold)
+            self._previous_threshold = None
+        if self._frozen:
+            gc.unfreeze()
+            self._frozen = 0
+
+    def stats(self) -> dict[str, int]:
+        poller = self._poller
+        return {
+            "threshold": gc.get_threshold()[0],
+            "frozen_objects": self._frozen,
+            "idle_young_collections": getattr(
+                poller, "gc_young_collections", 0),
+            "idle_full_collections": getattr(poller, "gc_full_collections", 0),
+            "idle_collect_nanoseconds": getattr(
+                poller, "gc_collect_nanoseconds", 0),
+        }
 
 
 def _stats_template() -> dict[str, int]:
@@ -325,8 +449,16 @@ class EventLoop(_LoopBase):
                  direct_task_steps: bool = True, worker_id: int = 0,
                  reuse_port: bool = False, adaptive_polling: bool = True,
                  diagnostics: bool = True, wheel_slots: int = 4096,
-                 wheel_resolution: float = 0.001):
+                 wheel_resolution: float = 0.001, gc_mode: str = "stock",
+                 gc_freeze: bool = True):
         super().__init__(selector)
+        # Everything `close()` touches, before anything below can raise.
+        # `super().__init__` has already made this object collectable, so a
+        # rejected argument leaves a half-built loop for `BaseEventLoop.__del__`
+        # to close -- and a `close()` that raises AttributeError there turns a
+        # clear ValueError into an unraisable one from a destructor.
+        self._poller = None
+        self._collector: _LoopCollector | None = None
         self._backend = backend
         self._tasks = tasks
         self._stats_on = stats
@@ -339,7 +471,6 @@ class EventLoop(_LoopBase):
         self._adaptive_polling = adaptive_polling
         self._diagnostics = diagnostics
         self._wreath_reuse_port = reuse_port
-        self._poller = None
         self._reactor_stats = _stats_template()
         # Native objects, so Any like `_core` everywhere else in the package;
         # None until timers="wheel" builds them. The wheel-only methods below are
@@ -348,6 +479,24 @@ class EventLoop(_LoopBase):
         self._wheel_schedule = None  # cached bound schedule_call: no per-timer attr lookup
         self._wheel_res = wheel_resolution
         self._wheel_tick_handle = None
+        if gc_mode not in ("stock", "idle"):
+            raise ValueError("gc_mode must be 'stock' or 'idle'")
+        if gc_mode == "idle" and not self._native_loop:
+            # The idle gap the policy spends is a native-run-loop concept: only
+            # the C poller knows when it is about to wait, and only it holds the
+            # arrival estimate that distinguishes "idle" from "saturated". Fail
+            # here rather than install a policy with no hook to run in.
+            raise ValueError(
+                "gc_mode='idle' requires native_loop=True: the idle gap it "
+                "collects in belongs to the native run loop")
+        # `gc_freeze` is separable from `gc_mode` because the two are separately
+        # measurable: freezing makes collections cheaper, the idle policy makes
+        # them land somewhere harmless, and which one earned a result is a
+        # question an ablation has to be able to ask.
+        self._collector = (
+            _LoopCollector(freeze_enabled=gc_freeze) if gc_mode == "idle"
+            else None
+        )
         if self._native_loop and timers != "wheel":
             # The C _run_once pops loop._scheduled by expiry only; asyncio's
             # cancelled-TimerHandle compaction lives in the Python _run_once it
@@ -373,6 +522,8 @@ class EventLoop(_LoopBase):
             self._run_once = super()._run_once  # ty: ignore[invalid-assignment]
         if self._native_loop:
             self._install_native_loop()
+        if self._collector is not None:
+            self._collector.attach(self._poller)
 
     def _install_native_loop(self) -> None:
         """Replace the selector I/O core with the C ReactorPoller.
@@ -421,10 +572,32 @@ class EventLoop(_LoopBase):
         inherited_selector.close()
 
     def close(self) -> None:
+        if self._collector is not None:
+            # Before the poller goes: the collector detaches through it, and a
+            # process that outlives this loop must get its heap policy back.
+            self._collector.release()
         if self._poller is not None:
             # Break the loop<->poller cycle and free the ring/registry promptly.
             self._poller.close()
         super().close()
+
+    def freeze_heap(self) -> int:
+        """Move everything currently alive beyond the collector's reach.
+
+        Called once by the server when startup is complete, which is the point
+        at which "everything reachable" and "everything long-lived" coincide.
+        Returns the number of objects in the permanent generation, or 0 when
+        this loop does not own its collector (``gc_mode="stock"``).
+        """
+        if self._collector is None:
+            return 0
+        return self._collector.freeze()
+
+    def gc_stats(self) -> dict[str, int]:
+        """Collector counters: what the policy did, and what it cost."""
+        if self._collector is None:
+            return {}
+        return self._collector.stats()
 
     # Returns a duck-typed task, not an `asyncio.Task`, whenever the inline tier
     # is on -- which is the reason this module exists (see `WreathTask`). That is
@@ -571,7 +744,8 @@ def new_event_loop(backend: str | None = None, *, timers: str = "heap") -> Event
 
 def metal_event_loop(
     *, worker_id: int = 0, reuse_port: bool | None = None,
-    diagnostics: bool = False,
+    diagnostics: bool = False, gc_mode: str | None = None,
+    adaptive_polling: bool | None = None,
 ) -> EventLoop:
     """The event loop for the ``metal`` tier: native C poller + transport.
 
@@ -582,6 +756,14 @@ def metal_event_loop(
 
     ReactorPoller reads the wheel's exact next deadline, so there is no recurring
     bridge tick and an idle server sleeps until native work or a real deadline.
+
+    Metal also owns its cycle collector (``gc_mode="idle"``): collection runs in
+    the loop's idle gaps rather than wherever CPython's allocation counter
+    happens to trip, and the server freezes the startup heap once it is up. Both
+    halves are ablatable without touching code -- ``WREATH_METAL_GC=stock``
+    restores CPython's automatic trigger, ``WREATH_METAL_GC_FREEZE=0`` keeps the
+    startup heap traceable -- so the four combinations can be measured against
+    each other.
     """
     import os
 
@@ -595,13 +777,30 @@ def metal_event_loop(
     direct_task_steps = True
     if reuse_port is None:
         reuse_port = os.environ.get("WREATH_METAL_REUSEPORT", "0") == "1"
+    if gc_mode is None:
+        gc_mode = os.environ.get("WREATH_METAL_GC", "idle")
+        if gc_mode not in ("stock", "idle"):
+            raise ValueError("WREATH_METAL_GC must be 'stock' or 'idle'")
+    if adaptive_polling is None:
+        # The spin is the one metal-only thing on the wait path that can cost a
+        # request time without doing any work for it (a miss burns its whole
+        # budget and then blocks anyway), so it needs an ablation switch like
+        # the send path and the collector have.
+        poll_setting = os.environ.get("WREATH_METAL_ADAPTIVE_POLL", "1")
+        if poll_setting not in ("0", "1"):
+            raise ValueError("WREATH_METAL_ADAPTIVE_POLL must be '0' or '1'")
+        adaptive_polling = poll_setting == "1"
+    freeze_setting = os.environ.get("WREATH_METAL_GC_FREEZE", "1")
+    if freeze_setting not in ("0", "1"):
+        raise ValueError("WREATH_METAL_GC_FREEZE must be '0' or '1'")
     backend = _default_backend()
     return EventLoop(selectors.EpollSelector(), backend=backend,
                      timers=timers, tasks=tasks, stats=False,
-                     adaptive_polling=True, diagnostics=diagnostics,
+                     adaptive_polling=adaptive_polling, diagnostics=diagnostics,
                      native_transport=transport, native_loop=native_loop,
                      direct_task_steps=direct_task_steps, worker_id=worker_id,
-                     reuse_port=reuse_port)
+                     reuse_port=reuse_port, gc_mode=gc_mode,
+                     gc_freeze=freeze_setting == "1")
 
 
 class _ServerHandle:

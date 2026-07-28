@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from .native_lint import repo_root
-from .quiet import split_cores
+from .quiet import physical_cores, split_cores
 
 
 def _uv() -> str:
@@ -129,6 +129,50 @@ def _resolve_pin(mode: str) -> set[int]:
         else:
             cpus.add(int(part))
     return cpus
+
+
+def _resolve_multi(value: str | None) -> int:
+    """Turn a --multi value into the number of server cores (and so workers).
+
+    `None` means the single-worker column: one worker, one physical core, for
+    every arm.
+
+    `auto` gives the server a *third* of the physical cores, not half. Measured
+    2026-07-28: one h2load thread saturates near 133k req/s and one metal worker
+    serves near 120k, so generator and server cost about the same per core. An
+    even split therefore stands the generator up at parity with the thing it is
+    measuring -- exactly the case where a plateau reads as the server's ceiling
+    when it is really the client's. Two generator cores per server core keeps
+    the measurement on the right side of that.
+
+    Below about six physical cores even a third leaves the generator at parity.
+    `--multi` is then a lower bound rather than a measurement, and the
+    `generator_threads` in the result metadata is how you tell.
+    """
+    if value is None:
+        return 1
+    if value == "auto":
+        cores = len(physical_cores())
+        return max(2, cores // 3) if cores else 2
+    try:
+        count = int(value)
+    except ValueError:
+        raise SystemExit(f"--multi expects a core count or 'auto', got {value!r}") from None
+    if count < 1:
+        raise SystemExit("--multi must be at least 1")
+    return count
+
+
+def _ensure_workers(forwarded: list[str], workers: int) -> list[str]:
+    """Tell `benchmarks.run` how many workers every arm gets, unless told already.
+
+    An explicit `--workers` from the caller wins: `--multi 4 --workers 2` is a
+    legitimate thing to ask for (four cores, two workers) and the harness should
+    not quietly overrule it.
+    """
+    if "--workers" in forwarded:
+        return forwarded
+    return [*forwarded, "--workers", str(workers)]
 
 
 def _apply_pin(cpus: set[int]) -> bool:
@@ -264,6 +308,11 @@ def bench(argv: list[str] | None = None) -> int:
                         help="framework-matrix passes to run and combine (default 3)")
     parser.add_argument("--pin", default="pcores",
                         help="CPUs to pin to: 'pcores' (default), 'none', or a list like '0-11'")
+    parser.add_argument("--multi", nargs="?", const="auto", default=None, metavar="N",
+                        help="run every arm multi-worker on N server cores "
+                             "(default: half the physical cores, so the load "
+                             "generator keeps the other half). Without it every "
+                             "arm is held to one worker on one core.")
     parser.add_argument("--matrix-only", action="store_true",
                         help="run only the framework matrix (skip webhook and database benches)")
     parser.add_argument("--no-db", action="store_true",
@@ -317,6 +366,21 @@ def bench(argv: list[str] | None = None) -> int:
         noise = _quiet.measure_noise()
         print(f"[quiet] A/A spread after quieting: {noise['spread_pct']:.2f}%")
 
+    # Everything past this point runs with the machine altered, so the restore
+    # belongs in a `finally` rather than on the happy path. It did not have one:
+    # a failed matrix pass returns 1 from inside the loop, and an interrupted run
+    # never reaches the end at all, so either left the governor on `performance`,
+    # six services stopped, and the operator's browser *frozen* until the
+    # watchdog deadline expired half an hour later. That is the watchdog doing
+    # its job, but it is not the process doing its own.
+    try:
+        return _bench_after_quiet(args, forwarded)
+    finally:
+        _unquiet(quiet_journal)
+
+
+def _bench_after_quiet(args: argparse.Namespace, forwarded: list[str]) -> int:
+    """The battery itself, with the machine already quieted and guaranteed restored."""
     # Pin the server and the load generator to *disjoint whole physical cores*.
     # Disjoint logical CPUs is not enough: taking CPUs 0 and 1 for the server on
     # a uniform SMT machine hands it one thread each of two different cores and
@@ -324,16 +388,18 @@ def bench(argv: list[str] | None = None) -> int:
     # core and the benchmark measures that contention. `split_cores` allocates by
     # `thread_siblings_list`, so a core belongs entirely to one side or the
     # other. On a hybrid part the E-core exclusion still comes from `--pin`.
+    server_cores = _resolve_multi(args.multi)
     pcores = sorted(_resolve_pin(args.pin))
-    split = split_cores() if args.pin == "pcores" else None
+    split = split_cores(server_cores) if args.pin == "pcores" else None
     if split is not None and split.whole_cores and "WREATH_BENCH_SERVER_CPUS" not in os.environ:
         os.environ["WREATH_BENCH_SERVER_CPUS"] = ",".join(str(c) for c in split.server)
         pinned = _apply_pin(set(split.client))
         if pinned:
             print(f"[pin] server -> CPUs {list(split.server)}; generator -> "
                   f"{list(split.client)} ({split.reason})")
-    elif len(pcores) >= 4 and "WREATH_BENCH_SERVER_CPUS" not in os.environ:
-        server_cpus, client_cpus = pcores[:2], set(pcores[2:])
+    elif len(pcores) >= 2 * server_cores + 2 and "WREATH_BENCH_SERVER_CPUS" not in os.environ:
+        take = 2 * server_cores
+        server_cpus, client_cpus = pcores[:take], set(pcores[take:])
         os.environ["WREATH_BENCH_SERVER_CPUS"] = ",".join(str(c) for c in server_cpus)
         pinned = _apply_pin(client_cpus)
         if pinned:
@@ -345,7 +411,10 @@ def bench(argv: list[str] | None = None) -> int:
     if not pinned and args.pin != "none":
         print("[pin] no CPU pinning applied (sysfs unavailable or empty selection)")
 
-    forwarded = _ensure_native_arm(forwarded)
+    forwarded = _ensure_workers(_ensure_native_arm(forwarded), server_cores)
+    print(f"[workers] every arm runs {server_cores} worker(s) on {server_cores} "
+          f"server core(s)" + ("" if server_cores > 1 else
+                               "; pass --multi for the multi-worker column"))
     print("[wreath] `wreath-native` is wreath's own HTTP+JSON stack (the headline "
           "wreath number); the `wreath` arm is wreath on uvicorn/httptools, kept as "
           "the common-server framework-overhead comparison and labeled by server.")
@@ -402,7 +471,6 @@ def bench(argv: list[str] | None = None) -> int:
 
         _report_main([*(str(path) for path in report_inputs), "-o", str(combined)])
         print(f"\nwreath-bench: combined report written to {combined}")
-    _unquiet(quiet_journal)
     return 0
 
 

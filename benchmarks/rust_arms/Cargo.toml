@@ -1,0 +1,24 @@
+# The compiled arms of the framework matrix, as one workspace.
+#
+# A workspace rather than four independent crates so they share a single
+# `target/` and a single `cargo build --release`: they overlap heavily in
+# dependencies, and building them separately would compile tokio, hyper and
+# serde once per arm. `tools/bench-quiet.sh` builds this once, before the machine
+# is quieted, because a cargo build is minutes of every core at full tilt and
+# would otherwise land on whichever arm happened to be measuring.
+[workspace]
+resolver = "2"
+members = [
+    "bench_common",
+    "axum_server",
+    "ntex_server",
+    "xitca_server",
+    "minihttp_server",
+]
+
+# One profile for every arm, so no arm is accidentally faster for having been
+# compiled differently. `lto` and a single codegen unit are what a Rust web
+# service ships with; leaving them off would understate the ceiling.
+[profile.release]
+lto = true
+codegen-units = 1
