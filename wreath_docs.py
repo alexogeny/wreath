@@ -256,6 +256,7 @@ nav = Nav(
         # dead link. The release-notes skill adds a line here as well as to
         # the index.
         Page("Overview", "release_notes/index.md"),
+        Page("v0.1.0a2", "release_notes/0.1.0a2.md"),
         Page("v0.1.0a1", "release_notes/0.1.0a1.md"),
     ),
 )

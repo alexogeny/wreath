@@ -1,0 +1,35 @@
+# What the sdist must carry so the C extensions can be compiled by whoever
+# installs it.
+#
+# Without this file setuptools ships only the sources it can infer: an
+# extension's `sources=` plus whatever its `depends=` happens to name. That
+# inference is silently incomplete in two ways, and v0.1.0a1 shipped broken
+# because of both:
+#
+#   * a header named in no `depends=` is never collected at all --
+#     `server_request_capi.h` and `server_hpack_huffman.h` were missing, and
+#     `_servermodule.c` includes the first one, so the build died on
+#     `fatal error: server_request_capi.h: No such file or directory`;
+#   * a *conditional* extension contributes nothing when it is not configured --
+#     the HTTP/3 sources and `http3.h` are only wired up under
+#     WREATH_BUILD_HTTP3=1, so a default release build omitted them, which would
+#     make the optional extension unbuildable from the published sdist even for
+#     someone who has the toolchain.
+#
+# Listing the tree explicitly avoids both. A new header is picked up because it
+# is a header, not because somebody remembered to add it to a `depends=`.
+recursive-include src/wreath/_native *.c
+recursive-include src/wreath/_native *.h
+recursive-include src/wreath/_native *.md
+
+# setup.py reads these at build time.
+include setup.py
+include pyproject.toml
+include README.md
+include LICENSE*
+
+# Never ship build detritus or a stale egg-info from the maintainer's tree.
+prune src/*.egg-info
+global-exclude *.so
+global-exclude __pycache__/*
+global-exclude *.py[cod]

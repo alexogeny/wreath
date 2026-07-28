@@ -8,6 +8,7 @@ Release cut by `.github/workflows/publish.yml`.
 Versions are listed newest first.
 
 <!-- releases:start -->
+- [v0.1.0a2](0.1.0a2.md) — 2026-07-28
 - [v0.1.0a1](0.1.0a1.md) — 2026-07-28
 <!-- The release-notes skill inserts a link to each new version above this line. -->
 <!-- releases:end -->
