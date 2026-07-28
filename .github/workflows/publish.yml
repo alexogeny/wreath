@@ -53,6 +53,7 @@ jobs:
     outputs:
       bumped: ${{ steps.check.outputs.bumped }}
       version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -83,6 +84,19 @@ jobs:
 
           version="$(extract < pyproject.toml)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # Emitted here because this is the only job with `packaging`, and a
+          # GitHub release that does not say it is a prerelease takes the
+          # "Latest release" badge from whatever stable version preceded it.
+          prerelease="$(python -c '
+          import sys
+          from packaging.version import InvalidVersion, Version
+          try:
+              print(str(Version(sys.argv[1]).is_prerelease).lower())
+          except InvalidVersion:
+              print("false")
+          ' "$version")"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
           if ! python -c '
           import sys
@@ -188,12 +202,22 @@ jobs:
         with:
           fetch-depth: 0 # full history so the tag and branch are complete
 
-      - name: Guard against an existing tag
+      - name: Guard against a tag that means something else
         run: |
           set -euo pipefail
-          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
-            echo "::error::tag v$VERSION already exists; bump the version"
-            exit 1
+          # A tag at a DIFFERENT commit means the version was reused, which is
+          # what this guard is for. A tag at THIS commit means an earlier run of
+          # this same release got partway and failed -- refusing that leaves the
+          # release permanently unfinishable, because the tag it already pushed
+          # is what blocks the retry. Ask for a re-run, not a version bump.
+          tag="v$VERSION"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            existing="$(git rev-list -n1 "$tag")"
+            if [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "::error::tag $tag already exists at $existing, not $GITHUB_SHA; bump the version"
+              exit 1
+            fi
+            echo "Tag $tag already exists at this commit; resuming a partial release."
           fi
 
       - name: Require release notes
@@ -214,18 +238,41 @@ jobs:
         run: |
           set -euo pipefail
           branch="release/v$VERSION"
+          tag="v$VERSION"
+          # --force on the branch and a skip on the tag: re-running must reach
+          # the same end state rather than failing on what the last run already
+          # did. checkout fetches tags at depth 0, so a tag present locally is a
+          # tag present on the remote.
           git branch -f "$branch" HEAD
-          git tag -a "v$VERSION" -m "wreath v$VERSION"
-          git push origin "$branch"
-          git push origin "refs/tags/v$VERSION"
+          git push --force origin "$branch"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "Tag $tag already pushed; leaving it."
+          else
+            git tag -a "$tag" -m "wreath v$VERSION"
+            git push origin "refs/tags/$tag"
+          fi
 
       - name: Create GitHub release
+        env:
+          PRERELEASE: ${{ needs.detect.outputs.prerelease }}
         run: |
           set -euo pipefail
-          gh release create "v$VERSION" \
-            --title "v$VERSION" \
-            --notes-file "docs/release_notes/$VERSION.md" \
-            --target "v$VERSION"
+          tag="v$VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; leaving it alone."
+            exit 0
+          fi
+          # No --target. It sets `target_commitish`, which GitHub defines as a
+          # BRANCH or COMMIT SHA to create the tag from -- passing the tag name
+          # is rejected outright ("release.target_commitish is invalid"), and it
+          # is unused anyway once the tag exists, which the previous step
+          # guarantees. --verify-tag makes that guarantee explicit: fail if the
+          # tag is somehow absent rather than silently creating a second one.
+          args=(--title "$tag" --notes-file "docs/release_notes/$VERSION.md" --verify-tag)
+          if [ "${PRERELEASE:-false}" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "$tag" "${args[@]}"
 
   pypi:
     needs: [detect, release]
