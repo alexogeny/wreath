@@ -758,14 +758,28 @@ ring_publish(wreath_nfr_worker *worker, const void *cell)
     return 1;
 }
 
-/* The log emitter's publish seam. Python packs a KIND_LOG cell and hands it
- * here so records ride the same single-writer ring, the same one capacity check
- * and release store, and the same RING_FULL accounting as a completion. A
- * native emitter would replace the packing above this line, not this call. */
+/* The log emitter's publish seam. The emitter packs a KIND_LOG cell and hands
+ * it here so records ride the same single-writer ring, the same one capacity
+ * check and release store, and the same RING_FULL accounting as a completion.
+ * The native emitter replaced the packing above this line, not this call --
+ * which is what the ADR promised the seam would survive. */
 int
 wreath_nfr_publish_cell(wreath_nfr_worker *worker, const void *cell)
 {
     return ring_publish(worker, cell);
+}
+
+/* The keyed redaction fingerprint, for callers outside this translation unit.
+ *
+ * The log emitter hashes with the *site registry's* key rather than the
+ * worker's, because the pure Python packer uses that key and the two must agree
+ * byte for byte -- a fingerprint that differed between the native and pure
+ * halves of one process would break correlation within a single recording. So
+ * the key travels in rather than being read off the worker. */
+uint64_t
+wreath_nfr_fingerprint(const void *data, size_t len, uint64_t k0, uint64_t k1)
+{
+    return siphash24((const uint8_t *)data, len, k0, k1);
 }
 
 Py_ssize_t

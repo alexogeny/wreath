@@ -292,6 +292,55 @@ no-op it is before a server boots — and, because the request path checks a pla
 module global before it touches anything native, a server with a recorder but no
 logging adds no boundary crossings at all.
 
+## Logging from a job, or any other thread
+
+The ring has exactly one writer, and it is the event loop. A record made from a
+`wreath.jobs` worker or a thread-pool task therefore cannot go straight onto it:
+it is staged, and the loop publishes it on its next tick — up to one writer
+interval later, carrying an `off-loop` flag so you can tell a late record from a
+reordered one.
+
+You do not have to do anything to get this; a log call is a log call wherever
+you make it. What you should know is that the staging queue is bounded, that
+overflow is a counted drop rather than growth, and that both numbers are
+readable:
+
+```python
+log.off_loop_counts()   # {"staged": 41, "dropped": 0, "held": 3}
+```
+
+A `staged` that climbs is not an error — it is telling you where your logging
+happens. A `dropped` that climbs means a burst outran the loop's drain, and it
+is the same `LossReason.LOG_OFF_LOOP` the recorder accounts everything else
+with.
+
+## What things cost
+
+Measured on CPython 3.14, 2026-07-28, with
+`uv run python -m benchmarks.bench_logging`. One machine — reproduce before
+relying on the absolutes; the ratios are the durable part:
+
+| | per record |
+| --- | --- |
+| `SITE(user, resource)` — the registration tier | **0.42 µs** |
+| `log.info("…", **kwargs)` — the ergonomic tier | 1.78 µs |
+| a *disabled* `DEBUG(...)` call | 0.07 µs |
+| a TRACE/DEBUG record **buffered** for promotion | 2.99 µs |
+| structlog, rendering and returning | 2.59 µs |
+| `logging.getLogger(...).warning(...)`, `StreamHandler` | 3.90 µs |
+
+Two of these are worth acting on. A **disabled** call is 70 ns, so verbose
+instrumentation you leave in the code costs essentially nothing when it is off,
+and `if SITE:` stays an escape hatch you will rarely need.
+
+A **buffered** call is not free. Failure-triggered logging holds records as
+objects until the request decides whether to promote them, and that is 3.0 µs
+apiece — more than an entire small request. If a hot handler carries ten DEBUG
+statements and you have set `capture_level` to DEBUG, you are paying ~29 µs per
+request for records that a healthy request throws away. Either raise
+`capture_level` on that path, or keep the verbose statements where the promotion
+is worth their price.
+
 ## What is deliberately not here
 
 - **`wreath.audit` is not built on this.** An audit trail needs "never lose a

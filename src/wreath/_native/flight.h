@@ -77,6 +77,12 @@ typedef struct wreath_nfr_worker wreath_nfr_worker;
  * Must be called from the worker's own thread, like every other writer. */
 int wreath_nfr_publish_cell(wreath_nfr_worker *worker, const void *cell);
 
+/* SipHash-2-4 over `data`, the keyed redaction fingerprint. Exposed so the log
+ * emitter can hash with the site registry's key -- the same key the pure Python
+ * packer uses, so the two agree byte for byte. */
+uint64_t wreath_nfr_fingerprint(const void *data, size_t len, uint64_t k0,
+                                uint64_t k1);
+
 /* --- worker lifecycle (control plane, not the request path) --------------- */
 
 /* Create a worker. ring_records must be a power of two (or 0 for Off-only).

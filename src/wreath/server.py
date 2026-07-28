@@ -173,6 +173,11 @@ def _create_logging(recorder: Any, config: ServerConfig) -> tuple[Any, Any]:
         sampling=settings.sampling,
         limiter_capacity=settings.limiter_capacity,
         scratch_budget=settings.scratch_budget,
+        # The native emitter when this recorder has one, packing a record
+        # straight into a ring cell in C. The sink above stays installed and
+        # stays the twin: a promoted buffer, and a pure recorder, still go
+        # through it.
+        native=wreath_logging.recorder_emitter(recorder),
     )
     # Carry the sites the application registered at import into the new runtime,
     # *keeping the configured capacity*. Without the adoption a module-level
@@ -182,6 +187,12 @@ def _create_logging(recorder: Any, config: ServerConfig) -> tuple[Any, Any]:
     # be silently ignored because the adopted table has its own.
     runtime.registry = wreath_logging.installed().registry
     runtime.registry.set_capacity(settings.site_capacity)
+    # This runs on the event loop during startup, and the loop is the ring's
+    # single writer. Binding it here opens the off-loop slow path: a record made
+    # on a job worker or in a thread-pool task is staged instead of racing the
+    # loop into `ring_publish`, which does not lose a record so much as
+    # overwrite one and advance the head anyway.
+    runtime.bind_writer()
     previous = wreath_logging.install(runtime)
     writer = config.log_writer
     if writer is None:
@@ -959,6 +970,7 @@ class Server:
         self._closed = loop.create_future()
         self._closing = False
         self._date_timer: asyncio.TimerHandle | None = None
+        self._off_loop_timer: asyncio.TimerHandle | None = None
 
     @property
     def prearmed_connections(self) -> int:
@@ -1054,6 +1066,7 @@ class Server:
                 )
                 if self._log_pipeline is not None:
                     self._log_pipeline.start()
+                    self._drain_off_loop_logs()
                 if self._projector is not None:
                     self._projector.start()
                 if self._export is not None:
@@ -1202,6 +1215,28 @@ class Server:
             self._date_timer.cancel()
             self._date_timer = None
 
+    def _drain_off_loop_logs(self) -> None:
+        """Publish records staged by threads that may not write to the ring.
+
+        A `call_later` chain rather than a thread, because the point is that
+        this runs *on the loop*: it is the only writer, and the whole slow path
+        exists so a job worker's record reaches the ring through it. The tick is
+        the writer's own interval, so an off-loop record's added latency is the
+        one a reader already expects from the writer.
+        """
+        from . import logging as wreath_logging
+        from ._logsink import DEFAULT_WRITER_INTERVAL
+
+        wreath_logging.installed().drain_off_loop()
+        self._off_loop_timer = self._loop.call_later(
+            DEFAULT_WRITER_INTERVAL, self._drain_off_loop_logs
+        )
+
+    def _cancel_off_loop_timer(self) -> None:
+        if self._off_loop_timer is not None:
+            self._off_loop_timer.cancel()
+            self._off_loop_timer = None
+
     async def _stop_projection(self) -> None:
         """Stop the export pipeline then the projector, joining their threads off
         the event loop. The export pipeline goes first so its final flush can
@@ -1214,6 +1249,11 @@ class Server:
         if previous is not None:
             from . import logging as wreath_logging
 
+            # One last drain on the loop, before the runtime is swapped out from
+            # under the stage. A record a job worker made during shutdown is
+            # exactly the one worth not losing.
+            self._cancel_off_loop_timer()
+            wreath_logging.installed().drain_off_loop()
             wreath_logging.install(previous)
         projector, self._projector = self._projector, None
         if projector is not None:
@@ -1236,6 +1276,7 @@ class Server:
 
     async def _abort_startup(self) -> None:
         self._cancel_date_timer()
+        self._cancel_off_loop_timer()
         if self._inspector is not None:
             await self._inspector.close()
             self._inspector = None
@@ -1287,6 +1328,7 @@ class Server:
             return
         self._closing = True
         self._cancel_date_timer()
+        self._cancel_off_loop_timer()
         config = self._config
 
         # 0. The Inspector goes first: no reads of a recorder mid-teardown.

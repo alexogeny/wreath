@@ -1,0 +1,409 @@
+{
+  "tool": "benchmarks.bench_logging",
+  "schema_version": 1,
+  "label": "baseline: python emitter, pure-python siphash",
+  "python": "3.14.6 (main, Jul 18 2026, 17:01:31) [Clang 22.1.3 ]",
+  "implementation": "cpython",
+  "platform": "Linux-6.12.38+deb13-amd64-x86_64-with-glibc2.41",
+  "native_flight": "/home/alex/private/neo/.claude/worktrees/logging-remainder/src/wreath/_native/_flight.cpython-314-x86_64-linux-gnu.so",
+  "rounds": 11,
+  "iterations": 20000,
+  "suites": {
+    "emit": {
+      "baseline": 0.006,
+      "floor": 0.0,
+      "rows": [
+        {
+          "arm": "wreath event, 2 args (raw)",
+          "median": 2.517,
+          "p95": 2.911,
+          "delta": 2.511,
+          "step": 2.511,
+          "resolved": true
+        },
+        {
+          "arm": "wreath event, 2 args (hashed)",
+          "median": 9.191,
+          "p95": 10.007,
+          "delta": 9.184,
+          "step": 6.674,
+          "resolved": true
+        },
+        {
+          "arm": "wreath event + cell encode",
+          "median": 3.924,
+          "p95": 4.026,
+          "delta": 3.917,
+          "step": -5.267,
+          "resolved": true
+        },
+        {
+          "arm": "wreath log.info(**kwargs)",
+          "median": 10.336,
+          "p95": 10.388,
+          "delta": 10.33,
+          "step": 6.413,
+          "resolved": true
+        },
+        {
+          "arm": "wreath event (limiter dropping)",
+          "median": 0.358,
+          "p95": 0.366,
+          "delta": 0.351,
+          "step": -9.978,
+          "resolved": true
+        },
+        {
+          "arm": "stdlib NullHandler",
+          "median": 2.836,
+          "p95": 2.856,
+          "delta": 2.829,
+          "step": 2.478,
+          "resolved": true
+        },
+        {
+          "arm": "stdlib StreamHandler",
+          "median": 3.861,
+          "p95": 3.885,
+          "delta": 3.854,
+          "step": 1.025,
+          "resolved": true
+        },
+        {
+          "arm": "stdlib QueueHandler",
+          "median": 5.063,
+          "p95": 5.098,
+          "delta": 5.057,
+          "step": 1.203,
+          "resolved": true
+        },
+        {
+          "arm": "structlog (ReturnLogger)",
+          "median": 2.59,
+          "p95": 2.616,
+          "delta": 2.584,
+          "step": -2.473,
+          "resolved": true
+        }
+      ],
+      "structlog": "installed",
+      "integrity": {
+        "unlimited_published": 1000,
+        "limited_published": 109
+      }
+    },
+    "disabled": {
+      "baseline": 0.006,
+      "floor": 0.0,
+      "rows": [
+        {
+          "arm": "wreath DEBUG site, disabled",
+          "median": 0.079,
+          "p95": 0.083,
+          "delta": 0.072,
+          "step": 0.072,
+          "resolved": true
+        },
+        {
+          "arm": "wreath DEBUG site, if-guarded",
+          "median": 0.049,
+          "p95": 0.063,
+          "delta": 0.042,
+          "step": -0.03,
+          "resolved": true
+        },
+        {
+          "arm": "wreath log.debug(**kwargs), disabled",
+          "median": 0.114,
+          "p95": 0.162,
+          "delta": 0.107,
+          "step": 0.065,
+          "resolved": true
+        },
+        {
+          "arm": "wreath DEBUG site, buffered",
+          "median": 2.789,
+          "p95": 3.238,
+          "delta": 2.783,
+          "step": 2.676,
+          "resolved": true
+        },
+        {
+          "arm": "stdlib logger.debug, disabled",
+          "median": 0.075,
+          "p95": 0.076,
+          "delta": 0.069,
+          "step": -2.714,
+          "resolved": true
+        },
+        {
+          "arm": "stdlib logger.debug, isEnabledFor",
+          "median": 0.043,
+          "p95": 0.044,
+          "delta": 0.037,
+          "step": -0.032,
+          "resolved": true
+        },
+        {
+          "arm": "structlog .debug(), filtered out",
+          "median": 0.18,
+          "p95": 0.184,
+          "delta": 0.173,
+          "step": 0.136,
+          "resolved": true
+        }
+      ],
+      "integrity": {
+        "disabled_published": 0
+      }
+    },
+    "publish": {
+      "baseline": 18.379,
+      "floor": 0.262,
+      "rows": [
+        {
+          "arm": "LogCell.encode() only",
+          "median": 1168.322,
+          "p95": 1233.441,
+          "delta": 1149.943,
+          "step": 1149.943,
+          "resolved": true
+        },
+        {
+          "arm": "publish_log(pre-encoded)",
+          "median": 44.198,
+          "p95": 66.427,
+          "delta": 25.819,
+          "step": -1124.124,
+          "resolved": true
+        },
+        {
+          "arm": "encode + publish_log",
+          "median": 1206.152,
+          "p95": 1236.04,
+          "delta": 1187.773,
+          "step": 1161.954,
+          "resolved": true
+        },
+        {
+          "arm": "completion (begin/route/finish)",
+          "median": 201.748,
+          "p95": 235.947,
+          "delta": 183.369,
+          "step": -1004.404,
+          "resolved": true
+        }
+      ],
+      "batch": 16384,
+      "trials": 15
+    },
+    "drain": {
+      "rows": [
+        {
+          "logs_per_request": 0,
+          "cells": 512,
+          "ns_per_cell": 4667.9,
+          "million_cells_per_second": 0.21,
+          "raw": [
+            4915.5,
+            4685.8,
+            4667.9,
+            4657.6,
+            4638.3,
+            4813.4,
+            4669.0,
+            4657.6,
+            4698.3,
+            4653.3,
+            4679.1,
+            4659.6,
+            4796.8,
+            4662.5,
+            4648.3
+          ]
+        },
+        {
+          "logs_per_request": 1,
+          "cells": 1024,
+          "ns_per_cell": 4970.1,
+          "million_cells_per_second": 0.2,
+          "raw": [
+            4970.1,
+            5588.0,
+            5027.4,
+            4951.5,
+            4923.5,
+            4938.4,
+            5258.0,
+            5021.4,
+            5090.7,
+            4933.9,
+            5030.3,
+            4942.4,
+            4952.7,
+            5068.5,
+            4938.3
+          ]
+        },
+        {
+          "logs_per_request": 10,
+          "cells": 5632,
+          "ns_per_cell": 4160.5,
+          "million_cells_per_second": 0.24,
+          "raw": [
+            4084.0,
+            4235.7,
+            5619.2,
+            4160.5,
+            4181.6,
+            4079.1,
+            4226.5,
+            4172.5,
+            4146.7,
+            4186.4,
+            4120.1,
+            4065.2,
+            4245.5,
+            4147.2,
+            4153.7
+          ]
+        },
+        {
+          "logs_per_request": 100,
+          "cells": 51712,
+          "ns_per_cell": 4263.5,
+          "million_cells_per_second": 0.23,
+          "raw": [
+            4234.3,
+            4357.8,
+            4454.3,
+            4039.5,
+            4192.9,
+            4266.0,
+            4388.1,
+            4416.0,
+            4028.1,
+            4208.3,
+            4263.5,
+            4477.5,
+            4002.0,
+            4157.2,
+            4267.8
+          ]
+        }
+      ],
+      "requests_per_trial": 512,
+      "trials": 15
+    },
+    "request": {
+      "baseline": 2.204,
+      "floor": 0.008,
+      "rows": [
+        {
+          "arm": "logging on, handler silent",
+          "median": 2.967,
+          "p95": 3.976,
+          "delta": 0.762,
+          "step": 0.762,
+          "resolved": true
+        },
+        {
+          "arm": "logging on, 1 INFO record",
+          "median": 5.808,
+          "p95": 6.484,
+          "delta": 3.603,
+          "step": 2.841,
+          "resolved": true
+        },
+        {
+          "arm": "logging on, 5 INFO records",
+          "median": 16.203,
+          "p95": 16.474,
+          "delta": 13.999,
+          "step": 10.396,
+          "resolved": true
+        },
+        {
+          "arm": "logging on, 5 buffered DEBUG",
+          "median": 15.638,
+          "p95": 15.728,
+          "delta": 13.434,
+          "step": -0.566,
+          "resolved": true
+        },
+        {
+          "arm": "logging on, 3 canonical fields",
+          "median": 8.461,
+          "p95": 8.524,
+          "delta": 6.257,
+          "step": -7.177,
+          "resolved": true
+        }
+      ],
+      "integrity": {
+        "records_published": 171514
+      }
+    },
+    "memory": {
+      "entries": 4096,
+      "rows": [
+        {
+          "component": "site",
+          "bytes_per_entry_measured": 351.4,
+          "bytes_per_entry_constant": 512,
+          "ratio": 0.686
+        },
+        {
+          "component": "limiter_slot",
+          "bytes_per_entry_measured": 153.3,
+          "bytes_per_entry_constant": 96,
+          "ratio": 1.596
+        },
+        {
+          "component": "queued_record",
+          "bytes_per_entry_measured": 405.5,
+          "bytes_per_entry_constant": 256,
+          "ratio": 1.584
+        },
+        {
+          "component": "scratch_record",
+          "bytes_per_entry_measured": 335.1,
+          "bytes_per_entry_constant": 256,
+          "ratio": 1.309
+        }
+      ],
+      "limiter_capacity": 4096
+    },
+    "e2e": {
+      "generator": "builtin",
+      "generator_version": "wreath-dev-1",
+      "shared_process": true,
+      "requests": 8000,
+      "concurrency": 32,
+      "repeats": 3,
+      "rows": [
+        {
+          "arm": "off",
+          "requests_per_second": 35233.7,
+          "latency_ms_median": 0.7024,
+          "latency_ms_p99": 12.474,
+          "errors": 0
+        },
+        {
+          "arm": "on",
+          "requests_per_second": 27027.6,
+          "latency_ms_median": 0.7524,
+          "latency_ms_p99": 21.1147,
+          "errors": 0
+        },
+        {
+          "arm": "off (A/A)",
+          "requests_per_second": 35337.3,
+          "latency_ms_median": 0.7006,
+          "latency_ms_p99": 11.7771,
+          "errors": 0
+        }
+      ]
+    }
+  }
+}

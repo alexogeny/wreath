@@ -226,6 +226,34 @@ enum {
     WREATH_NFR_LOG_ARG_LENGTH = 6  /* uint32_t original length, bytes dropped */
 };
 
+/* The declared type of one call-site field, as the emitter sees it. A site's
+ * fields are flattened at registration into a spec blob -- one byte per field,
+ * `(type << 4) | disposition` -- so the native emitter walks a byte string
+ * beside the argument tuple instead of reading Python objects to decide how to
+ * pack. That flattening is what makes the packing branch on a small integer
+ * rather than on `isinstance`. Mirrors LOG_SPEC_* in _flight_schema.py; the
+ * disposition nibble is CaptureDisposition, unchanged. */
+enum {
+    WREATH_NFR_LOG_SPEC_NONE = 0,  /* the value must be None                   */
+    WREATH_NFR_LOG_SPEC_BOOL = 1,
+    WREATH_NFR_LOG_SPEC_INT = 2,
+    WREATH_NFR_LOG_SPEC_FLOAT = 3,
+    WREATH_NFR_LOG_SPEC_STR = 4,
+    WREATH_NFR_LOG_SPEC_BYTES = 5
+};
+#define WREATH_NFR_LOG_SPEC_TYPE(byte) ((uint8_t)((byte) >> 4))
+#define WREATH_NFR_LOG_SPEC_DISPOSITION(byte) ((uint8_t)((byte) & 0x0F))
+
+/* Redaction dispositions, mirroring CaptureDisposition in _flight_schema.py.
+ * RAW writes the value; HASHED writes a keyed fingerprint; MASKED and LENGTH
+ * both keep only how long it was. */
+enum {
+    WREATH_NFR_CAPTURE_RAW = 0,
+    WREATH_NFR_CAPTURE_HASHED = 1,
+    WREATH_NFR_CAPTURE_MASKED = 2,
+    WREATH_NFR_CAPTURE_LENGTH = 3
+};
+
 /* A 64-byte ring cell carrying one application log record. Mirrors LogCell in
  * _flight_schema.py. Deliberately carries no trace or span id: the projector
  * joins a record to its trace by request_id, exactly as it joins a phase batch,

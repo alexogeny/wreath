@@ -210,6 +210,43 @@ is **not justified**; Wreath carries only the pure reference renderer. Reopen th
 gate only if a retained decomposition shows rendering dominating, and require the
 pure and native SHA-256 values to match before comparing any timings.
 
+## Logging
+
+`benchmarks/bench_logging.py` runs the six measurements
+`docs/plans/first-class-logging.md` owed, one per `--suite`: `emit` (a record
+against stdlib `logging` and structlog), `disabled` (what a *disabled*
+`DEBUG(...)` call costs — the load-bearing one, because failure-triggered
+logging assumes verbose instrumentation is affordable), `publish` (a LOG cell's
+ring publish against a COMPLETION cell's), `drain` (projector throughput as the
+log-to-completion mix shifts), `request` (an in-process ablation of the whole
+request path), `memory` (whether `MemoryBudget.logging`'s per-entry constants
+resemble reality), and `e2e` (the same request over a socket, off by default).
+
+```bash
+uv sync --inexact --group benchmark    # structlog is the competitor
+uv run python -m benchmarks.bench_logging --suite all \
+    --label "what this run measured" \
+    --output benchmark-results-logging/latest.json
+```
+
+Two failure modes are specific to logging and both are checked rather than
+assumed. **A limiter that starts dropping makes its arm fast**: the default
+policy passes the first 100 records from a site per second and then one in 100,
+so a loop emitting millions from one site measures the drop path. Every emit arm
+carries a counting sink and an integrity pass verifies the count; the drop path
+gets its own arm, labelled as such. That check earned its place immediately — it
+caught an arm built on a WARN site, which `LogSamplingPolicy.ceiling` never
+samples. **A ring that fills makes its arm fast too**, for the same reason, so
+each native arm sizes its ring from the run's own record budget and refuses the
+result if a single record was lost.
+
+The retained baselines are `benchmarks/results/logging_2026-07-28_baseline.json`
+(the Python emitter) and `logging_2026-07-28_native.json` (after
+`wreath_nfr_log`). The plan carries the tables and what they mean; the short
+version is that the fast tier was not fast until the emitter moved to C, and the
+cost has since moved off the request path and onto the projector thread. Every
+number is one machine — reproduce before quoting an absolute.
+
 ## Native GIL contention
 
 `benchmarks/bench_native_gil.py` separates uncontended kernel latency from

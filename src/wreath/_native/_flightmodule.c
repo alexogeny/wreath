@@ -340,6 +340,369 @@ recorder_publish_log(RecorderObject *self, PyObject *arg)
     return PyBool_FromLong(published);
 }
 
+/* --- the native log emitter ----------------------------------------------- */
+/*
+ * `wreath_nfr_log`: pack one record straight into a cell and publish it, with
+ * no LogArg, no LogCell, and no `struct.pack` in between. This is the piece
+ * stages 1-6 deliberately deferred; `_flight_schema.py` still holds the layout
+ * and `_logsite.pack_value` / `LogCell.encode` remain the pure twin it is
+ * checked against, byte for byte, by tests/test_logging_native_parity.py.
+ *
+ * What made the swap mechanical rather than a redesign is what stage 1 built
+ * for it: a dense `site_id`, argument types declared at the call site, and a
+ * level check that precedes marshalling. The declared types arrive here already
+ * flattened into a spec blob -- one byte per field, `(type << 4) | disposition`
+ * -- so packing branches on a small integer instead of on `isinstance`.
+ *
+ * Everything here mirrors `pack_value` and `_encode_log_arg` exactly, including
+ * the parts that look like details: bool is checked before int because bool is
+ * an int subclass; a value that fails its declared type packs as `none` and is
+ * *counted*, never raised, because a log call that can break the request that
+ * made it is worse than a log line reading `?`; a clipped string backs off to a
+ * UTF-8 boundary, because a record that raises on read is the one failure a log
+ * line must never have.
+ */
+
+/* One argument's packing cursor over a cell's inline area. The fingerprint key
+ * travels here rather than being read off the worker: the pure packer hashes
+ * with the site registry's key, and the two must agree byte for byte. */
+typedef struct {
+    uint8_t *cursor;
+    uint8_t *end;
+    uint64_t k0;
+    uint64_t k1;
+    uint16_t flags;
+    uint32_t mismatches;
+    uint8_t count;
+} log_pack_state;
+
+/* Write `tag` and `width` payload bytes if they fit. Returns 0 when they do
+ * not, which is the caller's signal to stop and flag truncation. */
+static int
+log_pack_fixed(log_pack_state *st, uint8_t tag, const void *payload, size_t width)
+{
+    if ((size_t)(st->end - st->cursor) < 1u + width) {
+        return 0;
+    }
+    *st->cursor++ = tag;
+    if (width != 0) {
+        memcpy(st->cursor, payload, width);
+        st->cursor += width;
+    }
+    return 1;
+}
+
+/* Write a STR argument, clipping to the remaining budget and to 255 bytes.
+ * Mirrors `_clip_utf8`: the cut backs off over continuation bytes so the
+ * payload still decodes. */
+static int
+log_pack_text(log_pack_state *st, const char *data, Py_ssize_t len)
+{
+    size_t budget = (size_t)(st->end - st->cursor);
+    if (budget < 3) {  /* tag + length + at least one byte */
+        return 0;
+    }
+    size_t limit = budget - 2;
+    if (limit > 0xFF) {
+        limit = 0xFF;
+    }
+    size_t take = (size_t)len;
+    if (take > limit) {
+        take = limit;
+        while (take > 0 && (((const uint8_t *)data)[take] & 0xC0) == 0x80) {
+            take--;
+        }
+        st->flags |= WREATH_NFR_LOG_FLAG_TRUNCATED;
+    }
+    *st->cursor++ = WREATH_NFR_LOG_ARG_STR;
+    *st->cursor++ = (uint8_t)take;
+    memcpy(st->cursor, data, take);
+    st->cursor += take;
+    return 1;
+}
+
+/* The UTF-8 bytes of a value, as `_as_bytes` produces them: bytes verbatim,
+ * anything else through `str()`. Returns a borrowed pointer valid while
+ * *owner is held; the caller must Py_XDECREF *owner. */
+static int
+log_value_bytes(PyObject *value, const char **out, Py_ssize_t *len, PyObject **owner)
+{
+    *owner = NULL;
+    if (PyBytes_Check(value)) {
+        *out = PyBytes_AS_STRING(value);
+        *len = PyBytes_GET_SIZE(value);
+        return 1;
+    }
+    PyObject *text = PyUnicode_Check(value) ? Py_NewRef(value) : PyObject_Str(value);
+    if (text == NULL) {
+        return 0;
+    }
+    /* The fast path refuses lone surrogates; Python's `.encode("utf-8",
+     * "replace")` does not, so fall back to it rather than differing. */
+    const char *utf8 = PyUnicode_AsUTF8AndSize(text, len);
+    if (utf8 != NULL) {
+        *out = utf8;
+        *owner = text;
+        return 1;
+    }
+    PyErr_Clear();
+    PyObject *encoded = PyUnicode_AsEncodedString(text, "utf-8", "replace");
+    Py_DECREF(text);
+    if (encoded == NULL) {
+        return 0;
+    }
+    *out = PyBytes_AS_STRING(encoded);
+    *len = PyBytes_GET_SIZE(encoded);
+    *owner = encoded;
+    return 1;
+}
+
+/* Pack one argument. Returns 1 on success, 0 when the cell had no room left
+ * (the caller flags truncation and stops), -1 with an exception set.
+ *
+ * A value that fails its declared type packs as `none` and bumps `mismatches`;
+ * only a genuine interpreter error (a failing `__str__`, a MemoryError) returns
+ * -1. That split is the contract `pack_value` documents. */
+static int
+log_pack_argument(log_pack_state *st, uint8_t spec, PyObject *value)
+{
+    const uint8_t declared = WREATH_NFR_LOG_SPEC_TYPE(spec);
+    const uint8_t disposition = WREATH_NFR_LOG_SPEC_DISPOSITION(spec);
+
+    if (disposition == WREATH_NFR_CAPTURE_HASHED) {
+        const char *data = NULL;
+        Py_ssize_t len = 0;
+        PyObject *owner = NULL;
+        if (!log_value_bytes(value, &data, &len, &owner)) {
+            return -1;
+        }
+        uint64_t digest =
+            wreath_nfr_fingerprint(data, (size_t)len, st->k0, st->k1);
+        Py_XDECREF(owner);
+        st->flags |= WREATH_NFR_LOG_FLAG_REDACTED;
+        return log_pack_fixed(st, WREATH_NFR_LOG_ARG_HASH, &digest, sizeof(digest));
+    }
+    if (disposition == WREATH_NFR_CAPTURE_MASKED
+        || disposition == WREATH_NFR_CAPTURE_LENGTH) {
+        const char *data = NULL;
+        Py_ssize_t len = 0;
+        PyObject *owner = NULL;
+        if (!log_value_bytes(value, &data, &len, &owner)) {
+            return -1;
+        }
+        Py_XDECREF(owner);
+        uint32_t original = len > (Py_ssize_t)UINT32_MAX ? UINT32_MAX : (uint32_t)len;
+        st->flags |= WREATH_NFR_LOG_FLAG_REDACTED;
+        return log_pack_fixed(st, WREATH_NFR_LOG_ARG_LENGTH, &original,
+                              sizeof(original));
+    }
+
+    if (value == Py_None) {
+        if (declared != WREATH_NFR_LOG_SPEC_NONE) {
+            st->mismatches++;
+        }
+        return log_pack_fixed(st, WREATH_NFR_LOG_ARG_NONE, NULL, 0);
+    }
+
+    switch (declared) {
+    case WREATH_NFR_LOG_SPEC_BOOL: {
+        /* Checked before INT deliberately: bool is an int subclass, and a
+         * `True` packed as an integer reads back as 1 with no way to tell. */
+        if (!PyBool_Check(value)) {
+            break;
+        }
+        uint8_t flag = (value == Py_True) ? 1u : 0u;
+        return log_pack_fixed(st, WREATH_NFR_LOG_ARG_BOOL, &flag, sizeof(flag));
+    }
+    case WREATH_NFR_LOG_SPEC_INT: {
+        if (!PyLong_Check(value) || PyBool_Check(value)) {
+            break;
+        }
+        int overflow = 0;
+        long long number = PyLong_AsLongLongAndOverflow(value, &overflow);
+        if (number == -1 && PyErr_Occurred()) {
+            return -1;
+        }
+        if (overflow != 0) {
+            /* Wider than the int64 slot. A mismatch, not an exception: the
+             * pure packer used to reach `struct.pack` and raise here, out of
+             * the sink and into whatever made the log call. */
+            break;
+        }
+        int64_t packed = (int64_t)number;
+        return log_pack_fixed(st, WREATH_NFR_LOG_ARG_INT, &packed, sizeof(packed));
+    }
+    case WREATH_NFR_LOG_SPEC_FLOAT: {
+        if (PyBool_Check(value) || !(PyFloat_Check(value) || PyLong_Check(value))) {
+            break;
+        }
+        double number = PyFloat_AsDouble(value);
+        if (number == -1.0 && PyErr_Occurred()) {
+            /* An int too wide to become a double. The pure packer's
+             * `float(value)` raises the same OverflowError, and neither should
+             * reach the caller, so it is a mismatch here too. */
+            PyErr_Clear();
+            break;
+        }
+        return log_pack_fixed(st, WREATH_NFR_LOG_ARG_FLOAT, &number, sizeof(number));
+    }
+    case WREATH_NFR_LOG_SPEC_STR: {
+        if (!PyUnicode_Check(value)) {
+            break;
+        }
+        const char *data = NULL;
+        Py_ssize_t len = 0;
+        PyObject *owner = NULL;
+        if (!log_value_bytes(value, &data, &len, &owner)) {
+            return -1;
+        }
+        int packed = log_pack_text(st, data, len);
+        Py_XDECREF(owner);
+        return packed;
+    }
+    case WREATH_NFR_LOG_SPEC_BYTES: {
+        if (!PyBytes_Check(value)) {
+            break;
+        }
+        /* The pure packer stores `value.decode("utf-8", "replace")`, so the
+         * bytes are round-tripped through the same replacement rather than
+         * copied: a byte string that is not valid UTF-8 must produce the same
+         * U+FFFD sequence on both paths. */
+        PyObject *text = PyUnicode_DecodeUTF8(PyBytes_AS_STRING(value),
+                                              PyBytes_GET_SIZE(value), "replace");
+        if (text == NULL) {
+            return -1;
+        }
+        Py_ssize_t len = 0;
+        const char *data = PyUnicode_AsUTF8AndSize(text, &len);
+        if (data == NULL) {
+            Py_DECREF(text);
+            return -1;
+        }
+        int packed = log_pack_text(st, data, len);
+        Py_DECREF(text);
+        return packed;
+    }
+    default:
+        break;
+    }
+
+    /* Fell through: the value is not what the site declared. */
+    st->mismatches++;
+    return log_pack_fixed(st, WREATH_NFR_LOG_ARG_NONE, NULL, 0);
+}
+
+/* Recorder.log(site_id, severity, request_id, flags, dropped_siblings,
+ *              specs, values, k0, k1) -> int
+ *
+ * Packs and publishes one record. The return value carries two answers in one
+ * int so the hot path allocates no tuple: bit 0 is whether the record reached
+ * the ring, and the remaining bits are how many arguments failed their declared
+ * type. The caller folds the latter into `SiteCounters.type_mismatch`.
+ *
+ * METH_FASTCALL, not METH_VARARGS: this is the request path, and building an
+ * argument tuple per record is exactly the kind of cost this whole function
+ * exists to remove. */
+static PyObject *
+recorder_log(RecorderObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs != 9) {
+        PyErr_Format(PyExc_TypeError, "log() takes 9 arguments, got %zd", nargs);
+        return NULL;
+    }
+    if (self->worker == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "recorder is closed");
+        return NULL;
+    }
+    unsigned long site_id = PyLong_AsUnsignedLong(args[0]);
+    if (site_id == (unsigned long)-1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    long severity = PyLong_AsLong(args[1]);
+    if (severity == -1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    unsigned long long request_id = PyLong_AsUnsignedLongLong(args[2]);
+    if (request_id == (unsigned long long)-1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    long flags = PyLong_AsLong(args[3]);
+    if (flags == -1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    unsigned long dropped = PyLong_AsUnsignedLong(args[4]);
+    if (dropped == (unsigned long)-1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    if (!PyBytes_Check(args[5])) {
+        PyErr_SetString(PyExc_TypeError, "specs must be bytes");
+        return NULL;
+    }
+    if (!PyTuple_Check(args[6])) {
+        PyErr_SetString(PyExc_TypeError, "values must be a tuple");
+        return NULL;
+    }
+    unsigned long long k0 = PyLong_AsUnsignedLongLong(args[7]);
+    if (k0 == (unsigned long long)-1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    unsigned long long k1 = PyLong_AsUnsignedLongLong(args[8]);
+    if (k1 == (unsigned long long)-1 && PyErr_Occurred()) {
+        return NULL;
+    }
+
+    const uint8_t *specs = (const uint8_t *)PyBytes_AS_STRING(args[5]);
+    Py_ssize_t spec_count = PyBytes_GET_SIZE(args[5]);
+    Py_ssize_t value_count = PyTuple_GET_SIZE(args[6]);
+
+    wreath_nfr_log_cell cell;
+    memset(&cell, 0, sizeof(cell));
+    cell.schema_version = WREATH_NFR_SCHEMA_VERSION;
+    cell.kind = WREATH_NFR_KIND_LOG;
+    cell.site_id = (uint32_t)site_id;
+    cell.request_id = (uint64_t)request_id;
+    cell.severity = (uint8_t)severity;
+    cell.dropped_siblings = (uint32_t)dropped;
+
+    log_pack_state st = {
+        .cursor = cell.args,
+        .end = cell.args + WREATH_NFR_LOG_INLINE_ARG_BYTES,
+        .k0 = (uint64_t)k0,
+        .k1 = (uint64_t)k1,
+        .flags = (uint16_t)flags,
+        .mismatches = 0,
+        .count = 0,
+    };
+
+    for (Py_ssize_t index = 0; index < spec_count; index++) {
+        if (index >= WREATH_NFR_LOG_MAX_ARGS) {
+            st.flags |= WREATH_NFR_LOG_FLAG_TRUNCATED;
+            break;
+        }
+        /* Fewer values than the site declares: the missing ones pack as `none`,
+         * exactly as the pure emitter pads them. The arity mismatch itself is
+         * counted by the caller, which is the only side that knows the site. */
+        PyObject *value = index < value_count ? PyTuple_GET_ITEM(args[6], index)
+                                              : Py_None;
+        int packed = log_pack_argument(&st, specs[index], value);
+        if (packed < 0) {
+            return NULL;
+        }
+        if (packed == 0) {
+            st.flags |= WREATH_NFR_LOG_FLAG_TRUNCATED;
+            break;
+        }
+        st.count++;
+    }
+
+    cell.flags = st.flags;
+    cell.arg_count = st.count;
+    cell.arg_bytes = (uint8_t)(st.cursor - cell.args);
+    int published = wreath_nfr_publish_cell(self->worker, &cell);
+    return PyLong_FromUnsignedLong(((unsigned long)st.mismatches << 1)
+                                   | (unsigned long)(published != 0));
+}
+
 static PyObject *
 recorder_drain(RecorderObject *self, PyObject *args)
 {
@@ -531,6 +894,7 @@ static PyMethodDef recorder_methods[] = {
     {"begin", (PyCFunction)recorder_begin, METH_VARARGS | METH_KEYWORDS, NULL},
     {"record", (PyCFunction)recorder_record, METH_VARARGS | METH_KEYWORDS, NULL},
     {"publish_log", (PyCFunction)recorder_publish_log, METH_O, NULL},
+    {"log", (PyCFunction)(void (*)(void))recorder_log, METH_FASTCALL, NULL},
     {"drain", (PyCFunction)recorder_drain, METH_VARARGS, NULL},
     {"drain_captures", (PyCFunction)recorder_drain_captures, METH_VARARGS, NULL},
     {"worker_capsule", (PyCFunction)recorder_worker_capsule, METH_NOARGS, NULL},

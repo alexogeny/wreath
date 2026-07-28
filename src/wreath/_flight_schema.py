@@ -532,42 +532,50 @@ class SchemaError(ValueError):
 # pass; Python has none, so the binding happens at import instead.
 #
 # =========================================================================
-# DEFERRED BY DECISION -- this packing is Python, and that is not an oversight
+# TWO PACKERS, AND WHICH ONE RUNS
 # =========================================================================
 #
-# Every log record is currently packed *here*, in Python, then handed to the
-# ring as bytes:
+# A published record is packed in C, straight into a ring cell:
+#
+#     Recorder.log()          PyObject...  -> 64 bytes -> ring
+#
+# The Python path below is the same work, in three steps, and it is still
+# reached whenever there is no ring to pack for:
 #
 #     _logsite.pack_value()   PyObject*  -> LogArg      (per argument)
 #     LogCell.encode()        LogArg...  -> 64 bytes    (this module)
 #     Recorder.publish_log()  bytes      -> ring        (_flightmodule.c)
 #
-# The native emitter that replaces the first two steps -- `wreath_nfr_log`,
-# packing straight into a ring slot from C -- is **not built**. The layout,
-# the declared argument types, and the level check that precedes marshalling
-# all exist to make that swap mechanical rather than a redesign, but nobody
-# has done it. Until then:
+# It is the pure twin of ADR 0005, not a fallback: `wreath_nfr_log` is checked
+# against it byte for byte over a corpus of every shape either can be handed
+# (tests/test_logging_native_parity.py), and writing that corpus found three
+# defects -- an int wider than the wire slot, a float too wide to narrow, and a
+# lone surrogate -- each of which raised out of a packer that promises never to.
 #
-#   * No performance claim may be made about logging. None is made in the
-#     docs, the ADR, or these docstrings, and none should be added.
-#   * `wreath_nfr_publish_cell` (flight.c) is the seam. A C emitter replaces
-#     what happens *above* that call, not the call itself.
+# It is also what runs, by design, in three cases:
 #
-# Also deferred, each decided rather than forgotten -- see
+#   * **No recorder.** A test capture, `testing_runtime`, a plain callable
+#     sink: there is no ring, so there is nothing for C to pack into.
+#   * **A buffered record.** TRACE/DEBUG held for a possible promotion has to
+#     survive as an object until the request decides, so it is packed here.
+#     Measured 3.0us per held record against 0.42us published, which makes it
+#     the most expensive thing left in this module -- see the plan.
+#   * **Off the loop.** The ring has exactly one writer. A record from a job
+#     worker is packed here and staged (`_logscratch.OffLoopStage`) for the
+#     loop to publish, flagged LOG_FLAG_OFF_LOOP and one interval late.
+#
+# `wreath_nfr_publish_cell` (flight.c) stayed the seam through all of it: the
+# native emitter replaced what happens *above* that call, exactly as stage 1
+# framed it, and the dense site_id, declared argument types and pre-marshalling
+# level check are what made that swap mechanical rather than a redesign.
+#
+# Still deferred, each decided rather than forgotten -- see
 # docs/plans/first-class-logging.md for the full list and ADR 0025 for why:
 #
-#   * **Benchmarks.** Six of them, none run. The load-bearing one is the cost
-#     of a *disabled* `DEBUG(...)` call: failure-triggered logging assumes
-#     verbose instrumentation is affordable, and that assumption is exactly
-#     that number.
 #   * **Crash forensics (stage 7).** The ring is anonymous memory, so a
 #     segfault takes the last records with it. The framing is ready for a
 #     file-backed ring -- every cell is versioned and every decode validates
 #     lengths against the buffer -- so adding it is not a format break.
-#   * **Off-loop emission.** The ring is single-writer. `wreath.jobs` and
-#     thread-pool work have no fast path; `LossReason.LOG_OFF_LOOP` is
-#     reserved for the counted slow path that is not built, because nothing
-#     yet emits from off the loop.
 #   * **`wreath.audit`.** Keeps its own `logging.getLogger` path. "Never
 #     blocks the request path" and "never loses a record" are incompatible
 #     promises; audit needs the second and must not inherit the first.
@@ -696,6 +704,31 @@ LOG_FLAG_PROMOTED: Final = 1 << 0  # buffered, then published by a promotion
 LOG_FLAG_TRUNCATED: Final = 1 << 1  # an argument was clipped or dropped
 LOG_FLAG_REDACTED: Final = 1 << 2  # an argument was hashed or reduced to a length
 LOG_FLAG_OFF_LOOP: Final = 1 << 3  # emitted off the recorder's writer thread
+#: Range an INT argument can carry. A Python int is unbounded and the wire slot
+#: is `int64_t`, so a value outside this is not representable -- and the packer
+#: counts that as a type mismatch and writes `none` rather than raising. It used
+#: to raise, from `struct.pack`, deep inside the sink: `log.info("n {n}",
+#: n=2**64)` propagated a `struct.error` out of whatever made the call, which is
+#: precisely what `pack_value` promises never to do.
+LOG_ARG_INT_MIN: Final = -(1 << 63)
+LOG_ARG_INT_MAX: Final = (1 << 63) - 1
+
+#: Ceiling on a LENGTH argument, whose slot is `uint32_t`. A value this large is
+#: already only an order of magnitude, so it clamps rather than mismatching.
+LOG_ARG_LENGTH_MAX: Final = (1 << 32) - 1
+
+#: Declared field types, as the emitter sees them. A site's fields are flattened
+#: at registration into one byte each -- `(type << 4) | disposition` -- so the
+#: native emitter walks a `bytes` beside the argument tuple rather than reading
+#: Python objects to decide how to pack. Mirrors WREATH_NFR_LOG_SPEC_* in
+#: `flight_schema.h`; the low nibble is `CaptureDisposition`, unchanged.
+LOG_SPEC_NONE: Final = 0
+LOG_SPEC_BOOL: Final = 1
+LOG_SPEC_INT: Final = 2
+LOG_SPEC_FLOAT: Final = 3
+LOG_SPEC_STR: Final = 4
+LOG_SPEC_BYTES: Final = 5
+
 #: The record carries application fields for its request's canonical log line
 #: rather than a message of its own. Its arguments are the wide event's
 #: attributes; a reader folds them into the completion rather than printing them
@@ -734,7 +767,12 @@ class LogArg:
 
     @classmethod
     def text(cls, value: str) -> LogArg:
-        return cls(LogArgType.STR, payload=value.encode("utf-8"))
+        # "replace", not strict: a lone surrogate is not exotic -- it is what a
+        # `surrogateescape` decode of a filename or a header leaves behind --
+        # and encoding one strictly raised `UnicodeEncodeError` out of the
+        # packer, into whatever made the log call. Matches `_as_bytes`, which
+        # the hashed and length dispositions have always used.
+        return cls(LogArgType.STR, payload=value.encode("utf-8", "replace"))
 
     @classmethod
     def hashed(cls, fingerprint: int) -> LogArg:
@@ -746,8 +784,15 @@ class LogArg:
 
     @property
     def text_value(self) -> str:
-        """The decoded string of a STR argument, empty for every other type."""
-        return self.payload.decode("utf-8")
+        """The decoded string of a STR argument, empty for every other type.
+
+        Lenient on the way out as well as in. A packed payload is always valid
+        UTF-8 -- clipping backs off to a character boundary for exactly this
+        reason -- but a torn or stale cell decoded off the ring need not be, and
+        a record that raises when it is read is the one failure a log line must
+        never have.
+        """
+        return self.payload.decode("utf-8", "replace")
 
     @property
     def redacted(self) -> bool:

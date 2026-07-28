@@ -30,7 +30,16 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from ._flight_schema import (
+    LOG_ARG_INT_MAX,
+    LOG_ARG_INT_MIN,
+    LOG_ARG_LENGTH_MAX,
     LOG_MAX_ARGS,
+    LOG_SPEC_BOOL,
+    LOG_SPEC_BYTES,
+    LOG_SPEC_FLOAT,
+    LOG_SPEC_INT,
+    LOG_SPEC_NONE,
+    LOG_SPEC_STR,
     CaptureDisposition,
     LogArg,
     LogArgType,
@@ -90,6 +99,34 @@ def declare(
     return LogField(name=name, type=type_, disposition=disposition)
 
 
+#: Declared type -> the nibble the emitter branches on. Keyed by `type` rather
+#: than by the literal classes so the lookup below types cleanly; `declare`
+#: already refuses anything absent here, at import, which is what makes the
+#: `.get` fallback unreachable rather than a silent default.
+_SPEC_TYPES: Final[dict[type, int]] = {
+    type(None): LOG_SPEC_NONE,
+    bool: LOG_SPEC_BOOL,
+    int: LOG_SPEC_INT,
+    float: LOG_SPEC_FLOAT,
+    str: LOG_SPEC_STR,
+    bytes: LOG_SPEC_BYTES,
+}
+
+
+def spec_blob(fields: tuple[LogField, ...]) -> bytes:
+    """Flatten a site's fields into one byte each: `(type << 4) | disposition`.
+
+    The native emitter walks this beside the argument tuple, so packing branches
+    on a small integer rather than on `isinstance` and a `CaptureDisposition`
+    comparison per argument. It is computed once, at registration, because that
+    is the whole point of interning a call site: the static half is decided at
+    import and the request path only carries values.
+    """
+    return bytes(
+        (_SPEC_TYPES[field.type] << 4) | int(field.disposition) for field in fields
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class LogSite:
     """The interned static half of one log statement."""
@@ -101,6 +138,27 @@ class LogSite:
     fields: tuple[LogField, ...]
     module: str = ""
     lineno: int = 0
+    #: `fields` flattened for the native emitter. Derived, never passed in.
+    specs: bytes = b""
+
+
+def specs_for(site: LogSite, fields: tuple[LogField, ...]) -> bytes:
+    """The spec blob for *these* fields, reusing the site's when they match.
+
+    Only the kwargs tiers need this. `intern_template` keys on the template
+    text, and the text does not pin the types: `log.info("v is {v}", v=1)` and
+    the same line with a string reach the same interned site, whose declared
+    fields are whichever call arrived first. Packing the second call against the
+    first call's types would turn its value into a counted mismatch and lose it,
+    which the pure packer never did -- so the native emitter must not either.
+
+    Rebuilding the blob unconditionally costs ~360ns; comparing first costs
+    ~170ns and skips the rebuild in every case that is not this pathology. A
+    record stays self-describing either way -- every argument carries its own
+    type tag -- so a reader decodes the value that was passed rather than the
+    one the site expected.
+    """
+    return site.specs if site.fields == fields else spec_blob(fields)
 
 
 def _template_names(template: str) -> tuple[str, ...]:
@@ -221,6 +279,7 @@ class SiteRegistry:
                 fields=fields,
                 module=module,
                 lineno=lineno,
+                specs=spec_blob(fields),
             )
         self._by_name[event_name] = site
         return site
@@ -246,6 +305,7 @@ class SiteRegistry:
                 template=template,
                 severity=severity,
                 fields=fields,
+                specs=spec_blob(fields),
             )
         self._by_template[template] = site
         return site
@@ -270,6 +330,7 @@ class SiteRegistry:
             fields=fields,
             module=module,
             lineno=lineno,
+            specs=spec_blob(fields),
         )
         self._by_id.append(site)
         return site
@@ -279,6 +340,18 @@ class SiteRegistry:
         if 1 <= site_id <= len(self._by_id):
             return self._by_id[site_id - 1]
         return None
+
+    @property
+    def key(self) -> tuple[int, int]:
+        """The fingerprint key, for an emitter that hashes somewhere else.
+
+        The native emitter computes the same SipHash in C, and it has to use
+        *this* registry's key or the two halves of one process would fingerprint
+        the same string differently -- which would break correlation within a
+        recording, the one property a fingerprint exists to provide. Handing the
+        key out is what keeps the registry its owner.
+        """
+        return self._key
 
     def fingerprint(self, raw: bytes) -> int:
         """The keyed, non-reversible fingerprint of a redacted value."""
@@ -299,20 +372,23 @@ def pack_value(
 ) -> tuple[LogArg, bool]:
     """Convert one Python value into a packed argument.
 
-    This is half of the Python packing a native emitter would replace; the other
-    half is `LogCell.encode`. **What is deferred and why is written once, at the
-    head of the log-record section in `_flight_schema.py`** -- read that before
-    starting on `wreath_nfr_log`.
-
+    This is half of the Python packing; the other half is `LogCell.encode`.
+    Together they are the pure twin `wreath_nfr_log` is checked against byte for
+    byte, and the path that still runs when there is no ring, when a record is
+    buffered, or when the caller is not the loop. **Which is which, and why, is
+    written once at the head of the log-record section in `_flight_schema.py`.**
 
     Returns the argument and whether the value failed its declared type. A
     mismatch is *counted*, never raised: a log call that can break the request
-    that made it is worse than a log line that reads `?`.
+    that made it is worse than a log line that reads `?`. Three values used to
+    break that promise from inside this function -- an int wider than the int64
+    slot, a float too wide to narrow, and a lone surrogate -- and each is now a
+    counted mismatch. The parity corpus is what found them.
     """
     if spec.disposition is CaptureDisposition.HASHED:
         return LogArg.hashed(registry.fingerprint(_as_bytes(value))), False
     if spec.disposition in (CaptureDisposition.MASKED, CaptureDisposition.LENGTH):
-        return LogArg.length(len(_as_bytes(value))), False
+        return LogArg.length(min(len(_as_bytes(value)), LOG_ARG_LENGTH_MAX)), False
     if value is None:
         return LogArg.none(), spec.type is not type(None)
     # bool before int: bool is an int subclass and would otherwise pack as one.
@@ -323,11 +399,24 @@ def pack_value(
     if spec.type is int:
         if not isinstance(value, int) or isinstance(value, bool):
             return LogArg.none(), True
+        # A Python int is unbounded and the wire slot is int64. Out of range is
+        # a mismatch, not an exception: `struct.pack` used to raise here, out of
+        # the sink and into whatever made the log call, which is the one thing
+        # this function promises cannot happen.
+        if not LOG_ARG_INT_MIN <= value <= LOG_ARG_INT_MAX:
+            return LogArg.none(), True
         return LogArg.integer(value), False
     if spec.type is float:
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             return LogArg.none(), True
-        return LogArg.real(float(value)), False
+        try:
+            widened = float(value)
+        except OverflowError:
+            # An int too wide to become a double. Same shape as the int32/int64
+            # case above and the same answer: a value the wire cannot carry is a
+            # mismatch, not an exception raised at whoever made the log call.
+            return LogArg.none(), True
+        return LogArg.real(widened), False
     if spec.type is str:
         if not isinstance(value, str):
             return LogArg.none(), True
