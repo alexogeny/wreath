@@ -10,6 +10,7 @@ from __future__ import annotations
 import json as stdlib_json
 import math
 import random
+import threading
 from collections.abc import Callable
 
 import pytest
@@ -342,10 +343,52 @@ def test_json_loads_input_types() -> None:
 
 @native
 def test_json_loads_deep_nesting_raises_recursion_error() -> None:
-    document = "[" * 200_000 + "]" * 200_000
-    for loads in (_core.json_loads, pure_json.json_loads):
-        with pytest.raises(RecursionError):
-            loads(document)
+    """Deep nesting must raise rather than crash -- on any stack, not just this one.
+
+    Both decoders detect exhaustion through CPython's own C-stack check, which
+    since 3.12 measures the real stack rather than counting frames. So the depth
+    that trips it is a function of the machine's stack limit and the per-frame
+    cost of the build, neither of which is a property of the code under test. At
+    the default 8 MiB limit the cliff here is ~104,000 levels at ~80 bytes each;
+    a fixed 200,000 clears that by only 1.9x, and a runner with a larger stack or
+    a build with cheaper frames sails straight past it and fails the test having
+    proved nothing. That is what happened in CI.
+
+    So the stack is made small and known rather than assumed. One thread with a
+    1 MiB stack puts the cliff near 13,000 levels, and 100,000 clears it by
+    roughly sevenfold -- enough margin that halving the per-frame cost would
+    still leave the property intact.
+    """
+    depth = 100_000
+    document = "[" * depth + "]" * depth
+    outcomes: dict[str, BaseException | None] = {}
+
+    def decode() -> None:
+        for name, loads in (
+            ("native", _core.json_loads),
+            ("pure", pure_json.json_loads),
+        ):
+            try:
+                loads(document)
+            except Exception as error:  # noqa: BLE001 -- asserted on below
+                outcomes[name] = error
+            else:
+                outcomes[name] = None
+
+    previous = threading.stack_size(1024 * 1024)
+    try:
+        worker = threading.Thread(target=decode)
+        worker.start()
+        worker.join()
+    finally:
+        threading.stack_size(previous)
+
+    assert set(outcomes) == {"native", "pure"}, "a decoder never ran"
+    for name, error in outcomes.items():
+        assert isinstance(error, RecursionError), (
+            f"the {name} decoder did not refuse {depth:,} levels of nesting; "
+            f"it raised {error!r}"
+        )
 
 
 def _random_json_value(rng: random.Random, depth: int) -> object:
