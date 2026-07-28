@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from . import support
+from . import conftest, support
 from .conftest import requires_h2, scope_capture_app
 
 pytestmark = [requires_h2, pytest.mark.asyncio]
@@ -124,3 +124,106 @@ async def test_connect_without_authority_is_protocol_error(make_driver):
         (b":method", b"CONNECT")])
     assert _stream_error(d) == support.PROTOCOL_ERROR
     assert not captured
+
+
+# --- field octets (RFC 9113 s8.2.1) ---------------------------------------
+#
+# HTTP/2 used to check names for uppercase only and values not at all, so the
+# same process accepted over h2 exactly the octets its HTTP/1.1 parser refuses
+# -- CR, LF and NUL included. Anything that re-serializes these headers to an
+# HTTP/1.1 upstream (a proxy, a forwarded outbound call, a cache key) re-splits
+# on the CRLF, which is a request-splitting primitive the origin client was
+# never authorized to use. Both protocols now share one octet rule
+# (wreath_field_token in server_common.c); these cases pin the h2 half of it.
+
+BASE = [(b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
+        (b":authority", b"x")]
+
+
+@pytest.mark.parametrize(
+    ("label", "field"),
+    [
+        ("crlf in value", (b"x-note", b"a\r\nx-injected: 1")),
+        ("lf in value", (b"x-note", b"a\nx-injected: 1")),
+        ("nul in value", (b"x-note", b"a\x00b")),
+        ("del in value", (b"x-note", b"a\x7fb")),
+        ("leading space in value", (b"x-note", b" v")),
+        ("trailing tab in value", (b"x-note", b"v\t")),
+        ("crlf in name", (b"x\r\nx-injected: 1", b"v")),
+        ("space in name", (b"x y", b"v")),
+        ("colon in name", (b"x:y", b"v")),
+        ("nul in name", (b"x\x00y", b"v")),
+        ("non-ascii in name", (b"x\xffy", b"v")),
+    ],
+)
+async def test_malformed_field_octets_are_protocol_errors(make_driver, label, field):
+    d, captured = await _send_raw_headers(make_driver, [*BASE, field])
+    assert _stream_error(d) == support.PROTOCOL_ERROR, f"{label} accepted"
+    assert not captured, f"{label} reached the application"
+
+
+async def test_crlf_in_pseudo_header_value_is_protocol_error(make_driver):
+    # A pseudo-header is a field too: :authority lands in the scope as `host`.
+    d, captured = await _send_raw_headers(make_driver, [
+        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
+        (b":authority", b"x\r\nx-injected: 1")])
+    assert _stream_error(d) == support.PROTOCOL_ERROR
+    assert not captured
+
+
+async def test_ordinary_field_octets_are_still_accepted(make_driver):
+    # The rule rejects control octets, not the printable range: a value may
+    # carry spaces, tabs and colons inside it, just not at its edges.
+    d, captured = await _send_raw_headers(make_driver, [
+        *BASE, (b"x-note", b"a b\tc: d"), (b"x-token", b"!#$%&'*+-.^_`|~")])
+    assert captured, "a well-formed field was rejected"
+    assert (b"x-note", b"a b\tc: d") in captured[0]["headers"]
+
+
+# --- content-length (RFC 9113 s8.1.1) --------------------------------------
+
+@pytest.mark.parametrize(
+    "value",
+    [b"100abc", b"0x10", b" 5", b"5 ", b"+5", b"-1", b"", b"1e3",
+     b"99999999999999999999999999999"],
+)
+async def test_malformed_content_length_is_protocol_error(make_driver, value):
+    # A length that does not parse used to be swallowed and recorded as "no
+    # declared length", which silently skipped the end-of-stream length check
+    # below -- a smuggling-adjacent opt-out of the framing rule.
+    d, captured = await _send_raw_headers(
+        make_driver, [*BASE, (b"content-length", value)])
+    assert _stream_error(d) == support.PROTOCOL_ERROR
+    assert not captured
+
+
+async def test_conflicting_duplicate_content_length_is_protocol_error(make_driver):
+    d, captured = await _send_raw_headers(make_driver, [
+        *BASE, (b"content-length", b"5"), (b"content-length", b"6")])
+    assert _stream_error(d) == support.PROTOCOL_ERROR
+    assert not captured
+
+
+async def test_repeated_identical_content_length_is_accepted(make_driver):
+    d, captured = await _send_raw_headers(make_driver, [
+        *BASE, (b"content-length", b"0"), (b"content-length", b"0")])
+    assert captured, "identical repeated content-length is not a conflict"
+
+
+async def test_declared_content_length_is_enforced(make_driver):
+    """A body shorter than the declared length is a malformed request.
+
+    The app has to still be reading for this to be the check under test: an app
+    that answers without draining closes the stream first, and a late DATA frame
+    is then STREAM_CLOSED rather than a framing error.
+    """
+    d = make_driver(conftest.ok_app)
+    await d.preface()
+    block = support.HpackEncoder().encode([
+        (b":method", b"POST"), (b":path", b"/"), (b":scheme", b"https"),
+        (b":authority", b"x"), (b"content-length", b"100")])
+    await d.feed_and_settle(
+        support.encode_frame(support.HEADERS, support.FLAG_END_HEADERS, 1, block))
+    await d.feed_and_settle(
+        support.encode_frame(support.DATA, support.FLAG_END_STREAM, 1, b"short"))
+    assert _stream_error(d) == support.PROTOCOL_ERROR

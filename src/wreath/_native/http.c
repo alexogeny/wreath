@@ -516,6 +516,15 @@ wreath_http_serialize_request(PyObject *Py_UNUSED(self), PyObject *args)
     char length_buf[32];
     Py_ssize_t length_len = 0;
     char *write;
+    /* Each header's name and value buffer, captured once. The output size is
+     * computed from these exact buffers and the copy reads them again, so a
+     * header object cannot report one length while being sized and a larger
+     * one while being written -- which is how the two-pass version overflowed
+     * its allocation. Small requests never touch the heap for this. */
+    Py_buffer inline_views[32];
+    Py_buffer *views = inline_views;
+    Py_ssize_t view_count = 0;
+    Py_ssize_t header_count = 0;
 
     if (!PyArg_ParseTuple(
             args, "OOOOO:http_serialize_request", &method_obj, &target_obj,
@@ -566,54 +575,85 @@ wreath_http_serialize_request(PyObject *Py_UNUSED(self), PyObject *args)
     }
     headers = PySequence_Fast(headers_obj, "headers must be an iterable of pairs");
     if (headers == NULL) goto error;
+    header_count = PySequence_Fast_GET_SIZE(headers);
+    if (header_count > (Py_ssize_t)(sizeof(inline_views) / sizeof(inline_views[0])) / 2) {
+        if (header_count > PY_SSIZE_T_MAX / (Py_ssize_t)(2 * sizeof(Py_buffer))) {
+            PyErr_NoMemory();
+            goto error;
+        }
+        views = PyMem_Malloc((size_t)header_count * 2 * sizeof(Py_buffer));
+        if (views == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
+    }
     if (http_add_size(&total, PyBytes_GET_SIZE(method)) < 0 ||
         http_add_size(&total, 1 + target.len +
             (Py_ssize_t)(sizeof(" HTTP/1.1\r\nhost: ") - 1) + host.len + 2) < 0)
         goto error;
-    for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(headers); index++) {
-        PyObject *pair = PySequence_Fast(
-            PySequence_Fast_GET_ITEM(headers, index), "header must be a pair"
-        );
-        Py_buffer name = {0};
-        Py_buffer value = {0};
+    for (Py_ssize_t index = 0; index < header_count; index++) {
+        PyObject *pair = PySequence_Fast_GET_ITEM(headers, index);  /* borrowed */
+        Py_buffer *name = &views[view_count];
+        Py_buffer *value = &views[view_count + 1];
+        PyObject *name_obj, *value_obj;
         int invalid = 0;
-        if (pair == NULL) goto error;
-        if (PySequence_Fast_GET_SIZE(pair) != 2 ||
-            PyObject_GetBuffer(PySequence_Fast_GET_ITEM(pair, 0), &name, PyBUF_SIMPLE) < 0 ||
-            PyObject_GetBuffer(PySequence_Fast_GET_ITEM(pair, 1), &value, PyBUF_SIMPLE) < 0) {
-            PyBuffer_Release(&name);
-            PyBuffer_Release(&value);
-            Py_DECREF(pair);
+        /* A header pair holds exactly two items, so read those two rather than
+         * materializing the sequence: a pair object whose __len__ reports 2
+         * while its __getitem__ never raises IndexError would otherwise make
+         * PySequence_Fast allocate until the process is killed. */
+        Py_ssize_t pair_size = PySequence_Size(pair);
+        if (pair_size < 0) {
+            PyErr_Clear();
+            PyErr_SetString(PyExc_TypeError, "header must be a pair");
             goto error;
         }
-        if (name.len == 0) invalid = 1;
-        for (Py_ssize_t i = 0; i < name.len && !invalid; i++)
-            if (!TOKEN_CHARS[((const uint8_t *)name.buf)[i]]) invalid = 1;
+        if (pair_size != 2) {
+            PyErr_SetString(PyExc_ValueError, "header must be a pair");
+            goto error;
+        }
+        name_obj = PySequence_GetItem(pair, 0);
+        if (name_obj == NULL) goto error;
+        value_obj = PySequence_GetItem(pair, 1);
+        if (value_obj == NULL) {
+            Py_DECREF(name_obj);
+            goto error;
+        }
+        int got = PyObject_GetBuffer(name_obj, name, PyBUF_SIMPLE);
+        if (got == 0 && PyObject_GetBuffer(value_obj, value, PyBUF_SIMPLE) < 0) {
+            PyBuffer_Release(name);
+            got = -1;
+        }
+        /* Each view holds its own reference to the exporter, so releasing the
+         * item references here cannot free the bytes underneath. */
+        Py_DECREF(name_obj);
+        Py_DECREF(value_obj);
+        if (got < 0) goto error;
+        view_count += 2;
+        if (name->len == 0) invalid = 1;
+        for (Py_ssize_t i = 0; i < name->len && !invalid; i++)
+            if (!TOKEN_CHARS[((const uint8_t *)name->buf)[i]]) invalid = 1;
         if (invalid) PyErr_SetString(PyExc_ValueError, "invalid header name");
-        for (Py_ssize_t i = 0; i < value.len && !invalid; i++) {
-            uint8_t c = ((const uint8_t *)value.buf)[i];
+        for (Py_ssize_t i = 0; i < value->len && !invalid; i++) {
+            uint8_t c = ((const uint8_t *)value->buf)[i];
             if (c != '\t' && (c < 0x20 || c == 0x7f)) {
                 PyErr_SetString(PyExc_ValueError, "invalid header value");
                 invalid = 1;
             }
         }
-        if (!invalid && http_ascii_equals(name.buf, name.len, "host")) {
+        if (!invalid && http_ascii_equals(name->buf, name->len, "host")) {
             PyErr_SetString(PyExc_ValueError, "host header is owned by the client");
             invalid = 1;
         }
-        if (!invalid && http_ascii_equals(name.buf, name.len, "content-length")) {
+        if (!invalid && http_ascii_equals(name->buf, name->len, "content-length")) {
             PyErr_SetString(PyExc_ValueError, "content-length is owned by the client");
             invalid = 1;
         }
-        if (!invalid && http_ascii_equals(name.buf, name.len, "transfer-encoding")) {
+        if (!invalid && http_ascii_equals(name->buf, name->len, "transfer-encoding")) {
             PyErr_SetString(PyExc_ValueError, "transfer-encoding requires streaming mode");
             invalid = 1;
         }
-        if (!invalid && http_add_size(&total, name.len + 2 + value.len + 2) < 0)
+        if (!invalid && http_add_size(&total, name->len + 2 + value->len + 2) < 0)
             invalid = 1;
-        PyBuffer_Release(&name);
-        PyBuffer_Release(&value);
-        Py_DECREF(pair);
         if (invalid) goto error;
     }
     if (body.len > 0) {
@@ -634,28 +674,16 @@ wreath_http_serialize_request(PyObject *Py_UNUSED(self), PyObject *args)
     HTTP_COPY(" HTTP/1.1\r\nhost: ", sizeof(" HTTP/1.1\r\nhost: ") - 1);
     HTTP_COPY(host.buf, host.len);
     HTTP_COPY("\r\n", 2);
-    for (Py_ssize_t index = 0; index < PySequence_Fast_GET_SIZE(headers); index++) {
-        PyObject *pair = PySequence_Fast(PySequence_Fast_GET_ITEM(headers, index), "header pair");
-        Py_buffer name = {0};
-        Py_buffer value = {0};
-        if (pair == NULL ||
-            PyObject_GetBuffer(PySequence_Fast_GET_ITEM(pair, 0), &name, PyBUF_SIMPLE) < 0 ||
-            PyObject_GetBuffer(PySequence_Fast_GET_ITEM(pair, 1), &value, PyBUF_SIMPLE) < 0) {
-            Py_XDECREF(pair);
-            PyBuffer_Release(&name);
-            PyBuffer_Release(&value);
-            goto error;
-        }
-        for (Py_ssize_t i = 0; i < name.len; i++) {
-            uint8_t c = ((const uint8_t *)name.buf)[i];
+    for (Py_ssize_t index = 0; index < view_count; index += 2) {
+        const Py_buffer *name = &views[index];
+        const Py_buffer *value = &views[index + 1];
+        for (Py_ssize_t i = 0; i < name->len; i++) {
+            uint8_t c = ((const uint8_t *)name->buf)[i];
             *write++ = c >= 'A' && c <= 'Z' ? (char)(c + ('a' - 'A')) : (char)c;
         }
         HTTP_COPY(": ", 2);
-        HTTP_COPY(value.buf, value.len);
+        HTTP_COPY(value->buf, value->len);
         HTTP_COPY("\r\n", 2);
-        PyBuffer_Release(&name);
-        PyBuffer_Release(&value);
-        Py_DECREF(pair);
     }
     if (body.len > 0) {
         HTTP_COPY("content-length: ", sizeof("content-length: ") - 1);
@@ -667,6 +695,8 @@ wreath_http_serialize_request(PyObject *Py_UNUSED(self), PyObject *args)
 #undef HTTP_COPY
     Py_DECREF(method);
     Py_DECREF(headers);
+    for (Py_ssize_t i = 0; i < view_count; i++) PyBuffer_Release(&views[i]);
+    if (views != inline_views) PyMem_Free(views);
     PyBuffer_Release(&target);
     PyBuffer_Release(&host);
     PyBuffer_Release(&body);
@@ -676,6 +706,8 @@ error:
     Py_XDECREF(method);
     Py_XDECREF(headers);
     Py_XDECREF(output);
+    for (Py_ssize_t i = 0; i < view_count; i++) PyBuffer_Release(&views[i]);
+    if (views != inline_views) PyMem_Free(views);
     PyBuffer_Release(&target);
     PyBuffer_Release(&host);
     PyBuffer_Release(&body);

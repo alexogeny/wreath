@@ -1346,25 +1346,75 @@ static PyType_Spec stream_spec = {
 /* header validation + request start                                        */
 /* ======================================================================== */
 
+/* RFC 9113 s8.2.1: a field name is an RFC 9110 token carrying no uppercase
+ * letter. The token set is the one the HTTP/1.1 parser enforces, walked in the
+ * same pass as the case check. */
 static int
 is_lowercase_token(const char *p, Py_ssize_t n)
 {
+    if (n == 0) {
+        return 0;
+    }
     for (Py_ssize_t i = 0; i < n; i++) {
-        char c = p[i];
-        if (c >= 'A' && c <= 'Z') {
+        unsigned char c = (unsigned char)p[i];
+        if (!wreath_field_token[c] || (c >= 'A' && c <= 'Z')) {
             return 0;
         }
     }
     return 1;
 }
 
+/* RFC 9113 s8.2.1: a field value carries no control octet -- NUL, CR and LF
+ * above all -- and neither leads nor trails with SP or HTAB. A value that
+ * fails this is a malformed field, and s8.3 says a malformed field must not
+ * reach the application. */
+static int
+is_field_value(const char *p, Py_ssize_t n)
+{
+    if (!wreath_field_value_valid(p, n)) {
+        return 0;
+    }
+    if (n > 0 && (p[0] == ' ' || p[0] == '\t' ||
+                  p[n - 1] == ' ' || p[n - 1] == '\t')) {
+        return 0;
+    }
+    return 1;
+}
+
+/* Strict decimal content-length, as RFC 9113 s8.1.1 requires: all digits, no
+ * sign, no whitespace (which the field-value rule above has already refused),
+ * no overflow. Returns 0 and writes *out, or -1 for a malformed value. The
+ * HTTP/2 path used to run this through PyLong_FromString and discard the
+ * error, which both leaked the intermediate and turned every unparseable
+ * length into "no declared length" -- silently skipping the end-of-stream
+ * length check that catches an under-run body. */
+static int
+parse_h2_content_length(const char *p, Py_ssize_t n, Py_ssize_t *out)
+{
+    Py_ssize_t parsed = 0;
+    if (n == 0) {
+        return -1;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        int digit = (unsigned char)p[i] - '0';
+        if (digit < 0 || digit > 9 || parsed > (PY_SSIZE_T_MAX - digit) / 10) {
+            return -1;
+        }
+        parsed = parsed * 10 + digit;
+    }
+    *out = parsed;
+    return 0;
+}
+
 /* Validate the decoded header list and build the ASGI scope. Returns:
- *   0 -> scope built (in *out_scope, new ref)
+ *   0 -> scope built (in *out_scope, new ref; declared body length, or -1 for
+ *        none, in *out_content_length)
  *  -1 -> stream protocol error (caller sends RST PROTOCOL_ERROR)
  *  -2 -> python exception set
  */
 static int
-build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope)
+build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope,
+               Py_ssize_t *out_content_length)
 {
     PyObject *method = NULL, *path = NULL, *scheme = NULL, *authority = NULL;
     PyObject *scope_headers = PyList_New(0);
@@ -1373,14 +1423,23 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope)
     }
     int seen_regular = 0;
     int has_host = 0;
+    Py_ssize_t content_length = -1;
     Py_ssize_t count = PyList_GET_SIZE(header_list);
     for (Py_ssize_t i = 0; i < count; i++) {
         PyObject *pair = PyList_GET_ITEM(header_list, i);
         PyObject *name = PyTuple_GET_ITEM(pair, 0);
         PyObject *value = PyTuple_GET_ITEM(pair, 1);
         char *nptr; Py_ssize_t nlen;
+        char *vptr; Py_ssize_t vlen;
         PyBytes_AsStringAndSize(name, &nptr, &nlen);
+        PyBytes_AsStringAndSize(value, &vptr, &vlen);
         if (nlen == 0) {
+            goto proto_err;
+        }
+        /* Every field value, pseudo-header included: a CR, LF or NUL that
+         * reaches the scope is a splitting primitive for whatever re-emits
+         * these headers over HTTP/1.1. */
+        if (!is_field_value(vptr, vlen)) {
             goto proto_err;
         }
         if (nptr[0] == ':') {
@@ -1417,14 +1476,24 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope)
             goto proto_err;
         }
         if (nlen == 2 && memcmp(nptr, "te", 2) == 0) {
-            char *vptr; Py_ssize_t vlen;
-            PyBytes_AsStringAndSize(value, &vptr, &vlen);
             if (!(vlen == 8 && memcmp(vptr, "trailers", 8) == 0)) {
                 goto proto_err;
             }
         }
         if (nlen == 4 && memcmp(nptr, "host", 4) == 0) {
             has_host = 1;
+        }
+        else if (nlen == 14 && memcmp(nptr, "content-length", 14) == 0) {
+            Py_ssize_t declared;
+            if (parse_h2_content_length(vptr, vlen, &declared) < 0) {
+                goto proto_err;
+            }
+            /* A second content-length that disagrees with the first is a
+             * malformed request, exactly as on the HTTP/1.1 path. */
+            if (content_length >= 0 && content_length != declared) {
+                goto proto_err;
+            }
+            content_length = declared;
         }
         if (PyList_Append(scope_headers, pair) < 0) {
             Py_DECREF(scope_headers);
@@ -1516,6 +1585,7 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope)
         return -2;
     }
     *out_scope = scope;
+    *out_content_length = content_length;
     return 0;
 
 proto_err:
@@ -1572,7 +1642,8 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
         return h2_stream_error((PyObject *)self, sid, H2_REFUSED_STREAM);
     }
     PyObject *scope = NULL;
-    int rc = build_h2_scope(self, header_list, &scope);
+    Py_ssize_t content_length = -1;
+    int rc = build_h2_scope(self, header_list, &scope, &content_length);
     if (rc == -2) {
         return -1;
     }
@@ -1598,7 +1669,7 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     st->receive_waiter = NULL;
     st->request_ended = end_stream;
     st->disconnected = 0;
-    st->content_length = -1;
+    st->content_length = content_length;  /* validated in build_h2_scope */
     st->body_received = 0;
     st->response_started = 0;
     st->response_ended = 0;
@@ -1650,22 +1721,19 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     st->nfr_bytes_out = 0;
     PyObject_GC_Track((PyObject *)st);
 
-    /* content-length from headers */
-    Py_ssize_t hc = PyList_GET_SIZE(header_list);
-    for (Py_ssize_t i = 0; i < hc; i++) {
-        PyObject *pair = PyList_GET_ITEM(header_list, i);
-        PyObject *name = PyTuple_GET_ITEM(pair, 0);
-        if (PyBytes_GET_SIZE(name) == 14 &&
-            memcmp(PyBytes_AS_STRING(name), "content-length", 14) == 0) {
-            PyObject *value = PyTuple_GET_ITEM(pair, 1);
-            st->content_length = (Py_ssize_t)PyLong_AsLong(
-                PyLong_FromString(PyBytes_AS_STRING(value), NULL, 10));
-            PyErr_Clear();
-        } else if (self->rfc9218_enabled && PyBytes_GET_SIZE(name) == 8 &&
-                   memcmp(PyBytes_AS_STRING(name), "priority", 8) == 0) {
-            PyObject *value = PyTuple_GET_ITEM(pair, 1);
-            parse_priority_field(PyBytes_AS_STRING(value), PyBytes_GET_SIZE(value),
-                                 &st->urgency, &st->incremental);
+    /* RFC 9218 priority hint; content-length was parsed during validation. */
+    if (self->rfc9218_enabled) {
+        Py_ssize_t hc = PyList_GET_SIZE(header_list);
+        for (Py_ssize_t i = 0; i < hc; i++) {
+            PyObject *pair = PyList_GET_ITEM(header_list, i);
+            PyObject *name = PyTuple_GET_ITEM(pair, 0);
+            if (PyBytes_GET_SIZE(name) == 8 &&
+                memcmp(PyBytes_AS_STRING(name), "priority", 8) == 0) {
+                PyObject *value = PyTuple_GET_ITEM(pair, 1);
+                parse_priority_field(PyBytes_AS_STRING(value),
+                                     PyBytes_GET_SIZE(value),
+                                     &st->urgency, &st->incremental);
+            }
         }
     }
 

@@ -966,42 +966,6 @@ set_deadline(WreathHttpProtocol *self, double timeout, int is_request)
 /* --- response framing ---------------------------------------------------- */
 
 static int
-valid_header_name(const char *data, Py_ssize_t size)
-{
-    if (size == 0) {
-        return 0;
-    }
-    for (Py_ssize_t i = 0; i < size; i++) {
-        unsigned char c = (unsigned char)data[i];
-        int token = (c >= '0' && c <= '9') ||
-                    (c >= 'A' && c <= 'Z') ||
-                    (c >= 'a' && c <= 'z') ||
-                    c == '!' || c == '#' || c == 0x24 || c == '%' ||
-                    c == '&' || c == 0x27 || c == '*' || c == '+' ||
-                    c == '-' || c == '.' || c == '^' || c == '_' ||
-                    c == 0x60 || c == '|' || c == '~';
-        if (!token) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-
-static int
-valid_header_value(const char *data, Py_ssize_t size)
-{
-    for (Py_ssize_t i = 0; i < size; i++) {
-        unsigned char c = (unsigned char)data[i];
-        if ((c < 0x20 && c != '\t') || c == 0x7f) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-
-static int
 validate_trailer_block(const char *data, Py_ssize_t size, Py_ssize_t max_count)
 {
     Py_ssize_t offset = 0;
@@ -1016,14 +980,14 @@ validate_trailer_block(const char *data, Py_ssize_t size, Py_ssize_t max_count)
             return 0;
         }
         const char *colon = memchr(data + offset, ':', (size_t)(end - offset));
-        if (colon == NULL || !valid_header_name(data + offset, colon - (data + offset))) {
+        if (colon == NULL || !wreath_field_name_valid(data + offset, colon - (data + offset))) {
             return 0;
         }
         const char *value = colon + 1;
         while (value < data + end && (*value == ' ' || *value == '\t')) {
             value++;
         }
-        if (!valid_header_value(value, data + end - value)) {
+        if (!wreath_field_value_valid(value, data + end - value)) {
             return 0;
         }
         Py_ssize_t name_size = colon - (data + offset);
@@ -1153,8 +1117,8 @@ begin_response_parts(WreathHttpProtocol *self, PyObject *status_obj, PyObject *h
             }
             name_data = PyBytes_AS_STRING(name);
             name_size = PyBytes_GET_SIZE(name);
-            if (!valid_header_name(name_data, name_size) ||
-                !valid_header_value(PyBytes_AS_STRING(value), PyBytes_GET_SIZE(value))) {
+            if (!wreath_field_name_valid(name_data, name_size) ||
+                !wreath_field_value_valid(PyBytes_AS_STRING(value), PyBytes_GET_SIZE(value))) {
                 PyErr_SetString(PyExc_RuntimeError, "invalid response header");
                 goto error;
             }
@@ -1794,8 +1758,8 @@ ws_asgi_send(WreathHttpProtocol *self, PyObject *message, PyObject *type)
                     char c = name_data[j];
                     lname[j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
                 }
-                if (!valid_header_name(lname, name_size) ||
-                    !valid_header_value(PyBytes_AS_STRING(value),
+                if (!wreath_field_name_valid(lname, name_size) ||
+                    !wreath_field_value_valid(PyBytes_AS_STRING(value),
                                         PyBytes_GET_SIZE(value))) {
                     Py_DECREF(items);
                     PyErr_SetString(PyExc_RuntimeError, "invalid response header");

@@ -277,6 +277,23 @@ int wreath_http1_commit_read(PyObject *, Py_ssize_t);
 int wreath_http1_feed_external(PyObject *, const char *, Py_ssize_t);
 
 
+/* --- field validation (defined in server_common.c) ----------------------- */
+/* RFC 9110 field-name token octets, one table for every ingress path in this
+ * module. The copies used to be per-protocol, and the protocols disagreed:
+ * HTTP/1.1 rejected CR, LF, NUL and SP in field names and values while HTTP/2
+ * checked names for uppercase only and values not at all, so the same process
+ * accepted over h2 exactly the octets it refused over h1. That disagreement is
+ * a request-splitting primitive for any downstream that re-serializes the
+ * headers to HTTP/1.1, so the rule now lives in one place. */
+extern const uint8_t wreath_field_token[256];
+
+/* A non-empty RFC 9110 token, any case. */
+int wreath_field_name_valid(const char *data, Py_ssize_t size);
+
+/* A field value with no control octet and no DEL; HTAB is permitted. */
+int wreath_field_value_valid(const char *data, Py_ssize_t size);
+
+
 /* --- shared module globals (defined in server_common.c) ------------------ */
 /* Borrowed from the live module; cleared by server_module_free(). */
 extern PyObject *disconnect_error;  /* module-private _Disconnect */
