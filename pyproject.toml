@@ -19,6 +19,17 @@ classifiers = [
   "Typing :: Typed",
 ]
 
+# PyPI renders these as the project's sidebar links. Without them the listing
+# has no way back to the source or the documentation, and every relative link
+# in the README resolves against pypi.org instead. The README uses absolute
+# URLs for the same reason.
+[project.urls]
+Homepage = "https://github.com/alexogeny/wreath"
+Documentation = "https://alexogeny.github.io/wreath/"
+Source = "https://github.com/alexogeny/wreath"
+Issues = "https://github.com/alexogeny/wreath/issues"
+Changelog = "https://alexogeny.github.io/wreath/release_notes/index.html"
+
 [dependency-groups]
 dev = [
   # Generating the throwaway self-signed certificates the TLS and HTTP/3 tests
