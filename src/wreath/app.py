@@ -46,6 +46,7 @@ from .binding import (
 )
 from .cache_control import CacheControl
 from .exceptions import (
+    BadRequest,
     Forbidden,
     HTTPException,
     MethodNotAllowed,
@@ -82,6 +83,17 @@ _build_capability_mask = (
 # Baseline Response.__call__ used to detect subclasses that override sending;
 # only unmodified responses ride the one-shot "wreath.response" server extension.
 _RESPONSE_CALL = Response.__call__
+
+
+def _ambiguous_request_path(scope: dict[str, Any], path: str) -> bool:
+    """Whether proxy and application could route encoded separators differently."""
+    raw_path = scope.get("raw_path")
+    if isinstance(raw_path, bytes) and b"%" in raw_path:
+        lowered = raw_path.lower()
+        if b"%2f" in lowered or b"%5c" in lowered:
+            return True
+    return "\\" in path
+
 
 # Flight-recorder phase markers, pre-resolved to plain ints so the armed request
 # path never touches the IntEnum machinery. Only a request whose native context
@@ -357,6 +369,7 @@ class Wreath:
         "_validation_formatter",
         "_status_handlers",
         "_webhook_hubs",
+        "_websocket_hooks",
         "_ws_router",
         "_ws_routes",
         "debug",
@@ -411,6 +424,8 @@ class Wreath:
         self._global_middleware: list[tuple[int, int, Middleware]] = []
         # (before_hook, after_hook, is_sync) per global middleware.
         self._global_hooks: tuple[tuple[Any, Any, bool], ...] = ()
+        # (before_hook, is_sync) for middleware explicitly safe on handshakes.
+        self._websocket_hooks: tuple[tuple[Any, bool], ...] = ()
         self._handler_requirements: dict[Any, AuthRequirement] = {}
         # Native Flight Recorder route attribution: {compiled_handler:
         # (route_id, plan_id)} joined to the Stage-0 metadata image, built lazily
@@ -1226,10 +1241,12 @@ class Wreath:
             ValueError: A second `handle_preflight` middleware was registered.
         """
         if not any(
-            hasattr(middleware, name) for name in ("before", "before_sync", "after")
+            hasattr(middleware, name)
+            for name in ("before", "before_sync", "before_websocket", "after")
         ):
             raise TypeError(
-                "global middleware must expose before, before_sync, and/or after hooks"
+                "global middleware must expose before, before_sync, "
+                "before_websocket, and/or after hooks"
             )
         self._global_middleware.append((priority, self._middleware_order, middleware))
         self._middleware_order += 1
@@ -1486,6 +1503,18 @@ class Wreath:
                         active_global,
                     )
                     return
+
+        if not native_response and _ambiguous_request_path(scope, path):
+            if request is None:
+                request = Request(scope, receive, limits=self._limits)
+            response = await self._handle_exception(
+                request,
+                BadRequest("ambiguous encoded path separator or dot segment"),
+            )
+            await self._finish_http(
+                request, response, send, method, scope, native_response, active_global
+            )
+            return
 
         if self._routing in _CLASSIFYING:
             classify = self._classify
@@ -1842,6 +1871,9 @@ class Wreath:
                 raise
 
     async def _handle_websocket(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if _ambiguous_request_path(scope, scope["path"]):
+            await send({"type": "websocket.close", "code": 1008})
+            return
         router = self._ws_router
         matched = (
             router.match("WEBSOCKET", scope["path"]) if router is not None else (None, None)
@@ -1866,23 +1898,36 @@ class Wreath:
             if attribution is not None:
                 scope["_wreath_flight"] = attribution
         # A WebSocket route carries the same `@authenticated`/`@roles`/
-        # `@permissions`/`@authorize` metadata an HTTP route does, and it used to
-        # be ignored here -- the handler ran for anyone who could reach the path.
-        # Enforced before the handshake, so a refused caller never gets an
-        # accepted socket: an ASGI server turns a pre-accept close into its own
-        # rejection response.
+        # `@permissions`/`@authorize` metadata an HTTP route does. Handshake-safe
+        # ingress hooks run first, so Host/proxy/session policy cannot be bypassed
+        # by switching protocols and session-backed auth sees the loaded session.
         identity: Identity | None = None
         requirement = requirement_for(handler)
-        if (
+        needs_auth = (
             requirement.needs_backend
             or requirement.role_checks
             or requirement.permission_checks
             or requirement.policies
-        ):
-            # Authentication backends read headers and cookies, which a
-            # WebSocket scope carries; `method` is synthesized on a copy because
-            # the handshake is a GET and a backend may look.
+        )
+        websocket_hooks = self._websocket_hooks
+        request: Request | None = None
+        if websocket_hooks or needs_auth:
+            # The handshake is a GET. Keep one Request for ingress and auth so
+            # session state published by middleware reaches the backend.
             request = Request({**scope, "method": "GET"}, receive, path_params, self._limits)
+        if request is not None:
+            for before, is_sync in websocket_hooks:
+                try:
+                    candidate = before(request) if is_sync else await before(request)
+                except Exception:  # noqa: BLE001 -- security ingress fails closed
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+                if candidate is not None:
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+        if needs_auth:
+            if request is None:
+                raise RuntimeError("WebSocket authentication request was not constructed")
             try:
                 await self._authorize_request(request, requirement)
             except HTTPException:
@@ -2100,6 +2145,18 @@ class Wreath:
             else (getattr(item, "before", None), getattr(item, "after", None), False)
             for item in global_middleware
         )
+        websocket_hooks: list[tuple[Any, bool]] = []
+        for item in global_middleware:
+            websocket_hook = getattr(item, "before_websocket", None)
+            if websocket_hook is not None:
+                websocket_hooks.append((websocket_hook, False))
+            elif getattr(item, "websocket_scope", False):
+                before_sync = getattr(item, "before_sync", None)
+                if before_sync is not None:
+                    websocket_hooks.append((before_sync, True))
+                elif (before := getattr(item, "before", None)) is not None:
+                    websocket_hooks.append((before, False))
+        self._websocket_hooks = tuple(websocket_hooks)
         stage_hooks = {
             stage: tuple(
                 hook

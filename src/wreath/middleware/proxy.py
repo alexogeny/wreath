@@ -74,6 +74,7 @@ class ProxyHeadersMiddleware:
     """
 
     global_scope = True
+    websocket_scope = True
     __slots__ = ("_networks", "_trust_host", "_trust_proto")
 
     def __init__(

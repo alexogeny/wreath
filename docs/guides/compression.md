@@ -25,6 +25,12 @@ gzip *and* the content type is worth compressing, and skips any body under
 it saves. It sets `Content-Encoding: gzip` and fixes the length for you — the
 handler still just returns data.
 
+Identified responses are not compressed by default. A compressed body containing
+both a secret and attacker-controlled reflection exposes a length oracle (the
+BREACH class of attacks). If a protected endpoint is known not to mix those,
+opt in deliberately with `compress_authenticated=True`; public responses keep
+the ordinary compression fast path.
+
 For the ordinary case, though, you don't touch the codec directly. You add
 `CompressionMiddleware` from the [middleware](middleware.md) module, which reads
 the request's `Accept-Encoding`, checks that the content type is worth

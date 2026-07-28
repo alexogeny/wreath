@@ -1,8 +1,9 @@
 """First-party trusted-host and browser security-header middleware.
 
-Two independent global middlewares. `TrustedHostMiddleware` refuses a request
+Three independent global middlewares. `TrustedHostMiddleware` refuses a request
 whose `Host` is not one this application serves, before routing.
-`SecurityHeadersMiddleware` adds the browser hardening headers to every response
+`WebSocketOriginMiddleware` applies an exact browser-origin allowlist before a
+WebSocket handshake. `SecurityHeadersMiddleware` adds hardening headers to every response
 that does not already declare them:
 
 ```python
@@ -17,9 +18,10 @@ Both read the request scheme and `Host`, so behind a proxy both belong after
 from __future__ import annotations
 
 from collections.abc import Iterable
+from urllib.parse import urlsplit
 
 from .._native import _core
-from .._webpolicy import append_missing_headers
+from .._webpolicy import append_missing_headers, origin_matches
 from ..request import Request
 from ..response import ProblemResponse
 
@@ -68,6 +70,7 @@ class TrustedHostMiddleware:
     """
 
     global_scope = True
+    websocket_scope = True
     __slots__ = ("allowed_hosts",)
 
     def __init__(self, allowed_hosts: Iterable[str]) -> None:
@@ -80,12 +83,71 @@ class TrustedHostMiddleware:
         self.allowed_hosts = patterns
 
     def before_sync(self, request: Request):
-        """Return None for an allowed host, or a 400 problem response otherwise."""
-        # Host validation is pure and synchronous: a before_sync hook so the
-        # global pipeline runs it with no coroutine or await.
-        value = request.header("host")
-        if value is None or not _host_allowed(_normalize_host(value), self.allowed_hosts):
+        """Return None for an allowed unique Host, or a 400 otherwise."""
+        # Host is not list-valued. Reject duplicates so an upstream proxy and
+        # Wreath cannot apply different first/last interpretations.
+        value_bytes: bytes | None = None
+        for name, candidate in request.headers:
+            if name.lower() != b"host":
+                continue
+            if value_bytes is not None:
+                return ProblemResponse(status=400, detail="Invalid Host header")
+            value_bytes = candidate
+        if value_bytes is None:
             return ProblemResponse(status=400, detail="Invalid Host header")
+        value = value_bytes.decode("latin-1")
+        if not _host_allowed(_normalize_host(value), self.allowed_hosts):
+            return ProblemResponse(status=400, detail="Invalid Host header")
+        return None
+
+
+def _normalize_origin(value: str) -> bytes:
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise ValueError(f"invalid WebSocket origin: {value!r}")
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(f"invalid WebSocket origin: {value!r}") from error
+    default = 80 if scheme == "http" else 443
+    authority = host if port is None or port == default else f"{host}:{port}"
+    return f"{scheme}://{authority}".encode("ascii")
+
+
+class WebSocketOriginMiddleware:
+    """Reject WebSocket handshakes outside an exact browser-origin allowlist."""
+
+    global_scope = True
+    __slots__ = ("allowed_origins",)
+
+    def __init__(self, allowed_origins: Iterable[str]) -> None:
+        origins = tuple(_normalize_origin(origin) for origin in allowed_origins)
+        if not origins:
+            raise ValueError("allowed WebSocket origins must not be empty")
+        self.allowed_origins = origins
+
+    async def before_websocket(self, request: Request):
+        encoded: bytes | None = None
+        for name, candidate in request.headers:
+            if name.lower() != b"origin":
+                continue
+            if encoded is not None:
+                return ProblemResponse(status=403, detail="WebSocket origin is not allowed")
+            encoded = candidate
+        if encoded is None or not origin_matches(encoded, self.allowed_origins):
+            return ProblemResponse(status=403, detail="WebSocket origin is not allowed")
         return None
 
 
@@ -198,4 +260,8 @@ class SecurityHeadersMiddleware:
         return response
 
 
-__all__ = ["SecurityHeadersMiddleware", "TrustedHostMiddleware"]
+__all__ = [
+    "SecurityHeadersMiddleware",
+    "TrustedHostMiddleware",
+    "WebSocketOriginMiddleware",
+]

@@ -47,6 +47,12 @@ Because `id` is annotated `int`, `/orders/42` reaches the handler as the integer
 `42` while `/orders/abc` never does — the caller gets a `422` and the conversion
 happens once, on the way in, instead of scattered through your code.
 
+Wreath refuses ambiguous path spellings before routing: percent-encoded `/` or
+`\\`, and a decoded backslash receive `400`. Reverse proxies disagree about
+whether to decode those forms before ACLs;
+refusing them prevents the proxy authorizing one path while the application
+activates another.
+
 ## Composing routers
 
 As an application grows you will want to keep related routes together and out of

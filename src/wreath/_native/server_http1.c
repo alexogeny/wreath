@@ -1898,7 +1898,15 @@ decode_path(const char *data, Py_ssize_t size, int *bad)
                    : (lo >= 'a' && lo <= 'f') ? lo - 'a' + 10
                    : (lo >= 'A' && lo <= 'F') ? lo - 'A' + 10 : -1;
             if (hv >= 0 && lv >= 0) {
-                decoded[out++] = (char)((hv << 4) | lv);
+                int decoded_byte = (hv << 4) | lv;
+                /* Encoded separators are routed differently by common proxies.
+                 * Refuse rather than let an edge ACL and Wreath activate two paths. */
+                if (decoded_byte == '/' || decoded_byte == '\\') {
+                    PyMem_Free(decoded);
+                    *bad = 1;
+                    return NULL;
+                }
+                decoded[out++] = (char)decoded_byte;
                 i += 2;
                 continue;
             }
