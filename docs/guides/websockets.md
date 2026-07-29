@@ -52,4 +52,22 @@ stays. The disconnect surfaces as a `WebSocketDisconnect` wherever you happen to
 be awaiting — inside the `async for` above included — so cleanup is a plain
 `except`.
 
+## Browser-origin and handshake security
+
+CORS does not protect WebSockets, and a browser attaches matching cookies to the
+handshake. Install an exact origin allowlist for every browser-facing socket:
+
+```python
+from wreath.middleware import WebSocketOriginMiddleware
+
+app.add_middleware(WebSocketOriginMiddleware(["https://app.example"]))
+```
+
+Missing, malformed, repeated, and unlisted `Origin` values are refused before
+`accept`. Handshake-safe global middleware also runs before WebSocket auth:
+`ProxyHeadersMiddleware`, `TrustedHostMiddleware`, and a global
+`SessionMiddleware` therefore apply on both HTTP and WebSocket paths. Encoded
+slashes and backslashes are refused before WebSocket routing just as they are
+before HTTP routing.
+
 **Reference:** [`wreath.websocket`](../reference/websocket.md).

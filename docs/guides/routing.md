@@ -1,3 +1,6 @@
+---
+keywords: path parameters, url parameters, route matching, http methods, sub-application
+---
 # Routing
 
 Routing is how a request finds its handler. In Wreath you describe that mapping
@@ -46,6 +49,12 @@ async def create_order(request: Request) -> dict:
 Because `id` is annotated `int`, `/orders/42` reaches the handler as the integer
 `42` while `/orders/abc` never does — the caller gets a `422` and the conversion
 happens once, on the way in, instead of scattered through your code.
+
+Wreath refuses ambiguous path spellings before routing: percent-encoded `/` or
+`\\`, and a decoded backslash receive `400`. Reverse proxies disagree about
+whether to decode those forms before ACLs;
+refusing them prevents the proxy authorizing one path while the application
+activates another.
 
 ## Composing routers
 

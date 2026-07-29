@@ -98,6 +98,12 @@ def _create_recorder(config: ServerConfig) -> Any:
         detailed_slow_us=telemetry.detailed_slow_us,
         capture_slabs=capture_slabs,
         slab_bytes=telemetry.slab_bytes,
+        # When set, the ring is a MAP_SHARED file rather than heap memory, so a
+        # process that dies badly leaves its last cells readable. A path that
+        # cannot be opened raises out of here rather than degrading: a forensic
+        # ring nobody notices is missing is worth nothing at the moment it is
+        # needed.
+        ring_path=telemetry.ring_path,
     )
 
 
@@ -119,11 +125,7 @@ def _create_projector(
     telemetry = config.telemetry
     export = None
     on_trace = None
-    if (
-        telemetry is not None
-        and telemetry.otlp.enabled
-        and telemetry.otlp.endpoint
-    ):
+    if telemetry is not None and telemetry.otlp.enabled and telemetry.otlp.endpoint:
         from ._export import ExportPipeline, OtlpHttpExporter
         from ._flight_metadata import build_metadata_image
 
@@ -173,6 +175,11 @@ def _create_logging(recorder: Any, config: ServerConfig) -> tuple[Any, Any]:
         sampling=settings.sampling,
         limiter_capacity=settings.limiter_capacity,
         scratch_budget=settings.scratch_budget,
+        # The native emitter when this recorder has one, packing a record
+        # straight into a ring cell in C. The sink above stays installed and
+        # stays the twin: a promoted buffer, and a pure recorder, still go
+        # through it.
+        native=wreath_logging.recorder_emitter(recorder),
     )
     # Carry the sites the application registered at import into the new runtime,
     # *keeping the configured capacity*. Without the adoption a module-level
@@ -182,11 +189,19 @@ def _create_logging(recorder: Any, config: ServerConfig) -> tuple[Any, Any]:
     # be silently ignored because the adopted table has its own.
     runtime.registry = wreath_logging.installed().registry
     runtime.registry.set_capacity(settings.site_capacity)
+    # This runs on the event loop during startup, and the loop is the ring's
+    # single writer. Binding it here opens the off-loop slow path: a record made
+    # on a job worker or in a thread-pool task is staged instead of racing the
+    # loop into `ring_publish`, which does not lose a record so much as
+    # overwrite one and advance the head anyway.
+    runtime.bind_writer()
     previous = wreath_logging.install(runtime)
     writer = config.log_writer
     if writer is None:
+
         def writer(line: str) -> None:
             print(line, file=sys.stdout)
+
         is_tty = sys.stdout.isatty()
     else:
         # A caller-supplied writer is a collector, not a terminal.
@@ -223,10 +238,9 @@ def _create_recording(recorder: Any, config: ServerConfig, app: Any) -> tuple[An
     arm_registry = ArmRegistry(config.recording)
     sink = None
     if config.recording_path is not None:
-        sink = RecordingSink(
-            recorder, build_metadata_image(app), config.recording_path
-        )
+        sink = RecordingSink(recorder, build_metadata_image(app), config.recording_path)
     return sink, arm_registry
+
 
 Scope = dict[str, Any]
 Message = dict[str, Any]
@@ -282,9 +296,7 @@ class TLSConfig:
         import ssl as _ssl
 
         context = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(
-            os.fspath(self.certfile), os.fspath(self.keyfile), self.password
-        )
+        context.load_cert_chain(os.fspath(self.certfile), os.fspath(self.keyfile), self.password)
         alpn = [p for p in protocols if p in ("http/1.1", "h2")]
         if alpn:
             context.set_alpn_protocols(alpn)
@@ -367,6 +379,7 @@ _SERVER_ENV_REGISTRY: tuple[_EnvSpec, ...] = (
     _EnvSpec("WREATH_MAX_HEADER_COUNT", "max_header_count", int),
     _EnvSpec("WREATH_MAX_HEADER_BYTES", "max_header_bytes", int),
     _EnvSpec("WREATH_MAX_BODY_BYTES", "max_body_bytes", int),
+    _EnvSpec("WREATH_MAX_BODY_CHUNKS", "max_body_chunks", int),
     _EnvSpec("WREATH_LIFESPAN", "lifespan", _env_lifespan),
     _EnvSpec("WREATH_PREARM", "prearm", int),
     _EnvSpec("WREATH_PROTOCOLS", "protocols", _env_protocols),
@@ -402,9 +415,10 @@ class ServerConfig:
         server_header: Value for the `Server` header. Printable ASCII, or None to send none.
         date_header: Send a `Date` header, refreshed once a second by the running server.
         max_request_line: Bytes in the request line before 414.
-        max_header_count: Header fields before 431.
+        max_header_count: Header fields per request before protocol rejection.
         max_header_bytes: Bytes in the whole head before 431.
         max_body_bytes: Request-body bytes before 413; also caps one WebSocket message.
+        max_body_chunks: Non-empty HTTP body frames/chunks before rejection.
         read_high_water: Queued request-body bytes before reading is paused.
         read_high_water_messages: Queued ASGI messages before reading is paused.
         response_high_water: Unacknowledged response bytes before ASGI `send` waits.
@@ -438,6 +452,12 @@ class ServerConfig:
     max_header_count: int = 100
     max_header_bytes: int = 32 * 1024
     max_body_bytes: int = 1 * 1024 * 1024
+    # A decoded-byte ceiling does not bound parser work: the same body can be
+    # encoded as one chunk/frame or as one per byte. HTTP/1's terminating
+    # zero-size chunk and HTTP/2's separately-budgeted empty DATA do not count.
+    # This default still permits a maximally fragmented 4 KiB body and is
+    # generous compared with ordinary clients.
+    max_body_chunks: int = 4096
     read_high_water: int = 256 * 1024
     # Queued ASGI messages may each carry zero payload bytes (an empty
     # WebSocket message, an empty chunk), so `read_high_water` alone cannot
@@ -510,8 +530,7 @@ class ServerConfig:
     def __post_init__(self) -> None:
         server_header = self.server_header
         if server_header is not None and (
-            not server_header
-            or any(ord(char) < 0x20 or ord(char) > 0x7E for char in server_header)
+            not server_header or any(ord(char) < 0x20 or ord(char) > 0x7E for char in server_header)
         ):
             raise ValueError("server_header must contain printable ASCII")
         if not isinstance(self.date_header, bool):
@@ -525,10 +544,18 @@ class ServerConfig:
             raise ValueError("port must be in 0..65535")
         if self.backlog < 1:
             raise ValueError("backlog must be positive")
-        for name in ("max_request_line", "max_header_count", "max_header_bytes",
-                     "max_body_bytes", "read_high_water",
-                     "read_high_water_messages", "response_high_water",
-                     "response_high_water_segments", "max_ws_fragments"):
+        for name in (
+            "max_request_line",
+            "max_header_count",
+            "max_header_bytes",
+            "max_body_bytes",
+            "max_body_chunks",
+            "read_high_water",
+            "read_high_water_messages",
+            "response_high_water",
+            "response_high_water_segments",
+            "max_ws_fragments",
+        ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
         for low, high in (
@@ -546,12 +573,15 @@ class ServerConfig:
         self._validate_protocols()
         # All limits are positive except the compression table sizes and the
         # blocked-stream count, which may be zero.
-        for name in ("max_concurrent_streams", "initial_stream_window",
-                     "initial_connection_window", "max_header_list_bytes"):
+        for name in (
+            "max_concurrent_streams",
+            "initial_stream_window",
+            "initial_connection_window",
+            "max_header_list_bytes",
+        ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
-        for name in ("hpack_table_bytes", "qpack_table_bytes",
-                     "qpack_blocked_streams"):
+        for name in ("hpack_table_bytes", "qpack_table_bytes", "qpack_blocked_streams"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be non-negative")
 
@@ -565,8 +595,7 @@ class ServerConfig:
         for name in protocols:
             if name not in _VALID_PROTOCOLS:
                 raise ValueError(
-                    f"unknown protocol {name!r}; expected one of "
-                    "'http/1.1', 'h2', 'h3'"
+                    f"unknown protocol {name!r}; expected one of 'http/1.1', 'h2', 'h3'"
                 )
             if name in seen:
                 raise ValueError(f"duplicate protocol {name!r}")
@@ -805,7 +834,10 @@ class NegotiatingHttpProtocol(asyncio.Protocol):
             transport.close()  # unknown ALPN: never reach ASGI
             return
         self._delegate = protocol_cls(
-            self._app, self._config, self._loop, self._registry,
+            self._app,
+            self._config,
+            self._loop,
+            self._registry,
             recorder=self._recorder,
         )
         self._delegate.connection_made(transport)
@@ -859,7 +891,7 @@ def _http3_available() -> bool:
             try:
                 importlib.import_module("wreath._native._http3")
                 _http3_available_cache = True
-            except (ImportError, ValueError):
+            except ImportError, ValueError:
                 _http3_available_cache = False
     return _http3_available_cache
 
@@ -959,6 +991,7 @@ class Server:
         self._closed = loop.create_future()
         self._closing = False
         self._date_timer: asyncio.TimerHandle | None = None
+        self._off_loop_timer: asyncio.TimerHandle | None = None
 
     @property
     def prearmed_connections(self) -> int:
@@ -1003,13 +1036,14 @@ class Server:
     def _protocol_factory(self) -> Any:
         protocol_cls = _select_tcp_protocol(self._config)
         return protocol_cls(
-            self._app, self._config, self._loop, self._protocols,
+            self._app,
+            self._config,
+            self._loop,
+            self._protocols,
             recorder=self._recorder,
         )
 
-    async def _start(
-        self, ssl: SSLContext | None, tls: TLSConfig | None = None
-    ) -> None:
+    async def _start(self, ssl: SSLContext | None, tls: TLSConfig | None = None) -> None:
         config = self._config
         protocols = config.protocols
         wants_tcp = "http/1.1" in protocols or "h2" in protocols
@@ -1044,16 +1078,13 @@ class Server:
                 self._log_pipeline, self._log_previous_runtime = _create_logging(
                     self._recorder, config
                 )
-                on_log = (
-                    self._log_pipeline.on_log
-                    if self._log_pipeline is not None
-                    else None
-                )
+                on_log = self._log_pipeline.on_log if self._log_pipeline is not None else None
                 self._projector, self._export = _create_projector(
                     self._recorder, config, self._app, on_log
                 )
                 if self._log_pipeline is not None:
                     self._log_pipeline.start()
+                    self._drain_off_loop_logs()
                 if self._projector is not None:
                     self._projector.start()
                 if self._export is not None:
@@ -1061,14 +1092,18 @@ class Server:
                 if self._export is not None and self._log_pipeline is not None:
                     from . import logging as wreath_logging
 
-                    self._export.set_log_registry(
-                        wreath_logging.installed().registry
-                    )
+                    self._export.set_log_registry(wreath_logging.installed().registry)
                 self._recording_sink, self._arm_registry = _create_recording(
                     self._recorder, config, self._app
                 )
                 if self._recording_sink is not None:
                     self._recording_sink.start()
+                    # The archival half of crash forensics: every cell the
+                    # projector drains is appended to the recording, so history
+                    # survives past the point where the ring refuses. The ring
+                    # file holds what was still in flight; this holds the rest.
+                    if self._projector is not None:
+                        self._projector.set_cell_archive(self._recording_sink.archive_cells)
                 # Install the compiled capture plan + arm registry on the app so
                 # its request-path seam can capture per policy. Only a Wreath app
                 # carries the seam; a bare ASGI app simply lacks the method.
@@ -1076,11 +1111,12 @@ class Server:
                 if setter is not None and self._arm_registry is not None:
                     from .recording import compile_redaction
 
-                    setter(compile_redaction(config.recording.redaction),
-                           self._arm_registry)
+                    setter(compile_redaction(config.recording.redaction), self._arm_registry)
             if config.inspector is not None and self._recorder is not None:
                 self._inspector = await serve_inspector(
-                    self._recorder, self._app, config.inspector,
+                    self._recorder,
+                    self._app,
+                    config.inspector,
                     projector=self._projector,
                     arm_registry=self._arm_registry,
                 )
@@ -1133,9 +1169,7 @@ class Server:
         host, port = self.sockets[0].getsockname()[:2]
         if host in ("0.0.0.0", "::", ""):
             host = "::1" if ":" in host else "127.0.0.1"
-        request = (
-            f"GET {self.PREARM_PATH} HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()
-        )
+        request = f"GET {self.PREARM_PATH} HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()
         for _ in range(self._config.prearm):
             try:
                 reader, writer = await asyncio.open_connection(host, port)
@@ -1173,16 +1207,19 @@ class Server:
         if freeze is not None:
             freeze()
 
-    async def _bind_datagram(
-        self, tls: TLSConfig, port: int
-    ) -> asyncio.DatagramTransport:
+    async def _bind_datagram(self, tls: TLSConfig, port: int) -> asyncio.DatagramTransport:
         ext = importlib.import_module("wreath._native._http3")
         config = self._config
 
         def factory() -> Any:
             return ext.DatagramEndpoint(
-                self._app, config, self._loop, self._protocols,
-                os.fspath(tls.certfile), os.fspath(tls.keyfile), tls.password,
+                self._app,
+                config,
+                self._loop,
+                self._protocols,
+                os.fspath(tls.certfile),
+                os.fspath(tls.keyfile),
+                tls.password,
                 self._recorder,
             )
 
@@ -1202,6 +1239,28 @@ class Server:
             self._date_timer.cancel()
             self._date_timer = None
 
+    def _drain_off_loop_logs(self) -> None:
+        """Publish records staged by threads that may not write to the ring.
+
+        A `call_later` chain rather than a thread, because the point is that
+        this runs *on the loop*: it is the only writer, and the whole slow path
+        exists so a job worker's record reaches the ring through it. The tick is
+        the writer's own interval, so an off-loop record's added latency is the
+        one a reader already expects from the writer.
+        """
+        from . import logging as wreath_logging
+        from ._logsink import DEFAULT_WRITER_INTERVAL
+
+        wreath_logging.installed().drain_off_loop()
+        self._off_loop_timer = self._loop.call_later(
+            DEFAULT_WRITER_INTERVAL, self._drain_off_loop_logs
+        )
+
+    def _cancel_off_loop_timer(self) -> None:
+        if self._off_loop_timer is not None:
+            self._off_loop_timer.cancel()
+            self._off_loop_timer = None
+
     async def _stop_projection(self) -> None:
         """Stop the export pipeline then the projector, joining their threads off
         the event loop. The export pipeline goes first so its final flush can
@@ -1214,6 +1273,11 @@ class Server:
         if previous is not None:
             from . import logging as wreath_logging
 
+            # One last drain on the loop, before the runtime is swapped out from
+            # under the stage. A record a job worker made during shutdown is
+            # exactly the one worth not losing.
+            self._cancel_off_loop_timer()
+            wreath_logging.installed().drain_off_loop()
             wreath_logging.install(previous)
         projector, self._projector = self._projector, None
         if projector is not None:
@@ -1236,6 +1300,7 @@ class Server:
 
     async def _abort_startup(self) -> None:
         self._cancel_date_timer()
+        self._cancel_off_loop_timer()
         if self._inspector is not None:
             await self._inspector.close()
             self._inspector = None
@@ -1287,6 +1352,7 @@ class Server:
             return
         self._closing = True
         self._cancel_date_timer()
+        self._cancel_off_loop_timer()
         config = self._config
 
         # 0. The Inspector goes first: no reads of a recorder mid-teardown.
@@ -1388,7 +1454,7 @@ class Server:
         for signame in (signal.SIGINT, signal.SIGTERM):
             try:
                 self._loop.add_signal_handler(signame, handler)
-            except (NotImplementedError, RuntimeError):
+            except NotImplementedError, RuntimeError:
                 return
 
 
@@ -1592,7 +1658,7 @@ class _LifespanManager:
         await self._receive_queue.put({"type": "lifespan.shutdown"})
         try:
             await asyncio.wait_for(self._shutdown_event, timeout=10.0)
-        except (TimeoutError, RuntimeError):
+        except TimeoutError, RuntimeError:
             # The only two outcomes this await has besides success: the app never
             # answered (TimeoutError), or it answered `lifespan.shutdown.failed`,
             # which `_receive` turns into exactly this RuntimeError. Shutdown

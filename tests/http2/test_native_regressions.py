@@ -86,3 +86,20 @@ async def test_header_block_larger_than_configured_limit_is_rejected(make_driver
     assert resets
     assert int.from_bytes(resets[-1].payload, "big") == support.ENHANCE_YOUR_CALM
     assert not captured
+
+
+async def test_hpack_stops_at_configured_header_count(make_driver) -> None:
+    """Compressed one-byte fields must not expand into an unbounded Python list."""
+    app, captured = scope_capture_app()
+    config = ServerConfig(
+        protocols=("h2",), max_header_count=8, max_header_list_bytes=1 << 20
+    )
+    driver = make_driver(app, config)
+    await driver.preface()
+    headers = support.request_headers(extra=[(b"accept", b"")] * 32)
+    await driver.feed_and_settle(support.build_headers_frame(1, headers))
+
+    resets = [frame for frame in driver.frames() if frame.type == support.RST_STREAM]
+    assert resets, "HPACK materialized fields beyond max_header_count"
+    assert int.from_bytes(resets[-1].payload, "big") == support.ENHANCE_YOUR_CALM
+    assert not captured

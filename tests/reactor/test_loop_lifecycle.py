@@ -45,8 +45,12 @@ def test_run_forever_returns_after_stop(loop):
 
 def test_run_until_complete_is_not_reentrant(loop):
     async def main():
-        with pytest.raises(RuntimeError):
-            loop.run_until_complete(asyncio.sleep(0))
+        pending = asyncio.sleep(0)
+        try:
+            with pytest.raises(RuntimeError):
+                loop.run_until_complete(pending)
+        finally:
+            pending.close()
         return "ok"
 
     assert run(loop, main()) == "ok"

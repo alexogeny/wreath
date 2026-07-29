@@ -22,7 +22,18 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 
-from . import apidoc, charts, codeblocks, figures, hero, markdown, scripts, theme
+from . import (
+    apidoc,
+    charts,
+    codeblocks,
+    figures,
+    hero,
+    markdown,
+    repo,
+    scripts,
+    search,
+    theme,
+)
 from .config import Page, Section, Site
 
 _TAG = re.compile(r"<[^>]+>")
@@ -33,6 +44,8 @@ _JS_PATH = "assets/docs.js"
 _INTERNAL_MD = re.compile(r'href="([^"#:]+)\.md(#[^"]*)?"')
 _ANCHOR = re.compile(r'href="#([^"]+)"')
 _FM_DESC = re.compile(r"^description:\s*(.+?)\s*$", re.MULTILINE)
+_FM_KEYWORDS = re.compile(r"^keywords:\s*(.+?)\s*$", re.MULTILINE)
+_FM_BOOST = re.compile(r"^boost:\s*([0-9.]+)\s*$", re.MULTILINE)
 #: Where one indexable section of a page starts. Only h2/h3 — an h4 is a label
 #: inside a section, not a destination somebody searches for.
 _SECTION_SPLIT = re.compile(r'<h([23]) id="([^"]+)"')
@@ -161,6 +174,11 @@ class _RenderedPage:
     toc: tuple
     slugs: frozenset[str]
     description: str
+    #: Front-matter `keywords:` — the words a reader would use that the page
+    #: itself does not say. See `_write_search_index`.
+    keywords: str = ""
+    #: Front-matter `boost:` — a multiplier on this page's search score.
+    boost: float = 1.0
 
 
 def build(site: Site, root: Path | None = None) -> BuildReport:
@@ -209,7 +227,10 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
                 f"{'orphan' if orphan else 'nav'} page missing on disk: {page.source}")
             continue
         text = src.read_text(encoding="utf-8")
-        description = _frontmatter_description(text) or site.description
+        front = _frontmatter(text)
+        description = _field(front, _FM_DESC) or site.description
+        keywords = _field(front, _FM_KEYWORDS)
+        boost = float(_field(front, _FM_BOOST) or 1.0)
         # The Python in the page, checked against the real objects before the
         # markdown is touched. Structural checks pass a page whose first line
         # raises `AttributeError`; five such pages shipped in one week.
@@ -234,7 +255,8 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
         (rendered_orphans if orphan else rendered_pages).append(_RenderedPage(
             page, _output_path(page.source),
             rendered.title or hero.title_of(hero_tokens) or page.title,
-            html, rendered.toc, frozenset(e.slug for e in rendered.toc), description))
+            html, rendered.toc, frozenset(e.slug for e in rendered.toc), description,
+            keywords, boost))
 
     slugs_by_page = {
         rp.out_rel: rp.slugs for rp in [*rendered_pages, *rendered_orphans]}
@@ -258,6 +280,13 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
     _write_asset(output_dir / _JS_PATH, scripts.runtime())
     index_pages: list[dict] = []
     index_sections: list[dict] = []
+    # One resolution per build, not per page: the counts are a property of the
+    # repository, and asking the host 160 times would be a rate limit, not a
+    # header. A failure here is a warning and an unadorned link.
+    repo_html = theme.repo_link(
+        repo.describe(site.repo, warnings) if site.repo else None)
+    links_html = theme.link_row(site.links)
+    breadcrumbs = _breadcrumbs(site)
     for pos, rp in enumerate(rendered_pages):
         prev = rendered_pages[pos - 1] if pos > 0 else None
         nxt = rendered_pages[pos + 1] if pos + 1 < len(rendered_pages) else None
@@ -279,14 +308,28 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
             footer=_footer(rp.out_rel, prev, nxt, site),
             home_href=_relative(rp.out_rel, "index.html"),
             canonical=f"{site.base_url.rstrip('/')}/{rp.out_rel}" if site.base_url else "",
+            repo_html=repo_html,
+            links_html=links_html,
         )
         out_file = output_dir / rp.out_rel
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text(html, encoding="utf-8")
         page_id = len(index_pages)
-        index_pages.append({"u": rp.out_rel, "t": rp.title})
-        for anchor, heading, body in _sections(content, rp.toc, rp.title):
-            index_sections.append({"p": page_id, "a": anchor, "h": heading, "x": body})
+        record = {"u": rp.out_rel, "t": rp.title}
+        # Only what this page actually declares: a field carrying its default on
+        # 160 pages is 160 copies of "nothing to say".
+        if breadcrumbs.get(rp.out_rel):
+            record["c"] = breadcrumbs[rp.out_rel]
+        if rp.keywords:
+            record["k"] = rp.keywords
+        if rp.boost != 1.0:
+            record["b"] = rp.boost
+        index_pages.append(record)
+        for anchor, heading, body, words in _sections(content, rp.toc, rp.title):
+            section = {"p": page_id, "a": anchor, "h": heading, "x": body}
+            if words:
+                section["w"] = words
+            index_sections.append(section)
 
     # Phase 4 — site-level artifacts.
     (output_dir / "assets" / "search-index.json").write_text(
@@ -294,7 +337,7 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
         encoding="utf-8")
     _write_llms_txt(output_dir, site, rendered_pages)
     _write_robots(output_dir, site)
-    _write_404(output_dir, site)
+    _write_404(output_dir, site, repo_html, links_html)
     _copy_chart_sources(chart_sources, source_dir.resolve(), output_dir)
     if site.base_url:
         _write_sitemap(output_dir, site, rendered_pages)
@@ -302,31 +345,63 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
     return BuildReport(len(rendered_pages), str(output_dir), tuple(errors), tuple(warnings))
 
 
-def _sections(html: str, toc, title: str) -> list[tuple[str, str, str]]:
-    """Split a rendered page into `(anchor, heading, text)` search records.
+def _breadcrumbs(site: Site) -> dict[str, str]:
+    """Output path -> the nav trail above it, e.g. `"API reference"`.
+
+    A result reading `wreath.queries` is ambiguous to anyone who has not already
+    read the page; the same result under *API reference* is not. Only the trail
+    *above* the page is kept — the page's own title is already the group line.
+    """
+    trails: dict[str, str] = {}
+
+    def walk(items, trail: tuple[str, ...]) -> None:
+        for item in items:
+            if isinstance(item, Section):
+                walk(item.items, trail + (item.title,))
+            else:
+                trails[_output_path(item.source)] = " › ".join(trail)
+
+    walk(site.nav.items, ())
+    return trails
+
+
+def _sections(html: str, toc, title: str) -> list[tuple[str, str, str, str]]:
+    """Split a page into `(anchor, heading, snippet, words)` search records.
 
     One record per h2/h3 rather than one blob per page. It costs a little more
     JSON and buys three things a page-level index cannot: a result that lands on
     the *section* you wanted, a heading match that can outrank a body match, and
     a snippet drawn from near the term instead of from the top of the page.
+
+    The snippet is capped because it is shown to a reader. `words` is what makes
+    the *rest* of the section findable — see `search.word_set`.
     """
     headings = {entry.slug: entry.text for entry in toc}
-    out: list[tuple[str, str, str]] = []
+    out: list[tuple[str, str, str, str]] = []
     cursor = 0
     anchor, heading = "", title
     for match in _SECTION_SPLIT.finditer(html):
-        body = _plain(html[cursor:match.start()])
-        if body or not out:
-            out.append((anchor, heading, body))
+        chunk = _prose(html[cursor:match.start()])
+        if chunk or not out:
+            out.append((anchor, heading, chunk[:_SECTION_CHARS],
+                        search.word_set(chunk, heading + " " + chunk[:_SECTION_CHARS])))
         anchor = match.group(2)
         heading = headings.get(anchor, anchor)
         cursor = match.start()
-    out.append((anchor, heading, _plain(html[cursor:])))
+    chunk = _prose(html[cursor:])
+    out.append((anchor, heading, chunk[:_SECTION_CHARS],
+                search.word_set(chunk, heading + " " + chunk[:_SECTION_CHARS])))
+    # A reference page opens with its `# module` title and goes straight into the
+    # first `##`, leaving a lead record with the page's own name and no prose --
+    # a result that repeats the group line above it and lands where the reader
+    # already was. Kept only when it is the page's only record.
+    if len(out) > 1 and not out[0][2] and not out[0][3]:
+        del out[0]
     return out
 
 
-def _plain(html: str) -> str:
-    """Section HTML as the prose a reader would see.
+def _prose(html: str) -> str:
+    """Section HTML as the prose a reader would see, in full.
 
     The section's own heading comes off the front and the permalink glyphs come
     out throughout: the record already carries the heading in its own field, so
@@ -334,7 +409,7 @@ def _plain(html: str) -> str:
     at the head of every snippet.
     """
     html = _OWN_HEADING.sub("", html.lstrip())
-    return _WS.sub(" ", _TAG.sub(" ", _PERMALINK.sub("", html))).strip()[:_SECTION_CHARS]
+    return _WS.sub(" ", _TAG.sub(" ", _PERMALINK.sub("", html))).strip()
 
 
 def _write_robots(output_dir: Path, site: Site) -> None:
@@ -344,7 +419,7 @@ def _write_robots(output_dir: Path, site: Site) -> None:
     (output_dir / "robots.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _write_404(output_dir: Path, site: Site) -> None:
+def _write_404(output_dir: Path, site: Site, repo_html: str, links_html: str) -> None:
     body = markdown.render(
         "# Page not found\n\nThe page you were looking for doesn't exist. "
         "Head back to the [home page](index.html) or press "
@@ -355,7 +430,8 @@ def _write_404(output_dir: Path, site: Site) -> None:
         content=_rewrite_md_links(body.html), nav_html=nav_html, tabs_html=tabs_html,
         toc_html="", css_href=_relative("404.html", _CSS_PATH),
         js_href=_relative("404.html", _JS_PATH), palette=site.palette,
-        feel=site.feel, search_root="", description="", footer="")
+        feel=site.feel, search_root="", description="", footer="",
+        repo_html=repo_html, links_html=links_html)
     (output_dir / "404.html").write_text(html, encoding="utf-8")
 
 
@@ -377,13 +453,16 @@ def _footer(
     return f'<nav class="page-nav">{left}{right}</nav>{meta}'
 
 
-def _frontmatter_description(text: str) -> str:
+def _frontmatter(text: str) -> str:
+    """The YAML-ish front-matter block, or `""` when the page has none."""
     if not text.startswith("---"):
         return ""
     end = text.find("\n---", 3)
-    if end < 0:
-        return ""
-    match = _FM_DESC.search(text[:end])
+    return text[:end] if end >= 0 else ""
+
+
+def _field(front: str, pattern: re.Pattern[str]) -> str:
+    match = pattern.search(front)
     return match.group(1).strip("\"'") if match else ""
 
 

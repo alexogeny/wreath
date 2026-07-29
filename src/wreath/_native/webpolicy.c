@@ -273,6 +273,18 @@ wreath_origin_matches(PyObject *Py_UNUSED(self), PyObject *args)
 }
 
 static int
+validate_header_pair(PyObject *pair)
+{
+    if (!PyTuple_Check(pair) || PyTuple_GET_SIZE(pair) != 2 ||
+        !PyBytes_Check(PyTuple_GET_ITEM(pair, 0)) ||
+        !PyBytes_Check(PyTuple_GET_ITEM(pair, 1))) {
+        PyErr_SetString(PyExc_TypeError, "response headers must be two-item bytes tuples");
+        return -1;
+    }
+    return 0;
+}
+
+static int
 validate_headers(PyObject *headers)
 {
     if (!PyList_Check(headers)) {
@@ -281,11 +293,7 @@ validate_headers(PyObject *headers)
     }
     for (Py_ssize_t i = 0; i < PyList_GET_SIZE(headers); i++) {
         PyObject *pair = PyList_GET_ITEM(headers, i);
-        if (!PyTuple_Check(pair) || PyTuple_GET_SIZE(pair) != 2 ||
-            !PyBytes_Check(PyTuple_GET_ITEM(pair, 0)) || !PyBytes_Check(PyTuple_GET_ITEM(pair, 1))) {
-            PyErr_SetString(PyExc_TypeError, "response headers must be two-item bytes tuples");
-            return -1;
-        }
+        if (validate_header_pair(pair) < 0) return -1;
     }
     return 0;
 }
@@ -558,6 +566,222 @@ wreath_replace_content_length(PyObject *Py_UNUSED(self), PyObject *args)
         if (result < 0) return NULL;
     }
     Py_RETURN_NONE;
+}
+
+static PyObject *
+header_pair(PyObject *name, PyObject *value)
+{
+    if (!PyBytes_Check(name) || !PyBytes_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "header name and value must be bytes");
+        return NULL;
+    }
+    return PyTuple_Pack(2, name, value);
+}
+
+PyObject *
+wreath_replace_response_header(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *headers, *name, *value;
+    if (!PyArg_ParseTuple(args, "OOO:replace_response_header", &headers, &name, &value))
+        return NULL;
+    PyObject *replacement = header_pair(name, value);
+    if (replacement == NULL) return NULL;
+    if (!PyList_Check(headers)) {
+        Py_DECREF(replacement);
+        PyErr_SetString(PyExc_TypeError, "response headers must be a list");
+        return NULL;
+    }
+    Py_ssize_t count = PyList_GET_SIZE(headers), first = -1;
+    for (Py_ssize_t i = 0; i < count; i++) {
+        PyObject *pair = PyList_GET_ITEM(headers, i);
+        if (validate_header_pair(pair) < 0) { Py_DECREF(replacement); return NULL; }
+        if (first < 0 && header_keys_equal_ci(name, PyTuple_GET_ITEM(pair, 0))) {
+            first = i;
+        }
+    }
+    if (first < 0) {
+        int result = PyList_Append(headers, replacement);
+        Py_DECREF(replacement);
+        if (result < 0) return NULL;
+        Py_RETURN_NONE;
+    }
+    PyObject *rebuilt = PyList_New(0);
+    if (rebuilt == NULL) { Py_DECREF(replacement); return NULL; }
+    for (Py_ssize_t i = 0; i < count; i++) {
+        PyObject *pair = PyList_GET_ITEM(headers, i);
+        if (!header_keys_equal_ci(name, PyTuple_GET_ITEM(pair, 0)) &&
+            PyList_Append(rebuilt, pair) < 0) goto error;
+    }
+    if (PyList_Append(rebuilt, replacement) < 0 ||
+        PyList_SetSlice(headers, 0, count, rebuilt) < 0) goto error;
+    Py_DECREF(rebuilt);
+    Py_DECREF(replacement);
+    Py_RETURN_NONE;
+error:
+    Py_DECREF(rebuilt);
+    Py_DECREF(replacement);
+    return NULL;
+}
+
+PyObject *
+wreath_replace_cookie(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *headers, *prefix, *value;
+    if (!PyArg_ParseTuple(args, "OOO:replace_cookie", &headers, &prefix, &value))
+        return NULL;
+    if (!PyBytes_Check(prefix) || !PyBytes_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "cookie prefix and value must be bytes");
+        return NULL;
+    }
+    if (!PyList_Check(headers)) {
+        PyErr_SetString(PyExc_TypeError, "response headers must be a list");
+        return NULL;
+    }
+    Py_ssize_t count = PyList_GET_SIZE(headers);
+    Py_ssize_t prefix_length = PyBytes_GET_SIZE(prefix);
+    const char *prefix_data = PyBytes_AS_STRING(prefix);
+    int found = 0;
+    for (Py_ssize_t i = 0; i < count; i++) {
+        PyObject *pair = PyList_GET_ITEM(headers, i);
+        if (validate_header_pair(pair) < 0) return NULL;
+        PyObject *current = PyTuple_GET_ITEM(pair, 1);
+        if (!found && header_name_is(pair, "set-cookie") &&
+            PyBytes_GET_SIZE(current) >= prefix_length &&
+            memcmp(PyBytes_AS_STRING(current), prefix_data, (size_t)prefix_length) == 0) {
+            found = 1;
+        }
+    }
+    PyObject *name = PyBytes_FromString("set-cookie");
+    PyObject *replacement = name ? header_pair(name, value) : NULL;
+    Py_XDECREF(name);
+    if (replacement == NULL) return NULL;
+    if (!found) {
+        int result = PyList_Append(headers, replacement);
+        Py_DECREF(replacement);
+        if (result < 0) return NULL;
+        Py_RETURN_NONE;
+    }
+    PyObject *rebuilt = PyList_New(0);
+    if (rebuilt == NULL) { Py_DECREF(replacement); return NULL; }
+    for (Py_ssize_t i = 0; i < count; i++) {
+        PyObject *pair = PyList_GET_ITEM(headers, i);
+        PyObject *current = PyTuple_GET_ITEM(pair, 1);
+        int matches = header_name_is(pair, "set-cookie") &&
+            PyBytes_GET_SIZE(current) >= prefix_length &&
+            memcmp(PyBytes_AS_STRING(current), prefix_data, (size_t)prefix_length) == 0;
+        if (!matches && PyList_Append(rebuilt, pair) < 0) goto error;
+    }
+    if (PyList_Append(rebuilt, replacement) < 0 ||
+        PyList_SetSlice(headers, 0, count, rebuilt) < 0) goto error;
+    Py_DECREF(rebuilt);
+    Py_DECREF(replacement);
+    Py_RETURN_NONE;
+error:
+    Py_DECREF(rebuilt);
+    Py_DECREF(replacement);
+    return NULL;
+}
+
+static int
+timing_metric_matches(const char *data, Py_ssize_t length, PyObject *metric)
+{
+    const char *semi = memchr(data, ';', (size_t)length);
+    if (semi != NULL) length = (Py_ssize_t)(semi - data);
+    trim_ows(&data, &length);
+    Py_ssize_t target_length = PyBytes_GET_SIZE(metric);
+    if (length != target_length) return 0;
+    const unsigned char *target =
+        (const unsigned char *)PyBytes_AS_STRING(metric);
+    for (Py_ssize_t i = 0; i < length; i++) {
+        unsigned char left = (unsigned char)data[i], right = target[i];
+        if (left >= 'A' && left <= 'Z') left += 'a' - 'A';
+        if (right >= 'A' && right <= 'Z') right += 'a' - 'A';
+        if (left != right) return 0;
+    }
+    return 1;
+}
+
+PyObject *
+wreath_replace_server_timing(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *headers, *metric, *value;
+    if (!PyArg_ParseTuple(args, "OOO:replace_server_timing", &headers, &metric, &value))
+        return NULL;
+    if (!PyBytes_Check(metric) || !PyBytes_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "timing metric and value must be bytes");
+        return NULL;
+    }
+    if (!PyList_Check(headers)) {
+        PyErr_SetString(PyExc_TypeError, "response headers must be a list");
+        return NULL;
+    }
+    Py_ssize_t count = PyList_GET_SIZE(headers);
+    int found = 0;
+    for (Py_ssize_t i = 0; i < count; i++) {
+        PyObject *pair = PyList_GET_ITEM(headers, i);
+        if (validate_header_pair(pair) < 0) return NULL;
+        if (!found && header_name_is(pair, "server-timing")) {
+            found = 1;
+        }
+    }
+    PyObject *name = PyBytes_FromString("server-timing");
+    PyObject *replacement = name ? header_pair(name, value) : NULL;
+    Py_XDECREF(name);
+    if (replacement == NULL) return NULL;
+    if (!found) {
+        int result = PyList_Append(headers, replacement);
+        Py_DECREF(replacement);
+        if (result < 0) return NULL;
+        Py_RETURN_NONE;
+    }
+    PyObject *rebuilt = PyList_New(0), *retained = PyList_New(0);
+    if (rebuilt == NULL || retained == NULL) {
+        Py_XDECREF(rebuilt); Py_XDECREF(retained); Py_DECREF(replacement);
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < count; i++) {
+        PyObject *pair = PyList_GET_ITEM(headers, i);
+        if (!header_name_is(pair, "server-timing")) {
+            if (PyList_Append(rebuilt, pair) < 0) goto timing_error;
+            continue;
+        }
+        PyObject *current = PyTuple_GET_ITEM(pair, 1);
+        const char *data = PyBytes_AS_STRING(current);
+        Py_ssize_t length = PyBytes_GET_SIZE(current), start = 0;
+        for (Py_ssize_t j = 0; j <= length; j++) {
+            if (j < length && data[j] != ',') continue;
+            const char *entry = data + start;
+            Py_ssize_t entry_length = j - start;
+            start = j + 1;
+            trim_ows(&entry, &entry_length);
+            if (entry_length == 0 || timing_metric_matches(entry, entry_length, metric))
+                continue;
+            PyObject *part = PyBytes_FromStringAndSize(entry, entry_length);
+            if (part == NULL || PyList_Append(retained, part) < 0) {
+                Py_XDECREF(part);
+                goto timing_error;
+            }
+            Py_DECREF(part);
+        }
+    }
+    if (PyList_Append(retained, value) < 0) goto timing_error;
+    PyObject *separator = PyBytes_FromStringAndSize(", ", 2);
+    PyObject *merged = separator ? PyObject_CallMethod(separator, "join", "O", retained) : NULL;
+    Py_XDECREF(separator);
+    if (merged == NULL) goto timing_error;
+    PyObject *merged_name = PyBytes_FromString("server-timing");
+    PyObject *merged_pair = merged_name ? header_pair(merged_name, merged) : NULL;
+    Py_XDECREF(merged_name); Py_DECREF(merged);
+    if (merged_pair == NULL) goto timing_error;
+    int append_result = PyList_Append(rebuilt, merged_pair);
+    Py_DECREF(merged_pair);
+    if (append_result < 0 || PyList_SetSlice(headers, 0, count, rebuilt) < 0)
+        goto timing_error;
+    Py_DECREF(rebuilt); Py_DECREF(retained); Py_DECREF(replacement);
+    Py_RETURN_NONE;
+timing_error:
+    Py_DECREF(rebuilt); Py_DECREF(retained); Py_DECREF(replacement);
+    return NULL;
 }
 
 int

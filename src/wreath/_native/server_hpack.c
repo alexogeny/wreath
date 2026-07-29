@@ -460,10 +460,13 @@ resolve_index(WreathHpackTable *t, uint64_t index, PyObject **name, PyObject **v
 
 int
 wreath_hpack_decode(WreathHpackTable *t, const uint8_t *data, Py_ssize_t len,
+                 Py_ssize_t max_header_count, Py_ssize_t max_header_list,
                  PyObject *out_list, int *h2_error)
 {
     *h2_error = 0;
     Py_ssize_t pos = 0;
+    Py_ssize_t header_count = 0;
+    Py_ssize_t header_size = 0;
     int saw_header = 0;
     while (pos < len) {
         uint8_t first = data[pos];
@@ -555,6 +558,19 @@ wreath_hpack_decode(WreathHpackTable *t, const uint8_t *data, Py_ssize_t len,
             }
         }
         saw_header = 1;
+        Py_ssize_t name_size = PyBytes_GET_SIZE(name);
+        Py_ssize_t value_size = PyBytes_GET_SIZE(value);
+        if ((max_header_count > 0 && header_count >= max_header_count) ||
+            name_size > PY_SSIZE_T_MAX - value_size - 32 ||
+            (max_header_list > 0 &&
+             header_size > max_header_list - (name_size + value_size + 32))) {
+            Py_DECREF(name);
+            Py_DECREF(value);
+            *h2_error = H2_ENHANCE_YOUR_CALM;
+            return -1;
+        }
+        header_count++;
+        header_size += name_size + value_size + 32;
         PyObject *tuple = PyTuple_Pack(2, name, value);
         Py_XDECREF(name);
         Py_XDECREF(value);

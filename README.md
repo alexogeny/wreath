@@ -20,6 +20,10 @@ you to change a line of your application.
 > **Status:** pre-1.0. The feature set below is implemented and tested; expect
 > additions, and expect what already works to keep working as it grows.
 
+**Documentation: <https://alexogeny.github.io/wreath/>** ·
+[Source](https://github.com/alexogeny/wreath) ·
+[Issues](https://github.com/alexogeny/wreath/issues)
+
 ```python
 from wreath import Wreath, Request
 
@@ -72,11 +76,18 @@ back to the pure-Python implementation when no compiler is available.
 
 ## Documentation
 
-- **Getting started** — install and build your first app.
-- **Guides** — a page for each part of the framework, with the reasoning behind
-  it.
-- **Cookbook** — recipes for developers, and a set written for coding agents.
-- **API reference** — every public module, generated from the source.
+The published site is <https://alexogeny.github.io/wreath/>.
+
+- [**Getting started**](https://alexogeny.github.io/wreath/getting-started/index.html)
+  — install and build your first app.
+- [**Guides**](https://alexogeny.github.io/wreath/guides/routing.html) — a page
+  for each part of the framework, with the reasoning behind it.
+- [**Cookbook**](https://alexogeny.github.io/wreath/cookbook/index.html) —
+  recipes for developers, and a set written for coding agents.
+- [**API reference**](https://alexogeny.github.io/wreath/reference/app.html) —
+  every public module, generated from the source.
+- [**Release notes**](https://alexogeny.github.io/wreath/release_notes/index.html)
+  — what changed in each version.
 
 Build the docs locally:
 
@@ -94,8 +105,10 @@ uv run pytest -m '' -n 4      # everything, including network/fuzz/performance
 ```
 
 Contributing — including the invariants a change must preserve and how to verify
-one — is documented in [`AGENTS.md`](AGENTS.md) and the cookbook's
-[section for coding agents](docs/cookbook/agents/index.md).
+one — is documented in
+[`AGENTS.md`](https://github.com/alexogeny/wreath/blob/main/AGENTS.md) and the
+cookbook's
+[section for coding agents](https://alexogeny.github.io/wreath/cookbook/agents/index.html).
 
 ## Benchmarks
 
@@ -107,11 +120,14 @@ noise. Results are regenerated locally; render the holistic report with:
 uv run wreath-bench-report    # one report across every benchmark family
 ```
 
-See [`benchmarks/README.md`](benchmarks/README.md) for methodology.
+See [`benchmarks/README.md`](https://github.com/alexogeny/wreath/blob/main/benchmarks/README.md)
+for methodology.
 
 ## License
 
-Wreath is licensed under the [Mozilla Public License 2.0](LICENSE) (MPL-2.0).
+Wreath is licensed under the
+[Mozilla Public License 2.0](https://github.com/alexogeny/wreath/blob/main/LICENSE)
+(MPL-2.0).
 
 In practice: use it freely, commercially, as a dependency of anything —
 proprietary applications and closed-source SaaS included. Your own code is

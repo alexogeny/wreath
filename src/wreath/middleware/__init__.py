@@ -49,7 +49,11 @@ from .ratelimit import (
     principal_key,
 )
 from .request_id import RequestIDMiddleware, request_id
-from .security import SecurityHeadersMiddleware, TrustedHostMiddleware
+from .security import (
+    SecurityHeadersMiddleware,
+    TrustedHostMiddleware,
+    WebSocketOriginMiddleware,
+)
 from .sessions import SessionMiddleware
 from .timing import ServerTimingMiddleware, elapsed
 
@@ -81,6 +85,7 @@ __all__ = [
     "ServerTimingMiddleware",
     "SessionMiddleware",
     "TrustedHostMiddleware",
+    "WebSocketOriginMiddleware",
     "csrf_token",
     "elapsed",
     "request_id",

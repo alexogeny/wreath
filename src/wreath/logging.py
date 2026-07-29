@@ -44,11 +44,20 @@ if DENIED:              # only where a benchmark says it pays
 Formatting is deferred: the record holds arguments, the registry holds the
 template, and `render` puts them together off the request path.
 
-**Packing is still Python, deliberately, along with four other deferred pieces.**
-They are declared in one place -- the head of the log-record section in
-`wreath._flight_schema`, immediately above `Severity` -- so the next person to
-pick this up reads one block rather than assembling it from commit messages.
-`docs/plans/first-class-logging.md` is the longer form.
+**A published record is packed in C** -- `wreath_nfr_log` writes it straight
+into a ring cell, with no intermediate object -- and the Python packer beside it
+is the twin that C is checked against byte for byte, not a fallback. It is also
+what runs when there is no ring to pack into, when a record is buffered for a
+possible promotion, and when the caller is not the loop. Which is which, and
+why, is written once: the head of the log-record section in
+`wreath._flight_schema`, immediately above `Severity`.
+`docs/plans/first-class-logging.md` is the longer form, with the measurements.
+
+Measured on CPython 3.14, 2026-07-28 (`benchmarks/bench_logging.py`; medians,
+interleaved arms, A/A floor): a two-argument `SITE(a, b)` costs **0.42us**
+against structlog's 2.59us and stdlib's 2.85-3.88us, a *disabled* `DEBUG(...)`
+costs **0.07us**, and a record buffered for promotion costs **3.0us** -- which
+is the one number here that is not good, and the plan says so plainly.
 
 See `docs/guides/observability.md` and `docs/reference/logging.md`.
 """
@@ -59,11 +68,14 @@ import logging as _stdlib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import replace
+from threading import get_ident as _thread_id
 from typing import Any, Final
 from typing import Protocol as _Protocol
 
 from ._flight_schema import (
     LOG_FLAG_EVENT_FIELDS,
+    LOG_FLAG_OFF_LOOP,
     LOG_FLAG_REDACTED,
     LOG_MAX_ARGS,
     CaptureDisposition,
@@ -75,8 +87,10 @@ from ._flight_schema import (
 )
 from ._logscratch import (
     DEFAULT_LIMITER_CAPACITY,
+    DEFAULT_OFF_LOOP_CAPACITY,
     DEFAULT_SCRATCH_BUDGET,
     LogSamplingPolicy,
+    OffLoopStage,
     RequestLogBuffer,
     SiteLimiter,
 )
@@ -89,6 +103,7 @@ from ._logsite import (
     SiteRegistry,
     infer_field,
     pack_value,
+    specs_for,
 )
 from ._logsite import attributes as _attributes
 from ._logsite import declare as _declare
@@ -119,6 +134,7 @@ __all__ = [
     "begin_request_seeded",
     "current_request_id",
     "current_scope",
+    "recorder_emitter",
     "recorder_sink",
     "set_field",
     "bridged_loggers",
@@ -133,6 +149,7 @@ __all__ = [
     "finish_session",
     "info",
     "installed",
+    "off_loop_counts",
     "render",
     "request_scope",
     "severity_text",
@@ -163,6 +180,14 @@ LENGTH: Final = CaptureDisposition.LENGTH
 #: before the server boots.
 Sink = Callable[[LogCell], None]
 
+#: The native emitter's signature: `(site_id, severity, request_id, flags,
+#: dropped_siblings, specs, values, k0, k1) -> int`, where the returned int is
+#: `(type_mismatches << 1) | published`. Two answers in one int because the
+#: alternative is a tuple allocation on the request path.
+NativeEmitter = Callable[
+    [int, int, int, int, int, bytes, tuple[object, ...], int, int], int
+]
+
 
 class LogRuntime:
     """One process's logging state: a site registry, a level, and a sink.
@@ -178,9 +203,13 @@ class LogRuntime:
         "counters",
         "level",
         "limiter",
+        "native",
+        "off_loop",
+        "off_loop_capacity",
         "registry",
         "scratch_budget",
         "sink",
+        "writer_thread",
     )
 
     def __init__(
@@ -193,8 +222,17 @@ class LogRuntime:
         sampling: LogSamplingPolicy | None = None,
         limiter_capacity: int = DEFAULT_LIMITER_CAPACITY,
         scratch_budget: int = DEFAULT_SCRATCH_BUDGET,
+        native: NativeEmitter | None = None,
+        off_loop_capacity: int = DEFAULT_OFF_LOOP_CAPACITY,
     ) -> None:
         self.registry = SiteRegistry(site_capacity)
+        #: The native emitter, when a recorder provides one. Packing a record in
+        #: Python and encoding it costs ~2.5us before the ring ever sees it; the
+        #: same work in C is ~0.2us, which is why this exists and why the pure
+        #: path stays as its checked twin rather than being deleted. None means
+        #: the pure path -- which is what a test capture, `testing_runtime` and
+        #: any non-recorder sink get, because there is nothing else to pack for.
+        self.native = native
         #: At and above this, a record is published.
         self.level = level
         #: Below this, a call does nothing. Between the two a record is buffered
@@ -205,13 +243,116 @@ class LogRuntime:
         self.counters = SiteCounters()
         self.limiter = SiteLimiter(sampling, capacity=limiter_capacity)
         self.scratch_budget = scratch_budget
+        #: The thread allowed to write to the ring, and the queue for everything
+        #: else. Both stay unset until `bind_writer`: a sink that is not a ring
+        #: has no single-writer rule to keep, and paying for one would tax every
+        #: test capture and every plain-callable sink for nothing.
+        self.off_loop_capacity = off_loop_capacity
+        self.off_loop: OffLoopStage | None = None
+        self.writer_thread: int | None = None
+
+    def bind_writer(self, thread_id: int | None = None) -> None:
+        """Declare which thread may write to the ring, and open the slow path.
+
+        Called by the server on the event loop, once, after the recorder exists.
+        Until it is called `off_loop` is None and every record goes straight to
+        the sink -- which is right for a process with no ring behind the sink
+        (a test capture, a list, a file) and is why the check is not free-standing
+        module state.
+        """
+        self.writer_thread = _thread_id() if thread_id is None else thread_id
+        self.off_loop = OffLoopStage(self.off_loop_capacity)
+
+    def _stage_off_loop(self, cell: LogCell) -> bool:
+        """Stage a record made off the loop. False when there is no slow path."""
+        stage = self.off_loop
+        if stage is None or _thread_id() == self.writer_thread:
+            return False
+        stage.stage(replace(cell, flags=cell.flags | LOG_FLAG_OFF_LOOP))
+        return True
+
+    def drain_off_loop(self) -> int:
+        """Publish everything staged from off the loop. Returns the count.
+
+        Must run on the writer thread; the server drives it from a loop task on
+        the same interval the writer uses. Records arrive one interval late and
+        carry `LOG_FLAG_OFF_LOOP` so a reader can tell a late record from a
+        reordered one.
+        """
+        stage = self.off_loop
+        if stage is None:
+            return 0
+        records = stage.drain()
+        sink = self.sink
+        if sink is None:
+            self.counters.dropped_no_runtime += len(records)
+            return 0
+        for cell in records:
+            sink(cell)
+        return len(records)
 
     def emit(self, cell: LogCell) -> None:
         """Hand a finished record to the sink, or count it as dropped."""
         if self.sink is None:
             self.counters.dropped_no_runtime += 1
             return
+        if self._stage_off_loop(cell):
+            return
         self.sink(cell)
+
+    def publish(
+        self,
+        site: LogSite,
+        request_id: int,
+        severity: Severity,
+        values: tuple[object, ...],
+        flags: int = 0,
+        *,
+        limited: bool = True,
+        specs: bytes | None = None,
+    ) -> bool:
+        """Pack and publish one record in C. False when there is no emitter.
+
+        The caller has already decided this record is being published now -- the
+        level check, the scratch decision and the limiter all ran above -- so
+        this is packing and nothing else. It returns a bool rather than raising
+        so the pure path stays one `if` away, which is what makes the two
+        interchangeable and therefore comparable.
+
+        `limited` says whether this record went through the per-call-site
+        limiter, and so whether it should carry that site's outstanding drop
+        count. The canonical line's field records did not, and taking the
+        counter for them would report a suppression on a record that was never
+        subject to one.
+
+        `specs` overrides the site's own blob, for the kwargs tiers, where an
+        interned template's declared types are whichever call arrived first --
+        see `_logsite.specs_for`. A registered site never needs it: its fields
+        are its declaration.
+        """
+        native = self.native
+        if native is None:
+            return False
+        if self.off_loop is not None and _thread_id() != self.writer_thread:
+            # Off the loop, and the ring has exactly one writer. Refuse, so the
+            # caller packs a `LogCell` on the pure path and `emit` stages it.
+            return False
+        key = self.registry.key
+        outcome = native(
+            site.site_id,
+            severity,
+            request_id,
+            flags,
+            self.limiter.take_dropped(site.site_id) if limited else 0,
+            site.specs if specs is None else specs,
+            values,
+            key[0],
+            key[1],
+        )
+        mismatches = outcome >> 1
+        if mismatches:
+            self.counters.type_mismatch += mismatches
+        return True
 
 
 #: The installed runtime. A module-level singleton by necessity -- site ids must
@@ -397,21 +538,33 @@ class RequestScope:
         for start in range(0, len(items), LOG_MAX_ARGS):
             chunk = items[start : start + LOG_MAX_ARGS]
             specs: list[LogField] = []
-            packed: list[LogArg] = []
             flags = LOG_FLAG_EVENT_FIELDS
             for name, (value, raw) in chunk:
                 spec = infer_field(name, value)
                 if raw and spec.disposition is not RAW:
                     spec = LogField(name, spec.type, RAW)
+                specs.append(spec)
+            template = " ".join(f"{name}={{{name}}}" for name, _ in chunk)
+            site = runtime.registry.intern_template(template, INFO, tuple(specs))
+            values = tuple(value for _name, (value, _raw) in chunk)
+            if runtime.publish(
+                site,
+                self._buffer.request_id,
+                INFO,
+                values,
+                flags=flags,
+                limited=False,
+                specs=specs_for(site, tuple(specs)),
+            ):
+                continue
+            packed: list[LogArg] = []
+            for spec, value in zip(specs, values, strict=True):
                 arg, mismatched = pack_value(runtime.registry, value, spec)
                 if mismatched:
                     runtime.counters.type_mismatch += 1
                 if arg.redacted:
                     flags |= LOG_FLAG_REDACTED
-                specs.append(spec)
                 packed.append(arg)
-            template = " ".join(f"{name}={{{name}}}" for name, _ in chunk)
-            site = runtime.registry.intern_template(template, INFO, tuple(specs))
             runtime.emit(
                 LogCell(
                     request_id=self._buffer.request_id,
@@ -548,6 +701,17 @@ class _PublishesCells(_Protocol):
     """
 
     def publish_log(self, cell: bytes, /) -> bool: ...
+
+
+def recorder_emitter(recorder: object) -> NativeEmitter | None:
+    """The recorder's native emitter, or None when it has no C to offer.
+
+    The pure oracle and every test double satisfy `_PublishesCells` without
+    having a `log`; they get the Python packer, which is the twin the native one
+    is checked against, so the two are never both required to exist.
+    """
+    native = getattr(recorder, "log", None)
+    return native if callable(native) else None
 
 
 def recorder_sink(recorder: _PublishesCells) -> Sink:
@@ -754,6 +918,13 @@ class LogEvent:
         flags = 0
         if len(args) != len(specs):
             runtime.counters.arity_mismatch += 1
+        if not buffered and runtime.publish(
+            self.site, 0 if buffer is None else buffer.request_id, severity, args
+        ):
+            # Packed straight into a ring cell in C. A buffered record cannot
+            # take this path: it has to survive as an object until the request
+            # decides whether to promote it.
+            return
         packed: list[LogArg] = []
         for index, spec in enumerate(specs):
             if index >= len(args):
@@ -825,6 +996,14 @@ def _emit_kwargs(severity: Severity, template: str, values: dict[str, object]) -
     site_id = site.site_id
     if not buffered and not runtime.limiter.allow(site_id, severity):
         return
+    if not buffered and runtime.publish(
+        site,
+        0 if buffer is None else buffer.request_id,
+        severity,
+        tuple(values.values()),
+        specs=specs_for(site, specs),
+    ):
+        return
     flags = 0
     packed: list[LogArg] = []
     for spec, value in zip(specs, values.values(), strict=True):
@@ -866,6 +1045,14 @@ def _emit_prepared(
     site = runtime.registry.intern_template(template, severity, specs)
     site_id = site.site_id
     if not buffered and not runtime.limiter.allow(site_id, severity):
+        return
+    if not buffered and runtime.publish(
+        site,
+        0 if buffer is None else buffer.request_id,
+        severity,
+        tuple(value for _decl, value in pairs),
+        specs=specs_for(site, specs),
+    ):
         return
     flags = 0
     packed: list[LogArg] = []
@@ -1007,6 +1194,22 @@ def render(cell: LogCell) -> str:
 def attributes(cell: LogCell) -> dict[str, Any]:
     """The record's arguments as named values, for structured output."""
     return _attributes(_RUNTIME.registry, cell)
+
+
+def off_loop_counts() -> dict[str, int]:
+    """What the off-loop slow path has carried, and what it refused.
+
+    `staged` is records emitted from a thread that may not write to the ring --
+    a `wreath.jobs` worker, a thread-pool task -- and `dropped` is those the
+    bounded stage could not hold, which is `LossReason.LOG_OFF_LOOP`. A `staged`
+    that keeps climbing is not an error; it is instrumentation telling you where
+    your logging happens, and each of those records arrives one drain interval
+    late and flagged `off-loop`.
+    """
+    stage = _RUNTIME.off_loop
+    if stage is None:
+        return {"staged": 0, "dropped": 0, "held": 0}
+    return {"staged": stage.staged, "dropped": stage.dropped, "held": len(stage)}
 
 
 def site_overflow_count() -> int:

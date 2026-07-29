@@ -586,6 +586,51 @@ class Session:
         await self._run_selectin(compiled.load_plan.selectin, objects)
         return objects
 
+    async def _fetch_compiled(
+        self, query: Select, compiled: CompiledQuery
+    ) -> list[Any]:
+        """Execute a query whose immutable plan and bind values are ready.
+
+        This deliberately mirrors `fetch`'s execution tail. Factoring the tail
+        into a third async method puts another Python frame and await on every
+        ordinary ORM read; declared queries are the exceptional entry point,
+        so they carry the duplicate rather than taxing the general path.
+        """
+        self._check_usable()
+        self._check_tenant_bound()
+        self._check_locking(query)
+        if _nplusone.WATCHING:
+            # Gated on a module flag rather than reading the ContextVar
+            # unconditionally: `ContextVar.get` is a boundary crossing, and an
+            # application with no guard installed -- which is every production
+            # one -- should not pay one per query to learn that.
+            self._count_read(compiled.result_model)
+        connection = await self._acquire()
+        model_ids = self._registry._flight_model_ids
+        if not model_ids:
+            # No metadata image, so nothing is recording and there is no ID to
+            # attribute to. Same reasoning: an empty dict is a truth test, not
+            # a crossing.
+            objects = await self._fetch_objects(
+                connection, compiled, compiled.sql, compiled.bind_values
+            )
+        else:
+            objects = await self._fetch_recorded(model_ids, connection, compiled)
+        await self._run_selectin(compiled.load_plan.selectin, objects)
+        return objects
+
+    async def _fetch_one_compiled(
+        self, query: Select, compiled: CompiledQuery
+    ) -> Any:
+        """The prepared-query twin of `fetch_one`, without recompiling shape."""
+        results = await self._fetch_compiled(query, compiled)
+        if len(results) > 1:
+            raise MultipleResultsError(
+                f"fetch_one() matched {len(results)} rows for "
+                f"{query.model.__name__}; use fetch() or narrow the query"
+            )
+        return results[0] if results else None
+
     def _count_read(self, spec: ModelSpec | None) -> None:
         """Tell the request's query ledger which model this read hydrates.
 

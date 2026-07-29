@@ -1,0 +1,447 @@
+{
+  "tool": "benchmarks.bench_logging",
+  "schema_version": 1,
+  "label": "native emitter (wreath_nfr_log) + off-loop stage",
+  "python": "3.14.6 (main, Jul 18 2026, 17:01:31) [Clang 22.1.3 ]",
+  "implementation": "cpython",
+  "platform": "Linux-6.12.38+deb13-amd64-x86_64-with-glibc2.41",
+  "native_flight": "/home/alex/private/neo/.claude/worktrees/logging-remainder/src/wreath/_native/_flight.cpython-314-x86_64-linux-gnu.so",
+  "rounds": 11,
+  "iterations": 20000,
+  "suites": {
+    "emit": {
+      "baseline": 0.007,
+      "floor": 0.0,
+      "rows": [
+        {
+          "arm": "wreath event, 2 args (raw)",
+          "median": 2.834,
+          "p95": 3.204,
+          "delta": 2.827,
+          "step": 2.827,
+          "resolved": true
+        },
+        {
+          "arm": "wreath event, 2 args (hashed)",
+          "median": 9.425,
+          "p95": 10.054,
+          "delta": 9.418,
+          "step": 6.591,
+          "resolved": true
+        },
+        {
+          "arm": "wreath event + cell encode",
+          "median": 4.186,
+          "p95": 4.416,
+          "delta": 4.18,
+          "step": -5.238,
+          "resolved": true
+        },
+        {
+          "arm": "wreath log.info(**kwargs)",
+          "median": 10.999,
+          "p95": 11.471,
+          "delta": 10.993,
+          "step": 6.813,
+          "resolved": true
+        },
+        {
+          "arm": "wreath event (limiter dropping)",
+          "median": 0.36,
+          "p95": 0.363,
+          "delta": 0.353,
+          "step": -10.639,
+          "resolved": true
+        },
+        {
+          "arm": "stdlib NullHandler",
+          "median": 2.911,
+          "p95": 2.986,
+          "delta": 2.905,
+          "step": 2.551,
+          "resolved": true
+        },
+        {
+          "arm": "stdlib StreamHandler",
+          "median": 3.923,
+          "p95": 4.038,
+          "delta": 3.917,
+          "step": 1.012,
+          "resolved": true
+        },
+        {
+          "arm": "stdlib QueueHandler",
+          "median": 5.153,
+          "p95": 5.196,
+          "delta": 5.146,
+          "step": 1.229,
+          "resolved": true
+        },
+        {
+          "arm": "wreath event -> native emitter",
+          "median": 0.425,
+          "p95": 0.439,
+          "delta": 0.418,
+          "step": -4.728,
+          "resolved": true
+        },
+        {
+          "arm": "wreath event hashed -> native",
+          "median": 0.428,
+          "p95": 0.437,
+          "delta": 0.422,
+          "step": 0.004,
+          "resolved": true
+        },
+        {
+          "arm": "wreath log.info(**kwargs) -> native",
+          "median": 1.78,
+          "p95": 1.825,
+          "delta": 1.774,
+          "step": 1.352,
+          "resolved": true
+        },
+        {
+          "arm": "structlog (ReturnLogger)",
+          "median": 2.594,
+          "p95": 2.633,
+          "delta": 2.588,
+          "step": 0.814,
+          "resolved": true
+        }
+      ],
+      "structlog": "installed",
+      "integrity": {
+        "unlimited_published": 1000,
+        "limited_published": 109,
+        "native_ring_losses": {
+          "native event (raw)": 0,
+          "native event (hashed)": 0,
+          "native log.info(**kwargs)": 0
+        }
+      }
+    },
+    "disabled": {
+      "baseline": 0.006,
+      "floor": 0.0,
+      "rows": [
+        {
+          "arm": "wreath DEBUG site, disabled",
+          "median": 0.079,
+          "p95": 0.084,
+          "delta": 0.072,
+          "step": 0.072,
+          "resolved": true
+        },
+        {
+          "arm": "wreath DEBUG site, if-guarded",
+          "median": 0.049,
+          "p95": 0.055,
+          "delta": 0.043,
+          "step": -0.029,
+          "resolved": true
+        },
+        {
+          "arm": "wreath log.debug(**kwargs), disabled",
+          "median": 0.119,
+          "p95": 0.12,
+          "delta": 0.112,
+          "step": 0.07,
+          "resolved": true
+        },
+        {
+          "arm": "wreath DEBUG site, buffered",
+          "median": 2.993,
+          "p95": 3.916,
+          "delta": 2.987,
+          "step": 2.874,
+          "resolved": true
+        },
+        {
+          "arm": "stdlib logger.debug, disabled",
+          "median": 0.075,
+          "p95": 0.089,
+          "delta": 0.068,
+          "step": -2.918,
+          "resolved": true
+        },
+        {
+          "arm": "stdlib logger.debug, isEnabledFor",
+          "median": 0.043,
+          "p95": 0.044,
+          "delta": 0.037,
+          "step": -0.031,
+          "resolved": true
+        },
+        {
+          "arm": "structlog .debug(), filtered out",
+          "median": 0.19,
+          "p95": 0.196,
+          "delta": 0.183,
+          "step": 0.146,
+          "resolved": true
+        }
+      ],
+      "integrity": {
+        "disabled_published": 0
+      }
+    },
+    "publish": {
+      "baseline": 18.302,
+      "floor": 0.187,
+      "rows": [
+        {
+          "arm": "LogCell.encode() only",
+          "median": 1176.836,
+          "p95": 1182.236,
+          "delta": 1158.534,
+          "step": 1158.534,
+          "resolved": true
+        },
+        {
+          "arm": "publish_log(pre-encoded)",
+          "median": 45.626,
+          "p95": 65.834,
+          "delta": 27.324,
+          "step": -1131.209,
+          "resolved": true
+        },
+        {
+          "arm": "encode + publish_log",
+          "median": 1243.366,
+          "p95": 1261.16,
+          "delta": 1225.064,
+          "step": 1197.74,
+          "resolved": true
+        },
+        {
+          "arm": "native pack + publish",
+          "median": 130.084,
+          "p95": 157.195,
+          "delta": 111.782,
+          "step": -1113.282,
+          "resolved": true
+        },
+        {
+          "arm": "completion (begin/route/finish)",
+          "median": 194.473,
+          "p95": 231.596,
+          "delta": 176.171,
+          "step": 64.389,
+          "resolved": true
+        }
+      ],
+      "batch": 16384,
+      "trials": 15
+    },
+    "drain": {
+      "rows": [
+        {
+          "logs_per_request": 0,
+          "cells": 512,
+          "ns_per_cell": 4571.4,
+          "million_cells_per_second": 0.22,
+          "raw": [
+            5078.2,
+            4810.2,
+            4595.1,
+            4586.0,
+            4566.3,
+            4561.6,
+            4577.0,
+            4562.9,
+            4579.2,
+            4583.1,
+            4571.4,
+            4568.0,
+            4527.2,
+            4534.0,
+            4523.9
+          ]
+        },
+        {
+          "logs_per_request": 1,
+          "cells": 1024,
+          "ns_per_cell": 4856.0,
+          "million_cells_per_second": 0.21,
+          "raw": [
+            5313.5,
+            4951.3,
+            4987.4,
+            4856.0,
+            4838.6,
+            4865.8,
+            4884.7,
+            4866.4,
+            4842.2,
+            4836.5,
+            4900.7,
+            4852.8,
+            4847.2,
+            4838.5,
+            4851.3
+          ]
+        },
+        {
+          "logs_per_request": 10,
+          "cells": 5632,
+          "ns_per_cell": 4165.3,
+          "million_cells_per_second": 0.24,
+          "raw": [
+            4024.6,
+            4079.4,
+            5831.8,
+            4286.8,
+            4106.4,
+            4036.0,
+            4165.3,
+            4248.9,
+            4177.3,
+            4304.3,
+            4053.5,
+            3959.3,
+            4521.9,
+            4215.3,
+            4112.4
+          ]
+        },
+        {
+          "logs_per_request": 100,
+          "cells": 51712,
+          "ns_per_cell": 4296.6,
+          "million_cells_per_second": 0.23,
+          "raw": [
+            4365.4,
+            4365.7,
+            4481.4,
+            4016.2,
+            4136.0,
+            4285.2,
+            4320.6,
+            4508.6,
+            4112.4,
+            4332.9,
+            4235.8,
+            4340.2,
+            3934.3,
+            4130.9,
+            4296.6
+          ]
+        }
+      ],
+      "requests_per_trial": 512,
+      "trials": 15
+    },
+    "request": {
+      "baseline": 2.167,
+      "floor": 0.001,
+      "rows": [
+        {
+          "arm": "logging on, handler silent",
+          "median": 2.929,
+          "p95": 2.99,
+          "delta": 0.762,
+          "step": 0.762,
+          "resolved": true
+        },
+        {
+          "arm": "logging on, 1 INFO record",
+          "median": 3.498,
+          "p95": 4.24,
+          "delta": 1.331,
+          "step": 0.569,
+          "resolved": true
+        },
+        {
+          "arm": "logging on, 5 INFO records",
+          "median": 5.328,
+          "p95": 5.399,
+          "delta": 3.161,
+          "step": 1.83,
+          "resolved": true
+        },
+        {
+          "arm": "logging on, 5 buffered DEBUG",
+          "median": 16.46,
+          "p95": 16.779,
+          "delta": 14.293,
+          "step": 11.132,
+          "resolved": true
+        },
+        {
+          "arm": "logging on, 3 canonical fields",
+          "median": 6.289,
+          "p95": 6.363,
+          "delta": 4.122,
+          "step": -10.171,
+          "resolved": true
+        }
+      ],
+      "integrity": {
+        "native_ring_losses": 0,
+        "records_on_the_ring": 171514
+      }
+    },
+    "memory": {
+      "entries": 4096,
+      "rows": [
+        {
+          "component": "site",
+          "bytes_per_entry_measured": 394.4,
+          "bytes_per_entry_constant": 448,
+          "ratio": 0.88
+        },
+        {
+          "component": "limiter_slot",
+          "bytes_per_entry_measured": 153.3,
+          "bytes_per_entry_constant": 160,
+          "ratio": 0.958
+        },
+        {
+          "component": "queued_record",
+          "bytes_per_entry_measured": 405.5,
+          "bytes_per_entry_constant": 416,
+          "ratio": 0.975
+        },
+        {
+          "component": "scratch_record",
+          "bytes_per_entry_measured": 335.1,
+          "bytes_per_entry_constant": 352,
+          "ratio": 0.952
+        }
+      ],
+      "limiter_capacity": 4096
+    },
+    "e2e": {
+      "generator": "builtin",
+      "generator_version": "wreath-dev-1",
+      "shared_process": true,
+      "requests": 8000,
+      "concurrency": 32,
+      "repeats": 3,
+      "rows": [
+        {
+          "arm": "off",
+          "requests_per_second": 41204.6,
+          "latency_ms_median": 0.6272,
+          "latency_ms_p99": 6.7765,
+          "errors": 0
+        },
+        {
+          "arm": "on",
+          "requests_per_second": 29481.3,
+          "latency_ms_median": 0.629,
+          "latency_ms_p99": 14.847,
+          "errors": 0
+        },
+        {
+          "arm": "off (A/A)",
+          "requests_per_second": 39920.9,
+          "latency_ms_median": 0.6288,
+          "latency_ms_p99": 6.9948,
+          "errors": 0
+        }
+      ]
+    }
+  }
+}

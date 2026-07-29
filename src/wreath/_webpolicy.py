@@ -15,7 +15,10 @@ if _core is not None and hasattr(_core, "select_content_encoding"):
     find_response_header = _core.find_response_header
     is_compressible_content_type = _core.is_compressible_content_type
     origin_matches = _core.origin_matches
+    replace_cookie = _core.replace_cookie
     replace_content_length = _core.replace_content_length
+    replace_response_header = _core.replace_response_header
+    replace_server_timing = _core.replace_server_timing
     select_content_encoding = _core.select_content_encoding
 else:
     from ._pure.webpolicy import (
@@ -30,6 +33,9 @@ else:
         is_compressible_content_type,
         origin_matches,
         replace_content_length,
+        replace_cookie,
+        replace_response_header,
+        replace_server_timing,
         select_content_encoding,
     )
 
@@ -44,6 +50,9 @@ __all__ = [
     "find_response_header",
     "is_compressible_content_type",
     "origin_matches",
+    "replace_cookie",
     "replace_content_length",
+    "replace_response_header",
+    "replace_server_timing",
     "select_content_encoding",
 ]

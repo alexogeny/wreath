@@ -1,6 +1,6 @@
-"""Request-scoped buffering and per-call-site rate limiting.
+"""Request-scoped buffering, per-call-site rate limiting, and off-loop staging.
 
-Two policies that both drop records on purpose, and therefore both account for
+Three policies that all drop records on purpose, and therefore all account for
 what they dropped.
 
 **Failure-triggered buffering.** TRACE and DEBUG records made during a request
@@ -20,13 +20,24 @@ index rather than a hash of the message text. It applies to INFO and below only:
 a warning or an error is never suppressed, because an error nobody sees is the
 worst outcome an observability system can produce.
 
+**Off-loop staging.** The ring has exactly one writer, so a record emitted from
+a `wreath.jobs` worker or a thread-pool task cannot go straight onto it. Those
+records are staged in a bounded queue and published by the loop on its next
+drain, flagged `LOG_FLAG_OFF_LOOP` and one drain interval late. That is the
+counted slow path the design reserved `LossReason.LOG_OFF_LOOP` for, and it is
+deliberately not per-thread staging buffers: those would order records by
+whichever thread flushed first, which is a permanent tax on every record to
+serve the rare one.
+
 Drops are never silent. A limiter drop is carried on the next record from that
 site as `dropped_siblings`, so one line tells an operator how many like it were
-suppressed; a buffer overflow is counted on the buffer.
+suppressed; a buffer overflow is counted on the buffer, and a staging overflow
+on the stage.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -42,6 +53,11 @@ DEFAULT_SCRATCH_BUDGET: Final = 64
 #: Sites the limiter tracks. Beyond this, records pass unlimited rather than
 #: being silently suppressed -- an unbounded table would be the worse trade.
 DEFAULT_LIMITER_CAPACITY: Final = 4096
+
+#: Records staged from off the loop before the stage starts dropping. Sized like
+#: the writer queue: enough to absorb a burst from a job worker between drains,
+#: small enough that a loop which has stopped draining is bounded.
+DEFAULT_OFF_LOOP_CAPACITY: Final = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +161,69 @@ class SiteLimiter:
     @property
     def tracked_sites(self) -> int:
         return len(self._slots)
+
+
+class OffLoopStage:
+    """Records emitted from a thread that must not write to the ring.
+
+    `ring_publish` reads the head, copies a cell, and stores the head back with
+    no interlock at all, because by construction exactly one thread does it. A
+    job worker or a thread-pool task calling a log site is a *second* writer,
+    and two of them interleaved do not lose a record -- they overwrite one and
+    advance the head anyway, which is corruption of every cell after it. So an
+    off-loop record is staged here and published by the loop on its next drain.
+
+    The lock is the honest choice rather than a lock-free append: this is the
+    slow path by definition, contention is only ever between off-loop threads,
+    and an exact drop count matters more here than a few nanoseconds. Overflow
+    keeps the *oldest*, matching `RequestLogBuffer`, because a burst from a job
+    worker is most legible from its beginning.
+    """
+
+    __slots__ = ("_capacity", "_dropped", "_lock", "_records", "_staged")
+
+    def __init__(self, capacity: int = DEFAULT_OFF_LOOP_CAPACITY) -> None:
+        if capacity < 0:
+            raise ValueError("capacity must not be negative")
+        self._capacity = capacity
+        self._records: list[LogCell] = []
+        self._lock = threading.Lock()
+        self._dropped = 0
+        self._staged = 0
+
+    def stage(self, cell: LogCell) -> bool:
+        """Hold a record for the loop to publish. False when the stage is full."""
+        with self._lock:
+            if len(self._records) >= self._capacity:
+                self._dropped += 1
+                return False
+            self._records.append(cell)
+            self._staged += 1
+            return True
+
+    def drain(self) -> list[LogCell]:
+        """Take everything staged. Called on the ring's writer thread, only."""
+        with self._lock:
+            if not self._records:
+                return []
+            records, self._records = self._records, []
+            return records
+
+    @property
+    def dropped(self) -> int:
+        """Records the stage refused. Reported as LossReason.LOG_OFF_LOOP."""
+        with self._lock:
+            return self._dropped
+
+    @property
+    def staged(self) -> int:
+        """Records that took the slow path at all, dropped or not."""
+        with self._lock:
+            return self._staged
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._records)
 
 
 class RequestLogBuffer:

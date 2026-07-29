@@ -32,7 +32,11 @@ which is the case that motivates most resets.
 
 Failed sign-ins are throttled per identifier: `max_login_attempts` (10) within
 `login_window` (300s), answering `429` in the same shape as a wrong password so
-the response does not confirm the account exists. The throttle lives in this
+the response does not confirm the account exists. Reset-email issuance is
+separately capped by `max_reset_requests` (3) within `reset_window` (15 minutes);
+an exhausted budget still returns the same `reset_email_sent` response. A
+successful login rotates a server-side session id before adding the principal,
+so an anonymous id planted before login cannot become authenticated. The throttle lives in this
 router; `wreath._userkit.authenticate` stays unguarded for direct callers.
 
 

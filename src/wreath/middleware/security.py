@@ -1,8 +1,9 @@
 """First-party trusted-host and browser security-header middleware.
 
-Two independent global middlewares. `TrustedHostMiddleware` refuses a request
+Three independent global middlewares. `TrustedHostMiddleware` refuses a request
 whose `Host` is not one this application serves, before routing.
-`SecurityHeadersMiddleware` adds the browser hardening headers to every response
+`WebSocketOriginMiddleware` applies an exact browser-origin allowlist before a
+WebSocket handshake. `SecurityHeadersMiddleware` adds hardening headers to every response
 that does not already declare them:
 
 ```python
@@ -17,19 +18,52 @@ Both read the request scheme and `Host`, so behind a proxy both belong after
 from __future__ import annotations
 
 from collections.abc import Iterable
+from ipaddress import AddressValueError, IPv6Address
+from urllib.parse import urlsplit
 
 from .._native import _core
-from .._webpolicy import append_missing_headers
+from .._webpolicy import append_missing_headers, origin_matches
 from ..request import Request
 from ..response import ProblemResponse
 
+_HOST_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
 
-def _normalize_host(value: str) -> str:
+
+def _port_valid(value: str) -> bool:
+    """Whether an optional authority port is syntactically and numerically valid."""
+    return not value or (value.isascii() and value.isdigit() and int(value) <= 65535)
+
+
+def _normalize_host(value: str, *, pattern: bool = False) -> str | None:
+    """Return the host in a valid Host authority, stripped of its optional port."""
     value = value.strip().lower()
+    if not value or not value.isascii():
+        return None
     if value.startswith("["):
         end = value.find("]")
-        return value[: end + 1] if end >= 0 else value
-    return value.partition(":")[0]
+        if end < 0:
+            return None
+        rest = value[end + 1 :]
+        if rest and (not rest.startswith(":") or not _port_valid(rest[1:])):
+            return None
+        try:
+            address = IPv6Address(value[1:end])
+        except AddressValueError:
+            return None
+        return f"[{address}]"
+    if "[" in value or "]" in value:
+        return None
+    host, separator, port = value.partition(":")
+    if separator and not _port_valid(port):
+        return None
+    if pattern and host == "*":
+        return host
+    candidate = host[2:] if pattern and host.startswith("*.") else host
+    if not candidate or candidate.startswith("."):
+        return None
+    if any(character not in _HOST_CHARS for character in candidate):
+        return None
+    return host
 
 
 if _core is None or not hasattr(_core, "host_allowed"):
@@ -46,8 +80,11 @@ class TrustedHostMiddleware:
     is the point -- a request for a host this application does not serve never
     reaches a handler.
 
-    The check is on the host alone. Any port is stripped before comparison, an
-    IPv6 literal keeps its brackets, and the comparison is case-insensitive. A
+    The check is on the host alone. A syntactically valid numeric port is
+    stripped before comparison, an IPv6 literal keeps its brackets, and the
+    comparison is case-insensitive. User information, junk after a bracketed
+    literal, and malformed ports are rejected rather than truncated into an
+    allowed host. A
     pattern is either an exact host, `*` for any host, or `*.example.com`, which
     matches any subdomain of `example.com` but *not* the bare `example.com`; to
     accept both, list both. A `*` anywhere else in a pattern is rejected at
@@ -63,29 +100,95 @@ class TrustedHostMiddleware:
         allowed_hosts: Host patterns to accept. Must not be empty.
 
     Raises:
-        ValueError: `allowed_hosts` is empty.
-        ValueError: A pattern contains `*` other than as `*` or a leading `*.`.
+        ValueError: `allowed_hosts` is empty or contains an invalid pattern.
     """
 
     global_scope = True
+    websocket_scope = True
     __slots__ = ("allowed_hosts",)
 
     def __init__(self, allowed_hosts: Iterable[str]) -> None:
-        patterns = tuple(_normalize_host(host) for host in allowed_hosts)
-        if not patterns:
+        raw_patterns = tuple(allowed_hosts)
+        if not raw_patterns:
             raise ValueError("allowed_hosts must not be empty")
+        patterns: list[str] = []
+        for value in raw_patterns:
+            pattern = _normalize_host(value, pattern=True)
+            if pattern is None:
+                raise ValueError(f"invalid trusted-host pattern: {value!r}")
+            patterns.append(pattern)
         for pattern in patterns:
             if "*" in pattern and not (pattern == "*" or pattern.startswith("*.")):
                 raise ValueError(f"invalid trusted-host pattern: {pattern!r}")
-        self.allowed_hosts = patterns
+        self.allowed_hosts = tuple(patterns)
 
     def before_sync(self, request: Request):
-        """Return None for an allowed host, or a 400 problem response otherwise."""
-        # Host validation is pure and synchronous: a before_sync hook so the
-        # global pipeline runs it with no coroutine or await.
-        value = request.header("host")
-        if value is None or not _host_allowed(_normalize_host(value), self.allowed_hosts):
+        """Return None for an allowed unique Host, or a 400 otherwise."""
+        # Host is not list-valued. Reject duplicates so an upstream proxy and
+        # Wreath cannot apply different first/last interpretations.
+        value_bytes: bytes | None = None
+        for name, candidate in request.headers:
+            if name != b"host":
+                continue
+            if value_bytes is not None:
+                return ProblemResponse(status=400, detail="Invalid Host header")
+            value_bytes = candidate
+        if value_bytes is None:
             return ProblemResponse(status=400, detail="Invalid Host header")
+        value = value_bytes.decode("latin-1")
+        host = _normalize_host(value)
+        if host is None or not _host_allowed(host, self.allowed_hosts):
+            return ProblemResponse(status=400, detail="Invalid Host header")
+        return None
+
+
+def _normalize_origin(value: str) -> bytes:
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise ValueError(f"invalid WebSocket origin: {value!r}")
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(f"invalid WebSocket origin: {value!r}") from error
+    default = 80 if scheme == "http" else 443
+    authority = host if port is None or port == default else f"{host}:{port}"
+    return f"{scheme}://{authority}".encode("ascii")
+
+
+class WebSocketOriginMiddleware:
+    """Reject WebSocket handshakes outside an exact browser-origin allowlist."""
+
+    global_scope = True
+    __slots__ = ("allowed_origins",)
+
+    def __init__(self, allowed_origins: Iterable[str]) -> None:
+        origins = tuple(_normalize_origin(origin) for origin in allowed_origins)
+        if not origins:
+            raise ValueError("allowed WebSocket origins must not be empty")
+        self.allowed_origins = origins
+
+    async def before_websocket(self, request: Request):
+        encoded: bytes | None = None
+        for name, candidate in request.headers:
+            if name != b"origin":
+                continue
+            if encoded is not None:
+                return ProblemResponse(status=403, detail="WebSocket origin is not allowed")
+            encoded = candidate
+        if encoded is None or not origin_matches(encoded, self.allowed_origins):
+            return ProblemResponse(status=403, detail="WebSocket origin is not allowed")
         return None
 
 
@@ -184,7 +287,7 @@ class SecurityHeadersMiddleware:
             (*self.headers, self.hsts_header) if self.hsts_header is not None else self.headers
         )
 
-    async def after(self, request: Request, response):
+    def after_inplace(self, request: Request, response) -> None:
         """Append every configured header the response does not already carry.
 
         The HSTS header is part of that set only when the request scheme is
@@ -195,7 +298,19 @@ class SecurityHeadersMiddleware:
         # every single response just to compare one string.
         additions = self.https_headers if request.scheme == "https" else self.headers
         append_missing_headers(response.headers, additions)
+
+    def after_sync(self, request: Request, response):
+        """Compatibility transformer; compiled middleware mutates in place."""
+        self.after_inplace(request, response)
         return response
 
+    async def after(self, request: Request, response):
+        """Compatibility wrapper; compiled middleware mutates in place."""
+        return self.after_sync(request, response)
 
-__all__ = ["SecurityHeadersMiddleware", "TrustedHostMiddleware"]
+
+__all__ = [
+    "SecurityHeadersMiddleware",
+    "TrustedHostMiddleware",
+    "WebSocketOriginMiddleware",
+]

@@ -81,6 +81,53 @@ class TestPublicKeyAndPrincipals:
         assert first.json() == {"who": "ann"}
         assert second.json() == {"who": "bo"}, "one principal was served another's body"
 
+    async def test_a_declared_query_key_refuses_an_authenticated_request(self):
+        app = Wreath()
+        app.configure_auth(_Backend())
+
+        from wreath.auth import authenticated
+
+        @app.get("/me")
+        @authenticated()
+        @cached(ttl=60, query_params=("view",))
+        async def me(request):
+            return {"who": request.identity.id}
+
+        async with TestClient(app) as client:
+            first = await client.get(
+                "/me?view=profile", headers={"x-user": "ann"}
+            )
+            second = await client.get(
+                "/me?view=profile", headers={"x-user": "bo"}
+            )
+
+        assert first.json() == {"who": "ann"}
+        assert second.json() == {"who": "bo"}, "one principal was served another's body"
+
+    async def test_an_explicit_declared_query_key_refuses_authentication(self):
+        from wreath.auth import authenticated
+        from wreath.response_cache import cache_key_for
+
+        app = Wreath()
+        app.configure_auth(_Backend())
+
+        @app.get("/me")
+        @authenticated()
+        @cached(ttl=60, key=cache_key_for(("view",)))
+        async def me(request):
+            return {"who": request.identity.id}
+
+        async with TestClient(app) as client:
+            first = await client.get(
+                "/me?view=profile", headers={"x-user": "ann"}
+            )
+            second = await client.get(
+                "/me?view=profile", headers={"x-user": "bo"}
+            )
+
+        assert first.json() == {"who": "ann"}
+        assert second.json() == {"who": "bo"}
+
     async def test_a_principal_scoped_key_still_caches_per_caller(self):
         calls = 0
         app = Wreath()
@@ -153,3 +200,18 @@ class TestCacheBusting:
 
         key = cache_key_for(("a", "b"))
         assert key(_Request(b"a=1&b=2")) == key(_Request(b"b=2&a=1"))
+
+    def test_encoded_delimiters_do_not_collide(self):
+        from wreath.response_cache import cache_key_for
+
+        class _Request:
+            method = "GET"
+            path = "/document"
+
+            def __init__(self, query):
+                self.query_string = query
+
+        key = cache_key_for(("tenant", "document"))
+        victim = _Request(b"tenant=acme&document=payroll")
+        attacker = _Request(b"tenant=acme%26document%3Dpayroll")
+        assert key(victim) != key(attacker)

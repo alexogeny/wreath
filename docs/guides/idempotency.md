@@ -49,8 +49,10 @@ Silence there is how "idempotency works in staging" happens.
 ## Safe by construction
 
 - Only unsafe methods are considered — `POST`, `PUT`, `PATCH`, `DELETE`.
-- The key is scoped by **method, path, and the authenticated principal**, so two
-  users cannot collide on the same key value.
+- The key is scoped by **method, path, principal type, and principal id**, so
+  two authenticated principals cannot collide on the same key value. Each
+  component is length-framed before hashing, including decoded paths that
+  contain spaces or other delimiters.
 - An **unauthenticated** request is left unguarded — see below.
 - A **concurrent** duplicate (the first is still in flight) gets `409 Conflict`
   with a `Retry-After`, so a client that retries immediately is told when to

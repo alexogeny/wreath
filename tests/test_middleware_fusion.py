@@ -22,8 +22,18 @@ from typing import Any
 
 import pytest
 
-from wreath import Wreath
-from wreath.middleware import MiddlewareHooks, MiddlewareTape
+import wreath.app as app_module
+from wreath import Router, Wreath
+from wreath.middleware import (
+    CORSMiddleware,
+    CSRFMiddleware,
+    MiddlewareHooks,
+    MiddlewareTape,
+    ProxyHeadersMiddleware,
+    RequestIDMiddleware,
+    SecurityHeadersMiddleware,
+    ServerTimingMiddleware,
+)
 from wreath.response import TextResponse
 
 
@@ -64,6 +74,48 @@ def sync_marker_with_after(events: list[str], name: str, *, respond: Any = None)
         return response
 
     return MiddlewareHooks(before_sync=before_sync, after=after)
+
+
+def sync_marker_with_after_sync(
+    events: list[str], name: str, *, respond: Any = None
+) -> MiddlewareHooks:
+    def before_sync(request: Any) -> Any:
+        events.append(f"{name}-in")
+        return respond
+
+    def after_sync(request: Any, response: Any) -> Any:
+        events.append(f"{name}-out")
+        return response
+
+    async def after(request: Any, response: Any) -> Any:
+        events.append(f"{name}-async-out")
+        return response
+
+    return MiddlewareHooks(
+        before_sync=before_sync, after=after, after_sync=after_sync
+    )
+
+
+def sync_marker_with_after_inplace(
+    events: list[str], name: str, *, respond: Any = None
+) -> Any:
+    class InPlaceMarker:
+        def before_sync(self, request: Any) -> Any:
+            events.append(f"{name}-in")
+            return respond
+
+        def after_inplace(self, request: Any, response: Any) -> None:
+            events.append(f"{name}-out")
+
+        def after_sync(self, request: Any, response: Any) -> Any:
+            events.append(f"{name}-wrong-sync-out")
+            return response
+
+        async def after(self, request: Any, response: Any) -> Any:
+            events.append(f"{name}-wrong-async-out")
+            return response
+
+    return InPlaceMarker()
 
 
 # --- the fun one: a seeded Magic 8-Ball async user middleware ----------------
@@ -169,6 +221,102 @@ async def test_before_sync_short_circuit_runs_entered_afters_only() -> None:
     assert sent[1]["body"] == b"stop"
     # 'c' never runs; the endpoint never runs; the after hooks of the entered
     # middleware (a, b) run in reverse order on the short-circuit response.
+    assert events == ["a-in", "b-in", "b-out", "a-out"]
+
+
+@pytest.mark.asyncio
+async def test_after_sync_hooks_compile_without_await_in_reverse_order() -> None:
+    app = Wreath()
+    events: list[str] = []
+
+    @app.get("/", middleware=(
+        sync_marker_with_after_sync(events, "a"),
+        sync_marker_with_after_sync(events, "b"),
+        sync_marker_with_after_sync(events, "c"),
+    ))
+    async def endpoint(request: Any) -> str:
+        events.append("endpoint")
+        return "ok"
+
+    sent = await invoke(app)
+    matched = app.router.match("GET", "/")
+
+    assert isinstance(matched[0], MiddlewareTape)
+    assert matched[0].operations == (
+        "fused_before", "endpoint", "after_sync", "after_sync", "after_sync",
+    )
+    assert sent[1]["body"] == b"ok"
+    assert events == [
+        "a-in", "b-in", "c-in", "endpoint", "c-out", "b-out", "a-out",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_after_sync_short_circuit_runs_entered_afters_only() -> None:
+    app = Wreath()
+    events: list[str] = []
+
+    @app.get("/", middleware=(
+        sync_marker_with_after_sync(events, "a"),
+        sync_marker_with_after_sync(
+            events, "b", respond=TextResponse("stop", status=403)
+        ),
+        sync_marker_with_after_sync(events, "c"),
+    ))
+    async def endpoint(request: Any) -> str:
+        events.append("endpoint")
+        return "never"
+
+    sent = await invoke(app)
+
+    assert sent[0]["status"] == 403
+    assert sent[1]["body"] == b"stop"
+    assert events == ["a-in", "b-in", "b-out", "a-out"]
+
+
+@pytest.mark.asyncio
+async def test_after_inplace_preserves_response_without_using_return_value() -> None:
+    app = Wreath()
+    events: list[str] = []
+
+    @app.get("/", middleware=(
+        sync_marker_with_after_inplace(events, "a"),
+        sync_marker_with_after_inplace(events, "b"),
+    ))
+    async def endpoint(request: Any) -> str:
+        events.append("endpoint")
+        return "ok"
+
+    sent = await invoke(app)
+    matched = app.router.match("GET", "/")
+
+    assert isinstance(matched[0], MiddlewareTape)
+    assert matched[0].operations == (
+        "fused_before", "endpoint", "after_inplace", "after_inplace",
+    )
+    assert sent[1]["body"] == b"ok"
+    assert events == ["a-in", "b-in", "endpoint", "b-out", "a-out"]
+
+
+@pytest.mark.asyncio
+async def test_after_inplace_short_circuit_unwinds_only_entered_hooks() -> None:
+    app = Wreath()
+    events: list[str] = []
+
+    @app.get("/", middleware=(
+        sync_marker_with_after_inplace(events, "a"),
+        sync_marker_with_after_inplace(
+            events, "b", respond=TextResponse("stop", status=403)
+        ),
+        sync_marker_with_after_inplace(events, "c"),
+    ))
+    async def endpoint(request: Any) -> str:
+        events.append("endpoint")
+        return "never"
+
+    sent = await invoke(app)
+
+    assert sent[0]["status"] == 403
     assert events == ["a-in", "b-in", "b-out", "a-out"]
 
 
@@ -308,6 +456,50 @@ class GlobalAsync:
         return None
 
 
+class GlobalSyncAfter:
+    """A global middleware whose two hooks are both plain functions."""
+
+    global_scope = True
+
+    def __init__(self, events: list[str], name: str, *, respond: Any = None) -> None:
+        self._events, self._name, self._respond = events, name, respond
+
+    def before_sync(self, request: Any) -> Any:
+        self._events.append(f"{self._name}-in")
+        return self._respond
+
+    def after_sync(self, request: Any, response: Any) -> Any:
+        self._events.append(f"{self._name}-out")
+        return response
+
+    async def after(self, request: Any, response: Any) -> Any:
+        self._events.append(f"{self._name}-async-out")
+        return response
+
+
+class GlobalInPlaceAfter(GlobalSyncAfter):
+    def after_inplace(self, request: Any, response: Any) -> None:
+        self._events.append(f"{self._name}-out")
+
+    def after_sync(self, request: Any, response: Any) -> Any:
+        self._events.append(f"{self._name}-wrong-sync-out")
+        return response
+
+
+class GlobalBeforeOnly:
+    global_scope = True
+
+    def before_sync(self, request: Any) -> None:
+        return None
+
+
+class GlobalAfterOnly:
+    global_scope = True
+
+    def after_inplace(self, request: Any, response: Any) -> None:
+        return None
+
+
 @pytest.mark.asyncio
 async def test_global_before_sync_runs_without_await() -> None:
     app = Wreath()
@@ -365,6 +557,175 @@ async def test_global_sync_and_async_hooks_interleave_in_order() -> None:
     assert events == ["sync-a-in", "async-b-in", "sync-c-in", "endpoint"]
 
 
+@pytest.mark.asyncio
+async def test_global_after_sync_runs_without_await_and_in_reverse_order() -> None:
+    app = Wreath()
+    events: list[str] = []
+    outer = GlobalSyncAfter(events, "outer")
+    inner = GlobalSyncAfter(events, "inner")
+    assert not inspect.iscoroutinefunction(outer.after_sync)
+    app.add_middleware(outer)
+    app.add_middleware(inner)
+
+    @app.get("/")
+    async def endpoint(request: Any) -> str:
+        events.append("endpoint")
+        return "ok"
+
+    sent = await invoke(app)
+    assert sent[1]["body"] == b"ok"
+    assert events == ["outer-in", "inner-in", "endpoint", "inner-out", "outer-out"]
+
+
+@pytest.mark.asyncio
+async def test_global_after_sync_preserves_short_circuit_unwind() -> None:
+    app = Wreath()
+    events: list[str] = []
+    app.add_middleware(GlobalSyncAfter(events, "a"))
+    app.add_middleware(
+        GlobalSyncAfter(events, "b", respond=TextResponse("stop", status=403))
+    )
+    app.add_middleware(GlobalSyncAfter(events, "c"))
+
+    @app.get("/")
+    async def endpoint(request: Any) -> str:
+        events.append("endpoint")
+        return "never"
+
+    sent = await invoke(app)
+    assert sent[0]["status"] == 403
+    assert events == ["a-in", "b-in", "b-out", "a-out"]
+
+
+@pytest.mark.asyncio
+async def test_global_after_inplace_preserves_response_and_precedence() -> None:
+    app = Wreath()
+    events: list[str] = []
+    app.add_middleware(GlobalInPlaceAfter(events, "outer"))
+    app.add_middleware(GlobalInPlaceAfter(events, "inner"))
+
+    @app.get("/")
+    async def endpoint(request: Any) -> str:
+        events.append("endpoint")
+        return "ok"
+
+    sent = await invoke(app)
+
+    assert sent[1]["body"] == b"ok"
+    assert events == ["outer-in", "inner-in", "endpoint", "inner-out", "outer-out"]
+
+
+@pytest.mark.asyncio
+async def test_global_compiler_builds_dense_directional_hook_plans() -> None:
+    app = Wreath()
+    app.add_middleware(GlobalAfterOnly())
+    app.add_middleware(GlobalBeforeOnly())
+    app.add_middleware(GlobalInPlaceAfter([], "both"))
+
+    @app.get("/")
+    async def endpoint(request: Any) -> str:
+        return "ok"
+
+    await invoke(app)
+
+    assert len(app._global_before_hooks) == 2
+    assert len(app._global_after_hooks) == 2
+
+
+@pytest.mark.asyncio
+async def test_response_only_route_skips_the_middleware_coercion_wrapper(
+    monkeypatch,
+) -> None:
+    calls = 0
+    original = app_module._coerce_response
+
+    def counted(value: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return original(value)
+
+    monkeypatch.setattr(app_module, "_coerce_response", counted)
+    app = Wreath()
+
+    @app.get(
+        "/",
+        middleware=(MiddlewareHooks(before_sync=lambda request: None),),
+        response_only=True,
+    )
+    async def endpoint(request: Any) -> TextResponse:
+        return TextResponse("ok")
+
+    sent = await invoke(app)
+
+    assert sent[1]["body"] == b"ok"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_included_router_preserves_the_response_only_contract(
+    monkeypatch,
+) -> None:
+    calls = 0
+    original = app_module._coerce_response
+
+    def counted(value: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return original(value)
+
+    monkeypatch.setattr(app_module, "_coerce_response", counted)
+    router = Router(middleware=(MiddlewareHooks(before_sync=lambda request: None),))
+
+    @router.get("/", response_only=True)
+    async def endpoint(request: Any) -> TextResponse:
+        return TextResponse("ok")
+
+    app = Wreath()
+    app.include_router(router, prefix="/included")
+    sent = await invoke(app, "/included/")
+
+    assert sent[1]["body"] == b"ok"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_reused_response_does_not_accumulate_observability_headers() -> None:
+    app = Wreath()
+    app.add_middleware(RequestIDMiddleware())
+    app.add_middleware(ServerTimingMiddleware())
+    app.add_middleware(SecurityHeadersMiddleware())
+    response = TextResponse("ok")
+
+    @app.get("/", response_only=True)
+    async def endpoint(request: Any) -> TextResponse:
+        return response
+
+    for _ in range(20):
+        await invoke(app)
+
+    names = [name for name, _value in response.headers]
+    assert names.count(b"x-request-id") == 1
+    assert names.count(b"server-timing") == 1
+
+
+@pytest.mark.asyncio
+async def test_reused_response_replaces_its_csrf_cookie() -> None:
+    app = Wreath()
+    app.add_middleware(CSRFMiddleware("x" * 32, secure=False))
+    response = TextResponse("ok")
+
+    @app.get("/", response_only=True)
+    async def endpoint(request: Any) -> TextResponse:
+        return response
+
+    for _ in range(20):
+        await invoke(app)
+
+    cookies = [value for name, value in response.headers if name == b"set-cookie"]
+    assert len(cookies) == 1
+    assert cookies[0].startswith(b"wreath_csrf=")
+
+
 # --- built-ins actually adopt before_sync ------------------------------------
 
 
@@ -384,6 +745,51 @@ def test_rate_limit_local_store_exposes_a_synchronous_before_hook() -> None:
     assert getattr(local, "before_sync", None) is not None
     assert not inspect.iscoroutinefunction(local.before_sync)
     assert local.before is None
+
+
+@pytest.mark.parametrize(
+    ("middleware", "hooks"),
+    (
+        pytest.param(
+            lambda: ProxyHeadersMiddleware(trusted=("127.0.0.1",)),
+            ("before_sync",),
+            id="proxy",
+        ),
+        pytest.param(
+            lambda: CORSMiddleware(allow_origins=("https://example.com",)),
+            ("before_sync", "after_inplace"),
+            id="cors",
+        ),
+        pytest.param(
+            lambda: CSRFMiddleware("x" * 32, secure=False),
+            ("before_sync", "after_inplace"),
+            id="csrf",
+        ),
+        pytest.param(
+            SecurityHeadersMiddleware,
+            ("after_inplace",),
+            id="security-headers",
+        ),
+        pytest.param(
+            RequestIDMiddleware,
+            ("before_sync", "after_inplace"),
+            id="request-id",
+        ),
+        pytest.param(
+            ServerTimingMiddleware,
+            ("before_sync", "after_inplace"),
+            id="server-timing",
+        ),
+    ),
+)
+def test_non_suspending_builtins_expose_sync_hooks(
+    middleware: Any, hooks: tuple[str, ...]
+) -> None:
+    instance = middleware()
+    for name in hooks:
+        hook = getattr(instance, name, None)
+        assert hook is not None
+        assert not inspect.iscoroutinefunction(hook)
 
 
 @pytest.mark.asyncio

@@ -768,8 +768,8 @@ class Request:
 
         Parsed on first read and cached, so the session, the CSRF check and a
         bearer-cookie backend share one parse. A cookie sent twice keeps its
-        first value, and only the first `Cookie` header is read. Values are the
-        octets as they arrived, decoded latin-1 -- neither unquoted nor
+        first value. Split `Cookie` header lines are combined with `; ` as HTTP/2
+        requires. Values are the octets as they arrived, decoded latin-1 -- neither unquoted nor
         percent-decoded, because a cookie is bytes and only its writer knows how
         it was encoded.
 
@@ -787,17 +787,23 @@ class Request:
         cached = self._cookies
         if cached is not _MISSING:
             return cast(dict[str, str], cached)
-        header_map = self._header_map
-        value = (
-            find_header(self.headers, b"cookie")
-            if header_map is None
-            else header_map.get(b"cookie")
-        )
-        if value is not None and len(value) > self._limits.max_cookie_bytes:
-            raise RequestHeaderFieldsTooLarge(
-                f"Cookie header is {len(value)} bytes; the limit is "
-                f"{self._limits.max_cookie_bytes}"
-            )
+        # HTTP/2 permits Cookie to be split across field lines. Combine every
+        # line with the RFC cookie separator while enforcing the limit before
+        # allocating the joined value; first-line-only creates proxy/app auth
+        # ambiguity and silently drops CSRF/session cookies.
+        values: list[bytes] = []
+        total = 0
+        for name, candidate in self.headers:
+            if name != b"cookie":
+                continue
+            total += len(candidate) + (2 if values else 0)
+            if total > self._limits.max_cookie_bytes:
+                raise RequestHeaderFieldsTooLarge(
+                    f"Cookie headers are {total} bytes; the limit is "
+                    f"{self._limits.max_cookie_bytes}"
+                )
+            values.append(candidate)
+        value = b"; ".join(values) if values else None
         parsed: dict[str, str] = {} if value is None else parse_cookies(value)
         self._cookies = parsed
         return parsed

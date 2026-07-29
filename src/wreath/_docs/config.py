@@ -79,6 +79,77 @@ def _collect_pages(items: tuple[Page | Section, ...], out: list[Page]) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class Link:
+    """One header link — a project homepage, a package page, a chat room.
+
+    `icon` names one of the built-in marks (`ICONS`); there is no icon *pack* and
+    no way to point at a remote SVG, because a docs page that fetches its
+    chrome from a CDN is no longer self-contained.
+    """
+
+    label: str
+    url: str
+    icon: str = "link"
+
+    def __post_init__(self) -> None:
+        if not self.label:
+            raise ValueError("a Link needs a label")
+        if not self.url.startswith(("https://", "http://", "/")):
+            raise ValueError(f"Link.url must be http(s) or site-absolute: {self.url!r}")
+        if self.icon not in ICONS:
+            raise ValueError(f"unknown Link.icon {self.icon!r}; choose from {sorted(ICONS)}")
+
+
+@dataclass(frozen=True, slots=True)
+class Repo:
+    """The project's source repository, shown in the header.
+
+    Args:
+        url: the repository's web URL, e.g. `https://github.com/you/proj`.
+        label: header text. Empty derives `owner/name` from the URL.
+        stats: show star and fork counts. They are read **once, at build time**
+            from the host's public API and baked into the HTML — the built page
+            never calls out to an API, which is what keeps the site self-contained
+            and stops every reader spending your rate limit. No network, a
+            timeout, or an error means the link renders without counts and the
+            build reports a warning; it never fails the build.
+    """
+
+    url: str
+    label: str = ""
+    stats: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.url.startswith(("https://", "http://")):
+            raise ValueError(f"Repo.url must be an http(s) URL: {self.url!r}")
+        if self.stats and self.host() not in ("github", "gitlab"):
+            raise ValueError(
+                "Repo(stats=True) needs a github.com or gitlab.com URL; "
+                f"{self.url!r} is neither. Drop `stats` to keep the plain link.")
+
+    def host(self) -> str:
+        """`"github"`, `"gitlab"`, or `""` for a repository hosted elsewhere."""
+        rest = self.url.split("://", 1)[-1].lower()
+        domain = rest.split("/", 1)[0].removeprefix("www.")
+        return {"github.com": "github", "gitlab.com": "gitlab"}.get(domain, "")
+
+    def slug(self) -> str:
+        """`owner/name` as it appears in the URL, or `""` when there is none."""
+        parts = [p for p in self.url.split("://", 1)[-1].split("/")[1:] if p]
+        return "/".join(parts[:2]).removesuffix(".git") if len(parts) >= 2 else ""
+
+    def title(self) -> str:
+        """The text shown in the header."""
+        return self.label or self.slug() or self.url
+
+
+#: Built-in header marks. A closed registry, like the figure set: a name that is
+#: not here is a build error, not a blank box or a request to a CDN.
+ICONS: frozenset[str] = frozenset(
+    {"link", "home", "github", "gitlab", "package", "chat", "mail", "rss", "book"})
+
+
+@dataclass(frozen=True, slots=True)
 class Palette:
     """A full, coherent colour theme (light + dark surfaces), fonts, and a radius.
 
@@ -197,6 +268,10 @@ class Site:
             default, `"auto"`, does this once the nav has at least three
             top-level entries — below that a tab row is chrome around nothing.
             `"never"` keeps the whole tree in one sidebar.
+        repo: the source repository, rendered as a header link with optional
+            build-time star and fork counts. See `Repo`.
+        links: extra header links — a homepage, a package page, a chat room —
+            each drawn with one of the built-in `ICONS`.
     """
 
     name: str
@@ -215,6 +290,10 @@ class Site:
     source_url: str = ""
     #: "auto" (tabs once the nav has 3+ top-level entries) or "never".
     tabs: str = "auto"
+    #: The source repository shown in the header; `None` shows nothing.
+    repo: Repo | None = None
+    #: Extra header links (homepage, package page, chat).
+    links: tuple[Link, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -244,4 +323,4 @@ _FEELS = frozenset({"flat", "elevated", "papery", "hardcore", "orby"})
 _FACES = frozenset({"system", "sans", "serif", "mono"})
 
 
-__all__ = ["THEMES", "Nav", "Page", "Palette", "Section", "Site"]
+__all__ = ["ICONS", "THEMES", "Link", "Nav", "Page", "Palette", "Repo", "Section", "Site"]

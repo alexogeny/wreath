@@ -141,6 +141,9 @@ class _Task:
     backoff_factor: float
     backoff_cap: float
     backoff_jitter: float
+    #: Seconds this handler may run before it is cancelled, or `None` to take
+    #: the runner's default (a fraction of the lease). See `JobRunner.task`.
+    timeout: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +245,10 @@ class JobRunner:
         #: running the handler. Non-zero means jobs are being re-run on lease
         #: expiry rather than completing, which used to end a worker silently.
         self.run_errors = 0
+        #: Handlers cancelled for outrunning their deadline. Distinct from
+        #: `run_errors`: the handler did not fail, it was stopped, and the number
+        #: that matters is how often the deadline is the thing deciding.
+        self.run_timeouts = 0
         #: Passes whose shift could not be enqueued. A pass that is never driven
         #: does nothing at all, and the ledger cannot tell that apart from a
         #: pass with no work to do.
@@ -275,6 +282,7 @@ class JobRunner:
         """Every counter this runner keeps, by name. See `MessageBus.stats`."""
         return {
             "run_errors": self.run_errors,
+            "run_timeouts": self.run_timeouts,
             "sweep_errors": self.sweep_errors,
             "schedule_errors": self.schedule_errors,
             "dead_lettered": self.dead_lettered,
@@ -297,13 +305,38 @@ class JobRunner:
         backoff_factor: float = 2.0,
         backoff_cap: float = 3600.0,
         backoff_jitter: float = 0.2,
+        timeout: float | None = None,
     ) -> Callable[[JobHandler], JobHandler]:
-        """Decorator registering an async `handler(ctx, *args)` under `name`."""
+        """Decorator registering an async `handler(ctx, *args)` under `name`.
+
+        `timeout` is how long the handler may run before it is cancelled and the
+        attempt fails; `None` takes the runner's default, `DEADLINE_FRACTION` of
+        the lease. **It must end inside the lease**, and that is checked here.
+
+        There is no heartbeat, so a handler still running when its lease expires
+        is reclaimed by the sweeper and started again by another worker — two
+        copies of the same job, doing the same work, and the fence only stops
+        the loser's *bookkeeping* from landing. That was the whole cost of an
+        unbounded handler: not a stuck worker, a second charge on the card.
+        `drive()` has always refused a pass whose shift could outlast the lease
+        for this reason; an ordinary task simply had no bound to check.
+        """
         _validate_identifier(name, "task name")
         if name in self._tasks:
             raise ValueError(f"duplicate task: {name!r}")
         if retries < 0:
             raise ValueError("retries cannot be negative")
+        if timeout is not None:
+            if timeout <= 0:
+                raise ValueError("timeout must be positive")
+            if timeout >= self._lease:
+                raise ValueError(
+                    f"task {name!r} declares timeout={timeout:g}s but runner "
+                    f"{self._name!r} leases jobs for {self._lease:g}s. A handler "
+                    "still running when its lease expires is reclaimed and run "
+                    "again by another worker, so a handler has to finish -- or be "
+                    "cancelled -- before then."
+                )
 
         def register(func: JobHandler) -> JobHandler:
             self._tasks[name] = _Task(
@@ -316,6 +349,7 @@ class JobRunner:
                 backoff_factor=backoff_factor,
                 backoff_cap=backoff_cap,
                 backoff_jitter=backoff_jitter,
+                timeout=timeout,
             )
             return func
 
@@ -408,7 +442,12 @@ class JobRunner:
         # Retries are the runner's ordinary backoff. A shift is safe to re-run
         # from wherever the ledger says it got to, so there is nothing special
         # to arrange here.
-        self.task(task)(run_shift)
+        #
+        # The deadline is the shift itself, not the runner's default: a pass has
+        # already declared how long a chunk may take and that declaration was
+        # checked against the lease above. Taking the default instead would
+        # cancel a pass whose shift is legitimately longer than it.
+        self.task(task, timeout=shift)(run_shift)
         self._passes.append((task, walk))
         if cron is not None:
             self.schedule(task, cron=cron, tenant=walk.tenant)
@@ -844,18 +883,45 @@ class JobRunner:
                 permanent=True,
             )
             return
+        deadline = self.deadline_for(job.task)
         future = asyncio.ensure_future(handler.func(ctx, *job.args))
         self._inflight.add(future)
         try:
-            await future
+            async with asyncio.timeout(deadline):
+                await future
         except asyncio.CancelledError:
+            # Not ours: the supervisor is stopping. `asyncio.timeout` re-raises
+            # a cancellation it did not cause, so this stays the shutdown path.
             raise
+        except TimeoutError:
+            # Ours. The handler has already been cancelled by the timeout; the
+            # attempt is charged and retried like any other failure, because a
+            # deadline miss is usually a slow dependency rather than a bug.
+            self.run_timeouts += 1
+            await self._fail(
+                job,
+                f"{job.task!r} timed out after {deadline:g}s and was cancelled",
+                handler,
+            )
+            return
         except Exception as error:  # noqa: BLE001 - handler failures drive retry/dead-letter
             await self._fail(job, repr(error), handler)
             return
         finally:
             self._inflight.discard(future)
         await self._complete(job)
+
+    #: What fraction of the lease a handler may spend before it is cancelled.
+    #: The remaining fifth is for the cancellation to land and the failure to be
+    #: recorded -- a handler cancelled exactly *at* the lease would be racing the
+    #: sweeper for its own row.
+    DEADLINE_FRACTION = 0.8
+
+    def deadline_for(self, task: str) -> float:
+        """Seconds `task` may run before it is cancelled."""
+        registered = self._tasks.get(task)
+        declared = registered.timeout if registered is not None else None
+        return declared if declared is not None else self._lease * self.DEADLINE_FRACTION
 
     async def _fail(
         self, job: _Claimed, error: str, handler: _Task | None = None,

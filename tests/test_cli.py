@@ -183,6 +183,8 @@ def test_options_build_server_and_tls_configuration(tmp_path: Path) -> None:
             "on",
             "--max-body-bytes",
             "1234",
+            "--max-body-chunks",
+            "321",
             "--tls-cert",
             "cert.pem",
             "--tls-key",
@@ -201,6 +203,7 @@ def test_options_build_server_and_tls_configuration(tmp_path: Path) -> None:
     assert config.protocols == ("http/1.1", "h2")
     assert config.lifespan == "on"
     assert config.max_body_bytes == 1234
+    assert config.max_body_chunks == 321
     assert tls is not None
     assert tls.certfile == "cert.pem"
     assert tls.keyfile == "key.pem"

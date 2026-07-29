@@ -90,6 +90,87 @@ def test_unzip_roundtrip():
     assert contents["out/x/one.txt"] == b"one"
 
 
+def test_unzip_refuses_an_entry_over_the_expansion_limit():
+    """A tiny compressed object cannot make extraction allocate an arbitrary entry."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("safe.txt", b"safe")
+        archive.writestr("payload.bin", b"A" * (1024 * 1024))
+
+    async def go():
+        store = module.MemoryObjectStore()
+        await store.write("bomb.zip", buffer.getvalue())
+        limits = module.ZipExtractionLimits(
+            max_archive_bytes=64 * 1024,
+            max_entries=8,
+            max_entry_bytes=64 * 1024,
+            max_total_bytes=128 * 1024,
+        )
+        try:
+            await module.unzip_stream(store, "bomb.zip", limits=limits)
+        except module.ObjectError as error:
+            assert "payload.bin" in str(error)
+            assert "1048576" in str(error)
+        else:
+            raise AssertionError("oversized expanded entry was accepted")
+        assert not await store.exists("safe.txt")
+        assert not await store.exists("payload.bin")
+
+    asyncio.run(go())
+
+
+def test_unzip_refuses_too_many_entries():
+    archive = _build({"one": b"1", "two": b"2"})
+
+    async def go():
+        store = module.MemoryObjectStore()
+        await store.write("many.zip", archive)
+        limits = module.ZipExtractionLimits(max_entries=1)
+        try:
+            await module.unzip_stream(store, "many.zip", limits=limits)
+        except module.ObjectError as error:
+            assert "2 entries" in str(error)
+        else:
+            raise AssertionError("entry-count limit was not enforced")
+
+    asyncio.run(go())
+
+
+def test_unzip_refuses_cumulative_expanded_bytes():
+    archive = _build({"one": b"1234", "two": b"5678"})
+
+    async def go():
+        store = module.MemoryObjectStore()
+        await store.write("total.zip", archive)
+        limits = module.ZipExtractionLimits(max_entry_bytes=8, max_total_bytes=7)
+        try:
+            await module.unzip_stream(store, "total.zip", limits=limits)
+        except module.ObjectError as error:
+            assert "output exceeds 7 bytes" in str(error)
+        else:
+            raise AssertionError("cumulative output limit was not enforced")
+        assert not await store.exists("one")
+
+    asyncio.run(go())
+
+
+def test_unzip_refuses_archive_bytes_while_reading():
+    archive = _build({"payload": b"x" * 1024})
+
+    async def go():
+        store = module.MemoryObjectStore()
+        await store.write("large.zip", archive)
+        limits = module.ZipExtractionLimits(max_archive_bytes=len(archive) - 1)
+        try:
+            await module.unzip_stream(store, "large.zip", limits=limits)
+        except module.ObjectError as error:
+            assert f"exceeds {len(archive) - 1} bytes" in str(error)
+        else:
+            raise AssertionError("archive byte limit was not enforced")
+
+    asyncio.run(go())
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

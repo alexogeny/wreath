@@ -1,3 +1,6 @@
+---
+keywords: query parameters, query string, page size, cursor, offset, sorting, filtering, querystring, url params
+---
 # Pagination, filtering, and sorting
 
 List endpoints all want the same three things — a page, a sort, a filter — and all invent them slightly differently. Wreath gives you one dependency and one helper.

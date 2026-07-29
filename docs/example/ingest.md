@@ -162,12 +162,12 @@ or an out-of-process `vips` call, writes them to `thumbnail_key`, and changes
 nothing else: the column, the key layout and the job are already the right
 shape. The example stops where it would otherwise have to pretend.
 
-**`unzip_stream` is not safe for anonymous input**, and the example is arranged
-so it never sees any. It reads the archive whole and decompresses each entry
-whole, so peak memory is the archive plus its largest entry, and nothing bounds
-the expansion ratio. Minting requires a ranger and `MAX_CARD_BYTES` caps what
-even a ranger can make a worker allocate — those two together are what make "an
-operator's archive" true here rather than aspirational.
+**Card extraction has its own resource budget.** The example passes
+`CARD_EXTRACTION_LIMITS` to `unzip_stream`: at most 64 MiB of archive input,
+4,096 entries, 32 MiB for one expanded image, and 128 MiB of cumulative output.
+The upload URL still carries authority to write only one archive, while these
+limits ensure that even a validly uploaded compression bomb becomes a permanent
+failed ingest before any image object is written.
 
 ## The queue's tables are not in the migration artifact, and you do not apply them
 

@@ -1,3 +1,6 @@
+---
+keywords: query string, request body, json body, response headers, status code, streaming response, file response, redirect, querystring
+---
 # Requests and responses
 
 Every handler sits between two things: the `Request` that came in, and the
@@ -83,6 +86,20 @@ async def stream(request) -> StreamingResponse:
             yield chunk
     return StreamingResponse(chunks())
 ```
+
+For a route with route-scoped middleware whose handler always returns one of
+these response objects directly, `response_only=True` records that promise at
+startup and removes the middleware chain's response-coercion wrapper:
+
+```python
+@app.get("/health", middleware=(audit,), response_only=True)
+async def health(request) -> TextResponse:
+    return TextResponse("ok")
+```
+
+Do not set it on a handler that may return a dict, string, or bytes. The normal
+route path deliberately keeps coercion so those convenient return values retain
+their documented meaning.
 
 Errors are responses too. Raise an [`HTTPException`](../reference/exceptions.md)
 subclass when something goes wrong and Wreath turns it into a proper response;

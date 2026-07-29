@@ -142,3 +142,75 @@ async def test_run_unregistered_task_dead_letters() -> None:
     conn = FakeConn()
     await _runner(conn)._run(_job(task="ghost", max_attempts=1))
     assert "state='dead'" in conn.calls[-1][0]
+
+
+# --- runtime bounds ----------------------------------------------------------
+# A handler that outruns its lease is reclaimed by the sweeper *while it is still
+# running*, so a second worker starts a concurrent copy and the first one's
+# fenced completion lands on nothing. `drive()` already refuses a pass whose
+# shift could outlast the lease; an ordinary task had no such bound at all.
+
+
+async def test_a_handler_that_outruns_its_deadline_is_cancelled_and_retried() -> None:
+    import asyncio
+
+    conn = FakeConn()
+    runner = _runner(conn, lease=1.0)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    @runner.task("slow", timeout=0.05)
+    async def slow(ctx: Any) -> None:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    await runner._run(_job(task="slow", max_attempts=6, fence=0))
+    assert started.is_set()
+    assert cancelled.is_set(), "the handler was left running after its deadline"
+    # Retried like any other failure, with the reason legible in last_error.
+    failure = [args for sql, args in conn.calls if "last_error" in sql]
+    assert failure and "timed out" in str(failure[0])
+    assert not any("state='done'" in sql for sql in conn.sqls())
+    assert runner.stats()["run_timeouts"] == 1
+
+
+async def test_a_handler_deadline_defaults_to_inside_the_lease() -> None:
+    """A default that could exceed the lease would reintroduce the duplicate."""
+    conn = FakeConn()
+    runner = _runner(conn, lease=30.0)
+
+    @runner.task("plain")
+    async def plain(ctx: Any) -> None:
+        return None
+
+    assert 0 < runner.deadline_for("plain") < 30.0
+
+
+def test_a_task_may_not_declare_a_deadline_beyond_the_lease() -> None:
+    import pytest
+
+    conn = FakeConn()
+    runner = _runner(conn, lease=10.0)
+    with pytest.raises(ValueError, match="lease"):
+
+        @runner.task("too_slow", timeout=25.0)
+        async def too_slow(ctx: Any) -> None:
+            return None
+
+
+async def test_a_finished_handler_frees_its_slot_even_when_it_times_out() -> None:
+    import asyncio
+
+    conn = FakeConn()
+    runner = _runner(conn, lease=1.0)
+
+    @runner.task("hang", timeout=0.05)
+    async def hang(ctx: Any) -> None:
+        await asyncio.sleep(30)
+
+    await runner._run(_job(task="hang", max_attempts=6, fence=0))
+    assert not runner._inflight, "a timed-out handler kept its concurrency slot"

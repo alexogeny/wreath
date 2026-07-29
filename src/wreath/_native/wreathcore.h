@@ -134,6 +134,9 @@ PyObject *wreath_origin_matches(PyObject *self, PyObject *args);
 PyObject *wreath_append_missing_headers(PyObject *self, PyObject *args);
 PyObject *wreath_append_vary(PyObject *self, PyObject *args);
 PyObject *wreath_replace_content_length(PyObject *self, PyObject *args);
+PyObject *wreath_replace_response_header(PyObject *self, PyObject *args);
+PyObject *wreath_replace_cookie(PyObject *self, PyObject *args);
+PyObject *wreath_replace_server_timing(PyObject *self, PyObject *args);
 PyObject *wreath_find_response_header(PyObject *self, PyObject *args);
 int wreath_register_webpolicy(PyObject *module);
 

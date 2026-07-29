@@ -48,6 +48,32 @@ async def test_trusted_host_rejects_before_handler_and_accepts_subdomains() -> N
 
 
 @pytest.mark.asyncio
+async def test_trusted_host_rejects_authorities_with_userinfo_or_malformed_ports() -> None:
+    app = Wreath()
+    called = 0
+    app.add_middleware(TrustedHostMiddleware(("good.example", "[::1]")))
+
+    @app.get("/")
+    async def index(request: Any) -> str:
+        nonlocal called
+        called += 1
+        return f"https://{request.header('host')}/reset?token=secret"
+
+    async with TestClient(app) as client:
+        for host in (
+            "good.example:@evil.example",
+            "good.example:garbage",
+            "[::1]junk",
+        ):
+            response = await client.get("/", headers={"host": host})
+            assert response.status == 400, host
+        accepted = await client.get("/", headers={"host": "[::1]:8000"})
+
+    assert accepted.status == 200
+    assert called == 1
+
+
+@pytest.mark.asyncio
 async def test_security_headers_do_not_replace_handler_values() -> None:
     app = Wreath()
     app.add_middleware(

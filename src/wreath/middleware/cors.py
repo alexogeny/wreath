@@ -149,7 +149,7 @@ class CORSMiddleware:
             return (b"access-control-allow-origin", origin.encode("latin-1"))
         return None
 
-    async def before(self, request: Request) -> Any | None:
+    def before_sync(self, request: Request) -> Any | None:
         """Answer a CORS preflight, or return None to let the request proceed.
 
         Returns None for anything that is not a preflight: a non-`OPTIONS`
@@ -198,12 +198,16 @@ class CORSMiddleware:
             response.headers.append((b"vary", b"origin"))
         return response
 
+    async def before(self, request: Request) -> Any | None:
+        """Compatibility wrapper; compiled middleware uses `before_sync`."""
+        return self.before_sync(request)
+
     # Preflight requests target routes that usually declare no OPTIONS
     # method, so route-fused hooks never see them.  Wreath consults this
     # app-level fallback for unmatched OPTIONS requests.
     handle_preflight = before
 
-    async def after(self, request: Request, response: Any) -> Any:
+    def after_inplace(self, request: Request, response: Any) -> None:
         """Add the simple-request CORS headers to a cross-origin response.
 
         A request with no `Origin` header is left exactly as it is. An origin
@@ -225,7 +229,7 @@ class CORSMiddleware:
         """
         origin = request.header("origin")
         if origin is None:
-            return response
+            return
         allowed = self._origin_header(origin)
         headers = getattr(response, "headers", None)
         if allowed is None:
@@ -237,7 +241,7 @@ class CORSMiddleware:
             # one, and is a no-op when `origin` is already listed.
             if headers is not None:
                 append_vary(headers, b"origin")
-            return response
+            return
         if (
             headers is not None
             # Respect a response that already carries CORS headers — the
@@ -251,7 +255,14 @@ class CORSMiddleware:
             headers.extend(self._simple_headers)
             if not self._allow_all_origins or self._allow_credentials:
                 append_vary(headers, b"origin")
+    def after_sync(self, request: Request, response: Any) -> Any:
+        """Compatibility transformer; compiled middleware mutates in place."""
+        self.after_inplace(request, response)
         return response
+
+    async def after(self, request: Request, response: Any) -> Any:
+        """Compatibility wrapper; compiled middleware mutates in place."""
+        return self.after_sync(request, response)
 
 
 __all__ = ["CORSMiddleware"]

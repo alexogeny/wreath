@@ -47,7 +47,7 @@ enum {
 #define H2_BODY_COALESCE_MAX (16 * 1024)
 
 /* Frame-flood defence: a peer that keeps sending frames which make no request
- * progress (empty DATA, PING, SETTINGS, WINDOW_UPDATE, PRIORITY, RST_STREAM) is
+ * progress (empty DATA, control frames, or unknown extension frames) is
  * spending our CPU for nothing. We count consecutive unproductive frames and
  * GOAWAY(ENHANCE_YOUR_CALM) past this budget; any productive frame (a new
  * request, real body bytes, or response DATA framed toward the peer) resets it,
@@ -88,6 +88,7 @@ typedef struct {
     int disconnected;          /* reset/closed: deliver http.disconnect */
     Py_ssize_t content_length; /* declared content-length, or -1 */
     Py_ssize_t body_received;
+    Py_ssize_t body_frames;    /* non-empty or padded DATA frames accepted */
 
     /* response state */
     int response_started;
@@ -96,6 +97,7 @@ typedef struct {
 
     /* flow control */
     int64_t send_window;       /* peer receive window for this stream */
+    int64_t applied_initial_window; /* peer setting reflected in send_window */
     int64_t recv_window;       /* our advertised receive window */
     int64_t recv_consumed_pending;
     int64_t recv_credit_threshold;
@@ -146,11 +148,17 @@ typedef struct {
 
     PyObject *loop_create_future;
     PyObject *loop_create_task;
+    PyObject *scope_type;
+    PyObject *scope_asgi;
+    PyObject *scope_http_version;
+    PyObject *scope_scheme;
+    PyObject *scope_root_path;
 
     PyObject *streams;         /* dict {int stream_id: Http2Stream} */
     PyObject *pending_priorities; /* bounded PRIORITY_UPDATE values for idle streams */
     PyObject *conn_blocked;    /* cursor queue of streams with pending DATA */
     Py_ssize_t conn_blocked_head;
+    PyObject *stream_window_blocked; /* pending streams with no stream credit */
     PyObject *scheduler_callable; /* bound _run_write_scheduler */
     int scheduler_scheduled;
     int rfc9218_enabled;       /* metal-only urgency/incremental policy */
@@ -164,6 +172,8 @@ typedef struct {
     Py_ssize_t buf_len;
     Py_ssize_t buf_cap;
     Py_ssize_t cursor;
+    Py_ssize_t read_offer_offset;
+    Py_ssize_t read_offer_size;
 
     int preface_seen;          /* bytes of client preface matched */
     int got_first_settings;    /* client SETTINGS received */
@@ -192,7 +202,9 @@ typedef struct {
     Py_ssize_t our_max_frame;
     Py_ssize_t max_concurrent;
     Py_ssize_t max_header_list;
+    Py_ssize_t max_header_count;
     Py_ssize_t max_body_bytes;
+    Py_ssize_t max_body_chunks;
     Py_ssize_t hpack_max;
 
     int write_paused;
@@ -497,6 +509,10 @@ h2_stream_error(PyObject *proto, uint32_t sid, int code)
             }
         }
     }
+    if (PyDict_Pop(self->stream_window_blocked, key, NULL) < 0) {
+        Py_DECREF(key);
+        return -1;
+    }
     Py_DECREF(key);
     return 0;
 }
@@ -754,6 +770,79 @@ mark_conn_blocked(Http2Protocol *self, Http2Stream *st)
     return 0;
 }
 
+/* SETTINGS_INITIAL_WINDOW_SIZE is connection-wide, but applying it eagerly to
+ * every live stream makes one six-byte setting O(active streams). Reconcile a
+ * stream only when its send window is touched; the difference telescopes to
+ * the current setting, so repeated SETTINGS frames remain O(1). */
+static void
+h2_sync_stream_send_window(Http2Protocol *self, Http2Stream *st)
+{
+    st->send_window += self->peer_initial_window - st->applied_initial_window;
+    st->applied_initial_window = self->peer_initial_window;
+}
+
+static int
+mark_stream_window_blocked(Http2Protocol *self, Http2Stream *st)
+{
+    PyObject *key = PyLong_FromUnsignedLong(st->id);
+    if (key == NULL) {
+        return -1;
+    }
+    int result = PyDict_SetItem(
+        self->stream_window_blocked, key, (PyObject *)st
+    );
+    Py_DECREF(key);
+    return result;
+}
+
+static int
+unmark_stream_window_blocked(Http2Protocol *self, uint32_t stream_id)
+{
+    PyObject *key = PyLong_FromUnsignedLong(stream_id);
+    if (key == NULL) {
+        return -1;
+    }
+    int result = PyDict_Pop(self->stream_window_blocked, key, NULL);
+    Py_DECREF(key);
+    return result < 0 ? -1 : 0;
+}
+
+/* Only streams whose response is genuinely waiting for stream credit need to
+ * be reconsidered after an increase. Idle/open streams stay lazy; the work for
+ * blocked responses is bounded by work that can now make progress. */
+static int
+wake_stream_window_blocked(Http2Protocol *self)
+{
+    PyObject *blocked = self->stream_window_blocked;
+    self->stream_window_blocked = PyDict_New();
+    if (self->stream_window_blocked == NULL) {
+        self->stream_window_blocked = blocked;
+        return -1;
+    }
+    PyObject *key;
+    PyObject *stream;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(blocked, &pos, &key, &stream)) {
+        Http2Stream *st = (Http2Stream *)stream;
+        h2_sync_stream_send_window(self, st);
+        if (st->pending_body == NULL || st->state == S_CLOSED) {
+            continue;
+        }
+        if (st->send_window <= 0) {
+            if (PyDict_SetItem(self->stream_window_blocked, key, stream) < 0) {
+                Py_DECREF(blocked);
+                return -1;
+            }
+        }
+        else if (mark_conn_blocked(self, st) < 0) {
+            Py_DECREF(blocked);
+            return -1;
+        }
+    }
+    Py_DECREF(blocked);
+    return h2_schedule_pending((PyObject *)self);
+}
+
 static int
 h2_schedule_continuation(Http2Protocol *self)
 {
@@ -786,6 +875,7 @@ h2_flush_stream_pending(PyObject *proto, Http2Stream *st)
     if (self->write_paused) {
         return mark_conn_blocked(self, st);
     }
+    h2_sync_stream_send_window(self, st);
     Py_ssize_t total = PyBytes_GET_SIZE(st->pending_body);
     while (st->pending_offset < total) {
         int64_t window = st->send_window;
@@ -796,7 +886,7 @@ h2_flush_stream_pending(PyObject *proto, Http2Stream *st)
             if (self->conn_send_window <= 0 && st->send_window > 0) {
                 return mark_conn_blocked(self, st);
             }
-            return 0;
+            return mark_stream_window_blocked(self, st);
         }
         if (st->send_deficit <= 0) {
             return mark_conn_blocked(self, st);
@@ -905,6 +995,7 @@ h2_schedule_pending(PyObject *proto)
         if (st->pending_body == NULL || st->state == S_CLOSED) {
             continue;
         }
+        h2_sync_stream_send_window(self, st);
         Py_ssize_t before = PyBytes_GET_SIZE(st->pending_body) - st->pending_offset;
         /* A blocked turn earns no deficit: otherwise repeated wakeups with no
          * connection credit let the first stream hoard the next increment. */
@@ -964,110 +1055,104 @@ h2_run_write_scheduler(PyObject *op, PyObject *Py_UNUSED(ignored))
 }
 
 static PyObject *
+h2_response_start(Http2Stream *self, PyObject *status_obj, PyObject *headers,
+                  int trailers_expected)
+{
+    Http2Protocol *proto = (Http2Protocol *)self->protocol;
+    long status = status_obj ? PyLong_AsLong(status_obj) : 200;
+    if (status == -1 && PyErr_Occurred()) return NULL;
+    if (status < 100 || status > 999) {
+        PyErr_SetString(PyExc_ValueError, "response status must be between 100 and 999");
+        return NULL;
+    }
+    if (self->response_started) {
+        PyErr_SetString(PyExc_RuntimeError, "response already started");
+        return NULL;
+    }
+    self->nfr_status = (int)status;
+    self->trailers_expected = trailers_expected;
+    PyObject *block = PyByteArray_FromStringAndSize("", 0);
+    if (block == NULL) return NULL;
+    if (encode_header_block(block, (int)status, headers, proto->config) < 0 ||
+        h2_write_frame((PyObject *)proto, FRAME_HEADERS, FLAG_END_HEADERS,
+                       self->id,
+                       (const uint8_t *)PyByteArray_AS_STRING(block),
+                       PyByteArray_GET_SIZE(block)) < 0) {
+        Py_DECREF(block);
+        return NULL;
+    }
+    Py_DECREF(block);
+    self->response_started = 1;
+    if (h2_flush((PyObject *)proto) < 0) return NULL;
+    return completed_none();
+}
+
+
+static PyObject *
+h2_response_body(Http2Stream *self, PyObject *body, int more_body)
+{
+    Http2Protocol *proto = (Http2Protocol *)self->protocol;
+    if (!self->response_started) {
+        PyErr_SetString(PyExc_RuntimeError, "response not started");
+        return NULL;
+    }
+    if (self->send_waiter != NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "HTTP/2 send already pending");
+        return NULL;
+    }
+    PyObject *owned = NULL;
+    if (body == NULL || body == Py_None) {
+        owned = PyBytes_FromStringAndSize("", 0);
+        if (owned == NULL) return NULL;
+        body = owned;
+    } else if (!PyBytes_Check(body)) {
+        PyErr_SetString(PyExc_TypeError, "http.response.body 'body' must be bytes");
+        return NULL;
+    }
+    Py_XSETREF(self->pending_body, Py_NewRef(body));
+    Py_XDECREF(owned);
+    self->pending_offset = 0;
+    self->pending_end_stream = !more_body && !self->trailers_expected;
+    if (mark_conn_blocked(proto, self) < 0 ||
+        h2_schedule_pending((PyObject *)proto) < 0 ||
+        h2_flush((PyObject *)proto) < 0) {
+        return NULL;
+    }
+    if (self->pending_body == NULL) return completed_none();
+    PyObject *future = h2_make_future(proto);
+    if (future == NULL) return NULL;
+    self->send_waiter = Py_NewRef(future);
+    return future;
+}
+
+
+static PyObject *
 stream_send(PyObject *op, PyObject *message)
 {
     Http2Stream *self = (Http2Stream *)op;
     Http2Protocol *proto = (Http2Protocol *)self->protocol;
-    if (proto == NULL || self->state == S_CLOSED) {
-        /* stream gone: swallow to let the app unwind */
-        return completed_none();
-    }
+    if (proto == NULL || self->state == S_CLOSED) return completed_none();
     PyObject *type = PyDict_GetItemString(message, "type");
     if (type == NULL) {
         PyErr_SetString(PyExc_KeyError, "message has no 'type'");
         return NULL;
     }
     const char *t = PyUnicode_AsUTF8(type);
-    if (t == NULL) {
-        return NULL;
-    }
+    if (t == NULL) return NULL;
     if (strcmp(t, "http.response.start") == 0) {
-        PyObject *status_obj = PyDict_GetItemString(message, "status");
-        long status = status_obj ? PyLong_AsLong(status_obj) : 200;
-        if (status == -1 && PyErr_Occurred()) {
-            return NULL;
-        }
-        if (status < 100 || status > 999) {
-            PyErr_SetString(PyExc_ValueError, "response status must be between 100 and 999");
-            return NULL;
-        }
-        if (self->response_started) {
-            PyErr_SetString(PyExc_RuntimeError, "response already started");
-            return NULL;
-        }
-        self->nfr_status = (int)status;
-        PyObject *headers = PyDict_GetItemString(message, "headers");
         PyObject *trailers = PyDict_GetItemString(message, "trailers");
-        self->trailers_expected = (trailers != NULL && PyObject_IsTrue(trailers));
-        PyObject *block = PyByteArray_FromStringAndSize("", 0);
-        if (block == NULL) {
-            return NULL;
-        }
-        if (encode_header_block(block, (int)status, headers, proto->config) < 0) {
-            Py_DECREF(block);
-            return NULL;
-        }
-        if (h2_write_frame((PyObject *)proto, FRAME_HEADERS, FLAG_END_HEADERS,
-                           self->id,
-                           (const uint8_t *)PyByteArray_AS_STRING(block),
-                           PyByteArray_GET_SIZE(block)) < 0) {
-            Py_DECREF(block);
-            return NULL;
-        }
-        Py_DECREF(block);
-        self->response_started = 1;
-        if (h2_flush((PyObject *)proto) < 0) {
-            return NULL;
-        }
-        return completed_none();
+        int has_trailers = trailers != NULL && PyObject_IsTrue(trailers);
+        return h2_response_start(
+            self, PyDict_GetItemString(message, "status"),
+            PyDict_GetItemString(message, "headers"), has_trailers
+        );
     }
     if (strcmp(t, "http.response.body") == 0) {
-        if (!self->response_started) {
-            PyErr_SetString(PyExc_RuntimeError, "response not started");
-            return NULL;
-        }
-        if (self->send_waiter != NULL) {
-            PyErr_SetString(PyExc_RuntimeError, "HTTP/2 send already pending");
-            return NULL;
-        }
-        PyObject *body = PyDict_GetItemString(message, "body");
         PyObject *more = PyDict_GetItemString(message, "more_body");
-        int more_body = (more != NULL && PyObject_IsTrue(more));
-        PyObject *owned = NULL;
-        if (body == NULL || body == Py_None) {
-            owned = PyBytes_FromStringAndSize("", 0);
-            if (owned == NULL) {
-                return NULL;
-            }
-            body = owned;
-        } else if (!PyBytes_Check(body)) {
-            PyErr_SetString(PyExc_TypeError,
-                            "http.response.body 'body' must be bytes");
-            return NULL;
-        }
-        /* Retain the application's exact bytes; framing reads from it in place. */
-        Py_XSETREF(self->pending_body, Py_NewRef(body));
-        Py_XDECREF(owned);
-        self->pending_offset = 0;
-        self->pending_end_stream = !more_body && !self->trailers_expected;
-        if (mark_conn_blocked(proto, self) < 0 ||
-            h2_schedule_pending((PyObject *)proto) < 0) {
-            return NULL;
-        }
-        if (h2_flush((PyObject *)proto) < 0) {
-            return NULL;
-        }
-        if (self->pending_body == NULL) {
-            return completed_none();  /* framed in full; never suspend */
-        }
-        /* Flow control stopped this message part-way. The app awaits until the
-         * rest is framed, which is what bounds how far it can run ahead. */
-        PyObject *fut = h2_make_future(proto);
-        if (fut == NULL) {
-            return NULL;
-        }
-        self->send_waiter = Py_NewRef(fut);
-        return fut;
+        return h2_response_body(
+            self, PyDict_GetItemString(message, "body"),
+            more != NULL && PyObject_IsTrue(more)
+        );
     }
     if (strcmp(t, "http.response.trailers") == 0) {
         if (self->send_waiter != NULL) {
@@ -1115,39 +1200,17 @@ stream_send(PyObject *op, PyObject *message)
 static PyObject *
 stream_wreath_response(Http2Stream *self, PyObject *const *args, Py_ssize_t nargs)
 {
-    PyObject *start;
-    PyObject *body;
-    PyObject *result;
-
     if (nargs != 3) {
         PyErr_Format(
             PyExc_TypeError, "_wreath_response expected 3 arguments, got %zd", nargs
         );
         return NULL;
     }
-    start = Py_BuildValue(
-        "{s:s,s:O,s:O}", "type", "http.response.start",
-        "status", args[0], "headers", args[1]
-    );
-    if (start == NULL) {
-        return NULL;
-    }
-    result = stream_send((PyObject *)self, start);
-    Py_DECREF(start);
-    if (result == NULL) {
-        return NULL;
-    }
-    Py_DECREF(result);
-
-    body = Py_BuildValue(
-        "{s:s,s:O}", "type", "http.response.body", "body", args[2]
-    );
-    if (body == NULL) {
-        return NULL;
-    }
-    result = stream_send((PyObject *)self, body);
-    Py_DECREF(body);
-    return result;
+    if (self->protocol == NULL || self->state == S_CLOSED) return completed_none();
+    PyObject *started = h2_response_start(self, args[0], args[1], 0);
+    if (started == NULL) return NULL;
+    Py_DECREF(started);
+    return h2_response_body(self, args[2], 0);
 }
 
 
@@ -1165,8 +1228,9 @@ h2_maybe_close_stream(PyObject *proto, Http2Stream *st)
         return;
     }
     int removed = PyDict_Pop(self->streams, key, NULL);
+    int unblocked = PyDict_Pop(self->stream_window_blocked, key, NULL);
     Py_DECREF(key);
-    if (removed < 0) {
+    if (removed < 0 || unblocked < 0) {
         /* Nothing here can propagate: every caller is a void or completion
          * path. Surface it rather than continuing with an exception set. */
         PyErr_WriteUnraisable((PyObject *)self);
@@ -1346,41 +1410,197 @@ static PyType_Spec stream_spec = {
 /* header validation + request start                                        */
 /* ======================================================================== */
 
+/* RFC 9113 s8.2.1: a field name is an RFC 9110 token carrying no uppercase
+ * letter. The token set is the one the HTTP/1.1 parser enforces, walked in the
+ * same pass as the case check. */
 static int
 is_lowercase_token(const char *p, Py_ssize_t n)
 {
+    if (n == 0) {
+        return 0;
+    }
     for (Py_ssize_t i = 0; i < n; i++) {
-        char c = p[i];
-        if (c >= 'A' && c <= 'Z') {
+        unsigned char c = (unsigned char)p[i];
+        if (!wreath_field_token[c] || (c >= 'A' && c <= 'Z')) {
             return 0;
         }
     }
     return 1;
 }
 
+/* RFC 9113 s8.2.1: a field value carries no control octet -- NUL, CR and LF
+ * above all -- and neither leads nor trails with SP or HTAB. A value that
+ * fails this is a malformed field, and s8.3 says a malformed field must not
+ * reach the application. */
+static int
+is_field_value(const char *p, Py_ssize_t n)
+{
+    if (!wreath_field_value_valid(p, n)) {
+        return 0;
+    }
+    if (n > 0 && (p[0] == ' ' || p[0] == '\t' ||
+                  p[n - 1] == ' ' || p[n - 1] == '\t')) {
+        return 0;
+    }
+    return 1;
+}
+
+/* Strict decimal content-length, as RFC 9113 s8.1.1 requires: all digits, no
+ * sign, no whitespace (which the field-value rule above has already refused),
+ * no overflow. Returns 0 and writes *out, or -1 for a malformed value. The
+ * HTTP/2 path used to run this through PyLong_FromString and discard the
+ * error, which both leaked the intermediate and turned every unparseable
+ * length into "no declared length" -- silently skipping the end-of-stream
+ * length check that catches an under-run body. */
+static int
+parse_h2_content_length(const char *p, Py_ssize_t n, Py_ssize_t *out)
+{
+    Py_ssize_t parsed = 0;
+    if (n == 0) {
+        return -1;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        int digit = (unsigned char)p[i] - '0';
+        if (digit < 0 || digit > 9 || parsed > (PY_SSIZE_T_MAX - digit) / 10) {
+            return -1;
+        }
+        parsed = parsed * 10 + digit;
+    }
+    *out = parsed;
+    return 0;
+}
+
+typedef struct {
+    const char *host;
+    Py_ssize_t host_len;
+    int port;
+} H2Authority;
+
+/* Parse the authority shape needed to compare :authority with Host.  HTTP/2
+ * control data owns routing; accepting a disagreeing Host lets an edge and the
+ * application apply policy to different tenants.  Userinfo is prohibited for
+ * HTTP(S) authority, IPv6 must be bracketed, and a port is decimal. */
+static int
+parse_h2_authority(const char *data, Py_ssize_t len, int default_port,
+                   H2Authority *out)
+{
+    Py_ssize_t host_len = len;
+    Py_ssize_t port_at = -1;
+    if (len <= 0) {
+        return -1;
+    }
+    if (data[0] == '[') {
+        Py_ssize_t close = 1;
+        while (close < len && data[close] != ']') {
+            close++;
+        }
+        if (close == len || close == 1) {
+            return -1;
+        }
+        host_len = close + 1;
+        if (host_len < len) {
+            if (data[host_len] != ':') {
+                return -1;
+            }
+            port_at = host_len + 1;
+        }
+    }
+    else {
+        for (Py_ssize_t i = 0; i < len; i++) {
+            unsigned char c = (unsigned char)data[i];
+            if (c == '@' || c == '/' || c == '?' || c == '#' || c == '\\' ||
+                c == '[' || c == ']') {
+                return -1;
+            }
+            if (c == ':') {
+                if (port_at >= 0) {
+                    return -1;  /* an IPv6 literal must carry brackets */
+                }
+                host_len = i;
+                port_at = i + 1;
+            }
+        }
+        if (host_len == 0) {
+            return -1;
+        }
+    }
+    int port = default_port;
+    if (port_at >= 0 && port_at < len) {
+        port = 0;
+        for (Py_ssize_t i = port_at; i < len; i++) {
+            int digit = (unsigned char)data[i] - '0';
+            if (digit < 0 || digit > 9 || port > (65535 - digit) / 10) {
+                return -1;
+            }
+            port = port * 10 + digit;
+        }
+    }
+    out->host = data;
+    out->host_len = host_len;
+    out->port = port;
+    return 0;
+}
+
+static int
+h2_authorities_equal(PyObject *authority, PyObject *host, PyObject *scheme)
+{
+    const char *authority_data = PyBytes_AS_STRING(authority);
+    Py_ssize_t authority_len = PyBytes_GET_SIZE(authority);
+    const char *host_data = PyBytes_AS_STRING(host);
+    Py_ssize_t host_len = PyBytes_GET_SIZE(host);
+    int default_port = -1;
+    if (scheme != NULL && PyBytes_GET_SIZE(scheme) == 5 &&
+        PyOS_strnicmp(PyBytes_AS_STRING(scheme), "https", 5) == 0) {
+        default_port = 443;
+    }
+    else if (scheme != NULL && PyBytes_GET_SIZE(scheme) == 4 &&
+             PyOS_strnicmp(PyBytes_AS_STRING(scheme), "http", 4) == 0) {
+        default_port = 80;
+    }
+    H2Authority left;
+    H2Authority right;
+    if (parse_h2_authority(authority_data, authority_len, default_port, &left) < 0 ||
+        parse_h2_authority(host_data, host_len, default_port, &right) < 0) {
+        return 0;
+    }
+    return left.host_len == right.host_len && left.port == right.port &&
+           PyOS_strnicmp(left.host, right.host, left.host_len) == 0;
+}
+
 /* Validate the decoded header list and build the ASGI scope. Returns:
- *   0 -> scope built (in *out_scope, new ref)
+ *   0 -> scope built (in *out_scope, new ref; declared body length, or -1 for
+ *        none, in *out_content_length)
  *  -1 -> stream protocol error (caller sends RST PROTOCOL_ERROR)
  *  -2 -> python exception set
  */
 static int
-build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope)
+build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope,
+               Py_ssize_t *out_content_length)
 {
     PyObject *method = NULL, *path = NULL, *scheme = NULL, *authority = NULL;
+    PyObject *host = NULL;
     PyObject *scope_headers = PyList_New(0);
     if (scope_headers == NULL) {
         return -2;
     }
     int seen_regular = 0;
-    int has_host = 0;
+    Py_ssize_t content_length = -1;
     Py_ssize_t count = PyList_GET_SIZE(header_list);
     for (Py_ssize_t i = 0; i < count; i++) {
         PyObject *pair = PyList_GET_ITEM(header_list, i);
         PyObject *name = PyTuple_GET_ITEM(pair, 0);
         PyObject *value = PyTuple_GET_ITEM(pair, 1);
         char *nptr; Py_ssize_t nlen;
+        char *vptr; Py_ssize_t vlen;
         PyBytes_AsStringAndSize(name, &nptr, &nlen);
+        PyBytes_AsStringAndSize(value, &vptr, &vlen);
         if (nlen == 0) {
+            goto proto_err;
+        }
+        /* Every field value, pseudo-header included: a CR, LF or NUL that
+         * reaches the scope is a splitting primitive for whatever re-emits
+         * these headers over HTTP/1.1. */
+        if (!is_field_value(vptr, vlen)) {
             goto proto_err;
         }
         if (nptr[0] == ':') {
@@ -1417,14 +1637,27 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope)
             goto proto_err;
         }
         if (nlen == 2 && memcmp(nptr, "te", 2) == 0) {
-            char *vptr; Py_ssize_t vlen;
-            PyBytes_AsStringAndSize(value, &vptr, &vlen);
             if (!(vlen == 8 && memcmp(vptr, "trailers", 8) == 0)) {
                 goto proto_err;
             }
         }
         if (nlen == 4 && memcmp(nptr, "host", 4) == 0) {
-            has_host = 1;
+            if (host != NULL) {
+                goto proto_err;
+            }
+            host = value;
+        }
+        else if (nlen == 14 && memcmp(nptr, "content-length", 14) == 0) {
+            Py_ssize_t declared;
+            if (parse_h2_content_length(vptr, vlen, &declared) < 0) {
+                goto proto_err;
+            }
+            /* A second content-length that disagrees with the first is a
+             * malformed request, exactly as on the HTTP/1.1 path. */
+            if (content_length >= 0 && content_length != declared) {
+                goto proto_err;
+            }
+            content_length = declared;
         }
         if (PyList_Append(scope_headers, pair) < 0) {
             Py_DECREF(scope_headers);
@@ -1439,9 +1672,33 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope)
         if (!method || !path || !scheme) goto proto_err;
         if (PyBytes_GET_SIZE(path) == 0) goto proto_err;
     }
+    if (authority != NULL) {
+        H2Authority parsed;
+        int default_port = -1;
+        if (scheme != NULL && PyBytes_GET_SIZE(scheme) == 5 &&
+            PyOS_strnicmp(PyBytes_AS_STRING(scheme), "https", 5) == 0) {
+            default_port = 443;
+        }
+        else if (scheme != NULL && PyBytes_GET_SIZE(scheme) == 4 &&
+                 PyOS_strnicmp(PyBytes_AS_STRING(scheme), "http", 4) == 0) {
+            default_port = 80;
+        }
+        if (parse_h2_authority(PyBytes_AS_STRING(authority),
+                               PyBytes_GET_SIZE(authority), default_port, &parsed) < 0 ||
+            (host != NULL && !h2_authorities_equal(authority, host, scheme))) {
+            goto proto_err;
+        }
+    }
+    else if (host != NULL) {
+        H2Authority parsed;
+        if (parse_h2_authority(PyBytes_AS_STRING(host), PyBytes_GET_SIZE(host),
+                               -1, &parsed) < 0) {
+            goto proto_err;
+        }
+    }
     /* synthesize host from :authority when no host field is present; the name
      * is a cached constant, not a fresh allocation each request */
-    if (!has_host && authority != NULL) {
+    if (host == NULL && authority != NULL) {
         PyObject *hpair = PyTuple_Pack(2, header_host, authority);
         if (hpair == NULL) { Py_DECREF(scope_headers); return -2; }
         int rc = PyList_Insert(scope_headers, 0, hpair);
@@ -1449,7 +1706,14 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope)
         if (rc < 0) { Py_DECREF(scope_headers); return -2; }
     }
 
-    /* split path and query */
+    /* Split path and query, then build the scope from the *decoded* path, the
+     * same way `begin_request` does on HTTP/1.  Building it from the raw
+     * `:path` made request handling depend on which protocol carried the URL:
+     * `/caf%C3%A9` routed to `/café` over h1 and to the literal `/caf%C3%A9`
+     * over h2 (ASGI requires `path` percent-decoded), `%2F` was a 400 over h1
+     * and reached the application over h2, and `raw_path` carried the query
+     * string here but not there -- so an encoded slash in an ordinary query
+     * value tripped the encoded-separator guard that reads it. */
     char *pptr = (char *)"/"; Py_ssize_t plen = 1;
     if (path) {
         PyBytes_AsStringAndSize(path, &pptr, &plen);
@@ -1458,44 +1722,38 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope)
     for (Py_ssize_t i = 0; i < plen; i++) {
         if (pptr[i] == '?') { q = i; break; }
     }
-    PyObject *path_str, *raw_path, *query;
-    if (q >= 0) {
-        path_str = PyUnicode_DecodeUTF8(pptr, q, "surrogateescape");
-        query = PyBytes_FromStringAndSize(pptr + q + 1, plen - q - 1);
-    } else {
-        path_str = PyUnicode_DecodeUTF8(pptr, plen, "surrogateescape");
-        query = PyBytes_FromStringAndSize("", 0);
+    Py_ssize_t path_len = q >= 0 ? q : plen;
+    int bad_path = 0;
+    PyObject *path_str = wreath_decode_request_path(pptr, path_len, &bad_path);
+    if (path_str == NULL) {
+        if (!bad_path) {
+            Py_DECREF(scope_headers);
+            return -2;
+        }
+        /* An invalid `:path` makes the request malformed; the caller turns this
+         * into RST_STREAM(PROTOCOL_ERROR) (RFC 9113 s8.3.1). */
+        goto proto_err;
     }
-    raw_path = PyBytes_FromStringAndSize(pptr, plen);
+    PyObject *raw_path = PyBytes_FromStringAndSize(pptr, path_len);
+    PyObject *query = q >= 0
+        ? PyBytes_FromStringAndSize(pptr + q + 1, plen - q - 1)
+        : PyBytes_FromStringAndSize("", 0);
     PyObject *method_str = method
         ? PyUnicode_DecodeASCII(PyBytes_AS_STRING(method), PyBytes_GET_SIZE(method), "strict")
         : PyUnicode_FromString("GET");
-    if (!path_str || !query || !raw_path || !method_str) {
+    if (!query || !raw_path || !method_str) {
         Py_XDECREF(path_str); Py_XDECREF(query); Py_XDECREF(raw_path);
         Py_XDECREF(method_str); Py_DECREF(scope_headers);
         return -2;
     }
     PyObject *scope;
     if (self->native_app != NULL) {
-        PyObject *scope_type = PyUnicode_FromString("http");
-        PyObject *asgi = Py_BuildValue("{s:s,s:s}", "version", "3.0", "spec_version", "2.5");
-        PyObject *http_version = PyUnicode_FromString("2");
-        PyObject *scheme = PyUnicode_FromString("https");
-        PyObject *root_path = PyUnicode_FromString("");
-        if (scope_type == NULL || asgi == NULL || http_version == NULL ||
-            scheme == NULL || root_path == NULL) {
-            Py_XDECREF(scope_type); Py_XDECREF(asgi); Py_XDECREF(http_version);
-            Py_XDECREF(scheme); Py_XDECREF(root_path);
-            Py_DECREF(method_str); Py_DECREF(path_str); Py_DECREF(raw_path);
-            Py_DECREF(query); Py_DECREF(scope_headers);
-            return -2;
-        }
         scope = wreath_request_context_new(
-            scope_type, asgi, http_version, method_str, scheme, path_str,
-            raw_path, query, scope_headers, Py_None, Py_None, root_path
+            self->scope_type, self->scope_asgi, self->scope_http_version,
+            method_str, self->scope_scheme, path_str, raw_path, query,
+            scope_headers, Py_None, Py_None, self->scope_root_path
         );
-        Py_DECREF(scope_type); Py_DECREF(asgi); Py_DECREF(http_version);
-        Py_DECREF(scheme); Py_DECREF(root_path); Py_DECREF(method_str);
+        Py_DECREF(method_str);
         Py_DECREF(path_str); Py_DECREF(raw_path); Py_DECREF(query);
         Py_DECREF(scope_headers);
     }
@@ -1516,6 +1774,7 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope)
         return -2;
     }
     *out_scope = scope;
+    *out_content_length = content_length;
     return 0;
 
 proto_err:
@@ -1572,7 +1831,8 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
         return h2_stream_error((PyObject *)self, sid, H2_REFUSED_STREAM);
     }
     PyObject *scope = NULL;
-    int rc = build_h2_scope(self, header_list, &scope);
+    Py_ssize_t content_length = -1;
+    int rc = build_h2_scope(self, header_list, &scope, &content_length);
     if (rc == -2) {
         return -1;
     }
@@ -1598,12 +1858,14 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     st->receive_waiter = NULL;
     st->request_ended = end_stream;
     st->disconnected = 0;
-    st->content_length = -1;
+    st->content_length = content_length;  /* validated in build_h2_scope */
     st->body_received = 0;
+    st->body_frames = 0;
     st->response_started = 0;
     st->response_ended = 0;
     st->trailers_expected = 0;
     st->send_window = self->peer_initial_window;
+    st->applied_initial_window = self->peer_initial_window;
     st->recv_window = self->our_initial_window;
     st->recv_consumed_pending = 0;
     st->recv_credit_threshold = self->our_initial_window / 2;
@@ -1650,22 +1912,19 @@ start_request(Http2Protocol *self, uint32_t sid, PyObject *header_list,
     st->nfr_bytes_out = 0;
     PyObject_GC_Track((PyObject *)st);
 
-    /* content-length from headers */
-    Py_ssize_t hc = PyList_GET_SIZE(header_list);
-    for (Py_ssize_t i = 0; i < hc; i++) {
-        PyObject *pair = PyList_GET_ITEM(header_list, i);
-        PyObject *name = PyTuple_GET_ITEM(pair, 0);
-        if (PyBytes_GET_SIZE(name) == 14 &&
-            memcmp(PyBytes_AS_STRING(name), "content-length", 14) == 0) {
-            PyObject *value = PyTuple_GET_ITEM(pair, 1);
-            st->content_length = (Py_ssize_t)PyLong_AsLong(
-                PyLong_FromString(PyBytes_AS_STRING(value), NULL, 10));
-            PyErr_Clear();
-        } else if (self->rfc9218_enabled && PyBytes_GET_SIZE(name) == 8 &&
-                   memcmp(PyBytes_AS_STRING(name), "priority", 8) == 0) {
-            PyObject *value = PyTuple_GET_ITEM(pair, 1);
-            parse_priority_field(PyBytes_AS_STRING(value), PyBytes_GET_SIZE(value),
-                                 &st->urgency, &st->incremental);
+    /* RFC 9218 priority hint; content-length was parsed during validation. */
+    if (self->rfc9218_enabled) {
+        Py_ssize_t hc = PyList_GET_SIZE(header_list);
+        for (Py_ssize_t i = 0; i < hc; i++) {
+            PyObject *pair = PyList_GET_ITEM(header_list, i);
+            PyObject *name = PyTuple_GET_ITEM(pair, 0);
+            if (PyBytes_GET_SIZE(name) == 8 &&
+                memcmp(PyBytes_AS_STRING(name), "priority", 8) == 0) {
+                PyObject *value = PyTuple_GET_ITEM(pair, 1);
+                parse_priority_field(PyBytes_AS_STRING(value),
+                                     PyBytes_GET_SIZE(value),
+                                     &st->urgency, &st->incremental);
+            }
         }
     }
 
@@ -1804,6 +2063,14 @@ deliver_body(Http2Protocol *self, Http2Stream *st, const uint8_t *data,
 /* Returns 0 if ok, -1 python error. Connection/stream errors are emitted
  * internally and set self->closing when fatal. */
 static int
+apply_peer_initial_window(Http2Protocol *self, int64_t value)
+{
+    self->peer_initial_window = value;
+    return 0;
+}
+
+
+static int
 process_settings(Http2Protocol *self, int flags, uint32_t sid,
                  const uint8_t *payload, Py_ssize_t len)
 {
@@ -1814,7 +2081,9 @@ process_settings(Http2Protocol *self, int flags, uint32_t sid,
         if (len != 0) {
             return h2_connection_error(self, H2_FRAME_SIZE_ERROR);
         }
-        return 0;
+        /* A legitimate ACK is rare; an unlimited unsolicited run is parser
+         * work which consumes no protocol credit and makes no progress. */
+        return h2_note_unproductive(self);
     }
     if (len % 6 != 0) {
         return h2_connection_error(self, H2_FRAME_SIZE_ERROR);
@@ -1826,6 +2095,8 @@ process_settings(Http2Protocol *self, int flags, uint32_t sid,
     if (self->fatal) {
         return 0;
     }
+    int saw_initial_window = 0;
+    int64_t initial_window = self->peer_initial_window;
     for (Py_ssize_t i = 0; i < len; i += 6) {
         uint16_t ident = (uint16_t)((payload[i] << 8) | payload[i + 1]);
         uint32_t value = get_u32(payload + i + 2);
@@ -1839,15 +2110,8 @@ process_settings(Http2Protocol *self, int flags, uint32_t sid,
             if (value > WINDOW_MAX) {
                 return h2_connection_error(self, H2_FLOW_CONTROL_ERROR);
             }
-            {
-                int64_t delta = (int64_t)value - self->peer_initial_window;
-                self->peer_initial_window = value;
-                /* adjust existing streams' send windows */
-                PyObject *k, *v; Py_ssize_t pos = 0;
-                while (PyDict_Next(self->streams, &pos, &k, &v)) {
-                    ((Http2Stream *)v)->send_window += delta;
-                }
-            }
+            initial_window = value;
+            saw_initial_window = 1;
             break;
         case SET_MAX_FRAME_SIZE:
             if (value < DEFAULT_MAX_FRAME || value > MAX_ALLOWED_FRAME) {
@@ -1862,8 +2126,16 @@ process_settings(Http2Protocol *self, int flags, uint32_t sid,
             break;  /* accepted or ignored (unknown settings ignored) */
         }
     }
+    int window_increased = saw_initial_window &&
+        initial_window > self->peer_initial_window;
+    if (saw_initial_window && apply_peer_initial_window(self, initial_window) < 0) {
+        return -1;
+    }
     /* ACK */
-    return h2_write_frame((PyObject *)self, FRAME_SETTINGS, FLAG_ACK, 0, NULL, 0);
+    if (h2_write_frame((PyObject *)self, FRAME_SETTINGS, FLAG_ACK, 0, NULL, 0) < 0) {
+        return -1;
+    }
+    return window_increased ? wake_stream_window_blocked(self) : 0;
 }
 
 static int
@@ -1877,25 +2149,17 @@ finish_header_block(Http2Protocol *self, uint32_t sid, int end_stream)
     int rc = wreath_hpack_decode(&self->hpack,
                               (const uint8_t *)PyByteArray_AS_STRING(self->header_block),
                               PyByteArray_GET_SIZE(self->header_block),
+                              self->max_header_count, self->max_header_list,
                               header_list, &h2err);
     if (rc < 0) {
         Py_DECREF(header_list);
+        if (h2err == H2_ENHANCE_YOUR_CALM) {
+            return h2_stream_error((PyObject *)self, sid, h2err);
+        }
         if (h2err != 0) {
             return h2_connection_error(self, h2err);
         }
         return -1;  /* python error */
-    }
-    Py_ssize_t header_size = 0;
-    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(header_list); i++) {
-        PyObject *pair = PyList_GET_ITEM(header_list, i);
-        Py_ssize_t name_size = PyBytes_GET_SIZE(PyTuple_GET_ITEM(pair, 0));
-        Py_ssize_t value_size = PyBytes_GET_SIZE(PyTuple_GET_ITEM(pair, 1));
-        if (name_size > PY_SSIZE_T_MAX - value_size - 32 ||
-            header_size > self->max_header_list - (name_size + value_size + 32)) {
-            Py_DECREF(header_list);
-            return h2_stream_error((PyObject *)self, sid, H2_ENHANCE_YOUR_CALM);
-        }
-        header_size += name_size + value_size + 32;
     }
     int r = start_request(self, sid, header_list, end_stream);
     Py_DECREF(header_list);
@@ -2006,6 +2270,12 @@ process_data(Http2Protocol *self, int flags, uint32_t sid,
     if (st->request_ended) {
         return h2_stream_error((PyObject *)self, sid, H2_STREAM_CLOSED);
     }
+    if (len > 0) {
+        if (st->body_frames >= self->max_body_chunks) {
+            return h2_stream_error((PyObject *)self, sid, H2_ENHANCE_YOUR_CALM);
+        }
+        st->body_frames++;
+    }
     /* padding */
     Py_ssize_t off = 0, end = len;
     if (flags & FLAG_PADDED) {
@@ -2081,9 +2351,13 @@ process_window_update(Http2Protocol *self, uint32_t sid,
         return 0;  /* WINDOW_UPDATE on closed stream: ignore */
     }
     Http2Stream *st = (Http2Stream *)stobj;
+    h2_sync_stream_send_window(self, st);
     st->send_window += inc;
     if (st->send_window > WINDOW_MAX) {
         return h2_stream_error((PyObject *)self, sid, H2_FLOW_CONTROL_ERROR);
+    }
+    if (unmark_stream_window_blocked(self, sid) < 0) {
+        return -1;
     }
     if (st->pending_body != NULL && mark_conn_blocked(self, st) < 0) {
         return -1;
@@ -2163,7 +2437,9 @@ process_ping(Http2Protocol *self, int flags, uint32_t sid,
         return h2_connection_error(self, H2_FRAME_SIZE_ERROR);
     }
     if (flags & FLAG_ACK) {
-        return 0;  /* ignore */
+        /* Ignore one response normally, but do not give ACK-only floods a way
+         * around the same no-progress budget as ordinary PING frames. */
+        return h2_note_unproductive(self);
     }
     /* Each PING forces a reflected ACK; a flood is pure CPU/output amplification. */
     if (h2_note_unproductive(self) < 0) {
@@ -2275,7 +2551,11 @@ dispatch_frame(Http2Protocol *self, int type, int flags, uint32_t sid,
     case FRAME_PUSH_PROMISE:
         return h2_connection_error(self, H2_PROTOCOL_ERROR);
     default:
-        return 0;  /* unknown frame types are ignored */
+        /* RFC 9113 4.1 requires unknown frame types to be ignored, but does not
+         * require granting an unlimited amount of CPU to a run of them. One is
+         * ignored; a flood shares the same no-progress budget as PING,
+         * SETTINGS, and empty DATA. */
+        return h2_note_unproductive(self);
     }
 }
 
@@ -2293,7 +2573,7 @@ shrink_idle_input_buffer(Http2Protocol *self)
 
 /* Parse and dispatch all complete frames in the input buffer. */
 static int
-parse_frames(Http2Protocol *self)
+parse_frames(Http2Protocol *self, int borrowed)
 {
     while (!self->fatal) {
         Py_ssize_t avail = self->buf_len - self->cursor;
@@ -2317,7 +2597,7 @@ parse_frames(Http2Protocol *self)
         }
     }
     /* compact consumed prefix when it is large */
-    if (self->cursor > 0) {
+    if (!borrowed && self->cursor > 0) {
         Py_ssize_t remaining = self->buf_len - self->cursor;
         if (remaining > 0) {
             memmove(self->buf, self->buf + self->cursor, remaining);
@@ -2325,7 +2605,9 @@ parse_frames(Http2Protocol *self)
         self->buf_len = remaining;
         self->cursor = 0;
     }
-    shrink_idle_input_buffer(self);
+    if (!borrowed) {
+        shrink_idle_input_buffer(self);
+    }
     return 0;
 }
 
@@ -2396,46 +2678,176 @@ buf_reserve(Http2Protocol *self, Py_ssize_t extra)
 }
 
 static PyObject *
-h2_data_received(PyObject *op, PyObject *data)
+h2_data_received(PyObject *op, PyObject *data);
+
+
+static int
+h2_consume_preface(Http2Protocol *self, const char *data, Py_ssize_t len,
+                   Py_ssize_t *consumed)
 {
-    Http2Protocol *self = (Http2Protocol *)op;
-    if (self->fatal || self->transport == NULL) {
-        Py_RETURN_NONE;
-    }
-    char *bytes;
-    Py_ssize_t len;
-    if (PyBytes_AsStringAndSize(data, &bytes, &len) < 0) {
-        return NULL;
-    }
-    Py_ssize_t consumed = 0;
-    /* client connection preface */
+    *consumed = 0;
     if (self->preface_seen < H2_PREFACE_LEN) {
-        while (self->preface_seen < H2_PREFACE_LEN && consumed < len) {
-            if (bytes[consumed] != H2_PREFACE[self->preface_seen]) {
-                if (h2_connection_error(self, H2_PROTOCOL_ERROR) < 0) {
-                    return NULL;
-                }
-                Py_RETURN_NONE;
+        while (self->preface_seen < H2_PREFACE_LEN && *consumed < len) {
+            if (data[*consumed] != H2_PREFACE[self->preface_seen]) {
+                return h2_connection_error(self, H2_PROTOCOL_ERROR);
             }
             self->preface_seen++;
-            consumed++;
-        }
-        if (self->preface_seen < H2_PREFACE_LEN) {
-            Py_RETURN_NONE;  /* wait for the rest of the preface */
+            (*consumed)++;
         }
     }
-    Py_ssize_t remaining = len - consumed;
+    return 0;
+}
+
+
+static int
+h2_process_owned_input(Http2Protocol *self)
+{
+    if (self->preface_seen < H2_PREFACE_LEN && self->buf_len > 0) {
+        Py_ssize_t consumed;
+        if (h2_consume_preface(self, self->buf, self->buf_len, &consumed) < 0) {
+            return -1;
+        }
+        if (self->fatal) {
+            return 0;
+        }
+        Py_ssize_t remaining = self->buf_len - consumed;
+        if (remaining > 0) {
+            memmove(self->buf, self->buf + consumed, (size_t)remaining);
+        }
+        self->buf_len = remaining;
+    }
+    if (self->preface_seen == H2_PREFACE_LEN && parse_frames(self, 0) < 0) {
+        return -1;
+    }
+    return h2_flush((PyObject *)self);
+}
+
+
+int
+wreath_http2_feed_external(PyObject *protocol, const char *data, Py_ssize_t size)
+{
+    if (!wreath_http2_protocol_check(protocol)) {
+        PyErr_SetString(PyExc_TypeError, "expected native Http2Protocol");
+        return -1;
+    }
+    if (size < 0) {
+        PyErr_SetString(PyExc_ValueError, "negative external read size");
+        return -1;
+    }
+    Http2Protocol *self = (Http2Protocol *)protocol;
+    if (size == 0 || self->fatal || self->transport == NULL) {
+        return 0;
+    }
+    Py_ssize_t consumed;
+    if (h2_consume_preface(self, data, size, &consumed) < 0 || self->fatal) {
+        return self->fatal ? 0 : -1;
+    }
+    data += consumed;
+    size -= consumed;
+    if (size == 0) {
+        return h2_flush(protocol);
+    }
+    if (self->buf_len != 0) {
+        if (buf_reserve(self, size) < 0) {
+            return -1;
+        }
+        memcpy(self->buf + self->buf_len, data, (size_t)size);
+        self->buf_len += size;
+        return h2_process_owned_input(self);
+    }
+
+    /* Borrow an io_uring provided-buffer slice for this synchronous parse.
+     * Parsed objects own everything they retain; only an incomplete trailing
+     * frame is copied back before the reactor recycles the buffer. */
+    char *owned = self->buf;
+    Py_ssize_t owned_cap = self->buf_cap;
+    self->buf = (char *)data;
+    self->buf_len = size;
+    self->buf_cap = size;
+    self->cursor = 0;
+    int result = parse_frames(self, 1);
+    Py_ssize_t remaining = self->buf_len - self->cursor;
+    const char *tail = data + self->cursor;
+    self->buf = owned;
+    self->buf_cap = owned_cap;
+    self->buf_len = 0;
+    self->cursor = 0;
+    if (result < 0) {
+        return -1;
+    }
     if (remaining > 0) {
         if (buf_reserve(self, remaining) < 0) {
-            return NULL;
+            return -1;
         }
-        memcpy(self->buf + self->buf_len, bytes + consumed, remaining);
-        self->buf_len += remaining;
+        memcpy(self->buf, tail, (size_t)remaining);
+        self->buf_len = remaining;
     }
-    if (parse_frames(self) < 0) {
-        return NULL;
+    return h2_flush(protocol);
+}
+
+
+int
+wreath_http2_protocol_check(PyObject *protocol)
+{
+    return Http2ProtocolType != NULL &&
+           PyObject_TypeCheck(protocol, Http2ProtocolType);
+}
+
+
+int
+wreath_http2_acquire_read_buffer(PyObject *protocol, char **buffer,
+                                 Py_ssize_t *capacity)
+{
+    if (!wreath_http2_protocol_check(protocol)) {
+        PyErr_SetString(PyExc_TypeError, "expected native Http2Protocol");
+        return -1;
     }
-    if (h2_flush(op) < 0) {
+    Http2Protocol *self = (Http2Protocol *)protocol;
+    if (self->read_offer_size > 0) {
+        PyErr_SetString(PyExc_RuntimeError, "HTTP/2 read offer already active");
+        return -1;
+    }
+    if (buf_reserve(self, 16 * 1024) < 0) {
+        return -1;
+    }
+    self->read_offer_offset = self->buf_len;
+    self->read_offer_size = self->buf_cap - self->buf_len;
+    *buffer = self->buf + self->read_offer_offset;
+    *capacity = self->read_offer_size;
+    return 0;
+}
+
+
+int
+wreath_http2_commit_read(PyObject *protocol, Py_ssize_t nbytes)
+{
+    if (!wreath_http2_protocol_check(protocol)) {
+        PyErr_SetString(PyExc_TypeError, "expected native Http2Protocol");
+        return -1;
+    }
+    Http2Protocol *self = (Http2Protocol *)protocol;
+    if (self->read_offer_size <= 0) {
+        PyErr_SetString(PyExc_RuntimeError, "HTTP/2 commit without read offer");
+        return -1;
+    }
+    if (nbytes < 0 || nbytes > self->read_offer_size) {
+        self->read_offer_offset = self->read_offer_size = 0;
+        PyErr_SetString(PyExc_ValueError, "HTTP/2 committed byte count out of range");
+        return -1;
+    }
+    self->buf_len = self->read_offer_offset + nbytes;
+    self->read_offer_offset = self->read_offer_size = 0;
+    return nbytes == 0 ? 0 : h2_process_owned_input(self);
+}
+
+
+static PyObject *
+h2_data_received(PyObject *op, PyObject *data)
+{
+    char *bytes;
+    Py_ssize_t len;
+    if (PyBytes_AsStringAndSize(data, &bytes, &len) < 0 ||
+        wreath_http2_feed_external(op, bytes, len) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -2588,9 +3000,15 @@ h2_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->transport_write_fn);
     Py_VISIT(self->loop_create_future);
     Py_VISIT(self->loop_create_task);
+    Py_VISIT(self->scope_type);
+    Py_VISIT(self->scope_asgi);
+    Py_VISIT(self->scope_http_version);
+    Py_VISIT(self->scope_scheme);
+    Py_VISIT(self->scope_root_path);
     Py_VISIT(self->streams);
     Py_VISIT(self->pending_priorities);
     Py_VISIT(self->conn_blocked);
+    Py_VISIT(self->stream_window_blocked);
     Py_VISIT(self->scheduler_callable);
     Py_VISIT(self->out);
     Py_VISIT(self->header_block);
@@ -2610,9 +3028,15 @@ h2_clear(PyObject *op)
     Py_CLEAR(self->transport_write_fn);
     Py_CLEAR(self->loop_create_future);
     Py_CLEAR(self->loop_create_task);
+    Py_CLEAR(self->scope_type);
+    Py_CLEAR(self->scope_asgi);
+    Py_CLEAR(self->scope_http_version);
+    Py_CLEAR(self->scope_scheme);
+    Py_CLEAR(self->scope_root_path);
     Py_CLEAR(self->streams);
     Py_CLEAR(self->pending_priorities);
     Py_CLEAR(self->conn_blocked);
+    Py_CLEAR(self->stream_window_blocked);
     Py_CLEAR(self->scheduler_callable);
     Py_CLEAR(self->out);
     Py_CLEAR(self->header_block);
@@ -2665,12 +3089,22 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
     self->transport_write_fn = NULL;
     self->loop_create_future = PyObject_GetAttrString(loop, "create_future");
     self->loop_create_task = PyObject_GetAttrString(loop, "create_task");
-    if (!self->loop_create_future || !self->loop_create_task) {
+    self->scope_type = PyUnicode_FromString("http");
+    self->scope_asgi = Py_BuildValue(
+        "{s:s,s:s}", "version", "3.0", "spec_version", "2.5"
+    );
+    self->scope_http_version = PyUnicode_FromString("2");
+    self->scope_scheme = PyUnicode_FromString("https");
+    self->scope_root_path = PyUnicode_FromString("");
+    if (!self->loop_create_future || !self->loop_create_task ||
+        !self->scope_type || !self->scope_asgi || !self->scope_http_version ||
+        !self->scope_scheme || !self->scope_root_path) {
         return -1;
     }
     self->streams = PyDict_New();
     self->pending_priorities = PyDict_New();
     self->conn_blocked = PyList_New(0);
+    self->stream_window_blocked = PyDict_New();
     self->conn_blocked_head = 0;
     self->scheduler_callable = PyObject_GetAttrString(op, "_run_write_scheduler");
     self->scheduler_scheduled = 0;
@@ -2689,12 +3123,14 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
     self->out = PyByteArray_FromStringAndSize("", 0);
     self->header_block = PyByteArray_FromStringAndSize("", 0);
     if (!self->streams || !self->pending_priorities || !self->conn_blocked ||
+        !self->stream_window_blocked ||
         !self->scheduler_callable ||
         !self->out || !self->header_block) {
         return -1;
     }
     self->buf = NULL;
     self->buf_len = self->buf_cap = self->cursor = 0;
+    self->read_offer_offset = self->read_offer_size = 0;
     self->preface_seen = 0;
     self->got_first_settings = 0;
     self->closing = 0;
@@ -2725,7 +3161,9 @@ h2_init(PyObject *op, PyObject *args, PyObject *kwargs)
     }
     if (self->conn_credit_threshold < 1) self->conn_credit_threshold = 1;
     if (read_ssize(config, "max_header_list_bytes", &self->max_header_list) < 0 ||
+        read_ssize(config, "max_header_count", &self->max_header_count) < 0 ||
         read_ssize(config, "max_body_bytes", &self->max_body_bytes) < 0 ||
+        read_ssize(config, "max_body_chunks", &self->max_body_chunks) < 0 ||
         read_ssize(config, "hpack_table_bytes", &self->hpack_max) < 0) {
         return -1;
     }

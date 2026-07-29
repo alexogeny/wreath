@@ -58,10 +58,11 @@ Consequences of that framing, each of which is a decision in its own right:
   `FLAG_ERROR_PROMOTED` / `FLAG_SLOW_PROMOTED`, or an explicit `promote()`.
 - **`WARN` and above are never sampled.** The per-call-site limiter covers INFO
   and below only.
-- **The framing is designed for a file-backed ring it does not yet have.** Every
-  cell is versioned and every decode validates lengths against the buffer, so an
-  mmap-backed forensic ring can be added later without a format break. Doing
-  this now costs a little discipline; retrofitting it would be a compatibility
+- **The framing is designed for a file-backed ring.** Every cell is versioned
+  and every decode validates lengths against the buffer, so an mmap-backed
+  forensic ring could be added without a format break. It since has been, and
+  it needed a header in front of the cells rather than a re-framing -- which is
+  what the discipline bought. Retrofitting it would have been a compatibility
   event on a format operators' tooling already reads.
 
 Two things are deliberately excluded. **`wreath.audit` keeps its own path**,
@@ -77,12 +78,32 @@ cost of that restraint — two disjoint streams — is paired with
 - Logging inherits the ring, the quiet-cycle settle, the loss accounting, the
   bounded export queue and the WFR1 container with no new concepts. Adding the
   OTLP logs signal was `build_logs_request` plus a third tick.
-- `MemoryBudget` grows a `logging` component. It is an **estimate** while the
-  emitter is Python, and says so in its own docstring — a budget that silently
-  omits a component is worse than one that names what it approximates.
+- `MemoryBudget` grows a `logging` component. It is an **estimate**, because it
+  describes Python tables rather than a native reservation, and says so in its
+  own docstring — a budget that silently omits a component is worse than one
+  that names what it approximates. Its per-entry constants are measured, not
+  guessed; three of the four original guesses were low.
 - The registration tier is unfamiliar, and the kwargs tier is slower. Both are
   documented as such rather than one being quietly better.
-- **No performance claim is made.** The emitter is Python today; the design
-  keeps the shape a C emitter would take, and the numbers that would justify one
-  are unmeasured. In particular the cost of a *disabled* call — the premise of
-  the whole promotion story — is a benchmark nobody has run yet.
+- **The claim is now measured, and the shape this decision chose is what made
+  the measurement actionable.** The emitter was Python when this was written and
+  no claim was made; `benchmarks/bench_logging.py` has since run the six
+  measurements the plan owed, and `wreath_nfr_log` packs a published record
+  straight into a ring cell in C. A two-argument call costs 0.42 µs against
+  structlog's 2.59 µs and stdlib's 2.85–3.88 µs; a *disabled* call — the premise
+  of the whole promotion story — costs 0.07 µs, which is where that premise
+  needed it to be. The swap was mechanical rather than a redesign because of
+  three things decided here: a dense `site_id`, argument types declared at the
+  call site, and a level check that precedes marshalling.
+- **A buffered record is the exception, and it is expensive: 3.0 µs.** The
+  promotion tier holds records as Python objects because they must survive until
+  the request decides, so it did not move to C, and the shipped default buffers
+  every DEBUG record. `docs/plans/first-class-logging.md` carries the
+  decomposition and names the cause (frozen slots dataclass construction, which
+  every cell type in `_flight_schema` shares) rather than leaving it to be
+  rediscovered.
+- **A record made off the loop cannot use the ring.** The single-writer rule
+  this decision leans on is what makes the emitter cheap, and its cost is that a
+  `wreath.jobs` worker's record takes a counted slow path — staged, published by
+  the loop one interval later, flagged `LOG_FLAG_OFF_LOOP`. Before that existed,
+  such a call raced the loop into `ring_publish` and corrupted the ring.

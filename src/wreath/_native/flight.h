@@ -77,12 +77,26 @@ typedef struct wreath_nfr_worker wreath_nfr_worker;
  * Must be called from the worker's own thread, like every other writer. */
 int wreath_nfr_publish_cell(wreath_nfr_worker *worker, const void *cell);
 
+/* SipHash-2-4 over `data`, the keyed redaction fingerprint. Exposed so the log
+ * emitter can hash with the site registry's key -- the same key the pure Python
+ * packer uses, so the two agree byte for byte. */
+uint64_t wreath_nfr_fingerprint(const void *data, size_t len, uint64_t k0,
+                                uint64_t k1);
+
 /* --- worker lifecycle (control plane, not the request path) --------------- */
 
 /* Create a worker. ring_records must be a power of two (or 0 for Off-only).
  * detailed_sample_threshold is round(rate * 2^32): the ceiling below which a
  * per-request 32-bit draw arms Detailed capture (0 arms none; only consulted in
- * DETAILED/FORENSIC mode). Returns NULL and sets a Python exception on failure. */
+ * DETAILED/FORENSIC mode).
+ *
+ * `ring_path`, when non-NULL, maps the ring from that file with MAP_SHARED
+ * instead of allocating it, so the records survive a process that dies badly.
+ * A path that cannot be opened or sized is a failure rather than a downgrade:
+ * the caller asked for a forensic ring, and a server that quietly ran without
+ * one would leave nothing to notice until the crash it was meant for.
+ *
+ * Returns NULL and sets a Python exception on failure. */
 wreath_nfr_worker *wreath_nfr_worker_new(uint8_t mode, uint32_t worker_id,
                                          uint32_t ring_records,
                                          uint32_t active_requests,
@@ -94,7 +108,8 @@ wreath_nfr_worker *wreath_nfr_worker_new(uint8_t mode, uint32_t worker_id,
                                          uint32_t capture_slabs,
                                          uint32_t slab_bytes,
                                          uint64_t hash_key0,
-                                         uint64_t hash_key1);
+                                         uint64_t hash_key1,
+                                         const char *ring_path);
 void wreath_nfr_worker_free(wreath_nfr_worker *worker);
 uint8_t wreath_nfr_worker_mode(const wreath_nfr_worker *worker);
 

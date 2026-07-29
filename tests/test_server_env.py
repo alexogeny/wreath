@@ -20,6 +20,7 @@ def test_from_env_binds_registered_variables() -> None:
         "WREATH_LIFESPAN": "on",
         "WREATH_PROTOCOLS": "http/1.1, h2",
         "WREATH_MAX_BODY_BYTES": "1048576",
+        "WREATH_MAX_BODY_CHUNKS": "2048",
     }
     config = ServerConfig.from_env(env)
     assert config.host == "0.0.0.0"
@@ -30,6 +31,7 @@ def test_from_env_binds_registered_variables() -> None:
     assert config.lifespan == "on"
     assert config.protocols == ("http/1.1", "h2")
     assert config.max_body_bytes == 1_048_576
+    assert config.max_body_chunks == 2048
 
 
 def test_from_env_defaults_when_absent_or_empty() -> None:

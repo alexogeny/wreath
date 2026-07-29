@@ -25,6 +25,7 @@ from typing import Any
 
 from .._headers import find_header
 from .._native import _core
+from .._webpolicy import replace_response_header
 from ..request import Request
 
 if _core is not None and hasattr(_core, "request_id_valid"):
@@ -112,7 +113,7 @@ class RequestIDMiddleware:
             return None
         return value.decode("ascii")
 
-    async def before(self, request: Request) -> None:
+    def before_sync(self, request: Request) -> None:
         """Record the inbound id, or a freshly minted one, on request state."""
         value = self._inbound(request) if self._trust_inbound else None
         if value is None:
@@ -122,7 +123,11 @@ class RequestIDMiddleware:
         request.state.__setattr__(_STATE_KEY, value)
         return None
 
-    async def after(self, request: Request, response: Any) -> Any:
+    async def before(self, request: Request) -> None:
+        """Compatibility wrapper; compiled middleware uses `before_sync`."""
+        return self.before_sync(request)
+
+    def after_inplace(self, request: Request, response: Any) -> None:
         """Echo the id on the response, unless `echo` is off or no id was assigned.
 
         No id is assigned when a `before` hook ahead of this one short-circuited
@@ -130,11 +135,21 @@ class RequestIDMiddleware:
         than carrying a guess.
         """
         if not self._echo:
-            return response
+            return
         value = request.state.get(_STATE_KEY)
         if value is not None:
-            response.headers.append((self._header_bytes, value.encode("ascii")))
+            replace_response_header(
+                response.headers, self._header_bytes, value.encode("ascii")
+            )
+
+    def after_sync(self, request: Request, response: Any) -> Any:
+        """Compatibility transformer; compiled middleware mutates in place."""
+        self.after_inplace(request, response)
         return response
+
+    async def after(self, request: Request, response: Any) -> Any:
+        """Compatibility wrapper; compiled middleware mutates in place."""
+        return self.after_sync(request, response)
 
 
 __all__ = ["RequestIDMiddleware", "request_id"]

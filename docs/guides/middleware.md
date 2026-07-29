@@ -25,6 +25,34 @@ middleware** wraps matched handlers — it runs when a request lands on a route.
 nothing. Request IDs, security headers, and timing belong at the global level,
 because a `404` needs an ID and its headers just as much as a `200` does.
 
+## Synchronous hooks
+
+Use `before_sync` or `after_sync` when a hook never awaits anything. They have
+the same ordering and short-circuit semantics as `before` and `after`, but the
+compiled request path calls them directly instead of creating and awaiting a
+coroutine for every hook. If both forms are present, the synchronous hook takes
+precedence; compatibility wrappers may therefore keep the async spelling for
+callers that invoke a middleware method directly.
+
+When egress only mutates headers or other response state, use `after_inplace`.
+It returns `None`, which also lets the compiled path omit the return-value load,
+response replacement, and coercion performed for a transforming `after_sync`.
+Hook selection is `after_inplace`, then `after_sync`, then `after`; only the
+highest-precedence spelling runs when a middleware exposes more than one.
+
+```python
+from wreath.middleware import MiddlewareHooks
+
+def add_header(request, response):
+    response.headers.append((b"x-service", b"catalog"))
+
+hooks = MiddlewareHooks(after_inplace=add_header)
+```
+
+An egress hook still runs only if that middleware was entered. If an earlier
+hook short-circuits, Wreath unwinds exactly the entered portion of the chain in
+reverse order.
+
 ## User story: put a ceiling on abusive clients
 
 > *As an API author, a few clients hammer my API and occasionally knock it over.
@@ -84,6 +112,12 @@ origin is derived from, which the token fallback's origin check uses. Without it
 the Host is trusted, so that check depends on `TrustedHostMiddleware` being
 separately mounted — a dependency between two middlewares that nothing used to
 state. Naming the hosts here makes the CSRF check self-contained.
+
+`TrustedHostMiddleware` validates the whole authority before comparing its host.
+A numeric port is ignored for matching, but user information, malformed ports,
+and junk after a bracketed IPv6 literal are rejected rather than truncated into
+an allowed hostname. On HTTP/2 the server also rejects a regular `Host` that
+disagrees with `:authority`, before either value can reach host-based policy.
 
 A preflight is checked against `allow_methods` rather than echoing it: asking
 whether `DELETE` is allowed now gets an answer about `DELETE`. Origins compare

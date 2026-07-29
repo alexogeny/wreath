@@ -454,6 +454,60 @@ async def test_streaming_app_cannot_run_ahead_of_a_zero_window(make_driver):
     assert sum(len(f.payload) for f in _data_frames(d)) == 0
 
 
+async def test_initial_window_settings_increase_releases_blocked_send(make_driver):
+    """A SETTINGS credit increase must wake streams blocked at the old value."""
+    state = {"returned": False}
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"released"})
+        state["returned"] = True
+
+    d = await _blocked_driver(make_driver, app)
+    await d.settle()
+    assert state["returned"] is False
+    assert _data_frames(d) == []
+
+    await d.feed_and_settle(support.encode_settings({
+        support.SETTINGS_INITIAL_WINDOW_SIZE: len(b"released"),
+    }))
+    await d.settle()
+
+    assert b"".join(frame.payload for frame in _data_frames(d)) == b"released"
+    assert state["returned"] is True
+
+
+async def test_initial_window_decrease_is_applied_before_later_send(make_driver):
+    """Lazy reconciliation must not let a stream spend stale positive credit."""
+    gate = asyncio.Event()
+    state = {"returned": False}
+
+    async def app(scope, receive, send):
+        await gate.wait()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"x"})
+        state["returned"] = True
+
+    d = make_driver(app)
+    await d.preface({support.SETTINGS_INITIAL_WINDOW_SIZE: 8})
+    await d.feed_and_settle(support.build_headers_frame(
+        1, support.request_headers(path=b"/")
+    ))
+    await d.feed_and_settle(support.encode_settings({
+        support.SETTINGS_INITIAL_WINDOW_SIZE: 0,
+    }))
+    gate.set()
+    await d.settle()
+
+    assert _data_frames(d) == []
+    assert state["returned"] is False
+
+    await d.feed_and_settle(support.encode_window_update(1, 1))
+    await d.settle()
+    assert b"".join(frame.payload for frame in _data_frames(d)) == b"x"
+    assert state["returned"] is True
+
+
 async def test_end_stream_is_emitted_once_after_the_final_byte(make_driver):
     size = 40_000
 

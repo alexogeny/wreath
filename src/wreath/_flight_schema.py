@@ -532,42 +532,46 @@ class SchemaError(ValueError):
 # pass; Python has none, so the binding happens at import instead.
 #
 # =========================================================================
-# DEFERRED BY DECISION -- this packing is Python, and that is not an oversight
+# TWO PACKERS, AND WHICH ONE RUNS
 # =========================================================================
 #
-# Every log record is currently packed *here*, in Python, then handed to the
-# ring as bytes:
+# A published record is packed in C, straight into a ring cell:
+#
+#     Recorder.log()          PyObject...  -> 64 bytes -> ring
+#
+# The Python path below is the same work, in three steps, and it is still
+# reached whenever there is no ring to pack for:
 #
 #     _logsite.pack_value()   PyObject*  -> LogArg      (per argument)
 #     LogCell.encode()        LogArg...  -> 64 bytes    (this module)
 #     Recorder.publish_log()  bytes      -> ring        (_flightmodule.c)
 #
-# The native emitter that replaces the first two steps -- `wreath_nfr_log`,
-# packing straight into a ring slot from C -- is **not built**. The layout,
-# the declared argument types, and the level check that precedes marshalling
-# all exist to make that swap mechanical rather than a redesign, but nobody
-# has done it. Until then:
+# It is the pure twin of ADR 0005, not a fallback: `wreath_nfr_log` is checked
+# against it byte for byte over a corpus of every shape either can be handed
+# (tests/test_logging_native_parity.py), and writing that corpus found three
+# defects -- an int wider than the wire slot, a float too wide to narrow, and a
+# lone surrogate -- each of which raised out of a packer that promises never to.
 #
-#   * No performance claim may be made about logging. None is made in the
-#     docs, the ADR, or these docstrings, and none should be added.
-#   * `wreath_nfr_publish_cell` (flight.c) is the seam. A C emitter replaces
-#     what happens *above* that call, not the call itself.
+# It is also what runs, by design, in three cases:
 #
-# Also deferred, each decided rather than forgotten -- see
+#   * **No recorder.** A test capture, `testing_runtime`, a plain callable
+#     sink: there is no ring, so there is nothing for C to pack into.
+#   * **A buffered record.** TRACE/DEBUG held for a possible promotion has to
+#     survive as an object until the request decides, so it is packed here.
+#     Measured 3.0us per held record against 0.42us published, which makes it
+#     the most expensive thing left in this module -- see the plan.
+#   * **Off the loop.** The ring has exactly one writer. A record from a job
+#     worker is packed here and staged (`_logscratch.OffLoopStage`) for the
+#     loop to publish, flagged LOG_FLAG_OFF_LOOP and one interval late.
+#
+# `wreath_nfr_publish_cell` (flight.c) stayed the seam through all of it: the
+# native emitter replaced what happens *above* that call, exactly as stage 1
+# framed it, and the dense site_id, declared argument types and pre-marshalling
+# level check are what made that swap mechanical rather than a redesign.
+#
+# Still deferred, each decided rather than forgotten -- see
 # docs/plans/first-class-logging.md for the full list and ADR 0025 for why:
 #
-#   * **Benchmarks.** Six of them, none run. The load-bearing one is the cost
-#     of a *disabled* `DEBUG(...)` call: failure-triggered logging assumes
-#     verbose instrumentation is affordable, and that assumption is exactly
-#     that number.
-#   * **Crash forensics (stage 7).** The ring is anonymous memory, so a
-#     segfault takes the last records with it. The framing is ready for a
-#     file-backed ring -- every cell is versioned and every decode validates
-#     lengths against the buffer -- so adding it is not a format break.
-#   * **Off-loop emission.** The ring is single-writer. `wreath.jobs` and
-#     thread-pool work have no fast path; `LossReason.LOG_OFF_LOOP` is
-#     reserved for the counted slow path that is not built, because nothing
-#     yet emits from off the loop.
 #   * **`wreath.audit`.** Keeps its own `logging.getLogger` path. "Never
 #     blocks the request path" and "never loses a record" are incompatible
 #     promises; audit needs the second and must not inherit the first.
@@ -696,6 +700,31 @@ LOG_FLAG_PROMOTED: Final = 1 << 0  # buffered, then published by a promotion
 LOG_FLAG_TRUNCATED: Final = 1 << 1  # an argument was clipped or dropped
 LOG_FLAG_REDACTED: Final = 1 << 2  # an argument was hashed or reduced to a length
 LOG_FLAG_OFF_LOOP: Final = 1 << 3  # emitted off the recorder's writer thread
+#: Range an INT argument can carry. A Python int is unbounded and the wire slot
+#: is `int64_t`, so a value outside this is not representable -- and the packer
+#: counts that as a type mismatch and writes `none` rather than raising. It used
+#: to raise, from `struct.pack`, deep inside the sink: `log.info("n {n}",
+#: n=2**64)` propagated a `struct.error` out of whatever made the call, which is
+#: precisely what `pack_value` promises never to do.
+LOG_ARG_INT_MIN: Final = -(1 << 63)
+LOG_ARG_INT_MAX: Final = (1 << 63) - 1
+
+#: Ceiling on a LENGTH argument, whose slot is `uint32_t`. A value this large is
+#: already only an order of magnitude, so it clamps rather than mismatching.
+LOG_ARG_LENGTH_MAX: Final = (1 << 32) - 1
+
+#: Declared field types, as the emitter sees them. A site's fields are flattened
+#: at registration into one byte each -- `(type << 4) | disposition` -- so the
+#: native emitter walks a `bytes` beside the argument tuple rather than reading
+#: Python objects to decide how to pack. Mirrors WREATH_NFR_LOG_SPEC_* in
+#: `flight_schema.h`; the low nibble is `CaptureDisposition`, unchanged.
+LOG_SPEC_NONE: Final = 0
+LOG_SPEC_BOOL: Final = 1
+LOG_SPEC_INT: Final = 2
+LOG_SPEC_FLOAT: Final = 3
+LOG_SPEC_STR: Final = 4
+LOG_SPEC_BYTES: Final = 5
+
 #: The record carries application fields for its request's canonical log line
 #: rather than a message of its own. Its arguments are the wide event's
 #: attributes; a reader folds them into the completion rather than printing them
@@ -734,7 +763,12 @@ class LogArg:
 
     @classmethod
     def text(cls, value: str) -> LogArg:
-        return cls(LogArgType.STR, payload=value.encode("utf-8"))
+        # "replace", not strict: a lone surrogate is not exotic -- it is what a
+        # `surrogateescape` decode of a filename or a header leaves behind --
+        # and encoding one strictly raised `UnicodeEncodeError` out of the
+        # packer, into whatever made the log call. Matches `_as_bytes`, which
+        # the hashed and length dispositions have always used.
+        return cls(LogArgType.STR, payload=value.encode("utf-8", "replace"))
 
     @classmethod
     def hashed(cls, fingerprint: int) -> LogArg:
@@ -746,8 +780,15 @@ class LogArg:
 
     @property
     def text_value(self) -> str:
-        """The decoded string of a STR argument, empty for every other type."""
-        return self.payload.decode("utf-8")
+        """The decoded string of a STR argument, empty for every other type.
+
+        Lenient on the way out as well as in. A packed payload is always valid
+        UTF-8 -- clipping backs off to a character boundary for exactly this
+        reason -- but a torn or stale cell decoded off the ring need not be, and
+        a record that raises when it is read is the one failure a log line must
+        never have.
+        """
+        return self.payload.decode("utf-8", "replace")
 
     @property
     def redacted(self) -> bool:
@@ -962,6 +1003,217 @@ class LogCell:
 
 
 _SEVERITIES = frozenset(int(s) for s in Severity)
+
+
+# --- the ring file (crash forensics) ----------------------------------------
+#
+# The ring is normally `PyMem_Calloc` memory, which the process owns and which a
+# segfault therefore takes with it -- along with every record since the
+# projector's last drain, which is the window a post-mortem is actually about.
+# Given a path, the recorder maps the ring from a file with MAP_SHARED instead,
+# so the pages belong to the kernel and outlive the process that was writing to
+# them.
+#
+# **This is not durability, and the distinction has to stay sharp.** MAP_SHARED
+# pages survive the *process* -- SIGSEGV, SIGKILL, abort -- because the kernel
+# writes them back on its own schedule. They do not survive a machine losing
+# power or a kernel panicking, unless they were written back first. Shutdown
+# msyncs; nothing else does. Documenting it the other way round would make the
+# whole feature a lie in exactly the situation someone reaches for it.
+#
+# The file is self-describing because the process that wrote it is, by
+# assumption, gone: a decoder gets the geometry, the clock calibration and the
+# provenance out of the header rather than from a live recorder. The cells that
+# follow are the cells that were on the ring, byte for byte -- this adds a
+# header in front of the format, it does not re-frame it.
+
+#: Ring-file magic. Distinct from `WFR1`, the recording *container*: that is a
+#: chunked stream someone chose to write, this is a live mapping of the ring.
+RING_FILE_MAGIC: Final = b"WFRR"
+
+#: Container version for the header below, independent of the cell schema.
+RING_FILE_VERSION: Final = 1
+
+#: Bytes reserved before the first cell. One page, so the cell area is
+#: page-aligned and the header's own writes never share a page with a cell.
+RING_FILE_HEADER_BYTES: Final = 4096
+
+#: Offset of the head/tail pair inside the header. Its own cache line, away from
+#: the fixed fields: those are written once at creation, these move constantly.
+RING_FILE_CURSOR_OFFSET: Final = 64
+
+#: Offset of the mirrored loss counters, one per `LossReason`.
+#:
+#: A crash file without these is a file you cannot draw a conclusion from: "the
+#: last thing it did was serve /orders" means something different when the ring
+#: was also full four thousand times. The counters are already maintained on the
+#: drop path, so mirroring them costs a store somewhere that was never fast.
+RING_FILE_LOSS_OFFSET: Final = 128
+
+# Fixed provenance (little-endian), at offset 0:
+#   0  4s   magic (RING_FILE_MAGIC)
+#   4  u8   container version
+#   5  u8   schema version (SCHEMA_VERSION)
+#   6  u16  flags (reserved)
+#   8  u32  ring_records (power of two)
+#  12  u32  cell_size (CELL_SIZE; a reader refuses anything else)
+#  16  u32  worker_id
+#  20  u32  reserved
+#  24  u64  epoch_mono_ns     (the origin a cell's offset_ms is measured from)
+#  32  u64  epoch_unix_ns     (... and its wall-clock pair)
+#  40  u64  created_unix_nano
+#  48  u64  pid               (whose crash this was)
+#  56  u64  reserved2
+_RING_FILE_HEADER = struct.Struct(BYTE_ORDER + "4sBBHIIIIQQQQQ")
+_require_layout(_RING_FILE_HEADER.size, RING_FILE_CURSOR_OFFSET, "the ring file header")
+
+# The moving pair, at RING_FILE_CURSOR_OFFSET:
+#  64  u64  head  (the writer's publish cursor)
+#  72  u64  tail  (the reader's consume cursor)
+_RING_FILE_CURSOR = struct.Struct(BYTE_ORDER + "QQ")
+_require_layout(_RING_FILE_CURSOR.size, 16, "the ring file cursor pair")
+
+#: Loss counters mirrored at RING_FILE_LOSS_OFFSET, one u64 per `LossReason`,
+#: in enum order.
+_RING_FILE_LOSSES = struct.Struct(BYTE_ORDER + f"{len(LossReason)}Q")
+if RING_FILE_LOSS_OFFSET + _RING_FILE_LOSSES.size > RING_FILE_HEADER_BYTES:
+    raise RuntimeError(
+        "the mirrored loss counters do not fit the ring file's header page"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RingFileHeader:
+    """The provenance a decoder needs when the process that wrote it is gone."""
+
+    ring_records: int
+    cell_size: int
+    worker_id: int
+    epoch_mono_ns: int
+    epoch_unix_ns: int
+    created_unix_nano: int
+    pid: int
+    head: int
+    tail: int
+    flags: int = 0
+    #: Every drop the worker counted, by reason. A crash file without these is
+    #: one you cannot draw a conclusion from: "the last thing it served was
+    #: /orders" means something different when the ring was also full 4,000
+    #: times and the real last thing is not in the file at all.
+    losses: tuple[int, ...] = ()
+
+    @classmethod
+    def decode(cls, data: bytes) -> RingFileHeader:
+        """Read a header, refusing what cannot be read rather than guessing.
+
+        A ring file is by definition produced by a process that is no longer
+        available to ask, so every field that could make a reader misparse the
+        cells -- the magic, both versions, the cell size -- is a refusal rather
+        than a best effort.
+        """
+        if len(data) < RING_FILE_HEADER_BYTES:
+            raise SchemaError(
+                f"a ring file header is {RING_FILE_HEADER_BYTES} bytes, got {len(data)}"
+            )
+        (
+            magic,
+            container_version,
+            schema_version,
+            flags,
+            ring_records,
+            cell_size,
+            worker_id,
+            _reserved,
+            epoch_mono_ns,
+            epoch_unix_ns,
+            created_unix_nano,
+            pid,
+            _reserved2,
+        ) = _RING_FILE_HEADER.unpack(data[: _RING_FILE_HEADER.size])
+        if magic != RING_FILE_MAGIC:
+            raise SchemaError(
+                f"not a wreath ring file: magic is {magic!r}, expected "
+                f"{RING_FILE_MAGIC!r}"
+            )
+        if container_version != RING_FILE_VERSION:
+            raise SchemaError(
+                f"unsupported ring file version {container_version}; this build "
+                f"reads {RING_FILE_VERSION}"
+            )
+        if schema_version != SCHEMA_VERSION:
+            raise SchemaError(
+                f"ring file carries schema version {schema_version}; this build "
+                f"reads {SCHEMA_VERSION}"
+            )
+        if cell_size != CELL_SIZE:
+            raise SchemaError(
+                f"ring file declares {cell_size}-byte cells; this build reads "
+                f"{CELL_SIZE}"
+            )
+        if ring_records == 0 or ring_records & (ring_records - 1):
+            raise SchemaError(
+                f"ring file declares {ring_records} records, which is not a "
+                "positive power of two"
+            )
+        head, tail = _RING_FILE_CURSOR.unpack(
+            data[RING_FILE_CURSOR_OFFSET : RING_FILE_CURSOR_OFFSET + 16]
+        )
+        losses = _RING_FILE_LOSSES.unpack(
+            data[
+                RING_FILE_LOSS_OFFSET : RING_FILE_LOSS_OFFSET
+                + _RING_FILE_LOSSES.size
+            ]
+        )
+        return cls(
+            ring_records=ring_records,
+            cell_size=cell_size,
+            worker_id=worker_id,
+            epoch_mono_ns=epoch_mono_ns,
+            epoch_unix_ns=epoch_unix_ns,
+            created_unix_nano=created_unix_nano,
+            pid=pid,
+            head=head,
+            tail=tail,
+            flags=flags,
+            losses=losses,
+        )
+
+    def loss(self, reason: LossReason) -> int:
+        """One mirrored loss counter, or 0 for a file that carried none."""
+        index = int(reason)
+        return self.losses[index] if index < len(self.losses) else 0
+
+    def encode(self) -> bytes:
+        """The full header page, for tests and for the pure twin."""
+        fixed = _RING_FILE_HEADER.pack(
+            RING_FILE_MAGIC,
+            RING_FILE_VERSION,
+            SCHEMA_VERSION,
+            self.flags,
+            self.ring_records,
+            self.cell_size,
+            self.worker_id,
+            0,
+            self.epoch_mono_ns,
+            self.epoch_unix_ns,
+            self.created_unix_nano,
+            self.pid,
+            0,
+        )
+        cursor = _RING_FILE_CURSOR.pack(self.head, self.tail)
+        counters = list(self.losses[: len(LossReason)])
+        counters.extend([0] * (len(LossReason) - len(counters)))
+        losses = _RING_FILE_LOSSES.pack(*counters)
+        page = bytearray(RING_FILE_HEADER_BYTES)
+        page[: len(fixed)] = fixed
+        page[RING_FILE_CURSOR_OFFSET : RING_FILE_CURSOR_OFFSET + len(cursor)] = cursor
+        page[RING_FILE_LOSS_OFFSET : RING_FILE_LOSS_OFFSET + len(losses)] = losses
+        return bytes(page)
+
+
+def ring_file_bytes(ring_records: int) -> int:
+    """The size a ring file must be for this geometry, header included."""
+    return RING_FILE_HEADER_BYTES + ring_records * CELL_SIZE
 
 
 # --- forensic capture (Stage 5) --------------------------------------------

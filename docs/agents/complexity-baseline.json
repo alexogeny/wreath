@@ -27,12 +27,12 @@
         "assumption": "advance() over k same-tick timers: linear, exactly one slot rescan.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.92,
-        "tail_exponent": 0.955,
+        "fitted_exponent": 1.026,
+        "tail_exponent": 1.064,
         "local_exponents": [
-          0.854,
-          0.907,
-          1.002
+          0.958,
+          0.998,
+          1.13
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -45,10 +45,10 @@
           16000
         ],
         "seconds": [
-          1.4188990462571383e-05,
-          2.5649031158536673e-05,
-          4.8107991460710764e-05,
-          9.633699664846063e-05
+          6.983899947954342e-05,
+          0.00013566700363298878,
+          0.00027104400214739144,
+          0.0005930679981247522
         ],
         "counters": [
           {
@@ -91,12 +91,12 @@
         "assumption": "cancel() of k same-deadline timers: linear, exactly one slot rescan.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.985,
-        "tail_exponent": 0.984,
+        "fitted_exponent": 1.015,
+        "tail_exponent": 1.011,
         "local_exponents": [
-          0.989,
-          0.977,
-          0.991
+          1.021,
+          1.021,
+          1.001
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -109,10 +109,10 @@
           16000
         ],
         "seconds": [
-          3.2939016819000244e-05,
-          6.536900764331222e-05,
-          0.0001286870101466775,
-          0.0002558440319262445
+          8.266799704870209e-05,
+          0.00016781700105639175,
+          0.00034045299980789423,
+          0.0006815760061726905
         ],
         "counters": [
           {
@@ -155,12 +155,12 @@
         "assumption": "advance() across one idle rotation with n parked long timers: O(1).",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.336,
-        "tail_exponent": -0.145,
+        "fitted_exponent": 0.323,
+        "tail_exponent": 0.125,
         "local_exponents": [
-          1.167,
-          0.726,
-          -1.016
+          0.718,
+          0.32,
+          -0.07
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -173,10 +173,10 @@
           400000
         ],
         "seconds": [
-          9.799841791391373e-07,
-          2.200016751885414e-06,
-          3.6400160752236843e-06,
-          1.800013706088066e-06
+          9.299983503296971e-07,
+          1.529995643068105e-06,
+          1.9099970813840628e-06,
+          1.820000761654228e-06
         ],
         "counters": [
           {},
@@ -229,10 +229,10 @@
           2000
         ],
         "seconds": [
-          1.721450826153159e-07,
-          2.5064509827643634e-07,
-          4.243900184519589e-07,
-          7.84980074968189e-07
+          1.8214497686130925e-07,
+          2.5249497412005437e-07,
+          4.229399928590283e-07,
+          7.900349737610668e-07
         ],
         "counters": [
           {
@@ -275,12 +275,12 @@
         "assumption": "k call_later+cancel cycles on the metal-config loop: linear, no rot.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.032,
-        "tail_exponent": 1.062,
+        "fitted_exponent": 1.052,
+        "tail_exponent": 1.112,
         "local_exponents": [
-          0.985,
-          0.995,
-          1.128
+          0.938,
+          1.026,
+          1.199
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -293,10 +293,10 @@
           40000
         ],
         "seconds": [
-          0.0005967780016362667,
-          0.0011812149896286428,
-          0.0023545600124634802,
-          0.0051468919846229255
+          0.0006350660041789524,
+          0.0012167250024504028,
+          0.002478278001945,
+          0.005688189994543791
         ],
         "counters": [
           {
@@ -339,12 +339,12 @@
         "assumption": "one pop plus one push is amortized O(1) in queue capacity",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.009,
-        "tail_exponent": 0.017,
+        "fitted_exponent": 0.001,
+        "tail_exponent": -0.001,
         "local_exponents": [
+          0.005,
           -0.001,
-          -0.006,
-          0.041
+          -0.002
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -357,10 +357,10 @@
           131072
         ],
         "seconds": [
-          3.771448973566294e-05,
-          3.767613088712096e-05,
-          3.7525955121964216e-05,
-          3.859581192955375e-05
+          1.3676959497388452e-05,
+          1.3721946743316948e-05,
+          1.371600228594616e-05,
+          1.3699034752789885e-05
         ],
         "counters": [
           {},
@@ -395,12 +395,12 @@
         "assumption": "incremental delimiter scans visit each buffered byte O(1) times",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.659,
-        "tail_exponent": 0.752,
+        "fitted_exponent": 0.637,
+        "tail_exponent": 0.76,
         "local_exponents": [
-          0.477,
-          0.649,
-          0.855
+          0.377,
+          0.682,
+          0.838
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -413,10 +413,10 @@
           16000
         ],
         "seconds": [
-          0.00011991697829216719,
-          0.00016687600873410702,
-          0.0002616139827296138,
-          0.00047332001850008965
+          0.00012165800580987707,
+          0.00015793600323377177,
+          0.00025342499429825693,
+          0.00045307000254979357
         ],
         "counters": [
           {},
@@ -451,12 +451,12 @@
         "assumption": "request parsing, activation, and response emission are O(requests)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.965,
-        "tail_exponent": 0.986,
+        "fitted_exponent": 0.974,
+        "tail_exponent": 0.978,
         "local_exponents": [
-          0.921,
-          0.971,
-          1.002
+          0.965,
+          0.973,
+          0.984
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -469,10 +469,10 @@
           4000
         ],
         "seconds": [
-          0.0010036889580078423,
-          0.0019007999799214303,
-          0.0037255120114423335,
-          0.007461093016900122
+          0.0009743599948706105,
+          0.0019020199979422614,
+          0.003733060999365989,
+          0.0073828739987220615
         ],
         "counters": [
           {},
@@ -507,12 +507,12 @@
         "assumption": "one-shot response validation and serialization are O(header bytes)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.668,
-        "tail_exponent": 0.733,
+        "fitted_exponent": 0.842,
+        "tail_exponent": 1.036,
         "local_exponents": [
-          0.533,
-          0.687,
-          0.779
+          0.482,
+          0.755,
+          1.317
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -525,10 +525,10 @@
           16000
         ],
         "seconds": [
-          0.0001294970279559493,
-          0.0001873259898275137,
-          0.0003015140537172556,
-          0.000517548993229866
+          0.00013083800149615854,
+          0.0001827669984777458,
+          0.0003084839991061017,
+          0.0007684140000492334
         ],
         "counters": [
           {},
@@ -563,12 +563,12 @@
         "assumption": "per-frame size-line scan and buffer consumption are O(frames)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.97,
-        "tail_exponent": 0.982,
+        "fitted_exponent": 0.98,
+        "tail_exponent": 1.039,
         "local_exponents": [
-          0.951,
-          0.956,
-          1.008
+          0.856,
+          1.001,
+          1.076
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -581,10 +581,10 @@
           16000
         ],
         "seconds": [
-          0.0007830940303392708,
-          0.001513638999313116,
-          0.0029361279448494315,
-          0.005903935991227627
+          0.0007920229982119054,
+          0.0014333889994304627,
+          0.0028695500004687347,
+          0.00605019299837295
         ],
         "counters": [
           {
@@ -607,8 +607,8 @@
         "group": "metal-host",
         "stage": "timers",
         "axis": "timers sharing one slot at distinct deadlines",
-        "assumption": "KNOWN DEFECT: the fire loop walks the whole slot chain per sweep",
-        "expect_exponent": 2.0,
+        "assumption": "pairing heaps and the slot tournament drain k colliding timers in O(k)",
+        "expect_exponent": 1.0,
         "tolerance": 0.6,
         "metric": null,
         "sizes": [
@@ -617,36 +617,26 @@
           2000,
           4000
         ],
-        "todo": {
-          "degree": 2.0,
-          "target": 1.0,
-          "reason": "the fire loop walks the entire slot chain on every sweep; the fix is structural (a per-slot ordered structure, or the far-future overflow list this hybrid lacks), so it is recorded rather than patched",
-          "owner": "#124"
-        }
+        "todo": null
       },
       "observation": {
         "probe": "wheel-colliding-slot-chain",
         "group": "metal-host",
         "stage": "timers",
         "axis": "timers sharing one slot at distinct deadlines",
-        "assumption": "KNOWN DEFECT: the fire loop walks the whole slot chain per sweep",
-        "expect_exponent": 2.0,
+        "assumption": "pairing heaps and the slot tournament drain k colliding timers in O(k)",
+        "expect_exponent": 1.0,
         "tolerance": 0.6,
-        "fitted_exponent": 1.968,
-        "tail_exponent": 1.951,
+        "fitted_exponent": 0.994,
+        "tail_exponent": 0.991,
         "local_exponents": [
-          2.008,
-          1.951,
-          1.95
+          1.008,
+          0.971,
+          1.011
         ],
-        "class": "O(n^2)",
-        "degree_name": "quadratic",
-        "todo": {
-          "degree": 2.0,
-          "target": 1.0,
-          "reason": "the fire loop walks the entire slot chain on every sweep; the fix is structural (a per-slot ordered structure, or the far-future overflow list this hybrid lacks), so it is recorded rather than patched",
-          "owner": "#124"
-        },
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
         "status": "PASS",
         "sizes": [
           500,
@@ -655,23 +645,23 @@
           4000
         ],
         "seconds": [
-          0.0003520119935274124,
-          0.0014154999516904354,
-          0.005473634984809905,
-          0.021148814004845917
+          4.213899956084788e-05,
+          8.474799687974155e-05,
+          0.00016610699822194874,
+          0.00033473300572950393
         ],
         "counters": [
           {
-            "slot_rescans": 500
+            "slot_rescans": 501
           },
           {
-            "slot_rescans": 1000
+            "slot_rescans": 1001
           },
           {
-            "slot_rescans": 2000
+            "slot_rescans": 2001
           },
           {
-            "slot_rescans": 4000
+            "slot_rescans": 4001
           }
         ]
       }
@@ -701,12 +691,12 @@
         "assumption": "draining k timers that do not share a slot is O(k)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.039,
-        "tail_exponent": 1.061,
+        "fitted_exponent": 1.016,
+        "tail_exponent": 1.03,
         "local_exponents": [
-          0.996,
-          1.039,
-          1.083
+          0.989,
+          1.017,
+          1.042
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -719,23 +709,23 @@
           4000
         ],
         "seconds": [
-          3.449898213148117e-05,
-          6.878800923004746e-05,
-          0.00014137703692540526,
-          0.00029958400409668684
+          3.642999945441261e-05,
+          7.232899952214211e-05,
+          0.0001463470034650527,
+          0.0003014429967151955
         ],
         "counters": [
-          {
-            "slot_rescans": 500
-          },
           {
             "slot_rescans": 1000
           },
           {
-            "slot_rescans": 2000
+            "slot_rescans": 1512
           },
           {
-            "slot_rescans": 4000
+            "slot_rescans": 2512
+          },
+          {
+            "slot_rescans": 4512
           }
         ]
       }
@@ -765,12 +755,12 @@
         "assumption": "gathered-write buffering is O(chunks), not O(chunks * buffered)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.921,
-        "tail_exponent": 0.913,
+        "fitted_exponent": 0.994,
+        "tail_exponent": 0.99,
         "local_exponents": [
-          0.958,
-          0.859,
-          0.966
+          1.011,
+          0.967,
+          1.014
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -783,10 +773,10 @@
           16000
         ],
         "seconds": [
-          3.510899841785431e-05,
-          6.819900590926409e-05,
-          0.0001237369724549353,
-          0.000241645029745996
+          3.7838995922356844e-05,
+          7.625800208188593e-05,
+          0.00014904700219631195,
+          0.0003009930005646311
         ],
         "counters": [
           {
@@ -829,12 +819,12 @@
         "assumption": "native egress enqueue is amortized O(writes) under backpressure",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.919,
-        "tail_exponent": 0.932,
+        "fitted_exponent": 0.929,
+        "tail_exponent": 0.948,
         "local_exponents": [
-          0.885,
-          0.938,
-          0.926
+          0.89,
+          0.936,
+          0.959
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -847,10 +837,10 @@
           8000
         ],
         "seconds": [
-          3.2569048926234245e-05,
-          6.014900282025337e-05,
-          0.00011525797890499234,
-          0.00021898496197536588
+          3.2919000659603626e-05,
+          6.100899918237701e-05,
+          0.00011674700363073498,
+          0.00022692499624099582
         ],
         "counters": [
           {
@@ -893,12 +883,12 @@
         "assumption": "Rejecting a body with n extra keys against an n-field schema: O(n).",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.034,
-        "tail_exponent": 1.042,
+        "fitted_exponent": 1.048,
+        "tail_exponent": 1.045,
         "local_exponents": [
-          1.022,
-          1.017,
-          1.067
+          1.063,
+          1.021,
+          1.069
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -911,10 +901,10 @@
           3200
         ],
         "seconds": [
-          0.00012938730069436132,
-          0.00026272745162714273,
-          0.0005318277981132269,
-          0.0011140544986119494
+          0.00012369389987725298,
+          0.0002585110501968302,
+          0.0005246324002655456,
+          0.0011004793501342646
         ],
         "counters": [
           {},
@@ -949,12 +939,12 @@
         "assumption": "A nested-union validation bomb stays bounded regardless of depth: O(1).",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": -0.435,
-        "tail_exponent": 0.047,
+        "fitted_exponent": -0.084,
+        "tail_exponent": 0.198,
         "local_exponents": [
-          -1.601,
-          0.725,
-          -0.704
+          -0.419,
+          -0.566,
+          1.045
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -967,10 +957,10 @@
           28
         ],
         "seconds": [
-          0.5240835290169343,
-          0.455948113987688,
-          0.4831772000179626,
-          0.4586046260083094
+          0.44441625599574763,
+          0.4285086509989924,
+          0.4095295509978314,
+          0.4424974049979937
         ],
         "counters": [
           {},
@@ -1005,12 +995,12 @@
         "assumption": "Encoding an n-element structure is O(n): the writer buffer grows",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.012,
-        "tail_exponent": 1.025,
+        "fitted_exponent": 0.997,
+        "tail_exponent": 0.998,
         "local_exponents": [
-          0.982,
-          1.022,
-          1.029
+          1.006,
+          0.958,
+          1.038
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1023,10 +1013,10 @@
           160000
         ],
         "seconds": [
-          0.00017411599401384592,
-          0.0003439330030232668,
-          0.0006982850027270615,
-          0.0014251000247895718
+          0.0001775760028976947,
+          0.0003565719962352887,
+          0.000692864996381104,
+          0.0014230500019039027
         ],
         "counters": [
           {},
@@ -1061,12 +1051,12 @@
         "assumption": "Decoding an n-element document is O(n): single-pass scan, parser-local",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.021,
-        "tail_exponent": 1.031,
+        "fitted_exponent": 1.03,
+        "tail_exponent": 1.028,
         "local_exponents": [
-          0.998,
-          1.033,
-          1.029
+          0.991,
+          1.159,
+          0.897
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1079,10 +1069,10 @@
           160000
         ],
         "seconds": [
-          0.00039940199349075556,
-          0.0007978529902175069,
-          0.001632154977414757,
-          0.0033307700068689883
+          0.00039016200025798753,
+          0.0007755730039207265,
+          0.0017313830030616373,
+          0.0032248719944618642
         ],
         "counters": [
           {},
@@ -1117,12 +1107,12 @@
         "assumption": "Parsing an n-cookie header is O(n): one forward pass, O(1) dict ops.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.989,
-        "tail_exponent": 1.027,
+        "fitted_exponent": 0.997,
+        "tail_exponent": 1.014,
         "local_exponents": [
-          0.898,
-          1.028,
-          1.027
+          0.964,
+          0.995,
+          1.033
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1135,10 +1125,10 @@
           16000
         ],
         "seconds": [
-          0.00015394698129966855,
-          0.00028688402380794287,
-          0.0005849070148542523,
-          0.0011918149539269507
+          0.00016268699982902035,
+          0.0003174540033796802,
+          0.0006325270005618222,
+          0.001294503003009595
         ],
         "counters": [
           {},
@@ -1173,12 +1163,12 @@
         "assumption": "Parsing an n-field query string is O(n): one forward pass, list append.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.028,
-        "tail_exponent": 1.022,
+        "fitted_exponent": 0.989,
+        "tail_exponent": 1.035,
         "local_exponents": [
-          1.021,
-          1.082,
-          0.962
+          0.89,
+          1.009,
+          1.061
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1191,10 +1181,10 @@
           16000
         ],
         "seconds": [
-          0.00015486701158806682,
-          0.00031422398751601577,
-          0.000665175961330533,
-          0.0012957020080648363
+          0.00020406499970704317,
+          0.0003781320046982728,
+          0.0007612340050400235,
+          0.0015883070009294897
         ],
         "counters": [
           {},
@@ -1229,12 +1219,12 @@
         "assumption": "Building the header map from n headers is O(n): one pass into a dict.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.008,
-        "tail_exponent": 0.942,
+        "fitted_exponent": 1.17,
+        "tail_exponent": 1.174,
         "local_exponents": [
-          1.118,
-          1.076,
-          0.808
+          1.095,
+          1.378,
+          0.97
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1247,10 +1237,10 @@
           16000
         ],
         "seconds": [
-          7.100898073986173e-05,
-          0.00015408603940159082,
-          0.0003248029970563948,
-          0.0005687480443157256
+          6.956899596843868e-05,
+          0.0001485960019635968,
+          0.00038608199974987656,
+          0.0007561039965366945
         ],
         "counters": [
           {},
@@ -1285,12 +1275,12 @@
         "assumption": "Injecting a fixed set of default headers into an n-header response stays",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.07,
-        "tail_exponent": 1.11,
+        "fitted_exponent": 0.966,
+        "tail_exponent": 0.927,
         "local_exponents": [
-          1.039,
-          0.924,
-          1.297
+          1.025,
+          1.022,
+          0.833
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1303,10 +1293,10 @@
           8000
         ],
         "seconds": [
-          0.00023235497064888477,
-          0.00047734996769577265,
-          0.0009055110276676714,
-          0.002225173986516893
+          0.00024748499708948657,
+          0.0005035489957663231,
+          0.0010222590062767267,
+          0.0018215620002592914
         ],
         "counters": [
           {},
@@ -1341,12 +1331,12 @@
         "assumption": "Parsing an n-part multipart body is O(body): the boundary search advances",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.965,
-        "tail_exponent": 0.799,
+        "fitted_exponent": 0.927,
+        "tail_exponent": 0.898,
         "local_exponents": [
-          1.299,
-          0.955,
-          0.643
+          1.032,
+          0.785,
+          1.01
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1359,10 +1349,10 @@
           8000
         ],
         "seconds": [
-          0.000280683976598084,
-          0.0006906760390847921,
-          0.0013393730041570961,
-          0.002090956026222557
+          0.00032247300259768963,
+          0.0006595770028070547,
+          0.0011363960002199747,
+          0.002289192001626361
         ],
         "counters": [
           {},
@@ -1397,12 +1387,12 @@
         "assumption": "static route activation is O(1) in total route count",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": -0.013,
-        "tail_exponent": 0.008,
+        "fitted_exponent": 0.028,
+        "tail_exponent": 0.044,
         "local_exponents": [
-          -0.061,
+          0.004,
           0.006,
-          0.01
+          0.081
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -1415,10 +1405,10 @@
           64000
         ],
         "seconds": [
-          0.00014722696505486965,
-          0.00013536697952076793,
-          0.00013644702266901731,
-          0.00013827701332047582
+          0.00013580700033344328,
+          0.00013650699838763103,
+          0.00013770700024906546,
+          0.00015402700228150934
         ],
         "counters": [
           {},
@@ -1453,12 +1443,12 @@
         "assumption": "worst-case bitset activation is O(group size / 64)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.823,
-        "tail_exponent": 0.912,
+        "fitted_exponent": 0.878,
+        "tail_exponent": 0.923,
         "local_exponents": [
-          0.63,
-          0.871,
-          0.952
+          0.75,
+          0.991,
+          0.856
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1471,10 +1461,10 @@
           64000
         ],
         "seconds": [
-          0.0015118380542844534,
-          0.0023396710166707635,
-          0.004278120002709329,
-          0.008278966008219868
+          0.001394450999214314,
+          0.0023457510033040307,
+          0.00466155100002652,
+          0.00843738199910149
         ],
         "counters": [
           {},
@@ -1509,12 +1499,12 @@
         "assumption": "Trie match cost is independent of route count: O(1) in N.",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.039,
-        "tail_exponent": 0.043,
+        "fitted_exponent": 0.029,
+        "tail_exponent": 0.021,
         "local_exponents": [
-          0.025,
-          0.062,
-          0.023
+          0.046,
+          0.028,
+          0.014
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -1527,10 +1517,10 @@
           4000
         ],
         "seconds": [
-          0.0005050590261816978,
-          0.0005139089771546423,
-          0.0005364289972931147,
-          0.000545227958355099
+          0.0005198889994062483,
+          0.0005367089979699813,
+          0.0005474079953273758,
+          0.0005527589964913204
         ],
         "counters": [
           {},
@@ -1565,12 +1555,12 @@
         "assumption": "request-head parsing is O(headers plus header bytes)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.104,
-        "tail_exponent": 1.141,
+        "fitted_exponent": 1.044,
+        "tail_exponent": 1.09,
         "local_exponents": [
-          1.0,
-          1.187,
-          1.095
+          0.889,
+          1.227,
+          0.953
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1583,10 +1573,10 @@
           4000
         ],
         "seconds": [
-          4.488899139687419e-05,
-          8.975801756605506e-05,
-          0.0002044160501100123,
-          0.00043680000817403197
+          4.705900209955871e-05,
+          8.715800504432991e-05,
+          0.00020408600539667532,
+          0.00039516100514447317
         ],
         "counters": [
           {},
@@ -1621,12 +1611,12 @@
         "assumption": "Decoding an object with n distinct keys is O(n): the parser-local key",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.071,
-        "tail_exponent": 1.082,
+        "fitted_exponent": 1.162,
+        "tail_exponent": 1.226,
         "local_exponents": [
-          1.061,
-          1.035,
-          1.128
+          1.062,
+          1.08,
+          1.371
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1639,10 +1629,10 @@
           80000
         ],
         "seconds": [
-          0.0007246950408443809,
-          0.0015120779862627387,
-          0.003098484012298286,
-          0.006772866996470839
+          0.0007024650039966218,
+          0.001466159003030043,
+          0.0031001550014480017,
+          0.008017172003746964
         ],
         "counters": [
           {},
@@ -1677,12 +1667,12 @@
         "assumption": "Percent-decoding an n-byte target is O(n): one forward pass.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.988,
-        "tail_exponent": 0.991,
+        "fitted_exponent": 0.982,
+        "tail_exponent": 0.99,
         "local_exponents": [
-          0.982,
-          0.989,
-          0.992
+          0.967,
+          0.98,
+          0.999
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1695,10 +1685,10 @@
           160000
         ],
         "seconds": [
-          4.785897908732295e-05,
-          9.45479841902852e-05,
-          0.00018769700545817614,
-          0.00037338200490921736
+          4.861900379182771e-05,
+          9.50479952734895e-05,
+          0.00018750700110103935,
+          0.0003747119990293868
         ],
         "counters": [
           {},
@@ -1733,12 +1723,12 @@
         "assumption": "XOR-unmasking an n-byte WebSocket payload is O(n): a single word-at-a-",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.957,
-        "tail_exponent": 1.051,
+        "fitted_exponent": 0.833,
+        "tail_exponent": 0.857,
         "local_exponents": [
-          0.857,
-          0.688,
-          1.414
+          0.709,
+          1.063,
+          0.652
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1751,10 +1741,10 @@
           400000
         ],
         "seconds": [
-          4.130008164793253e-06,
-          7.479975465685129e-06,
-          1.2049975339323282e-05,
-          3.212003502994776e-05
+          4.350004019215703e-06,
+          7.110000296961516e-06,
+          1.4850003935862333e-05,
+          2.3329004761762917e-05
         ],
         "counters": [
           {},
@@ -1789,12 +1779,12 @@
         "assumption": "middleware dispatch is O(active hooks)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.657,
-        "tail_exponent": 0.751,
+        "fitted_exponent": 0.644,
+        "tail_exponent": 0.727,
         "local_exponents": [
-          0.468,
-          0.659,
-          0.844
+          0.48,
+          0.639,
+          0.815
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1807,10 +1797,10 @@
           64
         ],
         "seconds": [
-          0.009083758981432766,
-          0.01256856496911496,
-          0.019839412008877844,
-          0.03560637903865427
+          0.008916232000046875,
+          0.012437347999366466,
+          0.019372521004697774,
+          0.0340909919978003
         ],
         "counters": [
           {},
@@ -1845,12 +1835,12 @@
         "assumption": "tape dispatch is O(instructions), with a per-instruction cost that does not grow with the number of instruction kinds",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.95,
-        "tail_exponent": 0.968,
+        "fitted_exponent": 0.942,
+        "tail_exponent": 0.966,
         "local_exponents": [
-          0.911,
-          0.956,
-          0.98
+          0.89,
+          0.954,
+          0.977
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1863,10 +1853,10 @@
           64
         ],
         "seconds": [
-          0.0033825290156528354,
-          0.0063586459727957845,
-          0.012334200029727072,
-          0.02433135698083788
+          0.003429667995078489,
+          0.006355485995300114,
+          0.012313781000557356,
+          0.024237529003585223
         ],
         "counters": [
           {},
@@ -1901,12 +1891,12 @@
         "assumption": "response coercion is O(encoded body bytes)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.689,
-        "tail_exponent": 0.763,
+        "fitted_exponent": 0.713,
+        "tail_exponent": 0.79,
         "local_exponents": [
-          0.542,
-          0.687,
-          0.839
+          0.562,
+          0.71,
+          0.869
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1919,10 +1909,10 @@
           160000
         ],
         "seconds": [
-          0.00013638701057061553,
-          0.0001985160051845014,
-          0.00031949300318956375,
-          0.000571537995710969
+          0.00013027700333623216,
+          0.00019237599917687476,
+          0.0003147940005874261,
+          0.0005747480026911944
         ],
         "counters": [
           {},
@@ -1958,11 +1948,11 @@
         "expect_exponent": 1.0,
         "tolerance": 0.5,
         "fitted_exponent": 0.935,
-        "tail_exponent": 0.94,
+        "tail_exponent": 0.934,
         "local_exponents": [
-          0.917,
-          0.958,
-          0.922
+          0.942,
+          0.916,
+          0.953
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -1975,10 +1965,10 @@
           8000
         ],
         "seconds": [
-          0.0002583150053396821,
-          0.00048760900972411036,
-          0.0009472299716435373,
-          0.001794801966752857
+          0.0002822539972839877,
+          0.0005422989997896366,
+          0.0010229089966742322,
+          0.0019798779976554215
         ],
         "counters": [
           {},
@@ -2031,10 +2021,10 @@
           2000
         ],
         "seconds": [
-          0.00027907395269721746,
-          0.0005434289923869073,
-          0.001045338052790612,
-          0.002138165000360459
+          0.00025874400307657197,
+          0.0005256590011413209,
+          0.0011025169951608405,
+          0.0021958330034976825
         ],
         "counters": [
           {
@@ -2077,12 +2067,12 @@
         "assumption": "an unmatched request scans mounts in registration order, and costs nothing per request-path character",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.679,
-        "tail_exponent": 0.758,
+        "fitted_exponent": 0.688,
+        "tail_exponent": 0.754,
         "local_exponents": [
-          0.509,
-          0.713,
-          0.804
+          0.572,
+          0.642,
+          0.865
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2095,10 +2085,10 @@
           32
         ],
         "seconds": [
-          0.004175941983703524,
-          0.005942744959611446,
-          0.00974161399062723,
-          0.017007050977554172
+          0.004100763995666057,
+          0.00609792100294726,
+          0.009518748993286863,
+          0.01733927400346147
         ],
         "counters": [
           {},
@@ -2133,12 +2123,12 @@
         "assumption": "a missed static match does not scan the request path",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.004,
-        "tail_exponent": 0.004,
+        "fitted_exponent": -0.002,
+        "tail_exponent": 0.0,
         "local_exponents": [
-          0.006,
-          0.001,
-          0.007
+          -0.003,
+          -0.012,
+          0.012
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -2151,10 +2141,10 @@
           16000
         ],
         "seconds": [
-          0.00247836799826473,
-          0.0024888580082915723,
-          0.002490618033334613,
-          0.002503237978089601
+          0.0025037469968083315,
+          0.002498846995877102,
+          0.0024781080064713024,
+          0.0024993870028993115
         ],
         "counters": [
           {},
@@ -2189,12 +2179,12 @@
         "assumption": "parsing is O(document size), never superlinear in field count",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.005,
-        "tail_exponent": 0.979,
+        "fitted_exponent": 1.01,
+        "tail_exponent": 1.021,
         "local_exponents": [
-          1.087,
-          0.914,
-          1.044
+          0.986,
+          1.016,
+          1.027
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2207,10 +2197,10 @@
           4000
         ],
         "seconds": [
-          0.0006083447020500899,
-          0.001292148299398832,
-          0.0024340067495359106,
-          0.005017379351193086
+          0.000636563049920369,
+          0.001260521900258027,
+          0.0025488547500572166,
+          0.005192705599984038
         ],
         "counters": [
           {},
@@ -2245,12 +2235,12 @@
         "assumption": "rejecting an over-deep document is O(document size), and it is `max_document_bytes` -- not the depth check -- that bounds it",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.014,
-        "tail_exponent": 1.021,
+        "fitted_exponent": 1.023,
+        "tail_exponent": 1.036,
         "local_exponents": [
-          0.996,
-          1.024,
-          1.017
+          1.005,
+          1.005,
+          1.067
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2263,10 +2253,10 @@
           16000
         ],
         "seconds": [
-          0.0008893643505871295,
-          0.0017736261506797746,
-          0.0036066455504624173,
-          0.00730062680086121
+          0.0009910120999848005,
+          0.001988582549893181,
+          0.003991089899864164,
+          0.00836014084998169
         ],
         "counters": [
           {},
@@ -2301,12 +2291,12 @@
         "assumption": "SigV4 header signing is O(headers log headers)",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.854,
-        "tail_exponent": 0.912,
+        "fitted_exponent": 0.88,
+        "tail_exponent": 0.92,
         "local_exponents": [
-          0.741,
-          0.849,
-          0.974
+          0.81,
+          0.85,
+          0.99
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2319,10 +2309,10 @@
           4000
         ],
         "seconds": [
-          0.0002448050072416663,
-          0.0004090910078957677,
-          0.0007367150392383337,
-          0.0014475089847110212
+          0.00023423499806085601,
+          0.0004107220011064783,
+          0.0007401850016321987,
+          0.0014699789971928112
         ],
         "counters": [
           {},
@@ -2358,11 +2348,11 @@
         "expect_exponent": 0.0,
         "tolerance": 0.5,
         "fitted_exponent": -0.001,
-        "tail_exponent": -0.001,
+        "tail_exponent": -0.003,
         "local_exponents": [
-          -0.004,
-          0.008,
-          -0.009
+          0.005,
+          -0.003,
+          -0.003
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -2375,10 +2365,10 @@
           80000
         ],
         "seconds": [
-          0.0038737390423193574,
-          0.0038642089930363,
-          0.003884357982315123,
-          0.003860918979626149
+          0.0038741989992558956,
+          0.003887208004016429,
+          0.0038779789974796586,
+          0.0038697380005032755
         ],
         "counters": [
           {},
@@ -2413,12 +2403,12 @@
         "assumption": "Building a Cedar set of n scalars is linear in n.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.973,
-        "tail_exponent": 0.967,
+        "fitted_exponent": 0.984,
+        "tail_exponent": 0.996,
         "local_exponents": [
-          1.0,
-          0.926,
-          1.008
+          0.962,
+          0.973,
+          1.019
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2431,10 +2421,10 @@
           1600
         ],
         "seconds": [
-          4.1721202433109286e-05,
-          8.345040259882808e-05,
-          0.00015852060168981553,
-          0.00031888140365481376
+          4.3061000178568064e-05,
+          8.386020053876563e-05,
+          0.00016461460036225616,
+          0.000333680999756325
         ],
         "counters": [
           {},
@@ -2487,10 +2477,10 @@
           1600
         ],
         "seconds": [
-          6.166897946968675e-05,
-          0.0001061679795384407,
-          0.00019999605137854815,
-          0.000435421010479331
+          5.7978999393526465e-05,
+          0.00010447800013935193,
+          0.00022120500216260552,
+          0.00042790099541889504
         ],
         "counters": [
           {
@@ -2533,12 +2523,12 @@
         "assumption": "Evaluating an n-member Cedar set literal is linear in n.",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.678,
-        "tail_exponent": 0.688,
+        "fitted_exponent": 0.676,
+        "tail_exponent": 0.772,
         "local_exponents": [
-          0.672,
-          0.638,
-          0.738
+          0.443,
+          0.801,
+          0.743
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2551,10 +2541,10 @@
           800
         ],
         "seconds": [
-          1.3979803770780564e-05,
-          2.2273394279181957e-05,
-          3.466319758445024e-05,
-          5.782680818811059e-05
+          1.4551599451806397e-05,
+          1.9783599418587984e-05,
+          3.4471400431357325e-05,
+          5.7682600163389e-05
         ],
         "counters": [
           {},
@@ -2607,10 +2597,10 @@
           32
         ],
         "seconds": [
-          4.727998748421669e-06,
-          8.735794108361005e-06,
-          1.6953598242253064e-05,
-          3.402320435270667e-05
+          5.170000076759607e-06,
+          9.665799734648316e-06,
+          1.8121600442100315e-05,
+          3.336320078233257e-05
         ],
         "counters": [
           {
@@ -2671,10 +2661,10 @@
           256
         ],
         "seconds": [
-          0.0002736739697866142,
-          0.0004229809856042266,
-          0.0007866329979151487,
-          0.0014521690318360925
+          0.0003793920041061938,
+          0.0006142070051282644,
+          0.0010970170042128302,
+          0.002021637003053911
         ],
         "counters": [
           {
@@ -2717,12 +2707,12 @@
         "assumption": "pure static route activation is O(1) in total route count",
         "expect_exponent": 0.0,
         "tolerance": 0.5,
-        "fitted_exponent": -0.0,
-        "tail_exponent": -0.017,
+        "fitted_exponent": 0.007,
+        "tail_exponent": 0.018,
         "local_exponents": [
-          0.045,
-          -0.037,
-          0.003
+          -0.013,
+          0.004,
+          0.032
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -2735,10 +2725,10 @@
           1600
         ],
         "seconds": [
-          0.0012092739925719798,
-          0.0012476440169848502,
-          0.0012162539642304182,
-          0.0012191549758426845
+          0.0011760859997593798,
+          0.0011656450005830266,
+          0.001168575996416621,
+          0.0011950950065511279
         ],
         "counters": [
           {},
@@ -2773,12 +2763,12 @@
         "assumption": "pure parameter matching is at worst linear in group size",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 0.035,
-        "tail_exponent": 0.045,
+        "fitted_exponent": 0.037,
+        "tail_exponent": 0.04,
         "local_exponents": [
-          0.023,
-          0.011,
-          0.079
+          0.024,
+          0.063,
+          0.017
         ],
         "class": "O(1)",
         "degree_name": "constant",
@@ -2791,10 +2781,10 @@
           512
         ],
         "seconds": [
-          0.006167109997477382,
-          0.006265578034799546,
-          0.006312037003226578,
-          0.006668048969004303
+          0.006067002002964728,
+          0.0061682099985773675,
+          0.006441484001697972,
+          0.006517373003589455
         ],
         "counters": [
           {},
@@ -2809,8 +2799,8 @@
         "group": "pure",
         "stage": "database",
         "axis": "queued operations cancelled newest-first",
-        "assumption": "KNOWN DEFECT: deque.remove rescans the queue per cancellation",
-        "expect_exponent": 2.0,
+        "assumption": "tombstoning a queued operation is O(1), independent of position",
+        "expect_exponent": 1.0,
         "tolerance": 0.6,
         "metric": null,
         "sizes": [
@@ -2819,36 +2809,26 @@
           2000,
           4000
         ],
-        "todo": {
-          "degree": 2.0,
-          "target": 1.0,
-          "reason": "`_cancel_operation` removes by value from a deque, which scans from the left, so cancelling the newest of k queued operations walks all k; the fix is an index or a tombstone flag rather than a positional removal",
-          "owner": "#135"
-        }
+        "todo": null
       },
       "observation": {
         "probe": "pure-pipeline-cancel-back-to-front",
         "group": "pure",
         "stage": "database",
         "axis": "queued operations cancelled newest-first",
-        "assumption": "KNOWN DEFECT: deque.remove rescans the queue per cancellation",
-        "expect_exponent": 2.0,
+        "assumption": "tombstoning a queued operation is O(1), independent of position",
+        "expect_exponent": 1.0,
         "tolerance": 0.6,
-        "fitted_exponent": 1.901,
-        "tail_exponent": 1.887,
+        "fitted_exponent": 0.991,
+        "tail_exponent": 1.001,
         "local_exponents": [
-          1.886,
-          2.036,
-          1.737
+          0.97,
+          0.997,
+          1.005
         ],
-        "class": "O(n^2)",
-        "degree_name": "quadratic",
-        "todo": {
-          "degree": 2.0,
-          "target": 1.0,
-          "reason": "`_cancel_operation` removes by value from a deque, which scans from the left, so cancelling the newest of k queued operations walks all k; the fix is an index or a tombstone flag rather than a positional removal",
-          "owner": "#135"
-        },
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
         "status": "PASS",
         "sizes": [
           500,
@@ -2857,10 +2837,10 @@
           4000
         ],
         "seconds": [
-          0.0011563660227693617,
-          0.004274670034646988,
-          0.01753185101551935,
-          0.05844851804431528
+          0.00010534800094319507,
+          0.0002063450010609813,
+          0.0004118920041946694,
+          0.0008265329961432144
         ],
         "counters": [
           {
@@ -2903,12 +2883,12 @@
         "assumption": "cancelling the head of the queue is O(1) per operation",
         "expect_exponent": 1.0,
         "tolerance": 0.5,
-        "fitted_exponent": 1.009,
-        "tail_exponent": 1.022,
+        "fitted_exponent": 0.995,
+        "tail_exponent": 0.999,
         "local_exponents": [
-          0.982,
-          1.005,
-          1.039
+          0.986,
+          0.991,
+          1.008
         ],
         "class": "O(n)",
         "degree_name": "linear",
@@ -2921,10 +2901,10 @@
           4000
         ],
         "seconds": [
-          0.00018715596524998546,
-          0.0003697419888339937,
-          0.0007422750350087881,
-          0.0015256880433298647
+          0.00010472799476701766,
+          0.000207425000553485,
+          0.00041237099503632635,
+          0.0008290520054288208
         ],
         "counters": [
           {
@@ -2938,6 +2918,134 @@
           },
           {
             "cancelled": 4000
+          }
+        ]
+      }
+    },
+    "replace-reused-response-headers": {
+      "contract": {
+        "group": "metal-http1",
+        "stage": "egress",
+        "axis": "middleware headers accumulated on a reused response",
+        "assumption": "built-in egress header replacement is linear and leaves one current value",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "replace-reused-response-headers",
+        "group": "metal-http1",
+        "stage": "egress",
+        "axis": "middleware headers accumulated on a reused response",
+        "assumption": "built-in egress header replacement is linear and leaves one current value",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.979,
+        "tail_exponent": 0.988,
+        "local_exponents": [
+          0.958,
+          0.994,
+          0.981
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "seconds": [
+          9.209800191456452e-05,
+          0.0001788869994925335,
+          0.000356353004463017,
+          0.0007033869987935759
+        ],
+        "counters": [
+          {
+            "remaining_headers": 3
+          },
+          {
+            "remaining_headers": 3
+          },
+          {
+            "remaining_headers": 3
+          },
+          {
+            "remaining_headers": 3
+          }
+        ]
+      }
+    },
+    "reused-response-lifecycle": {
+      "contract": {
+        "group": "metal-http1",
+        "stage": "egress",
+        "axis": "requests returning the same mutable response",
+        "assumption": "the standard middleware lifecycle is linear in sends and keeps headers bounded",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "metric": null,
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "todo": null
+      },
+      "observation": {
+        "probe": "reused-response-lifecycle",
+        "group": "metal-http1",
+        "stage": "egress",
+        "axis": "requests returning the same mutable response",
+        "assumption": "the standard middleware lifecycle is linear in sends and keeps headers bounded",
+        "expect_exponent": 1.0,
+        "tolerance": 0.5,
+        "fitted_exponent": 0.946,
+        "tail_exponent": 0.935,
+        "local_exponents": [
+          0.969,
+          0.948,
+          0.922
+        ],
+        "class": "O(n)",
+        "degree_name": "linear",
+        "todo": null,
+        "status": "PASS",
+        "sizes": [
+          250,
+          500,
+          1000,
+          2000
+        ],
+        "seconds": [
+          0.003854169000987895,
+          0.007542048995674122,
+          0.01454922999982955,
+          0.027558046000194736
+        ],
+        "counters": [
+          {
+            "retained_headers": 12
+          },
+          {
+            "retained_headers": 12
+          },
+          {
+            "retained_headers": 12
+          },
+          {
+            "retained_headers": 12
           }
         ]
       }

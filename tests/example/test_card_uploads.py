@@ -128,6 +128,64 @@ async def mint(client, headers, deployment_id: int = DEPLOYMENT) -> dict:
     return response.json()
 
 
+def test_ingest_refuses_a_compression_bomb_before_writing(monkeypatch) -> None:
+    """The real ingest handler passes its card-specific extraction budget."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from camera_trap import tasks
+    from camera_trap.media import card_key, image_prefix
+
+    from wreath.objects import MemoryObjectStore, ZipExtractionLimits
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("payload.bin", b"A" * (1024 * 1024))
+
+    class Runner:
+        def task(self, _name, **_options):
+            def capture(handler):
+                self.handler = handler
+                return handler
+            return capture
+
+    class Session:
+        async def close(self):
+            pass
+
+    async def locate(_session, _deployment_id):
+        return SimpleNamespace(card_serial="CARD-1"), "reserve"
+
+    async def go():
+        store = MemoryObjectStore()
+        source = card_key("reserve", DEPLOYMENT, "CARD-1")
+        await store.write(source, buffer.getvalue())
+        runner = Runner()
+        monkeypatch.setattr(tasks, "Session", lambda *_args: Session())
+        monkeypatch.setattr(tasks, "_locate", locate)
+        monkeypatch.setattr(
+            tasks,
+            "CARD_EXTRACTION_LIMITS",
+            ZipExtractionLimits(
+                max_archive_bytes=64 * 1024,
+                max_entries=8,
+                max_entry_bytes=64 * 1024,
+                max_total_bytes=128 * 1024,
+            ),
+        )
+        tasks.register(runner, object(), store)
+        try:
+            await runner.handler(SimpleNamespace(report=lambda *_args: None), DEPLOYMENT)
+        except tasks.IngestRefused as error:
+            assert "payload.bin" in str(error)
+        else:
+            raise AssertionError("camera-trap ingest accepted a compression bomb")
+        prefix = image_prefix("reserve", DEPLOYMENT)
+        assert [stat async for stat in store.list(prefix=prefix)] == []
+
+    asyncio.run(go())
+
+
 # --- who may mint ------------------------------------------------------------
 
 

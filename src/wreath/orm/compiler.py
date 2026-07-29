@@ -16,7 +16,7 @@ import re
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from .._native import _core
 from .errors import DeclarationError, ORMError
@@ -345,6 +345,104 @@ def _append_bind_paths(
     raise ORMError(f"cannot compile bind extraction for {type(node).__name__}")
 
 
+def _append_declared_values(
+    node: Expression,
+    placeholder: type,
+    program: list[tuple[str, Any, Any]],
+) -> None:
+    """Record runtime parameters and fixed literals in SQL bind order."""
+    if isinstance(node, placeholder):
+        declared: Any = node
+        program.append(("parameter", declared.pg_type, declared.name))
+        return
+    if isinstance(node, ValueExpr):
+        program.append(("literal", node.pg_type, node.value))
+        return
+    if isinstance(node, BinaryExpr):
+        _append_declared_values(node.left, placeholder, program)
+        _append_declared_values(node.right, placeholder, program)
+        return
+    if isinstance(node, InExpr):
+        _append_declared_values(node.left, placeholder, program)
+        for item in node.values:
+            _append_declared_values(item, placeholder, program)
+        return
+    if isinstance(node, InSubqueryExpr):
+        _append_declared_values(node.left, placeholder, program)
+        for predicate in node.select.predicates:
+            _append_declared_values(predicate, placeholder, program)
+        return
+    if isinstance(node, BooleanExpr):
+        for operand in node.operands:
+            _append_declared_values(operand, placeholder, program)
+        return
+    if isinstance(node, UnaryExpr):
+        _append_declared_values(node.operand, placeholder, program)
+        return
+    if isinstance(node, ColumnExpr):
+        return
+    raise ORMError(f"cannot compile declared binds for {type(node).__name__}")
+
+
+def compile_declared_values(
+    select: Select, placeholder: type
+) -> Callable[[dict[str, Any]], tuple[Any, ...]]:
+    """Compile direct parameter-to-wire extraction for a declared query.
+
+    Unlike the ordinary cached-plan binder, this program does not need a newly
+    rebound `Select`: fixed literals come from the declaration and named
+    placeholders read the call's value mapping directly. Parameter names are
+    identifiers validated by `Param`; they enter generated source only through
+    `repr`, while types and literal values stay in the closed namespace.
+    """
+    program: list[tuple[str, Any, Any]] = []
+    for predicate in select.predicates:
+        _append_declared_values(predicate, placeholder, program)
+
+    types: list[Any] = []
+    literals: list[Any] = []
+    lines = ["def extract(values):"]
+    expressions: list[str] = []
+    for index, (kind, pg_type, value) in enumerate(program):
+        type_index = len(types)
+        types.append(pg_type)
+        if kind == "parameter":
+            if not isinstance(value, str) or not value.isidentifier():
+                raise ValueError(
+                    f"refusing to generate a binder for parameter {value!r}"
+                )
+            lines.extend(
+                (
+                    "    try:",
+                    f"        value_{index} = _types[{type_index}].coerce(values[{value!r}])",
+                    "    except (TypeError, ValueError, OverflowError) as error:",
+                    f"        raise type(error)(\"parameter {value!r}: \" + str(error)) from error",
+                )
+            )
+            expressions.append(
+                f"_types[{type_index}].to_wire(value_{index})"
+            )
+        else:
+            literal_index = len(literals)
+            literals.append(value)
+            expressions.append(
+                f"_types[{type_index}].to_wire(_literals[{literal_index}])"
+            )
+    if select.limit_ is not None:
+        expressions.append(repr(select.limit_))
+    if select.offset_ is not None:
+        expressions.append(repr(select.offset_))
+    body = ", ".join(expressions)
+    if len(expressions) == 1:
+        body += ","
+    lines.append(f"    return ({body})")
+    namespace = {"_types": tuple(types), "_literals": tuple(literals)}
+    exec(  # noqa: S102 -- names are identifier-checked and values stay closed over
+        "\n".join(lines), namespace
+    )
+    return cast(Callable[[dict[str, Any]], tuple[Any, ...]], namespace["extract"])
+
+
 
 def _generated_names(body: str) -> list[str]:
     """The bare names a generated extractor body refers to.
@@ -577,6 +675,13 @@ def compile_select(registry: Any, select: Select) -> CompiledQuery:
     if plan is None:
         plan = registry.store_plan(shape_key, _build_plan(registry, select, spec))
     values = plan.bind_program(select)
+    return _bind_cached_plan(plan, shape_key, values)
+
+
+def _bind_cached_plan(
+    plan: _CachedPlan, shape_key: bytes, values: tuple[Any, ...]
+) -> CompiledQuery:
+    """Attach this execution's values to an already selected immutable plan."""
     if len(values) > MAX_BIND_PARAMETERS:
         raise ORMError(
             f"query needs {len(values)} bind parameters, above PostgreSQL's "
@@ -1322,6 +1427,7 @@ __all__ = [
     "SqlBuilder",
     "check_predicate_columns",
     "compile_count",
+    "compile_declared_values",
     "compile_rebind",
     "compile_select",
     "conjoin",

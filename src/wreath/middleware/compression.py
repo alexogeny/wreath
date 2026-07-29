@@ -81,13 +81,20 @@ class CompressionMiddleware:
         minimum_size: Smallest in-memory body to compress, in bytes.
         gzip_level: zlib compression level from 0 to 9.
         compress_streaming: Compress streaming responses as chunks are produced.
+        compress_authenticated: Opt identified callers into compression despite
+            the response-length side channel. False by default.
 
     Raises:
         ValueError: `minimum_size` is negative, or `gzip_level` is outside 0-9.
     """
 
     global_scope = True
-    __slots__ = ("compress_streaming", "gzip_level", "minimum_size")
+    __slots__ = (
+        "compress_authenticated",
+        "compress_streaming",
+        "gzip_level",
+        "minimum_size",
+    )
 
     def __init__(
         self,
@@ -95,6 +102,7 @@ class CompressionMiddleware:
         minimum_size: int = 1024,
         gzip_level: int = 5,
         compress_streaming: bool = True,
+        compress_authenticated: bool = False,
     ) -> None:
         if minimum_size < 0:
             raise ValueError("minimum_size must be non-negative")
@@ -103,6 +111,7 @@ class CompressionMiddleware:
         self.minimum_size = minimum_size
         self.gzip_level = gzip_level
         self.compress_streaming = compress_streaming
+        self.compress_authenticated = compress_authenticated
 
     async def after(self, request: Request, response):
         """Compress the response when every eligibility condition holds.
@@ -112,6 +121,11 @@ class CompressionMiddleware:
         does its work as the response is sent.
         """
         if request.method == "HEAD" or response.status in _BODYLESS or response.status == 206:
+            return response
+        # Compression length is an oracle when one body contains both secrets and
+        # attacker-controlled reflection (BREACH). Identified responses therefore
+        # require an explicit opt-in; public responses keep the existing fast path.
+        if request.identity is not None and not self.compress_authenticated:
             return response
         headers = response.headers
         accepted = find_header(request.headers, b"accept-encoding")

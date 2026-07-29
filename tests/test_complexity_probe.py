@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from wreath._devtools.complexity_probe import (
+    _REGISTRY,
     Probe,
     Result,
     Todo,
@@ -201,3 +202,23 @@ def test_degree_names_reach_past_cubic() -> None:
     assert degree_name(3.9) == "quartic"
     assert degree_name(5.1) == "quintic"
     assert degree_name(6.0) == "sextic"
+
+
+def test_fixed_timing_wheel_collision_probe_is_a_linear_contract() -> None:
+    wheel = _REGISTRY["wheel-colliding-slot-chain"]
+
+    assert wheel.todo is None
+    assert wheel.expect == 1.0
+
+
+def test_reused_response_header_replacement_is_a_linear_contract() -> None:
+    replacement = _REGISTRY["replace-reused-response-headers"]
+
+    assert replacement.todo is None
+    assert replacement.expect == 1.0
+    assert replacement.axis == "middleware headers accumulated on a reused response"
+
+    lifecycle = _REGISTRY["reused-response-lifecycle"]
+    assert lifecycle.todo is None
+    assert lifecycle.expect == 1.0
+    assert lifecycle.axis == "requests returning the same mutable response"

@@ -45,6 +45,7 @@ class RunOptions:
     max_header_count: int
     max_header_bytes: int
     max_body_bytes: int
+    max_body_chunks: int
     read_high_water: int
     read_high_water_messages: int
     response_high_water: int
@@ -88,6 +89,7 @@ class RunOptions:
                 max_header_count=self.max_header_count,
                 max_header_bytes=self.max_header_bytes,
                 max_body_bytes=self.max_body_bytes,
+                max_body_chunks=self.max_body_chunks,
                 read_high_water=self.read_high_water,
                 read_high_water_messages=self.read_high_water_messages,
                 response_high_water=self.response_high_water,
@@ -157,6 +159,7 @@ def _add_server_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-header-count", type=int, default=defaults.max_header_count)
     parser.add_argument("--max-header-bytes", type=int, default=defaults.max_header_bytes)
     parser.add_argument("--max-body-bytes", type=int, default=defaults.max_body_bytes)
+    parser.add_argument("--max-body-chunks", type=int, default=defaults.max_body_chunks)
     parser.add_argument("--read-high-water", type=int, default=defaults.read_high_water)
     parser.add_argument(
         "--read-high-water-messages", type=int, default=defaults.read_high_water_messages
@@ -460,7 +463,56 @@ def build_parser() -> argparse.ArgumentParser:
     _add_replay_parser(commands)
     _add_passes_parser(commands)
     _add_schema_parser(commands)
+    _add_flight_parser(commands)
     return parser
+
+
+def _add_flight_parser(commands: Any) -> None:
+    """`wreath flight read` -- what the recorder still held when it died.
+
+    The one command here that is used *after* something has gone wrong, and the
+    only one that needs no running server: a ring file is a mapping the dead
+    process left behind, and reading it is a file operation.
+    """
+    flight_parser = commands.add_parser(
+        "flight", help="read a flight recorder ring file left behind by a crash"
+    )
+    actions = flight_parser.add_subparsers(dest="flight_action", required=True)
+
+    read = actions.add_parser(
+        "read", help="decode the records a ring file still held"
+    )
+    read.add_argument("path", help="the file the recorder mapped its ring from")
+    read.add_argument(
+        "--kind", default=None,
+        choices=("completion", "correlation", "phase", "log"),
+        help="show only records of one kind",
+    )
+    read.add_argument("--limit", type=int, default=50,
+                     help="records to print (0 = all)")
+    read.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="print JSON instead of a human summary",
+    )
+
+    reproduce = actions.add_parser(
+        "replay",
+        help="re-drive a recorded request and check it retraces the crash",
+    )
+    reproduce.add_argument("path", help="the ring file the crash left behind")
+    reproduce.add_argument("recording", help="a WTR1 transport recording of the request")
+    reproduce.add_argument("target", help="the application, as module:attribute")
+    reproduce.add_argument("--factory", default=None,
+                           help="callable that builds the application")
+    reproduce.add_argument(
+        "--request-id", type=int, default=None,
+        help="which request from the ring to check against (default: the one "
+             "that was in flight)",
+    )
+    reproduce.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="print JSON instead of a human summary",
+    )
 
 
 def _add_schema_parser(commands: Any) -> None:
@@ -732,6 +784,7 @@ def options_from_namespace(namespace: argparse.Namespace) -> RunOptions:
         max_header_count=namespace.max_header_count,
         max_header_bytes=namespace.max_header_bytes,
         max_body_bytes=namespace.max_body_bytes,
+        max_body_chunks=namespace.max_body_chunks,
         read_high_water=namespace.read_high_water,
         read_high_water_messages=namespace.read_high_water_messages,
         response_high_water=namespace.response_high_water,
@@ -1800,6 +1853,169 @@ def _print_projector_loss(loss: dict | None) -> None:
         print(f"  projector loss: {nonzero}")
 
 
+def _execute_flight_replay(namespace: argparse.Namespace) -> int:
+    """Re-drive a recorded request and say whether it retraced the crash.
+
+    The ring file names the request that was in flight and the call sites it had
+    reached; it does not hold the request's bytes, so the recording supplies
+    those. What joins them is the sequence of sites: a replay that emits the
+    same ones in the same order went where the dead process went.
+
+    Exit code 1 when the replay diverges, so this is usable as the check in a
+    loop -- "did my fix change the path?" is a question with a yes and a no.
+    """
+    import asyncio
+    import json as _json
+
+    from . import replay as rp
+    from .recording import read_ring_file
+
+    ring = read_ring_file(namespace.path)
+    app = load_application(namespace.target, factory=namespace.factory)
+    try:
+        outcome = asyncio.run(
+            rp.reproduce_from_ring(
+                app,
+                ring,
+                rp.open_recording(namespace.recording),
+                request_id=namespace.request_id,
+            )
+        )
+    except rp.ReplayError as error:
+        # "no request was in flight", "more than one was", "that one logged
+        # nothing" -- all usage problems with a specific answer, and none of
+        # them worth a traceback at someone reading a crash file.
+        raise CliError(str(error), exit_code=2) from error
+
+    if namespace.as_json:
+        print(_json.dumps({
+            "schema_version": 1,
+            "request_id": outcome.request_id,
+            "reproduced": outcome.reproduced,
+            "diverged_at": outcome.diverged_at,
+            "expected_sites": list(outcome.expected),
+            "observed_sites": list(outcome.observed),
+            "terminal": outcome.result.terminal,
+        }, indent=2))
+        return 0 if outcome.reproduced else 1
+
+    print(f"request {outcome.request_id} was in flight when the process died")
+    print(f"  it had reached {len(outcome.expected)} log call site(s)")
+    print(f"  the replay reached {len(outcome.observed)}")
+    if outcome.reproduced:
+        print("  the replay retraced the whole recorded path")
+        if len(outcome.observed) > len(outcome.expected):
+            print("  and went further, which is expected: the file stops where "
+                  "the process stopped, not where the request would have")
+    else:
+        print(f"  they diverge at site {outcome.diverged_at}")
+        print(f"    crash file: {list(outcome.expected)}")
+        print(f"    replay:     {list(outcome.observed)}")
+        if outcome.diverged_at == 0:
+            # Only here. A divergence further in is a real behaviour change and
+            # saying "wrong build?" at it would send someone chasing the
+            # environment instead of reading their own diff.
+            print("  diverging at the very first site usually means this is not "
+                  "the build that crashed -- a site id is import order, not an "
+                  "identity, so two builds share none of them")
+    print(f"  the replayed connection ended {outcome.result.terminal}")
+    return 0 if outcome.reproduced else 1
+
+
+def execute_flight(namespace: argparse.Namespace) -> int:
+    """Decode a ring file and report what it held -- and what it could not.
+
+    The counts are printed *first*, and deliberately. A crash file read as if it
+    were complete is worse than one nobody read: a ring that was full has
+    dropped exactly the records nearest the failure, and a reader who does not
+    see that count will conclude the last thing in the file was the last thing
+    that happened.
+    """
+    import json as _json
+
+    from ._flight_schema import EventKind, LossReason
+    from .recording import read_ring_file
+
+    if namespace.flight_action == "replay":
+        return _execute_flight_replay(namespace)
+
+    ring = read_ring_file(namespace.path)
+    header = ring.header
+    kinds = {
+        "completion": EventKind.COMPLETION,
+        "correlation": EventKind.CORRELATION,
+        "phase": EventKind.PHASE,
+        "log": EventKind.LOG,
+    }
+    records = (
+        ring.records if namespace.kind is None else ring.of_kind(kinds[namespace.kind])
+    )
+    shown = records if namespace.limit == 0 else records[: namespace.limit]
+    losses = {
+        reason.name.lower(): header.loss(reason)
+        for reason in LossReason
+        if header.loss(reason)
+    }
+
+    if namespace.as_json:
+        print(
+            _json.dumps(
+                {
+                    "schema_version": 1,
+                    "pid": header.pid,
+                    "worker_id": header.worker_id,
+                    "ring_records": header.ring_records,
+                    "head": header.head,
+                    "tail": header.tail,
+                    "live": ring.live,
+                    "drained": ring.drained,
+                    "undecodable": ring.undecodable,
+                    "cursors_inconsistent": ring.cursors_inconsistent,
+                    "created_unix_nano": header.created_unix_nano,
+                    "losses": losses,
+                    "records": [
+                        {
+                            "sequence": record.sequence,
+                            "kind": EventKind(record.kind).name,
+                            "record": repr(record.decode()),
+                        }
+                        for record in shown
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print(f"ring file {namespace.path}")
+    print(f"  written by pid {header.pid}, worker {header.worker_id}")
+    print(f"  ring of {header.ring_records} records; head {header.head}, "
+          f"tail {header.tail}")
+    print(f"  {ring.live} recovered, {ring.drained} already drained "
+          f"(look for those in the recording's EVNT stream)")
+    if ring.undecodable:
+        print(f"  {ring.undecodable} slot(s) did not decode -- a cell half-written "
+              "as the process died")
+    if ring.cursors_inconsistent:
+        print("  the head/tail pair was torn mid-update; the window was clamped")
+    if losses:
+        print("  the worker dropped:")
+        for name, count in losses.items():
+            print(f"    {name:24s} {count}")
+        if ring.ring_full_drops:
+            print("    ^ a full ring refuses rather than overwrites, so the "
+                  "records nearest the crash may be the missing ones")
+    else:
+        print("  the worker dropped nothing")
+    print()
+    for record in shown:
+        print(f"  {record.sequence:>8}  {EventKind(record.kind).name:<12} "
+              f"{record.decode()}")
+    if len(records) > len(shown):
+        print(f"  ... {len(records) - len(shown)} more (--limit 0 for all)")
+    return 0
+
+
 def execute_replay(namespace: argparse.Namespace) -> int:
     """Run a transport or endpoint-plan replay and print the owned outcome.
 
@@ -1917,6 +2133,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return execute_capture(namespace)
         if namespace.command == "replay":
             return execute_replay(namespace)
+        if namespace.command == "flight":
+            try:
+                return execute_flight(namespace)
+            except (OSError, ValueError) as error:
+                # SchemaError is a ValueError: an unreadable ring file is a
+                # usage-level failure, not a traceback at someone whose process
+                # has already crashed once today.
+                raise CliError(str(error), exit_code=2) from error
         if namespace.command == "passes":
             try:
                 return execute_passes(namespace)

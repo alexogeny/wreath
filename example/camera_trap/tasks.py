@@ -26,7 +26,7 @@ import datetime
 import zipfile
 from typing import Any
 
-from wreath.objects import ObjectError, unzip_stream
+from wreath.objects import ObjectError, ZipExtractionLimits, unzip_stream
 from wreath.orm import Registry, Session
 
 from .media import card_key, image_prefix
@@ -36,6 +36,17 @@ from .models import Deployment, Reserve, Station
 #: registration decorates by string, and two spellings of one name is exactly
 #: the bug `JobRunner` raises `KeyError: unknown task` for.
 INGEST_CARD = "ingest_card"
+
+#: The upload and extraction budgets for one card. JPEGs are already compressed,
+#: so legitimate card archives should stay close to their expanded size; these
+#: ceilings still allow a large field card while refusing compression bombs.
+MAX_CARD_BYTES = 64 * 1024 * 1024
+CARD_EXTRACTION_LIMITS = ZipExtractionLimits(
+    max_archive_bytes=MAX_CARD_BYTES,
+    max_entries=4096,
+    max_entry_bytes=32 * 1024 * 1024,
+    max_total_bytes=128 * 1024 * 1024,
+)
 
 #: The runner's queue name, and the schema its tables live in.
 #:
@@ -146,14 +157,18 @@ def register(runner: Any, registry: Registry, store: Any) -> None:
             prefix = image_prefix(slug, deployment_id)
             ctx.report(20, "unpacking")
             try:
-                written = await unzip_stream(store, archive, prefix=prefix)
+                written = await unzip_stream(
+                    store,
+                    archive,
+                    prefix=prefix,
+                    limits=CARD_EXTRACTION_LIMITS,
+                )
             except ObjectError as error:
-                # An entry name the store refuses -- a `../` traversal, or an
-                # empty name. Converted rather than propagated so the field
-                # team is told the card is bad, not handed a store-internal
-                # error about key normalisation.
+                # Traversing names and resource-limit violations are both facts
+                # about this archive. Convert them to one permanent job failure
+                # rather than leaking a store-internal exception or retrying.
                 raise IngestRefused(
-                    f"card {deployment.card_serial} holds an unusable entry name: {error}"
+                    f"card {deployment.card_serial} archive was refused: {error}"
                 ) from error
             except zipfile.BadZipFile as error:
                 # Truncated, or never a zip. Named separately from `ObjectError`

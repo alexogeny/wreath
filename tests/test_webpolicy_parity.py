@@ -10,6 +10,9 @@ def test_native_webpolicy_exports_when_core_is_built() -> None:
     if _core is not None:
         assert hasattr(_core, "select_content_encoding")
         assert hasattr(_core, "append_vary")
+        assert hasattr(_core, "replace_response_header")
+        assert hasattr(_core, "replace_cookie")
+        assert hasattr(_core, "replace_server_timing")
 
 
 @pytest.mark.parametrize(
@@ -65,6 +68,33 @@ def test_header_mutations() -> None:
         _core.replace_content_length(native_headers, 12)
         _core.append_vary(native_headers, b"Accept-Encoding")
         assert native_headers == headers
+
+
+def test_bounded_response_header_mutations_native_pure_parity() -> None:
+    initial = [
+        (b"X-Request-ID", b"old"),
+        (b"set-cookie", b"session=keep; Path=/"),
+        (b"set-cookie", b"wreath_csrf=old; Path=/"),
+        (b"server-timing", b"db;dur=2, total;dur=9"),
+        (b"server-timing", b"cache;dur=1"),
+        (b"x-request-id", b"duplicate"),
+    ]
+    expected = initial.copy()
+    pure.replace_response_header(expected, b"x-request-id", b"new")
+    pure.replace_cookie(expected, b"wreath_csrf=", b"wreath_csrf=new; Path=/")
+    pure.replace_server_timing(expected, b"total", b"total;dur=3")
+    assert expected == [
+        (b"set-cookie", b"session=keep; Path=/"),
+        (b"x-request-id", b"new"),
+        (b"set-cookie", b"wreath_csrf=new; Path=/"),
+        (b"server-timing", b"db;dur=2, cache;dur=1, total;dur=3"),
+    ]
+    if _core is not None:
+        native = initial.copy()
+        _core.replace_response_header(native, b"x-request-id", b"new")
+        _core.replace_cookie(native, b"wreath_csrf=", b"wreath_csrf=new; Path=/")
+        _core.replace_server_timing(native, b"total", b"total;dur=3")
+        assert native == expected
 
 
 def test_append_missing_headers_native_pure_parity() -> None:

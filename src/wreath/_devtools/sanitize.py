@@ -238,9 +238,9 @@ def run_target(
     outcome.passed = int(summary.group(1)) if summary else 0
 
     outcome.leak_records, outcome.attributed = _attribute(text, lib)
-    outcome.errors = [
+    outcome.errors.extend(
         line.strip() for line in text.splitlines() if _SANITIZER_ERROR.search(line)
-    ]
+    )
     # A leak *summary* is not an error unless a frame was ours; drop the ones
     # the attribution already accounted for so the count is not double-reported.
     # A LeakSanitizer summary is never a failure on its own; `main` explains why.

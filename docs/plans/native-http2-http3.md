@@ -234,7 +234,12 @@ scope["http_version"] == "2"
 scope["scheme"] == "https"
 ```
 
-Pseudo-headers do not appear in `scope["headers"]`. `:authority` maps to a `host` header only when no regular host field is present, following ASGI HTTP specification behavior. Preserve duplicate ordinary headers and their order.
+Pseudo-headers do not appear in `scope["headers"]`. `:authority` maps to a
+`host` header when no regular host field is present. An explicit regular `host`
+is preserved only when it identifies the same normalized authority; a mismatch
+is a stream protocol error so routing and application policy cannot select two
+different tenants. Preserve duplicate ordinary headers and their order, except
+for `host`, which is singular.
 
 Run `h2spec` against the network server after the in-process suite passes. Check its version into benchmark/test metadata and store raw output under the test artifact directory. No mandatory h2spec section may fail or be excluded without a written scope justification in this plan.
 

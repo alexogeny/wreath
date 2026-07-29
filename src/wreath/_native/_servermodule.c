@@ -20,6 +20,14 @@ static WreathHttp1CAPI http1_capi = {
     wreath_http1_feed_external,
 };
 
+static WreathHttp2CAPI http2_capi = {
+    WREATH_HTTP2_CAPI_VERSION,
+    wreath_http2_protocol_check,
+    wreath_http2_acquire_read_buffer,
+    wreath_http2_commit_read,
+    wreath_http2_feed_external,
+};
+
 static PyModuleDef server_module = {
     PyModuleDef_HEAD_INIT,
     .m_name = "wreath._native._server",
@@ -67,6 +75,7 @@ PyInit__server(void)
     PyObject *protocol_type;
     PyObject *request_capsule;
     PyObject *http1_capsule;
+    PyObject *http2_capsule;
 
     module = PyModule_Create(&server_module);
     if (module == NULL) {
@@ -144,6 +153,14 @@ PyInit__server(void)
     /* Register the HTTP/2 protocol type (server_http2.c) and build the shared
      * HPACK Huffman decode tree. */
     if (wreath_http2_ready(module) < 0) {
+        disconnect_error = NULL;
+        Py_DECREF(module);
+        return NULL;
+    }
+    http2_capsule = PyCapsule_New(&http2_capi, WREATH_HTTP2_CAPI_NAME, NULL);
+    if (http2_capsule == NULL ||
+        PyModule_AddObject(module, "_HTTP2_C_API", http2_capsule) < 0) {
+        Py_XDECREF(http2_capsule);
         disconnect_error = NULL;
         Py_DECREF(module);
         return NULL;

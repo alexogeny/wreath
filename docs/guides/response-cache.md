@@ -162,6 +162,11 @@ fills the store and evicts everything real:
 @cached(ttl=30, query_params=("page", "size"))   # only these reach the key
 ```
 
+The named parameters are parsed and then encoded component by component, so an
+encoded `&` or `=` remains part of its value rather than impersonating another
+field in the cache key. This shorthand still builds a shared/public key: an
+identified request bypasses it just as it bypasses the default key.
+
 The default key has no notion of *who* is asking, so it is a **shared/public**
 cache. If a response depends on the caller, either don't cache it, or pass a key
 that includes the principal:

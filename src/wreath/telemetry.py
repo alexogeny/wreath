@@ -82,23 +82,34 @@ _ACTIVE_SLOT_BYTES = 128
 #: A single log2 histogram is HISTOGRAM_BUCKETS 64-bit counters.
 _HISTOGRAM_BYTES = HISTOGRAM_BUCKETS * 8
 
-# --- logging's fixed tables (provisional, Python-object estimates) ----------
+# --- logging's fixed tables (measured Python-object footprints) -------------
 #
-# Measured shapes, not guesses at nothing: an interned `LogSite` is a slots
-# dataclass holding six attributes plus a tuple of `LogField`s; a limiter slot
-# is three ints; a queued record is a slots dataclass around one `LogCell`.
-# They are estimates because CPython object overhead is not a wire format --
-# see `MemoryBudget.logging`.
+# These four were guesses at plausible shapes until `benchmarks/bench_logging.py
+# --suite memory` measured them: it builds each table at its default capacity
+# and reads `tracemalloc`'s *current* allocation across the build, so a
+# builder's temporaries do not count and what remains is what the table costs to
+# hold. Three of the four guesses were low -- a limiter slot by 1.6x, a queued
+# record by 1.6x, a buffered record by 1.3x -- and low is the dangerous
+# direction for a budget, because it under-reports what a configuration will
+# actually reserve. Each is now the measured figure rounded up.
+#
+# They remain estimates rather than exact reservations, and the emitter moving
+# to C did not change that: these describe Python *tables*, not the packing.
+# Re-measure with the suite above when the objects change shape.
 
 #: One interned call site: the site object, its template and event-name strings,
-#: and a couple of declared fields.
-_LOG_SITE_BYTES = 512
-#: One limiter slot: tick, count, dropped.
-_LOG_LIMITER_SLOT_BYTES = 96
-#: One queued record awaiting the writer.
-_LOG_QUEUED_RECORD_BYTES = 256
+#: its declared fields, and the flattened spec blob the native emitter walks.
+#: Measured 425.9B at capacity 4096 on CPython 3.14 (2026-07-28).
+_LOG_SITE_BYTES = 448
+#: One limiter slot: tick, count, dropped, plus its dict entry.
+#: Measured 153.3B.
+_LOG_LIMITER_SLOT_BYTES = 160
+#: One queued record awaiting the writer: a `ProjectedLog` around one `LogCell`
+#: around its packed `LogArg`s. Measured 405.5B.
+_LOG_QUEUED_RECORD_BYTES = 416
 #: One buffered TRACE/DEBUG record held for a possible promotion.
-_LOG_SCRATCH_RECORD_BYTES = 256
+#: Measured 335.1B.
+_LOG_SCRATCH_RECORD_BYTES = 352
 
 
 class TelemetryConfigError(ValueError):
@@ -268,10 +279,16 @@ class MemoryBudget:
     #: **This one is an estimate, and the others are not.** The recorder's
     #: reservations above are exact because native code allocates exactly that
     #: many bytes; logging's tables are Python objects, so this is their
-    #: approximate footprint from the provisional per-entry constants below. It
-    #: is here rather than absent because a budget that silently omits a
-    #: component is worse than one that says which part it is estimating -- and
-    #: it becomes exact when the emitter moves to C.
+    #: approximate footprint from the per-entry constants above. It is here
+    #: rather than absent because a budget that silently omits a component is
+    #: worse than one that says which part it is estimating.
+    #:
+    #: It used to say it would become exact once the emitter moved to C. The
+    #: emitter has, and it did not: what these constants describe is the site
+    #: table, the limiter, the writer queue and the per-request scratch, none of
+    #: which were ever the packing. They are measured now instead --
+    #: `benchmarks/bench_logging.py --suite memory` -- which is the honest
+    #: version of the same intent.
     logging: int = 0
 
     @property
@@ -319,6 +336,16 @@ class TelemetryConfig:
     #: Preallocated forensic capture, only meaningful in Forensic mode.
     capture_slabs: int = 0
     slab_bytes: int = 64 * 1024
+    #: Map the ring from this file instead of the heap, so the records survive a
+    #: process that dies badly. Deliberately **not** tied to Forensic mode: a
+    #: crash is worth reconstructing whether or not anyone armed request
+    #: capture, and requiring `Mode.FORENSIC` would mean paying for slab pools
+    #: and redaction machinery to answer "what was it doing when it died".
+    #:
+    #: This is not durability. The mapping survives the *process*; it does not
+    #: survive a machine losing power before the pages are written back. Read it
+    #: with `wreath.recording.read_ring_file`, or `wreath flight read`.
+    ring_path: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.mode, Mode):
@@ -341,6 +368,11 @@ class TelemetryConfig:
         _require(self.capture_slabs >= 0, "capture_slabs must be >= 0")
         _require(self.capture_slabs <= _MAX_CAPTURE_SLABS, "capture_slabs is too large")
         _require(self.slab_bytes >= 0, "slab_bytes must be >= 0")
+
+        _require(
+            self.ring_path is None or self.ring_records > 0,
+            "ring_path maps the ring from a file, so it needs a non-empty ring",
+        )
 
         if self.mode is Mode.OFF:
             return

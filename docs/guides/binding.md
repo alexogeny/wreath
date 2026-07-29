@@ -1,3 +1,6 @@
+---
+keywords: query parameters, query string, path parameters, url parameters, headers, cookies, form data, file uploads, request body, validation, dependency injection, querystring, url params, get parameters
+---
 # Binding, validation, and dependencies
 
 Binding is where a raw HTTP request becomes the clean, typed arguments your

@@ -43,6 +43,7 @@ from ._userkit import (  # re-export the stdlib-only surface
 )
 from .binding import Body, Path
 from .cache import BoundedCache
+from .middleware.sessions import rotate_session
 from .response import JSONResponse
 from .router import Router
 
@@ -308,6 +309,8 @@ def user_router(
     sessions: Any = None,
     max_login_attempts: int = 10,
     login_window: float = 300.0,
+    max_reset_requests: int = 3,
+    reset_window: float = 15 * 60.0,
 ) -> Router:
     """Build a mountable `Router` with the full user lifecycle.
 
@@ -326,9 +329,11 @@ def user_router(
     holding; without it the reset changes the credential and nothing more.
 
     `max_login_attempts`/`login_window` throttle failed sign-ins per identifier
-    -- in this router only. `wreath._userkit.authenticate` stays unguarded for
-    direct callers, and `LoginLimiter` documents what the throttle does and does
-    not protect (in particular that it is per-process).
+    -- in this router only. `max_reset_requests`/`reset_window` independently
+    bound reset-email issuance per normalized identifier while preserving the
+    uniform response. `wreath._userkit.authenticate` stays unguarded for direct
+    callers, and `LoginLimiter` documents what the throttle does and does not
+    protect (in particular that it is per-process).
 
     No response here reveals whether an account exists. Register answers 202 and
     forgot-password answers 200 either way, a failed login answers 401
@@ -353,6 +358,10 @@ def user_router(
     links = link_builder if link_builder is not None else _default_link(base_url, prefix)
     router = Router(prefix=prefix, tags=("users",))
     limiter = LoginLimiter(max_attempts=max_login_attempts, window=login_window)
+    reset_limiter = LoginLimiter(
+        max_attempts=max_reset_requests,
+        window=reset_window,
+    )
 
     def _session(request: Any) -> dict[str, Any] | None:
         return getattr(request.state, "session", None)
@@ -386,6 +395,7 @@ def user_router(
             limiter.record_failure(identifier)
             return JSONResponse({"error": "invalid_credentials"}, status=401)
         limiter.record_success(identifier)
+        rotate_session(request)
         session[session_key] = {"sub": user.id, "type": "User", "roles": []}
         return JSONResponse(_profile(user), status=200)
 
@@ -410,11 +420,16 @@ def user_router(
 
     @router.post("/forgot-password")
     async def forgot(request: Any, data: Annotated[ForgotInput, Body()]):
-        await _userkit.start_password_reset(
-            store, mailer, secret=secret, email=data.email,
-            link_builder=links, ttl=reset_ttl,
-        )
-        # Uniform response regardless of whether the account exists.
+        identifier = data.email.strip().lower()
+        if reset_limiter.allow(identifier):
+            # Count issuance attempts whether or not the account exists, keeping
+            # both the response and the work decision free of enumeration clues.
+            reset_limiter.record_failure(identifier)
+            await _userkit.start_password_reset(
+                store, mailer, secret=secret, email=data.email,
+                link_builder=links, ttl=reset_ttl,
+            )
+        # Uniform response for absent accounts and exhausted issuance budgets.
         return JSONResponse({"status": "reset_email_sent"}, status=200)
 
     @router.post("/reset-password")

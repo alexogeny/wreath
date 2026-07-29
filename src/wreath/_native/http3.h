@@ -59,6 +59,7 @@ typedef struct {
     PyObject *header_list;       /* list[(name,value)] during header assembly */
     PyObject *body_buffer;       /* bytearray coalescing queued request DATA */
     Py_ssize_t body_received;    /* request payload bytes accepted for this stream */
+    Py_ssize_t body_frames;      /* non-empty DATA callbacks accepted */
     PyObject *receive_waiter;    /* Future or NULL */
     int request_ended;
     int disconnected;
@@ -130,6 +131,10 @@ typedef struct WreathH3Endpoint {
     PyObject *loop_create_future;
     PyObject *loop_create_task;
     PyObject *loop_call_at;
+    PyObject *scope_type;
+    PyObject *scope_asgi;
+    PyObject *scope_http_version;
+    PyObject *scope_root_path;
     PyObject *timer_handle;           /* TimerHandle or NULL */
     double timer_target;              /* loop.time() the timer will fire, or -1 */
     SSL_CTX *ssl_ctx;
@@ -149,6 +154,8 @@ typedef struct WreathH3Endpoint {
     /* limits (from ServerConfig) */
     Py_ssize_t max_concurrent_streams;
     Py_ssize_t max_body_bytes;
+    Py_ssize_t max_body_chunks;
+    Py_ssize_t max_header_count;
     Py_ssize_t read_high_water;
     Py_ssize_t read_high_water_messages;
     Py_ssize_t response_high_water;

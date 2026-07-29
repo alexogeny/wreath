@@ -35,9 +35,21 @@ class BearerTokenBackend:
         self._verifier_is_async = inspect.iscoroutinefunction(verifier)
 
     async def authenticate(self, request: Request) -> Identity | None:
-        value = request.header("authorization")
-        if value is None:
+        value_bytes: bytes | None = None
+        for name, candidate in request.headers:
+            # ASGI supplies lowercase field names; avoid re-normalizing every
+            # header in this authentication scan.
+            if name != b"authorization":
+                continue
+            if value_bytes is not None:
+                # Authorization is not a list-valued field. Refusing ambiguity
+                # prevents a proxy and the application authenticating different
+                # values under first/last/combined interpretations.
+                return None
+            value_bytes = candidate
+        if value_bytes is None:
             return None
+        value = value_bytes.decode("latin-1")
         scheme, separator, token = value.partition(" ")
         if not separator or not token or (
             scheme != "Bearer" and scheme.lower() != "bearer"

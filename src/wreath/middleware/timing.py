@@ -21,6 +21,7 @@ import time
 from typing import Any
 
 from .._native import _core
+from .._webpolicy import replace_server_timing
 from ..request import Request
 
 if _core is not None and hasattr(_core, "format_server_timing"):
@@ -95,12 +96,16 @@ class ServerTimingMiddleware:
         self._metric = metric.encode("ascii")
         self._emit = emit_header
 
-    async def before(self, request: Request) -> None:
+    def before_sync(self, request: Request) -> None:
         """Start the timer for this request."""
         request.state.__setattr__(_STATE_START, time.perf_counter())
         return None
 
-    async def after(self, request: Request, response: Any) -> Any:
+    async def before(self, request: Request) -> None:
+        """Compatibility wrapper; compiled middleware uses `before_sync`."""
+        return self.before_sync(request)
+
+    def after_inplace(self, request: Request, response: Any) -> None:
         """Record the elapsed time and, when configured, append `Server-Timing`.
 
         Returns the response unchanged when the timer never started.
@@ -108,14 +113,24 @@ class ServerTimingMiddleware:
         start = request.state.get(_STATE_START)
         if start is None:
             # A short-circuiting before-hook ahead of this one skipped the timer.
-            return response
+            return
         duration = time.perf_counter() - start
         request.state.__setattr__(_STATE_ELAPSED, duration)
         if self._emit:
-            response.headers.append(
-                (b"server-timing", _format_server_timing(self._metric, duration))
+            replace_server_timing(
+                response.headers,
+                self._metric,
+                _format_server_timing(self._metric, duration),
             )
+
+    def after_sync(self, request: Request, response: Any) -> Any:
+        """Compatibility transformer; compiled middleware mutates in place."""
+        self.after_inplace(request, response)
         return response
+
+    async def after(self, request: Request, response: Any) -> Any:
+        """Compatibility wrapper; compiled middleware mutates in place."""
+        return self.after_sync(request, response)
 
 
 __all__ = ["ServerTimingMiddleware", "elapsed"]

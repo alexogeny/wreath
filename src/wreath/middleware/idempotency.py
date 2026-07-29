@@ -349,6 +349,11 @@ def _json_list(value: list) -> str:
     return encoded.decode("utf-8") if isinstance(encoded, bytes) else encoded
 
 
+def _idempotency_scope(*parts: str) -> str:
+    """Length-frame scope fields so attacker-controlled boundaries cannot move."""
+    return "".join(f"{len(part.encode('utf-8'))}:{part}" for part in parts)
+
+
 class IdempotencyMiddleware:
     """Replay the stored response for a repeated `Idempotency-Key`.
 
@@ -366,11 +371,10 @@ class IdempotencyMiddleware:
     told rather than left to assume.
 
     Only `POST`, `PUT`, `PATCH` and `DELETE` are considered, and only when the
-    request carries the header. The store key is a blake2s digest over the
-    method, the path, the principal id, and the header value — hashed rather
-    than concatenated, so a chosen key cannot reach another principal's entry by
-    containing a delimiter, and the stored key is a bounded width whatever the
-    path.
+    request carries the header. The store key is a blake2s digest over
+    length-framed method, path, principal type, principal id, and the header
+    value. Length framing keeps spaces or other delimiters inside one component,
+    and hashing keeps the stored key bounded whatever the path.
 
     The first request holding a key claims it, runs the handler, and stores the
     response. A repeat arriving while the first is still running is refused with
@@ -469,10 +473,18 @@ class IdempotencyMiddleware:
         identity = request.identity
         if identity is None:
             return None
-        # Hashed with the scope rather than concatenated, so an arbitrary user
-        # key cannot reach another principal's entry by containing a delimiter,
-        # and the stored key is a bounded width whatever the path length.
-        return dedup_key(f"{request.method} {request.path} {identity.id}", value)
+        # Each scope component is length-framed before hashing. A plain
+        # `method path id` string lets a space in the decoded path and a space
+        # in the principal id shift the boundary and replay across identities.
+        # Principal type participates too: `User:42` and `Service:42` are not
+        # the same authenticated principal.
+        scope = _idempotency_scope(
+            request.method,
+            request.path,
+            str(getattr(identity, "type", "User")),
+            str(identity.id),
+        )
+        return dedup_key(scope, value)
 
     async def action(self, request: Request):
         """Claim the key, or answer the request from the store.

@@ -92,6 +92,24 @@ def _parse_path(expr: str, line: int) -> tuple[str, ...]:
     for segment in segments:
         if not _IDENT(segment):
             raise TemplateSyntaxError(f"invalid lookup path {expr!r}", line=line)
+        # A lookup resolves by subscript and then by `getattr`, so a dotted path
+        # can walk an object's internals: `{{ u.__init__.__globals__.API_KEY }}`
+        # reads a module global straight into the output. There is no call
+        # opcode, so the ceiling is disclosure rather than execution -- but
+        # disclosure of exactly the credentials worth stealing.
+        #
+        # It only bites a template whose *source* came from outside, which is
+        # already a mistake. It is refused here anyway, because the cost is one
+        # comparison at compile time and the alternative is that the mistake is
+        # unrecoverable: template injection through a config field is one of the
+        # two paths that put an agent inside Hugging Face's data pipeline in
+        # July 2026. No legitimate template reads a private attribute.
+        if segment.startswith("_"):
+            raise TemplateSyntaxError(
+                f"{segment!r} in {expr!r} is a private name; templates may not "
+                "read attributes beginning with an underscore",
+                line=line,
+            )
     return tuple(segments)
 
 

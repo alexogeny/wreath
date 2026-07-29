@@ -251,6 +251,7 @@ class Projector:
         "_max_cells",
         "_on_trace",
         "_on_log",
+        "_on_cells",
         "_max_routes",
         "_lock",
         "_pending",
@@ -277,6 +278,7 @@ class Projector:
         max_routes: int = _DEFAULT_ROUTES,
         on_trace: Callable[[ProjectedTrace], None] | None = None,
         on_log: Callable[[ProjectedLog], None] | None = None,
+        on_cells: Callable[[bytes], None] | None = None,
     ) -> None:
         if interval <= 0:
             raise ValueError("interval must be positive")
@@ -293,6 +295,10 @@ class Projector:
         self._max_cells = max_cells
         self._on_trace = on_trace
         self._on_log = on_log
+        #: The archival stream: every drained cell, before assembly. The ring
+        #: refuses once full, so anything wanting more history than one ring
+        #: holds has to be fed here.
+        self._on_cells = on_cells
         self._max_routes = max_routes
         # Guards every mutable buffer below: the drain thread writes under it,
         # snapshot()/metrics() read under it. Held only for O(batch) work.
@@ -349,6 +355,7 @@ class Projector:
         number of traces finalized this cycle. Exposed for deterministic tests
         and for the shutdown flush; the thread calls it on the interval."""
         raw = self._recorder.drain(self._max_cells)
+        self._archive(raw)
         with self._lock:
             self._cycle += 1
             self._ingest(raw)
@@ -512,6 +519,43 @@ class Projector:
         if trace.duration_us > metric.duration_us_max:
             metric.duration_us_max = trace.duration_us
         metric.buckets[histogram_bucket(trace.duration_us)] += 1
+
+    def set_cell_archive(self, hook: Callable[[bytes], None] | None) -> None:
+        """Point the archival stream at a sink, after construction.
+
+        The recording sink is built after the projector -- it needs the app's
+        metadata image, which is not available until later in startup -- so the
+        wiring runs in this direction rather than through the constructor. The
+        same shape as `ExportPipeline.set_log_registry`, and for the same
+        reason: a hook that exists later than the object that calls it.
+        """
+        self._on_cells = hook
+
+    def _archive(self, raw: bytes) -> None:
+        """Hand the drained bytes to the archival stream, before assembly.
+
+        The ring holds `ring_records` cells and then refuses; a recording that
+        wants more history than that has to be fed as the ring is drained, which
+        is here. It runs *before* ingestion deliberately: assembly discards what
+        it cannot join, and an archive is supposed to be what happened rather
+        than what could be reassembled.
+
+        Outside the lock, because the sink only appends to its own file and
+        holding the projector's lock across a write would put a disk between
+        every consumer and the drain.
+        """
+        hook = self._on_cells
+        if hook is None or not raw:
+            return
+        try:
+            hook(raw)
+        except Exception:  # noqa: BLE001 - archival sink; counted in export_error
+            # Same posture as `_export`: the cells have already happened, and a
+            # sink that cannot write them must not stall the drain that feeds
+            # the trace assembly, the writer and the exporters. Counted rather
+            # than logged, so a broken archive is a rising number.
+            with self._lock:
+                self._loss.export_error += 1
 
     def _export(self, trace: ProjectedTrace) -> None:
         hook = self._on_trace

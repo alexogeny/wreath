@@ -214,3 +214,39 @@ def test_include_rejects_symlink_escape(tmp_path):
         assert "SECRET" not in str(exc)
     else:
         raise AssertionError("template included a symlinked file")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{{ u.__class__ }}",
+        "{{ u.__init__.__globals__.API_KEY }}",
+        "{{ __class__ }}",                      # first segment: getattr on the context dict
+        "{{ u._private }}",
+        "{% if u.__dict__ %}x{% endif %}",
+        "{% for x in u._items %}{{ x }}{% endfor %}",
+    ],
+)
+def test_a_template_cannot_walk_into_private_attributes(source: str) -> None:
+    """A lookup falls back from subscript to `getattr`, so a dotted path could
+    walk an object's internals -- `u.__init__.__globals__.API_KEY` read a module
+    global straight into the output. Refused at compile time, which is also why
+    the native engine needs no rule of its own: it only executes the tape."""
+    with pytest.raises(TemplateSyntaxError) as caught:
+        Template.from_string(source)
+    assert "private name" in str(caught.value)
+
+
+def test_the_private_name_rule_is_enforced_before_a_tape_exists() -> None:
+    with pytest.raises(TemplateSyntaxError):
+        compile_tape("{{ u.__class__ }}")
+
+
+def test_ordinary_dotted_lookups_still_resolve() -> None:
+    class User:
+        def __init__(self) -> None:
+            self.name = "alex"
+            self.tags = {"role": "owner"}
+
+    assert Template.from_string("{{ u.name }}/{{ u.tags.role }}").render(u=User()) == (
+        "alex/owner")

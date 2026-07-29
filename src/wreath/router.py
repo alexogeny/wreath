@@ -89,6 +89,7 @@ class RouteDefinition:
         dependencies: Depends markers resolved before the handler runs.
         requirement: The merged authentication and authorization requirement.
         operation_id: Explicit client-facing operation id, or None to derive one.
+        response_only: Handler promises to return a response object directly.
     """
 
     path: str
@@ -102,6 +103,7 @@ class RouteDefinition:
     #: An explicit client-facing operation identifier. When `None` the typegen
     #: and OpenAPI layers derive a deterministic id from method and path.
     operation_id: str | None = None
+    response_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +245,7 @@ class Router:
         dependencies: Iterable[Depends] = (),
         permissions: Iterable[str] = (),
         operation_id: str | None = None,
+        response_only: bool = False,
     ) -> Callable[[Handler], Handler]:
         """Register a handler for `path` under one or more methods.
 
@@ -284,6 +287,7 @@ class Router:
             dependencies: Depends markers resolved before this handler runs.
             permissions: Additional permissions required, all of them.
             operation_id: Explicit operation id; when omitted one is derived from method and path.
+            response_only: Promise that the handler returns a response object directly.
 
         Returns:
             A decorator that registers the handler and returns it unchanged.
@@ -312,6 +316,7 @@ class Router:
                     route_dependencies,
                     requirement,
                     operation_id,
+                    response_only,
                 )
             )
             return handler

@@ -92,6 +92,15 @@ def _reason(status: int) -> bytes:
     return _REASONS.get(status, b"Unknown")
 
 
+def _header_has_token(headers: list[tuple[bytes, bytes]], name: bytes, token: bytes) -> bool:
+    """Return whether any occurrence of a list-valued header has an exact token."""
+    return any(
+        token in (part.strip().lower() for part in value.split(b","))
+        for header_name, value in headers
+        if header_name == name
+    )
+
+
 class _Disconnect(Exception):
     """Raised inside the app task when the peer disconnects mid-request."""
 
@@ -129,6 +138,8 @@ class HttpProtocol(asyncio.Protocol):
         self._reading_paused = False
         self._remaining = 0  # bytes left for a fixed-length body
         self._chunk_remaining = 0  # bytes left in the current chunk
+        self._body_received = 0  # cumulative decoded bytes in a chunked body
+        self._body_chunks = 0  # non-empty chunks in this HTTP request
         self._disconnected = False
         self._request_more_body = True
 
@@ -332,19 +343,27 @@ class HttpProtocol(asyncio.Protocol):
         raw_path, _, query_string = target.partition(b"?")
         try:
             path = percent_decode(raw_path).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
+        except ValueError, UnicodeDecodeError:
             self._send_error(400)
             return
 
-        if self._is_upgrade_request(head.headers):
-            self._begin_websocket(method, minor, path, raw_path, query_string, head.headers)
-            return
-
-        # Body framing decision.
+        # Decide HTTP message framing before considering a protocol switch.  A
+        # client cannot start the upgraded protocol until its request message is
+        # complete; this server does not drain WebSocket-handshake bodies, so a
+        # non-empty or chunked body must be refused rather than reinterpreted as
+        # WebSocket frames.  Framing ambiguities are rejected here too.
         try:
             framing = self._decide_framing(head.headers)
         except _FramingError as exc:
             self._send_error(exc.status)
+            return
+
+        kind, length = framing
+        if self._is_upgrade_request(head.headers):
+            if kind == "chunked" or length > 0:
+                self._send_error(400)
+                return
+            self._begin_websocket(method, minor, path, raw_path, query_string, head.headers)
             return
 
         scope = self._build_scope(method, http_version, path, raw_path, query_string, head.headers)
@@ -353,10 +372,11 @@ class HttpProtocol(asyncio.Protocol):
         self._receive_queue = deque()
         self._receive_waiter = None
         self._queued_bytes = 0
+        self._body_received = 0
+        self._body_chunks = 0
         self._disconnected = False
         self._request_more_body = True
 
-        kind, length = framing
         if kind == "none":
             self._request_more_body = False
             self.state = REQUEST_RUNNING
@@ -371,9 +391,7 @@ class HttpProtocol(asyncio.Protocol):
 
         if self.state == REQUEST_RUNNING:
             # No request body: hand the app a single terminal message.
-            self._receive_queue.append(
-                {"type": "http.request", "body": b"", "more_body": False}
-            )
+            self._receive_queue.append({"type": "http.request", "body": b"", "more_body": False})
 
         self._task = self.loop.create_task(self._run_app(scope))
 
@@ -382,18 +400,14 @@ class HttpProtocol(asyncio.Protocol):
     @staticmethod
     def _is_upgrade_request(headers: list[tuple[bytes, bytes]]) -> bool:
         upgrade = None
-        connection = None
         for name, value in headers:
             if name == b"upgrade" and upgrade is None:
                 upgrade = value
-            elif name == b"connection" and connection is None:
-                connection = value
-        if upgrade is None or connection is None:
+        if upgrade is None:
             return False
         if upgrade.strip().lower() != b"websocket":
             return False
-        tokens = [t.strip().lower() for t in connection.split(b",")]
-        return b"upgrade" in tokens
+        return _header_has_token(headers, b"connection", b"upgrade")
 
     def _begin_websocket(
         self,
@@ -414,9 +428,7 @@ class HttpProtocol(asyncio.Protocol):
                 version = value.strip()
             elif name == b"sec-websocket-protocol":
                 protocols.extend(
-                    part.strip().decode("latin-1")
-                    for part in value.split(b",")
-                    if part.strip()
+                    part.strip().decode("latin-1") for part in value.split(b",") if part.strip()
                 )
         if method != "GET" or minor != 1 or not key:
             self._send_error(400)
@@ -514,8 +526,10 @@ class HttpProtocol(asyncio.Protocol):
                 self._ws_close_sent = True
                 return
             if not self._ws_close_sent:
-                self._ws_send_close(int(message.get("code") or 1000),
-                                    str(message.get("reason") or "").encode("utf-8"))
+                self._ws_send_close(
+                    int(message.get("code") or 1000),
+                    str(message.get("reason") or "").encode("utf-8"),
+                )
             self._close()
             return
         raise RuntimeError(f"unexpected ASGI message: {message_type!r}")
@@ -808,11 +822,17 @@ class HttpProtocol(asyncio.Protocol):
         if size == 0:
             self.state = READING_CHUNK_TRAILERS
             return True
-        # Count decoded bytes against the body limit.
-        if self._queued_bytes + size > self.config.max_body_bytes:
+        self._body_chunks += 1
+        if self._body_chunks > self.config.max_body_chunks:
             self._framing_error = True
             self._send_error(413)
             return False
+        # Count decoded bytes against the body limit.
+        if self._body_received + size > self.config.max_body_bytes:
+            self._framing_error = True
+            self._send_error(413)
+            return False
+        self._body_received += size
         self._chunk_remaining = size
         self.state = READING_CHUNK_DATA
         return True
@@ -951,8 +971,8 @@ class HttpProtocol(asyncio.Protocol):
             self._queued_bytes -= len(message.get("body", b""))
         elif message_type == "websocket.receive":
             payload = message.get("bytes")
-            self._queued_bytes -= len(payload) if payload is not None else len(
-                message.get("text") or ""
+            self._queued_bytes -= (
+                len(payload) if payload is not None else len(message.get("text") or "")
             )
         else:
             return message
@@ -1040,15 +1060,10 @@ class HttpProtocol(asyncio.Protocol):
         self._resp_headers = []
         self._framing_error = False
         # Determine whether the peer permits keep-alive.
-        conn = b""
-        for name, value in headers:
-            if name == b"connection":
-                conn = value.lower()
-                break
         if http_version == "1.1":
-            self._response_keep_alive = b"close" not in conn
+            self._response_keep_alive = not _header_has_token(headers, b"connection", b"close")
         else:
-            self._response_keep_alive = b"keep-alive" in conn
+            self._response_keep_alive = _header_has_token(headers, b"connection", b"keep-alive")
 
     def _begin_response(self, message: Message) -> None:
         status = int(message["status"])
@@ -1129,9 +1144,7 @@ class HttpProtocol(asyncio.Protocol):
         elif self._response_chunked and not self._response_suppress_body:
             out += b"transfer-encoding: chunked\r\n"
         out += (
-            b"connection: keep-alive\r\n"
-            if self._response_keep_alive
-            else b"connection: close\r\n"
+            b"connection: keep-alive\r\n" if self._response_keep_alive else b"connection: close\r\n"
         )
         out += b"\r\n"
         self._transport_write(bytes(out))
@@ -1211,6 +1224,8 @@ class HttpProtocol(asyncio.Protocol):
         self._queued_bytes = 0
         self._remaining = 0
         self._chunk_remaining = 0
+        self._body_received = 0
+        self._body_chunks = 0
         self._head_scan = 0
         self._line_scan = 0
         self._line_end = -1

@@ -402,6 +402,40 @@ class RecordingSink:
             with self._lock:
                 self._written += len(slabs)
 
+    def archive_cells(self, cells: bytes) -> None:
+        """Append drained ring cells to the recording as an `EVNT` chunk.
+
+        The archival half of crash forensics. The ring file holds what was still
+        in flight when a process died; this holds everything before it, because
+        a ring keeps `ring_records` cells and then refuses. Wired to the
+        projector's drain, which is where cells leave the ring.
+
+        Called from the projector thread rather than this sink's own, so it
+        takes the same lock the stats do and follows the same rule as
+        `_drain_once`: a write error degrades to drop-and-count and never
+        propagates. The cells have already happened; failing to file them must
+        not stall the drain that feeds trace assembly and every exporter.
+        """
+        if not cells:
+            return
+        with self._lock:
+            if self._degraded or self._writer is None:
+                self._dropped += len(cells) // CELL_SIZE
+                return
+            try:
+                self._writer.write_events(cells)
+                self._fh.flush()
+            except (OSError, ValueError):
+                # ValueError: a partial cell, which means the drain handed over
+                # something that is not a whole number of cells -- a bug worth
+                # degrading on rather than writing a chunk no reader can split.
+                self._write_errors += 1
+                self._dropped += len(cells) // CELL_SIZE
+                self._degraded = True
+                self._close_file()
+            else:
+                self._written += len(cells) // CELL_SIZE
+
     def _note_error(self) -> None:
         with self._lock:
             self._write_errors += 1

@@ -58,7 +58,9 @@ class SessionMiddleware:
     """Load and persist a per-caller session held in a signed cookie.
 
     Route middleware by default, not global: it is compiled into a route's tape,
-    so it runs for routed requests and not for misses or static files. `before`
+    so it runs for routed requests and not for misses or static files. Register it
+    globally when authentication reads it; its load hook then also runs before
+    WebSocket authentication. `before`
     publishes the session as a plain dict on `request.state.session`; handlers
     mutate that dict and `after` decides what to write.
 
@@ -121,6 +123,7 @@ class SessionMiddleware:
     #: refusal on this attribute rather than on the class, so a replacement
     #: session middleware is covered by the same check.
     publishes_session = True
+    websocket_scope = True
 
     __slots__ = (
         "_cookie", "_http_only", "_max_age", "_previous", "_same_site", "_secret",
