@@ -140,6 +140,7 @@ async def drive(
 
 # --- simple apps ------------------------------------------------------------
 
+
 async def echo_ok(scope: dict, receive: Any, send: Any) -> None:
     body = b""
     while True:
@@ -149,8 +150,13 @@ async def echo_ok(scope: dict, receive: Any, send: Any) -> None:
         body += message.get("body", b"")
         if not message.get("more_body", False):
             break
-    await send({"type": "http.response.start", "status": 200,
-                "headers": [(b"content-type", b"text/plain")]})
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"text/plain")],
+        }
+    )
     await send({"type": "http.response.body", "body": body})
 
 
@@ -180,6 +186,7 @@ GET = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"
 
 
 # --- head fragmentation -----------------------------------------------------
+
 
 @impl
 @pytest.mark.asyncio
@@ -336,7 +343,8 @@ async def test_head_terminator_split_three_ways(protocol_cls: type) -> None:
     for first in range(1, 4):
         for second in range(first + 1, 4):
             transport = await drive(
-                protocol_cls, echo_ok,
+                protocol_cls,
+                echo_ok,
                 [GET[: end + first], GET[end + first : end + second], GET[end + second :]],
             )
             assert transport.buffer.startswith(b"HTTP/1.1 200"), (first, second)
@@ -347,7 +355,8 @@ async def test_head_terminator_split_three_ways(protocol_cls: type) -> None:
 async def test_trailers_split_every_boundary(protocol_cls: type) -> None:
     for split in range(1, len(CHUNKED_TRAILERS)):
         transport = await drive(
-            protocol_cls, echo_ok,
+            protocol_cls,
+            echo_ok,
             [CHUNKED_TRAILERS[:split], CHUNKED_TRAILERS[split:]],
         )
         assert transport.buffer.endswith(b"hello"), split
@@ -381,9 +390,7 @@ async def test_pipelined_requests_rescan_from_the_new_request(protocol_cls: type
 @pytest.mark.asyncio
 async def test_pipelined_requests_one_byte_at_a_time(protocol_cls: type) -> None:
     stream = GET + GET
-    transport = await drive(
-        protocol_cls, echo_ok, [stream[i : i + 1] for i in range(len(stream))]
-    )
+    transport = await drive(protocol_cls, echo_ok, [stream[i : i + 1] for i in range(len(stream))])
     assert transport.buffer.count(b"HTTP/1.1 200") == 2
 
 
@@ -423,6 +430,7 @@ async def test_chunk_extensions_ignored(protocol_cls: type) -> None:
 
 # --- framing errors ---------------------------------------------------------
 
+
 @impl
 @pytest.mark.asyncio
 async def test_conflicting_content_length(protocol_cls: type) -> None:
@@ -438,16 +446,34 @@ async def test_conflicting_content_length(protocol_cls: type) -> None:
     assert not called
 
 
-@pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
+@impl
 @pytest.mark.asyncio
-async def test_native_chunked_body_limit_is_cumulative() -> None:
+async def test_chunked_body_limit_is_cumulative_while_app_drains(
+    protocol_cls: type,
+) -> None:
     config = ServerConfig(max_body_bytes=10)
+    first = b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n6\r\n123456\r\n"
+    second = b"6\r\nabcdef\r\n0\r\n\r\n"
+    transport = await drive(protocol_cls, echo_ok, [first, second], config)
+    assert transport.buffer.startswith(b"HTTP/1.1 413")
+
+
+@impl
+@pytest.mark.asyncio
+async def test_chunked_body_frame_count_is_bounded(protocol_cls: type) -> None:
+    config = ServerConfig(max_body_chunks=8)
     request = (
         b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
-        b"6\r\n123456\r\n6\r\nabcdef\r\n0\r\n\r\n"
+        + b"1\r\nx\r\n" * 9
+        + b"0\r\n\r\n"
     )
-    transport = await drive(_NativeHttpProtocol, echo_ok, [request], config)
+    transport = await drive(protocol_cls, echo_ok, [request], config)
     assert transport.buffer.startswith(b"HTTP/1.1 413")
+
+
+def test_body_chunk_limit_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="max_body_chunks must be positive"):
+        ServerConfig(max_body_chunks=0)
 
 
 @pytest.mark.skipif(_NativeHttpProtocol is None, reason="native server not built")
@@ -472,9 +498,7 @@ async def test_native_header_count_rejects_before_dispatch() -> None:
         called = True
 
     request = b"GET / HTTP/1.1\r\nHost: x\r\nX-Extra: y\r\n\r\n"
-    transport = await drive(
-        _NativeHttpProtocol, app, [request], ServerConfig(max_header_count=1)
-    )
+    transport = await drive(_NativeHttpProtocol, app, [request], ServerConfig(max_header_count=1))
     assert transport.buffer.startswith(b"HTTP/1.1 431")
     assert called is False
 
@@ -483,8 +507,7 @@ async def test_native_header_count_rejects_before_dispatch() -> None:
 @pytest.mark.asyncio
 async def test_native_expect_continue_is_answered() -> None:
     request = (
-        b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
-        b"Expect: 100-continue\r\n\r\nhello"
+        b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nExpect: 100-continue\r\n\r\nhello"
     )
     transport = await drive(_NativeHttpProtocol, echo_ok, [request])
     assert transport.buffer.startswith(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200")
@@ -515,9 +538,7 @@ async def test_native_pauses_a_pipeline_behind_a_running_request() -> None:
 
     loop = asyncio.get_running_loop()
     transport = FakeTransport()
-    protocol = _NativeHttpProtocol(
-        slow, ServerConfig(max_header_bytes=1024), loop, set()
-    )
+    protocol = _NativeHttpProtocol(slow, ServerConfig(max_header_bytes=1024), loop, set())
     protocol.connection_made(transport)
     feed(protocol, GET)
     await started.wait()
@@ -570,6 +591,7 @@ async def test_oversized_body(protocol_cls: type) -> None:
 
 # --- read backpressure ------------------------------------------------------
 
+
 @impl
 @pytest.mark.asyncio
 async def test_read_pause_resume_watermarks(protocol_cls: type) -> None:
@@ -601,6 +623,7 @@ async def test_read_pause_resume_watermarks(protocol_cls: type) -> None:
 
 # --- write backpressure -----------------------------------------------------
 
+
 @impl
 @pytest.mark.asyncio
 async def test_write_pause_resume_awaitable(protocol_cls: type) -> None:
@@ -627,6 +650,7 @@ async def test_write_pause_resume_awaitable(protocol_cls: type) -> None:
 
 
 # --- timeouts ---------------------------------------------------------------
+
 
 @impl
 @pytest.mark.asyncio
@@ -657,6 +681,7 @@ async def test_request_timeout(protocol_cls: type) -> None:
 
 # --- disconnects ------------------------------------------------------------
 
+
 @impl
 @pytest.mark.asyncio
 async def test_disconnect_before_body_complete(protocol_cls: type) -> None:
@@ -683,6 +708,7 @@ async def test_disconnect_before_body_complete(protocol_cls: type) -> None:
 
 
 # --- application errors ------------------------------------------------------
+
 
 @impl
 @pytest.mark.asyncio
@@ -711,12 +737,14 @@ async def test_app_exception_after_start(protocol_cls: type) -> None:
 
 # --- body suppression -------------------------------------------------------
 
+
 @impl
 @pytest.mark.asyncio
 async def test_head_suppresses_body(protocol_cls: type) -> None:
     async def app(scope: dict, receive: Any, send: Any) -> None:
-        await send({"type": "http.response.start", "status": 200,
-                    "headers": [(b"content-length", b"5")]})
+        await send(
+            {"type": "http.response.start", "status": 200, "headers": [(b"content-length", b"5")]}
+        )
         await send({"type": "http.response.body", "body": b"hello"})
 
     req = b"HEAD / HTTP/1.1\r\nHost: x\r\n\r\n"
@@ -744,11 +772,7 @@ async def test_no_body_statuses(protocol_cls: type, status: int) -> None:
 async def test_server_supplies_default_response_headers(protocol_cls: type) -> None:
     transport = await drive(protocol_cls, echo_ok, [GET])
     head = bytes(transport.buffer.partition(b"\r\n\r\n")[0])
-    headers = dict(
-        line.split(b": ", 1)
-        for line in head.split(b"\r\n")[1:]
-        if b": " in line
-    )
+    headers = dict(line.split(b": ", 1) for line in head.split(b"\r\n")[1:] if b": " in line)
 
     assert headers[b"server"] == b"wreath"
     parsed = parsedate_to_datetime(headers[b"date"].decode("ascii"))
@@ -788,6 +812,7 @@ async def test_server_default_headers_can_be_disabled(protocol_cls: type) -> Non
 
 # --- HTTP/1.0 ---------------------------------------------------------------
 
+
 @impl
 @pytest.mark.asyncio
 async def test_http10_defaults_close(protocol_cls: type) -> None:
@@ -801,6 +826,28 @@ async def test_http10_defaults_close(protocol_cls: type) -> None:
 @pytest.mark.asyncio
 async def test_http10_keep_alive(protocol_cls: type) -> None:
     req = b"GET / HTTP/1.0\r\nHost: x\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n"
+    transport = await drive(protocol_cls, echo_ok, [req])
+    assert b"connection: keep-alive" in transport.buffer.lower()
+    assert not transport.closed
+
+
+@impl
+@pytest.mark.asyncio
+async def test_http10_keep_alive_requires_an_exact_connection_token(
+    protocol_cls: type,
+) -> None:
+    req = b"GET / HTTP/1.0\r\nHost: x\r\nConnection: xkeep-alive\r\n\r\n"
+    transport = await drive(protocol_cls, echo_ok, [req])
+    assert b"connection: close" in transport.buffer.lower()
+    assert transport.closed
+
+
+@impl
+@pytest.mark.asyncio
+async def test_http11_close_requires_an_exact_connection_token(
+    protocol_cls: type,
+) -> None:
+    req = b"GET / HTTP/1.1\r\nHost: x\r\nConnection: disclose\r\n\r\n"
     transport = await drive(protocol_cls, echo_ok, [req])
     assert b"connection: keep-alive" in transport.buffer.lower()
     assert not transport.closed
@@ -929,6 +976,7 @@ async def test_native_does_not_retain_large_response_serialization_buffer() -> N
 
 # --- collectability ---------------------------------------------------------
 
+
 @impl
 @pytest.mark.asyncio
 async def test_protocol_collectable_after_loss(protocol_cls: type) -> None:
@@ -957,13 +1005,16 @@ async def test_protocol_collectable_after_loss(protocol_cls: type) -> None:
 
 # --- wreath.response one-shot extension -----------------------------------------
 
+
 async def one_shot_ok(scope: dict, receive: Any, send: Any) -> None:
-    await send({
+    await send(
+        {
         "type": "wreath.response",
         "status": 200,
         "headers": [(b"content-type", b"text/plain")],
         "body": b"hello",
-    })
+        }
+    )
 
 
 @impl
@@ -979,8 +1030,13 @@ async def test_extension_advertised_in_scope(protocol_cls: type) -> None:
 @pytest.mark.asyncio
 async def test_one_shot_matches_start_body_pair(protocol_cls: type) -> None:
     async def paired(scope: dict, receive: Any, send: Any) -> None:
-        await send({"type": "http.response.start", "status": 200,
-                    "headers": [(b"content-type", b"text/plain")]})
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/plain")],
+            }
+        )
         await send({"type": "http.response.body", "body": b"hello"})
 
     one_shot_wire = (await drive(protocol_cls, one_shot_ok, [GET])).buffer
@@ -1023,8 +1079,7 @@ async def test_one_shot_after_start_rejected(protocol_cls: type) -> None:
     async def app(scope: dict, receive: Any, send: Any) -> None:
         await send({"type": "http.response.start", "status": 200, "headers": []})
         try:
-            await send({"type": "wreath.response", "status": 200, "headers": [],
-                        "body": b"x"})
+            await send({"type": "wreath.response", "status": 200, "headers": [], "body": b"x"})
         except RuntimeError as exc:
             errors.append(str(exc))
             raise
@@ -1038,8 +1093,13 @@ async def test_one_shot_after_start_rejected(protocol_cls: type) -> None:
 @pytest.mark.asyncio
 async def test_one_shot_head_suppresses_body(protocol_cls: type) -> None:
     async def paired(scope: dict, receive: Any, send: Any) -> None:
-        await send({"type": "http.response.start", "status": 200,
-                    "headers": [(b"content-type", b"text/plain")]})
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/plain")],
+            }
+        )
         await send({"type": "http.response.body", "body": b"hello"})
 
     head = b"HEAD / HTTP/1.1\r\nHost: x\r\n\r\n"
@@ -1244,6 +1304,7 @@ async def test_native_data_received_compat_path_still_parses() -> None:
 
 # --- adversarial: receive-queue drain must not be quadratic (#6) -------------
 
+
 class _ShiftCountingQueue:
     """Records how many references a front removal shifts.
 
@@ -1295,9 +1356,7 @@ async def test_receive_queue_drain_has_linear_reference_movement() -> None:
     queue = _ShiftCountingQueue()
     protocol._receive_queue = queue  # type: ignore[assignment]
     for index in range(n):
-        queue.append(
-            {"type": "http.request", "body": b"x", "more_body": index < n - 1}
-        )
+        queue.append({"type": "http.request", "body": b"x", "more_body": index < n - 1})
     protocol._queued_bytes = n
 
     delivered = [await protocol._receive() for _ in range(n)]
@@ -1308,6 +1367,7 @@ async def test_receive_queue_drain_has_linear_reference_movement() -> None:
 
 
 # --- adversarial: incomplete-head parsing must be linear (#3) -----------------
+
 
 @pytest.mark.asyncio
 async def test_incomplete_head_scans_each_byte_a_bounded_number_of_times() -> None:

@@ -46,6 +46,15 @@ jobs:
       - name: Build site (strict)
         # `check` fails on an orphan page, a dead internal link, or a broken
         # anchor -- the same gate contributors run locally.
+        #
+        # The token is for the header's star and fork counts, read once here and
+        # baked into the HTML (`_docs/repo.py`). Anonymous GitHub API calls are
+        # limited per source address, which on a shared runner is a budget split
+        # with every other project on that machine; with the token the limit is
+        # this repository's own, so the counts don't come and go between deploys.
+        # No token, no network, or an error: the link renders without counts.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: uv run --no-sync wreath docs check
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

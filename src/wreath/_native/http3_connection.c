@@ -1082,6 +1082,19 @@ endpoint_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwargs))
     ep->config = Py_NewRef(config);
     ep->loop = Py_NewRef(loop);
     ep->registry = Py_NewRef(registry);
+    ep->loop_create_future = PyObject_GetAttrString(loop, "create_future");
+    ep->loop_create_task = PyObject_GetAttrString(loop, "create_task");
+    ep->scope_type = PyUnicode_FromString("http");
+    ep->scope_asgi = Py_BuildValue(
+        "{s:s,s:s}", "version", "3.0", "spec_version", "2.5"
+    );
+    ep->scope_http_version = PyUnicode_FromString("3");
+    ep->scope_root_path = PyUnicode_FromString("");
+    if (ep->loop_create_future == NULL || ep->loop_create_task == NULL ||
+        ep->scope_type == NULL || ep->scope_asgi == NULL ||
+        ep->scope_http_version == NULL || ep->scope_root_path == NULL) {
+        return -1;
+    }
     ep->conns = PyDict_New();
     if (ep->conns == NULL) {
         return -1;
@@ -1098,6 +1111,8 @@ endpoint_init(PyObject *op, PyObject *args, PyObject *Py_UNUSED(kwargs))
     ep->local_addrlen_store = 0;
     if (read_ssize(config, "max_concurrent_streams", &ep->max_concurrent_streams) < 0 ||
         read_ssize(config, "max_body_bytes", &ep->max_body_bytes) < 0 ||
+        read_ssize(config, "max_body_chunks", &ep->max_body_chunks) < 0 ||
+        read_ssize(config, "max_header_count", &ep->max_header_count) < 0 ||
         read_ssize(config, "read_high_water", &ep->read_high_water) < 0 ||
         read_ssize(config, "read_high_water_messages", &ep->read_high_water_messages) < 0 ||
         read_ssize(config, "response_high_water", &ep->response_high_water) < 0 ||
@@ -1140,6 +1155,12 @@ endpoint_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(ep->registry);
     Py_VISIT(ep->transport);
     Py_VISIT(ep->transport_sendto);
+    Py_VISIT(ep->loop_create_future);
+    Py_VISIT(ep->loop_create_task);
+    Py_VISIT(ep->scope_type);
+    Py_VISIT(ep->scope_asgi);
+    Py_VISIT(ep->scope_http_version);
+    Py_VISIT(ep->scope_root_path);
     Py_VISIT(ep->timer_handle);
     Py_VISIT(ep->conns);
     return 0;
@@ -1162,6 +1183,12 @@ endpoint_clear(PyObject *op)
     Py_CLEAR(ep->registry);
     Py_CLEAR(ep->transport);
     Py_CLEAR(ep->transport_sendto);
+    Py_CLEAR(ep->loop_create_future);
+    Py_CLEAR(ep->loop_create_task);
+    Py_CLEAR(ep->scope_type);
+    Py_CLEAR(ep->scope_asgi);
+    Py_CLEAR(ep->scope_http_version);
+    Py_CLEAR(ep->scope_root_path);
     Py_CLEAR(ep->timer_handle);
     Py_CLEAR(ep->conns);
     if (ep->ssl_ctx != NULL) {

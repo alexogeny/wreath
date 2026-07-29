@@ -63,6 +63,7 @@ class Registry:
         "_flight_model_ids",
         "_lock",
         "_model_order",
+        "_prepared_shapes",
         "_specs",
         "database",
         "fingerprint",
@@ -131,6 +132,10 @@ class Registry:
         self._lock = threading.Lock()
         self._cache: OrderedDict[bytes, tuple[Any, int]] = OrderedDict()
         self._cache_bytes = 0
+        # Declared-query identity -> its registry-specific shape key. The plan
+        # itself remains in the bounded LRU above; this small index lets a hot
+        # declaration reach it without rebuilding a Select or hashing its tree.
+        self._prepared_shapes: dict[Any, bytes] = {}
         self.compile(tuple(models))
 
     # -- compilation --------------------------------------------------------
@@ -533,6 +538,23 @@ class Registry:
                 _, (_, evicted_bytes) = self._cache.popitem(last=False)
                 self._cache_bytes -= evicted_bytes
             return plan
+
+    def cached_prepared_plan(self, declaration: Any) -> tuple[bytes, Any] | None:
+        """The live plan previously associated with `declaration`, if any."""
+        with self._lock:
+            shape_key = self._prepared_shapes.get(declaration)
+            if shape_key is None:
+                return None
+            entry = self._cache.get(shape_key)
+            if entry is None:
+                return None
+            self._cache.move_to_end(shape_key)
+            return shape_key, entry[0]
+
+    def remember_prepared_shape(self, declaration: Any, shape_key: bytes) -> None:
+        """Associate an explicit declaration with its registry-owned plan key."""
+        with self._lock:
+            self._prepared_shapes[declaration] = shape_key
 
     @property
     def cached_plan_count(self) -> int:

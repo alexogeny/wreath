@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 
 from wreath import Wreath
+from wreath._auth.decorators import roles
 from wreath._userkit import InMemoryUserStore
 from wreath.auth import (
     BearerTokenBackend,
@@ -15,6 +17,7 @@ from wreath.auth import (
     SessionIdentityBackend,
     authenticated,
 )
+from wreath.binding import File, Form
 from wreath.middleware.compression import CompressionMiddleware
 from wreath.middleware.security import TrustedHostMiddleware
 from wreath.middleware.sessions import SessionMiddleware
@@ -315,3 +318,96 @@ async def test_password_reset_email_issuance_is_bounded(monkeypatch) -> None:
             assert response.status == 200
             assert response.json() == {"status": "reset_email_sent"}
     assert sent == 3
+
+
+async def test_encoded_nul_in_a_static_path_is_a_miss_not_a_crash(tmp_path: Path) -> None:
+    """`%00` in a static path must 404 like any other miss.
+
+    The native parser percent-decodes the target before routing, so `%00`
+    reaches `StaticFiles` as a real NUL byte in `path_params["path"]`. `os.open`
+    and `os.lstat` reject an embedded NUL with `ValueError`, which is neither
+    `ContainmentError` nor `OSError` -- so it escaped the lookup's handler and
+    became a 500. That contradicts the documented guarantee that "a missing,
+    unreadable, or escaping path raises `NotFound` -- the same 404 either way,
+    so probing cannot distinguish them": a 500 tells an unauthenticated prober
+    exactly which prefixes are static mounts, and every probe costs the app a
+    logged traceback.
+    """
+    root = tmp_path / "public"
+    root.mkdir()
+    (root / "a.txt").write_text("hello")
+    app = Wreath()
+    app.static("/assets", str(root))
+
+    for path in ("/assets/\x00", "/assets/a\x00.txt", "/assets/\x00/a.txt"):
+        sent = await _asgi_http(app, path)
+        assert sent[0]["status"] == 404, path
+
+
+async def test_malformed_multipart_body_is_refused_with_400(tmp_path: Path) -> None:
+    """A body the multipart parser cannot read is the caller's fault, not a 500.
+
+    `_decode_body` wraps the JSON body path in `except ValueError -> BadRequest`
+    but ran the multipart tapes outside it, so every route binding `Form()` or
+    `File()` answered 500 to a bad boundary, an unterminated part, or a
+    malformed part header -- all unauthenticated, single-request inputs.
+    """
+    app = Wreath()
+
+    @app.post("/upload")
+    async def upload(
+        request: Any,
+        caption: Annotated[str, Form()],
+        photo: Annotated[Any, File()],
+    ) -> dict[str, str]:
+        return {"caption": caption}
+
+    bodies = [
+        ("multipart/form-data", b"--x\r\n\r\nv\r\n--x--\r\n"),
+        ("multipart/form-data; boundary=x", b""),
+        ("multipart/form-data; boundary=x", b"--x\r\nno-colon\r\n\r\nv\r\n--x--\r\n"),
+        (
+            "multipart/form-data; boundary=x",
+            b"--x\r\ncontent-disposition: form-data\r\n\r\nv\r\n",
+        ),
+    ]
+    async with TestClient(app) as client:
+        for content_type, body in bodies:
+            response = await client.post(
+                "/upload", content=body, headers={"content-type": content_type}
+            )
+            assert response.status == 400, (content_type, body)
+
+
+async def test_role_check_accepts_any_collection_of_role_names() -> None:
+    """An identity whose roles are a tuple must authorize, not 500.
+
+    `mode="any"` already worked -- `frozenset.isdisjoint` takes any iterable --
+    while the default `mode="all"` used `frozenset <= actual`, which demands a
+    set on the right and raises `TypeError` otherwise. A backend that hands the
+    roles claim straight through (JSON arrays decode to lists) therefore made
+    every *authorized* request a 500 on one mode and succeed on the other.
+    """
+    app = Wreath()
+    app.configure_auth(
+        backend=BearerTokenBackend(
+            lambda token: Identity(id="1", roles=("admin", "user"))  # type: ignore[arg-type]
+            if token == "admin"
+            else None
+        )
+    )
+
+    @app.get("/all")
+    @roles("admin")
+    async def all_mode(request: Any) -> dict[str, bool]:
+        return {"ok": True}
+
+    @app.get("/any")
+    @roles("admin", "other", mode="any")
+    async def any_mode(request: Any) -> dict[str, bool]:
+        return {"ok": True}
+
+    async with TestClient(app) as client:
+        headers = {"authorization": "Bearer admin"}
+        assert (await client.get("/any", headers=headers)).status == 200
+        assert (await client.get("/all", headers=headers)).status == 200

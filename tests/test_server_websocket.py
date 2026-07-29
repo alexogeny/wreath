@@ -209,6 +209,68 @@ async def test_wrong_version_is_426(protocol_cls: type) -> None:
 
 @impl
 @pytest.mark.asyncio
+async def test_connection_upgrade_requires_an_exact_token(protocol_cls: type) -> None:
+    scopes: list[str] = []
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        scopes.append(scope["type"])
+        if scope["type"] == "websocket":
+            await receive()
+            await send({"type": "websocket.accept"})
+            return
+        await receive()
+        await send({"type": "http.response.start", "status": 204})
+        await send({"type": "http.response.body", "body": b""})
+
+    request = upgrade().replace(b"Connection: Upgrade", b"Connection: xupgrade")
+    _, transport = await start(protocol_cls, app, [request])
+    assert bytes(transport.buffer).startswith(b"HTTP/1.1 204")
+    assert scopes == ["http"]
+
+
+@impl
+@pytest.mark.asyncio
+async def test_connection_upgrade_token_can_be_in_a_repeated_field(
+    protocol_cls: type,
+) -> None:
+    request = upgrade().replace(
+        b"Connection: Upgrade",
+        b"Connection: keep-alive\r\nConnection: Upgrade",
+    )
+    _, transport = await start(protocol_cls, echo_app, [request])
+    assert bytes(transport.buffer).startswith(b"HTTP/1.1 101 Switching Protocols")
+
+
+@impl
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "framing",
+    [
+        pytest.param(b"Content-Length: 4\r\n", id="fixed-body"),
+        pytest.param(b"Transfer-Encoding: chunked\r\n", id="chunked-body"),
+        pytest.param(
+            b"Content-Length: 4\r\nTransfer-Encoding: chunked\r\n",
+            id="ambiguous-body",
+        ),
+    ],
+)
+async def test_websocket_upgrade_rejects_http_body_framing(
+    protocol_cls: type, framing: bytes
+) -> None:
+    called = False
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        nonlocal called
+        called = True
+
+    _, transport = await start(protocol_cls, app, [upgrade(extra=framing)])
+    assert bytes(transport.buffer).startswith(b"HTTP/1.1 400")
+    assert transport.closed
+    assert called is False
+
+
+@impl
+@pytest.mark.asyncio
 async def test_subprotocol_negotiation(protocol_cls: type) -> None:
     async def app(scope: dict, receive: Any, send: Any) -> None:
         await receive()

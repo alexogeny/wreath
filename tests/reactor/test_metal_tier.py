@@ -681,6 +681,150 @@ def test_native_transport_fuses_http1_ingress_without_python_buffer_callbacks():
         loop.close()
 
 
+def test_native_transport_fuses_http2_ingress_without_python_data_received():
+    """Provided-buffer H2 ingress must stay inside the transport/protocol C seam."""
+    from http2 import support
+
+    Http2Protocol = importlib.import_module("wreath._native._server").Http2Protocol
+    ServerConfig = importlib.import_module("wreath.server").ServerConfig
+    callbacks: list[str] = []
+
+    class ObservedProtocol(Http2Protocol):
+        def data_received(self, data):
+            callbacks.append("data_received")
+            return super().data_received(data)
+
+    loop = _metal_loop()
+    client, server = socket.socketpair()
+    client.setblocking(False)
+    try:
+        protocol = ObservedProtocol(
+            _echo, ServerConfig(protocols=("h2",), lifespan="off"), loop, set()
+        )
+        transport = loop._make_socket_transport(server, protocol)
+        loop.run_until_complete(asyncio.sleep(0))
+        assert transport._fused_stream == "wreath._native._server"
+        assert transport._fused_http1 is False
+
+        request = (
+            support.PREFACE
+            + support.encode_settings({})
+            + support.build_headers_frame(1, support.request_headers())
+        )
+        client.sendall(request)
+        loop.run_until_complete(asyncio.sleep(0.01))
+
+        assert callbacks == []
+        transport.close()
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        client.close()
+        loop.close()
+
+
+@pytest.mark.parametrize(
+    ("connection", "framing", "expected_status"),
+    [
+        pytest.param(b"xupgrade", b"", b"404", id="substring-option"),
+        pytest.param(
+            b"Upgrade",
+            b"Content-Length: 4\r\nTransfer-Encoding: chunked\r\n",
+            b"400",
+            id="ambiguous-framing",
+        ),
+    ],
+)
+def test_metal_rejects_websocket_upgrade_confusion(
+    connection: bytes, framing: bytes, expected_status: bytes
+) -> None:
+    """The fused metal ingress must enforce the HTTP/1 upgrade boundary."""
+    from wreath import Wreath
+    from wreath.server import ServerConfig
+    from wreath.websocket import WebSocket
+
+    Http1Protocol = importlib.import_module("wreath._native._server").Http1Protocol
+    called = False
+    app = Wreath()
+
+    @app.websocket("/ws")
+    async def websocket(socket: WebSocket) -> None:
+        nonlocal called
+        called = True
+        await socket.accept()
+        await socket.close()
+
+    request = (
+        b"GET /ws HTTP/1.1\r\nHost: test\r\nUpgrade: websocket\r\nConnection: "
+        + connection
+        + b"\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        b"Sec-WebSocket-Version: 13\r\n"
+        + framing
+        + b"\r\n"
+    )
+    loop = _metal_loop()
+    client, server = socket.socketpair()
+    client.setblocking(False)
+    try:
+        protocol = Http1Protocol(app, ServerConfig(lifespan="off"), loop, set())
+        transport = loop._make_socket_transport(server, protocol)
+        loop.run_until_complete(asyncio.sleep(0))
+        assert transport._fused_http1 is True
+
+        client.sendall(request)
+        loop.run_until_complete(asyncio.sleep(0.01))
+        response = client.recv(4096)
+
+        assert response.startswith(b"HTTP/1.1 " + expected_status)
+        assert called is False
+        transport.close()
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        client.close()
+        loop.close()
+
+
+def test_metal_trusted_host_rejects_userinfo_shaped_authority() -> None:
+    """The fused metal path must not truncate an attacker-controlled Host."""
+    from wreath import Wreath
+    from wreath.middleware import TrustedHostMiddleware
+    from wreath.server import ServerConfig
+
+    Http1Protocol = importlib.import_module("wreath._native._server").Http1Protocol
+    called = False
+    app = Wreath()
+    app.add_middleware(TrustedHostMiddleware(("good.example",)))
+
+    @app.get("/")
+    async def index(request) -> str:
+        nonlocal called
+        called = True
+        return "should not run"
+
+    loop = _metal_loop()
+    client, server = socket.socketpair()
+    client.setblocking(False)
+    try:
+        protocol = Http1Protocol(app, ServerConfig(lifespan="off"), loop, set())
+        transport = loop._make_socket_transport(server, protocol)
+        loop.run_until_complete(asyncio.sleep(0))
+        assert transport._fused_http1 is True
+
+        client.sendall(
+            b"GET / HTTP/1.1\r\nHost: good.example:@evil.example\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        loop.run_until_complete(asyncio.sleep(0.01))
+        response = client.recv(4096)
+
+        assert response.startswith(b"HTTP/1.1 400")
+        assert called is False
+        transport.close()
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        client.close()
+        loop.close()
+
+
 def test_external_buffer_ingress_preserves_fragmented_request_body():
     Http1Protocol = importlib.import_module("wreath._native._server").Http1Protocol
     ServerConfig = importlib.import_module("wreath.server").ServerConfig

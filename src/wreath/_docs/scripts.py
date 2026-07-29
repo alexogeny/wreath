@@ -240,32 +240,83 @@ _RUNTIME = r"""
     return loading;
   }
 
+  /* Query words that carry no topic. Only the ones a reader actually types in
+     a docs search; the index's own list (search.py) is a different job. */
+  var STOP = { a: 1, an: 1, the: 1, of: 1, in: 1, on: 1, to: 1, for: 1,
+               and: 1, or: 1, is: 1, it: 1, with: 1, from: 1 };
+
+  /* Strip a plural, and only a plural. The twin of `stem()` in search.py, which
+     stems the index; the two must agree or a term is normalised on one side
+     only and matches nothing. "parameters" contains "param" but not "params",
+     which is why typing the plural of a word used to return an empty palette. */
+  function stem(word) {
+    if (word.length <= 4) { return word; }
+    if (/ies$/.test(word)) { return word.slice(0, -3) + 'y'; }
+    if (/(ches|shes|sses|xes|zes)$/.test(word)) { return word.slice(0, -2); }
+    if (/es$/.test(word)) { return word.slice(0, -1); }
+    if (/s$/.test(word) && !/ss$/.test(word)) { return word.slice(0, -1); }
+    return word;
+  }
+
+  /* Where a term was found in one field: 2 as typed, 1 only after stemming,
+     0 not at all. Stemmed matches are worth half, so an exact word still
+     outranks the page that merely shares its singular. */
+  function inField(text, term, stemmed) {
+    if (text.indexOf(term) >= 0) { return 2; }
+    return stemmed !== term && text.indexOf(stemmed) >= 0 ? 1 : 0;
+  }
+
   /* Scoring. A heading match is what people are almost always looking for in
      docs, so it outranks a body hit by an order of magnitude; a page title
      matching outranks a body hit in a differently-titled page. Every term has
      to appear somewhere in the section or the section is not a result at all,
-     which is what makes two-word queries useful rather than noisier. */
-  function score(section, page, terms) {
+     which is what makes two-word queries useful rather than noisier.
+
+     `w` is the rest of the section — every word past the snippet, stemmed and
+     deduped. It scores barely above nothing because it cannot say *where* in
+     the section the word was; its job is to make the section findable at all. */
+  function score(section, page, terms, phrase) {
     var heading = section.h.toLowerCase();
     var title = page.t.toLowerCase();
     var body = section.x.toLowerCase();
+    var words = section.w || '';
+    var keywords = (page.k || '').toLowerCase();
     var total = 0;
     for (var i = 0; i < terms.length; i++) {
       var term = terms[i];
-      var inHeading = heading.indexOf(term);
-      var inTitle = title.indexOf(term);
-      var inBody = body.indexOf(term);
-      if (inHeading < 0 && inTitle < 0 && inBody < 0) { return 0; }
-      if (heading === term) { total += 200; }
-      else if (inHeading === 0) { total += 120; }
-      else if (inHeading > 0) { total += 60; }
-      if (title === term) { total += 90; }
-      else if (inTitle === 0) { total += 45; }
-      else if (inTitle > 0) { total += 20; }
-      if (inBody >= 0) { total += 8; }
+      var stemmed = stem(term);
+      var h = inField(heading, term, stemmed);
+      var t = inField(title, term, stemmed);
+      var b = inField(body, term, stemmed);
+      var k = inField(keywords, term, stemmed);
+      var w = words.indexOf(stemmed) >= 0 ? 1 : 0;
+      if (!h && !t && !b && !k && !w) { return 0; }
+      if (h) {
+        var weight = heading === term ? 200 : heading.indexOf(term) === 0 ? 120 : 60;
+        total += h === 2 ? weight : weight / 2;
+      }
+      if (t) {
+        var titleWeight = title === term ? 90 : title.indexOf(term) === 0 ? 45 : 20;
+        total += t === 2 ? titleWeight : titleWeight / 2;
+      }
+      /* A keyword is the author saying "people look for this here" — worth more
+         than a passing mention in the prose, less than the heading it points at. */
+      if (k) { total += k === 2 ? 80 : 40; }
+      if (b) { total += b === 2 ? 8 : 4; }
+      else if (w) { total += 3; }
+    }
+    /* The whole query, in order, in one field. "query parameters" as a phrase is
+       a far better answer than a page that says "query" and, elsewhere,
+       "parameters" — which is exactly how a SQL query builder outranked the
+       page about URLs. */
+    if (phrase) {
+      if (heading.indexOf(phrase) >= 0) { total += 140; }
+      if (keywords.indexOf(phrase) >= 0) { total += 120; }
+      if (title.indexOf(phrase) >= 0) { total += 70; }
+      if (body.indexOf(phrase) >= 0) { total += 50; }
     }
     // A shorter heading containing the query is a tighter match than a long one.
-    return total + Math.max(0, 24 - heading.length / 4);
+    return (total + Math.max(0, 24 - heading.length / 4)) * (page.b || 1);
   }
 
   function highlight(text, terms) {
@@ -289,16 +340,38 @@ _RUNTIME = r"""
   function render(query) {
     var terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     if (!terms.length || !index) { results.innerHTML = ''; return; }
+    /* "upload a file" is a search for two words and a preposition. Every term
+       has to match for a section to place, so leaving "a" in ranked whatever
+       happened to contain the letter alongside the words that mattered. Dropped
+       only while something else survives -- someone searching "a" means it. */
+    var real = terms.filter(function (t) { return !STOP[t]; });
+    if (real.length) { terms = real; }
+    var phrase = terms.length > 1 ? terms.join(' ') : '';
     var root_ = indexRoot();
     var hits = [];
     for (var i = 0; i < index.s.length; i++) {
       var section = index.s[i];
       var page = index.p[section.p];
-      var points = score(section, page, terms);
+      var points = score(section, page, terms, phrase);
       if (points > 0) { hits.push({ s: section, p: page, n: points }); }
     }
     hits.sort(function (a, b) { return b.n - a.n; });
-    hits = hits.slice(0, 24);
+    /* No page may take more than three of the slots. One page whose keywords
+       claim the query would otherwise fill the palette with its own sections
+       and hide every other page that answers it. */
+    var perPage = {}, seen = {}, kept = [];
+    for (var k = 0; k < hits.length && kept.length < 24; k++) {
+      var id = hits[k].s.p;
+      /* An API page opens with its own module name and then an `##` of the same
+         name, so the palette offered "wreath.binding → wreath.binding" twice,
+         a line apart, differing only in where they landed. Best one wins. */
+      var label = id + '#' + hits[k].s.h;
+      if (seen[label]) { continue; }
+      seen[label] = 1;
+      perPage[id] = (perPage[id] || 0) + 1;
+      if (perPage[id] <= 3) { kept.push(hits[k]); }
+    }
+    hits = kept;
     if (!hits.length) {
       results.innerHTML = '<div class="palette-empty">No results for &ldquo;' +
         esc(query) + '&rdquo;</div>';
@@ -310,7 +383,10 @@ _RUNTIME = r"""
       var hit = hits[j];
       if (hit.p.t !== group) {
         group = hit.p.t;
-        html += '<div class="group">' + esc(group) + '</div>';
+        /* The nav trail above the page, so `wreath.queries` under "API
+           reference" is visibly not the page about URLs. */
+        html += '<div class="group">' + esc(group) +
+          (hit.p.c ? '<span class="in">' + esc(hit.p.c) + '</span>' : '') + '</div>';
       }
       var href = root_ + hit.p.u + (hit.s.a ? '#' + hit.s.a : '');
       html += '<a href="' + esc(href) + '"><span class="r-title">' +

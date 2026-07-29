@@ -30,6 +30,11 @@ Findings guarded here (see the accompanying red-team report):
       connection window was never the binding constraint and nothing can flush.
       That is O(open_streams) of wasted work per 13-byte frame, on top of having
       no frame budget at all.
+  F6  Unknown extension-frame flood: RFC 9113 requires one unknown frame to be
+      ignored, but ignoring an unlimited run without charging the no-progress
+      budget lets nine-byte frames pin the parser indefinitely.
+  F7  ACK-only flood: SETTINGS ACK and PING ACK frames are ignored without
+      charging the no-progress budget, providing another parser-budget bypass.
 """
 from __future__ import annotations
 
@@ -37,6 +42,8 @@ import asyncio
 from pathlib import Path
 
 import pytest
+
+from wreath.server import ServerConfig
 
 from . import support
 from .conftest import ok_app, requires_h2
@@ -129,6 +136,26 @@ async def test_empty_data_flood_amplifies_into_asgi_receive(make_driver):
     )
 
 
+async def test_nonempty_data_frames_share_the_body_chunk_budget(make_driver):
+    """A byte limit must not permit one ASGI wakeup per attacker frame."""
+    config = ServerConfig(protocols=("h2",), max_body_chunks=4)
+    d = make_driver(ok_app, config)
+    await d.preface()
+    await _open_stream(d, 1, end_stream=False)
+    d.frames()  # discard handshake output
+
+    for _ in range(config.max_body_chunks + 1):
+        d.feed(support.encode_frame(support.DATA, 0, 1, b"x"))
+        await d.settle()
+
+    resets = [
+        frame for frame in d.frames()
+        if frame.type == support.RST_STREAM and frame.stream_id == 1
+    ]
+    assert resets, "positive DATA frames bypass max_body_chunks"
+    assert int.from_bytes(resets[-1].payload, "big") == support.ENHANCE_YOUR_CALM
+
+
 # --- F2: PING flood ---------------------------------------------------------
 
 async def test_ping_flood_is_throttled(make_driver):
@@ -167,6 +194,47 @@ async def test_settings_flood_is_throttled(make_driver):
     assert len(acks) < 10_000 or _goaways(d), (
         f"{len(acks)} SETTINGS ACKs for 10k empty SETTINGS with no GOAWAY: "
         "unthrottled control-frame reflection (F3)"
+    )
+
+
+# --- F6: unknown extension-frame flood -------------------------------------
+
+async def test_unknown_extension_frame_flood_is_throttled(make_driver):
+    """Unknown frames are ignored individually, not granted infinite CPU."""
+    d = make_driver(ok_app)
+    await d.preface()
+
+    unknown = support.encode_frame(0xFA, 0, 0, b"")
+    d.feed(unknown * 10_000)
+    await d.settle()
+
+    assert _goaways(d), (
+        "no GOAWAY after 10k unknown nine-byte frames: extension frames "
+        "bypass the no-progress budget (F6)"
+    )
+
+
+# --- F7: ACK-only flood ----------------------------------------------------
+
+@pytest.mark.parametrize(
+    "ack",
+    [
+        support.encode_frame(support.SETTINGS, support.FLAG_ACK, 0, b""),
+        support.encode_frame(support.PING, support.FLAG_ACK, 0, b"ackflood"),
+    ],
+    ids=("settings", "ping"),
+)
+async def test_ack_only_frame_flood_is_throttled(make_driver, ack):
+    """ACK responses are ignored individually, but still consume parser work."""
+    d = make_driver(ok_app)
+    await d.preface()
+
+    d.feed(ack * 10_000)
+    await d.settle()
+
+    assert _goaways(d), (
+        "no GOAWAY after 10k ACK-only frames: ignored ACKs bypass the "
+        "no-progress budget (F7)"
     )
 
 

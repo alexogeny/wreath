@@ -101,7 +101,7 @@ class ProxyHeadersMiddleware:
             return False
         return bool(self._networks.contains(str(client[0])))
 
-    async def before(self, request: Request) -> None:
+    def before_sync(self, request: Request) -> None:
         """Rewrite client, scheme, and Host from a trusted peer's forwarding headers.
 
         Always returns None; this hook never short-circuits. A request whose
@@ -143,6 +143,10 @@ class ProxyHeadersMiddleware:
                 if value:
                     request._set_header(b"host", value)
         return None
+
+    async def before(self, request: Request) -> None:
+        """Compatibility wrapper; compiled middleware uses `before_sync`."""
+        return self.before_sync(request)
 
 
 __all__ = ["ProxyHeadersMiddleware"]

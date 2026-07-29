@@ -45,6 +45,7 @@ class RunOptions:
     max_header_count: int
     max_header_bytes: int
     max_body_bytes: int
+    max_body_chunks: int
     read_high_water: int
     read_high_water_messages: int
     response_high_water: int
@@ -88,6 +89,7 @@ class RunOptions:
                 max_header_count=self.max_header_count,
                 max_header_bytes=self.max_header_bytes,
                 max_body_bytes=self.max_body_bytes,
+                max_body_chunks=self.max_body_chunks,
                 read_high_water=self.read_high_water,
                 read_high_water_messages=self.read_high_water_messages,
                 response_high_water=self.response_high_water,
@@ -157,6 +159,7 @@ def _add_server_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-header-count", type=int, default=defaults.max_header_count)
     parser.add_argument("--max-header-bytes", type=int, default=defaults.max_header_bytes)
     parser.add_argument("--max-body-bytes", type=int, default=defaults.max_body_bytes)
+    parser.add_argument("--max-body-chunks", type=int, default=defaults.max_body_chunks)
     parser.add_argument("--read-high-water", type=int, default=defaults.read_high_water)
     parser.add_argument(
         "--read-high-water-messages", type=int, default=defaults.read_high_water_messages
@@ -781,6 +784,7 @@ def options_from_namespace(namespace: argparse.Namespace) -> RunOptions:
         max_header_count=namespace.max_header_count,
         max_header_bytes=namespace.max_header_bytes,
         max_body_bytes=namespace.max_body_bytes,
+        max_body_chunks=namespace.max_body_chunks,
         read_high_water=namespace.read_high_water,
         read_high_water_messages=namespace.read_high_water_messages,
         response_high_water=namespace.response_high_water,

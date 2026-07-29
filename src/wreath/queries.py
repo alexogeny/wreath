@@ -37,7 +37,13 @@ from __future__ import annotations
 
 from typing import Any, TypeVar, get_args, get_origin
 
-from .orm.compiler import check_predicate_columns, compile_rebind
+from .orm.compiler import (
+    _bind_cached_plan,
+    check_predicate_columns,
+    compile_declared_values,
+    compile_rebind,
+    compile_select,
+)
 from .orm.errors import DeclarationError
 from .orm.expressions import (
     EQ,
@@ -184,7 +190,16 @@ class QueryDeclaration:
     level can be reused by more than one class.
     """
 
-    __slots__ = ("_binders", "_select", "_single", "_steps", "name", "parameters")
+    __slots__ = (
+        "_binders",
+        "_execution_select",
+        "_select",
+        "_single",
+        "_steps",
+        "_value_program",
+        "name",
+        "parameters",
+    )
 
     def __init__(
         self,
@@ -193,6 +208,8 @@ class QueryDeclaration:
         single: bool = False,
         select: Select | None = None,
         binders: tuple[Any, ...] = (),
+        execution_select: Select | None = None,
+        value_program: Any = None,
         name: str = "query",
         parameters: tuple[str, ...] = (),
     ) -> None:
@@ -200,6 +217,8 @@ class QueryDeclaration:
         self._single = single
         self._select = select
         self._binders = binders
+        self._execution_select = execution_select
+        self._value_program = value_program
         #: `Class.attribute`, once a `Queries` class has claimed it.
         self.name = name
         #: Parameter names, in the order they bind.
@@ -283,11 +302,18 @@ class QueryDeclaration:
         for predicate in select.predicates:
             check_predicate_columns(model, predicate)
             binders.append(compile_rebind(predicate, Placeholder, found))
+        execution_select = select
+        if self._single and (
+            execution_select.limit_ is None or execution_select.limit_ > 2
+        ):
+            execution_select = execution_select.limit(2)
         return QueryDeclaration(
             self._steps,
             single=self._single,
             select=select,
             binders=tuple(binders),
+            execution_select=execution_select,
+            value_program=compile_declared_values(execution_select, Placeholder),
             name=f"{owner}.{attribute}",
             # A name used twice binds both sites from one argument, so the
             # parameter list is de-duplicated while keeping bind order.
@@ -314,11 +340,15 @@ class QueryDeclaration:
                 "a query() declaration is only usable as an attribute of a "
                 "Queries subclass, which is what gives it a model"
             )
+        self._check_values(values)
+        return self._bind_validated(values)
+
+    def _check_values(self, values: dict[str, Any]) -> None:
         names = self.parameters
         if not names:
             if values:
                 raise TypeError(f"{self.name}() takes no parameters")
-            return select
+            return
         for name in names:
             if name not in values:
                 raise TypeError(f"{self.name}() is missing parameter {name!r}")
@@ -326,12 +356,44 @@ class QueryDeclaration:
             for name in values:
                 if name not in names:
                     raise TypeError(f"{self.name}() got an unexpected parameter {name!r}")
+
+    def _bind_validated(self, values: dict[str, Any]) -> Select:
+        select = self._select
+        if select is None:
+            raise DeclarationError(
+                "a query() declaration is only usable as an attribute of a "
+                "Queries subclass, which is what gives it a model"
+            )
+        if not self.parameters:
+            return select
         return select.rebound(
             tuple(
                 predicate if binder is None else binder(values)
                 for predicate, binder in zip(select.predicates, self._binders, strict=True)
             )
         )
+
+    def _compile(self, registry: Any, values: dict[str, Any]) -> tuple[Any, Select]:
+        """Bind against this registry, bypassing Select construction on hits."""
+        self._check_values(values)
+        execution_select = self._execution_select
+        value_program = self._value_program
+        if execution_select is None or value_program is None:
+            raise DeclarationError(
+                "a query() declaration is only usable as an attribute of a "
+                "Queries subclass, which is what gives it a model"
+            )
+        cached = registry.cached_prepared_plan(self)
+        if cached is not None:
+            shape_key, plan = cached
+            return _bind_cached_plan(plan, shape_key, value_program(values)), execution_select
+
+        bound = self._bind_validated(values)
+        if self._single and (bound.limit_ is None or bound.limit_ > 2):
+            bound = bound.limit(2)
+        compiled = compile_select(registry, bound)
+        registry.remember_prepared_shape(self, compiled.shape_key)
+        return compiled, execution_select
 
     def __get__(self, instance: Any, owner: type | None = None) -> Any:
         # Reached on the class, this is the declaration itself -- which is what
@@ -356,10 +418,12 @@ class BoundQuery:
 
     async def __call__(self, **values: Any) -> Any:
         declaration = self.declaration
-        select = declaration.bind(**values)
+        compiled, execution_select = declaration._compile(
+            self.session.registry, values
+        )
         if declaration.single:
-            return await self.session.fetch_one(select)
-        return await self.session.fetch(select)
+            return await self.session._fetch_one_compiled(execution_select, compiled)
+        return await self.session._fetch_compiled(execution_select, compiled)
 
     async def count(self, **values: Any) -> int:
         """How many rows this query matches, without hydrating them."""

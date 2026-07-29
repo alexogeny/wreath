@@ -61,17 +61,17 @@ async def test_authority_maps_to_host_header(make_driver):
     assert all(not name.startswith(b":") for name, _ in captured[0]["headers"])
 
 
-async def test_explicit_host_header_preserved_over_authority(make_driver):
+async def test_explicit_host_header_equivalent_to_authority_is_preserved(make_driver):
     app, captured = scope_capture_app()
     d = make_driver(app)
     await d.preface()
     block = support.HpackEncoder().encode([
         (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
-        (b":authority", b"authority.example"), (b"host", b"host.example")])
+        (b":authority", b"example.com:443"), (b"host", b"EXAMPLE.COM")])
     await d.feed_and_settle(support.encode_frame(
         support.HEADERS, support.FLAG_END_HEADERS | support.FLAG_END_STREAM, 1, block))
     headers = [v for n, v in captured[0]["headers"] if n == b"host"]
-    assert b"host.example" in headers
+    assert headers == [b"EXAMPLE.COM"]
 
 
 async def test_duplicate_regular_headers_preserved_in_order(make_driver):
@@ -298,3 +298,65 @@ async def test_delivery_is_correct_across_coalescing_boundaries(make_driver):
     # than left holding consumed references.
     streams = _decode_response(d)
     assert streams[1]["body"] == b"ok"
+
+
+@pytest.mark.parametrize(
+    ("target", "path", "raw_path", "query"),
+    [
+        (b"/caf%C3%A9", "/café", b"/caf%C3%A9", b""),
+        (b"/items/%41", "/items/A", b"/items/%41", b""),
+        (b"/a%20b?q=1", "/a b", b"/a%20b", b"q=1"),
+        (b"/search?q=a%2Fb", "/search", b"/search", b"q=a%2Fb"),
+    ],
+)
+async def test_scope_path_is_percent_decoded_like_http1(
+    make_driver, target, path, raw_path, query
+):
+    """The same URL must produce the same scope whichever protocol carried it.
+
+    The h2 scope was built straight from the raw `:path`: `path` kept its
+    percent escapes (ASGI 3.0 requires it decoded, and HTTP/1 decodes it), and
+    `raw_path` carried the query string too. So a route with any encoded
+    character in its path was unreachable over h2 while working over h1, path
+    parameters reached handlers still encoded, and the application-level
+    encoded-separator guard -- which reads `raw_path` -- refused an ordinary
+    `%2F` inside a *query* value on h2 only.
+    """
+    app, captured = scope_capture_app()
+    d = make_driver(app)
+    await d.preface()
+    await d.feed_and_settle(support.build_headers_frame(
+        1, support.request_headers(method=b"GET", path=target,
+                                   authority=b"example.com")))
+    assert len(captured) == 1
+    assert captured[0]["path"] == path
+    assert captured[0]["raw_path"] == raw_path
+    assert captured[0]["query_string"] == query
+
+
+@pytest.mark.parametrize("target", [b"/x%2fy", b"/x%5Cy", b"/bad%FF"])
+async def test_a_path_http1_refuses_is_a_malformed_request_on_http2(
+    make_driver, target
+):
+    """An encoded separator, or a path that is not UTF-8, is malformed either way.
+
+    HTTP/1 answers 400. The h2 equivalent is a stream error (RFC 9113 s8.3.1),
+    not a 200 with the escape handed to the application -- which is what
+    building the scope from the raw `:path` produced. The connection survives,
+    so a well-formed request on the same connection still runs.
+    """
+    app, captured = scope_capture_app()
+    d = make_driver(app)
+    await d.preface()
+    await d.feed_and_settle(support.build_headers_frame(
+        1, support.request_headers(method=b"GET", path=target,
+                                   authority=b"example.com")))
+    assert captured == []
+    resets = [f for f in d.frames() if f.type == support.RST_STREAM]
+    assert resets and resets[-1].stream_id == 1
+    assert int.from_bytes(resets[-1].payload[:4], "big") == support.PROTOCOL_ERROR
+
+    await d.feed_and_settle(support.build_headers_frame(
+        3, support.request_headers(method=b"GET", path=b"/ok",
+                                   authority=b"example.com")))
+    assert [scope["path"] for scope in captured] == ["/ok"]

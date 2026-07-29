@@ -194,3 +194,65 @@ def test_secrets_of_any_length_agree() -> None:
     for size in (32, 33, 64, 65, 128, 200):
         secret = os.urandom(size)
         assert sign(secret, NOW, nonce) == pure.csrf_sign(secret, NOW, nonce)
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        "\N{ARABIC-INDIC DIGIT ONE}\N{ARABIC-INDIC DIGIT TWO}",  # int() takes these
+        "\N{EXTENDED ARABIC-INDIC DIGIT ONE}",
+        "1_0",           # int() takes the PEP 515 separator; strtoll does not
+        "1 ",            # int() strips a trailing space; strtoll stops at it
+        "1\t",
+        "0" * 24 + "1",  # longer than the C twin's 24-byte parse buffer
+        "\N{NO-BREAK SPACE}1",
+        "0x10",
+        "1e3",
+        "--1",
+        "",
+    ],
+)
+def test_a_junk_issued_field_is_read_identically_by_both_twins(stamp: str) -> None:
+    """The twins must agree on the *whole* result, `issued` included.
+
+    `csrf_validate` reports the issue time alongside the verdict so a caller can
+    renew rather than reject an expired token. The C twin parses that field with
+    `strtoll` into a 24-byte buffer; `int()` accepts a strictly wider language --
+    Unicode digits, `_` separators, trailing whitespace, unbounded length -- so
+    the pure twin used to answer `(False, 123)` where the C twin answered
+    `(False, 0)`, and accepted a zero-padded stamp the C twin refused outright.
+    """
+    _sign, new, validate = _native()
+    parts = new(SECRET, NOW).split(".")
+    parts[1] = stamp
+    token = ".".join(parts)
+    assert validate(SECRET, token, NOW, MAX_AGE) == pure.csrf_validate(
+        SECRET, token, NOW, MAX_AGE
+    )
+
+
+@pytest.mark.parametrize(
+    ("host", "patterns", "expected"),
+    [
+        (".example", ("*.example",), False),
+        ("example", ("*.example",), False),
+        ("a.example", ("*.example",), True),
+        (".app.example", ("*.app.example",), False),
+        ("..example", ("*.example",), True),
+        ("app.example", ("app.example",), True),
+    ],
+)
+def test_wildcard_host_matching_agrees_with_the_pure_twin(
+    host: str, patterns: tuple[str, ...], expected: bool
+) -> None:
+    """`*.example` stands for at least one label, so `.example` is not a match.
+
+    The pure twin excluded only the bare parent (`host != suffix[1:]`), which
+    still admitted the empty-label host that the C twin's length comparison
+    rejects. `TrustedHostMiddleware` normalizes such a host away before it gets
+    here, so this was a twin divergence rather than a live bypass -- but the
+    pure matcher is what ships when the extension is not built.
+    """
+    assert _core is not None
+    assert _core.host_allowed(host, patterns) is expected
+    assert pure.host_allowed(host, patterns) is expected

@@ -88,6 +88,35 @@ async def reindex(ctx, doc_id: str) -> None:
 
 When a task raises, it is retried with backoff; once `retries` is exhausted it is **dead-lettered** (moved to a terminal state you can inspect) rather than lost or retried forever.
 
+### A handler has to finish inside its lease
+
+There is no heartbeat. A handler still running when its lease expires is reclaimed
+by the sweeper and started again by another worker — two copies of the same job,
+doing the same work. The fence stops the first one's *bookkeeping* from landing;
+it does not stop the second one from charging the card.
+
+So a handler is cancelled before that can happen:
+
+```python
+@jobs.task("export", timeout=20.0)      # must be < the runner's lease
+async def export(ctx, report_id: str) -> None:
+    ...
+```
+
+`timeout` defaults to 80% of the runner's lease, leaving the remaining fifth for
+the cancellation to land and the failure to be recorded. Declaring one longer
+than the lease is refused at registration, the same way `drive()` refuses a pass
+whose shift could outlast it. A cancelled handler counts an attempt and retries
+with backoff — a deadline miss is usually a slow dependency, not a bug — and the
+runner counts it under `run_timeouts`, separately from `run_errors`, because
+nothing failed: work was stopped.
+
+If your work genuinely needs longer than a lease, raise the lease
+(`app.jobs(..., lease=120.0)`) rather than the timeout. The lease is what bounds
+how long a *crashed* worker's job sits unclaimed, so raising it trades recovery
+latency for headroom — which is the trade you actually want to make, and making
+it visible is the point.
+
 One failure skips the retries: a job whose stored arguments no longer **bind** to its handler's signature is dead-lettered on the first attempt. That is version skew — the row was written by a release where the task took different arguments — and the fourth attempt binds no better than the first. The `last_error` names the task, how many arguments the row carried, and which parameter is missing, so it reads as a deploy-ordering problem rather than as a handler bug. Arguments are bound *before* the handler is called, so this never reaches your code.
 
 ## Transactional enqueue

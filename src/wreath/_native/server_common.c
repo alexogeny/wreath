@@ -49,6 +49,61 @@ wreath_field_value_valid(const char *data, Py_ssize_t size)
 }
 
 
+/* --- request path ------------------------------------------------------- */
+
+PyObject *
+wreath_decode_request_path(const char *data, Py_ssize_t size, int *bad)
+{
+    /* Percent-decode (without plus-as-space), then strict UTF-8, matching the
+     * pure reference. */
+    char *decoded = PyMem_Malloc(size ? (size_t)size : 1);
+    Py_ssize_t out = 0;
+    PyObject *path;
+    *bad = 0;
+    if (decoded == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < size; i++) {
+        char c = data[i];
+        if (c == '%' && i + 2 < size) {
+            int hi = (unsigned char)data[i + 1];
+            int lo = (unsigned char)data[i + 2];
+            int hv = (hi >= '0' && hi <= '9') ? hi - '0'
+                   : (hi >= 'a' && hi <= 'f') ? hi - 'a' + 10
+                   : (hi >= 'A' && hi <= 'F') ? hi - 'A' + 10 : -1;
+            int lv = (lo >= '0' && lo <= '9') ? lo - '0'
+                   : (lo >= 'a' && lo <= 'f') ? lo - 'a' + 10
+                   : (lo >= 'A' && lo <= 'F') ? lo - 'A' + 10 : -1;
+            if (hv >= 0 && lv >= 0) {
+                int decoded_byte = (hv << 4) | lv;
+                /* Encoded separators are routed differently by common proxies.
+                 * Refuse rather than let an edge ACL and Wreath activate two paths. */
+                if (decoded_byte == '/' || decoded_byte == '\\') {
+                    PyMem_Free(decoded);
+                    *bad = 1;
+                    return NULL;
+                }
+                decoded[out++] = (char)decoded_byte;
+                i += 2;
+                continue;
+            }
+        }
+        decoded[out++] = c;
+    }
+    path = PyUnicode_DecodeUTF8(decoded, out, "strict");
+    PyMem_Free(decoded);
+    if (path == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_UnicodeDecodeError)) {
+            PyErr_Clear();
+            *bad = 1;
+        }
+        return NULL;
+    }
+    return path;
+}
+
+
 /* --- shared module globals ---------------------------------------------- */
 /* Borrowed from the live module; cleared by server_module_free(). */
 PyObject *disconnect_error = NULL;    /* module-private _Disconnect */
@@ -330,32 +385,6 @@ find_sub_from(
     Py_ssize_t resume = hay_len - (needle_len - 1);
     *scan_from = resume > 0 ? resume : 0;
     return -1;
-}
-
-
-int
-contains_ci(const char *hay, Py_ssize_t n, const char *needle)
-{
-    Py_ssize_t m = (Py_ssize_t)strlen(needle);
-    if (m == 0) {
-        return 1;
-    }
-    for (Py_ssize_t i = 0; i + m <= n; i++) {
-        Py_ssize_t j = 0;
-        for (; j < m; j++) {
-            char c = hay[i + j];
-            if (c >= 'A' && c <= 'Z') {
-                c = (char)(c + 32);
-            }
-            if (c != needle[j]) {
-                break;
-            }
-        }
-        if (j == m) {
-            return 1;
-        }
-    }
-    return 0;
 }
 
 

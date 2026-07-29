@@ -794,7 +794,7 @@ class Request:
         values: list[bytes] = []
         total = 0
         for name, candidate in self.headers:
-            if name.lower() != b"cookie":
+            if name != b"cookie":
                 continue
             total += len(candidate) + (2 if values else 0)
             if total > self._limits.max_cookie_bytes:

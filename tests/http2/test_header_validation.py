@@ -63,6 +63,32 @@ async def test_duplicate_pseudo_header_is_protocol_error(make_driver):
     assert not captured
 
 
+async def test_host_must_not_disagree_with_authority(make_driver):
+    """Conflicting routing authorities must not reach host-based policy."""
+    d, captured = await _send_raw_headers(make_driver, [
+        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
+        (b":authority", b"evil.example"), (b"host", b"good.example")])
+    assert _stream_error(d) == support.PROTOCOL_ERROR
+    assert not captured
+
+
+async def test_authority_must_not_contain_userinfo(make_driver):
+    d, captured = await _send_raw_headers(make_driver, [
+        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
+        (b":authority", b"good.example@evil.example")])
+    assert _stream_error(d) == support.PROTOCOL_ERROR
+    assert not captured
+
+
+async def test_duplicate_host_is_protocol_error(make_driver):
+    d, captured = await _send_raw_headers(make_driver, [
+        (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),
+        (b":authority", b"good.example"),
+        (b"host", b"good.example"), (b"host", b"good.example")])
+    assert _stream_error(d) == support.PROTOCOL_ERROR
+    assert not captured
+
+
 async def test_unknown_pseudo_header_is_protocol_error(make_driver):
     d, captured = await _send_raw_headers(make_driver, [
         (b":method", b"GET"), (b":path", b"/"), (b":scheme", b"https"),

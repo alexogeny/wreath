@@ -718,7 +718,12 @@ def _http1_chunked_body_frames(n: int):
             return Response(b"x")
 
         loop = asyncio.get_running_loop()
-        protocol = _server.HttpProtocol(app, ServerConfig(), loop, set())
+        # This probe deliberately scales chunk count beyond the production
+        # default. Raise only that budget so it continues measuring parser
+        # complexity instead of exercising the separate DoS rejection guard.
+        protocol = _server.HttpProtocol(
+            app, ServerConfig(max_body_chunks=n), loop, set()
+        )
         transport = _SinkTransport()
         protocol.connection_made(transport)
         start = time.perf_counter()
@@ -737,43 +742,19 @@ def _http1_chunked_body_frames(n: int):
 
 
 @probe(
-    "wheel-colliding-slot-chain", tolerance=0.6,
+    "wheel-colliding-slot-chain", expect=1.0, tolerance=0.6,
     sizes=(500, 1000, 2000, 4000),
     axis="timers sharing one slot at distinct deadlines",
-    assumption="KNOWN DEFECT: the fire loop walks the whole slot chain per sweep",
+    assumption="pairing heaps and the slot tournament drain k colliding timers in O(k)",
     stage="timers", group="metal-host",
-    todo=Todo(
-        degree=2.0, target=1.0,
-        reason="the fire loop walks the entire slot chain on every sweep; the fix "
-               "is structural (a per-slot ordered structure, or the far-future "
-               "overflow list this hybrid lacks), so it is recorded rather than "
-               "patched",
-        owner="#124",
-    ),
 )
 def _wheel_colliding_slot_chain(k: int):
-    """k timers in ONE slot at k distinct deadlines: currently O(k**2).
+    """k timers in one slot at distinct deadlines remain linear to drain.
 
     `wheel_slot()` masks the deadline, so deadlines congruent modulo `nslots`
-    share a slot. The fire loop (`reactor_wheel.c:510`) then walks that slot's
-    entire chain on every sweep to find the entries whose deadline has actually
-    come due -- one or two of them -- so a slot holding k timers across k
-    rotations costs k + (k-1) + ... to drain.
-
-    No existing probe builds this arrangement: `wheel-parked-rotation` spreads
-    parked timers one per slot, and `wheel-fire-batch`/`wheel-cancel-cohort`
-    use same-deadline cohorts where walking the chain *is* the work rather than
-    overhead. Measured against a spread control of identical size, k=4000 drains
-    in ~27ms versus ~0.36ms -- the same timers, ~75x apart on arrangement alone.
-
-    Reachable two ways: a periodic workload whose period is a multiple of
-    `nslots * resolution`, and a caller that opens connections on that cadence
-    so their keep-alive deadlines collide. Both degrade every later sweep, not
-    just the offender's.
-
-    The fix is structural -- a per-slot ordered structure, or the far-future
-    overflow list a classic hashed wheel carries and this hybrid does not --
-    so it is tracked rather than patched here."""
+    share a slot. Each slot is now a pairing heap and the wheel maintains a
+    tournament over slot minima, so arrangement does not restore the former
+    repeated linked-list rescan. This adversarial shape guards that fix."""
     import contextvars
 
     _reactor: Any = importlib.import_module("wreath._native._reactor")
@@ -1060,6 +1041,86 @@ def _append_missing_headers(n: int):
     headers = [(a, b) for a, b in headers]
     _core.append_missing_headers(headers, additions)
     return time.perf_counter() - start
+
+
+@probe(
+    "replace-reused-response-headers", expect=1.0,
+    sizes=(1000, 2000, 4000, 8000),
+    axis="middleware headers accumulated on a reused response",
+    assumption="built-in egress header replacement is linear and leaves one current value",
+    stage="egress", group="metal-http1",
+)
+def _replace_reused_response_headers(n: int):
+    """Replacing built-in headers on a reused response is O(n), then bounded.
+
+    Request ID, CSRF, and Server-Timing used to append a new line on every
+    send. Security-header scans then made n sends quadratic and retained O(n)
+    memory. This adversarial input starts with n stale copies of each header;
+    each replacement compacts once, retains unrelated values, and leaves one
+    current line rather than front-deleting from the list.
+    """
+    from wreath._native import _core
+
+    headers = (
+        [(b"x-request-id", b"old")] * n
+        + [(b"set-cookie", b"wreath_csrf=old; Path=/")] * n
+        + [(b"server-timing", b"total;dur=9")] * n
+    )
+    start = time.perf_counter()
+    _core.replace_response_header(headers, b"x-request-id", b"current")
+    _core.replace_cookie(headers, b"wreath_csrf=", b"wreath_csrf=current; Path=/")
+    _core.replace_server_timing(headers, b"total", b"total;dur=1")
+    elapsed = time.perf_counter() - start
+    return elapsed, {"remaining_headers": len(headers)}
+
+
+@probe(
+    "reused-response-lifecycle", expect=1.0,
+    sizes=(250, 500, 1000, 2000),
+    axis="requests returning the same mutable response",
+    assumption="the standard middleware lifecycle is linear in sends and keeps headers bounded",
+    stage="egress", group="metal-http1",
+)
+def _reused_response_lifecycle(n: int):
+    """Sending one response n times stays O(n) with O(1) retained headers.
+
+    This is the complete exploit chain, not just the replacement primitive:
+    request ID, timing, CSRF, and security middleware all run around the same
+    response instance. Appending observability headers made later security
+    scans progressively longer, so the former lifecycle was quadratic.
+    """
+    import asyncio
+
+    from wreath import Response, Wreath
+    from wreath._devtools.measure import run, scope
+    from wreath._devtools.sample_app import MIDDLEWARE_FACTORIES
+
+    async def drive() -> tuple[float, dict[str, int]]:
+        app = Wreath()
+        for factory in MIDDLEWARE_FACTORIES:
+            app.add_middleware(factory())
+        response = Response(b"ok")
+
+        @app.get("/", response_only=True)
+        async def endpoint(request: Any) -> Response:
+            return response
+
+        template = scope(
+            "GET",
+            "/",
+            {
+                "host": "example.com",
+                "origin": "https://example.com",
+                "x-forwarded-for": "203.0.113.7",
+            },
+        )
+        await run(app, template, 1)
+        start = time.perf_counter()
+        await run(app, template, n)
+        elapsed = time.perf_counter() - start
+        return elapsed, {"retained_headers": len(response.headers)}
+
+    return asyncio.run(drive())
 
 
 @probe("multipart-many-parts", expect=1.0, sizes=(1000, 2000, 4000, 8000))
@@ -1917,6 +1978,7 @@ def _pure_cancel_harness(k: int, order: str):
         loop = asyncio.get_running_loop()
         connection = object.__new__(Connection)
         connection._waiting = collections.deque()
+        connection._waiting_live = k
         connection._transaction_barrier = False
         connection._current = None
         connection._backend_pid = 0
@@ -1932,7 +1994,8 @@ def _pure_cancel_harness(k: int, order: str):
         for operation in victims:
             connection._cancel_operation(operation)
         elapsed = time.perf_counter() - start
-        assert not connection._waiting
+        assert connection._waiting_live == 0
+        assert len(connection._waiting) == k  # tombstones drain later in _flush
         for operation in operations:
             operation.future.cancel()
         return elapsed, {"cancelled": len(operations)}
@@ -1941,36 +2004,19 @@ def _pure_cancel_harness(k: int, order: str):
 
 
 @probe(
-    "pure-pipeline-cancel-back-to-front", tolerance=0.6,
+    "pure-pipeline-cancel-back-to-front", expect=1.0, tolerance=0.6,
     sizes=(500, 1000, 2000, 4000),
     axis="queued operations cancelled newest-first",
-    assumption="KNOWN DEFECT: deque.remove rescans the queue per cancellation",
+    assumption="tombstoning a queued operation is O(1), independent of position",
     stage="database", group="pure",
-    todo=Todo(
-        degree=2.0, target=1.0,
-        reason="`_cancel_operation` removes by value from a deque, which scans "
-               "from the left, so cancelling the newest of k queued operations "
-               "walks all k; the fix is an index or a tombstone flag rather than "
-               "a positional removal",
-        owner="#135",
-    ),
 )
 def _pure_pipeline_cancel_back_to_front(k: int):
-    """Cancelling k queued operations newest-first is O(k**2).
+    """Cancelling k queued operations newest-first remains O(k).
 
-    `_pure/postgres.py:1718` calls `self._waiting.remove(operation)`. `_waiting`
-    is a `deque`, whose `remove` scans from the left, so removing the *last*
-    element costs the whole queue -- and unwinding k of them costs
-    k + (k-1) + ...
-
-    Newest-first is not a contrived order: it is what a stack of nested `async
-    with` scopes produces when the innermost is cancelled first, and what a
-    `TaskGroup` unwinding on error tends toward. The queue is the operations
-    sitting *behind* the pipeline depth, so it is bounded by concurrent callers
-    rather than by `max_emitted_operations`.
-
-    `pure-pipeline-cancel-front-to-back` is the control: identical k, identical
-    operations, opposite order, linear."""
+    Cancellation marks the operation and decrements `_waiting_live`; `_flush`
+    drops the tombstone when it reaches the head. No cancellation searches the
+    deque, so the adversarial newest-first unwind has the same linear total as
+    the oldest-first control."""
     return _pure_cancel_harness(k, "back")
 
 
@@ -1982,11 +2028,7 @@ def _pure_pipeline_cancel_back_to_front(k: int):
     stage="database", group="pure",
 )
 def _pure_pipeline_cancel_front_to_back(k: int):
-    """The control for `pure-pipeline-cancel-back-to-front`: same k, same work.
-
-    `deque.remove` scans from the left, so cancelling the oldest operation finds
-    it immediately. Without this control the other probe would only show that
-    cancelling many operations is slow, not that the *order* is what costs."""
+    """The order control for the newest-first cancellation probe."""
     return _pure_cancel_harness(k, "front")
 
 

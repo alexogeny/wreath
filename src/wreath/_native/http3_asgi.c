@@ -24,21 +24,70 @@ wreath_h3_alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *out
     return SSL_TLSEXT_ERR_OK;
 }
 
-/* --- small future helpers ------------------------------------------------ */
+/* --- immediate value awaitable ------------------------------------------- */
+typedef struct {
+    PyObject_HEAD
+    PyObject *value;
+} H3ValueAwaitable;
+
 static PyObject *
-resolved_future(PyObject *loop, PyObject *value)
+h3_value_await(PyObject *self)
 {
-    PyObject *fut = PyObject_CallMethod(loop, "create_future", NULL);
-    if (fut == NULL) {
+    return Py_NewRef(self);
+}
+
+static PyObject *
+h3_value_next(PyObject *op)
+{
+    H3ValueAwaitable *self = (H3ValueAwaitable *)op;
+    PyObject *value = self->value;
+    if (value == NULL) {
+        PyErr_SetNone(PyExc_StopIteration);
         return NULL;
     }
-    PyObject *r = PyObject_CallMethod(fut, "set_result", "O", value);
-    if (r == NULL) {
-        Py_DECREF(fut);
+    self->value = NULL;
+    if (PyTuple_Check(value) || PyExceptionInstance_Check(value)) {
+        PyObject *exc = PyObject_CallOneArg(PyExc_StopIteration, value);
+        Py_DECREF(value);
+        if (exc == NULL) return NULL;
+        PyErr_SetObject(PyExc_StopIteration, exc);
+        Py_DECREF(exc);
         return NULL;
     }
-    Py_DECREF(r);
-    return fut;
+    PyErr_SetObject(PyExc_StopIteration, value);
+    Py_DECREF(value);
+    return NULL;
+}
+
+static void
+h3_value_dealloc(PyObject *op)
+{
+    Py_XDECREF(((H3ValueAwaitable *)op)->value);
+    Py_TYPE(op)->tp_free(op);
+}
+
+static PyAsyncMethods h3_value_async = {.am_await = h3_value_await};
+
+static PyTypeObject H3ValueAwaitableType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "wreath._native._http3._ValueAwaitable",
+    .tp_basicsize = sizeof(H3ValueAwaitable),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = h3_value_dealloc,
+    .tp_as_async = &h3_value_async,
+    .tp_iter = PyObject_SelfIter,
+    .tp_iternext = h3_value_next,
+};
+
+static PyObject *
+resolved_future(PyObject *Py_UNUSED(loop), PyObject *value)
+{
+    H3ValueAwaitable *awaitable = PyObject_New(
+        H3ValueAwaitable, &H3ValueAwaitableType
+    );
+    if (awaitable == NULL) return NULL;
+    awaitable->value = Py_NewRef(value);
+    return (PyObject *)awaitable;
 }
 
 static PyObject *endpoint_loop(WreathH3Conn *c) { return c->endpoint->loop; }
@@ -153,7 +202,9 @@ h3_response_send_result(WreathH3Stream *s, PyObject *loop)
         return resolved_future(loop, Py_None);
     }
     if (s->send_waiter == NULL) {
-        s->send_waiter = PyObject_CallMethod(loop, "create_future", NULL);
+        s->send_waiter = PyObject_CallNoArgs(
+            s->conn->endpoint->loop_create_future
+        );
         if (s->send_waiter == NULL) {
             return NULL;
         }
@@ -196,7 +247,8 @@ wreath_h3_init_message_keys(void)
     if (k_type != NULL) {
         return 0;
     }
-    if ((k_type = PyUnicode_InternFromString("type")) == NULL ||
+    if (PyType_Ready(&H3ValueAwaitableType) < 0 ||
+        (k_type = PyUnicode_InternFromString("type")) == NULL ||
         (k_status = PyUnicode_InternFromString("status")) == NULL ||
         (k_headers = PyUnicode_InternFromString("headers")) == NULL ||
         (k_body = PyUnicode_InternFromString("body")) == NULL ||
@@ -275,11 +327,90 @@ h3_stream_receive(PyObject *op, PyObject *Py_UNUSED(ignored))
         Py_DECREF(msg);
         return f;
     }
-    PyObject *fut = PyObject_CallMethod(loop, "create_future", NULL);
+    PyObject *fut = PyObject_CallNoArgs(s->conn->endpoint->loop_create_future);
     if (fut == NULL) return NULL;
     Py_XSETREF(s->receive_waiter, Py_NewRef(fut));
     return fut;
 }
+
+static PyObject *
+h3_response_start(WreathH3Stream *s, PyObject *status_obj, PyObject *headers)
+{
+    PyObject *loop = endpoint_loop(s->conn);
+    long status = status_obj ? PyLong_AsLong(status_obj) : 200;
+    if (status == -1 && PyErr_Occurred()) return NULL;
+    if (status < 100 || status > 999) {
+        PyErr_SetString(PyExc_ValueError, "response status must be between 100 and 999");
+        return NULL;
+    }
+    if (s->response_started) {
+        PyErr_SetString(PyExc_RuntimeError, "response already started");
+        return NULL;
+    }
+    PyObject *header_items = headers
+        ? PySequence_Fast(headers, "response headers must be a sequence")
+        : PyTuple_New(0);
+    if (header_items == NULL) return NULL;
+    s->status = (int)status;
+    Py_XSETREF(s->resp_headers, header_items);
+    s->response_started = 1;
+    if (submit_response(s, 200) < 0) return NULL;
+    return resolved_future(loop, Py_None);
+}
+
+
+static PyObject *
+h3_response_body(WreathH3Stream *s, PyObject *body, int more_body)
+{
+    PyObject *loop = endpoint_loop(s->conn);
+    if (!s->response_started) {
+        PyErr_SetString(PyExc_RuntimeError, "response not started");
+        return NULL;
+    }
+    if (body != NULL && body != Py_None) {
+        if (!PyBytes_Check(body)) {
+            PyErr_SetString(PyExc_TypeError, "http.response.body 'body' must be bytes");
+            return NULL;
+        }
+        Py_ssize_t body_size = PyBytes_GET_SIZE(body);
+        if (body_size > 0) {
+            WreathH3Conn *c = s->conn;
+            WreathH3Endpoint *ep = c->endpoint;
+            if (body_size > PY_SSIZE_T_MAX - s->resp_retained_bytes ||
+                body_size > PY_SSIZE_T_MAX - c->retained_response_bytes ||
+                body_size > PY_SSIZE_T_MAX - ep->retained_response_bytes) {
+                PyErr_SetString(PyExc_OverflowError,
+                                "retained HTTP/3 response bytes overflow");
+                return NULL;
+            }
+            if (s->resp_chunks_len == s->resp_chunks_cap) {
+                if (s->resp_chunks_cap > PY_SSIZE_T_MAX / 2) return PyErr_NoMemory();
+                Py_ssize_t cap = s->resp_chunks_cap ? s->resp_chunks_cap * 2 : 16;
+                if ((size_t)cap > SIZE_MAX / sizeof(PyObject *)) return PyErr_NoMemory();
+                PyObject **grown = PyMem_Realloc(
+                    s->resp_chunks, (size_t)cap * sizeof(PyObject *));
+                if (grown == NULL) return PyErr_NoMemory();
+                s->resp_chunks = grown;
+                s->resp_chunks_cap = cap;
+            }
+            s->resp_chunks[s->resp_chunks_len++] = Py_NewRef(body);
+            s->resp_retained_bytes += body_size;
+            s->resp_retained_segments++;
+            c->retained_response_bytes += body_size;
+            c->retained_response_segments++;
+            ep->retained_response_bytes += body_size;
+            ep->retained_response_segments++;
+        }
+        if (s->nfr_active) s->nfr_bytes_out += (uint64_t)PyBytes_GET_SIZE(body);
+    }
+    if (!more_body) s->resp_eof = 1;
+    if (s->conn != NULL && s->conn->h3 != NULL) {
+        nghttp3_conn_resume_stream(s->conn->h3, s->stream_id);
+        wreath_h3_flush(s->conn);
+    }
+    return h3_response_send_result(s, loop);
+}
+
 
 static PyObject *
 h3_stream_send(PyObject *op, PyObject *message)
@@ -290,7 +421,6 @@ h3_stream_send(PyObject *op, PyObject *message)
          * awaited, so this must still be an awaitable, not a bare None. */
         return s->loop ? resolved_future(s->loop, Py_None) : NULL;
     }
-    PyObject *loop = endpoint_loop(s->conn);
     PyObject *type = PyDict_GetItem(message, k_type);
     if (type == NULL) {
         PyErr_SetString(PyExc_KeyError, "message has no 'type'");
@@ -300,92 +430,15 @@ h3_stream_send(PyObject *op, PyObject *message)
     if (t == NULL) return NULL;
 
     if (strcmp(t, "http.response.start") == 0) {
-        PyObject *status_obj = PyDict_GetItem(message, k_status);
-        long status = status_obj ? PyLong_AsLong(status_obj) : 200;
-        if (status == -1 && PyErr_Occurred()) return NULL;
-        if (status < 100 || status > 999) {
-            PyErr_SetString(PyExc_ValueError, "response status must be between 100 and 999");
-            return NULL;
-        }
-        if (s->response_started) {
-            PyErr_SetString(PyExc_RuntimeError, "response already started");
-            return NULL;
-        }
-        PyObject *headers = PyDict_GetItem(message, k_headers);
-        PyObject *header_items = headers
-            ? PySequence_Fast(headers, "response headers must be a sequence")
-            : PyTuple_New(0);
-        if (header_items == NULL) return NULL;
-        s->status = (int)status;
-        Py_XSETREF(s->resp_headers, header_items);
-        s->response_started = 1;
-        /* Submit headers and the data reader now, not after the final body
-         * message: bytes must reach the wire while the app is still streaming. */
-        if (submit_response(s, 200) < 0) return NULL;
-        return resolved_future(loop, Py_None);
+        return h3_response_start(
+            s, PyDict_GetItem(message, k_status), PyDict_GetItem(message, k_headers)
+        );
     }
     if (strcmp(t, "http.response.body") == 0) {
-        if (!s->response_started) {
-            PyErr_SetString(PyExc_RuntimeError, "response not started");
-            return NULL;
-        }
         PyObject *body = PyDict_GetItem(message, k_body);
         PyObject *more = PyDict_GetItem(message, k_more_body);
         int more_body = (more != NULL && PyObject_IsTrue(more));
-        if (body != NULL && body != Py_None) {
-            if (!PyBytes_Check(body)) {
-                PyErr_SetString(PyExc_TypeError,
-                                "http.response.body 'body' must be bytes");
-                return NULL;
-            }
-            /* Retain the app's exact bytes; never concatenate into a bytearray
-             * whose reallocation would move addresses nghttp3 still holds. */
-            Py_ssize_t body_size = PyBytes_GET_SIZE(body);
-            if (body_size > 0) {
-                WreathH3Conn *c = s->conn;
-                WreathH3Endpoint *ep = c->endpoint;
-                if (body_size > PY_SSIZE_T_MAX - s->resp_retained_bytes ||
-                    body_size > PY_SSIZE_T_MAX - c->retained_response_bytes ||
-                    body_size > PY_SSIZE_T_MAX - ep->retained_response_bytes) {
-                    PyErr_SetString(PyExc_OverflowError,
-                                    "retained HTTP/3 response bytes overflow");
-                    return NULL;
-                }
-                if (s->resp_chunks_len == s->resp_chunks_cap) {
-                    if (s->resp_chunks_cap > PY_SSIZE_T_MAX / 2) {
-                        return PyErr_NoMemory();
-                    }
-                    Py_ssize_t cap = s->resp_chunks_cap ? s->resp_chunks_cap * 2 : 16;
-                    if ((size_t)cap > SIZE_MAX / sizeof(PyObject *)) {
-                        return PyErr_NoMemory();
-                    }
-                    PyObject **grown = PyMem_Realloc(
-                        s->resp_chunks, (size_t)cap * sizeof(PyObject *));
-                    if (grown == NULL) return PyErr_NoMemory();
-                    s->resp_chunks = grown;
-                    s->resp_chunks_cap = cap;
-                }
-                s->resp_chunks[s->resp_chunks_len++] = Py_NewRef(body);
-                s->resp_retained_bytes += body_size;
-                s->resp_retained_segments++;
-                c->retained_response_bytes += body_size;
-                c->retained_response_segments++;
-                ep->retained_response_bytes += body_size;
-                ep->retained_response_segments++;
-            }
-            if (s->nfr_active) {
-                s->nfr_bytes_out += (uint64_t)PyBytes_GET_SIZE(body);
-            }
-        }
-        if (!more_body) {
-            s->resp_eof = 1;
-        }
-        if (s->conn != NULL && s->conn->h3 != NULL) {
-            /* New data (or EOF) is available for the data reader. */
-            nghttp3_conn_resume_stream(s->conn->h3, s->stream_id);
-            wreath_h3_flush(s->conn);
-        }
-        return h3_response_send_result(s, loop);
+        return h3_response_body(s, body, more_body);
     }
     PyErr_Format(PyExc_RuntimeError, "unsupported ASGI message type: %s", t);
     return NULL;
@@ -803,31 +856,19 @@ h3_stream_wreath_response(
     WreathH3Stream *self, PyObject *const *args, Py_ssize_t nargs
 )
 {
-    PyObject *start;
-    PyObject *body;
-    PyObject *result;
     if (nargs != 3) {
         PyErr_Format(
             PyExc_TypeError, "_wreath_response expected 3 arguments, got %zd", nargs
         );
         return NULL;
     }
-    start = Py_BuildValue(
-        "{s:s,s:O,s:O}", "type", "http.response.start",
-        "status", args[0], "headers", args[1]
-    );
-    if (start == NULL) return NULL;
-    result = h3_stream_send((PyObject *)self, start);
-    Py_DECREF(start);
-    if (result == NULL) return NULL;
-    Py_DECREF(result);
-    body = Py_BuildValue(
-        "{s:s,s:O}", "type", "http.response.body", "body", args[2]
-    );
-    if (body == NULL) return NULL;
-    result = h3_stream_send((PyObject *)self, body);
-    Py_DECREF(body);
-    return result;
+    if (self->conn == NULL) {
+        return self->loop ? resolved_future(self->loop, Py_None) : NULL;
+    }
+    PyObject *started = h3_response_start(self, args[0], args[1]);
+    if (started == NULL) return NULL;
+    Py_DECREF(started);
+    return h3_response_body(self, args[2], 0);
 }
 
 
@@ -872,6 +913,7 @@ begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     s->header_list = PyList_New(0);
     s->body_buffer = PyByteArray_FromStringAndSize(NULL, 0);
     s->body_received = 0;
+    s->body_frames = 0;
     s->receive_waiter = NULL;
     s->request_ended = s->disconnected = 0;
     s->response_started = s->response_ended = 0;
@@ -908,6 +950,8 @@ begin_headers_cb(nghttp3_conn *conn, int64_t stream_id, void *cu, void *su)
     return 0;
 }
 
+static void h3_reject_stream(WreathH3Stream *s, uint64_t app_error);
+
 static int
 recv_header_cb(nghttp3_conn *conn, int64_t stream_id, int32_t token,
                nghttp3_rcbuf *name, nghttp3_rcbuf *value, uint8_t flags,
@@ -915,7 +959,11 @@ recv_header_cb(nghttp3_conn *conn, int64_t stream_id, int32_t token,
 {
     (void)conn; (void)stream_id; (void)token; (void)flags; (void)cu;
     WreathH3Stream *s = (WreathH3Stream *)su;
-    if (s == NULL) return 0;
+    if (s == NULL || s->disconnected) return 0;
+    if (PyList_GET_SIZE(s->header_list) >= s->conn->endpoint->max_header_count) {
+        h3_reject_stream(s, NGHTTP3_H3_EXCESSIVE_LOAD);
+        return 0;
+    }
     nghttp3_vec nv = nghttp3_rcbuf_get_buf(name);
     nghttp3_vec vv = nghttp3_rcbuf_get_buf(value);
     PyObject *pn = PyBytes_FromStringAndSize((const char *)nv.base, (Py_ssize_t)nv.len);
@@ -994,23 +1042,13 @@ start_request(WreathH3Stream *s)
     }
     PyObject *scope;
     if (c->endpoint->native_app != NULL) {
-        PyObject *scope_type = PyUnicode_FromString("http");
-        PyObject *asgi = Py_BuildValue("{s:s,s:s}", "version", "3.0", "spec_version", "2.5");
-        PyObject *http_version = PyUnicode_FromString("3");
-        PyObject *root_path = PyUnicode_FromString("");
-        if (scope_type == NULL || asgi == NULL || http_version == NULL || root_path == NULL) {
-            Py_XDECREF(scope_type); Py_XDECREF(asgi); Py_XDECREF(http_version);
-            Py_XDECREF(root_path); Py_DECREF(path_str); Py_DECREF(raw_path);
-            Py_DECREF(query); Py_DECREF(method_str); Py_DECREF(scheme_str);
-            Py_DECREF(scope_headers);
-            return -1;
-        }
         scope = wreath_request_context_new(
-            scope_type, asgi, http_version, method_str, scheme_str, path_str,
-            raw_path, query, scope_headers, Py_None, Py_None, root_path
+            c->endpoint->scope_type, c->endpoint->scope_asgi,
+            c->endpoint->scope_http_version, method_str, scheme_str, path_str,
+            raw_path, query, scope_headers, Py_None, Py_None,
+            c->endpoint->scope_root_path
         );
-        Py_DECREF(scope_type); Py_DECREF(asgi); Py_DECREF(http_version);
-        Py_DECREF(root_path); Py_DECREF(path_str); Py_DECREF(raw_path);
+        Py_DECREF(path_str); Py_DECREF(raw_path);
         Py_DECREF(query); Py_DECREF(method_str); Py_DECREF(scheme_str);
         Py_DECREF(scope_headers);
     }
@@ -1062,10 +1100,7 @@ start_request(WreathH3Stream *s)
         ? c->endpoint->native_app : endpoint_app(c);
     PyObject *coro = PyObject_Vectorcall(target, app_args, 3, NULL);
     if (coro == NULL) return -1;
-    PyObject *create_task = PyObject_GetAttrString(endpoint_loop(c), "create_task");
-    if (create_task == NULL) { Py_DECREF(coro); return -1; }
-    PyObject *task = PyObject_CallOneArg(create_task, coro);
-    Py_DECREF(create_task);
+    PyObject *task = PyObject_CallOneArg(c->endpoint->loop_create_task, coro);
     Py_DECREF(coro);
     if (task == NULL) return -1;
     s->task = task;
@@ -1079,7 +1114,7 @@ end_headers_cb(nghttp3_conn *conn, int64_t stream_id, int fin, void *cu, void *s
 {
     (void)conn; (void)stream_id; (void)cu;
     WreathH3Stream *s = (WreathH3Stream *)su;
-    if (s == NULL) return 0;
+    if (s == NULL || s->disconnected) return 0;
     if (fin) s->request_ended = 1;
     if (start_request(s) < 0) {
         return NGHTTP3_ERR_CALLBACK_FAILURE;
@@ -1132,6 +1167,14 @@ recv_data_cb(nghttp3_conn *conn, int64_t stream_id, const uint8_t *data,
     WreathH3Stream *s = (WreathH3Stream *)su;
     if (s == NULL || s->disconnected) return 0;
     WreathH3Conn *c = s->conn;
+
+    if (datalen > 0) {
+        if (s->body_frames >= c->endpoint->max_body_chunks) {
+            h3_reject_stream(s, NGHTTP3_H3_EXCESSIVE_LOAD);
+            return 0;
+        }
+        s->body_frames++;
+    }
 
     /* Enforce the limit before narrowing size_t and before allocating: a chunk
      * that breaks the bound must never become a Python object. The bound counts

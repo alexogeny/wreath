@@ -12,7 +12,7 @@ of page ordering and mirrors the thematic, user-journey structure the docs use.
 
 from __future__ import annotations
 
-from wreath._docs import THEMES, Nav, Page, Section, Site
+from wreath._docs import THEMES, Link, Nav, Page, Repo, Section, Site
 
 nav = Nav(
     Page("Home", "index.md"),
@@ -272,6 +272,10 @@ site = Site(
     palette=THEMES["wreath"],
     base_url="https://alexogeny.github.io/wreath/",
     source_url="https://github.com/alexogeny/wreath/edit/main/docs",
+    # Counts are read once, at build time, and baked in -- see `_docs/repo.py`.
+    # A build with no network renders the link without them and warns.
+    repo=Repo("https://github.com/alexogeny/wreath", stats=True),
+    links=(Link("Wreath on PyPI", "https://pypi.org/project/wreath/", icon="package"),),
     description=(
         "Guides, cookbook, and API reference for the Wreath ASGI framework "
         "and native server."

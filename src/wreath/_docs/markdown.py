@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from .highlight import highlight
 
-__all__ = ["Rendered", "TocEntry", "render", "slugify"]
+__all__ = ["Rendered", "TocEntry", "plain", "render", "slugify"]
 
 _SAFE_SCHEME = re.compile(r"^(?:https?:|mailto:|#|/|\.{0,2}/|[^:]*$)", re.IGNORECASE)
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
@@ -40,6 +40,22 @@ _ADMONITION = re.compile(r'^(!!!|\?\?\?\+?|\?\?\?)\s+([\w-]+)(?:\s+"([^"]*)")?\s
 _TABLE_DELIM = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$")
 _CONTENT_TAB = re.compile(r'^=== +"([^"]*)"\s*$')
 _TASK = re.compile(r"\[([ xX])\]\s+(.*)$")
+
+
+#: Inline markup, for the places a heading is quoted as *text* rather than
+#: rendered: the table of contents, the `<title>`, and the search index. A rail
+#: reading "`wreath.binding`" with the backticks showing is the markdown source
+#: leaking through the frame -- and in the search index it also cost every API
+#: heading its exact-match score, because `"`query`"` is not `"query"`.
+_MD_LINK_TEXT = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_MD_EMPHASIS = re.compile(r"(\*\*|\*|__|_)(?=\S)(.+?)(?<=\S)\1")
+
+
+def plain(text: str) -> str:
+    """A heading's visible words, with the inline markers taken off."""
+    text = _MD_LINK_TEXT.sub(r"\1", text)
+    text = _MD_EMPHASIS.sub(r"\2", text)
+    return text.replace("`", "")
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,8 +196,8 @@ class _Renderer:
         else:
             slug = self._unique_slug(text)
         if level == 1 and self.title is None:
-            self.title = text
-        self.toc.append(TocEntry(level, slug, text))
+            self.title = plain(text)
+        self.toc.append(TocEntry(level, slug, plain(text)))
         self.out.append(
             f'<h{level} id="{slug}">{_inline(text)}'
             f'<a class="anchor" href="#{slug}" aria-label="Permalink">#</a></h{level}>')

@@ -31,6 +31,7 @@ from collections.abc import Callable, Iterable
 from copy import deepcopy
 from functools import wraps
 from typing import Any
+from urllib.parse import urlencode
 
 from ._codecs import parse_qs as _parse_qs
 from ._orm_events import subscribe_writes
@@ -72,11 +73,20 @@ def cache_key_for(names: Iterable[str]) -> Callable[[Any], str]:
         values: dict[str, str] = {}
         for name, value in _parse_qs(request.query_string, 0):
             values.setdefault(name, value)
-        selected = "&".join(
-            f"{name}={values[name]}" for name in declared if name in values
+        # Encode each parsed component again before joining it into the cache
+        # key.  Concatenating decoded values directly lets an embedded `%26`
+        # and `%3D` impersonate another field and collide with a different
+        # request (for example one `a=x&b=y` value versus two `a=x`, `b=y`
+        # values).
+        selected = urlencode(
+            [(name, values[name]) for name in declared if name in values]
         )
         return f"{base}?{selected}" if selected else base
 
+    # This helper deliberately builds a shared key with no principal.  Keep the
+    # marker on the callable so `cached(key=cache_key_for(...))` and the
+    # `query_params=` shorthand both enforce the authenticated-request bypass.
+    key._wreath_public = True  # ty: ignore[unresolved-attribute]
     return key
 
 

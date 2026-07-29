@@ -8,6 +8,13 @@ import os
 import re
 
 _TOKEN_COMPONENT = re.compile(r"^[A-Za-z0-9_-]{43}$")
+#: Exactly what `strtoll(number, &end, 10)` in the C twin consumes whole: C
+#: locale whitespace, an optional sign, and ASCII digits. `int()` is wider than
+#: that -- it also takes Unicode digits (`int("\N{ARABIC-INDIC DIGIT ONE}")`),
+#: `_` separators (`int("1_0")`), and trailing whitespace -- so parsing with it
+#: unguarded made the twins report different `issued` values for the same
+#: rejected token.
+_TOKEN_STAMP = re.compile(r"[ \t\n\v\f\r]*[+-]?[0-9]+\Z")
 _TOKEN_VERSION = "v1"
 
 
@@ -37,10 +44,13 @@ def csrf_validate(secret: bytes, token: str, now: int, max_age: int) -> tuple[bo
     parts = token.split(".")
     if len(parts) != 4 or parts[0] != _TOKEN_VERSION:
         return False, 0
-    try:
-        issued = int(parts[1])
-    except ValueError:
+    # The C twin copies this field into a 24-byte buffer before `strtoll`, so it
+    # refuses anything that would not fit. Without the same bound, a stamp
+    # padded to 24+ leading zeros parsed here to the value the padding hides and
+    # was accepted where the twin rejected it.
+    if not 0 < len(parts[1]) < 24 or _TOKEN_STAMP.fullmatch(parts[1]) is None:
         return False, 0
+    issued = int(parts[1])
     # Python's int is arbitrary precision and C's strtoll is not, so a token
     # claiming a 26-digit issue time would be rejected by both twins but with
     # different `issued` values. No caller reads `issued` from a rejected
@@ -63,7 +73,12 @@ def host_allowed(host: str, patterns: tuple[str, ...]) -> bool:
             return True
         if pattern.startswith("*."):
             suffix = pattern[1:]
-            if host.endswith(suffix) and host != suffix[1:]:
+            # The wildcard stands for at least one label, so the host must be
+            # strictly longer than the suffix. Comparing against `suffix[1:]`
+            # instead only excluded the bare parent (`example` for
+            # `*.example`) and still admitted the empty-label host `.example`,
+            # which the C twin rejects.
+            if len(host) > len(suffix) and host.endswith(suffix):
                 return True
     return False
 

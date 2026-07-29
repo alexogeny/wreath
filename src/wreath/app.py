@@ -11,6 +11,10 @@ marks the application dirty, so the next request recompiles.
 from __future__ import annotations
 
 import threading
+
+# Imported by name, like `monotonic_ns` below: one global lookup, and it is only
+# reached by a response that carries background tasks.
+from asyncio import timeout as _asyncio_timeout
 from collections.abc import Awaitable, Callable, Iterable
 from inspect import isawaitable
 from time import monotonic_ns as _monotonic_ns
@@ -301,9 +305,10 @@ class Wreath:
     puts its database on `app.state.postgres_main`. `router` is the compiled route
     table, replaced wholesale on each recompile.
 
-    The remaining three count failures that no caller is in a position to see,
-    which makes them the only record that anything went wrong: `background_errors`
+    The remaining count failures that no caller is in a position to see, which
+    makes them the only record that anything went wrong: `background_errors`
     for background tasks that raised after their response had already been sent,
+    `background_timeouts` for tasks cancelled for outrunning `background_timeout`,
     `exception_handler_errors` for a registered error renderer that raised while
     rendering, and `lifespan_teardown_errors` for a resource that refused to
     close while a lifespan failure path was releasing it.
@@ -318,6 +323,8 @@ class Wreath:
         debug: Put the exception type and message in the body of an unhandled 500.
         routing: Route-table backend -- `bitset` (default), `decision`, or `trie`.
         limits: Body, form and cookie ceilings applied to every request built here.
+        background_timeout: Seconds a response's background tasks may run before
+            they are cancelled, or `None` for no limit. Default 30.
     """
 
     __slots__ = (
@@ -331,6 +338,8 @@ class Wreath:
         "_compile_lock",
         "_crud_enabled",
         "background_errors",
+        "background_timeouts",
+        "_background_timeout",
         "exception_handler_errors",
         "lifespan_teardown_errors",
         "_dirty",
@@ -343,7 +352,9 @@ class Wreath:
         "_flight_arm_registry",
         "_limits",
         "_fallback_exception_handler",
-        "_global_hooks",
+        "_global_after_hooks",
+        "_global_before_hooks",
+        "_has_global_http_hooks",
         "_global_middleware",
         "_handler_requirements",
         "_http_clients",
@@ -383,9 +394,21 @@ class Wreath:
         debug: bool = False,
         routing: RoutingMode = "bitset",
         limits: RequestLimits = DEFAULT_LIMITS,
+        background_timeout: float | None = 30.0,
     ) -> None:
         self._routing = routing
         self._limits = limits
+        if background_timeout is not None and background_timeout <= 0:
+            raise ValueError("background_timeout must be positive, or None for no limit")
+        #: Seconds a response's background tasks may run before they are
+        #: cancelled. They run *after* the response is sent but still inside the
+        #: ASGI invocation, and a conforming server cannot read the next request
+        #: on that connection until the invocation returns -- so an unbounded
+        #: task is an unbounded stall on a connection whose client has already
+        #: been told the work finished. Measured at 1002 ms for a 1 s task over
+        #: HTTP/1.1 keep-alive. `None` restores the old unbounded behaviour for
+        #: an application that knows what its tasks do.
+        self._background_timeout = background_timeout
         self.router = CompiledRouter(routing)
         # Bind the route table's match directly: it saves a Python frame per
         # request over going through Router.match. The table never changes
@@ -422,8 +445,11 @@ class Wreath:
         self._application_image = _ApplicationImage(self)
         self._middleware: list[tuple[int, int, Middleware]] = []
         self._global_middleware: list[tuple[int, int, Middleware]] = []
-        # (before_hook, after_hook, is_sync) per global middleware.
-        self._global_hooks: tuple[tuple[Any, Any, bool], ...] = ()
+        # Directional request-time programs. Before entries also carry the
+        # exact number of after hooks to unwind on failure and short-circuit.
+        self._global_before_hooks: tuple[tuple[Any, bool, int, int], ...] = ()
+        self._global_after_hooks: tuple[tuple[Any, int], ...] = ()
+        self._has_global_http_hooks = False
         # (before_hook, is_sync) for middleware explicitly safe on handshakes.
         self._websocket_hooks: tuple[tuple[Any, bool], ...] = ()
         self._handler_requirements: dict[Any, AuthRequirement] = {}
@@ -449,6 +475,7 @@ class Wreath:
         #: can be reported to the client at that point, so this is the only
         #: place the failure exists.
         self.background_errors = 0
+        self.background_timeouts = 0
         #: Registered exception handlers, status handlers, validation formatters
         #: and fallback handlers that raised while rendering an error response.
         #: The client still gets a 500, so the failure is invisible to it; this
@@ -991,6 +1018,7 @@ class Wreath:
         dependencies: Iterable[Depends] = (),
         permissions: Iterable[str] = (),
         operation_id: str | None = None,
+        response_only: bool = False,
     ) -> Callable[[Handler], Handler]:
         """Register the decorated handler for `path` under each of `methods`.
 
@@ -1011,6 +1039,11 @@ class Wreath:
         `None` becomes `application/json`. Any other type is a `TypeError`, which
         the dispatch error boundary turns into a 500 like any other handler error.
 
+        Set `response_only=True` only when the handler always returns a response
+        object. On a route with middleware this removes the coercing wrapper
+        between the handler and the middleware; violating the promise may hand
+        a non-response value to an egress hook.
+
         Registration only appends to the route table. Signature inspection, binder
         compilation, middleware fusing and capability-mask assignment all happen
         once, when the routes are compiled, and cost a request nothing.
@@ -1023,6 +1056,7 @@ class Wreath:
             dependencies: `Depends` values resolved per request before the handler.
             permissions: Permission names the caller must hold, all of them.
             operation_id: OpenAPI operationId, and the generated clients' method name.
+            response_only: Handler promises to return a response object directly.
 
         Raises:
             ValueError: This method and path are already registered.
@@ -1055,6 +1089,7 @@ class Wreath:
                     route_dependencies,
                     requirement,
                     operation_id,
+                    response_only,
                 )
             )
             self._dirty = True
@@ -1146,6 +1181,7 @@ class Wreath:
                     include_dependencies + definition.dependencies,
                     merge_requirements(include_requirement, definition.requirement),
                     definition.operation_id,
+                    definition.response_only,
                 )
             )
         self._dirty = True
@@ -1242,11 +1278,14 @@ class Wreath:
         """
         if not any(
             hasattr(middleware, name)
-            for name in ("before", "before_sync", "before_websocket", "after")
+            for name in (
+                "before", "before_sync", "before_websocket", "after", "after_sync",
+                "after_inplace",
+            )
         ):
             raise TypeError(
                 "global middleware must expose before, before_sync, "
-                "before_websocket, and/or after hooks"
+                "before_websocket, after, after_sync, and/or after_inplace hooks"
             )
         self._global_middleware.append((priority, self._middleware_order, middleware))
         self._middleware_order += 1
@@ -1460,24 +1499,20 @@ class Wreath:
         native_response: bool,
     ) -> None:
         request: Request | None = None
-        global_hooks = self._global_hooks
-        active_global = len(global_hooks)
+        before_hooks = self._global_before_hooks
+        after_hooks = self._global_after_hooks
+        global_hooks = self._has_global_http_hooks
+        active_global = len(after_hooks)
         if global_hooks:
             request = Request(scope, receive, limits=self._limits)
             request._route_outcome = "ingress"
-            for index, (before, _after, is_sync) in enumerate(global_hooks):
-                if before is None:
-                    continue
+            for before, is_sync, error_afters, success_afters in before_hooks:
                 try:
                     candidate = before(request) if is_sync else await before(request)
                 except Exception as error:  # noqa: BLE001 -- see _handle_exception
-                    # `index`, not `index + 1`: this hook's `before` did not
-                    # complete, so pairing it with its own `after` would run
-                    # cleanup against preconditions that were never
-                    # established. The hooks *below* it did complete, and they
-                    # still unwind. A `before` that acquires something and then
-                    # raises owns that in its own `try`/`finally` -- dispatch
-                    # cannot know how far through it got.
+                    # `error_afters` excludes this hook's own egress: its
+                    # `before` did not complete, so cleanup preconditions may
+                    # not exist. Earlier hooks did complete and still unwind.
                     await self._finish_http(
                         request,
                         _coerce_response(await self._handle_exception(request, error)),
@@ -1485,14 +1520,13 @@ class Wreath:
                         method,
                         scope,
                         native_response,
-                        index,
+                        error_afters,
                     )
                     return
                 if candidate is not None:
                     # Returning a response is a *completed* `before`, so this
-                    # hook keeps its `after` -- hence `index + 1` here and
-                    # `index` above.
-                    active_global = index + 1
+                    # hook keeps its egress, which `success_afters` includes.
+                    active_global = success_afters
                     await self._finish_http(
                         request,
                         _coerce_response(candidate),
@@ -1814,18 +1848,25 @@ class Wreath:
         native_response: bool,
         active_global: int,
     ) -> None:
-        hooks = self._global_hooks
+        hooks = self._global_after_hooks
         # Counted down by index rather than `reversed(hooks[:active_global])`,
         # which allocated a fresh list slice on every response.
         index = active_global
         while index:
             index -= 1
-            after = hooks[index][1]
-            if after is not None:
-                try:
-                    response = _coerce_response(await after(request, response))
-                except Exception as error:  # noqa: BLE001 -- see _handle_exception
-                    response = await self._handle_exception(request, error)
+            after, mode = hooks[index]
+            try:
+                if mode == 2:
+                    after(request, response)
+                else:
+                    candidate = (
+                        after(request, response)
+                        if mode == 1
+                        else await after(request, response)
+                    )
+                    response = _coerce_response(candidate)
+            except Exception as error:  # noqa: BLE001 -- see _handle_exception
+                response = await self._handle_exception(request, error)
 
         # Close this request's log scope before the response goes out, so its
         # records are published while the recorder still holds the context they
@@ -1859,7 +1900,18 @@ class Wreath:
         background = response.background
         if background is not None:
             try:
-                await background()
+                # The deadline is on the *group*, not each task: they run in
+                # sequence and it is the total that holds the connection open.
+                async with _asyncio_timeout(self._background_timeout):
+                    await background()
+            except TimeoutError:
+                # The tasks have already been cancelled by the timeout. Counted
+                # apart from `background_errors` because nothing failed -- work
+                # was stopped, and the two want different responses: a rising
+                # error count is a bug, a rising timeout count is work that does
+                # not belong after a response.
+                self.background_timeouts += 1
+                raise
             except Exception:
                 # Counted, then re-raised. Propagating is the shipped contract
                 # (tests/test_background.py asserts it) and it is the right one:
@@ -2136,15 +2188,48 @@ class Wreath:
             for item in sorted(self._global_middleware, key=lambda item: (item[0], item[1]))
         )
         self._reject_session_after_authentication(app_middleware)
-        # (before_hook, after_hook, is_sync). A synchronous before_sync hook is
-        # dispatched without a coroutine/await in the global loop; otherwise the
-        # async before hook is awaited as before.
-        self._global_hooks = tuple(
-            (before_sync, getattr(item, "after", None), True)
-            if (before_sync := getattr(item, "before_sync", None)) is not None
-            else (getattr(item, "before", None), getattr(item, "after", None), False)
-            for item in global_middleware
-        )
+        # Dense directional programs: request dispatch never scans a missing
+        # before/after slot. Each before records the exact after-prefix active
+        # before and after it completes, preserving partial unwind semantics.
+        compiled_before_hooks: list[tuple[Any, bool, int, int]] = []
+        compiled_after_hooks: list[tuple[Any, int]] = []
+        for item in global_middleware:
+            before_sync = getattr(item, "before_sync", None)
+            before = (
+                before_sync
+                if before_sync is not None
+                else getattr(item, "before", None)
+            )
+            after_sync = getattr(item, "after_sync", None)
+            after_inplace = getattr(item, "after_inplace", None)
+            after = (
+                after_inplace
+                if after_inplace is not None
+                else (
+                    after_sync
+                    if after_sync is not None
+                    else getattr(item, "after", None)
+                )
+            )
+            error_afters = len(compiled_after_hooks)
+            if after is not None:
+                mode = (
+                    2
+                    if after_inplace is not None
+                    else (1 if after_sync is not None else 0)
+                )
+                compiled_after_hooks.append((after, mode))
+            if before is not None:
+                compiled_before_hooks.append(
+                    (
+                        before,
+                        before_sync is not None,
+                        error_afters,
+                        len(compiled_after_hooks),
+                    )
+                )
+        self._global_before_hooks = tuple(compiled_before_hooks)
+        self._global_after_hooks = tuple(compiled_after_hooks)
         websocket_hooks: list[tuple[Any, bool]] = []
         for item in global_middleware:
             websocket_hook = getattr(item, "before_websocket", None)
@@ -2166,6 +2251,9 @@ class Wreath:
             for stage in ("miss", "pre_auth", "identity", "action")
         }
         self._stage_hooks = {stage: hooks for stage, hooks in stage_hooks.items() if hooks}
+        self._has_global_http_hooks = bool(
+            compiled_before_hooks or compiled_after_hooks or self._stage_hooks
+        )
         requirements = [
             merge_requirements(route.requirement, requirement_for(route.endpoint))
             for route in self._routes
@@ -2190,7 +2278,7 @@ class Wreath:
                 app_scope=self._app_scope,
             )
             chain = app_middleware + definition.middleware
-            if chain:
+            if chain and not definition.response_only:
                 # Middleware (hooks and call_next alike) always sees Response
                 # objects, never raw handler return values; without a chain
                 # the coercion in __call__ suffices.
@@ -2885,8 +2973,14 @@ class Wreath:
 
 
 def _check_set(actual: frozenset[str], requirement: SetRequirement) -> bool:
+    # `issubset`, not `<=`: the operator form demands a set on the right and
+    # raises `TypeError` for any other collection, while `isdisjoint` on the
+    # `any` branch below has always accepted any iterable. A backend that passes
+    # a roles claim through unconverted (a JSON array decodes to a list) thus
+    # made every *authorized* request a 500 under `mode="all"` and a 200 under
+    # `mode="any"`. Both branches now read the same collections.
     if requirement.mode == "all":
-        return requirement.values <= actual
+        return requirement.values.issubset(actual)
     return not requirement.values.isdisjoint(actual)
 
 

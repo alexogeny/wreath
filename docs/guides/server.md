@@ -42,6 +42,14 @@ streams, keeping the nominal per-connection body budget at 64 MiB. Raise either
 explicitly only alongside application-consumption flow control and an observed
 workload that needs it.
 
+`max_body_chunks` separately caps parser and application-wakeup work at 4,096
+non-empty body units per request: HTTP/1 chunks, HTTP/2 DATA frames, or HTTP/3
+DATA callbacks. A byte limit alone cannot distinguish one large body unit from
+thousands of one-byte units. Exceeding either limit rejects the request (413 on
+HTTP/1, a stream error on HTTP/2 or HTTP/3). Set it with `--max-body-chunks`,
+`WREATH_MAX_BODY_CHUNKS`, or `ServerConfig(max_body_chunks=...)`; HTTP/1's
+terminating zero-size chunk does not count.
+
 ## Bounding HTTP/3 response retention
 
 HTTP/3 may need to retransmit response data, so handing bytes to the QUIC stack

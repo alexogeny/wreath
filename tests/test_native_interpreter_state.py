@@ -275,6 +275,18 @@ _HOSTILE_HEADERS = b"".join(letter + b": v\r\n" for letter in _ONE_LETTER)
             lambda: _core.append_vary([(b"vary", b"A")], b"origin"),
         ),
         (
+            "replace_response_header",
+            lambda: _core.replace_response_header([], b"x-id", b"A"),
+        ),
+        (
+            "replace_cookie",
+            lambda: _core.replace_cookie([], b"csrf=", b"csrf=A"),
+        ),
+        (
+            "replace_server_timing",
+            lambda: _core.replace_server_timing([], b"total", b"total;dur=1"),
+        ),
+        (
             "select_content_encoding",
             lambda: _core.select_content_encoding(b"gzip, br", 0),
         ),

@@ -83,6 +83,47 @@ scheme-checked — a `[click](javascript:…)` in someone's markdown is neutrali
 and raw `<script>` in content is escaped, not emitted. Your docs can't become an
 XSS vector because a contributor pasted the wrong thing.
 
+## The repository, and where else the project lives
+
+A docs site is usually one of several places a project lives. Point at the rest
+of them and they appear in the header — the repository with its star and fork
+counts, and any number of extra links drawn with one of the built-in marks:
+
+```python
+from wreath._docs import Link, Repo
+
+site = Site(
+    ...,
+    repo=Repo("https://github.com/you/proj", stats=True),
+    links=(
+        Link("Homepage", "https://proj.example", icon="home"),
+        Link("proj on PyPI", "https://pypi.org/project/proj/", icon="package"),
+    ),
+)
+```
+
+`Repo.label` overrides the header text, which is otherwise `owner/name` read out
+of the URL. `Link.icon` names one of `link`, `home`, `github`, `gitlab`,
+`package`, `chat`, `mail`, `rss`, `book` — a closed registry, so a typo is a
+build error rather than a blank square, and there is no way to point at a remote
+SVG.
+
+**The counts are read once, at build time, and baked into the HTML.** This is the
+one place where wreath's generator deliberately does something mkdocs-material
+does not: mkdocs asks the *reader's* browser, which spends every visitor's share
+of GitHub's anonymous 60-per-hour budget and makes a static page phone a third
+party on every view. Reading them at build time costs one request per deploy,
+keeps the built page self-contained, and shows the same number to everybody. The
+trade is that the count is as old as your last deploy — which, for a star count,
+nobody notices.
+
+Nothing about it can fail your build. No network, a slow host, a rate limit, a
+renamed repository: the link renders without counts and the build reports a
+warning. `stats=True` needs a `github.com` or `gitlab.com` URL (they are the two
+APIs it knows); any other host still gets a plain link. Set
+`WREATH_DOCS_OFFLINE=1` to skip the request entirely, and `GITHUB_TOKEN` — as
+CI already has — to use the authenticated rate limit instead of the shared one.
+
 ## Themes and feel — two axes
 
 Pick a **colour theme** and, independently, a surface **feel**. Any of the five
@@ -176,8 +217,9 @@ the four things below and nothing else.
 
 - **Search palette** — `Ctrl K` (`⌘K` on a Mac) or `/`. Results are scored per
   *section*, not per page, so a hit lands on the heading you wanted; matches are
-  highlighted, results group under their page, and arrow keys move real focus
-  between them. The index is fetched once, on your first keystroke.
+  highlighted, results group under their page and the trail above it in the nav,
+  and arrow keys move real focus between them. The index is fetched once, on
+  your first keystroke. See [what the search can see](#what-the-search-can-see).
 - **Instant navigation** — links prefetch on hover and swap `<main>` in place,
   with a View Transition where the browser has one. The point is not the
   milliseconds; it is that a 147-page sidebar does not blink and lose its scroll
@@ -187,6 +229,39 @@ the four things below and nothing else.
 - **A three-state theme control** — system, light, dark. A two-state toggle
   silently throws away "follow the OS" the first time you press it, with no way
   back.
+
+## What the search can see
+
+Each **section** — every `##` and `###` — is a record: its heading, a 280-character
+snippet, and a stemmed set of every other distinct word in the section. The
+snippet is what you are shown; the word set is what makes the rest of the section
+findable at all. Without it an index carries only each section's opening
+sentences, which on wreath's own corpus meant **84% of sections were truncated**
+and three-quarters of the prose could not be searched.
+
+Plurals are stemmed on both sides, so "params" finds `parameters` and "queries"
+finds `query`; the whole query as a *phrase* scores far above the same words
+found apart, which is what stops a page about SQL queries answering a search for
+"query parameters".
+
+Where a reader's word for something isn't a word the page uses, say so in the
+page's front matter:
+
+```markdown
+---
+keywords: query parameters, querystring, url params, get parameters
+boost: 1.5
+---
+
+# Binding, validation, and dependencies
+```
+
+`keywords` are scored as though the page's author had put them in a heading —
+they are the intended way to fix a search that lands on the wrong page, rather
+than salting prose with words for a machine. `boost` multiplies the page's whole
+score, for the rare page that should win its topic outright. No page may take
+more than three of the palette's slots, so neither lever lets one page bury the
+others.
 
 ## Writing the content
 
@@ -355,7 +430,10 @@ site = Site(
 - **Syntax highlighting** for python, bash, c, and json — a small built-in
   tokenizer, no Pygments, no dependency.
 - **Client-side search** — a build-time JSON index and a tiny vanilla-JS box in
-  the header; no lunr, no service.
+  the header; no lunr, no service. Whole sections indexed, plural-tolerant,
+  phrase-aware, and steerable per page with `keywords`.
+- **A header that points at the rest of the project** — repository link with
+  build-time star and fork counts, plus your own links.
 - **API reference** via the `:::` directive.
 - **Reader polish**: previous/next page links (from nav order), a scroll-spy
   "on this page" TOC, and a copy button on every code block.

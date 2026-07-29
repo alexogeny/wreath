@@ -1,19 +1,23 @@
 """Middleware contracts and the startup compilation that turns them into a tape.
 
 Wreath accepts middleware in two forms. The *hook* form is an object carrying
-`before` or `before_sync` and/or `after` attributes; `MiddlewareHooks` is the
-canonical container, but any object with those attributes qualifies, which is
-how `CORSMiddleware` and the rest are written. The *legacy* form is the familiar
-`async def (request, call_next)` callable. An object carrying both is rejected
-with `TypeError` at compile time, because which form it is cannot be guessed.
+`before` or `before_sync` and/or `after`, `after_sync`, or `after_inplace`
+attributes;
+`MiddlewareHooks` is the canonical container, but any object with those
+attributes qualifies, which is how `CORSMiddleware` and the rest are written.
+The *legacy* form is the familiar `async def (request, call_next)` callable. An
+object carrying both is rejected with `TypeError` at compile time, because
+which form it is cannot be guessed.
 
 Hook middleware is compiled once, at startup, into a `MiddlewareTape`: a flat
 tuple of instructions with precomputed jump targets, walked by one loop instead
 of a stack of nested closures. A contiguous run of `before_sync` hooks is fused
-into a single instruction that runs them in one synchronous pass, with no
-per-hook coroutine and no await. One legacy middleware anywhere in a route's
-chain opts that whole route out of the tape: the chain falls back to nested
-closures, with the hook middleware adapted into that shape.
+into a single instruction that runs them in one synchronous pass;
+`after_sync` instructions likewise run without a coroutine or await, while
+`after_inplace` additionally promises not to replace the response. One legacy
+middleware anywhere in a route's chain opts that whole route out of the tape:
+the chain falls back to nested closures, with the hook middleware adapted into
+that shape.
 
 Setting `global_scope = True` on a middleware object makes `Wreath.add_middleware`
 route it to `Wreath.add_global_middleware` instead of a route's chain. Global hooks
@@ -38,6 +42,12 @@ type BeforeHook = Callable[[Request], Awaitable[ResponseValue | None]]
 # per-hook coroutine or await.
 type SyncBeforeHook = Callable[[Request], ResponseValue | None]
 type AfterHook = Callable[[Request, ResponseValue], Awaitable[ResponseValue]]
+# The egress twin of ``SyncBeforeHook``. A plain response transformer whose
+# result is consumed directly, without allocating and awaiting a coroutine.
+type SyncAfterHook = Callable[[Request, ResponseValue], ResponseValue]
+# A response mutator. Dispatch preserves the object it was handed, so this
+# form pays neither coroutine machinery nor response coercion after the call.
+type InPlaceAfterHook = Callable[[Request, ResponseValue], None]
 type RoutePredicate = Callable[[MiddlewareRoute], bool]
 
 
@@ -74,8 +84,9 @@ class LegacyMiddleware(Protocol):
     single legacy middleware makes the whole route compile to nested closures.
     Everything else is better expressed as `MiddlewareHooks`.
 
-    An object that defines `__call__` *and* any of `before`, `before_sync`, or
-    `after` is rejected with `TypeError` when the route compiles.
+    An object that defines `__call__` *and* any of `before`, `before_sync`,
+    `after`, `after_sync`, or `after_inplace` is rejected with `TypeError` when
+    the route compiles.
     """
 
     async def __call__(self, request: Request, call_next: CallNext) -> ResponseValue: ...
@@ -96,6 +107,10 @@ class MiddlewareHooks:
     compiled into one instruction that calls them in a single pass, with no
     per-hook coroutine and no await. Set `before` or `before_sync`, never both;
     when both are set `before_sync` wins and `before` is silently unreachable.
+    `after_sync` is the equivalent synchronous form of `after`; set one or the
+    other, and `after_sync` wins when both exist.
+    `after_inplace` is for a hook that only mutates the response. It returns
+    nothing and takes precedence over both transforming forms.
 
     **When `after` runs.** An `after` hook runs only when its own `before`
     completed, or when the middleware has no `before` at all -- but it may run
@@ -111,12 +126,16 @@ class MiddlewareHooks:
         after: Async hook run on the way out; returns the response to continue with.
         applies_to: Predicate over `MiddlewareRoute` deciding route membership.
         before_sync: The synchronous, fusible form of `before`.
+        after_sync: The synchronous, non-awaiting form of `after`.
+        after_inplace: Synchronous response mutation with no replacement value.
     """
 
     before: BeforeHook | None = None
     after: AfterHook | None = None
     applies_to: RoutePredicate | None = None
     before_sync: SyncBeforeHook | None = None
+    after_sync: SyncAfterHook | None = None
+    after_inplace: InPlaceAfterHook | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,10 +143,10 @@ class PipelineHooks:
     """Global hooks placed at the named boundaries of the request pipeline.
 
     `global_scope` is always True, so `Wreath.add_middleware` registers these
-    globally: `before` and `after` bracket every HTTP request, including route
-    misses, static files, and error responses. The four stage hooks in between
-    fire only when the request reaches that boundary, which is what makes them
-    cheap -- a stage nobody registered is not dispatched at all.
+    globally: `before` and the selected egress hook bracket every HTTP request,
+    including route misses, static files, and error responses. The four stage
+    hooks in between fire only when the request reaches that boundary, which is
+    what makes them cheap -- a stage nobody registered is not dispatched at all.
 
     Every hook returns `None` to continue or a response to terminate the request
     there. A stage hook that raises is converted to an error response rather
@@ -146,6 +165,8 @@ class PipelineHooks:
         identity: The backend has run and `request.identity` is set.
         action: Authorization passed; the handler is about to be invoked.
         after: Egress, wrapping every response this middleware was entered for.
+        after_sync: Synchronous egress; takes precedence over `after`.
+        after_inplace: In-place egress; takes precedence over both other forms.
     """
 
     before: BeforeHook | None = None
@@ -154,6 +175,8 @@ class PipelineHooks:
     identity: BeforeHook | None = None
     action: BeforeHook | None = None
     after: AfterHook | None = None
+    after_sync: SyncAfterHook | None = None
+    after_inplace: InPlaceAfterHook | None = None
 
     @property
     def global_scope(self) -> bool:
@@ -191,8 +214,23 @@ class _AfterInstruction:
     hook: AfterHook
 
 
+@dataclass(frozen=True, slots=True)
+class _SyncAfterInstruction:
+    hook: SyncAfterHook
+
+
+@dataclass(frozen=True, slots=True)
+class _InPlaceAfterInstruction:
+    hook: InPlaceAfterHook
+
+
 type _Instruction = (
-    _BeforeInstruction | _FusedBeforeInstruction | _EndpointInstruction | _AfterInstruction
+    _BeforeInstruction
+    | _FusedBeforeInstruction
+    | _EndpointInstruction
+    | _AfterInstruction
+    | _SyncAfterInstruction
+    | _InPlaceAfterInstruction
 )
 _UNSET = object()
 
@@ -211,12 +249,16 @@ _OP_FUSED_BEFORE = 0
 _OP_BEFORE = 1
 _OP_ENDPOINT = 2
 _OP_AFTER = 3
+_OP_SYNC_AFTER = 4
+_OP_INPLACE_AFTER = 5
 
 _OPCODES: tuple[tuple[type, int, str], ...] = (
     (_FusedBeforeInstruction, _OP_FUSED_BEFORE, "fused_before"),
     (_BeforeInstruction, _OP_BEFORE, "before"),
     (_EndpointInstruction, _OP_ENDPOINT, "endpoint"),
     (_AfterInstruction, _OP_AFTER, "after"),
+    (_SyncAfterInstruction, _OP_SYNC_AFTER, "after_sync"),
+    (_InPlaceAfterInstruction, _OP_INPLACE_AFTER, "after_inplace"),
 )
 
 
@@ -251,8 +293,9 @@ class MiddlewareTape:
     around the result.
 
     `operations` holds the opcode name of each instruction in order -- one of
-    `fused_before`, `before`, `endpoint`, `after` -- which is how a test or a
-    complexity probe asserts what the compiler produced.
+    `fused_before`, `before`, `endpoint`, `after`, `after_sync`,
+    `after_inplace` -- which is how a test or a complexity probe asserts what
+    the compiler produced.
     """
 
     __slots__ = ("_program", "operations")
@@ -302,15 +345,23 @@ class MiddlewareTape:
             elif opcode == _OP_ENDPOINT:
                 response = await instruction.endpoint(request)
                 position += 1
-            else:
+            elif opcode == _OP_AFTER:
                 response = await instruction.hook(request, response)
+                position += 1
+            elif opcode == _OP_SYNC_AFTER:
+                response = instruction.hook(request, response)
+                position += 1
+            else:
+                instruction.hook(request, response)
                 position += 1
         if response is _UNSET:
             raise RuntimeError("middleware tape completed without a response")
         return response
 
 
-_HOOK_ATTRIBUTES = ("before", "before_sync", "after")
+_HOOK_ATTRIBUTES = (
+    "before", "before_sync", "after", "after_sync", "after_inplace"
+)
 
 
 def _is_fused(middleware: Middleware) -> bool:
@@ -390,28 +441,67 @@ def _fuse_sync_befores(instructions: list[_Instruction]) -> list[_Instruction]:
 
 def _compile_tape(endpoint: CallNext, middleware: tuple[Middleware, ...]) -> MiddlewareTape:
     # A synchronous before_sync hook is the fusable form; otherwise the async
-    # before hook is used. (name, hook, is_sync, after) per middleware.
-    hooks: list[tuple[BeforeHook | SyncBeforeHook | None, bool, AfterHook | None]] = []
+    # before hook is used. Sync egress has the same precedence over async
+    # egress. Both choices are fixed here, never rediscovered per request.
+    hooks: list[
+        tuple[
+            BeforeHook | SyncBeforeHook | None,
+            bool,
+            AfterHook | SyncAfterHook | InPlaceAfterHook | None,
+            bool,
+            bool,
+        ]
+    ] = []
     for current in middleware:
         before_sync = cast(SyncBeforeHook | None, getattr(current, "before_sync", None))
-        after = cast(AfterHook | None, getattr(current, "after", None))
+        after_inplace = cast(
+            InPlaceAfterHook | None, getattr(current, "after_inplace", None)
+        )
+        after_sync = cast(SyncAfterHook | None, getattr(current, "after_sync", None))
+        after = (
+            after_inplace
+            if after_inplace is not None
+            else (
+                after_sync
+                if after_sync is not None
+                else cast(AfterHook | None, getattr(current, "after", None))
+            )
+        )
         if before_sync is not None:
-            hooks.append((before_sync, True, after))
+            hooks.append(
+                (
+                    before_sync,
+                    True,
+                    after,
+                    after_sync is not None,
+                    after_inplace is not None,
+                )
+            )
         else:
-            hooks.append((cast(BeforeHook | None, getattr(current, "before", None)), False, after))
+            hooks.append(
+                (
+                    cast(BeforeHook | None, getattr(current, "before", None)),
+                    False,
+                    after,
+                    after_sync is not None,
+                    after_inplace is not None,
+                )
+            )
 
     before_entries = [
-        (index, hook, sync) for index, (hook, sync, _) in enumerate(hooks) if hook
+        (index, hook, sync)
+        for index, (hook, sync, _, _, _) in enumerate(hooks)
+        if hook
     ]
     after_entries = [
-        (index, after)
-        for index, (_, _, after) in reversed(tuple(enumerate(hooks)))
+        (index, after, sync, inplace)
+        for index, (_, _, after, sync, inplace) in reversed(tuple(enumerate(hooks)))
         if after
     ]
     endpoint_position = len(before_entries)
     after_positions = {
         middleware_index: endpoint_position + 1 + offset
-        for offset, (middleware_index, _) in enumerate(after_entries)
+        for offset, (middleware_index, _, _, _) in enumerate(after_entries)
     }
     final_position = endpoint_position + 1 + len(after_entries)
 
@@ -427,13 +517,26 @@ def _compile_tape(endpoint: CallNext, middleware: tuple[Middleware, ...]) -> Mid
         )
         instructions.append(_BeforeInstruction(cast(BeforeHook, hook), failure_target, sync))
     instructions.append(_EndpointInstruction(endpoint))
-    instructions.extend(_AfterInstruction(after) for _, after in after_entries)
+    instructions.extend(
+        _InPlaceAfterInstruction(cast(InPlaceAfterHook, after))
+        if inplace
+        else (
+            _SyncAfterInstruction(cast(SyncAfterHook, after))
+            if sync
+            else _AfterInstruction(cast(AfterHook, after))
+        )
+        for _, after, sync, inplace in after_entries
+    )
     return MiddlewareTape(tuple(_fuse_sync_befores(instructions)))
 
 
 def _adapt_fused(middleware: Middleware) -> LegacyMiddleware:
     before_sync = cast(SyncBeforeHook | None, getattr(middleware, "before_sync", None))
     before = cast(BeforeHook | None, getattr(middleware, "before", None))
+    after_inplace = cast(
+        InPlaceAfterHook | None, getattr(middleware, "after_inplace", None)
+    )
+    after_sync = cast(SyncAfterHook | None, getattr(middleware, "after_sync", None))
     after = cast(AfterHook | None, getattr(middleware, "after", None))
 
     async def adapted(request: Request, call_next: CallNext) -> ResponseValue:
@@ -443,7 +546,11 @@ def _adapt_fused(middleware: Middleware) -> LegacyMiddleware:
             response = None if before is None else await before(request)
         if response is None:
             response = await call_next(request)
-        if after is not None:
+        if after_inplace is not None:
+            after_inplace(request, response)
+        elif after_sync is not None:
+            response = after_sync(request, response)
+        elif after is not None:
             response = await after(request, response)
         return response
 

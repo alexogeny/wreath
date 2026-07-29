@@ -1267,3 +1267,201 @@ def test_apidoc_skips_slots_and_non_members() -> None:
     out = apidoc.expand("::: wreath.health.HealthCheck")
     assert "#### `name`" not in out          # a slot, not a method
     assert "HealthCheck(" in out             # ...but the field is in the signature
+
+
+# --- header: repository and links --------------------------------------------
+
+
+def test_a_repo_link_names_the_repository_without_counts(tmp_path) -> None:
+    """No `stats`, no request: the link is just a link."""
+    from wreath._docs import Repo
+
+    site = dataclasses.replace(
+        _site(tmp_path), repo=Repo("https://github.com/you/proj"))
+    build(site, root=tmp_path)
+    index = (tmp_path / "site" / "index.html").read_text()
+    assert 'href="https://github.com/you/proj"' in index
+    assert ">you/proj<" in index                       # owner/name, derived
+    assert "repo-stats" not in index                   # nothing was fetched
+
+
+def test_repo_counts_are_baked_in_at_build_time(tmp_path, monkeypatch) -> None:
+    """The reader's browser never asks GitHub; this build did, once."""
+    from wreath._docs import Repo
+    from wreath._docs import repo as repo_mod
+
+    calls = []
+
+    def fake_get(host, slug, warnings):
+        calls.append((host, slug))
+        return {"stargazers_count": 1234, "forks_count": 7}
+
+    monkeypatch.setattr(repo_mod, "_CACHE", {})
+    monkeypatch.setattr(repo_mod, "_get", fake_get)
+    site = dataclasses.replace(
+        _site(tmp_path),
+        repo=Repo("https://github.com/you/proj", stats=True))
+    report = build(site, root=tmp_path)
+    index = (tmp_path / "site" / "index.html").read_text()
+    assert ">1.2k<" in index and ">7<" in index         # compacted, not raw
+    assert "1234 stars, 7 forks" in index               # ...but exact for a reader
+    assert not report.warnings
+    # Once for the whole site, not once per page, and never from the page itself.
+    assert calls == [("github", "you/proj")]
+    assert "api.github.com" not in index
+
+
+def test_an_unreachable_host_costs_the_counts_and_nothing_else(tmp_path, monkeypatch) -> None:
+    """A docs build must not fail because a third party is down."""
+    import urllib.error
+
+    from wreath._docs import Repo
+    from wreath._docs import repo as repo_mod
+
+    def boom(request, timeout=0):
+        raise urllib.error.URLError("no route to host")
+
+    monkeypatch.setattr(repo_mod, "_CACHE", {})
+    monkeypatch.setattr(repo_mod.urllib.request, "urlopen", boom)
+    site = dataclasses.replace(
+        _site(tmp_path), strict=True,
+        repo=Repo("https://github.com/you/proj", stats=True))
+    report = build(site, root=tmp_path)
+    assert report.ok and not report.errors
+    assert any("repo stats" in w for w in report.warnings)
+    index = (tmp_path / "site" / "index.html").read_text()
+    assert 'href="https://github.com/you/proj"' in index and "repo-stats" not in index
+
+
+def test_repo_stats_need_a_host_with_an_api() -> None:
+    from wreath._docs import Repo
+
+    Repo("https://git.example/you/proj")                        # a plain link is fine
+    with pytest.raises(ValueError):
+        Repo("https://git.example/you/proj", stats=True)        # ...counts are not
+    with pytest.raises(ValueError):
+        Repo("ftp://github.com/you/proj")
+
+
+def test_compact_counts_round_the_way_a_reader_reads_them() -> None:
+    from wreath._docs.repo import compact
+
+    assert [compact(n) for n in (0, 999, 1000, 1234, 12_500, 1_000_000, 2_400_000)] == [
+        "0", "999", "1k", "1.2k", "12.5k", "1M", "2.4M"]
+
+
+def test_header_links_draw_only_built_in_marks(tmp_path) -> None:
+    from wreath._docs import ICONS, Link
+    from wreath._docs.theme import ICON_MARKS
+
+    # A name config accepts is a mark the theme can draw. Nothing else is drawable.
+    assert set(ICON_MARKS) == set(ICONS)
+    with pytest.raises(ValueError):
+        Link("Chat", "https://example.test", icon="discord")     # not in the registry
+    with pytest.raises(ValueError):
+        Link("Home", "javascript:alert(1)")                      # not a link at all
+    site = dataclasses.replace(
+        _site(tmp_path),
+        links=(Link("Wreath on PyPI", "https://pypi.test/p/w", icon="package"),))
+    build(site, root=tmp_path)
+    index = (tmp_path / "site" / "index.html").read_text()
+    assert 'href="https://pypi.test/p/w"' in index
+    assert 'aria-label="Wreath on PyPI"' in index
+    assert "<img" not in index          # a mark, not a badge fetched from a service
+
+
+# --- search ------------------------------------------------------------------
+
+
+def test_the_stemmer_agrees_with_its_twin_in_the_browser() -> None:
+    """`search.stem` indexes; the JS `stem` reads the query. Drift is a miss."""
+    from wreath._docs.scripts import runtime
+    from wreath._docs.search import stem
+
+    table = {
+        "params": "param", "parameters": "parameter", "queries": "query",
+        "routes": "route", "classes": "class", "cors": "cors", "jobs": "jobs",
+        "class": "class", "process": "process", "response": "response",
+    }
+    for word, expected in table.items():
+        assert stem(word) == expected, word
+    # The browser half is the same five rules in the same order.
+    js = runtime()
+    for rule in ("/ies$/", "/(ches|shes|sses|xes|zes)$/", "/es$/",
+                 "/s$/.test(word) && !/ss$/.test(word)", "word.length <= 4"):
+        assert rule in js, rule
+
+
+def test_a_section_is_searchable_past_its_first_paragraph(tmp_path) -> None:
+    """84% of wreath's own sections were longer than the indexed snippet."""
+    import json
+
+    src = tmp_path / "docs"
+    src.mkdir()
+    tail = "The bound value is read from the query parameters of the request."
+    (src / "index.md").write_text("# Home\n\n## Binding\n\n" + ("filler word. " * 40)
+                                  + "\n\n" + tail + "\n")
+    site = Site("Demo", "docs", "site", Nav(Page("Home", "index.md")))
+    build(site, root=tmp_path)
+    index = json.loads((tmp_path / "site" / "assets" / "search-index.json").read_text())
+    section = next(s for s in index["s"] if s["h"] == "Binding")
+    assert "query parameters" not in section["x"]      # past the snippet...
+    assert "parameter" in section["w"]                 # ...but still findable
+    # The word set carries what the snippet cannot answer for, and not a copy of it.
+    assert "filler" not in section["w"]
+
+
+def test_a_page_can_declare_the_words_readers_search_for(tmp_path) -> None:
+    import json
+
+    src = tmp_path / "docs"
+    src.mkdir()
+    (src / "index.md").write_text(
+        "---\nkeywords: query parameters, querystring\nboost: 2\n---\n"
+        "# Binding\n\ntext\n")
+    site = Site("Demo", "docs", "site", Nav(Page("Home", "index.md")))
+    build(site, root=tmp_path)
+    index = json.loads((tmp_path / "site" / "assets" / "search-index.json").read_text())
+    assert index["p"][0]["k"] == "query parameters, querystring"
+    assert index["p"][0]["b"] == 2.0
+
+
+def test_a_result_says_where_in_the_nav_it_sits(tmp_path) -> None:
+    """`wreath.queries` means one thing under "API reference" and another
+    anywhere else; the group line has to say which."""
+    import json
+
+    index_json = tmp_path / "site" / "assets" / "search-index.json"
+    build(_site(tmp_path), root=tmp_path)
+    index = json.loads(index_json.read_text())
+    routing = next(p for p in index["p"] if p["u"] == "guides/routing.html")
+    assert routing["c"] == "Guides"
+    home = next(p for p in index["p"] if p["u"] == "index.html")
+    assert "c" not in home                  # top-level: no trail to draw
+
+
+def test_a_code_heading_is_indexed_as_the_word_it_shows(tmp_path) -> None:
+    """`` `Query` `` is a heading about Query, not about a backtick."""
+    import json
+
+    src = tmp_path / "docs"
+    src.mkdir()
+    (src / "index.md").write_text("# `wreath.binding`\n\n## `Query`\n\ntext\n")
+    site = Site("Demo", "docs", "site", Nav(Page("Home", "index.md")))
+    build(site, root=tmp_path)
+    index = json.loads((tmp_path / "site" / "assets" / "search-index.json").read_text())
+    assert index["p"][0]["t"] == "wreath.binding"
+    assert any(s["h"] == "Query" for s in index["s"])
+    page = (tmp_path / "site" / "index.html").read_text()
+    assert "<title>wreath.binding · Demo</title>" in page
+    assert "`" not in page.split('<div class="toc-rail">')[1].split("</div>")[0]
+    assert "<code>Query</code>" in page      # the heading itself still renders as code
+
+
+def test_the_palette_does_not_repeat_a_page_or_a_heading() -> None:
+    """Two guards on the result list, both learned from the real corpus."""
+    from wreath._docs.scripts import runtime
+
+    js = runtime()
+    assert "perPage[id] <= 3" in js            # one page may not fill the palette
+    assert "if (seen[label]) { continue; }" in js   # nor offer one heading twice

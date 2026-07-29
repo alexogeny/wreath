@@ -19,6 +19,7 @@ def _request(
     path="/orders",
     key: str | None = "k1",
     principal: str | None = "alice",
+    principal_type: str = "User",
 ) -> Request:
     """A request, authenticated as ``principal`` unless it is ``None``.
 
@@ -35,7 +36,9 @@ def _request(
              "raw_path": path.encode(), "query_string": b"", "headers": headers}
     request = Request(scope, _receive)
     if principal is not None:
-        request._set_identity(Identity(id=principal, roles=frozenset()))
+        request._set_identity(
+            Identity(id=principal, type=principal_type, roles=frozenset())
+        )
     return request
 
 
@@ -89,6 +92,26 @@ async def test_key_is_scoped_by_principal() -> None:
     bob = _request(principal="bob")                  # same key value, different user
     # Bob must NOT get alice's stored response.
     assert await mw.action(bob) is None
+
+
+async def test_scope_components_cannot_shift_across_principals() -> None:
+    mw = IdempotencyMiddleware()
+    victim = _request(path="/resource/a b", principal="c")
+    await mw.action(victim)
+    await mw.after(victim, Response(b"victim-secret", status=201))
+
+    attacker = _request(path="/resource/a", principal="b c")
+    assert await mw.action(attacker) is None
+
+
+async def test_same_id_in_different_principal_types_has_a_distinct_scope() -> None:
+    mw = IdempotencyMiddleware()
+    user = _request(principal="42", principal_type="User")
+    await mw.action(user)
+    await mw.after(user, Response(b"user-secret", status=201))
+
+    service = _request(principal="42", principal_type="Service")
+    assert await mw.action(service) is None
 
 
 async def test_anonymous_requests_are_not_guarded_and_never_replay_each_other() -> None:

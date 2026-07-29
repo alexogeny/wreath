@@ -30,7 +30,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .._native import _core
-from .._webpolicy import append_vary, origin_matches
+from .._webpolicy import append_vary, origin_matches, replace_cookie
 from ..request import Request
 from ..response import ProblemResponse
 
@@ -259,6 +259,7 @@ class CSRFMiddleware:
     global_scope = True
     __slots__ = (
         "_cookie_name",
+        "_cookie_prefix",
         "_exempt",
         "exempt_errors",
         "_header_name",
@@ -308,6 +309,7 @@ class CSRFMiddleware:
             raise ValueError("SameSite=None requires secure=True")
         self._secret = secret_bytes
         self._cookie_name = cookie_name
+        self._cookie_prefix = f"{cookie_name}=".encode("ascii")
         self._header_name = header_name
         self._header_name_bytes = header_name.encode("ascii")
         self._max_age = max_age
@@ -389,7 +391,7 @@ class CSRFMiddleware:
         request.state.__setattr__(_STATE_ISSUE, True)
         return token
 
-    async def before(self, request: Request):
+    def before_sync(self, request: Request):
         """Answer from `Sec-Fetch-Site` when the browser sent it; else the token.
 
         Two checks, in cost order, and the cheap one is also the stronger one.
@@ -475,7 +477,11 @@ class CSRFMiddleware:
         request.state.__setattr__(_STATE_ISSUE, renew)
         return None
 
-    async def after(self, request: Request, response):
+    async def before(self, request: Request):
+        """Compatibility wrapper; compiled middleware uses `before_sync`."""
+        return self.before_sync(request)
+
+    def after_inplace(self, request: Request, response) -> None:
         """Write the CSRF cookie when `before` minted or renewed the token.
 
         A request that reused a still-fresh token gets no `Set-Cookie` at all,
@@ -492,10 +498,10 @@ class CSRFMiddleware:
         if request.state.get(_STATE_MINTER) is not None:
             append_vary(response.headers, _SEC_FETCH_SITE)
         if not request.state.get(_STATE_ISSUE, False):
-            return response
+            return
         token = request.state.get(_STATE_TOKEN)
         if token is None:
-            return response
+            return
         attributes = [
             f"{self._cookie_name}={token}",
             "Path=/",
@@ -504,8 +510,20 @@ class CSRFMiddleware:
         ]
         if self._secure:
             attributes.append("Secure")
-        response.headers.append((b"set-cookie", "; ".join(attributes).encode("latin-1")))
+        replace_cookie(
+            response.headers,
+            self._cookie_prefix,
+            "; ".join(attributes).encode("latin-1"),
+        )
+
+    def after_sync(self, request: Request, response):
+        """Compatibility transformer; compiled middleware mutates in place."""
+        self.after_inplace(request, response)
         return response
+
+    async def after(self, request: Request, response):
+        """Compatibility wrapper; compiled middleware mutates in place."""
+        return self.after_sync(request, response)
 
 
 __all__ = ["CSRFMiddleware", "csrf_token"]

@@ -14,6 +14,7 @@ typedef struct {
 
 static StreamCapiEntry g_stream_capis[] = {
     {"wreath._native._server", "_HTTP1_C_API", WREATH_HTTP1_CAPI_NAME, NULL},
+    {"wreath._native._server", "_HTTP2_C_API", WREATH_HTTP2_CAPI_NAME, NULL},
     {"wreath._native._postgres", "_STREAM_C_API",
      "wreath._native._postgres._STREAM_C_API", NULL},
     {"wreath._native._client", "_STREAM_C_API",
@@ -1912,4 +1913,3 @@ static PyTypeObject SocketTransportType = {
     .tp_init = st_init,
     .tp_new = PyType_GenericNew,
 };
-

@@ -163,6 +163,7 @@ def worker_argv(options: RunOptions) -> tuple[str, ...]:
         ("max_header_count", options.max_header_count),
         ("max_header_bytes", options.max_header_bytes),
         ("max_body_bytes", options.max_body_bytes),
+        ("max_body_chunks", options.max_body_chunks),
         ("read_high_water", options.read_high_water),
         ("read_high_water_messages", options.read_high_water_messages),
         ("response_high_water", options.response_high_water),

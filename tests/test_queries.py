@@ -12,6 +12,7 @@ import pytest
 # are scoped to tests/orm/, so the three below rebuild them here.
 from tests.orm.conftest import FakeDatabase, Membership, Post, User, user_row
 from wreath.orm import DeclarationError, ORMError, Select
+from wreath.orm import compiler as orm_compiler
 from wreath.orm.compiler import shape_of
 from wreath.orm.registry import Registry
 from wreath.orm.session import Session
@@ -148,6 +149,27 @@ async def test_one_shape_per_declaration_however_many_calls(session):
     for value in ("A", "B", "C"):
         await users.named(name=value)
     assert session.registry.cached_plan_count == before + 1
+
+
+async def test_a_declaration_derives_its_shape_only_once_per_registry(
+    session, monkeypatch
+):
+    scripted(session)
+    calls = 0
+    original = orm_compiler.shape_of
+
+    def counted_shape(registry, select):
+        nonlocal calls
+        calls += 1
+        return original(registry, select)
+
+    monkeypatch.setattr(orm_compiler, "shape_of", counted_shape)
+    users = Users(session)
+    await users.named(name="A")
+    await users.named(name="B")
+    await users.named(name="C")
+
+    assert calls == 1
 
 
 def test_a_declaration_keys_identically_to_the_hand_written_query(registry):

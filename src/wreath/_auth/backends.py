@@ -37,7 +37,9 @@ class BearerTokenBackend:
     async def authenticate(self, request: Request) -> Identity | None:
         value_bytes: bytes | None = None
         for name, candidate in request.headers:
-            if name.lower() != b"authorization":
+            # ASGI supplies lowercase field names; avoid re-normalizing every
+            # header in this authentication scan.
+            if name != b"authorization":
                 continue
             if value_bytes is not None:
                 # Authorization is not a list-valued field. Refusing ambiguity

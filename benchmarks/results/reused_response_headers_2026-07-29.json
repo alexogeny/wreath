@@ -1,0 +1,30 @@
+{
+  "metadata": {
+    "python": "CPython 3.14.6",
+    "platform": "Linux x86_64",
+    "method": "best of 3 whole-ASGI lifecycle runs per size; identical source except bounded built-in response-header replacement",
+    "sizes": [250, 500, 1000, 2000]
+  },
+  "before": {
+    "seconds": [
+      0.009187718998873606,
+      0.026556345001154114,
+      0.08034732200030703,
+      0.2630330039974069
+    ],
+    "retained_headers": [762, 1512, 3012, 6012],
+    "fitted_exponent": 1.612,
+    "contract": "FAIL: exponent must be <= 1.5"
+  },
+  "after": {
+    "seconds": [
+      0.003854169000987895,
+      0.007542048995674122,
+      0.01454922999982955,
+      0.027558046000194736
+    ],
+    "retained_headers": [12, 12, 12, 12],
+    "fitted_exponent": 0.946,
+    "contract": "PASS: exponent must be <= 1.5"
+  }
+}

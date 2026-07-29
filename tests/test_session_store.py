@@ -77,8 +77,10 @@ async def test_the_cookie_carries_only_an_id_and_contents_live_in_the_store() ->
     login = await client.get("/login")
     token = _cookie(login)
 
-    # The value in the cookie is not the session content.
-    assert "ada" not in token
+    # The signed payload is the opaque session id, not the session content.
+    middleware = SessionMiddleware(secret="s" * 32, store=store)
+    sid = middleware._load_sid(token)
+    assert sid is not None and sid in store.rows
     assert len(store.rows) == 1
     assert next(iter(store.rows.values())) == {"user": "ada"}
 

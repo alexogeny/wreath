@@ -100,6 +100,7 @@ typedef struct {
     Py_ssize_t max_header_count;
     Py_ssize_t max_header_bytes;
     Py_ssize_t max_body_bytes;
+    Py_ssize_t max_body_chunks;
     Py_ssize_t read_high_water;
     Py_ssize_t read_high_water_messages;
     Py_ssize_t max_ws_fragments;
@@ -155,6 +156,7 @@ typedef struct {
     Py_ssize_t remaining;        /* fixed-length bytes still expected */
     Py_ssize_t chunk_remaining;  /* bytes left in the current chunk */
     Py_ssize_t body_received;    /* cumulative bytes in this HTTP request */
+    Py_ssize_t body_chunks;      /* non-empty chunks in this HTTP request */
     Py_ssize_t queued_bytes;     /* undelivered buffered body bytes */
     int reading_paused;
     int request_more_body;
@@ -276,6 +278,16 @@ int wreath_http1_acquire_read_buffer(PyObject *, char **, Py_ssize_t *);
 int wreath_http1_commit_read(PyObject *, Py_ssize_t);
 int wreath_http1_feed_external(PyObject *, const char *, Py_ssize_t);
 
+#define WREATH_HTTP2_CAPI_NAME "wreath._native._server._HTTP2_C_API"
+#define WREATH_HTTP2_CAPI_VERSION WREATH_STREAM_CAPI_VERSION
+
+typedef WreathStreamCAPI WreathHttp2CAPI;
+
+int wreath_http2_protocol_check(PyObject *);
+int wreath_http2_acquire_read_buffer(PyObject *, char **, Py_ssize_t *);
+int wreath_http2_commit_read(PyObject *, Py_ssize_t);
+int wreath_http2_feed_external(PyObject *, const char *, Py_ssize_t);
+
 
 /* --- field validation (defined in server_common.c) ----------------------- */
 /* RFC 9110 field-name token octets, one table for every ingress path in this
@@ -292,6 +304,15 @@ int wreath_field_name_valid(const char *data, Py_ssize_t size);
 
 /* A field value with no control octet and no DEL; HTAB is permitted. */
 int wreath_field_value_valid(const char *data, Py_ssize_t size);
+
+/* Percent-decode a request path into the `str` an ASGI scope's `path` must
+ * carry, then require strict UTF-8. Returns a new reference, or NULL; `*bad` is
+ * set when the path itself is at fault (an encoded separator, or bytes that are
+ * not UTF-8) rather than the interpreter. Shared, because HTTP/2 built its
+ * scope from the raw `:path` instead: the same URL routed to a different place
+ * depending on which protocol carried it, and `%2F` was refused over h1 and
+ * accepted over h2. */
+PyObject *wreath_decode_request_path(const char *data, Py_ssize_t size, int *bad);
 
 
 /* --- shared module globals (defined in server_common.c) ------------------ */
@@ -380,7 +401,6 @@ Py_ssize_t find_sub_from(
     const char *hay, Py_ssize_t hay_len, const char *needle, Py_ssize_t needle_len,
     Py_ssize_t *scan_from
 );
-int contains_ci(const char *hay, Py_ssize_t n, const char *needle);
 const char *reason_phrase(int status, Py_ssize_t *size);
 int append_raw(PyObject *buffer, const char *data, Py_ssize_t size);
 int append_decimal(PyObject *buffer, Py_ssize_t value);
@@ -448,7 +468,9 @@ void wreath_hpack_table_set_hard_max(WreathHpackTable *t, size_t hard_max);
  * exception for protocol errors; a -1 with *h2_error == 0 means a real Python
  * error is set (e.g. MemoryError). */
 int wreath_hpack_decode(WreathHpackTable *t, const uint8_t *data, Py_ssize_t len,
-                     PyObject *out_list, int *h2_error);
+                        Py_ssize_t max_header_count,
+                        Py_ssize_t max_header_list,
+                        PyObject *out_list, int *h2_error);
 
 /* Append one response header to `out` (a bytearray) as an HPACK literal without
  * indexing (new name), Huffman-encoded when it is not larger. Returns 0/-1. */

@@ -39,6 +39,7 @@ silently never ran on a single built page.
 from __future__ import annotations
 
 from .config import Palette
+from .repo import RepoInfo, compact
 from .scripts import BOOT
 
 _SANS = ('ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", '
@@ -235,6 +236,13 @@ header.site{position:sticky;top:0;z-index:40;border-bottom:1px solid var(--borde
  letter-spacing:var(--track-xl);}
 .brand .mark{width:1.5rem;height:1.5rem;flex:none;color:var(--link);}
 .bar .spacer{flex:1;}
+/* Repository link. Declared with the header rather than with the components so
+   it does not arrive a frame late and shove the theme control sideways. */
+.repo{display:flex;align-items:center;gap:var(--space-2);flex:none;
+ color:var(--fg-muted);font-size:var(--text-ui);}
+.repo:hover{color:var(--fg);}
+.repo svg{width:1.125rem;height:1.125rem;flex:none;}
+.bar-links{display:flex;align-items:center;gap:var(--space-1);flex:none;}
 
 /* --- layout ---------------------------------------------------------------- */
 /* The measure lives on the *column*, not on `main`. Capping `main` inside a
@@ -323,6 +331,21 @@ kbd{font-family:var(--font-mono);font-size:var(--text-2xs);line-height:1;
 .search-open svg{width:1rem;height:1rem;flex:none;}
 .search-open .label{flex:1;text-align:left;}
 html.no-js .search-open{display:none;}
+
+/* --- repository link ------------------------------------------------------- */
+/* The name and the counts stack: the name is the link's subject, the counts are
+   a footnote to it, and side-by-side they read as three separate controls. */
+.repo{line-height:var(--leading-snug);text-decoration:none;}
+.repo-name{font-family:var(--font-mono);font-size:var(--text-sm);
+ white-space:nowrap;max-width:12rem;overflow:hidden;text-overflow:ellipsis;}
+/* Muted, not subtle: a star count is information at 11px, and `--fg-subtle` is
+   the token that is deliberately below AA because nothing reads it for content. */
+.repo-stats{display:flex;gap:var(--space-2);color:var(--fg-muted);
+ font-size:var(--text-2xs);}
+.repo-stats .stat{display:inline-flex;align-items:center;gap:.25em;}
+.repo-stats svg{width:.75rem;height:.75rem;}
+/* Name over counts in one column, so the mark centres against the pair. */
+.repo-text{display:flex;flex-direction:column;min-width:0;}
 
 /* --- section tabs ---------------------------------------------------------- */
 nav.tabs{max-width:100rem;margin:0 auto;padding:0 var(--space-5);
@@ -600,7 +623,12 @@ dialog.palette[open]{animation:pop .14s ease-out;}
 .palette-results{overflow-y:auto;padding:var(--space-2);scrollbar-width:thin;}
 .palette-results .group{font-family:var(--font-mono);font-size:var(--text-2xs);
  font-weight:700;text-transform:uppercase;letter-spacing:var(--track-caps);
- color:var(--fg-subtle);padding:var(--space-3) var(--space-2) var(--space-1);}
+ color:var(--fg-subtle);padding:var(--space-3) var(--space-2) var(--space-1);
+ display:flex;gap:var(--space-2);align-items:baseline;}
+/* Where the page sits in the nav. Un-bolded: it qualifies the page name, and
+   two equally loud labels on one line read as two separate groups. */
+.palette-results .group .in{font-weight:400;text-transform:none;
+ letter-spacing:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .palette-results a{display:block;padding:var(--space-2) var(--space-3);
  border-radius:var(--radius-sm);color:var(--fg);border-left:2px solid transparent;}
 .palette-results a:hover,.palette-results a:focus-visible{background:var(--surface-2);
@@ -820,6 +848,11 @@ del{color:var(--fg-subtle);}
  .page-nav{flex-direction:column;}
  .page-nav a{max-width:none;}
 }
+@media (max-width:62rem){
+ /* The counts are the first thing to go: they are the least of the three
+    signals and the widest. The link itself stays, as an icon. */
+ .repo-text{display:none;}
+}
 @media (max-width:46rem){
  .search-open{width:2rem;padding:0;justify-content:center;}
  .search-open .label,.search-open kbd{display:none;}
@@ -998,12 +1031,102 @@ _ICON_TOP = ('<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
              'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" '
              'aria-hidden="true"><path d="M10 16V4M4.8 9.2 10 4l5.2 5.2"/></svg>')
 
+#: One stroked mark per `config.ICONS` name, drawn on the same 20-unit grid and
+#: the same 1.7 weight as the rest of the chrome so a header link never reads as
+#: a pasted-in logo. `github` and `gitlab` are filled marks because a stroked
+#: outline of either is unrecognisable at 18px.
+_STROKE = ('viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" '
+           'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"')
+_FILL = 'viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"'
+ICON_MARKS: dict[str, str] = {
+    "link": f'<svg {_STROKE}><path d="M8.4 11.6a3.4 3.4 0 0 0 5 .3l2.2-2.2a3.4 3.4 0 0 '
+            f'0-4.8-4.8L9.5 6.2"/><path d="M11.6 8.4a3.4 3.4 0 0 0-5-.3l-2.2 2.2a3.4 3.4 '
+            f'0 0 0 4.8 4.8l1.3-1.3"/></svg>',
+    "home": f'<svg {_STROKE}><path d="M3.2 9.4 10 3.6l6.8 5.8"/>'
+            f'<path d="M5 8.6v7.8h10V8.6"/><path d="M8.2 16.4v-4.2h3.6v4.2"/></svg>',
+    "github": f'<svg {_FILL}><path d="M10 1.4a8.6 8.6 0 0 0-2.7 16.8c.43.08.59-.19.59-.41'
+              f'0-.2-.01-.87-.01-1.58-2.18.4-2.74-.53-2.92-1.02-.1-.25-.53-1.02-.9-1.23'
+              f'-.31-.16-.75-.57-.02-.58.69-.01 1.18.63 1.34.9.78 1.32 2.03.95 2.53.72'
+              f'.08-.57.31-.95.56-1.17-1.94-.22-3.96-.97-3.96-4.31 0-.95.34-1.74.9-2.35'
+              f'-.09-.22-.39-1.12.09-2.33 0 0 .73-.23 2.4.9a8.1 8.1 0 0 1 4.36 0c1.66'
+              f'-1.13 2.39-.9 2.39-.9.48 1.21.18 2.11.09 2.33.56.61.9 1.39.9 2.35 0 3.35'
+              f'-2.03 4.09-3.96 4.31.31.27.59.79.59 1.6 0 1.16-.01 2.09-.01 2.38 0 .23'
+              f'.16.5.6.41A8.6 8.6 0 0 0 10 1.4z"/></svg>',
+    "gitlab": f'<svg {_FILL}><path d="M10 18.4 6.7 8.2h6.6L10 18.4zM10 18.4 2.2 8.2h4.5'
+              f'L10 18.4zM2.2 8.2 1.2 11.4c-.1.3 0 .6.27.8L10 18.4 2.2 8.2zM2.2 8.2h4.5'
+              f'L4.8 2.3c-.1-.3-.5-.3-.6 0L2.2 8.2zM10 18.4l3.3-10.2h4.5L10 18.4z'
+              f'M17.8 8.2l1 3.2c.1.3 0 .6-.27.8L10 18.4l7.8-10.2zM17.8 8.2h-4.5l1.9-5.9'
+              f'c.1-.3.5-.3.6 0l2 5.9z"/></svg>',
+    "package": f'<svg {_STROKE}><path d="M10 2.8 16.6 6v8L10 17.2 3.4 14V6z"/>'
+               f'<path d="M3.4 6 10 9.2 16.6 6"/><path d="M10 9.2v8"/></svg>',
+    "chat": f'<svg {_STROKE}><path d="M16.6 12.2a1.8 1.8 0 0 1-1.8 1.8H7.2L3.4 17V5.4'
+            f'a1.8 1.8 0 0 1 1.8-1.8h9.6a1.8 1.8 0 0 1 1.8 1.8z"/></svg>',
+    "mail": f'<svg {_STROKE}><path d="M3.2 5.4h13.6v9.2H3.2z"/>'
+            f'<path d="m3.2 6 6.8 4.6L16.8 6"/></svg>',
+    "rss": f'<svg {_STROKE}><path d="M4.4 4.2a11.4 11.4 0 0 1 11.4 11.4"/>'
+           f'<path d="M4.4 9.2a6.4 6.4 0 0 1 6.4 6.4"/>'
+           f'<circle cx="4.9" cy="15.1" r="1.1" fill="currentColor" stroke="none"/></svg>',
+    "book": f'<svg {_STROKE}><path d="M3.6 4.2h4.2A2.2 2.2 0 0 1 10 6.4v9.4a1.8 1.8 0 0 '
+            f'0-1.8-1.8H3.6z"/><path d="M16.4 4.2h-4.2A2.2 2.2 0 0 0 10 6.4v9.4a1.8 1.8 '
+            f'0 0 1 1.8-1.8h4.6z"/></svg>',
+}
+
+#: Star and fork, drawn only next to a repository link that carries counts.
+_ICON_STAR = ('<svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">'
+              '<path d="m10 2.8 2.24 4.54 5.01.73-3.62 3.53.85 4.99L10 14.24l-4.48 2.35'
+              '.85-4.99L2.75 8.07l5.01-.73z"/></svg>')
+_ICON_FORK = ('<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
+              'stroke-width="1.8" stroke-linecap="round" aria-hidden="true">'
+              '<circle cx="5.6" cy="4.8" r="1.9"/><circle cx="14.4" cy="4.8" r="1.9"/>'
+              '<circle cx="10" cy="15.2" r="1.9"/>'
+              '<path d="M5.6 6.7v1.1a2.2 2.2 0 0 0 2.2 2.2h4.4a2.2 2.2 0 0 0 2.2-2.2V6.7'
+              'M10 10v3.3"/></svg>')
+
+
+def repo_link(info: RepoInfo | None) -> str:
+    """The header's repository link, with counts when the build resolved them.
+
+    The counts are two spans of text, not badge images: an `<img>` from
+    shields.io would be the one remote request in an otherwise self-contained
+    page, and it would be the request that renders *last*, on a service the docs
+    do not control.
+    """
+    if info is None:
+        return ""
+    mark = ICON_MARKS.get(info.host or "link", ICON_MARKS["link"])
+    stats = ""
+    if info.stars >= 0:
+        stats = (f'<span class="stat">{_ICON_STAR}'
+                 f'<span>{_e(compact(info.stars))}</span></span>'
+                 f'<span class="stat">{_ICON_FORK}'
+                 f'<span>{_e(compact(info.forks))}</span></span>')
+        label = (f"{info.title} on {info.host or 'the web'}: "
+                 f"{info.stars} stars, {info.forks} forks")
+    else:
+        label = f"{info.title} on {info.host or 'the web'}"
+    body = (f'<span class="repo-name">{_e(info.title)}</span>'
+            f'{f"<span class=\"repo-stats\">{stats}</span>" if stats else ""}')
+    return (f'<a class="repo" href="{_e(info.url)}" rel="noopener noreferrer" '
+            f'aria-label="{_e(label)}">{mark}<span class="repo-text">{body}</span></a>')
+
+
+def link_row(links) -> str:
+    """The extra header links (homepage, package page, chat) as icon buttons."""
+    if not links:
+        return ""
+    items = "".join(
+        f'<a class="icon-btn" href="{_e(link.url)}" rel="noopener noreferrer" '
+        f'title="{_e(link.label)}" aria-label="{_e(link.label)}">'
+        f'{ICON_MARKS[link.icon]}</a>' for link in links)
+    return f'<div class="bar-links">{items}</div>'
+
 
 def page(
     *, site_name: str, page_title: str, content: str, nav_html: str, toc_html: str,
     css_href: str, palette: Palette, search_root: str = "", description: str = "",
     footer: str = "", home_href: str = "index.html", feel: str = "flat",
     js_href: str = "assets/docs.js", tabs_html: str = "", canonical: str = "",
+    repo_html: str = "", links_html: str = "",
 ) -> str:
     """Assemble one full HTML document (no external requests)."""
     title = f"{page_title} · {site_name}" if page_title else site_name
@@ -1036,6 +1159,7 @@ def page(
         f'<button class="search-open" id="search-open" type="button" '
         f'aria-label="Search documentation" aria-haspopup="dialog">{_ICON_SEARCH}'
         '<span class="label">Search</span><kbd>Ctrl K</kbd></button>'
+        f"{links_html}{repo_html}"
         f'<button class="icon-btn theme" id="theme-toggle" type="button"'
         f' data-mode="system" aria-label="Theme: match system. Switch to light."'
         f">{_ICONS_THEME}</button>"

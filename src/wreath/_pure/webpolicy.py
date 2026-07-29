@@ -196,6 +196,51 @@ def replace_content_length(headers: list[tuple[bytes, bytes]], length: int | Non
         headers.append((b"content-length", str(length).encode("ascii")))
 
 
+def replace_response_header(
+    headers: list[tuple[bytes, bytes]], name: bytes, value: bytes
+) -> None:
+    """Replace every instance of one response header with one current value."""
+    _validated_headers(headers)
+    target = name.lower()
+    headers[:] = [(key, item) for key, item in headers if key.lower() != target]
+    headers.append((name, value))
+
+
+def replace_cookie(
+    headers: list[tuple[bytes, bytes]], prefix: bytes, value: bytes
+) -> None:
+    """Replace one cookie's Set-Cookie line, preserving every other cookie."""
+    _validated_headers(headers)
+    headers[:] = [
+        (key, item)
+        for key, item in headers
+        if not (key.lower() == b"set-cookie" and item.startswith(prefix))
+    ]
+    headers.append((b"set-cookie", value))
+
+
+def replace_server_timing(
+    headers: list[tuple[bytes, bytes]], metric: bytes, value: bytes
+) -> None:
+    """Replace one Server-Timing metric while retaining every other metric."""
+    _validated_headers(headers)
+    retained: list[bytes] = []
+    target = metric.strip().lower()
+    for key, item in headers:
+        if key.lower() != b"server-timing":
+            continue
+        for entry in item.split(b","):
+            entry = entry.strip()
+            name = entry.partition(b";")[0].strip().lower()
+            if entry and name != target:
+                retained.append(entry)
+    headers[:] = [
+        (key, item) for key, item in headers if key.lower() != b"server-timing"
+    ]
+    retained.append(value)
+    headers.append((b"server-timing", b", ".join(retained)))
+
+
 __all__ = [
     "NO_STORE",
     "NO_TRANSFORM",
@@ -207,6 +252,9 @@ __all__ = [
     "find_response_header",
     "is_compressible_content_type",
     "origin_matches",
+    "replace_cookie",
     "replace_content_length",
+    "replace_response_header",
+    "replace_server_timing",
     "select_content_encoding",
 ]

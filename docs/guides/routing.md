@@ -1,3 +1,6 @@
+---
+keywords: path parameters, url parameters, route matching, http methods, sub-application
+---
 # Routing
 
 Routing is how a request finds its handler. In Wreath you describe that mapping

@@ -36,6 +36,13 @@ def open_root(directory: str | os.PathLike[str]) -> int:
 
 
 def _components(relative: str) -> list[str]:
+    if "\x00" in relative:
+        # `os.open`/`os.lstat` reject an embedded NUL with `ValueError`, which is
+        # neither of the two exceptions this module is documented to raise, so it
+        # escaped every caller's handler and became a 500. A percent-encoded
+        # `%00` in a request path decodes to exactly this, so the refusal has to
+        # be in the vocabulary callers already catch.
+        raise ContainmentError("path contains a NUL byte")
     parts = [p for p in relative.replace(os.sep, "/").split("/") if p not in ("", ".")]
     if any(part == ".." for part in parts):
         # `..` is not a symlink, so O_NOFOLLOW cannot catch it; refuse it here.
@@ -47,9 +54,10 @@ def open_beneath(root_fd: int, relative: str) -> tuple[int, os.stat_result]:
     """Open `relative` for reading beneath `root_fd`.
 
     Returns `(fd, stat)` where `stat` is the `fstat` of the opened
-    descriptor. Raises `ContainmentError` if any component is a symlink or
-    the path would escape the root, and `OSError` (e.g. `FileNotFoundError`)
-    if the target does not exist. The caller owns and must close `fd`.
+    descriptor. Raises `ContainmentError` if any component is a symlink, if the
+    path would escape the root, or if it is not a nameable path at all (an
+    embedded NUL), and `OSError` (e.g. `FileNotFoundError`) if the target does
+    not exist. The caller owns and must close `fd`.
     """
     if not _HAVE_DIR_FD:
         raise ContainmentError("platform lacks openat/dir_fd support")
