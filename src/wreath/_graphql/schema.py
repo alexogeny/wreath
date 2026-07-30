@@ -23,7 +23,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["ObjectType", "Schema", "SchemaField", "build_schema"]
+from .._auth.cedar_engine import CedarParseError, EntityUid
+
+__all__ = ["ObjectType", "Schema", "SchemaField", "build_schema", "policy_resource"]
 
 #: PostgreSQL type name -> GraphQL scalar. Anything unlisted becomes `String`,
 #: which is lossless for output because the JSON encoder stringifies it anyway.
@@ -56,6 +58,51 @@ _SCALARS = {
 _CUSTOM_SCALARS = frozenset({"JSON", "DateTime", "Date"})
 
 
+def policy_resource(policy: str) -> EntityUid:
+    """The Cedar entity reference a GraphQL policy string names.
+
+    A policy resource is written `Type.field` -- `User.email`, `Query.users`,
+    `Mutation.createUser` -- and that is the string in the schema, in the error
+    a denial produces, and in the documentation. It is **not** what an
+    authorizer can be handed: `PolicyRequirement.resource` reaches
+    `CedarPolicies` through `CedarAuthorizer`'s resource mapper, and the engine
+    accepts an `EntityUid` or a `Type::"id"` string and raises on anything
+    else. A bare `"User.email"` is neither, so the split happens here, once:
+    the type is the entity type and the field is the id.
+
+    That split is what makes the documented policies writable at all:
+
+    ```cedar
+    permit(principal, action == Action::"read", resource == User::"email");
+    forbid(principal, action, resource is Mutation);   // every write, one clause
+    ```
+
+    A policy already written as a Cedar reference (`Billing::"read"`, or the
+    bare `Billing::read`) is used verbatim, which is the seam for a resolver
+    whose resource is not a field of anything.
+
+    Raises:
+        ValueError: `policy` is neither a Cedar entity reference nor a dotted
+            `Type.field` name, so no engine could read it. Raised where the
+            policy is *declared* rather than on the request that first selects
+            the field -- the same reason `crud.Access.cedar` parses its resource
+            at declaration.
+    """
+    try:
+        return EntityUid.parse(policy)
+    except CedarParseError:
+        pass
+    type_name, dot, field_name = policy.rpartition(".")
+    if not dot or not type_name or not field_name:
+        raise ValueError(
+            f"{policy!r} is not a usable authorization resource; write it as "
+            "`Type.field` (e.g. 'User.email') or as a Cedar entity reference "
+            "(e.g. 'Billing::\"read\"'). A bare name cannot be evaluated by any "
+            "Cedar engine."
+        )
+    return EntityUid(type_name, field_name)
+
+
 @dataclass(frozen=True, slots=True)
 class SchemaField:
     """One field on an object type.
@@ -77,9 +124,11 @@ class SchemaField:
     #: Authorization resource for this field. Defaults to "Type.field" at
     #: build time, so a policy can always be written without configuring one.
     policy: str = ""
-    #: Complexity weight. A field that fans out or calls a service can declare
-    #: that it costs more than a column read, so `max_complexity` bounds work
-    #: rather than merely counting selections.
+    #: Complexity weight, charged against `max_complexity` by `cost.weigh`
+    #: after the parse. A field that fans out or calls a service declares that
+    #: it costs more than a column read, so the budget bounds *work* rather
+    #: than merely counting selections. Additive: a list field does not
+    #: multiply its children, because fan-out is what this number is for.
     cost: int = 1
 
 
@@ -104,6 +153,9 @@ class RootField:
     spec: Any = None
     resolver: Any = None
     policy: str = ""
+    #: Complexity weight, as on `SchemaField`. Derived roots declare more than
+    #: 1 because a root is a query: `cost=10` for a list root and `cost=5` for
+    #: a single-row one.
     cost: int = 1
 
 
@@ -190,7 +242,7 @@ def _plural(name: str) -> str:
 
 
 def _is_exposed(model_name: str, column_name: str, expose: frozenset[str]) -> bool:
-    """Whether a column that *looks* sensitive was explicitly opted back in.
+    """Whether a column withheld by default was explicitly opted back in.
 
     Accepts `"Model.column"` and a bare `"column"`, the second so a name
     like `api_key` can be exposed once rather than per model.
@@ -219,8 +271,21 @@ def build_schema(
     `{ user { passwordHash } }`. Name a column in `expose` to put it back,
     which is the same deliberate, auditable act `crud_router(expose=...)`
     asks for.
+
+    **Retrieval columns are left out too**, on the same argument and through the
+    same function: `wreath.crud.retrieval_fields` reads the declared type rather
+    than guessing from a name, so a `Vector` embedding and a `TsVector` are
+    withheld here exactly as they are from a generated REST response. A
+    `tsvector` is derived from columns already in the same selection, and a page
+    of twenty `Vector(1536)` rows is thirty thousand floats a client did not want
+    -- on a surface where the client, not the server, chooses the page. `expose`
+    puts one back, and that is the whole of the difference between the two
+    surfaces: `crud_router(expose=...)` also widens what may be *written*, and
+    there is nothing here for it to widen, because no mutation is generated. A
+    GraphQL write is a resolver somebody wrote, and it is that resolver's
+    business what it accepts.
     """
-    from ..crud import SENSITIVE_FIELD
+    from ..crud import SENSITIVE_FIELD, retrieval_fields
 
     exposed_names = frozenset(expose)
     specs = []
@@ -233,10 +298,17 @@ def build_schema(
     for spec in specs:
         name = spec.model_type.__name__
         object_type = ObjectType(name=name, spec=spec, fields={})
+        # Asked once per model rather than re-derived per column, and asked of
+        # `wreath.crud` rather than of the type system directly, so the two
+        # generated surfaces cannot come to disagree about what a retrieval
+        # column is.
+        retrieval = retrieval_fields(spec.model_type)
         for column in spec.columns:
-            if SENSITIVE_FIELD.search(column.python_name) and not _is_exposed(
-                name, column.python_name, exposed_names
-            ):
+            withheld = (
+                SENSITIVE_FIELD.search(column.python_name) is not None
+                or column.python_name in retrieval
+            )
+            if withheld and not _is_exposed(name, column.python_name, exposed_names):
                 continue
             object_type.fields[column.python_name] = SchemaField(
                 name=column.python_name,

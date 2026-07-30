@@ -15,9 +15,13 @@ What owning this in-tree buys, none of which a bolt-on library can:
 * **No N+1 and no DataLoader.** A relationship selection resolves through the
   session's batched select-in loader -- one statement per relationship per
   level, deduplicated by the identity map.
-* **One authorization language.** Field access is checked against the app's
-  authorizer with `Type.field` as the resource, so a Cedar policy covers REST
-  and GraphQL at once.
+* **One authorization language.** Field access is checked against the
+  authorizer you pass, with `Type.field` as the resource, so one Cedar policy
+  set covers REST and GraphQL. The authorizer is asked the way a route asks it
+  -- a `PolicyRequirement` whose resource is the field as a Cedar entity
+  reference, `User::"email"` -- so the shipped `CedarAuthorizer` needs no
+  adapter. Hand it the same object you handed `configure_auth`; there is
+  deliberately no pickup from the application (see `docs/guides/graphql.md`).
 * **Per-field latency in the Flight Recorder**, as `RESOLVER` phases, without
   wiring an exporter.
 * **Typegen.** `wreath typegen` emits GraphQL operations alongside the REST
@@ -35,6 +39,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from ._graphql.cost import weigh
 from ._graphql.execute import ExecutionError, execute
 from ._graphql.parser import GraphQLSyntaxError, Limits, parse
 from ._graphql.resolvers import (
@@ -44,7 +49,7 @@ from ._graphql.resolvers import (
     ResolverSpec,
     validate_dependencies,
 )
-from ._graphql.schema import RootField, Schema, SchemaField, build_schema
+from ._graphql.schema import RootField, Schema, SchemaField, build_schema, policy_resource
 from .cache import BoundedCache
 from .request import Request
 from .response import JSONResponse
@@ -78,7 +83,7 @@ class GraphQL:
     """A GraphQL endpoint over one ORM registry."""
 
     __slots__ = (
-        "_authorizer", "_cache", "_frozen", "_introspection", "_limits",
+        "_action", "_authorizer", "_cache", "_frozen", "_introspection", "_limits",
         "_max_page_size", "_on_denied", "_registry", "_resolvers", "_schema",
         "_session_factory", "resolver_errors",
     )
@@ -91,13 +96,35 @@ class GraphQL:
         expose: Iterable[str] = (),
         limits: Limits | None = None,
         authorizer: Any = None,
+        action: str = "read",
         introspection: bool = False,
         max_page_size: int = 100,
         cache_size: int = 512,
         on_denied: str = "error",
     ) -> None:
+        """Serve `registry` as a GraphQL endpoint.
+
+        `authorizer` is an `AuthorizationProvider` -- the same object the
+        application was configured with, passed rather than discovered. Every
+        field, relationship and root is asked about with one
+        `PolicyRequirement(action, resource)`, where `action` is this argument
+        and the resource is the field's policy as a Cedar entity reference.
+        `"read"` is the action because a selection is a read; a mutation is
+        distinguished by its resource (`Mutation.createUser`), not by a second
+        action, which is what lets `resource is Mutation` deny every write in
+        one clause.
+
+        Raises:
+            ValueError: `on_denied` is not `"error"` or `"null"`, or `action`
+                is empty -- an unnamed action would reach Cedar as
+                `Action::""`, which no policy can match, so every field would
+                deny with nothing to point at.
+        """
         if on_denied not in ("error", "null"):
             raise ValueError("on_denied must be 'error' or 'null'")
+        if not action:
+            raise ValueError("authorization action is required")
+        self._action = action
         self._registry = registry
         self._schema = build_schema(registry, models, expose=expose)
         self._limits = limits or Limits()
@@ -216,8 +243,22 @@ class GraphQL:
 
         return register
 
+    @staticmethod
+    def _checked_policy(policy: str | None) -> str | None:
+        """Refuse a policy resource no authorizer could evaluate, at declaration.
+
+        The derived `Type.field` resources are always readable; a hand-written
+        one need not be. Parsing it here means a typo is a startup error rather
+        than a generic resolver failure on the first request that selects the
+        field -- the endpoint blaming the caller for the author's mistake.
+        """
+        if policy is not None:
+            policy_resource(policy)
+        return policy
+
     def _add_resolver(self, spec: ResolverSpec) -> None:
         self._check_mutable()
+        self._checked_policy(spec.policy)
         object_type = self._schema.types.get(spec.type_name)
         if object_type is None:
             raise ResolverError(
@@ -240,9 +281,16 @@ class GraphQL:
         policy: str | None, cost: int, *, mutation: bool,
     ) -> None:
         self._check_mutable()
+        self._checked_policy(policy)
+        # No `cost=` on the spec: `ResolverSpec.cost` is read in exactly one
+        # place, `_add_resolver`, where it is copied onto the `SchemaField` of a
+        # field *on a type*. A root's weight lives on the `RootField` below,
+        # which is what `cost.weigh` looks up. Setting both would leave one of
+        # them inert, which is the state `cost=` was in across the whole stack
+        # until the weigher existed.
         spec = ResolverSpec(
             type_name="Mutation" if mutation else "Query", field_name=name, fn=fn,
-            type_name_out=returns, is_list=is_list, policy=policy, cost=cost,
+            type_name_out=returns, is_list=is_list, policy=policy,
         )
         self._resolvers.add_root(spec, mutation=mutation)
         root = RootField(
@@ -294,6 +342,28 @@ class GraphQL:
         self._cache.set(source, document)
         return document
 
+    def _weigh(self, document: Any, operation_name: str | None) -> None:
+        """Charge the operation's declared costs against `max_complexity`.
+
+        A second pass, because it cannot be a first one: the parser counts
+        selections while it reads, and a weight that depends on *which field* a
+        name resolves to is not knowable until the schema is. Until this ran,
+        `cost=` on `field()`, `query()` and `mutation()` was threaded through
+        three layers and read by nothing, so a field that called a payment
+        provider counted exactly as much as reading a column.
+
+        An operation this cannot resolve -- a name the document does not define,
+        or an unnamed request against a multi-operation document -- is left
+        alone. `execute` resolves the same operation moments later and reports
+        that properly; refusing it here would answer "no such operation" with
+        `complexity`.
+        """
+        try:
+            operation = document.operation(operation_name)
+        except (KeyError, ValueError):
+            return
+        weigh(self._schema, document, operation, max_complexity=self._limits.max_complexity)
+
     async def run(
         self,
         source: str,
@@ -306,6 +376,7 @@ class GraphQL:
         """Parse and execute `source`, returning a GraphQL response body."""
         try:
             document = self.parse(source)
+            self._weigh(document, operation_name)
         except GraphQLSyntaxError as error:
             return {"errors": [{"message": str(error), "extensions": {"code": error.code}}]}
         try:
@@ -319,6 +390,7 @@ class GraphQL:
                 request=request,
                 max_page_size=self._max_page_size,
                 on_denied=self._on_denied,
+                action=self._action,
             )
         except ExecutionError as error:
             body: dict[str, Any] = {"message": str(error)}

@@ -140,7 +140,9 @@ async def create_user(info):
 ```
 
 Mutations live in their own namespace on purpose: they are the write surface, so
-one policy can cover **all** writes without enumerating them.
+one policy can cover **all** writes without enumerating them —
+`forbid(principal, action, resource is Mutation);`, and nothing else to keep in
+step.
 
 The resolver receives a small `info`: `request`, `session`, `arguments` (with
 variables already substituted), `path`, and `parent_type`. Nothing from the
@@ -175,7 +177,7 @@ GraphQL(
     limits=Limits(
         max_document_bytes=16 * 1024,  # rejected on len(), before scanning
         max_depth=12,                  # selection nesting
-        max_complexity=1000,            # total selected fields
+        max_complexity=1000,           # selections, then weighted cost
         max_aliases=50,                 # aliases of one field
         max_steps=200_000,              # token budget backstop
     ),
@@ -186,7 +188,7 @@ GraphQL(
 | --- | --- |
 | `max_document_bytes` | Sheer size. Parse cost scales with length, and this is checked before a character is read. |
 | `max_depth` | `author { posts { author { posts { … } } } }` over a cyclic schema. |
-| `max_complexity` | Width — thousands of sibling fields in one document. |
+| `max_complexity` | Width — thousands of sibling fields in one document, and separately the *weighted* cost of what those fields resolve to (see [Cost weighting](#cost-weighting)). |
 | `max_aliases` | `a: user b: user c: user …` — one expensive resolve each, document stays tiny. |
 | `max_steps` | Anything neither deep nor wide: a pathological token stream. |
 
@@ -217,26 +219,46 @@ app.configure_auth(BearerTokenBackend(verify), authorizer)
 api = GraphQL(registry, models=[User, Post], authorizer=authorizer)
 ```
 
-There is deliberately no `app.authorizer` to read back. The authorizer is a value
-you construct, so the way to share it is to keep it — reaching into the app for
-one you already have is the indirection, not the convenience.
+There is deliberately no `app.authorizer` to read back, and `GraphQL` does not
+reach into the application for one. The authorizer is a value you construct, so
+the way to share it is to keep it — and a schema built without one that silently
+acquired the app's would flip from *no policy checks at all* to Cedar's
+default-deny the moment it was mounted, which is not a coupling worth the
+keystroke it saves.
 
-| Selection | Resource asked |
-| --- | --- |
-| `{ users { … } }` | `Query.users` |
-| `{ user { email } }` | `Query.user`, then `User.email` |
-| `{ user { posts { … } } }` | `User.posts`, then `Post.*` |
-| `mutation { createUser }` | `Mutation.createUser` |
+| Selection | Resource asked | Reaches the engine as |
+| --- | --- | --- |
+| `{ users { … } }` | `Query.users` | `Query::"users"` |
+| `{ user { email } }` | `Query.user`, then `User.email` | `User::"email"` |
+| `{ user { posts { … } } }` | `User.posts`, then `Post.*` | `Post::"title"`, … |
+| `mutation { createUser }` | `Mutation.createUser` | `Mutation::"createUser"` |
+
+The third column is the part a policy author needs. A Cedar engine reads entity
+references, not names, so the `Type.field` string is split on its dot: the type
+is the entity type and the field is the id. That is what makes both shapes of
+rule writable — one field, or a whole namespace:
+
+```cedar
+permit(principal in Role::"reader", action == Action::"read", resource == User::"email");
+forbid(principal, action, resource is Mutation);   // every write, one clause
+```
+
+The action is `read` for every decision, because a selection is a read; a
+mutation is told apart by its resource rather than by a second action, which is
+exactly what lets `resource is Mutation` stand for all of them. Name a different
+one with `GraphQL(..., action="view")` when your policies already have a
+vocabulary.
 
 Because roots are resources too, `Query.users` denies a whole entry point
-without touching field policies — and `Mutation.*` in a Cedar policy denies
-every write at once.
+without touching field policies.
 
 A resolver can name its own resource when the field's identity is not the
-policy's:
+policy's. Write it as a `Type.field` name or as a Cedar reference; a bare word
+is refused where you declare it, rather than becoming a resolver failure on the
+first request that selects the field:
 
 ```python
-@api.field("User", "balance", returns="Int", policy="billing.read")
+@api.field("User", "balance", returns="Int", policy='Billing::"read"')
 async def balance(users, info): ...
 ```
 
@@ -257,8 +279,11 @@ useful to the client than a failure — a dashboard that should still render.
 
 ## Cost weighting
 
-`max_complexity` counts *weight*, not selections, so a field that fans out can
-say so:
+`max_complexity` is charged twice, and the second charge is the interesting one.
+While parsing, every selection counts 1 — that is the width limit in the table
+above, and it is all the parser can do, because it does not yet know what any
+name resolves to. After parsing, the document is walked against the schema and
+each field is charged the weight it *declares*:
 
 ```python
 @api.field("User", "recommendations", returns="Post", is_list=True, cost=25)
@@ -266,8 +291,26 @@ async def recommendations(users, info): ...
 ```
 
 Derived fields are weighted already: a column costs 1, a relationship 5, a list
-root 10. A query selecting a handful of expensive fields is therefore bounded
-the same way as one selecting hundreds of cheap ones.
+root 10, and a single-row root 1. A query selecting a handful of expensive
+fields is therefore bounded the same way as one selecting hundreds of cheap
+ones, and both refusals come back under the same `complexity` code — one client
+handler covers them.
+
+Two properties worth knowing before you pick numbers:
+
+**It is additive, never multiplied.** A list field does not multiply its
+children. Fan-out is exactly what `cost=` is *for* — put the weight on the field
+that fans out — and a multiplier read off a `limit` argument would make the
+budget depend on a number the client chooses. Page size is bounded separately by
+`max_page_size`.
+
+**Fragments are expanded first**, using the same expansion the executor uses, so
+a cost cannot be hidden behind a spread and a document is never billed for a
+branch that will not run.
+
+A field the schema does not have costs nothing: a typo comes back named, as an
+ordinary field error, rather than as a budget refusal that would send you
+looking in the wrong place.
 
 ## Typegen: one client, both surfaces
 
@@ -301,6 +344,29 @@ GraphQL(registry, models=[User], expose=("User.api_key",))   # or just "api_key"
 
 A hidden column is absent from the SDL as well as from execution, so it is not
 discoverable either.
+
+## Retrieval columns
+
+A `Vector` embedding and a `TsVector` are **left out of the schema** too, and
+for the same reason generated CRUD withholds them: a retrieval column indexes
+content rather than carrying it. A `tsvector` is derived from columns already in
+the same selection, and twenty `Vector(1536)` rows are thirty thousand floats —
+on a surface where the client, not the server, picks the page size.
+
+This is not a guess from a name. Both surfaces call
+`wreath.crud.retrieval_fields`, which reads the *declared type*, so it cannot
+miss a column and cannot catch an ordinary one. `expose` puts one back, exactly
+as it does for a sensitive name:
+
+```python
+GraphQL(registry, models=[Doc], expose=("Doc.embedding",))
+```
+
+The one place the two surfaces differ: `crud_router(expose=...)` also makes a
+vector *writable*, because REST generates a `POST` and a `PATCH`. There is
+nothing here for `expose` to widen on the way in, because no mutation is
+generated — a GraphQL write is a resolver you wrote, and what it accepts is that
+resolver's business.
 
 ## Transport
 

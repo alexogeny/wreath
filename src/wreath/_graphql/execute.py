@@ -14,8 +14,10 @@ sibling field has that field resolved -- in batch -- before it runs, even if the
 client did not select it. Dependencies are a topological sort over the level,
 not an `await` buried in a loop.
 
-**One authorization language, asked once.** Field access goes through the app's
-authorizer with the field's policy resource, and decisions are cached per
+**One authorization language, asked once.** Field access goes through the
+authorizer the endpoint was given, as a `PolicyRequirement` -- the same value a
+route's `@authorize` builds, so the shipped `CedarAuthorizer` serves both
+surfaces -- carrying the field's policy resource. Decisions are cached per
 request, so a field selected under three aliases is authorized once.
 
 **Per-field timing.** Each resolve is a `RESOLVER` Flight phase carrying the
@@ -28,12 +30,13 @@ import inspect
 from time import monotonic_ns as _monotonic_ns
 from typing import Any
 
+from .._auth.requirements import PolicyRequirement
 from .._flight_markers import COV_PYTHON as _COV_PYTHON
 from .._flight_markers import PH_RESOLVER as _PH_RESOLVER
 from .._flight_markers import phase_marker as _phase_marker
 from .ast import Document, Field, FragmentSpread, InlineFragment, Operation, Variable
 from .resolvers import ResolverInfo, order_fields
-from .schema import ObjectType, Schema
+from .schema import ObjectType, Schema, policy_resource
 
 __all__ = ["ExecutionError", "execute"]
 
@@ -108,15 +111,16 @@ class _Run:
     """One execution. Carries the per-request caches so they cannot leak."""
 
     __slots__ = (
-        "_authorizer", "_decisions", "_document", "_max_page_size", "_on_denied",
-        "_request", "_schema", "_session", "_variables",
+        "_action", "_authorizer", "_decisions", "_document", "_max_page_size",
+        "_on_denied", "_request", "_schema", "_session", "_variables",
     )
 
     def __init__(
         self, schema: Schema, document: Document, session: Any, *,
         variables: dict[str, Any], authorizer: Any, request: Any,
-        max_page_size: int, on_denied: str,
+        max_page_size: int, on_denied: str, action: str,
     ) -> None:
+        self._action = action
         self._schema = schema
         self._document = document
         self._session = session
@@ -135,7 +139,16 @@ class _Run:
         cached = self._decisions.get(resource)
         if cached is not None:
             return cached
-        decision = await self._authorizer.authorize(self._request, resource)
+        # An `AuthorizationProvider` is asked with a `PolicyRequirement`, never
+        # with a bare resource: that is the protocol every route already uses,
+        # and handing the shipped `CedarAuthorizer` a `str` raised
+        # `AttributeError` on the first field it was asked about. The resource
+        # becomes a Cedar entity reference here for the same reason -- the
+        # engine reads `User::"email"`, not `"User.email"`.
+        decision = await self._authorizer.authorize(
+            self._request,
+            PolicyRequirement(action=self._action, resource=policy_resource(resource)),
+        )
         allowed = bool(getattr(decision, "allowed", False))
         self._decisions[resource] = allowed
         if not allowed and self._on_denied == "error":
@@ -430,6 +443,7 @@ async def execute(
     request: Any = None,
     max_page_size: int = 100,
     on_denied: str = "error",
+    action: str = "read",
 ) -> dict[str, Any]:
     """Run `document` against `schema` on `session`, returning the data map."""
     operation: Operation = document.operation(operation_name)
@@ -447,5 +461,5 @@ async def execute(
     return await _Run(
         schema, document, session,
         variables=supplied, authorizer=authorizer, request=request,
-        max_page_size=max_page_size, on_denied=on_denied,
+        max_page_size=max_page_size, on_denied=on_denied, action=action,
     ).run(operation)
