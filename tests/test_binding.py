@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 from dataclasses import dataclass, field
 from typing import Annotated, Any
@@ -9,7 +10,17 @@ from typing import Annotated, Any
 import pytest
 
 from wreath import Wreath
-from wreath.binding import Query, ValidationError, compile_binder, validate
+from wreath.binding import (
+    Body,
+    Depends,
+    Form,
+    Path,
+    Query,
+    ValidationError,
+    compile_binder,
+    validate,
+)
+from wreath.orm.session import Session
 from wreath.response import TextResponse
 
 
@@ -222,8 +233,6 @@ def test_request_only_handler_skips_type_hint_resolution(monkeypatch: pytest.Mon
 
 @pytest.mark.asyncio
 async def test_depends_resolution_and_cache() -> None:
-    from wreath.binding import Depends
-
     calls: list[str] = []
 
     async def get_settings(request: Any) -> dict:
@@ -253,8 +262,6 @@ async def test_depends_resolution_and_cache() -> None:
 
 @pytest.mark.asyncio
 async def test_generator_dependency_cleanup_runs_on_error() -> None:
-    from wreath.binding import Depends
-
     events: list[str] = []
 
     async def resource(request: Any):
@@ -278,8 +285,6 @@ async def test_generator_dependency_cleanup_runs_on_error() -> None:
 
 @pytest.mark.asyncio
 async def test_depends_combines_with_typed_params() -> None:
-    from wreath.binding import Depends
-
     def get_prefix(request: Any) -> str:
         return "item"
 
@@ -452,3 +457,247 @@ async def test_the_real_422_path_keeps_every_field_error() -> None:
         ["query", "limit"],
         ["query", "offset"],
     ]
+
+
+def _module_level_dep(request: Any) -> str:
+    """A dependency resolvable from module scope, which annotations require."""
+    return "x"
+
+
+# --- the refusals nothing had ever made fire ----------------------------------
+#
+# `wreath mutant --operators guard.remove-raise` over the whole binding suite:
+# 12 killed, 0 survived, and **22 unreached**. Every refusal below could be
+# deleted outright and no test would notice. Two are runtime request validation;
+# the rest are declaration-time errors that exist so a silently-wrong binding
+# fails at import rather than answering the caller strangely.
+
+
+async def test_a_value_below_the_minimum_is_rejected_under_the_error_policy() -> None:
+    """The lower bound, which was only ever exercised with `overflow="clamp"`.
+
+    `test_query_error_policy_rejects_out_of_range` refuses `n=99` against a
+    maximum; nothing refused anything against a *minimum*, so half the range
+    check was unwatched. `?page=-1` is the request that finds it.
+    """
+    async def handler(
+        request: Any,
+        n: Annotated[int, Query(minimum=1, maximum=10)] = 5,
+    ) -> Any:
+        return n
+
+    bound = compile_binder(handler, "/")
+    assert await bound(_query_request(b"n=1")) == 1        # the bound itself is fine
+    with pytest.raises(ValidationError) as caught:
+        await bound(_query_request(b"n=0"))
+    assert caught.value.errors[0]["type"] == "minimum"
+    with pytest.raises(ValidationError) as caught:
+        await bound(_query_request(b"n=-7"))
+    assert caught.value.errors[0]["type"] == "minimum"
+
+
+async def test_a_lower_bound_alone_still_refuses() -> None:
+    """No maximum at all, so the two clauses cannot cover for each other."""
+    async def handler(
+        request: Any, n: Annotated[int, Query(minimum=10)] = 10,
+    ) -> Any:
+        return n
+
+    bound = compile_binder(handler, "/")
+    assert await bound(_query_request(b"n=99999")) == 99999
+    with pytest.raises(ValidationError) as caught:
+        await bound(_query_request(b"n=9"))
+    assert caught.value.errors[0]["type"] == "minimum"
+
+
+async def test_an_annotation_binding_cannot_convert_is_a_validation_error() -> None:
+    """A scalar source with a type the converter has no rule for.
+
+    Reported against the parameter rather than raised as a `TypeError`, because
+    it is discovered while converting a value the caller sent.
+    """
+    async def handler(request: Any, n: Annotated[complex, Query()] = 0j) -> Any:
+        return n
+
+    bound = compile_binder(handler, "/")
+    with pytest.raises(ValidationError) as caught:
+        await bound(_query_request(b"n=1"))
+    assert caught.value.errors[0]["type"] == "unsupported"
+
+
+# --- declaration-time refusals ------------------------------------------------
+
+
+def test_a_handler_cannot_bind_varargs_or_kwargs() -> None:
+    """There is no request source that could fill them."""
+    async def star_args(request: Any, *args: Any) -> Any: ...
+    async def star_kwargs(request: Any, **kwargs: Any) -> Any: ...
+
+    for handler in (star_args, star_kwargs):
+        with pytest.raises(TypeError, match=r"\*args/\*\*kwargs"):
+            compile_binder(handler, "/")
+
+
+def test_depends_inside_annotated_is_refused_with_the_fix_in_the_message() -> None:
+    """A wiring bug that used to surface as the caller's fault.
+
+    `Depends` is read from the default only, so inside `Annotated` it was
+    invisible: the parameter fell through to the JSON body and a GET answered
+    400 "invalid JSON body". A 400 tells the caller *they* broke, and they have
+    no way to know it was this side.
+    """
+    async def handler(
+        request: Any, value: Annotated[str, Depends(_module_level_dep)],
+    ) -> Any: ...
+
+    with pytest.raises(TypeError, match="Depends"):
+        compile_binder(handler, "/")
+    # The documented spelling compiles, so the refusal is about the placement
+    # rather than about `Depends` itself.
+    async def correct(request: Any, value: str = Depends(_module_level_dep)) -> Any: ...
+
+    compile_binder(correct, "/")
+
+
+def test_a_bare_session_parameter_is_refused() -> None:
+    """`Session` alone does not say which registry or workload it wants."""
+    async def handler(request: Any, session: Session) -> Any: ...
+
+    with pytest.raises(TypeError, match="FromORM"):
+        compile_binder(handler, "/")
+
+
+def test_a_path_marker_naming_a_placeholder_the_route_lacks_is_refused() -> None:
+    """A typo here binds nothing and the parameter silently becomes a query."""
+    async def handler(request: Any, ident: Annotated[int, Path("item_id")]) -> Any: ...
+
+    with pytest.raises(TypeError, match="not present in"):
+        compile_binder(handler, "/items/{id}")
+    # And the correct spelling compiles, so this is not "Path is broken".
+    compile_binder(handler, "/items/{item_id}")
+
+
+def test_two_body_parameters_are_refused_in_both_spellings() -> None:
+    """Explicit `Body()`, and the implicit dataclass-annotation form."""
+    async def explicit(
+        request: Any, a: Annotated[Item, Body()], b: Annotated[Item, Body()],
+    ) -> Any: ...
+
+    async def implicit(request: Any, a: Item, b: Item) -> Any: ...
+
+    for handler in (explicit, implicit):
+        with pytest.raises(TypeError, match="two body parameters"):
+            compile_binder(handler, "/")
+
+
+def test_a_form_model_cannot_be_combined_or_repeated() -> None:
+    """One form model, and never beside individual `Form()` fields.
+
+    Both would read the same parsed form, and the model would be built from a
+    subset of it while the individual fields claimed the rest.
+    """
+    async def two_models(
+        request: Any, a: Annotated[Item, Form()], b: Annotated[Item, Form()],
+    ) -> Any: ...
+
+    async def model_and_field(
+        request: Any, a: Annotated[Item, Form()], name: Annotated[str, Form()] = "",
+    ) -> Any: ...
+
+    with pytest.raises(TypeError, match="two form-model parameters"):
+        compile_binder(two_models, "/")
+    with pytest.raises(TypeError, match="form-model with individual"):
+        compile_binder(model_and_field, "/")
+
+
+def test_a_body_cannot_be_combined_with_form_or_file_parameters() -> None:
+    """One request body, read one way."""
+    async def handler(
+        request: Any, body: Annotated[Item, Body()],
+        name: Annotated[str, Form()] = "",
+    ) -> Any: ...
+
+    with pytest.raises(TypeError, match="body and form/file"):
+        compile_binder(handler, "/")
+
+
+def test_an_annotation_naming_something_module_scope_cannot_see_is_blamed() -> None:
+    """The refusal that caught this file's own first draft.
+
+    Annotations are resolved at route-compile time in the module the callable
+    was defined in, so a name local to a function -- or imported only under
+    `if TYPE_CHECKING:` -- is invisible. Without this the `NameError` surfaces
+    from inside `typing.get_type_hints` naming neither the handler nor the
+    parameter, and it happens at import, far from the line that caused it.
+    """
+    def build():
+        class Local:
+            pass
+
+        async def handler(request: Any, value: Local) -> Any: ...
+
+        return handler
+
+    with pytest.raises(TypeError, match="unresolvable name") as caught:
+        compile_binder(build(), "/")
+    message = str(caught.value)
+    assert "'value'" in message          # names the parameter ...
+    assert "Local" in message            # ... and the name it could not resolve
+
+
+@pytest.mark.parametrize(
+    ("annotation", "raw", "expected_type"),
+    [
+        (float, b"n=notanumber", "float"),
+        (float, b"n=", "float"),
+        (bool, b"n=maybe", "bool"),
+        (bool, b"n=2", "bool"),
+        (_dt.date, b"n=2026-13-45", "date"),
+        (_dt.date, b"n=not-a-date", "date"),
+        (_dt.datetime, b"n=2026-07-30", "instant"),      # no offset: refused, not UTC
+        (_dt.datetime, b"n=nonsense", "instant"),
+    ],
+)
+async def test_every_scalar_converter_refuses_what_it_cannot_parse(
+    annotation: Any, raw: bytes, expected_type: str,
+) -> None:
+    """Only the `int` branch had a test; the other four were unreached.
+
+    Each answers a 422 naming which conversion failed, and the `type` is what a
+    client keys on -- so a branch that silently fell through to another
+    converter's message would be a different error for the same request.
+
+    The `datetime` cases are the sharp ones: a value with no offset is
+    *refused* rather than read as UTC, which is the mistake `Instant` exists to
+    make impossible.
+    """
+    async def handler(request: Any, n: Any = None) -> Any:
+        return n
+
+    handler.__annotations__["n"] = Annotated[annotation, Query()]
+    bound = compile_binder(handler, "/")
+    with pytest.raises(ValidationError) as caught:
+        await bound(_query_request(raw))
+    assert caught.value.errors[0]["type"] == expected_type
+    assert caught.value.errors[0]["loc"] == ["query", "n"]
+
+
+@pytest.mark.parametrize(
+    ("annotation", "raw", "expected"),
+    [
+        (float, b"n=1.5", 1.5),
+        (bool, b"n=true", True),
+        (bool, b"n=off", False),
+        (_dt.date, b"n=2026-07-30", _dt.date(2026, 7, 30)),
+    ],
+)
+async def test_every_scalar_converter_still_accepts_what_it_should(
+    annotation: Any, raw: bytes, expected: Any,
+) -> None:
+    """The other half, so "refuse everything" cannot pass the tests above."""
+    async def handler(request: Any, n: Any = None) -> Any:
+        return n
+
+    handler.__annotations__["n"] = Annotated[annotation, Query()]
+    bound = compile_binder(handler, "/")
+    assert await bound(_query_request(raw)) == expected

@@ -179,3 +179,91 @@ async def test_it_is_route_middleware_on_purpose() -> None:
 async def test_at_least_one_tier_is_required() -> None:
     with pytest.raises(ValueError, match="at least one tier"):
         TieredRateLimitMiddleware(tiers={}, default=(1, 60.0))
+
+
+# --- what the tier actually hands to its limiter ------------------------------
+#
+# `TieredRateLimitMiddleware` builds one `RateLimitMiddleware` per tier.
+# `wreath mutant` dropped `window=`, `cost=` and `exempt=` from that call and
+# every test stayed green: every test above uses `window=60.0`, which is also
+# `RateLimitMiddleware`'s default, so the propagation was invisible. A tier
+# declared "10 per day" silently becoming "10 per minute" is a 1440x weaker
+# limit that no test could see.
+
+
+async def test_a_tier_window_is_not_quietly_replaced_by_the_default() -> None:
+    """`Retry-After` is the observable that distinguishes one window from another.
+
+    60.0 is `RateLimitMiddleware`'s own default, so a window equal to it proves
+    nothing about whether the tier's value was passed at all.
+    """
+    app = _app(TieredRateLimitMiddleware(
+        tiers={"pro": (1, 3600.0)}, default=(1, 1800.0),
+    ))
+    async with TestClient(app) as client:
+        pro = client.acting_as("ada", roles=["pro"])
+        assert (await pro.get("/llamas")).status == 200
+        refused = await pro.get("/llamas")
+        assert refused.status == 429
+        # One token refills in window/limit seconds. Far above the 60s default,
+        # which is the number this would collapse to.
+        assert int(refused.header("retry-after")) > 3000
+
+        free = client.acting_as("bo")
+        assert (await free.get("/llamas")).status == 200
+        refused = await free.get("/llamas")
+        assert refused.status == 429
+        # The default tier carries its own window, distinct from both.
+        assert 1500 < int(refused.header("retry-after")) <= 1800
+
+
+async def test_the_cost_a_request_spends_reaches_every_tier() -> None:
+    """`cost=2` against an allowance of 4 is two requests, not four."""
+    app = _app(TieredRateLimitMiddleware(
+        tiers={"pro": (4, 60.0)}, default=(4, 60.0), cost=2.0,
+    ))
+    async with TestClient(app) as client:
+        for who in (client.acting_as("ada", roles=["pro"]), client.acting_as("bo")):
+            assert (await who.get("/llamas")).status == 200
+            assert (await who.get("/llamas")).status == 200
+            assert (await who.get("/llamas")).status == 429
+
+
+async def test_an_exempt_request_is_not_limited_in_any_tier() -> None:
+    """The exemption has to reach the per-tier limiter, not just the wrapper."""
+    app = _app(TieredRateLimitMiddleware(
+        tiers={"pro": (1, 60.0)}, default=(1, 60.0),
+        exempt=lambda request: request.header("x-internal") == "yes",
+    ))
+    async with TestClient(app) as client:
+        for who in (client.acting_as("ada", roles=["pro"]), client.acting_as("bo")):
+            for _ in range(5):
+                response = await who.get("/llamas", headers={"x-internal": "yes"})
+                assert response.status == 200
+            # ... and the same caller without the header is limited normally.
+            assert (await who.get("/llamas")).status == 200
+            assert (await who.get("/llamas")).status == 429
+
+
+async def test_an_anonymous_caller_on_a_public_route_gets_the_default_tier() -> None:
+    """`_tier_from_roles` reads `identity.roles`, and there may be no identity.
+
+    Every test above puts the limiter on a route behind `@add_authenticated`, so
+    `request.identity` was never None and the guard never ran -- `wreath mutant`
+    deleted it and nothing objected. On a route with no auth requirement the
+    unguarded version reaches `None.roles` and answers 500, turning a rate
+    limiter into an outage for exactly the traffic it exists to bound.
+    """
+    app = Wreath()
+    app.add_middleware(TieredRateLimitMiddleware(
+        tiers={"pro": (9, 60.0)}, default=(1, 60.0),
+    ))
+
+    @app.get("/public")
+    async def public(request) -> dict:
+        return {"ok": True}
+
+    async with TestClient(app) as client:
+        assert (await client.get("/public")).status == 200
+        refused = await client.get("/public")
+        assert refused.status == 429          # the default tier, not a crash

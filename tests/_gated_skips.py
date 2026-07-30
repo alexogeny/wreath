@@ -36,10 +36,14 @@ DSN_ENV = "WREATH_TEST_POSTGRES_DSN"
 #: Checked in order; the first one present is the one the banner suggests.
 RUNTIMES = ("docker", "podman", "nerdctl")
 
+# `pgvector/pgvector:pg17`, not `postgres:17-alpine`: it is stock PostgreSQL 17
+# with `pgvector` available to CREATE EXTENSION. The vector suites skip on a
+# server without it, which is this banner's own failure mode one layer down --
+# a suite that quietly does not run.
 _START = (
     "docker run -d --name wreath-test-pg -e POSTGRES_PASSWORD=wreath "
     "-e POSTGRES_USER=wreath \\\n"
-    "  -e POSTGRES_DB=wreath_test -p 55432:5432 postgres:17-alpine \\\n"
+    "  -e POSTGRES_DB=wreath_test -p 55432:5432 pgvector/pgvector:pg17 \\\n"
     "  -c max_connections=200 -c fsync=off -c synchronous_commit=off"
 )
 _EXPORT = f'export {DSN_ENV}="postgresql://wreath:wreath@127.0.0.1:55432/wreath_test"'

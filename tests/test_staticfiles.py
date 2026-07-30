@@ -138,3 +138,118 @@ async def test_a_failed_startup_also_closes_a_static_mount(tmp_path) -> None:
     assert _mount_fd(app) == -1, "a failed startup left the mount's descriptor open"
     with pytest.raises(OSError):
         os.fstat(root_fd)
+
+
+# --- the four response shapes nothing was watching ----------------------------
+#
+# `wreath mutant` survived every conditional in `__call__` below the resolve:
+# the directory redirect, the cache-control header, the conditional 304 and the
+# unsatisfiable-range 416. All four are HTTP behaviours a client depends on and
+# none of them errors when it stops happening -- the response is simply wrong in
+# a way only a browser notices.
+
+
+def _static_app(root, **kwargs):
+    from wreath import Wreath
+
+    app = Wreath()
+    app.static("/assets", str(root), **kwargs)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_a_directory_without_a_trailing_slash_redirects_canonically(tmp_path) -> None:
+    """Serving the index from the un-slashed path breaks every relative link.
+
+    `/assets/docs` and `/assets/docs/` resolve relative URLs one level apart, so
+    the index has to be reached at the canonical path or its own `<img src="a.png">`
+    asks for `/assets/a.png`. 308 rather than 301 so the method and body survive.
+    """
+    from wreath.testing import TestClient
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "index.html").write_bytes(b"<h1>hi</h1>")
+
+    app = _static_app(tmp_path)
+    async with TestClient(app) as client:
+        response = await client.get("/assets/docs")
+        assert response.status == 308
+        assert response.header("location") == "/assets/docs/"
+
+        served = await client.get("/assets/docs/")
+        assert served.status == 200
+        assert served.body == b"<h1>hi</h1>"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_file_is_a_404(tmp_path) -> None:
+    from wreath.testing import TestClient
+
+    app = _static_app(tmp_path)
+    async with TestClient(app) as client:
+        assert (await client.get("/assets/nope.txt")).status == 404
+
+
+@pytest.mark.asyncio
+async def test_cache_control_is_sent_when_configured_and_absent_when_not(
+    tmp_path,
+) -> None:
+    """Both halves: asserting only the presence passes with the condition gone."""
+    from wreath.staticfiles import CacheControl
+    from wreath.testing import TestClient
+
+    (tmp_path / "a.txt").write_bytes(b"hi")
+
+    app = _static_app(tmp_path, cache_control=CacheControl(max_age=60))
+    async with TestClient(app) as client:
+        response = await client.get("/assets/a.txt")
+        assert response.status == 200
+        assert b"max-age=60" in response.header("cache-control").encode()
+
+    bare = _static_app(tmp_path, cache_control=None)
+    async with TestClient(bare) as client:
+        response = await client.get("/assets/a.txt")
+        assert response.header("cache-control") is None
+
+
+@pytest.mark.asyncio
+async def test_a_matching_etag_is_answered_304_with_no_body(tmp_path) -> None:
+    """The conditional request, which is most of a static server's traffic."""
+    from wreath.testing import TestClient
+
+    (tmp_path / "a.txt").write_bytes(b"hello")
+
+    app = _static_app(tmp_path)
+    async with TestClient(app) as client:
+        first = await client.get("/assets/a.txt")
+        etag = first.header("etag")
+        assert first.status == 200 and etag
+
+        again = await client.get("/assets/a.txt", headers={"if-none-match": etag})
+        assert again.status == 304
+        assert again.body == b""
+        assert again.header("etag") == etag
+
+        # A stale validator still gets the body, so this is not "304 always".
+        stale = await client.get("/assets/a.txt", headers={"if-none-match": '"nope"'})
+        assert stale.status == 200 and stale.body == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_a_range_beyond_the_file_is_416_with_the_real_length(tmp_path) -> None:
+    """416 must carry `Content-Range: bytes * /size` or the client cannot recover."""
+    from wreath.testing import TestClient
+
+    (tmp_path / "a.txt").write_bytes(b"hello")
+
+    app = _static_app(tmp_path)
+    async with TestClient(app) as client:
+        refused = await client.get("/assets/a.txt", headers={"range": "bytes=99-200"})
+        assert refused.status == 416
+        assert refused.header("content-range") == "bytes */5"
+
+        # A satisfiable range still works, so this is not "416 always".
+        partial = await client.get("/assets/a.txt", headers={"range": "bytes=1-3"})
+        assert partial.status == 206
+        assert partial.body == b"ell"
+        assert partial.header("content-range") == "bytes 1-3/5"

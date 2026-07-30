@@ -1266,3 +1266,128 @@ def test_webhook_purge_pass_builders_take_no_database() -> None:
             for name, p in parameters.items()
             if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
         ] == ["self"], owner.__name__
+
+
+# --- the envelope and key checks nothing was watching -------------------------
+#
+# `wreath mutant` survived or never reached every guard in
+# `WebhookEnvelope.__post_init__` and in the two HMAC classes' constructors: the
+# suite builds well-formed envelopes with good keys, which is the right thing
+# for it to do and the reason none of these had ever refused anything. Two of
+# them defend the same signature-base ambiguity from opposite ends.
+
+
+@pytest.mark.parametrize("field", ["id", "type", "version"])
+def test_an_envelope_missing_an_identifying_field_is_refused(field: str) -> None:
+    """All three are joined into the signature base, so none may be absent."""
+    fields = {"id": "evt-1", "type": "widget.changed", "version": "1"}
+    fields[field] = ""
+    with pytest.raises(ValueError, match="id, type, and version are required"):
+        WebhookEnvelope(
+            timestamp=datetime.now(UTC), content_type="application/json",
+            body=b"{}", **fields,
+        )
+
+
+@pytest.mark.parametrize("field", ["id", "type", "version"])
+@pytest.mark.parametrize("char", ["\n", "\r", "\x00", "\x1f", "\x7f"])
+def test_a_control_character_in_a_signed_field_is_refused(field: str, char: str) -> None:
+    """The ambiguity attack the module's own comment describes.
+
+    `_signature_base` joins these with newlines, so a newline inside one of them
+    lets a single MAC cover more than one `(timestamp, id, type, body)` split --
+    the signed fields stop being unambiguously recoverable from what was signed.
+    Refused rather than escaped, because no real event id or type contains one.
+    """
+    fields = {"id": "evt-1", "type": "widget.changed", "version": "1"}
+    fields[field] = fields[field] + char
+    with pytest.raises(ValueError, match=f"{field} contains a control character"):
+        WebhookEnvelope(
+            timestamp=datetime.now(UTC), content_type="application/json",
+            body=b"{}", **fields,
+        )
+
+
+def test_the_verifier_refuses_a_control_character_before_it_computes_a_mac() -> None:
+    """The same refusal from the other end, on headers an attacker supplies.
+
+    The signer cannot be trusted to have applied it: these bytes arrive over the
+    wire. It has to happen before `_signature_base` sees them, so a forged split
+    is never MAC'd at all.
+    """
+    envelope = _envelope()
+    headers = dict(HMACWebhookSigner(KEYS, key_id="current").headers(envelope))
+    for header, name in (
+        (b"wreath-webhook-id", "id"),
+        (b"wreath-webhook-type", "type"),
+        (b"wreath-webhook-version", "version"),
+    ):
+        tampered = dict(headers)
+        tampered[header] = tampered[header] + b"\nwreath-webhook-id: evt-2"
+        with pytest.raises(ValueError, match=f"{name} contains a control character"):
+            HMACWebhookVerifier(KEYS).verify(
+                body=envelope.body, headers=tampered, now=envelope.timestamp,
+            )
+
+
+def test_a_naive_timestamp_is_refused() -> None:
+    """Replay is bounded by comparing timestamps, and a naive one has no meaning."""
+    with pytest.raises(ValueError, match="must include a timezone"):
+        WebhookEnvelope(
+            id="evt-1", type="widget.changed", version="1",
+            timestamp=datetime(2026, 7, 16, 10, 0),   # naive, which is the point
+            content_type="application/json", body=b"{}",
+        )
+
+
+def test_a_relay_path_that_is_too_long_or_malformed_is_refused() -> None:
+    """The hop bound, and the format that makes a hop id unambiguous."""
+    common = {
+        "id": "evt-1", "type": "widget.changed", "version": "1",
+        "timestamp": datetime.now(UTC), "content_type": "application/json",
+        "body": b"{}",
+    }
+    assert WebhookEnvelope(relay_path=tuple(f"h{n}" for n in range(32)), **common)
+    with pytest.raises(ValueError, match="invalid or too long"):
+        WebhookEnvelope(relay_path=tuple(f"h{n}" for n in range(33)), **common)
+    for bad in ("has space", "has,comma", "", "has\nnewline"):
+        with pytest.raises(ValueError, match="invalid or too long"):
+            WebhookEnvelope(relay_path=("ok", bad), **common)
+
+
+def test_a_relay_path_that_revisits_a_hop_is_refused_as_a_loop() -> None:
+    """Distinct from the length bound: a two-hop cycle never reaches 32."""
+    with pytest.raises(ValueError, match="contains a loop"):
+        WebhookEnvelope(
+            id="evt-1", type="widget.changed", version="1",
+            timestamp=datetime.now(UTC), content_type="application/json",
+            body=b"{}", relay_path=("a", "b", "a"),
+        )
+
+
+def test_a_signer_asked_for_a_key_it_does_not_hold_refuses() -> None:
+    """Redelivering an old row names its original key, which may be retired."""
+    signer = HMACWebhookSigner(KEYS, key_id="current")
+    with pytest.raises(ValueError, match="signing key is unavailable"):
+        signer.headers(_envelope(), key_id="retired")
+    # The default is used when none is named, and it is the one it was built with.
+    assert dict(signer.headers(_envelope()))[b"wreath-webhook-key-id"] == b"current"
+
+
+def test_a_verifier_with_no_usable_key_is_refused_at_construction() -> None:
+    """A verifier holding an empty secret would MAC everything to the same value."""
+    with pytest.raises(ValueError, match="non-empty webhook verification key"):
+        HMACWebhookVerifier({})
+    with pytest.raises(ValueError, match="non-empty webhook verification key"):
+        HMACWebhookVerifier({"current": b""})
+    # One bad entry poisons the mapping, exactly as for origins elsewhere.
+    with pytest.raises(ValueError, match="non-empty webhook verification key"):
+        HMACWebhookVerifier({"current": KEYS["current"], "previous": b""})
+
+
+def test_a_verifier_replay_window_that_can_never_hold_is_refused() -> None:
+    """`max_age` bounds replay; zero or less accepts nothing and is a typo."""
+    with pytest.raises(ValueError, match="max_age must be positive"):
+        HMACWebhookVerifier(KEYS, max_age=0)
+    with pytest.raises(ValueError, match="max_age must be positive"):
+        HMACWebhookVerifier(KEYS, max_age=-1)
