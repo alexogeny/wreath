@@ -18,6 +18,7 @@ from asyncio import timeout as _asyncio_timeout
 from collections.abc import Awaitable, Callable, Iterable
 from inspect import isawaitable
 from time import monotonic_ns as _monotonic_ns
+from time import time as _wall_clock
 from typing import Any, Literal, cast
 
 from ._auth.backends import AuthenticationBackend, AuthorizationProvider
@@ -27,6 +28,7 @@ from ._auth.requirements import (
     SetRequirement,
     merge_requirements,
     requirement_for,
+    second_factor_age,
 )
 from ._codecs import parse_qs as _parse_qs
 from ._flight_markers import capture_marker as _capture_marker
@@ -197,6 +199,20 @@ def _make_dependency_capturer(scope: Any, rule: tuple[Any, int]) -> Any:
 
     return _capture_dependency
 
+
+def _first_session_publisher(middleware: Iterable[Any]) -> Any | None:
+    """The first item in `middleware` that publishes `request.state.session`.
+
+    Keyed on the `publishes_session` attribute rather than on
+    `SessionMiddleware` itself, so a replacement session middleware is covered
+    by `_reject_session_after_authentication` too.
+    """
+    for item in middleware:
+        if getattr(item, "publishes_session", False):
+            return item
+    return None
+
+
 #: Most distinct access clauses one route may compile to. See
 #: `_requirement_clauses`. Every clause is scanned on every request by
 #: `_eligible`, so this bounds request-path work as well as declaration-time
@@ -356,6 +372,7 @@ class Wreath:
         "_global_before_hooks",
         "_has_global_http_hooks",
         "_global_middleware",
+        "_auth_handlers",
         "_handler_requirements",
         "_http_clients",
         "_job_runners",
@@ -453,6 +470,9 @@ class Wreath:
         # (before_hook, is_sync) for middleware explicitly safe on handshakes.
         self._websocket_hooks: tuple[tuple[Any, bool], ...] = ()
         self._handler_requirements: dict[Any, AuthRequirement] = {}
+        # The subset of those whose `needs_backend` is true, so dispatch asks a
+        # set rather than a requirement -- see the read site in `__call__`.
+        self._auth_handlers: frozenset[Any] = frozenset()
         # Native Flight Recorder route attribution: {compiled_handler:
         # (route_id, plan_id)} joined to the Stage-0 metadata image, built lazily
         # the first time a request carries a live recorder context. None until
@@ -1591,7 +1611,34 @@ class Wreath:
                 auth_start = (
                     _monotonic_ns() if native_response and scope.flight == 2 else 0
                 )
-                identity = await backend.authenticate(request)
+                try:
+                    identity = await backend.authenticate(request)
+                except Exception as error:  # noqa: BLE001 -- see _handle_exception
+                    # On a classifying table authentication runs *here*, before
+                    # the route is resolved, and this is the error boundary it
+                    # was missing. Without it an exception from a backend left
+                    # `__call__` with no response started at all: the ASGI
+                    # server, not wreath, decided what the caller saw,
+                    # `_handle_exception` never ran, and every global `after`
+                    # hook was skipped -- so the security headers, the access
+                    # log and the recorder's finish went missing for exactly the
+                    # requests that failed inside authentication. The `trie`
+                    # path answered 500 for the same backend through
+                    # `_authorize_request`, which made the difference a routing
+                    # mode nobody connected to error handling.
+                    #
+                    # A backend is documented to refuse with `None` rather than
+                    # raise, so this is misuse -- but it is also reachable
+                    # without any application mistake: `OidcProvider`'s verifier
+                    # awaits a JWKS fetch in here, so an identity provider that
+                    # is merely unreachable raises straight through.
+                    if global_hooks:
+                        request._set_route_outcome("protected")
+                    response = await self._handle_exception(request, error)
+                    await self._finish_http(
+                        request, response, send, method, scope, native_response, active_global
+                    )
+                    return
                 if auth_start:
                     scope._flight_phase(
                         _PH_AUTH, 0, _COV_PYTHON, _monotonic_ns() - auth_start
@@ -1618,7 +1665,23 @@ class Wreath:
                 if matched is None:
                     error: HTTPException
                     if identity is None:
-                        error = Unauthorized(challenge=backend.challenge(request))
+                        try:
+                            error = Unauthorized(challenge=backend.challenge(request))
+                        except Exception as raised:  # noqa: BLE001 -- as above
+                            # The other half of the same boundary. `challenge`
+                            # is backend code too, and it is only ever called on
+                            # a path that is already refusing, so a raise here
+                            # replaced a 401 with an escaped exception.
+                            # `_authorize_request` calls it inside its caller's
+                            # try; this call had nothing around it.
+                            if global_hooks:
+                                request._set_route_outcome("protected")
+                            response = await self._handle_exception(request, raised)
+                            await self._finish_http(
+                                request, response, send, method, scope,
+                                native_response, active_global,
+                            )
+                            return
                     else:
                         error = Forbidden("Forbidden")
                     if global_hooks:
@@ -1772,8 +1835,18 @@ class Wreath:
                 _capture_marker.set(_make_dependency_capturer(scope, dep_rule))
         if global_hooks and request._get_route_outcome() in (None, "ingress"):
             request._set_route_outcome("route")
-        requirement = self._handler_requirements.get(handler)
-        if requirement is not None and requirement.needs_backend:
+        # `_auth_handlers` is `needs_backend` decided once, at compile time: the
+        # answer cannot change between requests, and asking a requirement per
+        # request costs a property call and several attribute reads on the path
+        # every public route takes. `_handler_requirements` stays complete --
+        # `wreath-request-trace` reads it to learn which compiled endpoints are
+        # route code.
+        requirement = (
+            self._handler_requirements.get(handler)
+            if handler in self._auth_handlers
+            else None
+        )
+        if requirement is not None:
             try:
                 if flight_phase is None:
                     stage_response = await self._authorize_request(request, requirement)
@@ -1955,12 +2028,10 @@ class Wreath:
         # by switching protocols and session-backed auth sees the loaded session.
         identity: Identity | None = None
         requirement = requirement_for(handler)
-        needs_auth = (
-            requirement.needs_backend
-            or requirement.role_checks
-            or requirement.permission_checks
-            or requirement.policies
-        )
+        # One question, asked in one place: `needs_backend` now covers the
+        # checks this used to name itself, and the second-factor window it did
+        # not name -- see `AuthRequirement.access_level`.
+        needs_auth = requirement.needs_backend
         websocket_hooks = self._websocket_hooks
         request: Request | None = None
         if websocket_hooks or needs_auth:
@@ -1982,7 +2053,16 @@ class Wreath:
                 raise RuntimeError("WebSocket authentication request was not constructed")
             try:
                 await self._authorize_request(request, requirement)
-            except HTTPException:
+            except Exception:  # noqa: BLE001 -- security ingress fails closed
+                # `Exception`, not `HTTPException`, and for the same reason the
+                # ingress hooks three lines above catch broadly: a handshake
+                # that cannot be authorized is refused, whatever went wrong.
+                # Catching only the refusal meant a backend raising anything
+                # else escaped the application with the handshake neither
+                # accepted nor closed -- which is not a 500 here, because there
+                # is no response to turn into one. The peer simply waits for a
+                # frame that never comes, and the exception is swallowed into an
+                # application task nobody awaits.
                 await send({"type": "websocket.close", "code": 1008})
                 return
             identity = request.identity
@@ -2138,7 +2218,7 @@ class Wreath:
                 return          # another caller compiled while we waited
             self._compile_routes_locked()
 
-    def _reject_session_after_authentication(self, route_middleware: tuple[Any, ...]) -> None:
+    def _reject_session_after_authentication(self, app_middleware: tuple[Any, ...]) -> None:
         """Refuse a session-reading backend behind route-scoped session middleware.
 
         `SessionIdentityBackend` reads `request.state.session` during
@@ -2155,22 +2235,40 @@ class Wreath:
         distinguishes it from a genuine anonymous call. So it is refused here,
         naming the remedy, rather than left to be discovered in production.
 
+        **Every route-scoped registration is examined, not just
+        `add_middleware()`.** This used to read `self._middleware` alone, so
+        `Router(middleware=[SessionMiddleware(...)])` -- and
+        `@app.get(..., middleware=[...])`, and `include_router(middleware=[...])`
+        -- walked past a refusal that had nothing to look at and shipped the
+        exact 401 it exists to prevent: sign-in answered 200 and `/me` answered
+        401. A refusal that holds on one supported wiring and not another reports
+        safety while providing none (docs/decisions/0024). Nesting needs no
+        special case: `Router.routes` folds an included router's middleware into
+        each route before the application ever sees it, so a session middleware
+        three routers deep arrives in that route's own tuple.
+
         Raises:
             TypeError: The authentication backend needs a session and the session
-                middleware is registered on the route pipeline.
+                middleware is registered on a route pipeline -- the application's,
+                a router's, or one route's.
         """
         backend = self._auth_backend
         if backend is None or not getattr(backend, "requires_session", False):
             return
-        offenders = [
-            item for item in route_middleware if getattr(item, "publishes_session", False)
-        ]
-        if not offenders:
+        offender = _first_session_publisher(app_middleware)
+        where = "add_middleware()"
+        if offender is None:
+            for definition in self._routes:
+                offender = _first_session_publisher(definition.middleware)
+                if offender is not None:
+                    where = f"middleware=[...] on {definition.path}"
+                    break
+        if offender is None:
             return
-        name = type(offenders[0]).__name__
+        name = type(offender).__name__
         raise TypeError(
             f"{type(backend).__name__} reads request.state.session during "
-            f"authentication, but {name} was registered with add_middleware(), "
+            f"authentication, but {name} was registered with {where}, "
             "which runs it after authorization -- every protected route would "
             f"answer 401 with a valid session cookie. Register it with "
             f"add_global_middleware({name}(...)) so the session is published "
@@ -2310,6 +2408,11 @@ class Wreath:
         if self._ws_router is not None:
             self._ws_router.compile()
         self._handler_requirements = handler_requirements
+        self._auth_handlers = frozenset(
+            compiled
+            for compiled, requirement in handler_requirements.items()
+            if requirement.needs_backend
+        )
         # Sorted for a stable `Allow` header; deduplicated because a method
         # appears once per route that declares it.
         self._route_methods = tuple(
@@ -2580,16 +2683,29 @@ class Wreath:
                     if stage_response is not None:
                         return stage_response
         if identity is None:
-            if not requirement.authenticated:
+            if requirement.access_level == 0:
                 # `identify()` only: the backend was asked and answered nobody,
-                # which is a value rather than a failure. Every check below is
-                # reached only through a decorator that sets `authenticated`, so
-                # there is nothing left to enforce against an absent principal.
+                # which is a value rather than a failure, and this endpoint asks
+                # the caller for nothing. Asked as `access_level` rather than as
+                # `not authenticated` so that every field that can refuse a
+                # caller is consulted: a requirement carrying role checks or a
+                # second-factor window but not the `authenticated` flag its
+                # decorator would have set is refused here, rather than admitted
+                # anonymously with its checks silently skipped.
                 return None
             challenge = (
                 None if auth_backend is None else auth_backend.challenge(request)
             )
             raise Unauthorized(challenge=challenge)
+        if requirement.second_factor is not None:
+            # Step-up, checked before roles and policies: the question "did this
+            # person prove a factor lately" does not depend on any of them, and
+            # answering it first keeps the remediation unambiguous. A 403 rather
+            # than a 401 -- re-authenticating changes nothing, proving a factor
+            # does -- with the reason naming what to do about it.
+            age = second_factor_age(identity, _wall_clock())
+            if age is None or age > requirement.second_factor:
+                raise Forbidden("second_factor_required")
         for check in requirement.role_checks:
             if not _check_set(identity.roles, check):
                 raise Forbidden("Forbidden")
@@ -2857,9 +2973,19 @@ class Wreath:
                         # Ordered explicitly rather than through a synthetic
                         # startup handler: the schema must be checked once the
                         # database is up but before user code queries it.
-                        from .orm.introspection import validate_registry
+                        from .orm.introspection import (
+                            resolve_extension_types,
+                            validate_registry,
+                        )
 
                         for registry in self._orm_registries.values():
+                            # Extension type OIDs first, and unconditionally:
+                            # they are assigned by CREATE EXTENSION rather than
+                            # compiled in, the codec cannot frame a value
+                            # without them, and validate_schema="off" must not
+                            # be a way to skip that. A registry declaring none
+                            # does no I/O here.
+                            await resolve_extension_types(registry)
                             await validate_registry(registry)
                     for name, client in self._http_clients.items():
                         await client.start()

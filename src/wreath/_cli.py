@@ -390,6 +390,13 @@ def build_parser() -> argparse.ArgumentParser:
              "give a function that runs queries the session parameter it needs "
              "(its callers then have to pass one)",
     )
+    mutant_parser = commands.add_parser(
+        "mutant",
+        help="remove one declared control at a time and see whether the tests notice",
+    )
+    from ._mutant.cli import add_arguments as _add_mutant_arguments
+
+    _add_mutant_arguments(mutant_parser)
     audit_parser = commands.add_parser(
         "audit",
         help="audit generated HTML + responses for accessibility (WCAG 2.1) and performance",
@@ -458,6 +465,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", dest="as_json",
         help="print versioned JSON instead of tables",
     )
+    _add_mcp_parser(commands)
     _add_doctor_parser(commands)
     _add_capture_parser(commands)
     _add_replay_parser(commands)
@@ -592,6 +600,44 @@ def _add_passes_parser(commands: Any) -> None:
     retry.add_argument("--schema", default=None)
     retry.add_argument("--name", default=None, help="one pass by name")
     retry.add_argument("--json", action="store_true", dest="as_json")
+
+
+def _add_mcp_parser(commands: Any) -> None:
+    """`wreath mcp stdio` -- the MCP endpoint you already have, behind a pipe.
+
+    The supported deployment is the HTTP endpoint, because that is where
+    authorization and the audit trail are worth anything. This exists for the
+    editor on someone's laptop that speaks only stdio, and it is a byte relay
+    over the application's own route rather than a second server: routing, auth,
+    `MCPLimits` and the Flight Recorder marker are the ones `/mcp` has, because
+    it is `/mcp`.
+    """
+    mcp_parser = commands.add_parser(
+        "mcp", help="serve an application's MCP endpoint over a local transport"
+    )
+    actions = mcp_parser.add_subparsers(dest="mcp_action", required=True)
+    stdio = actions.add_parser(
+        "stdio", help="relay newline-delimited JSON-RPC between stdin/stdout and /mcp"
+    )
+    stdio.add_argument("target", metavar="MODULE[:ATTRIBUTE]")
+    stdio.add_argument(
+        "--factory", action="store_true",
+        help="invoke the target as a zero-argument application factory",
+    )
+    stdio.add_argument(
+        "--path", default="/mcp",
+        help="the MCP endpoint's path on that application (default: /mcp)",
+    )
+
+
+def execute_mcp(namespace: argparse.Namespace) -> int:
+    """Drive the application's MCP route over stdin/stdout."""
+    import asyncio
+
+    from ._mcp.stdio import serve
+
+    app = load_application(namespace.target, factory=namespace.factory)
+    return asyncio.run(serve(app, path=namespace.path))
 
 
 def _add_doctor_parser(commands: Any) -> None:
@@ -2129,6 +2175,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return execute_inspect(namespace)
         if namespace.command == "doctor":
             return execute_doctor(namespace)
+        if namespace.command == "mcp":
+            return execute_mcp(namespace)
         if namespace.command == "capture":
             return execute_capture(namespace)
         if namespace.command == "replay":
@@ -2167,6 +2215,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             try:
                 return execute_port(namespace)
+            except (OSError, ValueError) as error:
+                raise CliError(str(error), exit_code=2) from error
+        if namespace.command == "mutant":
+            from ._mutant.cli import execute_mutant
+
+            try:
+                return execute_mutant(namespace)
             except (OSError, ValueError) as error:
                 raise CliError(str(error), exit_code=2) from error
         if namespace.command == "audit":

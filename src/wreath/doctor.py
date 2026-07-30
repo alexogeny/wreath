@@ -42,6 +42,7 @@ from ._nplusone import (
 
 __all__ = [
     "Finding",
+    "check_extension_types",
     "check_logging_streams",
     "NPlusOneDetected",
     "NPlusOneGuard",
@@ -131,6 +132,56 @@ class NPlusOneGuard:
 
 def _raise(finding: Finding) -> None:
     raise NPlusOneDetected(finding)
+
+
+# --- extension readiness -----------------------------------------------------
+
+
+async def check_extension_types(registry: Any) -> list[str]:
+    """Report extension types a registry needs that its database lacks.
+
+    Startup already refuses to run against a database missing one -- see
+    `wreath.orm.introspection.resolve_extension_types`, which raises with the
+    extension named. This is the same reading without the refusal, for the case
+    where you want to *ask* before deploying: a `Vector` column needs
+    `CREATE EXTENSION vector`, some managed PostgreSQL tiers restrict who may
+    run that, and finding out during a rollout is the expensive way.
+
+    Args:
+        registry: A started ORM registry.
+
+    Returns:
+        One human-readable line per missing extension type, worst first by name.
+        Empty when every declared extension type resolved -- including when the
+        registry declares none, in which case no query is issued at all.
+    """
+    from .orm.introspection import declared_extension_columns, probe_extension_types
+
+    columns = declared_extension_columns(registry)
+    if not columns:
+        return []
+    wanted = {
+        column.pg_type.type_name: column.pg_type.extension for _, column in columns
+    }
+    users: dict[str, list[str]] = {}
+    for spec, column in columns:
+        users.setdefault(column.pg_type.type_name, []).append(
+            f"{spec.model_type.__name__}.{column.python_name}"
+        )
+    connection = await registry.database.acquire("write")
+    try:
+        found = await probe_extension_types(connection, wanted)
+    finally:
+        await registry.database.release("write", connection)
+    return [
+        f"the {item.extension!r} extension is not installed on "
+        f"{registry.database.name!r} (current schema "
+        f"{item.current_schema or '?'!r}), so the {item.type_name!r} type used by "
+        f"{', '.join(sorted(users[item.type_name]))} has no OID; run "
+        f"CREATE EXTENSION IF NOT EXISTS {item.extension}"
+        for item in found
+        if not item.installed
+    ]
 
 
 # --- split logging streams ---------------------------------------------------
