@@ -35,6 +35,14 @@ app.crud(
 )
 ```
 
+Retrieval columns — a `Vector` embedding, a `TsVector` — are withheld the same
+way, and that one is typed rather than guessed: an embedding in a list response
+is about thirty thousand floats per page, and an embedding a client may `PATCH`
+puts a row at the top of every semantic search without touching a word of its
+visible content. `expose=("embedding",)` opts one back into both directions; a
+generated column stays unwritable whatever you name. See
+[Generating CRUD routes](../../guides/crud.md).
+
 To expose a "sensitive-looking" column that's actually safe, name it in `expose`
 — a deliberate, greppable act, never a default. Setting a real secret is
 intentionally *not* something CRUD does for you; do it through a purpose-built

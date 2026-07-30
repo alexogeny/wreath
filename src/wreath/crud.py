@@ -14,6 +14,12 @@ accident:
   auditable, deliberate act. **That name check is a backstop, not a boundary**:
   it withholds the column nobody thought about, and it cannot recognise a secret
   that does not look like one. `fields=(...)` is the control.
+* **Retrieval columns are withheld too, and that one is not a guess.** A
+  `Vector` embedding or a `TsVector` is how rows are *found*, not what they say,
+  so it is excluded from responses — a page of twenty `Vector(1536)` rows is
+  thirty thousand floats — and from accepted input, because an embedding moves a
+  row to the top of every semantic query while its visible content stays put.
+  `expose=(...)` names one back; a generated column stays unwritable regardless.
 
     router = crud_router(Widget, open_session, expose=(), readonly=("owner_id",))
     app.include_router(router)          # after app.enable_crud()
@@ -29,7 +35,7 @@ import inspect
 import re
 import uuid
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -43,7 +49,13 @@ def _as_model(model: type) -> type[Model]:
     """Narrow to a wreath model so the ORM-injected class attributes resolve."""
     return cast("type[Model]", model)
 
-__all__ = ["SENSITIVE_FIELD", "Access", "crud_router", "sensitive_fields"]
+__all__ = [
+    "SENSITIVE_FIELD",
+    "Access",
+    "crud_router",
+    "retrieval_fields",
+    "sensitive_fields",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +82,10 @@ class Access:
     mappers) is the adapter layer for richer evaluations.
     For decisions that need the *loaded row* (ownership, tenant match), pass
     `crud_router(object_authorizer=...)` instead.
+
+    `.within(seconds)` adds step-up to any of these — `DELETE` is the operation
+    that most often wants it, and it composes with the rule rather than
+    replacing it.
     """
 
     kind: str
@@ -77,6 +93,12 @@ class Access:
     mode: str = "all"
     action: str | None = None
     resource: Any = None
+    #: Seconds within which the caller must have proved a second factor, or None
+    #: for "no such demand". A field and a combinator rather than a seventh
+    #: `kind`, because step-up is orthogonal to *who* may act: an admin-only
+    #: delete that also wants a fresh factor is one rule, not a choice between
+    #: two.
+    second_factor: float | None = None
 
     @classmethod
     def public(cls) -> Access:
@@ -132,6 +154,57 @@ class Access:
                 from something else.
         """
         return cls("cedar", action=action, resource=_checked_resource(resource))
+
+    def within(self, seconds: float) -> Access:
+        """This rule, and a second factor proved within the last `seconds`.
+
+        ```python
+        crud_router(Account, open_session, authorize={
+            "read":   Access.authenticated(),
+            "delete": Access.roles("admin").within(300),   # and prove it again
+        })
+        ```
+
+        A combinator rather than a factory, so it composes: the roles check
+        still runs, and the window is checked on top of it by the same
+        `@second_factor` machinery a hand-written route uses. Stacking two
+        windows keeps the shorter one, exactly as stacking the decorators does.
+
+        Step-up implies authentication, so this is refused on `public()` and on
+        `deny()`: the first would silently stop being public, and the second
+        already refuses everyone, which makes a window on it a declaration that
+        can never be read.
+
+        Args:
+            seconds: The freshness window. Five minutes is the usual choice.
+
+        Returns:
+            A new rule; `Access` is frozen, so the original is unchanged.
+
+        Raises:
+            ValueError: `seconds` is not positive, or the rule is `public()` or
+                `deny()`.
+        """
+        if seconds <= 0:
+            raise ValueError(
+                f"Access.within({seconds!r}) is a window no caller can satisfy. "
+                "Pass a positive number of seconds, or Access.deny() if the "
+                "intent is that nobody may perform this operation."
+            )
+        if self.kind in ("public", "deny"):
+            raise ValueError(
+                f"Access.{self.kind}().within(...) is a contradiction: step-up "
+                "demands an identity that has recently proved a second factor, "
+                f"and {self.kind}() "
+                + (
+                    "admits callers who have none."
+                    if self.kind == "public"
+                    else "admits nobody at all."
+                )
+                + " Build it from authenticated(), roles(), permissions() or "
+                "cedar() instead."
+            )
+        return replace(self, second_factor=seconds)
 
 
 #: A `{param}` placeholder in a resource template, filled from `path_params`.
@@ -210,6 +283,25 @@ def sensitive_fields(model: type) -> frozenset[str]:
     )
 
 
+def retrieval_fields(model: type) -> frozenset[str]:
+    """Column names of `model` that index content rather than carry it.
+
+    A `Vector` embedding and a `TsVector` are how rows are *found*, not what a
+    row says, so generated CRUD treats them as infrastructure: withheld from
+    responses and refused on input unless named in `expose=`. Unlike
+    `sensitive_fields` this is not a guess from a name -- it is the declared
+    column type, so it cannot miss one and cannot catch an ordinary column by
+    accident.
+    """
+    from .orm.types import _is_retrieval_type
+
+    return frozenset(
+        name
+        for name, item in _as_model(model).__wreath_column_map__.items()
+        if _is_retrieval_type(item.pg_type)
+    )
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
         return value.isoformat()
@@ -258,6 +350,21 @@ def crud_router(
     in `readonly` are likewise refused on input — silently dropped from the body
     rather than rejected, so a client sending them gets the row it would have got.
 
+    **Retrieval columns are withheld both ways, and `expose` widens both.** A
+    `Vector` embedding or a `TsVector` (see `retrieval_fields`) is how rows are
+    *found* rather than what they say, so it is neither serialized nor accepted
+    by default. On output that is bandwidth: a `tsvector` is derived from columns
+    already in the same payload, and a page of twenty `Vector(1536)` rows is
+    thirty thousand floats. On input it is control: ranking is the one thing a
+    row's own editor can change invisibly, since an embedding puts a row at the
+    top of every semantic query while the visible content stays put. An
+    application whose clients compute their own embeddings names the column in
+    `expose=("embedding",)`, which makes both the reading and the writing an
+    explicit, auditable act. A **generated** column — every `TsVector` — has no
+    such opt-in on input: PostgreSQL derives it on every write, so `expose` makes
+    it readable and nothing makes it writable. It is dropped from the body like
+    the primary key rather than rejected with a 422.
+
     `authorize` rules attach as route metadata that the app enforces in its
     single-pass pipeline, so a denied write never touches the database.
     `Access.deny()` is the exception: it is enforced inside the handler and answers
@@ -278,7 +385,8 @@ def crud_router(
 
     Args:
         open_session: `(request) -> Session`, one per request, closed by the handler
-        expose: sensitive columns to include in responses anyway, an explicit opt-in
+        expose: columns withheld by default — sensitive-looking names, and
+            retrieval indexes — to include anyway, an explicit opt-in
         fields: the *only* columns to serialize; mutually exclusive with `expose`
         readonly: columns excluded from create and update input, e.g. server-set ones
         exclude: columns never serialized at all
@@ -300,13 +408,19 @@ def crud_router(
     pk_name = primary_key[0].python_name
 
     sensitive = sensitive_fields(model)
-    exposed_sensitive = frozenset(expose)
+    # Two more deny-lists, both derived from the declared type rather than
+    # guessed from a name. `retrieval` is withheld by default and `expose=` names
+    # it back; `generated` can never be written by anyone, so it has no opt-in.
+    retrieval = retrieval_fields(model)
+    generated = frozenset(name for name, item in columns.items() if item.generated)
+    exposed = frozenset(expose)
     allow_list = None if fields is None else tuple(fields)
     if allow_list is not None:
-        if exposed_sensitive:
+        if exposed:
             raise ValueError(
                 "pass either `fields` (an allow-list of what may leave) or "
-                "`expose` (exceptions to the sensitive-name deny-list), not both"
+                "`expose` (exceptions to what is withheld by default -- "
+                "sensitive-looking names, and retrieval columns), not both"
             )
         unknown = [name for name in allow_list if name not in columns]
         if unknown:
@@ -319,21 +433,35 @@ def crud_router(
     ops = frozenset(operations)
 
     # What leaves the server: every column minus the excluded, minus sensitive
-    # ones that were not explicitly exposed.
+    # or retrieval ones that were not explicitly exposed. A `tsvector` in a
+    # response is noise by construction -- it is derived from columns already in
+    # the same payload -- and a page of twenty `Vector(1536)` rows is thirty
+    # thousand floats nobody asked for.
     output_fields = (
         tuple(name for name in allow_list if name not in exclude_set)
         if allow_list is not None
         else tuple(
             name for name in columns
             if name not in exclude_set
-            and (name not in sensitive or name in exposed_sensitive)
+            and (name not in sensitive or name in exposed)
+            and (name not in retrieval or name in exposed)
         )
     )
     # What the client may set: never the primary key, never read-only, never a
-    # sensitive column (set those through a purpose-built endpoint, not CRUD).
+    # sensitive column (set those through a purpose-built endpoint, not CRUD),
+    # never a generated one (PostgreSQL computes it, so a write is discarded),
+    # and never a retrieval index unless `expose=` named it. Ranking is the one
+    # thing a row's own editor can change invisibly: an embedding puts a row at
+    # the top of every semantic query while its visible content stays put.
+    # `fields=` deliberately does not widen this. It names what may *leave*, and
+    # a sensitive column named there is likewise readable and not writable.
     writable_fields = frozenset(
         name for name in (allow_list if allow_list is not None else columns)
-        if name != pk_name and name not in readonly_set and name not in sensitive
+        if name != pk_name
+        and name not in readonly_set
+        and name not in sensitive
+        and name not in generated
+        and (name not in retrieval or name in exposed)
     )
 
     resource = prefix if prefix is not None else "/" + model.__name__.lower()
@@ -535,19 +663,27 @@ def _apply_requirement(handler: Any, rule: Access) -> Any:
 
     `public` and `deny` attach nothing — `deny` is enforced inside the
     handler so it 403s regardless of identity.
-    """
-    from ._auth.decorators import authenticated, authorize, permissions, roles
 
-    if rule.kind == "authenticated":
-        return authenticated()(handler)
+    A `.within(...)` window is applied *alongside* whatever the kind produced
+    rather than instead of it, which is what makes step-up compose: the roles
+    check and the freshness check both end up on one `AuthRequirement`, and the
+    app enforces them in one pass.
+    """
+    from ._auth.decorators import authenticated, authorize, permissions, roles, second_factor
+
     mode = cast('Literal["all", "any"]', rule.mode)
-    if rule.kind == "roles":
-        return roles(*rule.values, mode=mode)(handler)
-    if rule.kind == "permissions":
-        return permissions(*rule.values, mode=mode)(handler)
-    if rule.kind == "cedar":
-        return authorize(action=cast("str", rule.action), resource=_resource_fn(rule.resource))(
-            handler)
+    if rule.kind == "authenticated":
+        handler = authenticated()(handler)
+    elif rule.kind == "roles":
+        handler = roles(*rule.values, mode=mode)(handler)
+    elif rule.kind == "permissions":
+        handler = permissions(*rule.values, mode=mode)(handler)
+    elif rule.kind == "cedar":
+        handler = authorize(
+            action=cast("str", rule.action), resource=_resource_fn(rule.resource)
+        )(handler)
+    if rule.second_factor is not None:
+        handler = second_factor(max_age=rule.second_factor)(handler)
     return handler
 
 

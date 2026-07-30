@@ -95,6 +95,71 @@ Setting a real secret (a password) is intentionally *not* something CRUD does fo
 you — do it through a purpose-built endpoint (or [`wreath.users`](users.md)), where
 you can hash and validate.
 
+## Retrieval columns are withheld, both ways
+
+A `Vector` embedding and a `TsVector` are how rows are **found**, not what they
+say. Generated CRUD treats them as infrastructure: neither is serialized into a
+response, and neither is accepted from a request body. Unlike the sensitive-name
+deny-list this is not a guess — it is the declared column type, so it cannot miss
+one and cannot catch an ordinary column by accident. `retrieval_fields(Model)`
+returns exactly what is withheld.
+
+```python
+class Doc(Model, table="docs"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    title: Mapped[str] = column(Text)
+    body: Mapped[str] = column(Text)
+    embedding: Mapped[list] = column(Vector(1536), nullable=True,
+                                     index="hnsw", index_ops="vector_cosine_ops")
+    search: Mapped[bytes] = column(TsVector("english", sources=("title", "body")),
+                                   index="gin")
+
+app.crud(Doc, open_session)
+# GET  /doc      -> {"items": [{"id": 1, "title": "...", "body": "..."}], ...}
+# PATCH /doc/1 {"embedding": [...]}  -> the field is silently dropped
+```
+
+Two different reasons, both worth stating.
+
+**On the way out it is bandwidth.** A `tsvector` is derived from columns that are
+already in the same payload — it is noise by construction, and it serializes as a
+hex blob. A default page of twenty `Vector(1536)` rows is about thirty thousand
+floats nobody asked for, on every list request.
+
+**On the way in it is control.** Ranking is the one thing a row's own editor can
+change *invisibly*: for an application whose search is semantic, anyone permitted
+to `PATCH` a row could otherwise put it at the top of every query while its
+visible content stayed exactly as it was.
+
+To opt one back in, name it in `expose=` — the same deliberate, greppable act the
+sensitive-name deny-list uses, and it widens both directions at once:
+
+```python
+app.crud(Doc, open_session, expose=("embedding",))
+# GET  /doc/1                        -> ..., "embedding": [0.01, ...]
+# PATCH /doc/1 {"embedding": [...]}  -> accepted
+```
+
+That is the right shape when the client computes the vector itself. When an
+embedding is produced server-side — a [durable job](jobs.md) after the row is
+written — leave it withheld.
+
+**A generated column has no input opt-in.** Every `TsVector` is
+`GENERATED ALWAYS AS (...) STORED`, so PostgreSQL recomputes it on every write
+and there is nothing a client could usefully send. `expose=("search",)` makes it
+*readable*; nothing makes it writable. Like the primary key and `readonly=`
+columns, it is dropped from the body rather than rejected, so a client that sends
+one gets the row it would have got.
+
+**[GraphQL](graphql.md) withholds them too**, through this same
+`retrieval_fields`, so the two generated surfaces cannot disagree about what
+they publish. It has no input half to widen: no mutation is generated there.
+
+**A `NOT NULL` vector column and a generated `POST` do not mix.** If the column
+is required and no longer writable, `POST /doc` has no way to supply it. Give it
+a server default, declare it `nullable=True` (the usual shape when a background
+embedder fills it in later), or `expose=` it.
+
 ## Shaping the surface
 
 ```python
@@ -104,7 +169,7 @@ app.crud(
     operations=("list", "retrieve"),     # read-only: no create/update/delete
     readonly=("owner_id", "created_at"),  # present in output, never accepted as input
     exclude=("internal_notes",),          # never serialized at all
-    expose=(),                            # sensitive columns to include anyway
+    expose=(),                            # withheld columns to include anyway
     prefix="/widgets",                    # default is "/<model name>"
     page_size=50,
 )
@@ -140,6 +205,31 @@ in its [single-pass pipeline](../perf/index.md#the-request-pipeline-routing-auth
 a session. `Access.deny()` answers `403` unconditionally (the route still exists,
 so it's a deliberate "forbidden", not a confusing `404`); to remove an operation
 entirely, leave it out of `operations=`.
+
+### And prove it again: step-up on a generated route
+
+`DELETE /{id}` is the operation most likely to want more than "you are an admin".
+`.within(seconds)` adds [step-up](second-factors.md) to any rule — it composes
+with the rule rather than replacing it, so the roles check still runs and the
+freshness check runs on top of it:
+
+```python
+app.crud(Account, open_session, authorize={
+    "read":   Access.authenticated(),
+    "delete": Access.roles("admin").within(300),     # ... and a factor, in the last 5 min
+})
+```
+
+Two admins with identical roles now get different answers, which is the whole
+point: the one who proved a factor four minutes ago gets `204`, and the one who
+logged in this morning and has not touched a code since gets `403` with
+`second_factor_required`. The remediation is `POST /auth/2fa/verify`, after which
+the same request succeeds.
+
+It is refused on `Access.public()` and `Access.deny()`. Step-up implies an
+identity, so a public rule carrying one would quietly stop being public, and a
+`deny()` already refuses everyone. Build it from `authenticated()`, `roles()`,
+`permissions()` or `cedar()`.
 
 ### Cedar, and richer decisions
 
