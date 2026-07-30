@@ -130,9 +130,11 @@ class GeneratedType(PgType):
 
 
 #: Codec kinds the driver backends know how to frame. One per extension wire
-#: format, not one per type: `vector` and a future `halfvec` are different
-#: kinds, but every `Vector(dim)` shares kind 1.
+#: format, not one per type: `vector` and `halfvec` are different kinds because
+#: their elements are different widths, but every `Vector(dim)` shares kind 1 and
+#: every `Halfvec(dim)` shares kind 2.
 EXT_KIND_VECTOR = 1
+EXT_KIND_HALFVEC = 2
 
 
 class WireList(list):
@@ -200,7 +202,8 @@ class ExtensionType(PgType):
         #: The extension that provides this type, as `CREATE EXTENSION` spells it.
         self.extension = extension
         #: The bare `pg_type.typname`, which is what the catalog is queried by
-        #: and what distinguishes `vector` from `halfvec`.
+        #: and what distinguishes `vector` from `halfvec`, which share an
+        #: extension but not a wire format.
         self.type_name = type_name
         self.shape_value = b"x" + sql.encode("utf-8")
         # A stable stand-in for the OID a fingerprint would otherwise record.
@@ -321,7 +324,10 @@ def _unbind_extension_oids() -> None:
 #: The codec kind each extension type name is framed by. Adding a type means
 #: adding a kind here and a branch in both codec twins -- never a silent
 #: fall-through to "bytes".
-_EXTENSION_KINDS: dict[str, int] = {"vector": EXT_KIND_VECTOR}
+_EXTENSION_KINDS: dict[str, int] = {
+    "vector": EXT_KIND_VECTOR,
+    "halfvec": EXT_KIND_HALFVEC,
+}
 
 
 def _type_error(expected: str, value: object) -> TypeError:
@@ -578,6 +584,95 @@ def Vector(dim: int) -> ExtensionType:
     )
 
 
+#: The largest finite IEEE-754 binary16. An element beyond it does not saturate,
+#: it becomes an infinity -- which pgvector then refuses -- so the bound is part
+#: of what a `halfvec` column can hold, not a codec detail.
+MAX_HALF_MAGNITUDE = 65504.0
+
+#: pgvector's ceiling on a `halfvec` column's dimension. Higher than `vector`'s
+#: because each element is half the width; HNSW indexes it to 4000, again a
+#: planner limit rather than a storage one and so not enforced here.
+MAX_HALFVEC_DIM = 16000
+
+
+def Halfvec(dim: int) -> ExtensionType:
+    """Declare a pgvector `halfvec(dim)` column -- half-precision, half the storage.
+
+    The same Python value as `Vector`: a `list[float]` of exactly `dim` finite
+    floats. What differs is what the database keeps. Each element is stored as an
+    IEEE-754 binary16 rather than a binary32, which halves both the column and any
+    HNSW index over it -- the reason to reach for this at 1536 dimensions and up,
+    where the index is usually the thing that stopped fitting in memory.
+
+    ```python
+    class Document(Model, table="documents"):
+        embedding: Mapped[list[float]] = column(
+            Halfvec(1536), index="hnsw", index_ops="halfvec_cosine_ops"
+        )
+    ```
+
+    **Be deliberate about the precision.** binary16 carries about three decimal
+    digits, so a value written and read back is *not* the value you wrote:
+    `0.1` returns `0.0999755859375`. For embedding similarity that is
+    normally irrelevant -- the ranking is what matters and it is robust to the
+    third digit -- but a `halfvec` is the wrong type for anything you intend to
+    compare for equality or accumulate.
+
+    Two refusals, both at coercion time rather than at the server:
+
+    * A magnitude above `MAX_HALF_MAGNITUDE` (65504) would round to an infinity,
+      which pgvector rejects. Refused here so the error names the element rather
+      than arriving as an `INSERT` failure naming neither it nor the column.
+    * NaN and infinity, exactly as for `Vector`.
+
+    Note the operator classes are the type's own -- `halfvec_cosine_ops`, not
+    `vector_cosine_ops`. Naming `vector`'s opclass on a `halfvec` column is an
+    error pgvector reports at index creation.
+
+    Requires `CREATE EXTENSION vector` (the same extension provides both types).
+    """
+    if dim.__class__ is not int or isinstance(dim, bool):
+        raise DeclarationError(f"Halfvec() requires an int dimension, got {dim!r}")
+    if not 1 <= dim <= MAX_HALFVEC_DIM:
+        raise DeclarationError(
+            f"Halfvec({dim}) is out of range; pgvector allows 1 to {MAX_HALFVEC_DIM} "
+            "dimensions"
+        )
+
+    def coerce(value: Any) -> list[float]:
+        if not isinstance(value, (list, tuple)):
+            raise _type_error("list or tuple of floats", value)
+        if len(value) != dim:
+            raise ValueError(
+                f"halfvec({dim}) requires exactly {dim} values, got {len(value)}"
+            )
+        out: list[float] = []
+        for item in value:
+            if isinstance(item, bool) or not isinstance(item, (int, float)):
+                raise _type_error("float", item)
+            number = float(item)
+            if not math.isfinite(number):
+                raise ValueError(
+                    "a halfvec element must be finite; pgvector stores neither NaN "
+                    "nor infinity and every distance involving one is undefined"
+                )
+            if not -MAX_HALF_MAGNITUDE <= number <= MAX_HALF_MAGNITUDE:
+                raise ValueError(
+                    f"halfvec element {number!r} is outside binary16's range of "
+                    f"+/-{MAX_HALF_MAGNITUDE}; it would round to an infinity, which "
+                    "pgvector refuses. Use Vector() for values this large."
+                )
+            out.append(number)
+        return out
+
+    # The extension is `vector`, not `halfvec`: one `CREATE EXTENSION vector`
+    # provides both types. Naming the type here would make the not-installed error
+    # tell the reader to install an extension that does not exist.
+    return ExtensionType(
+        "vector", "halfvec", f"halfvec({dim})", coerce, kind=EXT_KIND_HALFVEC
+    )
+
+
 #: PostgreSQL's own `tsvector`. Full-text search needs no extension, so unlike
 #: pgvector's types this is a compile-time constant like every other built-in
 #: here -- none of the dynamic-OID machinery applies to it.
@@ -733,7 +828,11 @@ TextArray = Array(Text)
 
 __all__ = [
     "BY_OID",
+    "EXT_KIND_HALFVEC",
     "EXT_KIND_VECTOR",
+    "Halfvec",
+    "MAX_HALFVEC_DIM",
+    "MAX_HALF_MAGNITUDE",
     "MAX_VECTOR_DIM",
     "TSVECTOR_OID",
     "Array",
