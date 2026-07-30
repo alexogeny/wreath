@@ -13,9 +13,9 @@ from `sys.settrace`:
   one bytecode location permanently. Every file that is not a mutation target
   therefore costs exactly one callback for the whole run, and then nothing.
 * **Nothing is paid for what is not watched.** The callback is only armed for
-  lines that some operator actually proposed a mutation for. Instrumenting a
-  4,400-test suite this way is not measurably slower than not instrumenting it
-  (see `docs/guides/mutant.md` for the numbers and how they were taken).
+  lines that some operator actually proposed a mutation for. Instrumenting the
+  then-4,400-test suite this way was not measurably slower than not instrumenting
+  it (see `docs/guides/mutant.md` for the numbers and how they were taken).
 
 The consequence to be honest about: a line reached only through a C extension
 frame, a subprocess, or a thread that outlives the test is attributed wrongly or
