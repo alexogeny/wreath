@@ -37,6 +37,8 @@ def fake_repo(tmp_path: Path) -> Path:
     (tmp_path / "docs" / "guides").mkdir(parents=True)
     (tmp_path / "docs" / "guides" / "widgets.md").write_text("")
     (tmp_path / "docs" / "llms.txt").write_text("- [Widgets](guides/widgets.md)\n")
+    (tmp_path / map_lint.CAPABILITY_PAGE).write_text(
+        "# What you don't have to install\n\n::: capability-map\n")
     for name in map_lint.PROSE_MAPS:
         (tmp_path / name).write_text("See `src/wreath/widgets.py`.\n")
     _write_manifest(tmp_path, _clean_manifest())
@@ -51,6 +53,8 @@ def _clean_manifest() -> dict:
         "subsystems": [
             {
                 "name": "widgets",
+                "capability": "Widgets, and the holding of them",
+                "replaces": ["widgetlib", "flask-widgets"],
                 "guides": ["docs/guides/widgets.md"],
                 "sources": ["src/wreath/widgets.py"],
                 "tests": ["tests/test_widgets.py"],
@@ -345,3 +349,94 @@ def test_repair_never_resolves_a_finding_that_needs_judgment(fake_repo: Path) ->
     map_lint.repair(fake_repo, [])
 
     assert _codes(map_lint.scan(fake_repo)) == {"MAP002", "MAP003"}
+
+
+# -- MAP010/MAP011/MAP012: the capability map stays describable ---------------
+
+
+def test_subsystem_with_no_capability_is_caught(fake_repo: Path) -> None:
+    """A user-facing subsystem that describes itself nowhere is invisible.
+
+    The capability map is generated from this field, so a subsystem that never
+    writes one is simply absent from the page that exists to prove the surface
+    is there — silently, which is the failure mode the map already had once.
+    """
+    manifest = _clean_manifest()
+    del manifest["subsystems"][0]["capability"]
+    _write_manifest(fake_repo, manifest)
+
+    findings = map_lint.scan(fake_repo)
+    assert "MAP011" in _codes(findings)
+    assert any("capability" in finding.message for finding in findings)
+
+
+def test_capability_null_means_deliberately_internal(fake_repo: Path) -> None:
+    """`null` is the explicit opt-out: devtools and the example app are not features."""
+    manifest = _clean_manifest()
+    manifest["subsystems"][0]["capability"] = None
+    del manifest["subsystems"][0]["replaces"]
+    _write_manifest(fake_repo, manifest)
+
+    assert map_lint.scan(fake_repo) == []
+
+
+def test_internal_subsystem_claiming_replacements_is_caught(fake_repo: Path) -> None:
+    """`capability: null` keeps a row off the map; `replaces` beside it is a claim
+    nobody will ever read, which means it is a claim nobody will ever check."""
+    manifest = _clean_manifest()
+    manifest["subsystems"][0]["capability"] = None
+    _write_manifest(fake_repo, manifest)
+
+    assert "MAP011" in _codes(map_lint.scan(fake_repo))
+
+
+def test_capability_that_is_not_a_sentence_is_caught(fake_repo: Path) -> None:
+    manifest = _clean_manifest()
+    manifest["subsystems"][0]["capability"] = ["Widgets"]
+    _write_manifest(fake_repo, manifest)
+
+    assert "MAP011" in _codes(map_lint.scan(fake_repo))
+
+
+def test_replaces_must_be_a_list(fake_repo: Path) -> None:
+    """A bare string is 24 one-character package names to anything that iterates."""
+    manifest = _clean_manifest()
+    manifest["subsystems"][0]["replaces"] = "widgetlib"
+    _write_manifest(fake_repo, manifest)
+
+    assert "MAP010" in _codes(map_lint.scan(fake_repo))
+
+
+def test_replaces_entry_that_is_not_a_distribution_name_is_caught(
+    fake_repo: Path,
+) -> None:
+    """Shape, not truth: the lint is offline and cannot ask PyPI anything.
+
+    `pydantic (v2)` and `python-jose[cryptography]` are the two spellings that
+    show up, and neither is a name anyone can install.
+    """
+    manifest = _clean_manifest()
+    manifest["subsystems"][0]["replaces"] = ["python-jose[cryptography]", "pydantic (v2)"]
+    _write_manifest(fake_repo, manifest)
+
+    findings = [f for f in map_lint.scan(fake_repo) if f.code == "MAP010"]
+    assert len(findings) == 2
+    assert any("python-jose[cryptography]" in finding.message for finding in findings)
+
+
+def test_capability_page_that_stopped_rendering_the_map_is_caught(
+    fake_repo: Path,
+) -> None:
+    """The fields are only worth requiring while something still renders them."""
+    (fake_repo / map_lint.CAPABILITY_PAGE).write_text(
+        "# What you don't have to install\n\nA hand-written table, probably.\n")
+
+    findings = map_lint.scan(fake_repo)
+    assert "MAP012" in _codes(findings)
+    assert any("capability-map" in finding.message for finding in findings)
+
+
+def test_capability_page_that_is_gone_is_caught(fake_repo: Path) -> None:
+    (fake_repo / map_lint.CAPABILITY_PAGE).unlink()
+
+    assert "MAP012" in _codes(map_lint.scan(fake_repo))

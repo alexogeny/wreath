@@ -41,6 +41,7 @@ rather than reading here.
 | Routing | `_routing.py` | Route declaration lives on the app and `Router`; the matcher backends are in `_pure/router.py` and `_native/router.c`. |
 | Requests and responses | `request.py`, `response.py`, `background.py`, `_http.py`, `_headers.py`, `_codecs.py`, `_json.py`, `_multipart.py` | Inbound HTTP objects, every response type including SSE and streaming, and response-bound background work. |
 | Outbound HTTP | `http_client.py`, `webhooks.py`, `_client_codec.py` | Managed pooling with native codecs, and signed webhook delivery with durable inbox/outbox contracts. |
+| Model Context Protocol | `mcp.py`, `_mcp/` | A first-party MCP server: declared callables served to a model as tools over streamable HTTP. Adds no C — the envelope is `_json.py`, the stream is `SSEResponse`, and a call is an ordinary route activation. Tool schemas are derived by `binding.py` and rendered by `openapi.py`, which is the parity that keeps them from drifting. |
 | Binding/OpenAPI | `binding.py`, `openapi.py`, `_native/validate.c` | Handler parameter resolution, dependency markers, native body validation (plan interpreter, pure twin in `binding.validate`), schema generation, and opt-in docs endpoints. |
 | Type generation | `typegen/`, `_pure/typegen.py` | Canonical IR from routes/binding, TypeScript + fetch + React Query targets, `wreath typegen` CLI. |
 | Middleware | `middleware/`, `compression.py`, `cache_control.py`, `_webpolicy.py` | Base pipeline plus CORS, CSRF, sessions, security headers, rate limiting, request IDs, timing, proxy headers, cache, and compression. |
@@ -53,6 +54,7 @@ rather than reading here.
 | Observability | `telemetry.py`, `recording.py`, `replay.py`, `inspector.py` | The Native Flight Recorder surfaces: telemetry configuration and the OpenTelemetry bridge, recording policy types, replay and fault injection, and the read-only local inspector. Crash forensics lives here too — `TelemetryConfig.ring_path` maps the ring from a file so a process that dies badly leaves its records readable, and `recording.read_ring_file` (or `wreath flight read`) decodes them. Exporters are the `_otlp.py`/`_prometheus.py`/`_statsd.py`/`_cloudwatch_emf.py` group. |
 | Server/protocols | `server.py`, `cli.py`, `_cli.py`, `_devserver.py`, `websocket.py`, `reactor.py` | Server configuration, CLI application loading/reload supervision, transport selection, lifespan, the WebSocket API, and the metal tier's native event loop. |
 | Auditing and porting | `_audit/`, `port.py`, `_port/` | The `wreath audit` accessibility/performance ruleset, and the `wreath port` codemod that analyzes a FastAPI app without importing it. |
+| Quality tools | `mutant.py`, `_mutant/` | `wreath mutant` removes one *declared* control at a time -- an `AuthRequirement` field, a Cedar policy, a refusal, a withheld-field filter, a rate limit's key -- and re-runs only the tests PEP 669 line attribution says reach it. A report, not a gate. |
 
 ### Backend split
 

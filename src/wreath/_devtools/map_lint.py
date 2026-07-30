@@ -36,6 +36,22 @@ Findings:
   ASan/UBSan. A file missing here is not a broken build: it is C that the
   sanitizer suites silently do not cover, which is the worst way to be wrong
   about memory safety.
+* `MAP010` -- a subsystem's `replaces` is not a list of distribution names.
+  Shape, not truth: this runs offline and must not ask PyPI anything, so it
+  checks that each entry is a name someone could type after `pip install` --
+  `python-jose[cryptography]` and `pydantic (v2)` are not.
+* `MAP011` -- a subsystem that ships guides or reference pages has no
+  `capability` sentence, or has `"capability": null` (the deliberate "this is
+  internal" marker) while still claiming `replaces`. The capability map is
+  generated from that field, so a subsystem that never writes one is simply
+  missing from the page that exists to show the surface is there -- silently,
+  which is how the maps rotted the first time.
+* `MAP012` -- `docs/capabilities.md` is gone, or no longer carries the
+  `::: capability-map` directive that renders those fields. Requiring data that
+  nothing reads is how a field becomes decoration; this keeps the reader and
+  the requirement attached to each other. The generated table's *links* need no
+  check of their own -- they are the `guides` and `reference` paths `MAP002`
+  already resolves.
 * `MAP009` -- a map cites a path `.gitignore` excludes. This is the one that
   hides best: the file is on disk, every other check resolves it, and the map is
   wrong only for someone who clones the repository. `.gitignore` excluded
@@ -66,6 +82,11 @@ LLMS_TXT = "docs/llms.txt"
 
 MANIFEST = "docs/agents/manifest.json"
 
+#: The page that turns the manifest's `capability`/`replaces` fields into prose,
+#: and the directive on it that does the turning.
+CAPABILITY_PAGE = "docs/capabilities.md"
+CAPABILITY_DIRECTIVE = "::: capability-map"
+
 #: Top-level keys the manifest may define.
 MANIFEST_KEYS = frozenset(
     {"schema_version", "project", "python", "status", "entrypoints", "commands",
@@ -74,8 +95,13 @@ MANIFEST_KEYS = frozenset(
 
 #: Keys a subsystem entry may define, and the ones it must.
 SUBSYSTEM_KEYS = frozenset({"name", "guides", "reference", "sources", "tests", "policy",
-                            "decisions"})
+                            "decisions", "capability", "replaces"})
 SUBSYSTEM_REQUIRED = ("name", "guides", "sources", "tests")
+
+#: A distribution name as PEP 503 spells it: letters, digits, and `-._` between
+#: them. Extras, versions, and markers are deliberately rejected -- `replaces` is
+#: vocabulary for a reader, not a requirement line.
+_DISTRIBUTION = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
 #: Fields holding lists of repository paths.
 PATH_FIELDS = ("guides", "reference", "sources", "tests", "decisions")
@@ -181,6 +207,7 @@ def check_manifest(root: Path) -> list[Finding]:
         for key in SUBSYSTEM_REQUIRED:
             if not subsystem.get(key):
                 findings.append(Finding("MAP004", MANIFEST, f"{name}: missing {key!r}"))
+        findings.extend(_check_capability(name, subsystem))
         for field in PATH_FIELDS:
             for value in subsystem.get(field, []):
                 cited.append((f"{name}.{field}", value))
@@ -204,6 +231,71 @@ def check_manifest(root: Path) -> list[Finding]:
                         " subsystem's `sources`; add it so it can be found without grep")
             )
     return findings
+
+
+def _check_capability(name: str, subsystem: dict) -> list[Finding]:
+    """One subsystem's contribution to the capability map, checked for shape.
+
+    `capability` is the sentence the map is written in and `replaces` is the
+    vocabulary beside it; between them they are the only part of the manifest a
+    *user* ever reads, which is why they are checked here rather than trusted to
+    the docs build. The build can only fail on what it renders, and a subsystem
+    that omits both renders nothing at all.
+    """
+    findings: list[Finding] = []
+    documented = bool(subsystem.get("guides") or subsystem.get("reference"))
+    replaces = subsystem.get("replaces")
+
+    if "capability" not in subsystem:
+        if documented:
+            findings.append(Finding(
+                "MAP011", MANIFEST,
+                f"{name}: has documentation but no 'capability'; add the sentence it"
+                " belongs on the capability map with, or \"capability\": null to say"
+                " it is internal"))
+    elif subsystem["capability"] is None:
+        if replaces:
+            findings.append(Finding(
+                "MAP011", MANIFEST,
+                f"{name}: 'capability' is null, which keeps it off the capability map,"
+                " but it still lists 'replaces' -- a claim nobody will read is a claim"
+                " nobody will check"))
+    elif not isinstance(subsystem["capability"], str) or not subsystem["capability"].strip():
+        findings.append(Finding(
+            "MAP011", MANIFEST,
+            f"{name}: 'capability' must be a sentence for the capability map's first"
+            f" column, not {subsystem['capability']!r}"))
+
+    if replaces is None:
+        return findings
+    if not isinstance(replaces, list):
+        return [*findings, Finding(
+            "MAP010", MANIFEST,
+            f"{name}: 'replaces' must be a list of distribution names, not"
+            f" {type(replaces).__name__}")]
+    for entry in replaces:
+        if not isinstance(entry, str) or not _DISTRIBUTION.match(entry):
+            findings.append(Finding(
+                "MAP010", MANIFEST,
+                f"{name}: 'replaces' entry {entry!r} is not a distribution name;"
+                " write the bare name a reader would recognise, with no extras,"
+                " version, or marker"))
+    return findings
+
+
+def check_capability_page(root: Path) -> list[Finding]:
+    """The page that renders `capability` and `replaces` still renders them."""
+    path = root / CAPABILITY_PAGE
+    if not path.is_file():
+        return [Finding("MAP012", CAPABILITY_PAGE, "the capability map page is missing;"
+                        " the manifest's 'capability' and 'replaces' fields have"
+                        " nothing rendering them")]
+    text = path.read_text(encoding="utf-8")
+    if not any(line.strip() == CAPABILITY_DIRECTIVE for line in text.splitlines()):
+        return [Finding("MAP012", CAPABILITY_PAGE, f"no {CAPABILITY_DIRECTIVE!r} directive;"
+                        " the table it generates is the only reader the manifest's"
+                        " 'capability' and 'replaces' fields have")]
+    return []
 
 
 def check_prose(root: Path, relative: str) -> list[Finding]:
@@ -449,6 +541,7 @@ def repair(root: Path, adopt: list[tuple[str, str]]) -> tuple[list[str], list[st
 
 def scan(root: Path) -> list[Finding]:
     findings = check_manifest(root)
+    findings.extend(check_capability_page(root))
     for relative in PROSE_MAPS:
         findings.extend(check_prose(root, relative))
     findings.extend(check_llms_txt(root))
