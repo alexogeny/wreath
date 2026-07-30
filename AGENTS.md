@@ -195,7 +195,7 @@ uv run wreath-docs               # build the docs strictly (--serve to watch)
 uv run wreath-bench --framework wreath starlette fastapi   # installs competitors first
 
 # The individual gates, when you want one of them
-uv run pytest                 # the default marks, serially (~31s); use -n 6 (~8s)
+uv run pytest                 # the default marks, serially; use -n 6 for normal checks
 uv run pytest -m '' -n 6      # everything, including network/fuzz/performance
 uv run ruff check .
 uv run ty check
@@ -221,15 +221,15 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
 - `tests/`: correctness and ASGI behavior tests. **Parallelism now pays on the
   default marks, and it did not used to.** The suite was ~3.5s, where an xdist
   worker's re-import of the native extensions cost more than it saved; it has
-  since passed 4,400 tests and 30s, and the trade inverted. Roughly: serial ~31s,
-  **`-n 6` ~8s**, and the curve turns back up once workers outnumber the cores
-  they share with the extensions each one loads — so prefer `-n 6` over
-  `-n auto` on a wide machine. `uv run wreath-check` applies `min(6, cpu_count)`
-  for you; a bare `uv run pytest` stays serial, because that is the one you
-  attach a debugger to. **The full measured curve lives in one place —
+  since grown past 8,600 default-collected tests, and the trade inverted. The
+  last measured curve flattened at six workers and turned back up once workers
+  outnumbered the cores they shared with the extensions each one loaded, so
+  prefer `-n 6` over `-n auto` on a wide machine. `uv run wreath-check` applies
+  `min(6, cpu_count)` for you; a bare `uv run pytest` stays serial, because that
+  is the one you attach a debugger to. **The full measured curve lives in one place —
   `_devtools/tasks.py::_pytest_command`'s docstring — and that is the copy to
-  read and to update.** These two numbers were stale here for a while precisely
-  because they were written down twice; re-measure there before changing the cap.
+  read and to update.** Its timings predate the current suite size; re-measure
+  there, off battery power, before changing the cap.
 - **Some tests need a real PostgreSQL, and skipping them used to be silent.**
   Suites gated on `WREATH_TEST_POSTGRES_DSN` cover what a fake cannot model —
   parameter type inference, query plans, lock and timeout behaviour, DST
