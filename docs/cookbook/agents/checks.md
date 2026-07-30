@@ -12,7 +12,7 @@ Run them individually while you work:
 
 | Command | What it protects |
 |---|---|
-| `uv run pytest` | Behaviour — the default suite. Serial (~31s); add `-n 6` for ~8s. |
+| `uv run pytest` | Behaviour — the default suite. Serial for debugging; add `-n 6` for normal checks. |
 | `uv run pytest -m '' -n 6` | Everything, including network, fuzz, and performance. |
 | `uv run ruff check .` | Lint and import hygiene. |
 | `uv run ty check` | Types. |
