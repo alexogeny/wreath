@@ -81,6 +81,7 @@ nav = Nav(
             Page("Server-Sent Events", "guides/sse.md"),
             Page("Task progress", "guides/progress.md"),
             Page("Durable jobs and messaging", "guides/jobs.md"),
+            Page("Workflows", "guides/workflows.md"),
             Page("Chunked passes", "guides/chunked-passes.md"),
         ),
         Section(
@@ -231,6 +232,7 @@ nav = Nav(
         Page("Audit rules", "reference/audit.md"),
         Page("Object storage", "reference/objects.md"),
         Page("Durable jobs", "reference/jobs.md"),
+        Page("Workflows", "reference/workflows.md"),
         Page("Chunked passes", "reference/passes.md"),
         Page("Messaging", "reference/messaging.md"),
         Page("Supervised services", "reference/services.md"),
