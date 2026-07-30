@@ -15,6 +15,8 @@ from ._migrations.scan import (
     transitional_read,
     waive_transitional,
 )
+from .orm.fields import _IMPLICIT_OPCLASS_METHODS
+from .orm.types import ExtensionType
 
 _SINGLE_CATALOG_SQL = """
 WITH migration_objects AS (
@@ -38,7 +40,15 @@ WITH migration_objects AS (
         a.attname::text,
         2::int4,
         concat_ws(
-            E'\\x1f', 'column', a.atttypid::text, ''::text,
+            E'\\x1f', 'column', a.atttypid::text,
+            -- Field 2 is the type's *spelling*, and is empty for every built-in
+            -- type so their signatures are byte-identical to what they always
+            -- were. An extension type has to spell itself: its OID is assigned
+            -- by CREATE EXTENSION, so the renderer cannot map it back to SQL,
+            -- and `vector(1536)` versus `vector(3)` is a rewrite the OID alone
+            -- cannot see. 16384 is PostgreSQL's first user-assignable OID.
+            CASE WHEN a.atttypid < 16384 THEN ''
+                 ELSE pg_catalog.format_type(a.atttypid, a.atttypmod) END,
             a.attnotnull::int::text, a.attidentity::text, a.attgenerated::text,
             COALESCE(pg_catalog.pg_get_expr(d.adbin, d.adrelid), '')
         )::text
@@ -136,7 +146,18 @@ WITH migration_objects AS (
             -- and the signature above is ':'-delimited.
             CASE WHEN i.indpred IS NULL THEN '' ELSE
                 chr(31) || pg_get_expr(i.indpred, i.indrelid)
-            END
+            END,
+            -- An approximate index carries two more fields: the operator class
+            -- per column, and the access method's own options. Both are emitted
+            -- only for the methods that need them, so every btree and GIN
+            -- signature is byte-identical to what it was. A predicate slot is
+            -- always written first (possibly empty) so the field positions are
+            -- fixed rather than depending on whether the index is partial.
+            CASE WHEN am.amname IN ('btree', 'gin') THEN '' ELSE concat(
+                CASE WHEN i.indpred IS NULL THEN chr(31) ELSE '' END,
+                chr(31), COALESCE(opclasses.names, ''),
+                chr(31), COALESCE(array_to_string(ic.reloptions, ','), '')
+            ) END
         )::text
     FROM pg_catalog.pg_index i
     JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
@@ -149,8 +170,19 @@ WITH migration_objects AS (
         JOIN pg_catalog.pg_attribute a
           ON a.attrelid = i.indrelid AND a.attnum = key.attnum
     ) columns
+    CROSS JOIN LATERAL (
+        -- Only a *non-default* operator class is recorded. The default is what
+        -- an index with no opclass clause gets, so naming it here would report
+        -- every such index as drifted against a declaration that (rightly) says
+        -- nothing about it.
+        SELECT string_agg(
+            CASE WHEN op.opcdefault THEN '' ELSE op.opcname END, ',' ORDER BY key.ord
+        ) AS names
+        FROM unnest(i.indclass::oid[]) WITH ORDINALITY AS key(opcoid, ord)
+        JOIN pg_catalog.pg_opclass op ON op.oid = key.opcoid
+    ) opclasses
     WHERE n.nspname = $1::text
-      AND am.amname IN ('btree', 'gin')
+      AND am.amname IN ('btree', 'gin', 'hnsw', 'ivfflat')
       AND i.indisvalid
       AND i.indisready
       -- indexprs stays excluded: an index *on* an expression is a different
@@ -718,6 +750,12 @@ def _descriptor_record(
 def _registry_descriptor(registry: Any) -> bytes:
     """Pack immutable ORM intent once for native migration compilation."""
     records: list[bytes] = []
+    # This database's default operator class per (access method, indexed type),
+    # if anything has read it yet. See the operator-class comment below; a
+    # registry that was never resolved against a database contributes none and
+    # every declared operator class is written out verbatim, which is what the
+    # offline renderers want.
+    default_opclasses = registry.default_opclasses or {}
     for spec in registry.specs:
         if spec.sql_namespace != "qualified" or not spec.schema:
             raise ValueError(
@@ -727,15 +765,34 @@ def _registry_descriptor(registry: Any) -> bytes:
             _descriptor_record(spec.schema, spec.table, "", 1, "table\x1fr\x1fp")
         )
         for column in spec.columns:
+            # An extension type spells itself; a built-in leaves the slot empty
+            # so its signature is unchanged. See `_SINGLE_CATALOG_SQL`, which
+            # has to produce the identical string from `format_type`.
+            #
+            # An *unresolved* extension type is refused rather than described.
+            # Its OID is 0, which fails the `>= 16384` test and so blanks the
+            # spelling: the column would be described as a built-in of type 0,
+            # every run would rediscover it as drift, and nothing would say why.
+            if isinstance(column.pg_type, ExtensionType):
+                column.pg_type.require_oid(
+                    f"the migration descriptor for "
+                    f"{spec.model_type.__name__}.{column.python_name}"
+                )
+            spelling = column.pg_type.sql if column.pg_type.oid >= 16384 else ""
+            # Field 5 is `attgenerated` and field 6 is `pg_get_expr(adbin)`. A
+            # stored generated column sets both: PostgreSQL keeps its expression
+            # in the same catalog slot an ordinary default lives in, so the two
+            # are mutually exclusive and share the field.
+            generated = column.generated_sql
             signature = "\x1f".join(
                 (
                     "column",
                     str(column.oid),
-                    "",
+                    spelling,
                     "1" if not column.nullable else "0",
                     "",
-                    "",
-                    column.server_default or "",
+                    "s" if generated is not None else "",
+                    generated if generated is not None else (column.server_default or ""),
                 )
             )
             records.append(
@@ -767,13 +824,34 @@ def _registry_descriptor(registry: Any) -> bytes:
                 method = column.index_method or "btree"
                 base = f"i:{column.database_name}"
                 index_name = base if method == "btree" else f"{base}:{method}"
+                signature = f"index:{base}:{method}"
+                if method not in _IMPLICIT_OPCLASS_METHODS:
+                    # Three fixed trailing fields for an approximate index: an
+                    # (always empty here) predicate slot, the operator class,
+                    # and the method options. Matches `_SINGLE_CATALOG_SQL`.
+                    options = ",".join(
+                        f"{name}={value}" for name, value in column.index_with
+                    )
+                    # A declared operator class that *is* this database's default
+                    # for the method is written as the empty string, because that
+                    # is what `_SINGLE_CATALOG_SQL` records for it -- PostgreSQL
+                    # does not remember that a default was named, so the two sides
+                    # could otherwise never agree and the index would be
+                    # rediscovered as drift on every run. Dropping it from the
+                    # descriptor also drops it from the emitted CREATE INDEX,
+                    # which builds the identical index: naming the default and
+                    # omitting it are the same statement to PostgreSQL.
+                    ops = column.index_ops or ""
+                    if ops and default_opclasses.get((method, column.oid)) == ops:
+                        ops = ""
+                    signature += f"\x1f\x1f{ops}\x1f{options}"
                 records.append(
                     _descriptor_record(
                         spec.schema,
                         spec.table,
                         index_name,
                         4,
-                        f"index:{base}:{method}",
+                        signature,
                     )
                 )
             reference = column.reference
@@ -941,8 +1019,24 @@ def _diff_packed_images(desired: object, actual: object) -> NativeMigrationDiff:
     return NativeMigrationDiff(operation_count, tape)
 
 
+async def _resolve_default_opclasses(registry: Any, connection: Any) -> None:
+    """Teach `registry` this database's default operator classes, once.
+
+    Done here rather than only at application startup because a migration is
+    routinely run from a CLI that never started the application, and the desired
+    descriptor cannot be written correctly without the answer. It is one query,
+    cached on the registry, and skipped entirely by a registry that declares no
+    index method with an operator class -- which is every registry that has no
+    pgvector index.
+    """
+    from .orm.introspection import resolve_default_opclasses
+
+    await resolve_default_opclasses(registry, connection)
+
+
 async def detect_single(registry: Any, connection: Any) -> MigrationDetection:
     """Compare one compiled single-schema registry with live PostgreSQL."""
+    await _resolve_default_opclasses(registry, connection)
     desired = _compile_registry_image(registry)
     schemas = {spec.schema for spec in registry.specs}
     if len(schemas) != 1:
@@ -957,6 +1051,7 @@ async def detect_single(registry: Any, connection: Any) -> MigrationDetection:
 
 async def generate_single_plan(registry: Any, connection: Any) -> MigrationGeneration:
     """Build a deterministic named plan for one live physical schema."""
+    await _resolve_default_opclasses(registry, connection)
     desired_descriptor = _registry_descriptor(registry)
     desired = _metal()._migration_compile_desired(desired_descriptor)
     schemas = {spec.schema for spec in registry.specs}
