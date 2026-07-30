@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 
@@ -22,6 +22,7 @@ from wreath import Wreath
 from wreath._secondfactor import (
     MAX_SKEW,
     SecondFactor,
+    base32_to_secret,
     begin_totp_enrolment,
     confirm_totp_enrolment,
     hash_recovery_code,
@@ -32,6 +33,7 @@ from wreath._secondfactor import (
     verify_totp,
 )
 from wreath.auth import Identity, SessionIdentityBackend
+from wreath.binding import Body
 from wreath.middleware.sessions import SessionMiddleware
 from wreath.orm.registry import Registry
 from wreath.testing import TestClient
@@ -1518,3 +1520,341 @@ async def test_a_store_refuses_a_duplicate_second_factor_id() -> None:
     await store.add(factor("u1", b"\x01" * 20))
     with pytest.raises(ValueError, match="duplicate second-factor id"):
         await store.add(factor("u2", b"\x02" * 20))
+
+
+# --- every second-factor endpoint, with nothing signed in -------------------------
+#
+# `second_factor_router` opens every handler with the same two refusals -- no session
+# at all, then no signed-in user -- and a mutation sweep reported almost all of them
+# `survived`: the suite reaches them only through the happy path, where a session
+# exists and somebody is signed in. Both guards were therefore deletable on nearly
+# every route, and `_signed_in` returning `None` would have been read as a user.
+#
+# These are the two cheapest requests an attacker makes, so each endpoint gets both.
+
+_RP = "example.test"
+
+# (method, path, json body, error on an anonymous session) for every route the router
+# mounts, webauthn included. The listing route is `/auth/2fa` with no trailing slash --
+# `/auth/2fa/` is a 405 -- and `verify` and `webauthn/verify/begin` answer
+# `no_pending_second_factor` rather than `not_authenticated`, because they run *before*
+# sign-in completes and key on the pending marker instead of a signed-in user.
+_SECOND_FACTOR_ROUTES = [
+    ("POST", "/auth/2fa/totp/begin", None, "not_authenticated"),
+    ("POST", "/auth/2fa/totp/confirm", {"code": "000000"}, "not_authenticated"),
+    ("GET", "/auth/2fa", None, "not_authenticated"),
+    ("POST", "/auth/2fa/verify", {"code": "000000"}, "no_pending_second_factor"),
+    ("DELETE", "/auth/2fa/some-factor-id", None, "not_authenticated"),
+    ("POST", "/auth/2fa/webauthn/begin", None, "not_authenticated"),
+    (
+        "POST",
+        "/auth/2fa/webauthn/confirm",
+        {"client_data": "e30", "attestation_object": "e30"},
+        "not_authenticated",
+    ),
+    ("POST", "/auth/2fa/webauthn/verify/begin", None, "no_pending_second_factor"),
+]
+
+
+def _router_only_app(
+    users: InMemoryUserStore,
+    factors: InMemorySecondFactorStore,
+    clock: _Clock,
+    *,
+    sessions: bool,
+) -> Wreath:
+    """The second-factor router mounted alone, with the session middleware optional.
+
+    `_app` above always installs `SessionMiddleware`, which is why the
+    `session is None` arm had never run: with the middleware there is always a
+    session, and the only way to reach that arm is an application that mounted the
+    router and forgot it. That is a real deployment mistake and the router answers
+    500 rather than 401, because it is the operator's fault and not the caller's.
+    """
+    app = Wreath()
+    if sessions:
+        app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    app.include_router(
+        second_factor_router(
+            users,
+            factors,
+            issuer="Wreath",
+            clock=clock,
+            enrolments=None,
+            rp_id=_RP,
+            rp_name="Wreath",
+        )
+    )
+    return app
+
+
+async def _request(client: Any, method: str, path: str, body: Any) -> Any:
+    if method == "GET":
+        return await client.get(path)
+    if method == "DELETE":
+        return await client.delete(path)
+    return await client.post(path, json=body) if body else await client.post(path)
+
+
+@pytest.mark.parametrize(("method", "path", "body", "anonymous_error"), _SECOND_FACTOR_ROUTES)
+async def test_a_router_mounted_without_session_middleware_refuses_every_route(
+    method: str, path: str, body: Any, anonymous_error: str,
+) -> None:
+    """500 `session_middleware_required`, on every route, not just the first.
+
+    Parametrised per route rather than looped in one test so that a route which
+    stops answering is named by the failure -- and so adding a route without this
+    refusal shows up here.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    app = _router_only_app(users, factors, clock, sessions=False)
+    async with TestClient(app) as client:
+        response = await _request(client, method, path, body)
+    assert response.status == 500, (path, response.status)
+    assert response.json() == {"error": "session_middleware_required"}
+
+
+@pytest.mark.parametrize(("method", "path", "body", "anonymous_error"), _SECOND_FACTOR_ROUTES)
+async def test_every_second_factor_route_refuses_an_anonymous_session(
+    method: str, path: str, body: Any, anonymous_error: str,
+) -> None:
+    """401 on every route — a session exists, nobody is signed in.
+
+    The expected error is in the table rather than asserted uniformly, because the
+    two `verify` routes genuinely answer a different one and flattening that to
+    "some 401" would let either guard be deleted in favour of the other.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    app = _router_only_app(users, factors, clock, sessions=True)
+    async with TestClient(app) as client:
+        response = await _request(client, method, path, body)
+    assert response.status == 401, (path, response.status, response.json())
+    assert response.json() == {"error": anonymous_error}
+
+
+# --- _principal: the four ways a session fails to name a signed-in user -----------
+
+
+@pytest.mark.parametrize(
+    ("principal", "signed_in_if_unguarded"),
+    [
+        ("not-a-dict", False),
+        ({"sub": "1", "type": "User", "pending": True}, True),
+        ({"sub": 1, "type": "User"}, True),
+        ({"sub": ""}, False),
+    ],
+    ids=["not-a-mapping", "still-pending", "non-string-subject", "empty-subject"],
+)
+async def test_a_malformed_principal_is_not_signed_in(
+    principal: Any, signed_in_if_unguarded: bool,
+) -> None:
+    """Each clause of `_principal` needs a session that isolates it.
+
+    The subject has to be a **real** user id, which is the part that makes this
+    test work at all: with a made-up id, deleting a guard still ends in
+    `users.get_by_id` returning `None` and the same 401, so every clause stayed
+    deletable. The seeded store hands out `"1"`.
+
+    That is also what makes `{"sub": 1}` the sharp case rather than a contrived
+    one. `_signed_in` calls `users.get_by_id(str(principal["sub"]))`, so an integer
+    id — what most databases hand an application that writes the principal itself,
+    the way `wreath._auth.oauth2` does — becomes `"1"` and signs in as a real user
+    if `not isinstance(subject, str)` is dropped.
+
+    `pending` is the clause that matters most: that principal has proved a password
+    and *not* a second factor, and treating it as signed in is the bypass this
+    router exists to prevent.
+
+    `{"sub": ""}` is marked as *not* signed in even unguarded, and is here as a
+    recorded non-finding: `not subject` is defence in depth, because an empty id
+    matches no row either way. It stays because the guard reads better as the
+    complete statement of what a subject must be.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    user = await _seed(users)
+    assert user.id == "1", "the fixture ids changed; the principals below hard-code one"
+
+    app = Wreath()
+    app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
+    with pytest.warns(UserWarning, match="enrolments="):
+        router = second_factor_router(users, factors, issuer="Wreath", clock=clock)
+    app.include_router(router)
+
+    @app.post("/plant")
+    async def plant(request: Any) -> dict[str, Any]:
+        request.state.session["principal"] = principal
+        return {"status": "planted"}
+
+    async with TestClient(app) as client:
+        cookie = _cookie(await client.post("/plant"))
+        response = await client.post(
+            "/auth/2fa/totp/begin", headers={"cookie": cookie}
+        )
+    assert response.status == 401, (principal, response.status, response.json())
+    assert response.json() == {"error": "not_authenticated"}
+
+
+# --- totp/confirm: the four states a begun enrolment can be in --------------------
+
+
+async def _signed_in_client(client: Any, users: InMemoryUserStore) -> str:
+    await _seed(users)
+    return _cookie(await _login(client))
+
+
+async def test_confirming_with_no_enrolment_in_progress_is_refused() -> None:
+    """`if not isinstance(marker, dict)` — a confirm that was never begun.
+
+    Signed in, so the two guards above cannot answer for this one.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    async with TestClient(_app(users, factors, clock)) as client:
+        cookie = await _signed_in_client(client, users)
+        response = await client.post(
+            "/auth/2fa/totp/confirm", json={"code": "000000"}, headers={"cookie": cookie}
+        )
+    assert response.status == 400
+    assert response.json() == {"error": "no_enrolment_in_progress"}
+
+
+async def test_confirming_an_enrolment_begun_too_long_ago_is_refused() -> None:
+    """`clock() - started > enrolment_ttl`, and the unconfirmed secret is dropped.
+
+    The secret is the reason the second assertion is here: an expired enrolment
+    that stayed in the session would let the same code be confirmed later, which
+    is the whole point of parking it with a TTL.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    async with TestClient(_app(users, factors, clock, enrolment_ttl=600.0)) as client:
+        cookie = await _signed_in_client(client, users)
+        begun = await client.post("/auth/2fa/totp/begin", headers={"cookie": cookie})
+        assert begun.status == 200
+        cookie = _cookie(begun) or cookie
+
+        clock.now += 601
+        response = await client.post(
+            "/auth/2fa/totp/confirm", json={"code": "000000"}, headers={"cookie": cookie}
+        )
+        assert response.status == 400
+        assert response.json() == {"error": "enrolment_expired"}
+
+        session = await client.get("/session", headers={"cookie": _cookie(response) or cookie})
+        assert "pending_totp_enrolment" not in session.json()
+
+
+async def test_beginning_a_second_totp_enrolment_is_refused() -> None:
+    """`if any(row.kind == "totp" for row in enrolled)`.
+
+    Enrolling twice mints a second secret and a second set of recovery codes and
+    invalidates neither, so the user ends up with two of everything and no way to
+    tell which is live.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    async with TestClient(_app(users, factors, clock)) as client:
+        cookie = await _signed_in_client(client, users)
+        _, _, cookie = await _enrol(client, clock, cookie)
+        response = await client.post("/auth/2fa/totp/begin", headers={"cookie": cookie})
+    assert response.status == 409
+    assert response.json() == {"error": "already_enrolled"}
+
+
+# --- totp/confirm: a marker that is present but not usable ------------------------
+#
+# The three checks below all answer *after* `no_enrolment_in_progress` has been ruled
+# out, so each needs a session carrying a marker that is malformed in one specific
+# way. Nothing planted one, so every check was deletable while the suite stayed green
+# -- and each of them drops the unconfirmed secret on the way out, which is the part
+# that matters: a marker left behind is a secret that can still be confirmed later.
+
+
+def _app_with_planting(
+    users: InMemoryUserStore,
+    factors: InMemorySecondFactorStore,
+    clock: _Clock,
+    **options: Any,
+) -> Wreath:
+    """`_app`, plus a route that writes an enrolment marker straight onto the session.
+
+    Planting is the only way in: the router writes well-formed markers, so a
+    malformed one cannot come from its own `begin`. Without an `enrolments=` store
+    the marker *is* the record, which is what lets a bad `secret` be planted here.
+    """
+    app = _app(users, factors, clock, **options)
+
+    @app.post("/plant-enrolment")
+    async def plant(request: Any, marker: Annotated[dict[str, Any], Body()]):
+        request.state.session["pending_totp_enrolment"] = marker
+        return {"status": "planted"}
+
+    return app
+
+
+@pytest.mark.parametrize(
+    ("marker", "expected"),
+    [
+        ({"secret": "JBSWY3DPEHPK3PXP", "user": "1", "at": "recently"}, "enrolment_expired"),
+        ({"secret": 1234, "user": "1", "at": 1_700_000_000.0}, "no_enrolment_in_progress"),
+        (
+            {"secret": "not-base32-!!", "user": "1", "at": 1_700_000_000.0},
+            "no_enrolment_in_progress",
+        ),
+    ],
+    ids=["non-numeric-timestamp", "non-string-secret", "undecodable-secret"],
+)
+async def test_a_malformed_enrolment_marker_is_refused_and_dropped(
+    marker: dict[str, Any], expected: str,
+) -> None:
+    """A timestamp that is not a number, a secret that is not a string, and a
+    string that is not base32.
+
+    The first is the interesting one: `not isinstance(started, (int, float))` shares
+    its `if` with the TTL comparison, and without it `clock() - "recently"` raises
+    `TypeError` and the endpoint answers 500 instead of asking the user to start
+    again. The third is reachable only from a session written by a different build
+    of the router, which is exactly why nothing had ever produced it.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    async with TestClient(_app_with_planting(users, factors, clock)) as client:
+        cookie = await _signed_in_client(client, users)
+        planted = await client.post(
+            "/plant-enrolment", json=marker, headers={"cookie": cookie}
+        )
+        cookie = _cookie(planted) or cookie
+        response = await client.post(
+            "/auth/2fa/totp/confirm", json={"code": "000000"}, headers={"cookie": cookie}
+        )
+        assert response.status == 400, (marker, response.json())
+        assert response.json() == {"error": expected}
+
+        session = await client.get(
+            "/session", headers={"cookie": _cookie(response) or cookie}
+        )
+        assert "pending_totp_enrolment" not in session.json()
+
+
+async def test_confirming_after_another_session_already_enrolled_is_refused() -> None:
+    """The race `begin` cannot see: two enrolments begun, one confirmed first.
+
+    `begin` refuses a second enrolment, so the only way to reach the *same* check
+    inside `confirm` is for the factor to appear between this session's `begin` and
+    its `confirm`. Without the check the second confirm mints a second secret and a
+    second set of recovery codes, invalidating neither — the exact outcome `begin`'s
+    refusal exists to prevent, reached by going around it.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    async with TestClient(_app(users, factors, clock)) as client:
+        cookie = await _signed_in_client(client, users)
+        begun = await client.post("/auth/2fa/totp/begin", headers={"cookie": cookie})
+        assert begun.status == 200
+        cookie = _cookie(begun) or cookie
+        secret_b32 = begun.json()["secret"]
+
+        # Somebody else finished first, on another session.
+        await factors.add(_factor(user_id="1", kind="totp"))
+
+        code = totp_code(base32_to_secret(secret_b32), totp_counter(clock.now))
+        response = await client.post(
+            "/auth/2fa/totp/confirm", json={"code": code}, headers={"cookie": cookie}
+        )
+    assert response.status == 409
+    assert response.json() == {"error": "already_enrolled"}
