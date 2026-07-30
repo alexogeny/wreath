@@ -50,21 +50,18 @@ own named module so the whole stays easy to hold in your head.
 - **One obvious home per idea.** A small top level — `Wreath`, `Router`,
   `Request`, `Response`, `JSONResponse`, `Depends` — and a cohesive module for
   everything else, from `wreath.middleware` to `wreath.orm`.
-- **The whole circle, not a starter kit.** Middleware, authentication and
-  authorization (with a built-in, dependency-free Cedar policy engine) and
-  ready-made user-management flows, WebSockets and server-sent events, an
-  outbound HTTP client with rate-limiting and retries, signed webhooks, durable
-  jobs, messaging and supervised services, distributed locks built into the
-  Postgres driver, object storage over local disk or S3, templates, an ORM with
-  first-class JSONB and arrays over a native Postgres driver, OpenAPI with a
-  self-contained docs UI and typed client generation, pagination, health,
-  feature flags and API versioning, and an in-process test client.
+- **The whole circle, not a starter kit.** An ORM and migrations over a native
+  Postgres driver, durable jobs and messaging, authentication with a built-in
+  Cedar policy engine, OpenAPI with typed clients — and about thirty more things
+  you would otherwise assemble a `requirements.txt` from. See
+  [what you don't have to install](capabilities.md).
 - **The batteries you'd otherwise install.** Native-flight-recorder telemetry
   that bridges to OpenTelemetry, Prometheus, StatsD, CloudWatch EMF and
   OpenMetrics; `wreath audit`, an accessibility (WCAG) and performance auditor
-  for the HTML and responses Wreath generates; and `wreath port`, which
-  translates an existing FastAPI application into Wreath source and tells you,
-  precisely, what it could not.
+  for the HTML and responses Wreath generates; `wreath mutant`, which deletes
+  one control you declared at a time and reports the ones your tests would not
+  have noticed; and `wreath port`, which translates an existing FastAPI
+  application into Wreath source and tells you, precisely, what it could not.
 - **A short walk from FastAPI.** If you build with FastAPI, Pydantic, SQLModel,
   or Alembic today, [Wreath for FastAPI developers](from-fastapi/index.md) shows
   your application in both dialects and maps every habit to its Wreath home —
@@ -97,15 +94,16 @@ of the framework with the reasoning behind it, grouped the way you meet it:
 4. **[Realtime and background work](guides/websockets.md)** — WebSockets, SSE,
    task progress, and durable jobs and messaging.
 5. **[Talking to other services](guides/http-client.md)** — the outbound client,
-   service-to-service calls, and object storage.
+   service-to-service calls, serving MCP tools to a model, and object storage.
 6. **[Speed and delivery](guides/caching.md)** — caching, compression, static
    files, and content negotiation.
 7. **[Your API's surface](guides/openapi-typegen.md)** — OpenAPI and typed
    clients, the built-in docs UI, and Wreath's own static-site generator.
 8. **[Configuration and operations](guides/config-state.md)** — config and state,
    health/flags/versioning, observability bridges, and the native server.
-9. **[Testing and quality](guides/testing.md)** — the in-process test client and
-   the accessibility/performance auditor.
+9. **[Testing and quality](guides/testing.md)** — the in-process test client,
+   the mutation tester that asks whether your tests would notice a control being
+   deleted, and the accessibility/performance auditor.
 
 And to get a specific thing done fast:
 

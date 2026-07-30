@@ -222,9 +222,15 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
   ```bash
   docker run -d --name wreath-test-pg -e POSTGRES_PASSWORD=wreath \
     -e POSTGRES_USER=wreath -e POSTGRES_DB=wreath_test -p 55432:5432 \
-    postgres:17-alpine -c max_connections=200 -c fsync=off -c synchronous_commit=off
+    pgvector/pgvector:pg17 -c max_connections=200 -c fsync=off -c synchronous_commit=off
   export WREATH_TEST_POSTGRES_DSN="postgresql://wreath:wreath@127.0.0.1:55432/wreath_test"
   ```
+
+  **The image is `pgvector/pgvector:pg17`, not `postgres:17-alpine`.** It is
+  stock PostgreSQL 17 with `pgvector` available to `CREATE EXTENSION`, and the
+  vector suites skip on a server without it — which is the silent-skip failure
+  mode this section exists to warn about, one layer down. Everything else
+  behaves identically.
 
   `podman` and `nerdctl` work too. Some database suites are also marked
   `network` and so are excluded by the default marker expression entirely —
