@@ -1506,7 +1506,7 @@ def test_no_reference_page_is_waived_out_of_having_an_api() -> None:
 _UNRENDERED_CONSTANTS = {
     "wreath.auth": set(),
     "wreath.authorization": {"PERMISSION_CHANNEL"},
-    "wreath.compression": set(),
+    "wreath.compression": {"ZSTD_DEFAULT_LEVEL", "ZSTD_MAX_LEVEL", "ZSTD_MIN_LEVEL"},
     "wreath.mcp": {"PROTOCOL_VERSION", "SUPPORTED_PROTOCOL_VERSIONS"},
     "wreath.port": {"NEEDS_REVIEW", "TRANSLATED", "UNSUPPORTED"},
 }
