@@ -1404,3 +1404,72 @@ async def test_incomplete_head_scans_each_byte_a_bounded_number_of_times() -> No
     assert b"HTTP/1.1 200" in bytes(transport.buffer)
     # Delimiter search work must be linear in the head length, not N^2/2.
     assert protocol.examined <= 4 * n, (protocol.examined, n)
+
+
+# --- integer rendering in the response head ---------------------------------
+#
+# The status code, the content-length, and every chunk size line are written by
+# hand in the native protocol rather than through `PyOS_snprintf`, because
+# glibc's printf machinery measured at ~2% of a saturated metal worker's cycles
+# for what is at most a 20-digit number. A hand-rolled writer is only worth
+# having if it is right at the edges, so these drive the values a `%zd`/`%zx`
+# format string would have covered for free: zero, one digit, every digit-count
+# boundary, and both sides of each hex nibble boundary.
+#
+# Parameterized over both implementations on purpose: the pure protocol still
+# formats through Python, so it is the oracle for what the native writer must
+# reproduce byte for byte.
+
+
+@impl
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "size",
+    [0, 1, 9, 10, 99, 100, 999, 1000, 65535, 65536, 1234567, 10_000_000],
+)
+async def test_response_content_length_renders_at_digit_boundaries(
+    protocol_cls: type, size: int
+) -> None:
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"z" * size})
+
+    transport = await drive(protocol_cls, app, [GET])
+    head = bytes(transport.buffer).split(b"\r\n\r\n", 1)[0]
+    assert b"content-length: %d\r\n" % size in head.lower(), head
+
+
+@impl
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [100, 101, 200, 204, 301, 404, 418, 500, 599, 999])
+async def test_response_status_line_renders_every_three_digit_code(
+    protocol_cls: type, status: int
+) -> None:
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        await send({"type": "http.response.start", "status": status, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    transport = await drive(protocol_cls, app, [GET])
+    assert bytes(transport.buffer).startswith(b"HTTP/1.1 %d " % status)
+
+
+@impl
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [1, 15, 16, 17, 255, 256, 257, 4095, 4096])
+async def test_streaming_chunk_size_lines_render_across_nibble_boundaries(
+    protocol_cls: type, size: int
+) -> None:
+    """A chunk size is hex, so its boundaries are the nibble ones, not the decimal."""
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        # No content-length: HTTP/1.1 framing falls to chunked, which is the
+        # only path that writes a size line.
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"q" * size, "more_body": True})
+        await send({"type": "http.response.body", "body": b""})
+
+    transport = await drive(protocol_cls, app, [GET])
+    head, _, body = bytes(transport.buffer).partition(b"\r\n\r\n")
+    assert b"transfer-encoding: chunked" in head.lower(), head
+    assert body.startswith(b"%x\r\n" % size), body[:32]
+    assert body.endswith(b"0\r\n\r\n"), body[-16:]

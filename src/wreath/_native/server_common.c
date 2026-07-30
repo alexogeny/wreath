@@ -227,6 +227,20 @@ immediate_next(PyObject *Py_UNUSED(self))
 }
 
 
+/* Deliberately no `am_send`, and the reason is worth keeping so nobody adds one
+ * as an optimization again. `immediate_next` raising StopIteration is visible in
+ * a profile (it is the only caller of `_PyErr_SetObject` on the request path),
+ * and `am_send` looks like the fix -- return the value through a status code,
+ * raise nothing. It does not work: CPython's `SEND` opcode tests
+ * `PyIter_Check(receiver)` before it would consult `am_send`, so an awaitable
+ * that is also an iterator always lands in `tp_iternext`. Measured directly --
+ * 1000 awaits, 1000 `tp_iternext` calls, zero `am_send` calls -- and dropping
+ * `tp_iternext` to force the other branch is not available either, because
+ * `GET_AWAITABLE` requires `__await__` to return an iterator.
+ *
+ * The raise is structural to the awaitable protocol. Removing it means removing
+ * the `await`, not re-slotting it: a caller that knows the native protocol never
+ * suspends can call a synchronous entry point instead. */
 static PyAsyncMethods immediate_async = {
     .am_await = immediate_await,
 };
@@ -298,6 +312,7 @@ value_awaitable_dealloc(PyObject *op)
 }
 
 
+/* No `am_send` here either -- see the note above `immediate_async`. */
 static PyAsyncMethods value_awaitable_async = {
     .am_await = immediate_await,
 };
@@ -432,13 +447,8 @@ append_raw(PyObject *buffer, const char *data, Py_ssize_t size)
 int
 append_decimal(PyObject *buffer, Py_ssize_t value)
 {
-    char digits[32];
-    int size = PyOS_snprintf(digits, sizeof(digits), "%zd", value);
-    if (size < 0 || size >= (int)sizeof(digits)) {
-        PyErr_SetString(PyExc_OverflowError, "integer formatting failed");
-        return -1;
-    }
-    return append_raw(buffer, digits, size);
+    char digits[WREATH_DIGITS_MAX];
+    return append_raw(buffer, digits, wreath_write_decimal(digits, value));
 }
 
 

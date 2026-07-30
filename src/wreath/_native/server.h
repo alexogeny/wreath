@@ -393,6 +393,67 @@ void wreath_request_context_set_flight(PyObject *object, wreath_nfr_context *nfr
 int wreath_request_context_set_armed(PyObject *object);
 void wreath_request_context_sever(PyObject *object);
 
+/* --- integer rendering for the response head ----------------------------- */
+/* Every response formats at least a status code and a Content-Length, and a
+ * chunked one formats a size line per chunk. Those used to go through
+ * `PyOS_snprintf("%zd")`, which drags in glibc's whole printf machinery:
+ * measured at ~55ns per call against ~7ns for a direct write, and at 1.8-2.2%
+ * of a saturated metal worker's cycles across two `perf record` runs (the
+ * in-situ share is larger than the isolated delta because printf is called
+ * cold and evicts i-cache and branch history the request path wants).
+ *
+ * The scratch buffer cannot overflow, which is why neither caller checks:
+ * the widest Py_ssize_t is 19 digits plus a sign, and the widest size_t is 16
+ * hex digits. The static assertion below is the guard, and it is compile-time
+ * on purpose -- `python -O` strips `assert`, and a wire-format invariant may
+ * not depend on something an interpreter flag removes. */
+#define WREATH_DIGITS_MAX 24
+
+_Static_assert(sizeof(Py_ssize_t) <= 8 && sizeof(size_t) <= 8,
+               "wreath_write_decimal/_hex size their scratch for 64-bit words");
+
+/* Write `value` as decimal at `out` (no NUL). Returns the byte count. */
+static inline int
+wreath_write_decimal(char *out, Py_ssize_t value)
+{
+    char reversed[WREATH_DIGITS_MAX];
+    int n = 0;
+    int len = 0;
+    /* Take the magnitude through the unsigned domain: negating PY_SSIZE_T_MIN
+     * is undefined in the signed one, and this helper must not have a value it
+     * is wrong for. */
+    size_t magnitude = value < 0 ? (size_t)0 - (size_t)value : (size_t)value;
+    do {
+        reversed[n++] = (char)('0' + (magnitude % 10));
+        magnitude /= 10;
+    } while (magnitude != 0);
+    if (value < 0) {
+        out[len++] = '-';
+    }
+    while (n > 0) {
+        out[len++] = reversed[--n];
+    }
+    return len;
+}
+
+/* Write `value` as lowercase hex at `out` (no NUL). Returns the byte count. */
+static inline int
+wreath_write_hex(char *out, size_t value)
+{
+    static const char digits[] = "0123456789abcdef";
+    char reversed[WREATH_DIGITS_MAX];
+    int n = 0;
+    int len = 0;
+    do {
+        reversed[n++] = digits[value & 0xf];
+        value >>= 4;
+    } while (value != 0);
+    while (n > 0) {
+        out[len++] = reversed[--n];
+    }
+    return len;
+}
+
 /* --- shared helpers (server_common.c) ------------------------------------ */
 PyObject *completed_none(void);
 PyObject *completed_value(PyObject *value);

@@ -700,3 +700,46 @@ async def test_the_prearm_path_is_not_routable() -> None:
 def test_prearm_rejects_a_negative_count() -> None:
     with pytest.raises(ValueError, match="prearm"):
         ServerConfig(host="127.0.0.1", port=0, prearm=-1)
+
+
+def test_protocol_class_is_resolved_once_not_per_connection() -> None:
+    """`_protocol_factory` runs per accepted connection, so it must not re-derive.
+
+    `_select_tcp_protocol` reads `os.environ` (two KeyErrors raised and caught
+    inside `os._Environ.get`) and calls `importlib.import_module`; it measured
+    at 1.82us to recompute a constant, paid on every connection. Resolution is
+    still lazy so a `Server` built by hand with an unservable protocol set fails
+    where it always did -- what is pinned here is that it happens once.
+    """
+    import asyncio
+
+    from wreath.server import Server
+
+    async def app(scope, receive, send):  # pragma: no cover - never invoked
+        raise AssertionError("no request is served here")
+
+    loop = asyncio.new_event_loop()
+    try:
+        server = Server(app, ServerConfig(lifespan="off"), loop)
+        assert server._protocol_cls is None, "resolution must stay lazy"
+
+        calls = 0
+        real = wreath.server._select_tcp_protocol
+
+        def counting(config):
+            nonlocal calls
+            calls += 1
+            return real(config)
+
+        wreath.server._select_tcp_protocol = counting
+        try:
+            first = server._protocol_factory()
+            second = server._protocol_factory()
+        finally:
+            wreath.server._select_tcp_protocol = real
+
+        assert calls == 1, f"protocol class re-derived {calls} times"
+        assert type(first) is type(second)
+        assert server._protocol_cls is type(first)
+    finally:
+        loop.close()

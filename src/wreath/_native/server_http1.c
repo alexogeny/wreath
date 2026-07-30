@@ -373,13 +373,8 @@ response_append_lower(WreathHttpProtocol *self, const char *data, Py_ssize_t siz
 static int
 response_append_decimal(WreathHttpProtocol *self, Py_ssize_t value)
 {
-    char digits[32];
-    int size = PyOS_snprintf(digits, sizeof(digits), "%zd", value);
-    if (size < 0 || size >= (int)sizeof(digits)) {
-        PyErr_SetString(PyExc_OverflowError, "integer formatting failed");
-        return -1;
-    }
-    return response_append(self, digits, size);
+    char digits[WREATH_DIGITS_MAX];
+    return response_append(self, digits, wreath_write_decimal(digits, value));
 }
 
 
@@ -1390,14 +1385,10 @@ write_body_parts(WreathHttpProtocol *self, PyObject *body, PyObject *more_obj)
             }
         }
         else if (chunked) {
-            char size_line[32];
-            int size_length = PyOS_snprintf(size_line, sizeof(size_line), "%zx\r\n",
-                                             (size_t)body_size);
-            if (size_length < 0 || size_length >= (int)sizeof(size_line)) {
-                Py_DECREF(body);
-                PyErr_SetString(PyExc_OverflowError, "integer formatting failed");
-                return NULL;
-            }
+            char size_line[WREATH_DIGITS_MAX + 2];
+            int size_length = wreath_write_hex(size_line, (size_t)body_size);
+            size_line[size_length++] = '\r';
+            size_line[size_length++] = '\n';
             self->out_len = 0;
             if (out_append(self, size_line, size_length) < 0 ||
                 out_append(self, PyBytes_AS_STRING(body), body_size) < 0 ||

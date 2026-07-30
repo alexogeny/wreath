@@ -980,6 +980,8 @@ class Server:
         self._recording_sink: Any = None
         self._arm_registry: Any = None
         self._inspector: InspectorServer | None = None
+        #: The TCP protocol class, resolved once by `_protocol_factory`.
+        self._protocol_cls: type | None = None
         self._protocols: set[Any] = set()
         self._asyncio_server: asyncio.AbstractServer | None = None
         self._datagram_transport: asyncio.DatagramTransport | None = None
@@ -1034,7 +1036,16 @@ class Server:
         return self._recorder
 
     def _protocol_factory(self) -> Any:
-        protocol_cls = _select_tcp_protocol(self._config)
+        # Resolved on the first connection and kept: `_select_tcp_protocol`
+        # reads `os.environ` (two KeyErrors raised and caught inside
+        # `os._Environ.get`) and calls `importlib.import_module`, and it
+        # measured at 1.82us to re-derive a constant -- paid on every accepted
+        # connection, on the one path metal otherwise keeps entirely in C.
+        # Cached lazily rather than in `__init__` so a `Server` built by hand
+        # with an unservable protocol set still fails where it always did.
+        protocol_cls = self._protocol_cls
+        if protocol_cls is None:
+            protocol_cls = self._protocol_cls = _select_tcp_protocol(self._config)
         return protocol_cls(
             self._app,
             self._config,
