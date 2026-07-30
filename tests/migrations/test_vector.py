@@ -37,7 +37,11 @@ from wreath.migrations import detect_single, generate_single_plan
 from wreath.orm import DeclarationError, Mapped, Model, column
 from wreath.orm.registry import Registry
 from wreath.orm.types import (
+    Bit,
+    Halfvec,
     Int64,
+    Sparsevec,
+    SparseVector,
     Text,
     Vector,
     _unbind_extension_oids,
@@ -425,8 +429,16 @@ def test_an_unknown_index_method_is_refused() -> None:
 _DSN = os.environ.get("WREATH_TEST_POSTGRES_DSN")
 
 
-async def _round_trip_index(model_of, schema: str) -> None:
-    """Apply a model's DDL, then assert a second `generate` has nothing to say."""
+async def _round_trip_index(
+    model_of, schema: str, type_names: tuple[str, ...] = ("vector",)
+) -> None:
+    """Apply a model's DDL, then assert a second `generate` has nothing to say.
+
+    `type_names` are the extension types this model's columns need resolved. It is
+    not always `("vector",)`: `halfvec` and `sparsevec` are separate entries in
+    `pg_type` that one `CREATE EXTENSION vector` installs, and `bit` is
+    PostgreSQL's own type needing none of this, so a `Bit` model passes `()`.
+    """
     db = await connect(_DSN)
     try:
         try:
@@ -434,13 +446,21 @@ async def _round_trip_index(model_of, schema: str) -> None:
         except Exception:  # noqa: BLE001 -- any failure here means "no pgvector"
             pytest.skip("this PostgreSQL has no pgvector; use pgvector/pgvector:pg17")
         await db.execute(f'CREATE SCHEMA "{schema}"')
-        # The real OID this server assigned, not the invented one the offline
+        # The real OIDs this server assigned, not the invented one the offline
         # tests bind -- the whole point here is to meet the actual catalog. One
         # process resolves an extension type once, so the fake has to be released
         # first; the autouse fixture rebinds it for whatever runs next.
-        rows = await db.fetch("SELECT oid FROM pg_type WHERE typname = 'vector'")
+        resolved = {}
+        for type_name in type_names:
+            rows = await db.fetch(
+                "SELECT oid FROM pg_type WHERE typname = $1", type_name
+            )
+            if not rows:
+                pytest.skip(f"this pgvector has no {type_name} type; needs >= 0.7")
+            resolved[type_name] = int(rows[0][0])
         _unbind_extension_oids()
-        bind_extension_oid("vector", int(rows[0][0]))
+        for type_name, oid in resolved.items():
+            bind_extension_oid(type_name, oid)
         registry = Registry(Database(), [model_of], validate_schema="off")
 
         generation = await generate_single_plan(registry, db)
@@ -562,3 +582,82 @@ async def test_a_vector_index_without_options_round_trips() -> None:
         )
 
     await _round_trip_index(Plain, schema)
+
+
+# The three types added after `Vector` reach the catalog through the same generic
+# extension-typed-column path, which is why nothing above needed changing when they
+# landed. "Expected to work" is not "shown to work", though, and each has its own
+# spelling for the renderer to get wrong: `halfvec(n)` and `sparsevec(n)` carry a
+# dimension the way `vector(n)` does but resolve to different OIDs, and `bit(n)`
+# carries a *length* through no extension machinery at all. Each also has its own
+# operator classes, which is the half that silently drifts.
+
+
+@pytest.mark.skipif(
+    _DSN is None,
+    reason="set WREATH_TEST_POSTGRES_DSN for the pgvector index catalog round trip",
+)
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_halfvec_index_round_trips_with_its_own_opclass() -> None:
+    """`halfvec_cosine_ops` on a `halfvec(n)` column, options and all."""
+    schema = f"wreath_halfvec_{uuid.uuid4().hex[:12]}"
+
+    class Document(Model, table="documents", schema=schema):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        embedding: Mapped[list[float]] = column(
+            Halfvec(8),
+            index="hnsw",
+            index_ops="halfvec_cosine_ops",
+            index_with={"m": 16, "ef_construction": 64},
+        )
+
+    await _round_trip_index(Document, schema, type_names=("halfvec",))
+
+
+@pytest.mark.skipif(
+    _DSN is None,
+    reason="set WREATH_TEST_POSTGRES_DSN for the pgvector index catalog round trip",
+)
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_sparsevec_index_round_trips_with_its_own_opclass() -> None:
+    """The round trip the handoff recorded as expected-but-undemonstrated.
+
+    `sparsevec(dim)` renders like `vector(dim)` and the extension-typed-column
+    path is generic, so this was predicted to pass. It does -- but the prediction
+    covered the column and said nothing about `sparsevec_l2_ops`, which is a
+    per-type opclass name and so a fresh chance for the emitted spelling and the
+    deparsed one to differ by a byte.
+    """
+    schema = f"wreath_sparsevec_{uuid.uuid4().hex[:12]}"
+
+    class Document(Model, table="documents", schema=schema):
+        terms: Mapped[SparseVector] = column(
+            Sparsevec(8), index="hnsw", index_ops="sparsevec_l2_ops"
+        )
+        id: Mapped[int] = column(Int64, primary_key=True)
+
+    await _round_trip_index(Document, schema, type_names=("sparsevec",))
+
+
+@pytest.mark.skipif(
+    _DSN is None,
+    reason="set WREATH_TEST_POSTGRES_DSN for the pgvector index catalog round trip",
+)
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_bit_index_round_trips_through_no_extension_machinery() -> None:
+    """`bit(n)` with `bit_hamming_ops` -- a built-in type under an extension opclass.
+
+    This is the one combination where the *type* needs no resolution and the
+    *index* still needs pgvector, so it exercises a path none of the arms above
+    reach: `type_names=()`, and an opclass whose type is not an `ExtensionType`.
+    """
+    schema = f"wreath_bit_{uuid.uuid4().hex[:12]}"
+
+    class Signature(Model, table="signatures", schema=schema):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        signature: Mapped[str] = column(Bit(8), index="hnsw", index_ops="bit_hamming_ops")
+
+    await _round_trip_index(Signature, schema, type_names=())

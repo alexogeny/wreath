@@ -16,7 +16,26 @@ from wreath.migrations import (
 )
 from wreath.orm import Mapped, Model, column
 from wreath.orm.registry import Registry
-from wreath.orm.types import Int64, Text
+from wreath.orm.types import (
+    Bit,
+    Bool,
+    Bytea,
+    Date,
+    Float32,
+    Float64,
+    Int16,
+    Int32,
+    Int64,
+    Json,
+    Jsonb,
+    Numeric,
+    Text,
+    TextArray,
+    Timestamp,
+    TimestampTz,
+    Uuid,
+    Varchar,
+)
 from wreath.postgres import connect
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.database]
@@ -27,6 +46,20 @@ async def connection() -> Any:
     if _DSN is None:
         pytest.skip("set WREATH_TEST_POSTGRES_DSN for real migration catalog tests")
     return await connect(_DSN)
+
+
+def _statements(tape: bytes) -> list[tuple[int, str]]:
+    """The `(flags, sql)` pairs in a rendered SQL tape. Flag 2 is MANUAL."""
+    import struct
+
+    offset = 12
+    out: list[tuple[int, str]] = []
+    for _ in range(struct.unpack_from("<I", tape, 8)[0]):
+        flags, length = struct.unpack_from("<II", tape, offset)
+        offset += 8
+        out.append((flags, tape[offset : offset + length].decode()))
+        offset += length
+    return out
 
 
 async def test_real_apply_locks_records_executes_and_verifies_target() -> None:
@@ -99,6 +132,76 @@ async def test_real_catalog_decodes_without_records_and_detects_drift() -> None:
         drifted = await detect_single(registry, db)
         assert not drifted.current
         assert drifted.diff.operation_count == 1
+    finally:
+        await db.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await db.close()
+
+
+async def test_every_builtin_column_type_survives_a_catalog_round_trip() -> None:
+    """Render, apply, then read back: the desired and catalog spellings must agree.
+
+    `test_object_coverage.py` proves each built-in *renders*; that is necessary and
+    not sufficient. The spelling wreath emits into DDL and the one
+    `_SINGLE_CATALOG_SQL` reads back out of `format_type` are produced by different
+    code, and a disagreement of one byte reports the column as drifted on every
+    run forever -- the same silent failure the vector opclass defect had.
+
+    `bit` is the interesting member: it is the only built-in that carries its
+    spelling in the descriptor, so it is the only one where both sides can differ.
+    The rest assert the cheap half -- that a blank spelling on both sides still
+    matches after a real `CREATE TABLE`.
+    """
+    db = await connection()
+    schema = f"wreath_types_{uuid.uuid4().hex[:12]}"
+    try:
+        await db.execute(f'CREATE SCHEMA "{schema}"')
+
+        class Every(Model, table="every", schema=schema):
+            id: Mapped[int] = column(Int64, primary_key=True)
+            a_bool: Mapped[bool] = column(Bool)
+            a_bytea: Mapped[bytes] = column(Bytea)
+            a_date: Mapped[Any] = column(Date)
+            a_float32: Mapped[float] = column(Float32)
+            a_float64: Mapped[float] = column(Float64)
+            a_int16: Mapped[int] = column(Int16)
+            a_int32: Mapped[int] = column(Int32)
+            a_json: Mapped[Any] = column(Json)
+            a_jsonb: Mapped[Any] = column(Jsonb)
+            a_numeric: Mapped[Any] = column(Numeric)
+            a_text: Mapped[str] = column(Text)
+            a_text_array: Mapped[Any] = column(TextArray)
+            a_timestamp: Mapped[Any] = column(Timestamp)
+            a_timestamptz: Mapped[Any] = column(TimestampTz)
+            a_uuid: Mapped[Any] = column(Uuid)
+            a_varchar: Mapped[str] = column(Varchar)
+            a_bit: Mapped[str] = column(Bit(8))
+
+        class Database:
+            name = "migration-types-test"
+
+        registry = Registry(Database(), [Every], validate_schema="off")
+        generation = await generate_single_plan(registry, db)
+        emitted = _statements(generation.sql.tape)
+        assert not any(flags & 2 for flags, _sql in emitted), emitted
+        for _flags, statement in emitted:
+            await db.execute(statement)
+
+        # The round trip. `current` means the catalog image and the desired image
+        # agree; an empty second plan means nothing was rediscovered as drift.
+        assert (await detect_single(registry, db)).current
+        assert _statements((await generate_single_plan(registry, db)).sql.tape) == []
+
+        # And the column PostgreSQL actually built is the width that was asked
+        # for, which a matching descriptor alone would not prove.
+        rows = await db.fetch(
+            "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) AS spelled "
+            "FROM pg_catalog.pg_attribute a "
+            "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = $1 AND c.relname = 'every' AND a.attname = 'a_bit'",
+            schema,
+        )
+        assert rows[0]["spelled"] == "bit(8)"
     finally:
         await db.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         await db.close()

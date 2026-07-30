@@ -195,3 +195,82 @@ def test_table_constraints_change_the_deployment_fingerprint() -> None:
     plain = Registry(Database(), [Plain], validate_schema="off")
     constrained = Registry(Database(), [Constrained], validate_schema="off")
     assert plain.deployment_fingerprint != constrained.deployment_fingerprint
+
+
+# --- every declarable type renders ------------------------------------------
+#
+# `render_column_type` maps a built-in's OID to its SQL spelling through a switch
+# in `migration_sql.c`, and a type missing from that switch does not fail loudly:
+# it becomes an empty MANUAL statement, so `generate` silently omits the column
+# and then emits the indexes and constraints that reference it. Applying such a
+# plan fails on a column that was never added.
+#
+# Three types were missing when this test was written -- `character varying`,
+# `json`, and `bit(n)` -- and `Varchar` is not an obscure corner. The point of
+# enumerating rather than adding three cases is that the next type added to
+# `wreath.orm.types` is checked without anyone remembering to check it.
+
+
+def _renders_as(pg_type: Any) -> str:
+    """The single `add column` statement a one-column model of this type yields."""
+
+    class Subject(Model, table="subjects", schema="app"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        value: Mapped[Any] = column(pg_type)
+
+    registry = Registry(Database(), [Subject], validate_schema="off")
+    empty = b"WMD1\x01\x00\x00\x00\x00\x00\x00\x00"
+    plan = native._migration_plan_descriptors(
+        migrations._registry_descriptor(registry), empty
+    )
+    emitted = _statements(native._migration_render_sql(plan))
+    assert not any(flags & 2 for flags, _sql in emitted), (
+        f"{pg_type.sql!r} produced a MANUAL statement; its OID {pg_type.oid} is "
+        f"probably missing from sql_type_for_oid in migration_sql.c"
+    )
+    value_statements = [sql for _flags, sql in emitted if '"value"' in sql]
+    assert len(value_statements) == 1, emitted
+    return value_statements[0]
+
+
+def _declarable_builtin_types() -> list[tuple[str, Any]]:
+    """Every built-in `PgType` `wreath.orm.types` exports, plus `Bit`'s factory.
+
+    Extension types are excluded: their OID is database-assigned and the suite
+    that covers them (`test_vector.py`) has to bind one first. Everything here
+    has a compile-time OID and needs no server.
+    """
+    from wreath.orm import types as declared
+    from wreath.orm.types import Bit, PgType
+
+    found = [
+        (name, getattr(declared, name))
+        for name in declared.__all__
+        if isinstance(getattr(declared, name), PgType)
+    ]
+    # `Bit` is a factory rather than a singleton, and is the one built-in whose
+    # modifier is part of the type, so it is the case the OID switch cannot serve.
+    found.append(("Bit(8)", Bit(8)))
+    return sorted(found)
+
+
+@pytest.mark.parametrize(
+    "name,pg_type", _declarable_builtin_types(), ids=lambda v: v if isinstance(v, str) else ""
+)
+def test_every_declarable_builtin_type_renders_rather_than_going_manual(
+    name: str, pg_type: Any
+) -> None:
+    statement = _renders_as(pg_type)
+    assert pg_type.sql in statement, (name, statement)
+
+
+def test_the_enumeration_actually_found_the_types() -> None:
+    """A parametrised suite over an empty list passes while testing nothing.
+
+    The list is built by reflection over `__all__`, so a rename that empties it
+    would turn every arm above into zero arms silently.
+    """
+    names = [name for name, _type in _declarable_builtin_types()]
+    assert len(names) > 15, names
+    for expected in ("Varchar", "Json", "Bit(8)", "Numeric", "Text"):
+        assert expected in names, names

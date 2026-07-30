@@ -396,6 +396,18 @@ sql_type_for_oid(uint32_t oid)
         case 21: return "smallint";
         case 23: return "integer";
         case 25: return "text";
+        /* `json` and `character varying`, both of which wreath declares as
+           unparameterised singletons. Their *array* forms (199 and 1015) were
+           here from the start while the scalars were not, so a `Json` or
+           `Varchar` column rendered as an empty MANUAL and could not be migrated
+           at all -- see the enumeration in
+           tests/migrations/test_object_coverage.py, which now covers every
+           built-in rather than the ones somebody thought of. There is
+           deliberately no `case 1042` (`bpchar`): wreath declares no
+           blank-padded type, and a modifier-bearing one has to spell itself the
+           way `bit` does instead. */
+        case 114: return "json";
+        case 1043: return "character varying";
         case 700: return "real";
         case 701: return "double precision";
         case 1082: return "date";

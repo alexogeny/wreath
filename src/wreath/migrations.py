@@ -16,7 +16,18 @@ from ._migrations.scan import (
     waive_transitional,
 )
 from .orm.fields import _IMPLICIT_OPCLASS_METHODS
-from .orm.types import ExtensionType
+from .orm.types import BIT_OID, ExtensionType
+
+#: Built-in types whose type *modifier* is part of the type, so the OID alone
+#: cannot reconstruct the SQL. These spell themselves in the descriptor exactly as
+#: an extension type does, and `_SINGLE_CATALOG_SQL` above hard-codes the same set
+#: because a `CASE` cannot read a Python frozenset. Adding a member means editing
+#: both, and `tests/migrations/test_vector.py` holds the two sides equal.
+#:
+#: `bit` is the only member: every other built-in wreath declares is
+#: unparameterised (`Numeric` takes no precision, `Varchar` no length), which is
+#: why `oid >= 16384` was a sufficient test until `Bit(length)` existed.
+_MODIFIER_BEARING_OIDS = frozenset({BIT_OID})
 
 _SINGLE_CATALOG_SQL = """
 WITH migration_objects AS (
@@ -41,13 +52,20 @@ WITH migration_objects AS (
         2::int4,
         concat_ws(
             E'\\x1f', 'column', a.atttypid::text,
-            -- Field 2 is the type's *spelling*, and is empty for every built-in
-            -- type so their signatures are byte-identical to what they always
-            -- were. An extension type has to spell itself: its OID is assigned
-            -- by CREATE EXTENSION, so the renderer cannot map it back to SQL,
-            -- and `vector(1536)` versus `vector(3)` is a rewrite the OID alone
-            -- cannot see. 16384 is PostgreSQL's first user-assignable OID.
-            CASE WHEN a.atttypid < 16384 THEN ''
+            -- Field 2 is the type's *spelling*, and is empty for almost every
+            -- built-in type so their signatures are byte-identical to what they
+            -- always were. An extension type has to spell itself: its OID is
+            -- assigned by CREATE EXTENSION, so the renderer cannot map it back to
+            -- SQL, and `vector(1536)` versus `vector(3)` is a rewrite the OID
+            -- alone cannot see. 16384 is PostgreSQL's first user-assignable OID.
+            --
+            -- `bit` (1560) is the one built-in that spells itself too, because it
+            -- is the only one wreath declares whose *modifier* is part of the
+            -- type: `bit(8)` and `bit(512)` share an OID, so blanking the
+            -- spelling loses the width and the renderer has nothing to emit. Kept
+            -- in step with `_MODIFIER_BEARING_OIDS` below, which must produce the
+            -- identical string from the desired side.
+            CASE WHEN a.atttypid < 16384 AND a.atttypid <> 1560 THEN ''
                  ELSE pg_catalog.format_type(a.atttypid, a.atttypmod) END,
             a.attnotnull::int::text, a.attidentity::text, a.attgenerated::text,
             COALESCE(pg_catalog.pg_get_expr(d.adbin, d.adrelid), '')
@@ -778,7 +796,12 @@ def _registry_descriptor(registry: Any) -> bytes:
                     f"the migration descriptor for "
                     f"{spec.model_type.__name__}.{column.python_name}"
                 )
-            spelling = column.pg_type.sql if column.pg_type.oid >= 16384 else ""
+            spelling = (
+                column.pg_type.sql
+                if column.pg_type.oid >= 16384
+                or column.pg_type.oid in _MODIFIER_BEARING_OIDS
+                else ""
+            )
             # Field 5 is `attgenerated` and field 6 is `pg_get_expr(adbin)`. A
             # stored generated column sets both: PostgreSQL keeps its expression
             # in the same catalog slot an ordinary default lives in, so the two
