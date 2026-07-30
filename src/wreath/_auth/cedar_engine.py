@@ -891,6 +891,28 @@ class CedarPolicies:
         context: Mapping[str, object] | None = None,
         entities: object = None,
     ) -> AuthorizationDecision:
+        """Evaluate this policy set for one request. Keyword arguments only.
+
+        `principal`, `action` and `resource` are each an `EntityUid` or a
+        `Type::"id"` string; anything else is a `TypeError`. `context` is a
+        mapping converted into the compiled value model, and `entities` is a
+        `CedarEntity` or an iterable of them, layered over the static hierarchy
+        given to the constructor — a request entity sharing a static uid
+        replaces it.
+
+        The decision follows Cedar: forbid overrides permit, the default is
+        deny, and a policy that errors while evaluating is skipped and named in
+        `diagnostics` rather than counting as satisfied. `reason` says which of
+        the three it was — `"explicit forbid"`, `"cedar permit"`, or
+        `"no permit policy matched"` — and `diagnostics` names every policy that
+        matched or was skipped, and why. `reason` names no policy, which matters
+        because it is what reaches the client as the 403's `detail`; the policy
+        ids stay in `diagnostics`, which is not sent.
+
+        Evaluation runs in C when the native extension is present and in the
+        pure-Python twin otherwise, with identical observable behaviour. This
+        does no parsing — that happened once, in `__init__`.
+        """
         request_entities = _as_entities(entities)
         if request_entities:
             store = _layer_store(

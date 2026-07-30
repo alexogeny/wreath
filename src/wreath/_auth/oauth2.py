@@ -25,16 +25,77 @@ from .oidc import OidcProvider, _same_origin_path
 if TYPE_CHECKING:
     from ..request import Request
 
-__all__ = ["ClientCredentials", "register_oauth2_login"]
+__all__ = ["ClientCredentials", "bearer_challenge", "register_oauth2_login"]
 
 _TOKEN_SKEW = 30.0
 
 
-def _bearer_401(error: str) -> JSONResponse:
+def _quote(value: str) -> str:
+    """One RFC 9110 §5.6.4 quoted-string. Backslash and quote are escaped.
+
+    A challenge parameter is the one place an application-supplied string is
+    copied into a response header, so an unescaped quote here would let a
+    caller-influenced value close the string early and invent a parameter the
+    server never sent.
+    """
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def bearer_challenge(
+    *,
+    error: str | None = None,
+    description: str | None = None,
+    realm: str | None = None,
+    scope: str | None = None,
+    resource_metadata: str | None = None,
+) -> bytes:
+    """The `WWW-Authenticate` value for a Bearer challenge (RFC 6750 §3).
+
+    Every parameter is optional, and omitting `error` is meaningful rather than
+    lazy: RFC 6750 §3.1 says a request that carried *no* credentials gets a bare
+    challenge, because there is no token for an error code to describe. A request
+    that carried a bad one gets `error="invalid_token"`.
+
+    `resource_metadata` is RFC 9728 §5.3: it names the URL of this resource
+    server's protected-resource metadata, which is how a client that has never
+    seen this server discovers which authorization server to go to. Without it a
+    401 tells a client that it needs a token and nothing about where to get one.
+    """
+    parts = [b"Bearer"]
+    parameters = (
+        ("realm", realm),
+        ("error", error),
+        ("error_description", description),
+        ("scope", scope),
+        ("resource_metadata", resource_metadata),
+    )
+    rendered = [
+        f"{name}={_quote(value)}" for name, value in parameters if value is not None
+    ]
+    if rendered:
+        parts.append(", ".join(rendered).encode("latin-1"))
+    return b" ".join(parts)
+
+
+def _bearer_401(
+    error: str,
+    *,
+    description: str | None = None,
+    resource_metadata: str | None = None,
+) -> JSONResponse:
     """A 401 with the RFC 6750 §3 Bearer challenge (RFC 9110 §15.5.2 requires
     a 401 to carry WWW-Authenticate)."""
     response = JSONResponse({"error": error}, status=401)
-    response.headers.append((b"www-authenticate", b'Bearer error="invalid_token"'))
+    response.headers.append(
+        (
+            b"www-authenticate",
+            bearer_challenge(
+                error="invalid_token",
+                description=description,
+                resource_metadata=resource_metadata,
+            ),
+        )
+    )
     return response
 
 
@@ -75,6 +136,25 @@ class ClientCredentials:
         self._lock = asyncio.Lock()
 
     async def token(self) -> str:
+        """A valid access token, from cache or from a fresh grant.
+
+        Refreshes when there is no token yet, or when the cached one is within
+        30 seconds of expiry — early, so a token does not expire in flight
+        between this call and the request that carries it. Expiry is tracked on
+        the running loop's clock from the `expires_in` of the token response,
+        defaulting to 3600 seconds when the provider omits it.
+
+        Concurrent callers refresh once: the fast path is a lock-free read, and
+        everyone who misses it queues on one lock and re-checks inside it, so a
+        burst of requests against a cold cache makes one token request rather
+        than one each.
+
+        Raises:
+            RuntimeError: the token endpoint answered with a status other than
+                200, or with a body carrying no string `access_token`. A failed
+                refresh is never a cached token — the previous one is not
+                returned as a fallback.
+        """
         loop = asyncio.get_running_loop()
         if self._token is not None and loop.time() < self._expires_at - _TOKEN_SKEW:
             return self._token
@@ -82,8 +162,16 @@ class ClientCredentials:
             if self._token is not None and loop.time() < self._expires_at - _TOKEN_SKEW:
                 return self._token
             await self._refresh(loop)
-            assert self._token is not None
-            return self._token
+            token = self._token
+            if token is None:
+                # `_refresh` raises on every failure it knows about, so this is
+                # unreachable today -- and it is a `raise` rather than an
+                # `assert` because `python -O` strips the latter, and a
+                # stripped one here would return `None` from a method typed to
+                # return a token, into whatever is about to sign a request
+                # with it.
+                raise RuntimeError("client-credentials refresh produced no token")
+            return token
 
     async def _refresh(self, loop: asyncio.AbstractEventLoop) -> None:
         form: dict[str, str] = {
@@ -170,6 +258,12 @@ def register_oauth2_login(
                 "code_challenge_method": "S256",
             }
         )
+        # Absolute, and deliberately not reduced to a path the way the token and
+        # JWKS endpoints are: this is where the caller's browser is sent, so a
+        # path would point at *this* application. Its origin is pinned against
+        # the issuer in `OidcProvider.discover`, which is why there is no second
+        # check here -- one that could never fire would be a check with nothing
+        # to check (docs/decisions/0024).
         return RedirectResponse(f"{provider.authorization_endpoint}?{params}", status=302)
 
     @app.get(callback_path)

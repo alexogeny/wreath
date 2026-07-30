@@ -75,6 +75,18 @@ _MAX_SEGMENT_BYTES = 16 * 1024
 # Absolute compact-token ceiling, mirroring native jose.c JOSE_ABS_MAX_TOKEN.
 _MAX_TOKEN_BYTES = 1 << 20
 
+#: The alphabet a compact-serialization segment may contain. RFC 7515 §2 writes
+#: them as base64url **without** padding, and `jose.c` enforces that; the stdlib
+#: fallback below has to as well, because `base64.urlsafe_b64decode` re-pads and
+#: silently discards anything outside its own alphabet. Without this, `<token>=`
+#: decoded to the same bytes as `<token>` and verified -- an unbounded family of
+#: strings authenticating as one token under `WREATH_PURE=1` and refused by the
+#: native build, which is exactly the sort of divergence a deployment that
+#: blocklists a leaked token by its value discovers the hard way.
+_B64URL_SEGMENT = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+)
+
 
 class JwtError(Exception):
     """Base class for JWT construction/configuration errors."""
@@ -305,6 +317,8 @@ def _parse_compact(token: str) -> tuple[dict[str, Any], dict[str, Any], bytes, b
         max_segment_b64 = (_MAX_SEGMENT_BYTES * 4) // 3 + 4
         if any(len(part) > max_segment_b64 for part in parts):
             raise ValueError("JWT segment exceeds size cap")
+        if any(not _B64URL_SEGMENT.issuperset(part) for part in parts):
+            raise ValueError("a compact JWT segment must be unpadded base64url")
         header_bytes = _b64url_decode(parts[0])
         payload_bytes = _b64url_decode(parts[1])
         signature = _b64url_decode(parts[2])
@@ -509,7 +523,19 @@ def _reason_valid(
         return 4
     if audiences:
         aud = claims.get("aud")
-        aud_set = {aud} if isinstance(aud, str) else set(aud) if isinstance(aud, list) else set()
+        if isinstance(aud, str):
+            aud_set = {aud}
+        elif isinstance(aud, list):
+            # Only the string members can ever match a configured audience, so
+            # filtering costs nothing -- and it is what keeps `set(aud)` from
+            # raising `TypeError` on an unhashable member (a nested list, an
+            # object). That raise left `verify_jwt` altogether, which is
+            # documented to return None and never raise for an authentication
+            # failure, so a token that should have been a 401 became a 500.
+            # `jose_validate_claims` answers 5 here; so does this now.
+            aud_set = {item for item in aud if isinstance(item, str)}
+        else:
+            aud_set = set()
         if not aud_set & set(audiences):
             return 5
     for name in required:

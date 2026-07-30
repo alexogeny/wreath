@@ -12,6 +12,7 @@ from .requirements import (
     add_permissions,
     add_policy,
     add_roles,
+    add_second_factor,
 )
 
 
@@ -59,7 +60,7 @@ def identify() -> Callable[[Any], Any]:
         identity = request.identity
         if identity is None:
             return {"signed_in": False}
-        return {"signed_in": True, "subject": identity.subject}
+        return {"signed_in": True, "subject": identity.id}
     ```
 
     The distinction from `authenticated()` is the whole point and is worth
@@ -72,6 +73,55 @@ def identify() -> Callable[[Any], Any]:
         A decorator that records the requirement on the endpoint.
     """
     return add_identify
+
+
+def second_factor(*, max_age: float = 300.0) -> Callable[[Any], Any]:
+    """Require a second factor proved within the last `max_age` seconds -- step-up.
+
+    Implies `authenticated()`. A caller with no identity is a 401; an identity
+    that has not proved a factor recently enough is a **403** whose detail is
+    `second_factor_required`, because they were identified and found wanting.
+    The remediation is `POST /auth/2fa/verify`, which stamps the session and
+    rotates its id, after which the same request succeeds.
+
+    ```python
+    @app.delete("/accounts/{account_id}")
+    @second_factor(max_age=300)
+    async def close_account(request: Request) -> dict:
+        ...
+    ```
+
+    This is what makes a second factor worth having in a framework that already
+    owns authorization, rather than a login-time formality. The freshness lives
+    on the route, so a handler never threads a "did they step up?" flag through
+    its arguments, and a route that forgets to ask is not a route that quietly
+    accepts a session from eight hours ago.
+
+    **An identity that carries no second-factor stamp never satisfies this.** A
+    bearer token or an OIDC login has no such stamp, so a route guarded this way
+    refuses it rather than treating an absent record as a fresh one. Guard only
+    the actions that warrant re-prompting; a whole API behind this is a
+    five-minute session with extra steps.
+
+    Args:
+        max_age: seconds. Five minutes is the default -- long enough to survive
+            a confirmation dialogue, short enough that a walked-away-from
+            browser is not still authorized to delete things.
+
+    Returns:
+        A decorator that records the requirement on the endpoint.
+
+    Raises:
+        ValueError: `max_age` is not positive. A window of zero or less can
+            never be satisfied, which is a mistake rather than a lockout policy.
+    """
+    if max_age <= 0:
+        raise ValueError("second-factor max_age must be positive")
+
+    def decorate(endpoint: Any) -> Any:
+        return add_second_factor(endpoint, float(max_age))
+
+    return decorate
 
 
 def authorize(

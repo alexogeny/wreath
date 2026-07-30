@@ -33,10 +33,21 @@ def _default_ports(scheme: str) -> int:
     return 443 if scheme == "https" else 80
 
 
-def _same_origin_path(issuer: str, url: str) -> str:
-    """Return the path(+query) of `url`, requiring it to share `issuer`'s
-    origin. This is the anti-SSRF pin: every endpoint we fetch must live on the
-    exact issuer origin, so a tampered discovery document cannot redirect us."""
+def _require_same_origin(issuer: str, url: str) -> str:
+    """Return `url` unchanged, once it is known to be on `issuer`'s origin.
+
+    This is the anti-SSRF pin, and it is the whole of it: the origin comparison
+    lives here and every discovered endpoint goes through it. Two callers want
+    two different things out of it, and only the comparison is shared --
+    `_same_origin_path` reduces a *fetched* endpoint to the path its
+    origin-pinned HTTP client takes, while the authorization endpoint is a
+    **browser redirect target** and has to stay an absolute URL, so it uses this
+    one directly. Reducing that one to a path would send the caller to this
+    application's own `/authorize` instead of the provider's.
+
+    Raises:
+        ValueError: `url` is not on the issuer's scheme/host/port.
+    """
     iss = urlsplit(issuer)
     target = urlsplit(url)
     same = (
@@ -49,6 +60,13 @@ def _same_origin_path(issuer: str, url: str) -> str:
         raise ValueError(
             f"OIDC endpoint {url!r} is not on the pinned issuer origin"
         )
+    return url
+
+
+def _same_origin_path(issuer: str, url: str) -> str:
+    """Return the path(+query) of `url`, requiring it to share `issuer`'s
+    origin, so a tampered discovery document cannot redirect a fetch."""
+    target = urlsplit(_require_same_origin(issuer, url))
     path = target.path or "/"
     return f"{path}?{target.query}" if target.query else path
 
@@ -115,7 +133,17 @@ class OidcProvider:
             )
         self.jwks_uri = document["jwks_uri"]
         self.token_endpoint = document.get("token_endpoint")
-        self.authorization_endpoint = document.get("authorization_endpoint")
+        # Pinned here rather than where it is used, unlike `token_endpoint`, and
+        # that is not an inconsistency: this one is published as a public
+        # attribute that any application may build its own redirect from, so the
+        # pin belongs at the point the value *enters* -- the earliest moment the
+        # error is knowable (docs/decisions/0019), and a startup failure rather
+        # than one 500 per sign-in. It stays an absolute URL because it is a
+        # browser redirect target, not something this process fetches.
+        authorization_endpoint = document.get("authorization_endpoint")
+        if authorization_endpoint is not None:
+            _require_same_origin(self.issuer, authorization_endpoint)
+        self.authorization_endpoint = authorization_endpoint
         jwks_path = _same_origin_path(self.issuer, self.jwks_uri)
         self._cache = JwksCache(http_client=self._client, jwks_path=jwks_path)
         await self._cache.prefetch()

@@ -64,6 +64,27 @@ Once configured, a handler can ask whether the request is authenticated and who
 it belongs to, and the `authenticated` decorator will turn away anyone who
 isn't.
 
+### A backend that reads the session must be behind global middleware
+
+`SessionIdentityBackend` reads `request.state.session` while it authenticates.
+`SessionMiddleware` is route middleware by default — compiled into a route's
+tape, so a miss or a static file never pays to decode a cookie — and route
+middleware runs *after* authorization. Register the two that way and the session
+arrives after the backend has already been asked who the caller is, so every
+protected route answers `401` to a cookie the server itself just issued.
+
+```python
+app.add_global_middleware(SessionMiddleware(secret=...))   # yes
+app.add_middleware(SessionMiddleware(secret=...))          # refused
+app.include_router(Router(middleware=[SessionMiddleware(secret=...)]))   # refused
+```
+
+Wreath refuses every route-scoped spelling when the routes compile — the
+application's, a router's, a nested router's, and one route's — naming the
+remedy, because the symptom is a `401` indistinguishable from a genuinely
+anonymous request. A session that only handlers read has no such ordering
+requirement, and route scope stays the cheaper registration for it.
+
 ## Deciding what they may do
 
 Require a role or a permission:
@@ -112,7 +133,11 @@ async def document(request) -> dict:
 The default mappers model the common case: the authenticated identity becomes
 the principal, its roles become `Role::"..."` parents (so `principal in
 Role::"editor"` works with no further wiring), and the request method and path
-arrive as `context`. Forbid overrides permit, the default is deny, and a
+arrive as `context` — along with `second_factor_age` when the caller has proved
+a second factor, so a policy can insist on a *recent* one before something
+destructive. `@second_factor(max_age=...)` says the same thing on a route
+without writing a policy; see [Second factors](second-factors.md). Forbid
+overrides permit, the default is deny, and a
 policy that errors is skipped and reported in the decision's diagnostics —
 never silently satisfied. The engine covers the Cedar core; extension types
 (`ip`, `decimal`, `datetime`) and schema validation are not implemented yet
