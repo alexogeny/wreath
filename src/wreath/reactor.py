@@ -80,6 +80,13 @@ __all__ = [
 ]
 
 
+#: Accept-flag bits that ride in a socket's `type` on Linux but never appear in
+#: what `getsockopt(SO_TYPE)` reports. Read through `getattr` because they are
+#: platform-conditional in the `socket` module and metal's listener spec must
+#: not depend on their presence.
+_SOCK_NONBLOCK = getattr(socket, "SOCK_NONBLOCK", 0)
+_SOCK_CLOEXEC = getattr(socket, "SOCK_CLOEXEC", 0)
+
 #: Defaults for ``gc_mode="idle"``. `threshold` is CPython's gen-0 allocation
 #: trigger (stock is 2000); `idle`/`full_idle` are arrival-gap seconds -- the
 #: poller's own estimate of how long it waits between completions -- above which
@@ -677,7 +684,22 @@ class EventLoop(_LoopBase):
         ssl_handshake_timeout=None, ssl_shutdown_timeout=None,
     ):
         if self._poller is not None and sslcontext is None:
-            native_server = (protocol_factory, server, socket.socket)
+            # The listener's family/type/proto ride along because every
+            # connection accepted from it has the same three, and a
+            # `socket(fileno=...)` that is not told them asks the kernel --
+            # two getsockopt calls per accepted connection for a fact this
+            # socket has known since it was bound.
+            #
+            # SOCK_NONBLOCK/SOCK_CLOEXEC are masked out of the type because a
+            # listener handed in as `sock=` may carry them and the kernel's
+            # SO_TYPE never reports them. Masking keeps the accepted socket's
+            # `.type` byte-identical to what the getsockopt path produced,
+            # rather than a value only this path can return.
+            sock_type = int(sock.type) & ~(_SOCK_NONBLOCK | _SOCK_CLOEXEC)
+            native_server = (
+                protocol_factory, server, socket.socket,
+                int(sock.family), sock_type, int(sock.proto),
+            )
             self._poller._add_uring_listener(sock.fileno(), native_server)
             return
         return super()._start_serving(

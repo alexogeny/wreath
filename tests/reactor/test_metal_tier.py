@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import errno
+import fcntl
 import importlib
 import json
 import os
@@ -1711,5 +1712,64 @@ def test_metal_call_soon_threadsafe_interleaves_with_fast_handles() -> None:
 
         loop.run_until_complete(exercise())
         assert ran == ["fast-1", "threadsafe", "fast-2"]
+    finally:
+        loop.close()
+
+
+def test_metal_accept_gives_the_socket_the_listener_family_type_and_proto():
+    """An accepted connection inherits all three; it must not re-ask the kernel.
+
+    `socket(fileno=fd)` with family/type/proto left at -1 makes CPython issue
+    `getsockopt(SO_TYPE)` and `getsockopt(SO_PROTOCOL)` per accepted connection
+    -- two syscalls answering a question settled at bind time. Metal carries the
+    listener's three into the accept path instead, so what is pinned here is
+    that the carried values are the ones the kernel would have reported, and
+    that the accepted socket is still the non-blocking one the transport
+    requires (`metal_recv`/`metal_send` issue recv/send holding the GIL, so a
+    blocking descriptor would stall the whole loop instead of returning EAGAIN).
+    """
+    loop = _metal_loop()
+    accepted: list = []
+
+    class Capture(asyncio.Protocol):
+        def connection_made(self, transport):
+            accepted.append(transport)
+
+    async def main():
+        server = await loop.create_server(Capture, "127.0.0.1", 0)
+        listener = server.sockets[0]
+        client = socket.create_connection(listener.getsockname())
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if accepted:
+                    break
+            assert accepted, "metal never activated the accepted connection"
+            sock = accepted[0].get_extra_info("socket")
+            assert sock.family == listener.family
+            assert sock.type == listener.type
+            assert sock.proto == listener.proto
+            # SOCK_NONBLOCK rides in `type` for a listener handed in that way
+            # and never appears in what SO_TYPE reports; carrying it through
+            # would make `.type` a value only this path can return.
+            assert not sock.type & getattr(socket, "SOCK_NONBLOCK", 0)
+            # The invariant metal actually depends on is on the descriptor, not
+            # on the socket object: `metal_recv`/`metal_send` issue recv/send on
+            # the raw fd while holding the GIL, so a blocking one would stall the
+            # whole loop instead of returning EAGAIN. Metal never calls
+            # setblocking(False) -- io_uring accepted with SOCK_NONBLOCK -- so
+            # assert the descriptor, which is the thing that has to be true.
+            # (`sock.gettimeout()` is None on both construction paths; the Python
+            # object's timeout is not where this invariant lives.)
+            assert fcntl.fcntl(sock.fileno(), fcntl.F_GETFL) & os.O_NONBLOCK
+            accepted[0].close()
+            await asyncio.sleep(0)
+        finally:
+            client.close()
+            server.close()
+            await server.wait_closed()
+
+    try:
+        loop.run_until_complete(main())
     finally:
         loop.close()
