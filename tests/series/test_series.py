@@ -17,13 +17,6 @@ from wreath.temporal import Day, Month, zone
 
 from .conftest import Herd, Trek, utc
 
-pytestmark = pytest.mark.anyio
-
-
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
 
 def series(**kwargs):
     return Series(Trek, at=Trek.started_at, bucket=Day, **kwargs)

@@ -964,7 +964,12 @@ def _app(
     )
     options.setdefault("rp_id", RP_ID)
     options.setdefault("origins", (ORIGIN,))
-    app.include_router(second_factor_router(users, factors, clock=clock, **options))
+    if "enrolments" in options:
+        router = second_factor_router(users, factors, clock=clock, **options)
+    else:
+        with pytest.warns(UserWarning, match="enrolments="):
+            router = second_factor_router(users, factors, clock=clock, **options)
+    app.include_router(router)
 
     @app.get("/session")
     async def show(request: Any) -> dict[str, Any]:
@@ -1489,7 +1494,9 @@ async def test_without_an_rp_id_there_are_no_passkey_routes() -> None:
     app = Wreath()
     app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
     app.include_router(user_router(users, secret="u" * 32, clock=clock))
-    app.include_router(second_factor_router(users, factors, clock=clock))
+    with pytest.warns(UserWarning, match="enrolments="):
+        router = second_factor_router(users, factors, clock=clock)
+    app.include_router(router)
     async with TestClient(app) as client:
         assert (await client.post("/auth/2fa/webauthn/begin")).status == 404
 

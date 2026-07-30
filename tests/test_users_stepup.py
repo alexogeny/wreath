@@ -274,9 +274,11 @@ def _app(
     app.include_router(
         user_router(users, secret="u" * 32, second_factors=factors, clock=clock)
     )
-    app.include_router(
-        second_factor_router(users, factors, issuer="Wreath", clock=clock, **options)
-    )
+    with pytest.warns(UserWarning, match="enrolments="):
+        router = second_factor_router(
+            users, factors, issuer="Wreath", clock=clock, **options
+        )
+    app.include_router(router)
 
     @app.get("/session")
     async def show(request: Any) -> dict[str, Any]:
@@ -432,7 +434,8 @@ async def test_step_up_with_nothing_enrolled_says_so(
 
 async def test_the_router_mounts_the_removal_route() -> None:
     users, factors = InMemoryUserStore(), InMemorySecondFactorStore()
-    router = second_factor_router(users, factors)
+    with pytest.warns(UserWarning, match="enrolments="):
+        router = second_factor_router(users, factors)
     routes = {(route.path, method) for route in router.routes for method in route.methods}
     assert ("/auth/2fa/{factor_id}", "DELETE") in routes
 

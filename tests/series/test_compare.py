@@ -18,16 +18,9 @@ from wreath.temporal import Day, Month, Week, Year, zone
 
 from .conftest import Trek, utc
 
-pytestmark = pytest.mark.anyio
-
 #: New Zealand leaves daylight saving at 3am on the first Sunday in April, so
 #: 5 April 2026 is a twenty-five hour day on that wall clock.
 AUCKLAND = "Pacific/Auckland"
-
-
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
 
 
 def local(year, month, day, hour=0, name=AUCKLAND):

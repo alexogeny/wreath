@@ -15,14 +15,6 @@ from wreath.temporal import Day, Month
 
 from .conftest import Deploy, Trek, utc
 
-pytestmark = pytest.mark.anyio
-
-
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
-
 WEEK = Range(utc(2026, 1, 1), utc(2026, 1, 8))
 
 

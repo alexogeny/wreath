@@ -19,9 +19,6 @@ from wreath.store import Column, Keyed
 from .conftest import NOW
 from .fakes import FakeDatabase, World
 
-pytestmark = pytest.mark.anyio
-
-
 REPLAYS = Keyed(
     table="wreath_idempotency",
     columns=(Column("response", "jsonb", null=True),),

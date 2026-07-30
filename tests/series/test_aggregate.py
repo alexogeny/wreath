@@ -16,13 +16,6 @@ from wreath.series import Aggregate, SeriesError, avg, count, sum_
 
 from .conftest import Herd, Trek
 
-pytestmark = pytest.mark.anyio
-
-
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
 
 async def run(view, session, database, rows, **values):
     database.connection.responses.clear()

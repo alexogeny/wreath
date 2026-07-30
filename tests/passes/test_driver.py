@@ -42,9 +42,6 @@ EXPIRES = Key("expires", "timestamptz", indexed=True)
 KEY = Key("key", "text", unique=True)
 ID = Key("id", "int8", indexed=True, unique=True, monotone=True)
 
-pytestmark = pytest.mark.anyio
-
-
 async def _nap(_seconds):
     """Pacing without the wall clock: assert the rest happened, do not serve it."""
     await asyncio.sleep(0)

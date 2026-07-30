@@ -544,9 +544,16 @@ def _app(
     app.include_router(
         user_router(users, secret="u" * 32, second_factors=factors, clock=clock)
     )
-    app.include_router(
-        second_factor_router(users, factors, issuer="Wreath", clock=clock, **options)
-    )
+    if "enrolments" in options:
+        router = second_factor_router(
+            users, factors, issuer="Wreath", clock=clock, **options
+        )
+    else:
+        with pytest.warns(UserWarning, match="enrolments="):
+            router = second_factor_router(
+                users, factors, issuer="Wreath", clock=clock, **options
+            )
+    app.include_router(router)
 
     @app.get("/session")
     async def show(request: Any) -> dict[str, Any]:
@@ -825,7 +832,8 @@ async def test_listing_factors_renders_no_material() -> None:
 
 async def test_the_router_mounts_the_stage_one_routes() -> None:
     users, factors = InMemoryUserStore(), InMemorySecondFactorStore()
-    router = second_factor_router(users, factors)
+    with pytest.warns(UserWarning, match="enrolments="):
+        router = second_factor_router(users, factors)
     routes = {(route.path, method) for route in router.routes for method in route.methods}
     assert ("/auth/2fa/totp/begin", "POST") in routes
     assert ("/auth/2fa/totp/confirm", "POST") in routes
@@ -1299,9 +1307,9 @@ def _unwired_app(
     app = Wreath()
     app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
     app.include_router(user_router(users, secret="u" * 32, clock=clock))
-    app.include_router(
-        second_factor_router(users, factors, issuer="Wreath", clock=clock)
-    )
+    with pytest.warns(UserWarning, match="enrolments="):
+        router = second_factor_router(users, factors, issuer="Wreath", clock=clock)
+    app.include_router(router)
 
     @app.get("/session")
     async def show(request: Any) -> dict[str, Any]:
