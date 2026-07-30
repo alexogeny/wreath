@@ -10,6 +10,52 @@ Wreath stores and searches vectors. It does not *produce* them: turning text int
 an embedding means a model provider, and that is your application's choice rather
 than a runtime dependency of the framework.
 
+## What this replaces
+
+The usual shape of a 2026 retrieval stack is an application database *plus* a
+vector database: Postgres for your rows, and Pinecone or Qdrant or Chroma for your
+embeddings. Two stores, two clients, two backup stories, two things to be down —
+and a consistency problem you now own, because a document and its embedding are
+written in two places with no transaction across them.
+
+Wreath's answer is that you already have a database that can do this. For scale,
+here is what the Python ecosystem actually installs, over the twelve months to
+July 2026:
+
+| You would otherwise run | Installs/year | With Wreath |
+| --- | --- | --- |
+| `weaviate-client` | 200.9M | — |
+| `opensearch-py` | 57.4M | — |
+| `elasticsearch` | 55.7M | — |
+| `pgvector` (the Python client) | 30.5M | not needed — the codec is Wreath's own |
+| `qdrant-client` | 24.6M | — |
+| `chromadb` | 13.3M | — |
+| `pinecone` | 8.0M | — |
+
+Every row above is a service to run or a hosted bill to pay, and none of them can
+join against your `users` table. `pgvector` is the most-installed *self-hosted*
+answer of the lot, and it is a PostgreSQL extension rather than a second server.
+
+Three things follow from keeping embeddings in the same database as everything
+else, and they are the real argument rather than the operational tidiness:
+
+* **One transaction.** A document and its embedding commit together or neither
+  does. In a two-store setup that write is two writes, and the window between
+  them is a source of documents that are invisible to search and embeddings that
+  point at rows which no longer exist.
+* **Filters are just `WHERE`.** "Nearest neighbours *belonging to this tenant,
+  published, not archived, in these three categories*" is one query with a real
+  planner behind it. Most vector databases model this as metadata filtering with
+  its own dialect and its own performance cliff.
+* **Joins.** The nearest documents *and their authors and their comment counts*
+  is one round trip. Across two stores it is a search, then an `IN (...)` query,
+  then a merge in Python — and the `IN` list is capped by whatever the first
+  query returned, so pagination stops being expressible.
+
+**And Wreath needs no `pgvector` Python package.** The wire codec is ours, in
+`_pure/postgres.py` and `_native/postgres/codec.c`, alongside every other type.
+What *is* required is the server extension — see below.
+
 ## Before anything else: the extension
 
 ```sql
@@ -70,6 +116,48 @@ one can put a row at the top of every search without changing a visible word.
 `ORDER BY embedding` is valid SQL that runs a full sort on kilobyte values with no
 index to serve it. Both have an explicit opt-in — `expose=("embedding",)` and
 `allow=("embedding",)` — for the applications that mean it.
+
+## Half precision: `Halfvec`
+
+At 1536 dimensions a `vector` column costs 6,148 bytes a row, and the HNSW index
+over it is usually the thing that stopped fitting in memory. `Halfvec` stores each
+element as an IEEE-754 binary16 instead of a binary32, which halves both:
+
+```python
+from wreath.orm.types import Halfvec
+
+class Document(Model, table="documents"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    embedding: Mapped[list[float]] = column(
+        Halfvec(1536), index="hnsw", index_ops="halfvec_cosine_ops"
+    )
+```
+
+The Python value is the same `list[float]`. Note the operator class is the type's
+own — `halfvec_cosine_ops`, not `vector_cosine_ops`; naming `vector`'s on a
+`halfvec` column is an error pgvector reports at index creation, and
+`tests/orm/test_halfvec_live.py` asserts both halves of that.
+
+**Be deliberate about the precision.** binary16 carries roughly three decimal
+digits, so a value written and read back is not the value you wrote: `0.1` returns
+`0.0999755859375`. For embedding similarity this is almost always irrelevant —
+what matters is the *ranking*, and rankings are robust to the third digit — but a
+`Halfvec` is the wrong type for anything you intend to compare for equality or
+accumulate.
+
+Two refusals happen on assignment rather than at the server. A magnitude above
+65504 (`MAX_HALF_MAGNITUDE`) would round to an infinity, which pgvector rejects;
+and NaN and infinity are refused exactly as for `Vector`. Both name the element,
+which an `INSERT` failure would not.
+
+There is one wart worth knowing, because it is visible to an equality assertion.
+The decimal you get back depends on the result format: our binary decoder widens
+the stored binary16 exactly (`0.0999755859375`), while pgvector's *text* rendering
+prints nine significant digits (`0.099975586`). Those are different Python floats,
+differing around the tenth digit. Neither is wrong and the gap is far below
+anything similarity depends on — it is written down here so it does not surprise
+anyone, and pinned in
+`tests/orm/test_halfvec_live.py::test_the_result_format_decides_which_decimal_comes_back`.
 
 ## Searching
 
@@ -235,14 +323,124 @@ docker run -d --name wreath-test-pg -e POSTGRES_PASSWORD=wreath \
 export WREATH_TEST_POSTGRES_DSN="postgresql://wreath:wreath@127.0.0.1:55432/wreath_test"
 ```
 
+## Five things to do with a nearest-neighbour query
+
+Retrieval for a language model is the reason most people install pgvector, and it
+is the least interesting thing a distance operator does. All five of these are the
+same `order_by` you have already seen — what changes is what you embedded.
+
+### Near-duplicate detection, on the way in
+
+The cheapest moment to notice that a support ticket is the same ticket as
+yesterday's is before you create it. A distance *threshold* rather than a limit:
+
+```python
+@app.post("/tickets")
+async def create(request, ticket: NewTicket, session: Session):
+    embedding = await embed(ticket.body)
+    duplicates = await session.fetch(
+        Ticket.select()
+        .where(Ticket.embedding.cosine_distance(embedding) < 0.08)
+        .order_by(Ticket.embedding.cosine_distance(embedding))
+        .limit(3)
+    )
+    if duplicates:
+        return JSONResponse({"merged_into": duplicates[0].id}, status=409)
+```
+
+Exact-hash deduplication cannot see this: "printer won't connect to wifi" and "my
+printer can't find the network" share no words at all. Tune the threshold against
+your own corpus — 0.08 is a starting point, not a constant.
+
+### "More like this", without a recommender system
+
+An embedding of the thing itself makes recommendation a one-liner, and the
+excluded self is the only subtlety:
+
+```python
+similar = await session.fetch(
+    Article.select()
+    .where(Article.id != article.id, Article.published == True)  # noqa: E712
+    .order_by(Article.embedding.cosine_distance(article.embedding))
+    .limit(6)
+)
+```
+
+Note the `WHERE` doing real work beside the distance. That clause is why this
+lives in your database: `published`, tenant scoping and "not the current article"
+are ordinary predicates the planner can combine with the index, not metadata
+filters in a second system's dialect.
+
+### A semantic cache in front of an expensive model
+
+If two questions mean the same thing, the second one can have the first one's
+answer. This is the same near-duplicate query pointed at a cache table, and it
+turns a 2-second, metered model call into a 2-millisecond index probe:
+
+```python
+class Answer(Model, table="answer_cache"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    question: Mapped[str] = column(Text)
+    answer: Mapped[str] = column(Text)
+    embedding: Mapped[list[float]] = column(
+        Halfvec(1536), index="hnsw", index_ops="halfvec_cosine_ops"
+    )
+```
+
+`Halfvec` earns its place here: a cache is allowed to be approximate, it is
+allowed to be large, and halving the index is worth more than the third decimal
+digit. Pair it with [`wreath.cache`](caching.md) for the exact-match layer in front
+— identical questions should never reach a vector at all.
+
+### Search over images, audio, or anything with an encoder
+
+Nothing in this guide is about text. A multimodal encoder puts images and the
+sentences describing them in one space, so "photos that look like this one" and
+"photos of a red bicycle in the rain" are the same query against the same column:
+
+```python
+class Photo(Model, table="photos"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    key: Mapped[str] = column(Text)          # the object in wreath.objects
+    embedding: Mapped[list[float]] = column(
+        Vector(512), index="hnsw", index_ops="vector_cosine_ops"
+    )
+```
+
+The row lives beside the object key, so a search returns a presigned URL in the
+same round trip — see [presign an upload](../cookbook/recipes/presign-upload.md).
+
+### Anomaly detection, by reading the distance instead of the order
+
+Every query above throws the distance away and keeps the ordering. Keep the
+distance and the same index answers a different question: *how unlike everything
+else is this?* A login event, a transaction, a log line whose nearest neighbour is
+far away is the interesting one. Select the distance as a column, alert above a
+threshold, and you have novelty detection with no model to train and no second
+service to run.
+
 ## What is not here
 
 No embedding generation, no chunking strategy, no re-embedding on write. Those
 are your pipeline, not framework surface. No client for a separate vector
 database either — the pitch is that you do not need one.
 
-`halfvec` and `sparsevec` are not implemented. The mechanism that resolves
-`vector`'s OID is general, so they are additive when someone asks for them.
+`sparsevec` is not implemented. The mechanism that resolves `vector`'s OID is
+general, so it is additive when someone asks for it -- what it needs beyond the
+codec is a distinct Python value type, since a sparse vector is a dimension plus a
+mapping of index to value rather than a `list[float]`.
+
+**Wreath implements the client half of pgvector, not the server half.** The wire
+codec is ours -- `wreath` needs no `pgvector` Python package, and the framing lives
+in `_pure/postgres.py` and `_native/postgres/codec.c` like every other type. But
+the `vector` and `halfvec` *types*, the `<->`/`<=>`/`<#>` operators, and the HNSW
+and IVFFlat access methods are PostgreSQL extension code running inside the
+server, and `CREATE EXTENSION vector` is what creates them. No client driver can
+substitute for that: an index access method cannot be defined from outside the
+database. Storing embeddings as `real[]` and computing distances in SQL would
+avoid the extension and lose ANN indexing entirely, which is the whole point. So
+the extension is required, and `doctor` checks for it rather than letting a query
+fail on an unresolved OID.
 
 Reference: [`Vector`](../reference/orm.md#vector) and the distance methods on
 [`ColumnExpr`](../reference/orm.md#columnexpr), in

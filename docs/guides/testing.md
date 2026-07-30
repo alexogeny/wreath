@@ -86,4 +86,53 @@ about what it covers.
 For headers you want on every request without touching identity, there is
 `client.with_headers(x_tenant="acme")`.
 
+## The fixtures come with the install
+
+Wreath registers a pytest plugin through the `pytest11` entry point — the same
+mechanism `pytest-django` and `pytest-asyncio` use — so its fixtures resolve in a
+project with no `conftest.py` at all. Define one fixture, `wreath_app`, and the
+rest follow:
+
+```python
+# conftest.py
+import pytest
+from myproject.app import app as application
+
+@pytest.fixture
+def wreath_app():
+    return application
+```
+
+```python
+async def test_products(wreath_client):
+    response = await wreath_client.get("/products")
+    assert response.status == 200
+```
+
+| Fixture | What it gives you |
+| --- | --- |
+| `wreath_app` | **Yours to override.** The shipped default raises with the lines to write |
+| `wreath_client` | A `TestClient` entered around the test, so startup and shutdown handlers run |
+| `wreath_email` | A `CapturingEmailSender`; read `verifications` / `resets` |
+| `wreath_postgres_dsn` | `WREATH_TEST_POSTGRES_DSN`, or a skip whose reason names it |
+| `wreath_database` | A started `Database` on that DSN, stopped afterwards |
+| `wreath_db` | A connection in a transaction that is **rolled back** after the test |
+
+Override any of them at any scope — a `session`-scoped `wreath_app` is the usual
+choice once building the app costs anything.
+
+Two things worth knowing before you rely on them. Every name is `wreath_`-prefixed
+on purpose: the plugin loads in *every* project that installs Wreath, and a bare
+`client` or `db` would shadow a fixture of your own in a file you did not write.
+And `wreath_db` rolls back in a `finally`, so a test that raises rolls back too —
+which is the difference from cleaning up on the last line of each test, where the
+first failure leaves rows behind and every later test in the file fails for
+reasons unrelated to what it asserts. Code under test that commits its own
+transaction defeats this; that case wants a fixture that truncates instead, and
+nothing here can detect it for you.
+
+The async fixtures need an async pytest plugin, which is not Wreath's to install.
+`pytest-asyncio` is used when present — including its own decorator, so they work
+under `asyncio_mode = strict` as well as `auto`.
+
 **Reference:** [`wreath.testing`](../reference/testing.md).
