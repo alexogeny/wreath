@@ -13,8 +13,10 @@ from wreath.binding import (
     _body_validator,
     _form_model_fields,
     _FormModelValidationTape,
+    _unwrap_form_type,
     inspect_handler,
 )
+from wreath.orm import Mapped
 from wreath.request import FormData
 
 
@@ -86,3 +88,61 @@ def test_body_and_form_model_conflict() -> None:
 
     with pytest.raises(TypeError):
         inspect_handler(handler, "/x")
+
+
+# --- _unwrap_form_type: the annotations a form field is allowed to wear -----------
+#
+# `_unwrap_form_type` peels `Mapped[T]` and `Optional[T]` down to something
+# `_convert_scalar` understands. A mutation sweep found every branch of it either
+# `unreached` or undistinguished: no form model in any test declared an optional
+# field, a `Mapped` field, or a union with two real options. A form field is a
+# string on the wire, so failing to peel means the field is refused as
+# `unsupported parameter annotation` -- the developer's model looks wrong when it
+# is not.
+
+
+@dataclasses.dataclass
+class Peeled:
+    """One field per shape `_unwrap_form_type` claims to handle."""
+
+    plain: str
+    maybe: int | None
+    mapped: Mapped[int]
+    both: Mapped[float] | None
+    either: int | str
+
+
+def test_every_wrapper_a_form_field_may_wear_is_peeled_to_its_scalar() -> None:
+    """`Optional`, `Mapped`, and the two composed, down to the scalar underneath.
+
+    `both: Mapped[float] | None` is the arm that matters most: it needs the union
+    branch to recurse rather than return, which is exactly what
+    `if len(options) == 1` decides. With that forced either way a nullable ORM
+    column stops binding from a form.
+
+    `either: int | str` is left alone on purpose -- a form value is one string and
+    a two-option union has no single answer -- and it is the only input that keeps
+    `len(options) == 1` from being deleted outright.
+    """
+    assert _form_model_fields(Peeled) == (
+        ("plain", str, True),
+        ("maybe", int, True),
+        ("mapped", int, True),
+        ("both", float, True),
+        ("either", int | str, True),
+    )
+
+
+def test_a_name_that_is_not_mapped_is_left_alone() -> None:
+    """`if name == "Mapped" and args` — both clauses, and the `getattr` pair
+    feeding them.
+
+    `name` is read from the origin *or* the annotation, whichever has a
+    `__name__`, so each source needs a case: `list[int]` has an origin with a
+    name, plain `str` has a name only on the annotation itself. Neither is
+    `Mapped`, so both must come back unchanged -- the guard is what stops every
+    parameterised generic from being silently replaced by its first argument.
+    """
+    assert _unwrap_form_type(list[int]) == list[int]
+    assert _unwrap_form_type(str) is str
+    assert _unwrap_form_type(Mapped) is Mapped  # no args: the `and args` clause
