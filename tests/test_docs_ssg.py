@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 
 import pytest
@@ -1269,6 +1270,383 @@ def test_apidoc_skips_slots_and_non_members() -> None:
     assert "HealthCheck(" in out             # ...but the field is in the signature
 
 
+# --- apidoc renders module-level values -------------------------------------
+
+
+def test_apidoc_renders_module_level_type_instances() -> None:
+    """`Int64` and friends are *instances* of `PgType`, not classes, so the
+    class/function filter emitted nothing for them -- and they are how every ORM
+    column in the framework is declared."""
+    from wreath._docs import apidoc
+
+    out = apidoc.expand("::: wreath.orm.types")
+    for name in ("Int64", "Text", "Jsonb", "Uuid", "TimestampTz"):
+        assert f"### `{name}` *(value)*" in out, name
+    # The declaration shows the type it is an instance of and what it reprs as,
+    # which is where the OID a reader is checking actually lives.
+    assert "Int64: PgType = <PgType int8 oid=20>" in out
+
+
+def test_a_documentable_value_needs_a_type_the_module_itself_defines() -> None:
+    """The rule, stated against a module rather than against `PgType`.
+
+    Without the second condition this becomes an object dumper: a module that
+    imports `os` or binds a stdlib constant would document it."""
+    import sys
+
+    from wreath._docs import apidoc
+
+    class Widget:
+        def __repr__(self) -> str:
+            return "<Widget>"
+
+    module = type(apidoc)("value_fixture")
+    Widget.__module__ = "value_fixture"
+    module.Widget = Widget
+    module.WIDGET = Widget()          # own type, own repr -> documented
+    module.IMPORTED = sys.maxsize     # not this module's type -> skipped
+    module.__all__ = ["Widget", "WIDGET", "IMPORTED"]
+    sys.modules["value_fixture"] = module
+    try:
+        out = apidoc.expand("::: value_fixture")
+    finally:
+        del sys.modules["value_fixture"]
+
+    assert "### `WIDGET` *(value)*" in out
+    assert "WIDGET: Widget = <Widget>" in out
+    assert "IMPORTED" not in out
+
+
+def test_a_value_with_no_repr_of_its_own_is_not_documented() -> None:
+    """`object.__repr__` prints a heap address, so a page built twice would
+    differ; a value that carries neither a repr nor a docstring has nothing to
+    show and is left out rather than rendered as `<... at 0x7f...>`."""
+    import sys
+
+    from wreath._docs import apidoc
+
+    class Plain:
+        pass
+
+    module = type(apidoc)("plain_fixture")
+    Plain.__module__ = "plain_fixture"
+    module.Plain = Plain
+    module.ANON = Plain()
+    module.__all__ = ["Plain", "ANON"]
+    sys.modules["plain_fixture"] = module
+    try:
+        out = apidoc.expand("::: plain_fixture")
+    finally:
+        del sys.modules["plain_fixture"]
+
+    assert "### `ANON`" not in out
+    assert "0x" not in out
+
+
+def test_a_value_documents_its_own_docstring_over_its_class_one() -> None:
+    """An instance that sets `__doc__` is describing *itself*; the class's
+    docstring is already rendered under the class."""
+    import sys
+
+    from wreath._docs import apidoc
+
+    class Marker:
+        """What a marker is in general."""
+
+    module = type(apidoc)("doc_fixture")
+    Marker.__module__ = "doc_fixture"
+    module.Marker = Marker
+    module.SPECIFIC = Marker()
+    module.SPECIFIC.__doc__ = "The one the router uses."
+    module.__all__ = ["Marker", "SPECIFIC"]
+    sys.modules["doc_fixture"] = module
+    try:
+        out = apidoc.expand("::: doc_fixture")
+    finally:
+        del sys.modules["doc_fixture"]
+
+    assert "### `SPECIFIC` *(value)*" in out
+    assert "The one the router uses." in out
+
+
+def test_a_signature_default_never_prints_a_heap_address() -> None:
+    """Two builds of the same source must produce the same page. A default value
+    with no `__repr__` of its own prints `<function f at 0x7f...>` -- a different
+    number every run, and nothing a reader can act on. The name survives; the
+    address does not. Five signatures on `reference/authorization.html` and one
+    each on `binding` and `middleware` carried one."""
+    import sys
+
+    from wreath._docs import apidoc
+
+    module = type(apidoc)("address_fixture")
+
+    def fallback() -> None: ...
+
+    sentinel = object()
+
+    def handler(hook=fallback, missing=sentinel) -> None:
+        """Takes a hook."""
+
+    for obj in (fallback, handler):
+        obj.__module__ = "address_fixture"
+    module.handler = handler
+    module.__all__ = ["handler"]
+    sys.modules["address_fixture"] = module
+    try:
+        out = apidoc.expand("::: address_fixture")
+    finally:
+        del sys.modules["address_fixture"]
+
+    assert "hook=<function test_a_signature_default_never_prints_a_heap_address" in out
+    assert "fallback>" in out
+    assert "missing=<object object>" in out
+    assert " at 0x" not in out
+
+
+# --- an empty `:::` module section must not build clean ----------------------
+
+
+def test_a_strict_build_refuses_a_module_directive_with_no_members() -> None:
+    """The defect this gate exists for: `::: wreath.orm` rendered the package
+    docstring and nothing else for as long as the page existed, because every
+    public name is re-exported from a submodule and the member filter drops
+    those. An empty section still builds clean -- ADR 0024's shape."""
+    import sys
+
+    from wreath._docs import apidoc
+
+    facade = type(apidoc)("facade_fixture")
+    facade.__doc__ = "A facade with nothing of its own."
+    facade.__all__ = []
+    sys.modules["facade_fixture"] = facade
+    try:
+        sink: list[str] = []
+        apidoc.expand("::: facade_fixture", "reference/facade.md", sink)
+    finally:
+        del sys.modules["facade_fixture"]
+
+    assert len(sink) == 1, sink
+    assert "reference/facade.md" in sink[0]
+    assert "no members" in sink[0]
+
+
+def test_a_facade_is_allowed_beside_the_submodules_that_document_it() -> None:
+    """`docs/reference/middleware.md`'s shape, and now the ORM's: the facade
+    directive contributes the package docstring as the page's intro and its API
+    is rendered by the submodule sections beneath it. The allowance is
+    structural -- the page must actually carry those sections."""
+    import sys
+
+    from wreath._docs import apidoc
+
+    facade = type(apidoc)("facade2")
+    facade.__all__ = []
+    part = type(apidoc)("facade2.part")
+
+    class Thing:
+        """A thing."""
+
+    Thing.__module__ = "facade2.part"
+    part.Thing = Thing
+    part.__all__ = ["Thing"]
+    sys.modules["facade2"] = facade
+    sys.modules["facade2.part"] = part
+    try:
+        sink: list[str] = []
+        apidoc.expand("::: facade2\n\n::: facade2.part", "reference/f.md", sink)
+    finally:
+        del sys.modules["facade2.part"]
+        del sys.modules["facade2"]
+
+    assert sink == []
+
+
+def test_wreaths_own_reference_pages_render_some_api() -> None:
+    """The corpus, not a fixture. `docs/reference/orm.md` was clean here while
+    documenting none of `Model`, `Session`, `Select`, `column` or `Registry`."""
+    import pathlib
+
+    from wreath._docs import apidoc
+
+    docs = _repo_docs()
+    if docs is None:
+        pytest.skip("docs/ not present")
+    offenders: dict[str, list[str]] = {}
+    for md in sorted(pathlib.Path(docs / "reference").glob("*.md")):
+        text = md.read_text(encoding="utf-8")
+        if not apidoc.has_directives(text):
+            continue
+        sink: list[str] = []
+        apidoc.expand(text, md.name, sink)
+        empty = [line for line in sink if "no members" in line]
+        if empty:
+            offenders[md.name] = empty
+    assert offenders == {}, offenders
+
+
+def test_no_reference_page_is_waived_out_of_having_an_api() -> None:
+    """`EMPTY_MODULE_OK` listed five facades over private packages whose pages
+    rendered nothing at all. The renderer reaches them now, so the waiver bought
+    nothing and is gone: a page that renders no API has to be fixed rather than
+    listed. The only allowance left is structural (a facade beside its own
+    submodule directives), which `_empty_module_finding` derives per page."""
+    from wreath._docs import apidoc
+
+    assert not hasattr(apidoc, "EMPTY_MODULE_OK")
+
+
+#: The five facades that rendered no API at all, with the names of their
+#: `__all__` that still do not render. Every one is a constant of a *builtin*
+#: type -- a `str` or a `tuple` -- which `_is_documentable_value` refuses for
+#: the reason it states: its type is not one this package minted, so there is
+#: nothing to render but the name the module's prose already carries. The list
+#: is pinned rather than derived so that a class or a function joining it turns
+#: this red instead of quietly shrinking the reference.
+_UNRENDERED_CONSTANTS = {
+    "wreath.auth": set(),
+    "wreath.authorization": {"PERMISSION_CHANNEL"},
+    "wreath.compression": set(),
+    "wreath.mcp": {"PROTOCOL_VERSION", "SUPPORTED_PROTOCOL_VERSIONS"},
+    "wreath.port": {"NEEDS_REVIEW", "TRANSLATED", "UNSUPPORTED"},
+}
+
+
+@pytest.mark.parametrize("path", sorted(_UNRENDERED_CONSTANTS))
+def test_a_facade_over_a_private_package_renders_its_whole_public_api(path: str) -> None:
+    """Checked as a set difference against `__all__`, not by eye. Each of these
+    is a public facade whose every name is defined in a *private* package, so no
+    submodule directive can reach the definitions and the facade is the only
+    place they can be rendered."""
+    import importlib
+
+    from wreath._docs import apidoc
+
+    module = importlib.import_module(path)
+    rendered = {name for name, _, _ in apidoc._module_members(module)}
+    assert rendered, f"{path} renders no API at all"
+    missing = set(module.__all__) - rendered
+    assert missing == _UNRENDERED_CONSTANTS[path], path
+    for name in sorted(missing):
+        assert type(getattr(module, name)).__module__ == "builtins", (
+            f"{path}.{name} is not a plain constant; it should be rendered"
+        )
+
+
+def test_a_re_export_is_api_only_where_its_module_declares_it() -> None:
+    """The condition that keeps the private-source rule from publishing imports.
+
+    `__module__` separates an export from an import for a name a module
+    *defines*; for a re-export it cannot, because an implementation detail
+    imported for internal use carries the same private `__module__` as the API
+    beside it. Only `__all__` says which is which -- `wreath.app` would
+    otherwise document `merge_requirements` and `CompiledRouter`."""
+    import sys
+
+    from wreath._docs import apidoc
+
+    private = type(apidoc)("pkg_fixture._impl")
+
+    class Exported:
+        """Public."""
+
+    class Internal:
+        """Not public."""
+
+    Exported.__module__ = Internal.__module__ = "pkg_fixture._impl"
+    private.Exported, private.Internal = Exported, Internal
+
+    facade = type(apidoc)("pkg_fixture")
+    facade.Exported, facade.Internal = Exported, Internal
+    facade.__all__ = ["Exported"]
+
+    undeclared = type(apidoc)("pkg2_fixture")
+    undeclared.Exported = Exported
+
+    sys.modules["pkg_fixture"] = facade
+    sys.modules["pkg_fixture._impl"] = private
+    sys.modules["pkg2_fixture"] = undeclared
+    try:
+        out = apidoc.expand("::: pkg_fixture")
+        bare = apidoc.expand("::: pkg2_fixture")
+    finally:
+        for name in ("pkg_fixture", "pkg_fixture._impl", "pkg2_fixture"):
+            del sys.modules[name]
+
+    assert "### `Exported`" in out
+    assert "### `Internal`" not in out      # imported, never declared
+    assert "### `Exported`" not in bare     # a module with no __all__ declares nothing
+
+
+def test_a_private_source_in_another_package_is_not_this_module_s_api() -> None:
+    """`from __future__ import annotations` binds a value whose type lives in
+    `__future__`, which is private by spelling and somebody else's code. A
+    re-export is documented here only when the private module it comes from
+    belongs to this module's own package."""
+    import sys
+
+    from wreath._docs import apidoc
+
+    foreign = type(apidoc)("_elsewhere")
+
+    class Borrowed:
+        """Theirs."""
+
+    Borrowed.__module__ = "_elsewhere"
+    foreign.Borrowed = Borrowed
+
+    facade = type(apidoc)("own_fixture")
+    facade.Borrowed = Borrowed
+    facade.__all__ = ["Borrowed"]
+    sys.modules["own_fixture"] = facade
+    sys.modules["_elsewhere"] = foreign
+    try:
+        sink: list[str] = []
+        out = apidoc.expand("::: own_fixture", "reference/own.md", sink)
+    finally:
+        del sys.modules["own_fixture"]
+        del sys.modules["_elsewhere"]
+
+    assert "### `Borrowed`" not in out
+    assert len(sink) == 1 and "no members" in sink[0]
+
+
+def test_a_class_never_borrows_a_docstring_from_a_foreign_base() -> None:
+    """`inspect.getdoc` walks the MRO, so a `Protocol` with no docstring of its
+    own rendered `typing.Protocol`'s -- reST literal blocks and all -- under the
+    subclass's name, and an `Exception` subclass rendered "Common base class for
+    all non-exit exceptions". A wreath base still passes its docstring down."""
+    import sys
+    from typing import Protocol
+
+    from wreath._docs import apidoc
+
+    module = type(apidoc)("doc_inherit_fixture")
+
+    class Backend(Protocol):
+        def check(self) -> bool: ...
+
+    class Base:
+        """What the base means."""
+
+    class Derived(Base):
+        pass
+
+    for cls in (Backend, Base, Derived):
+        cls.__module__ = "doc_inherit_fixture"
+    module.Backend, module.Base, module.Derived = Backend, Base, Derived
+    module.__all__ = ["Backend", "Base", "Derived"]
+    sys.modules["doc_inherit_fixture"] = module
+    try:
+        out = apidoc.expand("::: doc_inherit_fixture")
+    finally:
+        del sys.modules["doc_inherit_fixture"]
+
+    assert "Base class for protocol classes" not in out
+    assert "### `Backend`" in out                  # still rendered, just wordless
+    assert out.count("What the base means.") == 2  # Base, and Derived inheriting it
+
+
 # --- header: repository and links --------------------------------------------
 
 
@@ -1465,3 +1843,130 @@ def test_the_palette_does_not_repeat_a_page_or_a_heading() -> None:
     js = runtime()
     assert "perPage[id] <= 3" in js            # one page may not fill the palette
     assert "if (seen[label]) { continue; }" in js   # nor offer one heading twice
+
+
+def test_a_generated_alias_ranks_below_a_term_the_page_claims() -> None:
+    """The weights that keep `limits` answering with `RequestLimits`.
+
+    An alias is a third-party package name a page happens to list; a keyword and
+    a heading are terms the page claims for itself. Scored as equals, the four
+    distributions whose names are ordinary English -- `limits`, `arrow`,
+    `secure`, `requests` -- put the capability map above the API it is pointing
+    at, which is how a search box stops being trusted.
+    """
+    from wreath._docs.scripts import runtime
+
+    js = runtime()
+    assert "if (a) { total += a === 2 ? 40 : 20; }" in js       # generated alias
+    assert "if (k) { total += k === 2 ? 80 : 40; }" in js       # declared keyword
+    assert "heading.indexOf(term) === 0 ? 120 : 60" in js       # loosest heading
+    assert "if (b) { total += b === 2 ? 8 : 4; }" in js         # ... and prose
+
+
+# --- the capability map -----------------------------------------------------
+
+
+def _capability_site(tmp_path, manifest: dict):
+    """A site whose home page is the capability map, plus one guide to link to."""
+    src = tmp_path / "docs"
+    (src / "guides").mkdir(parents=True)
+    (src / "agents").mkdir(parents=True)
+    (src / "agents" / "manifest.json").write_text(json.dumps(manifest))
+    (src / "index.md").write_text(
+        "# What you don't have to install\n\n::: capability-map\n")
+    (src / "guides" / "widgets.md").write_text("# Holding a widget\n\ntext\n")
+    return Site(
+        name="Demo", source="docs", output="site",
+        nav=Nav(Page("Home", "index.md"),
+                Section("Guides", Page("Widgets", "guides/widgets.md"))),
+        exclude=("agents/",),
+    )
+
+
+def _one_subsystem(**overrides) -> dict:
+    subsystem = {
+        "name": "widgets",
+        "capability": "Widgets, and the holding of them",
+        "replaces": ["widgetlib"],
+        "guides": ["docs/guides/widgets.md"],
+        "sources": ["src/wreath/widgets.py", "src/wreath/_private.py",
+                    "src/wreath/_native/widget.c"],
+    }
+    return {"subsystems": [subsystem | overrides]}
+
+
+def test_capability_map_renders_a_row_per_documented_subsystem(tmp_path) -> None:
+    report = build(_capability_site(tmp_path, _one_subsystem()), root=tmp_path)
+
+    assert report.ok
+    page = (tmp_path / "site" / "index.html").read_text()
+    assert "Widgets, and the holding of them" in page
+    assert "<code>widgetlib</code>" in page
+    # The "In Wreath" column is derived from `sources`, so it cannot name a
+    # module that is not there -- and does not name the machine room either.
+    assert "<code>wreath.widgets</code>" in page
+    assert "_private" not in page and "widget.c" not in page
+    assert 'href="guides/widgets.html"' in page and "Holding a widget" in page
+
+
+def test_capability_map_omits_a_subsystem_marked_internal(tmp_path) -> None:
+    site = _capability_site(tmp_path, _one_subsystem(capability=None))
+    report = build(site, root=tmp_path)
+
+    assert report.ok
+    assert "widgetlib" not in (tmp_path / "site" / "index.html").read_text()
+    # Nor as a search alias: a reader who typed it would land on a page with no
+    # row for it, which is a worse answer than the search having missed.
+    index = json.loads((tmp_path / "site" / "assets" / "search-index.json").read_text())
+    assert "widgetlib" not in next(
+        p for p in index["p"] if p["u"] == "index.html").get("a", "")
+
+
+def test_capability_map_fails_strictly_on_a_subsystem_with_no_capability(
+    tmp_path,
+) -> None:
+    """The whole point of generating it: a subsystem cannot go quietly missing."""
+    manifest = _one_subsystem()
+    del manifest["subsystems"][0]["capability"]
+    report = build(_capability_site(tmp_path, manifest), root=tmp_path)
+
+    assert not report.ok
+    assert any("capability" in error and "widgets" in error for error in report.errors)
+
+
+def test_capability_map_makes_the_page_findable_by_the_name_you_searched_for(
+    tmp_path,
+) -> None:
+    """The reverse index: a reader who types `widgetlib` means this page.
+
+    Those names are already in the manifest, so the page does not write them
+    down a second time -- its own front matter keeps only the phrasing no data
+    file could know.
+    """
+    site = _capability_site(tmp_path, _one_subsystem())
+    (tmp_path / "docs" / "index.md").write_text(
+        "---\nkeywords: do i still need\n---\n"
+        "# What you don't have to install\n\n::: capability-map\n")
+    report = build(site, root=tmp_path)
+
+    assert report.ok
+    index = json.loads((tmp_path / "site" / "assets" / "search-index.json").read_text())
+    page = next(p for p in index["p"] if p["u"] == "index.html")
+    assert "widgetlib" in page["a"]
+    # Its own field, not the author's: an alias is generated, and `scripts.py`
+    # scores it below a term the page claims for itself.
+    assert page["k"] == "do i still need"
+    # An alias is a search term, not content: the page itself is unchanged.
+    assert "widgetlib" not in (tmp_path / "site" / "index.html").read_text().split(
+        "<table")[0]
+
+
+def test_capability_map_without_a_manifest_fails_strictly(tmp_path) -> None:
+    site = _capability_site(tmp_path, _one_subsystem())
+    (tmp_path / "docs" / "agents" / "manifest.json").unlink()
+    report = build(site, root=tmp_path)
+
+    assert not report.ok
+    assert any("capability-map" in error for error in report.errors)
+    # ... and the page still renders, so a local preview shows what is wrong.
+    assert "Capability map unavailable" in (tmp_path / "site" / "index.html").read_text()

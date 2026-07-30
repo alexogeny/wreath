@@ -125,6 +125,85 @@ under [What is genuinely different](#what-is-genuinely-different).
 | SQLModel / SQLAlchemy | `wreath.orm` over the native PostgreSQL driver | See [SQLModel, SQLAlchemy, and the ORM](sqlmodel.md) |
 | Alembic | Keep Alembic for DDL; `wreath migrations detect / check / show` | See [Alembic and migrations](alembic.md) |
 
+## Your requirements.txt, line by line
+
+The table above translates your code. This one translates your dependency file,
+because that is the other half of the move and it is usually the half nobody
+shows you. Here is a requirements file from an ordinary FastAPI service —
+nothing exotic, every line the sort of thing you added on a Tuesday because you
+needed rate limiting:
+
+```text title="requirements.txt (before)"
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+python-multipart
+sse-starlette
+slowapi
+sqlalchemy
+alembic
+asyncpg
+celery
+redis
+httpx
+tenacity
+authlib
+python-jose[cryptography]
+passlib[bcrypt]
+fastapi-users
+casbin
+boto3
+jinja2
+whitenoise
+fastapi-pagination
+structlog
+prometheus-fastapi-instrumentator
+opentelemetry-sdk
+python-dotenv
+respx
+pillow
+stripe
+```
+
+Twenty-seven of those thirty lines have a home in Wreath:
+
+| Line | Where it goes |
+| --- | --- |
+| `fastapi` | `wreath` — the framework itself |
+| `uvicorn[standard]` | `wreath run app:app`, or keep uvicorn: Wreath is a conforming ASGI app — [Native server](../guides/server.md) |
+| `pydantic`, `python-multipart` | `wreath.binding` — [Binding](../guides/binding.md), [Forms](../guides/forms.md) |
+| `pydantic-settings`, `python-dotenv` | `wreath.config` — [Configuration and state](../guides/config-state.md) |
+| `sse-starlette` | `SSEResponse` — [Server-Sent Events](../guides/sse.md) |
+| `slowapi` | `wreath.middleware` rate limiting — [Middleware](../guides/middleware.md) |
+| `sqlalchemy`, `asyncpg` | `wreath.orm` over `wreath.postgres` — [ORM](../guides/orm.md) |
+| `alembic` | `wreath migrations detect / check / apply / down` — [Alembic and migrations](alembic.md) |
+| `celery` | `wreath.jobs` — durable, Postgres-backed — [Jobs](../guides/jobs.md) |
+| `redis` | `wreath.messaging` for pub/sub, `wreath.cache` for caching, the driver's own advisory locks for locking — [Jobs](../guides/jobs.md), [Caching](../guides/caching.md), [Distributed locks](../guides/distributed-locks.md) |
+| `httpx`, `tenacity` | `wreath.http_client`, with rate limiting and retries built in — [Outbound HTTP](../guides/http-client.md) |
+| `authlib`, `python-jose[cryptography]` | `wreath.auth` — JWT, OAuth2, and OIDC login — [Auth](../guides/auth.md) |
+| `fastapi-users`, `passlib[bcrypt]` | `wreath.users` — registration, login, reset, and scrypt password hashing — [User management](../guides/users.md) |
+| `casbin` | `wreath.authorization`, a built-in Cedar engine — [Permissions](../guides/permissions.md) |
+| `boto3` | `wreath.objects`, over S3 or local disk — [Object storage](../guides/objects.md) |
+| `jinja2` | `wreath.templates` — [Templates](../guides/templates.md) |
+| `whitenoise` | `app.static(...)` — [Static files](../guides/static-files.md) |
+| `fastapi-pagination` | `wreath.pagination` — [Pagination](../guides/pagination.md) |
+| `structlog`, `prometheus-fastapi-instrumentator`, `opentelemetry-sdk` | `wreath.logging` and `wreath.telemetry` — [Observability](../guides/observability.md) |
+
+And three lines survive, which is the point of showing you the whole file.
+`pillow` and `stripe` are outside what a web framework should have opinions
+about. `respx` stays as well: Wreath's `TestClient` drives your app in-process
+and `wreath.replay` re-drives it under fault injection, but neither stubs an
+*outbound* call, so if you mock upstreams today keep doing it — see
+[Testing](../guides/testing.md). Whatever is domain-specific in your own file —
+a provider SDK, a parser, a science library — stays too. And `uvicorn` is
+listed above as replaced, but only if you want it to be: Wreath is a conforming
+ASGI application and your current deployment keeps working unchanged.
+
+If you would rather read this the other way round, ordered by capability instead
+of by your file, the [capability map](../capabilities.md) is the same claim
+generated from Wreath's own subsystem list.
+
 ## What is genuinely different
 
 Wreath is not a re-badged FastAPI, and pretending otherwise would cost you a

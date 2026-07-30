@@ -4,7 +4,7 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 126,
+        "c": 127,
         "python": 2
       },
       "pre_activation": {
@@ -25,7 +25,7 @@
           "python": 0
         },
         "handler": {
-          "c": 58,
+          "c": 59,
           "python": 1
         },
         "egress": {
@@ -35,7 +35,7 @@
       },
       "c_calls": {
         "dict.get": 40,
-        "builtins.isinstance": 8,
+        "builtins.isinstance": 9,
         "builtins.getattr": 5,
         "builtins.len": 4,
         "list.append": 4,
@@ -102,11 +102,11 @@
     "minimal": {
       "status": 200,
       "totals": {
-        "c": 10,
+        "c": 9,
         "python": 1
       },
       "pre_activation": {
-        "c": 6,
+        "c": 5,
         "python": 1
       },
       "phases": {
@@ -115,7 +115,7 @@
           "python": 1
         },
         "routing": {
-          "c": 3,
+          "c": 2,
           "python": 0
         },
         "handler": {
@@ -128,8 +128,8 @@
         }
       },
       "c_calls": {
-        "dict.get": 3,
         "builtins.len": 2,
+        "dict.get": 2,
         "builtins.isinstance": 2,
         "BitsetRouteTable.classify": 1,
         "wreath._native._core.json_dumps": 1,

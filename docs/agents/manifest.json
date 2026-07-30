@@ -32,6 +32,7 @@
   "subsystems": [
     {
       "name": "application",
+      "capability": "The application itself: routes, routers, app state, lifespan, and errors rendered as RFC 9457 problem details",
       "guides": [
         "docs/guides/routing.md",
         "docs/guides/config-state.md"
@@ -55,10 +56,11 @@
         "tests/test_request_pipeline.py",
         "tests/test_problem_details.py"
       ],
-      "policy": "Configuration is how Wreath starts; state is what it holds while running. They do not share an API. Route tables compile at startup, never per request."
+      "policy": "Configuration is how Wreath starts; state is what it holds while running. They do not share an API. Route tables compile at startup, never per request. `_reject_session_after_authentication` scans **every** route-scoped registration -- `add_middleware`, `Router(middleware=[...])`, an included router's, and one route's `middleware=[...]` -- not just the application's. It used to read `self._middleware` alone, so a session middleware on a router walked past a refusal that had nothing to look at and shipped the 401 it exists to prevent (docs/decisions/0024). Nesting needs no special case: `Router.routes` folds an included router's middleware into each route before the application sees it."
     },
     {
       "name": "routing",
+      "capability": null,
       "guides": [
         "docs/guides/routing.md"
       ],
@@ -83,6 +85,12 @@
     },
     {
       "name": "http",
+      "capability": "Requests and responses, streaming and server-sent events, multipart file uploads, background tasks, and content negotiation",
+      "replaces": [
+        "sse-starlette",
+        "python-multipart",
+        "msgpack"
+      ],
       "guides": [
         "docs/guides/requests-responses.md",
         "docs/guides/sse.md",
@@ -128,6 +136,14 @@
     },
     {
       "name": "http-client",
+      "capability": "Outbound HTTP with pooling, rate limiting and retries, service-to-service calls, and signed webhooks in both directions",
+      "replaces": [
+        "httpx",
+        "requests",
+        "tenacity",
+        "svix",
+        "standardwebhooks"
+      ],
       "guides": [
         "docs/guides/http-client.md",
         "docs/guides/service-client.md"
@@ -161,6 +177,13 @@
     },
     {
       "name": "binding",
+      "capability": "Typed parameters and request bodies, validation compiled at startup, and dependency injection with Depends",
+      "replaces": [
+        "pydantic",
+        "marshmallow",
+        "dependency-injector",
+        "svcs"
+      ],
       "guides": [
         "docs/guides/binding.md",
         "docs/guides/forms.md"
@@ -186,6 +209,13 @@
     },
     {
       "name": "openapi",
+      "capability": "An OpenAPI 3.1 schema derived from your routes, a self-contained docs UI, and generated typed clients",
+      "replaces": [
+        "drf-spectacular",
+        "apispec",
+        "openapi-python-client",
+        "datamodel-code-generator"
+      ],
       "guides": [
         "docs/guides/api-docs.md",
         "docs/guides/openapi-typegen.md"
@@ -210,6 +240,12 @@
     },
     {
       "name": "configuration",
+      "capability": "Environment-driven settings with types and required-variable checks, kept separate from runtime state",
+      "replaces": [
+        "pydantic-settings",
+        "python-dotenv",
+        "dynaconf"
+      ],
       "guides": [
         "docs/guides/config-state.md"
       ],
@@ -231,6 +267,15 @@
     },
     {
       "name": "middleware",
+      "capability": "Rate limiting, CORS, CSRF, sessions, security headers, compression, request IDs, idempotency keys, and cache-control policy",
+      "replaces": [
+        "slowapi",
+        "limits",
+        "flask-cors",
+        "django-cors-headers",
+        "secure",
+        "itsdangerous"
+      ],
       "guides": [
         "docs/guides/middleware.md",
         "docs/guides/compression.md",
@@ -270,16 +315,26 @@
         "tests/test_exactly_once.py",
         "tests/test_webpolicy_parity.py",
         "tests/test_session_store.py",
-        "tests/test_store.py"
+        "tests/test_store.py",
+        "tests/test_auth_wiring_red_team.py"
       ],
       "decisions": [
         "docs/decisions/0002-no-mandatory-runtime-dependencies.md",
         "docs/decisions/0019-refuse-rather-than-half-wire.md"
       ],
-      "policy": "Hooks are fused into a linear tape; global middleware (`global_scope = True`) runs around routing and every response, including misses and error responses, so its `after` still runs when a handler raises. Idempotency is *response replay*, not the effect-once guarantee: `IdempotencyMiddleware`'s claim must be atomic (`MemoryIdempotencyStore` is sync between read and write; `PostgresIdempotencyStore` is one INSERT ... ON CONFLICT ... RETURNING, where a returned row *is* the claim -- no owner column). The default store is per-worker, so the durable guarantee has to come from a unique index on the key (`jobs.enqueue(key=...)`, a unique column); design so that losing the store costs work, never correctness. `docs/cookbook/recipes/exactly-once.md` and `tests/test_exactly_once.py` hold that composition. Rate limiting has two shapes for one reason: `request.identity` is set during route authorization, so a limiter keyed on the principal cannot be a global hook. `RateLimitMiddleware` stays global and keyed on the address (ingress: 404 floods, login floods) and *raises at construction* if handed `principal_key`, because degrading silently to one shared bucket is a production incident. `TieredRateLimitMiddleware` is route middleware (`global_scope = False`), keyed on the principal, with one store per tier so a promotion gets a full allowance; the tier comes from the caller's roles -- the same roles Cedar authorizes with -- and the most generous match wins. The claim, the lazy statement preparation, the `clock_timestamp()` clock and the offered-not-applied schema live once, in `wreath.store`; a returned row *is* the claim, and `live`/`expired` are exact complements so a purge can never drop a row a read would still honour. `MemoryRateLimitStore` stays outside it deliberately: a token bucket is arithmetic every read advances, not a stored payload."
+      "policy": "Hooks are fused into a linear tape; global middleware (`global_scope = True`) runs around routing and every response, including misses and error responses, so its `after` still runs when a handler raises. Idempotency is *response replay*, not the effect-once guarantee: `IdempotencyMiddleware`'s claim must be atomic (`MemoryIdempotencyStore` is sync between read and write; `PostgresIdempotencyStore` is one INSERT ... ON CONFLICT ... RETURNING, where a returned row *is* the claim -- no owner column). The default store is per-worker, so the durable guarantee has to come from a unique index on the key (`jobs.enqueue(key=...)`, a unique column); design so that losing the store costs work, never correctness. `docs/cookbook/recipes/exactly-once.md` and `tests/test_exactly_once.py` hold that composition. Rate limiting has two shapes for one reason: `request.identity` is set during route authorization, so a limiter keyed on the principal cannot be a global hook. `RateLimitMiddleware` stays global and keyed on the address (ingress: 404 floods, login floods) and *raises at construction* if handed `principal_key`, because degrading silently to one shared bucket is a production incident. `TieredRateLimitMiddleware` is route middleware (`global_scope = False`), keyed on the principal, with one store per tier so a promotion gets a full allowance; the tier comes from the caller's roles -- the same roles Cedar authorizes with -- and the most generous match wins. The claim, the lazy statement preparation, the `clock_timestamp()` clock and the offered-not-applied schema live once, in `wreath.store`; a returned row *is* the claim, and `live`/`expired` are exact complements so a purge can never drop a row a read would still honour. `MemoryRateLimitStore` stays outside it deliberately: a token bucket is arithmetic every read advances, not a stored payload. `PostgresSessionStore.delete_for` is the only method that reads inside a session payload, so it is the only one that has to know which key holds the principal: `session_key=` at construction, overridable per call, bound as `$2::text` rather than interpolated so one prepared statement serves every key and an application string never reaches SQL. It was hardcoded to `principal`, so a deployment on `user_router(session_key=...)` got a password reset that matched no row, ended no sessions, and reported success."
     },
     {
       "name": "auth",
+      "capability": "Authentication (JWT, API keys, OAuth2 and OIDC login) and authorization on a built-in Cedar policy engine",
+      "replaces": [
+        "pyjwt",
+        "python-jose",
+        "authlib",
+        "casbin",
+        "django-guardian",
+        "openfga-sdk"
+      ],
       "guides": [
         "docs/guides/auth.md",
         "docs/guides/permissions.md"
@@ -309,9 +364,11 @@
         "tests/test_cedar_set_dedupe.py",
         "tests/test_permissions.py",
         "tests/test_jwt.py",
-        "tests/test_livedoc.py"
+        "tests/test_livedoc.py",
+        "tests/test_red_team_auth.py",
+        "tests/test_auth_wiring_red_team.py"
       ],
-      "policy": "Authentication (identity) and authorization (roles, permissions, Cedar) stay firmly apart. The Cedar engine is built in and dependency-free: policies parse at startup, evaluation is native with a pure twin, forbid overrides permit, default deny. `permissions_router(app)` answers what the caller may do from the *same* authorizer that enforces it, and `declared_actions(app)` reads the vocabulary off the routes' `@authorize` declarations -- there is no second list to drift, and an undeclared action is refused rather than evaluated (otherwise the endpoint is an oracle for probing policies). Two questions, two shapes: the manifest is resource-type level and ETagged (the tag covers principal, roles, and the policy set, so a promotion or a deploy invalidates it and nothing else does); the batch endpoint is row level, because a Cedar decision depends on the resource. Neither is enforcement -- the route is re-evaluated on the next request, so a stale answer can only draw a button that then 403s. The vocabulary reaches the generated TS client through `ApiModel.permissions`. The permission change stream (`_livedoc.LiveDocument`, transported by `_busbridge`) is **at-most-once and advisory**: a narrowing change may arrive late, which is safe only because the manifest is for chrome and enforcement is re-evaluated on the route -- a stale manifest can draw a button that then 403s and can never permit anything. A stream never emits an ETag it cannot state truthfully: on a roles change the captured identity is stale by definition, so it emits `etag: null` rather than a tag that would tell the client to skip exactly the refetch it needs, and coalescing two pending changes lets *unknown* win. Subscriptions are capped per principal and overall and **refused** (503, client falls back to If-None-Match) rather than evicted, since evicting the oldest tab invites a reconnect that evicts the next; the ORM write subscription is registered on the first subscriber and dropped on the last, so the process-global listener list is bounded by live streams.",
+      "policy": "Authentication (identity) and authorization (roles, permissions, Cedar) stay firmly apart. Step-up is the one thing that spans them and lives on the authentication side: `AuthRequirement.second_factor` is a *window*, not a flag, `wreath.auth.second_factor(max_age=...)` sets it, `requirements.second_factor_age` reads `Identity.claims['second_factor_at']` and returns None (a refusal, never a zero) when there is no stamp, merging takes the strictest window, and the Cedar context omits `second_factor_age` entirely rather than faking one so `when`/`has` and `unless`/`has` policies both fail closed. The Cedar engine is built in and dependency-free: policies parse at startup, evaluation is native with a pure twin, forbid overrides permit, default deny. `permissions_router(app)` answers what the caller may do from the *same* authorizer that enforces it, and `declared_actions(app)` reads the vocabulary off the routes' `@authorize` declarations -- there is no second list to drift, and an undeclared action is refused rather than evaluated (otherwise the endpoint is an oracle for probing policies). Two questions, two shapes: the manifest is resource-type level and ETagged (the tag covers principal, roles, and the policy set, so a promotion or a deploy invalidates it and nothing else does); the batch endpoint is row level, because a Cedar decision depends on the resource. Neither is enforcement -- the route is re-evaluated on the next request, so a stale answer can only draw a button that then 403s. The vocabulary reaches the generated TS client through `ApiModel.permissions`. The permission change stream (`_livedoc.LiveDocument`, transported by `_busbridge`) is **at-most-once and advisory**: a narrowing change may arrive late, which is safe only because the manifest is for chrome and enforcement is re-evaluated on the route -- a stale manifest can draw a button that then 403s and can never permit anything. A stream never emits an ETag it cannot state truthfully: on a roles change the captured identity is stale by definition, so it emits `etag: null` rather than a tag that would tell the client to skip exactly the refetch it needs, and coalescing two pending changes lets *unknown* win. Subscriptions are capped per principal and overall and **refused** (503, client falls back to If-None-Match) rather than evicted, since evicting the oldest tab invites a reconnect that evicts the next; the ORM write subscription is registered on the first subscriber and dropped on the last, so the process-global listener list is bounded by live streams. All three discovered OIDC endpoints are pinned to the issuer origin. `jwks_uri` and `token_endpoint` go through `_same_origin_path`, which reduces them to the path their origin-pinned client takes; `authorization_endpoint` is a **browser redirect target**, so it goes through `_require_same_origin` -- the same comparison, returning the URL unchanged -- inside `discover()`, and stays absolute. Reducing it to a path would send every sign-in to this application's own `/authorize`. The check is at discovery rather than at the redirect because the attribute is public and any application may build its own redirect from it; a second check at the use site could never fire and would be a check with nothing to check.",
       "decisions": [
         "docs/decisions/0017-cedar-is-built-in.md",
         "docs/decisions/0019-refuse-rather-than-half-wire.md"
@@ -319,23 +376,50 @@
     },
     {
       "name": "users",
+      "capability": "Registration, login, email verification, password reset, scrypt password hashing, and second factors: TOTP with hashed recovery codes, and WebAuthn passkeys",
+      "replaces": [
+        "fastapi-users",
+        "flask-login",
+        "django-allauth",
+        "passlib",
+        "pyotp",
+        "django-otp",
+        "webauthn",
+        "fido2"
+      ],
       "guides": [
-        "docs/guides/users.md"
+        "docs/guides/users.md",
+        "docs/guides/second-factors.md"
       ],
       "reference": [
         "docs/reference/users.md"
       ],
       "sources": [
         "src/wreath/users.py",
-        "src/wreath/_userkit.py"
+        "src/wreath/_userkit.py",
+        "src/wreath/_secondfactor.py",
+        "src/wreath/_webauthn.py"
       ],
       "tests": [
         "tests/test_userkit.py",
-        "tests/test_users_router.py"
-      ]
+        "tests/test_users_router.py",
+        "tests/test_users_totp.py",
+        "tests/test_users_stepup.py",
+        "tests/test_users_webauthn.py",
+        "tests/test_users_second_factor_redaction.py",
+        "tests/test_red_team_auth.py",
+        "tests/test_auth_wiring_red_team.py"
+      ],
+      "policy": "Second factors, stages one and two of docs/plans/second-factors-totp-webauthn.md: a TOTP code that verified once never verifies again (verify_totp requires a counter strictly greater than the credential's stored one, and SecondFactorStore.touch is an atomic conditional advance that reports whether it won -- one statement with WHERE counter < $1 in OrmSecondFactorStore, a compare-and-set in a synchronous function in InMemorySecondFactorStore -- so a lost advance is refused as a replay and two concurrent requests carrying one code cannot both complete); skew is one step by default and never more than _secondfactor.MAX_SKEW; enrolment is two-phase, so begin_totp_enrolment writes nothing and only a verified code creates a credential, and the unconfirmed secret lives in the `enrolments` SessionStore under an opaque id when one is passed, bound to the user who began it; recovery codes are a single SHA-256 (hash_recovery_code) rather than the password hasher -- ~78 bits needs no slow KDF, passwords still get scrypt -- shown once, compared with hmac.compare_digest, and deleted when redeemed -- the deletion claimed through the same conditional advance the TOTP branch uses, since a remove() that returns nothing cannot say which of two simultaneous redemptions spent the code, with stage one's scrypt$ rows still verifying; a login awaiting a second factor writes a pending marker and never a principal, so SessionIdentityBackend yields no identity for it; verification (promotion or step-up) rotates the session and stamps second_factor_at, which AuthRequirement.second_factor / wreath.auth.second_factor and the Cedar context's second_factor_age read, absent always meaning refused rather than fresh; DELETE /auth/2fa/{id} needs a factor within step_up_ttl, is owner-scoped, refuses a recovery id, and takes the recovery codes with the last real factor; the credential material column is named secret_material because crud.SENSITIVE_FIELD matches that and not `material`. Stage three adds WebAuthn as a second factor, all Python and no new C: _webauthn.py parses CBOR/COSE/authenticator data/DER and delegates every signature to _auth/_ecverify (ES256 and Ed25519 only -- RS256 is refused by name rather than implemented), the parsers refuse indefinite-length CBOR, tags, floats, duplicate keys, trailing bytes, non-minimal DER integers and off-curve points, and only `none` attestation is accepted because verifying an attestation statement needs a metadata service; a ceremony's type, challenge, origin and RP ID hash are four separate refusals; the challenge lives in the same `enrolments` SessionStore, is bound to the user who began it, and is spent unconditionally on every exit from confirm/verify, which is what makes it single-use; a signature counter that fails to increase above a stored non-zero one is refused as a clone signal while an authenticator that always reports 0 keeps working; user verification is requested (not required) and its outcome is recorded on the session as second_factor_uv; the webauthn routes mount only when second_factor_router is given rp_id. The accepted origins default to https://{rp_id} and widen for exactly one case: _webauthn.default_origins admits http:// as well when rp_id is a loopback host (localhost, ::1, 127.0.0.0/8), and _webauthn.origin_accepted lets a loopback origin carry any port, since http://localhost:8000 is a secure context and no default set can enumerate a development port -- no other host is ever admitted over http, no port is tolerated off loopback, and there is no wildcard. Building second_factor_router without enrolments= warns (UserWarning) rather than raising, because an in-memory development app is legitimate and stage two already rejected making the store mandatory; the warning names half its condition on purpose, since a router built before any application exists cannot observe whether SessionMiddleware was given a store=. The webauthn suite's authenticator is synthetic (a real key and a real signature from cryptography, a dev/test dependency), which proves agreement about the wire formats and not interoperability; interoperability is pinned by one recorded registration and one recorded assertion transcribed from the W3C WebAuthn Level 3 specification's own section 16.2 test vectors (CR Snapshot, 26 May 2026), cited in place -- do not replace those with generated bytes. The two routers are separate but not independent: second_factor_router records itself against the UserStore it was built with, so a user_router over that same store with no second_factors= of its own refuses (500 second_factor_not_wired, no session written) the login of a user who has a non-recovery factor, rather than issuing a password-only sign-in -- and the same refusal covers the other half-wiring, a user_router given a SecondFactorStore that is not the object second_factor_router writes to, which otherwise read an empty store and signed the caller in; and user_router's login and logout both clear pending_totp_enrolment and pending_webauthn from the session and delete the rows behind them, so a ceremony does not outlive the sitting it began in. Every one of those checks is a raise, never an assert. `user_router` hands its own `session_key` to `sessions.delete_for` when it is not the default, so a password reset enumerates by the key login actually wrote the principal under; the default call shape is unchanged so a store written against the one-argument signature keeps working."
     },
     {
       "name": "postgres",
+      "capability": "A native PostgreSQL driver: connection pooling, prepared statements, parameter type inference, and COPY",
+      "replaces": [
+        "asyncpg",
+        "psycopg",
+        "psycopg2-binary"
+      ],
       "guides": [
         "docs/guides/postgres.md"
       ],
@@ -361,6 +445,12 @@
     },
     {
       "name": "locks",
+      "capability": "Cluster-wide mutexes and run-once leases, on PostgreSQL advisory locks rather than a second datastore",
+      "replaces": [
+        "redis",
+        "python-redis-lock",
+        "sqlalchemy-dlock"
+      ],
       "guides": [
         "docs/guides/distributed-locks.md"
       ],
@@ -374,9 +464,23 @@
     },
     {
       "name": "orm",
+      "capability": "An async ORM with explicit loading, first-class JSONB and array columns, vector similarity and full-text search without a second datastore, transactions, and tenant-scoped sessions",
+      "replaces": [
+        "sqlalchemy",
+        "sqlmodel",
+        "tortoise-orm",
+        "peewee",
+        "pgvector",
+        "chromadb",
+        "qdrant-client",
+        "pinecone-client",
+        "weaviate-client"
+      ],
       "guides": [
         "docs/guides/orm.md",
-        "docs/guides/jsonb-arrays.md"
+        "docs/guides/jsonb-arrays.md",
+        "docs/guides/vector-search.md",
+        "docs/guides/full-text-search.md"
       ],
       "reference": [
         "docs/reference/orm.md"
@@ -391,10 +495,11 @@
         "tests/orm/",
         "tests/orm/test_native_shape_parity.py"
       ],
-      "policy": "The dependency direction is one-way: wreath.orm imports wreath.postgres, never the reverse. Attribute access never performs I/O; loading is explicit (no lazy N+1). Pure and native storage must match behavior, not representation; the native query cache-key (orm_shape) must produce bytes identical to _shape_of_pure or the plan cache splits."
+      "policy": "The dependency direction is one-way: wreath.orm imports wreath.postgres, never the reverse. Attribute access never performs I/O; loading is explicit (no lazy N+1). Pure and native storage must match behavior, not representation; the native query cache-key (orm_shape) must produce bytes identical to _shape_of_pure or the plan cache splits. An extension type's OID is assigned by CREATE EXTENSION and so differs between databases: it is resolved once at startup (orm/introspection.resolve_extension_types) and must never reach a plan-cache shape token or a model fingerprint, both of which are name-derived instead. ColumnSpec.oid reads through the type rather than snapshotting it, and native model storage -- which does bake the OID in at class definition -- is written back by rebind_storage_oid at the same moment. An ORDER BY key that is not a bare column (a vector distance) takes the pure keyer deliberately, because orm_shape.c reads ordering.expression.column. A generated column (`TsVector`) is the database's to write, never the application's: its expression names other columns, so it is rendered by orm/_generated.py once the registry knows their names and types, in PostgreSQL's own deparsed normal form -- a spelling that differs by one byte reports the column as drifted on every migration run, forever."
     },
     {
       "name": "series",
+      "capability": "Chart data as a declaration: buckets, fills, and rankings computed in the database in the reader's own timezone",
       "guides": [
         "docs/guides/calculated-views.md"
       ],
@@ -413,6 +518,11 @@
     },
     {
       "name": "migrations",
+      "capability": "Schema diffing, migration artifacts, apply, and a derived inverse that refuses to strand live code",
+      "replaces": [
+        "alembic",
+        "yoyo-migrations"
+      ],
       "guides": [
         "docs/guides/migrations.md"
       ],
@@ -435,6 +545,14 @@
     },
     {
       "name": "jobs",
+      "capability": "Durable Postgres-backed jobs and schedules, pub/sub messaging, WebSocket rooms, task progress, and supervised background services",
+      "replaces": [
+        "celery",
+        "rq",
+        "arq",
+        "apscheduler",
+        "redis"
+      ],
       "guides": [
         "docs/guides/jobs.md",
         "docs/guides/progress.md"
@@ -465,6 +583,10 @@
     },
     {
       "name": "passes",
+      "capability": "Backfills, rollups, and reindexes as a durable, resumable, paced walk over a big table",
+      "replaces": [
+        "celery"
+      ],
       "guides": [
         "docs/guides/chunked-passes.md"
       ],
@@ -483,6 +605,13 @@
     },
     {
       "name": "objects",
+      "capability": "Object storage over S3-compatible services or local disk, with presigned uploads and downloads",
+      "replaces": [
+        "boto3",
+        "aioboto3",
+        "django-storages",
+        "minio"
+      ],
       "guides": [
         "docs/guides/objects.md"
       ],
@@ -500,7 +629,49 @@
       "policy": "Blob/object storage: the `ObjectStore` protocol with `MemoryObjectStore` (the dev/test twin), a symlink-safe `LocalObjectStore` on the same `openat` containment as static files, and `S3ObjectStore` over `http_client` signed with zero-dependency SigV4. `normalize_key` is the single containment gate for every backend -- a key is validated there, not per backend. Named `objects` because \"store\" meant two unrelated things: this, and the small keyed tables behind rate limiting, idempotency, and sessions (`wreath.store`). `src/wreath/storage.py` is a deprecating alias that re-exports the old names (`Storage`/`S3Storage`/`StoragePath`/`StorageError`) and warns; it exists so the rename cannot break an existing import, and is removable once callers have moved."
     },
     {
+      "name": "mcp",
+      "capability": "A Model Context Protocol server: declared Python callables served to a model as tools, resources and prompts, over streamable HTTP",
+      "replaces": [
+        "mcp",
+        "fastmcp",
+        "fastapi-mcp",
+        "sse-starlette"
+      ],
+      "guides": [
+        "docs/guides/mcp.md"
+      ],
+      "reference": [
+        "docs/reference/mcp.md"
+      ],
+      "sources": [
+        "src/wreath/mcp.py",
+        "src/wreath/_mcp/"
+      ],
+      "tests": [
+        "tests/test_mcp_auth.py",
+        "tests/test_mcp_completion.py",
+        "tests/test_mcp_expose_routes.py",
+        "tests/test_mcp_notifications.py",
+        "tests/test_mcp_outbound.py",
+        "tests/test_mcp_prompts.py",
+        "tests/test_mcp_protocol.py",
+        "tests/test_mcp_recording.py",
+        "tests/test_mcp_resources.py",
+        "tests/test_mcp_schema.py",
+        "tests/test_mcp_stdio.py",
+        "tests/test_mcp_transport.py",
+        "tests/test_cross_subsystem.py",
+        "tests/test_red_team_mcp.py"
+      ],
+      "policy": "Stages 1-4 of `docs/plans/native-mcp-server.md`: `initialize`, `ping`, `tools/*`, `resources/*`, `prompts/*` and `notifications/cancelled` over streamable HTTP, the `GET` server-to-client stream, `expose_routes`, plus the whole authorization boundary. **No new C, at any stage** -- the plan decided this: the JSON-RPC envelope is `_native/json.c`, SSE framing is `_native/sse.c` via `SSEResponse`, ingress and routing are the ordinary native path, token verification rides `jose.c` through `JwtVerifier`, authorization rides `cedar.c` through `CedarAuthorizer`, and what is left is startup-time registration plus once-per-call orchestration. A tool's `inputSchema` is derived from `binding.inspect_handler` and rendered by `openapi._openapi_schema`/`_component_schema`, differing from the OpenAPI document only in the `$ref` base (`#/$defs/` against `#/components/schemas/`); `tests/test_mcp_schema.py` pins that parity and is the reason there is no second validator. The stage-1 optimization is Python and is the cached `tools/list` bytes -- `ToolRegistry.listing()` serializes once and registration invalidates it. A binding source a call cannot fill (header, cookie, form field, upload, path placeholder, `Depends`) is refused at registration, not at call time. **Five outcomes stay distinguishable**, for the reason `messaging.MessageBus` separates `doorbell_reconnects` from `handler_errors`: `ToolError` is a *result* carrying `isError`; an unplanned exception is caught at the boundary, counted in `tool_errors`, and reports only its type; arguments that miss the schema never reach the tool and count in `schema_rejections`; a Cedar denial counts in `unauthorized_calls`; a rate-limit or concurrency refusal counts in `throttled`. `MCP.stats()` returns those counters plus `expired_sessions` by name, the shape `MessageBus.stats()` uses; the plan expected the OTLP/Prometheus/StatsD bridges to carry them for free and they do not -- every bridge renders `Projector.snapshot()`'s per-route aggregates and never discovers a subsystem's own counters -- so publishing them is a route the deployment mounts and gates itself. Each outcome also names itself on the per-call Flight Recorder marker (`_mcp/record.py`), which is emitted through `wreath.logging` -- the site is re-interned when the installed runtime's registry moves, because a site interned at import belongs to whichever registry was installed then. Argument *values* follow `wreath.logging`'s deny-by-default rule and argument *names* follow `crud.SENSITIVE_FIELD`; there is no MCP-specific redaction code and there must not be. `MCPAuth` (`_mcp/auth.py`) serves RFC 9728 metadata at `metadata_path_for(path)` -- the well-known segment is *inserted before* the endpoint path, not appended -- reuses `_auth/oauth2.bearer_challenge` (extended, never duplicated) for the RFC 6750 challenge, and performs the `aud` check itself rather than trusting the verifier's `audience=`, because a misconfigured verifier has no symptom until it is exploited. Sessions are bound to the subject that opened them and expire on idle (`MCPLimits.session_idle_seconds`), swept on touch rather than by a background task. **The binding is resolved through whichever of the two ways in identified the caller**, and read that way on every later message: it used to record only the identity `MCPAuth` had published, so an application authenticating with its own `app.configure_auth(...)` backend -- the supported second way, and the one `expose_routes` exists for -- opened every session with `principal=None` and bound nothing, which made a leaked `Mcp-Session-Id` a credential another verified caller could drive that session's calls, `DELETE` and notification stream with. `MCP._initialize` therefore falls back to `_identify` when `MCPAuth` published nobody, and `MCP._owns` resolves the same way when the session it is checking *is* bound; an endpoint with neither has nobody to bind to and its sessions stay open to whoever holds the id, which is stated in the guide rather than left to be discovered (`tests/test_red_team_mcp.py`). Payload size is deliberately *not* in `MCPLimits`: it is `RequestLimits.max_body_bytes`, and a second ceiling would be a second place to forget. The legacy two-endpoint HTTP+SSE transport is out of scope permanently. **`GET` now opens the session's notification stream** (it answered 405 through stage 2, deliberately, because there was nothing to send): one per session, a second is 409, the queue is bounded by `MCPLimits.max_pending_notifications` and a drop is counted in `notifications_dropped` rather than swallowed, the close sentinel evicts the oldest to guarantee delivery, and the generator emits an SSE comment every `stream_keepalive_seconds` because nothing in `SSEResponse` is on a timer. **Progress is `wreath.progress` relayed, never a second mechanism**: `ToolContext.progress` is an ordinary `ProgressReporter` on a `ProgressRegistry` the deployment may supply (a bus-backed one makes it fleet-wide), a watcher task polls `ProgressRegistry.stream` only when the call carried `_meta.progressToken`, and the entry is seeded at 0% first because `stream` gives up on a task id that never appears. A resource is gated on **its own URI** as the Cedar resource and a prompt on its own name, because both have a stable identity and a tool does not. Prompt arguments are refused at registration unless they are strings, since MCP carries them as a string map. **`Tool.policy` became `Tool.requirement: AuthRequirement`** so `expose_routes` can hand a route's merged requirement (`definition.requirement` + `requirement_for(endpoint)`) through unchanged -- authenticated, second factor, roles, permissions and policies are all enforced in `MCP._authorize`, and `_identify` falls back to the app's own auth backend so a route protected by a session backend still works. **That fallback runs before the rate limit is charged and before the audit marker is written**, not after: `_tools_call` (and `_sampling`/`_elicit` for a gate declared only on `sampling=`/`elicitation=`) calls `_identify` whenever the tool has a limiter or a non-zero `access_level`. It used to run only inside `_authorize`, so on an endpoint with no `MCPAuth` a per-tool ceiling keyed on the session was reset by a free `initialize` (1/hour admitted 6 calls) and the marker said `anonymous` for a caller the same request authorized as `User::ada`. The laziness is the point of the condition: an ungated, unbounded tool still never runs the backend; exposing a route must never be a hole around what was in front of it. `expose_routes` takes `tags=`/`include=`/`predicate=` and **has no `all=True`, permanently**; it refuses a route with no docstring and one whose signature a call cannot fill, naming the route as well as the parameter (`derive_input_schema` is passed the route path precisely so a placeholder is classified and refused rather than becoming an argument). **It also refuses a route carrying its own `middleware=` or `dependencies=`**, because a tool invokes the handler and does not replay the route's chain: those two are controls somebody put on that route -- a `before` hook returning a `403`, a `Depends(require_api_key)` that raises -- and carrying `definition.requirement` while dropping them silently published the handler to a model with strictly less in front of it than the HTTP path had. Refusing is ADR 0019's answer and leaves running them later open where admitting the call would not; application middleware from `app.add_middleware(...)` is not in `definition.middleware` and already covers the endpoint, so nothing is refused for a control it still has (`tests/test_red_team_mcp.py`). **Error codes were renumbered once**: `-32002` is now the specification's own `RESOURCE_NOT_FOUND`, and Wreath's `RATE_LIMITED`/`TOO_MANY_CALLS` moved to `-32003`/`-32004` -- the collision was real, since the resources chapter names -32002 and clients special-case it. **Stage 4 shipped sampling, elicitation, roots, completions and the stdio wrapper, and every one of them reuses rather than adds.** The new machinery is `_mcp/outbound.py`: server-to-client *requests* need correlation, which stage 3's `GET` stream did not carry, so a `ClientChannel` per session holds a bounded pending table (`MCPLimits.max_pending_requests`) keyed on ids prefixed `wreath-` (JSON-RPC gives each direction its own id space). `Message` now carries `result`/`error` and `_post` routes a response into that table. **The reentrancy is the sharp edge and it works only because a `tools/call` already runs in its own task**: the answer arrives on a *different* POST while the call is parked, so a design that ran the call inline on the POST's coroutine would deadlock -- `tests/test_mcp_outbound.py` pins that a tool that elicits mid-call completes, a client that never answers times out and is told to stop (`notifications/cancelled` on the withdrawn id), `notifications/cancelled` on the outer call cancels the inner one, and `SessionStore.discard` fails every outstanding future (`ClientChannel.fail_all`, needed because a `resources/read` awaits on the POST's own coroutine and is in nobody's `in_flight`). A capability the client did not advertise in `initialize` is refused before anything is sent, never queued for a client that will not answer. **Sampling is declared per tool** as `Tool.sampling_requirement: AuthRequirement | None` -- None means the tool may not sample, which is the default -- decided by the same `_authorize` over a `_Gate`, spending the tool's *own* `MemoryRateLimitStore` bucket, and recorded at the same `_mcp/record.py` site with `sampled`/`sample_denied`/`sample_throttled`/`sample_failed`. It is in `declared_actions()` too. **Elicitation's requested schema is `derive_input_schema` over a signature synthesized from the form dataclass's fields** (`_mcp/elicit.py`, using `binding._dataclass_spec` so the annotations are the already-resolved objects), and the answer goes through `bind_arguments` -- the same validator, so a bad answer counts in `schema_rejections`; MCP forbids nesting, so a non-primitive property is refused with the field named. The answer is recorded through `record_arguments(prefix=ELICIT_PREFIX)`, so `crud.SENSITIVE_FIELD` hides a `password` a person typed exactly as it hides one a model sent. **Elicitation is gated exactly as sampling is, and this is not optional**: `Tool.elicitation_requirement: AuthRequirement | None` from `@mcp.tool(elicitation=\"Form::ask\")` (or `True` for no policy), None meaning the tool may not prompt at all -- same `_authorize`/`_Gate` decision, same tool rate-limit bucket, same record site with `elicited`/`elicit_declined`/`elicit_denied`/`elicit_throttled`/`elicit_failed`, and in `declared_actions()`. Both declarations are built by one `registry.gate_requirement(...)`, because the bool/action/None handling must not drift apart. The reason is sharper than sampling's and belongs in the guide as well as here: an elicitation renders arbitrary requested fields **inside a client UI the person already trusts**, so a tool asking for `{\"password\": str}` is a phishing surface wearing that chrome, and \"the user is asked and can decline\" is precisely the control social engineering defeats -- which is why the earlier no-gate reasoning was wrong and was reversed before release. A resource reader and a prompt handler carry no declaration and so may not prompt either, which is already true of sampling. **Roots are enforced, not listed**: `ToolContext.read_file` opens beneath `MCP(file_root=...)` through `wreath._fsguard` (the walk static files and templates use, refusing symlinks and `..`) on a worker thread, and additionally requires the name to lie beneath a client-declared root -- lexical check on the requested name, descriptor walk on the opened file, and both are needed. A server with no `file_root=` reads nothing; `notifications/roots/list_changed` invalidates the per-session cache. **Completions have no registry**: a prompt argument annotated `Literal`/`Enum` already renders an `enum`, `Prompt.completions` reads it off at build time, and `_is_string_schema` was widened to admit a string enum for exactly that reason. A `ref/resource` completion answers empty, consistently with `resources/templates/list`. **`wreath mcp stdio` is a byte relay, not a second dispatch path**: `_mcp/stdio.py` drives the app through `wreath.testing.TestClient` (lifespan included) and consumes the `GET` stream incrementally via the extracted `TestClient._scope`, because `request()` collects and would never return on an open stream; each inbound line after `initialize` is dispatched as its own task, since awaiting each POST in turn would make the relay unable to read the very line carrying the answer it is waiting for. New counters on `stats()`: `sampling_requests`, `sampling_refusals`, `elicitations`, `elicitation_declines`, `elicitation_refusals`, `client_request_timeouts`, `roots_refusals`. New bounds: `max_pending_requests`, `client_request_seconds`, `max_file_bytes`. A client that POSTs `sampling/createMessage`/`elicitation/create`/`roots/list` is told they go the other way rather than 'unknown method'. Still not built: `logging/setLevel`, stream resumption by `Last-Event-ID`, templated resources and `listChanged`. Dynamic client registration is permanently out of scope -- it is an authorization-server endpoint."
+    },
+    {
       "name": "pagination",
+      "capability": "Page, size, sort, and filter query parameters turned into safe queries over an allow-list of columns",
+      "replaces": [
+        "fastapi-pagination",
+        "django-filter"
+      ],
       "guides": [
         "docs/guides/pagination.md"
       ],
@@ -512,10 +683,16 @@
       ],
       "tests": [
         "tests/pagination/"
-      ]
+      ],
+      "policy": "Sorting and filtering are allow-list only; apply_sort/apply_filters fall back to sortable_fields(model), which is every column except the retrieval ones (Vector, TsVector). Excluded because pgvector gives vector a btree opclass, so ?sort=embedding is valid SQL that runs -- a full sort on kilobyte values with no index that can serve it, from a query string an anonymous caller controls, i.e. the same request-triggered cost MAX_PAGE bounds twenty lines away. It is a default, not a prohibition: an explicit allow= naming one is still honoured."
     },
     {
       "name": "crud",
+      "capability": "Generated REST CRUD routes for an ORM model, off until you opt in twice",
+      "replaces": [
+        "fastapi-crudrouter",
+        "fastcrud"
+      ],
       "guides": [
         "docs/guides/crud.md"
       ],
@@ -525,10 +702,11 @@
       "tests": [
         "tests/test_crud.py"
       ],
-      "policy": "Generate REST routes from an ORM model, off by default: enabled at the app level (Wreath.enable_crud) and opted into per model (Wreath.crud / crud_router). Sensitive columns (password, *_hash, token, ...) are hidden from output and rejected from input unless named in expose=. Authorization is per operation via authorize={op|group|'*': Access.*}: Access.roles/permissions/cedar attach AuthRequirement metadata the app enforces in its single-pass pipeline; Access.deny() 403s unconditionally; object_authorizer=(request, op, instance) covers row-level checks that need the loaded row. Single-column primary key only."
+      "policy": "Generate REST routes from an ORM model, off by default: enabled at the app level (Wreath.enable_crud) and opted into per model (Wreath.crud / crud_router). Sensitive columns (password, *_hash, token, ...) are hidden from output and rejected from input unless named in expose=. Retrieval columns (Vector, TsVector -- `crud.retrieval_fields`, typed rather than name-guessed) are likewise withheld both ways unless named in expose=: an embedding in a response is ~30k floats per default page and a tsvector is derived from columns already in it, while an embedding on input lets anyone who may edit a row top every semantic search without changing visible content. Generated columns (every TsVector) are dropped from input unconditionally, like the primary key, rather than reaching the ORM and answering 422; expose= makes one readable and nothing makes one writable. fields= names what may leave and never widens what may be written. Authorization is per operation via authorize={op|group|'*': Access.*}: Access.roles/permissions/cedar attach AuthRequirement metadata the app enforces in its single-pass pipeline; Access.deny() 403s unconditionally; object_authorizer=(request, op, instance) covers row-level checks that need the loaded row. Single-column primary key only."
     },
     {
       "name": "audit",
+      "capability": "An offline accessibility (WCAG 2.1 A/AA) and performance auditor for the HTML and responses your app returns",
       "guides": [
         "docs/guides/auditing.md"
       ],
@@ -545,7 +723,35 @@
       "policy": "The ruleset is curated and zero-dependency. A new rule is a module under src/wreath/_audit/rules/ registered in that package's __init__, plus a row in docs/reference/audit.md giving its WCAG success criterion or performance budget, its severity, and whether --fix can remediate it. Reached through `wreath audit`, not a public module."
     },
     {
+      "name": "mutant",
+      "capability": "Mutation testing that removes one *declared control* at a time -- an AuthRequirement field, a Cedar policy, a refusal, a withheld-field filter, a rate limit's key -- and reports the ones no test noticed",
+      "replaces": [
+        "mutmut",
+        "cosmic-ray"
+      ],
+      "guides": [
+        "docs/guides/mutant.md"
+      ],
+      "reference": [
+        "docs/reference/mutant.md"
+      ],
+      "sources": [
+        "src/wreath/mutant.py",
+        "src/wreath/_mutant/"
+      ],
+      "tests": [
+        "tests/test_mutant.py"
+      ],
+      "policy": "A report, not a gate: `wreath mutant` exits 0 and is absent from `wreath-check`, for `wreath-dup-scan`'s reason -- many survivors are legitimate (a defence behind another defence, a branch a deployment cannot reach) and a gate that cries wolf trains everyone to stop reading it. `--fail-on-survivor` opts in, and is meant for a module already cleared.\n\n**Operators name a control, never an operator.** There is no `<` -> `<=`; every mutation is a sentence from a post-mortem (`predicate.drop-operand`, `predicate.always-true`, `expression.take-branch`, `comprehension.drop-clause`, `guard.remove-raise|never-fires|always-fires|drop-statement`, `declaration.drop-keyword|widen-bound`, `cedar.flip-effect|drop-condition|delete-policy`, `value.widen-bound|disable-pattern|empty-denylist`). That scoping is what keeps equivalent mutants rare enough to be honest about, and `tests/test_mutant.py` pins the operator names and their count so one that stops being emitted turns the suite red rather than quietly shrinking coverage (ADR 0024).\n\n**Nothing is written to the tree.** The mutated module is compiled in the parent and the one changed code object is assigned over the live function's `__code__` in the forked child, which every `from x import y` alias sees because they share the function object; an import-time constant has no function to recompile and is rebound by *identity* in the defining module and in every module that imported it. The patch target is the **outermost** enclosing function, not the innermost, because a handler defined inside a router factory has no reachable function object -- recompiling the factory is what makes the next `crud_router(...)` build a mutated handler. The cost of that choice is a real blind spot: a control inside a factory that only ran at import will survive for a reason unrelated to the tests, and the guide says so.\n\n**Test selection is `sys.monitoring` (PEP 669), never `sys.settrace`** -- Wreath is 3.14-only, so it may use the API every cross-version tool is denied. Only lines some operator proposed a mutation for are watched; every other location retires with one `DISABLE`. Measured on this repository: 118.2s instrumented against ~116s uninstrumented over 8,018 tests. A `def` line must never be the watched line for `predicate.always-true` -- it runs once at import, and watching it reported a covered control as UNREACHED, the tool inventing ADR 0024's failure mode for itself.\n\n**A mutant is KILLED only when a test that passed at baseline fails.** An already-failing test can never catch anything and counting it would report safety that is not there. A mutation that cannot be built or applied is ERROR, never SURVIVED: a survivor is read as 'your tests would not notice', and a mutation that never reached the interpreter would say that falsely.\n\n**UNREACHED is reported separately from SURVIVED**, because 'the suite would not notice' and 'the suite never looks' are different problems with different fixes. Equivalence is decided only where it is decidable -- identical bytecode -- and everything else stays undecided rather than being guessed at.\n\n`declaration.drop-keyword` only offers a keyword the callee genuinely defaults, checked against the live signature: a mutant that raises `TypeError` would be caught by any test that ran it, and a broken mutant scored as a catch inflates the report with something the suite did not notice. The `predicate.*`/`guard.*`/`expression.*`/`comprehension.*` operators are confined to functions whose own source names a control (`CONTROL_TOKENS`); that is a heuristic, it is public and importable, and it is why the JSON encoder is not offered for mutation.\n\nThe tool was accepted on a two-directional experiment against six exploitable defects fixed on 2026-07-29, each with a regression test written the same day: **specificity** -- all six reported KILLED against the tree as it stands, each by its own regression test -- and **sensitivity** -- in a scratchpad shadow tree (ADR 0023) with that defect's regression tests physically deleted, the same control reported SURVIVED. Re-run it before trusting a change to the operator library or to candidate selection; a mutation tester that cannot detect known-missing coverage is worse than none, because it will be trusted. Linux-first: `os.fork()` is what makes a mutant cost a process rather than a full import graph."
+    },
+    {
       "name": "operations",
+      "capability": "Liveness and readiness checks, feature flags with deterministic percentage rollouts, and API versioning",
+      "replaces": [
+        "flagsmith",
+        "openfeature-sdk",
+        "django-waffle"
+      ],
       "guides": [
         "docs/guides/health-flags-versioning.md"
       ],
@@ -567,6 +773,13 @@
     },
     {
       "name": "observability",
+      "capability": "Structured logging on the flight recorder's ring, metrics and traces bridged to OpenTelemetry, Prometheus, StatsD and CloudWatch, and replay",
+      "replaces": [
+        "structlog",
+        "opentelemetry-sdk",
+        "prometheus-client",
+        "statsd"
+      ],
       "guides": [
         "docs/guides/observability.md",
         "docs/guides/logging.md"
@@ -646,6 +859,13 @@
     },
     {
       "name": "server",
+      "capability": "A native HTTP/1.1, HTTP/2, and optional HTTP/3 server, with WebSockets, TLS, and a development runner",
+      "replaces": [
+        "uvicorn",
+        "gunicorn",
+        "hypercorn",
+        "granian"
+      ],
       "guides": [
         "docs/guides/server.md"
       ],
@@ -689,6 +909,7 @@
     },
     {
       "name": "reactor",
+      "capability": null,
       "guides": [
         "docs/guides/server.md"
       ],
@@ -706,6 +927,10 @@
     },
     {
       "name": "templates",
+      "capability": "A server-side template engine that compiles once at startup and escapes by default",
+      "replaces": [
+        "jinja2"
+      ],
       "guides": [
         "docs/guides/templates.md"
       ],
@@ -724,6 +949,12 @@
     },
     {
       "name": "cache",
+      "capability": "An in-process snapshot cache for read-mostly data, and HTTP response caching invalidated by the ORM writes behind it",
+      "replaces": [
+        "redis",
+        "cachetools",
+        "aiocache"
+      ],
       "guides": [
         "docs/guides/caching.md",
         "docs/guides/response-cache.md"
@@ -747,6 +978,10 @@
     },
     {
       "name": "doctor",
+      "capability": "Runtime diagnostics for your own handlers, including the N+1 query you did not know you had",
+      "replaces": [
+        "nplusone"
+      ],
       "guides": [
         "docs/guides/n-plus-one.md"
       ],
@@ -764,6 +999,13 @@
     },
     {
       "name": "temporal",
+      "capability": "Timezone-correct dates, times, and durations across the request boundary and the database",
+      "replaces": [
+        "pendulum",
+        "arrow",
+        "python-dateutil",
+        "pytz"
+      ],
       "guides": [
         "docs/guides/dates-and-times.md"
       ],
@@ -781,6 +1023,10 @@
     },
     {
       "name": "staticfiles",
+      "capability": "Static file serving with ETags, conditional and range requests, and a hardened path guard",
+      "replaces": [
+        "whitenoise"
+      ],
       "guides": [
         "docs/guides/static-files.md"
       ],
@@ -798,6 +1044,10 @@
     },
     {
       "name": "testing",
+      "capability": "An in-process test client that runs the real lifespan, including WebSocket sessions",
+      "replaces": [
+        "httpx"
+      ],
       "guides": [
         "docs/guides/testing.md"
       ],
@@ -815,6 +1065,7 @@
     },
     {
       "name": "port",
+      "capability": "A codemod that reads an existing FastAPI, Pydantic, or SQLModel project and reports exactly what maps onto Wreath and what does not",
       "guides": [
         "docs/guides/porting.md"
       ],
@@ -832,6 +1083,7 @@
     },
     {
       "name": "devtools",
+      "capability": null,
       "guides": [
         "docs/cookbook/agents/checks.md"
       ],
@@ -858,6 +1110,7 @@
     },
     {
       "name": "performance",
+      "capability": null,
       "guides": [
         "benchmarks/README.md"
       ],
@@ -872,6 +1125,12 @@
     },
     {
       "name": "graphql",
+      "capability": "A GraphQL surface derived from the same model specs the REST routes use, so the two cannot drift",
+      "replaces": [
+        "strawberry-graphql",
+        "graphene",
+        "ariadne"
+      ],
       "guides": [
         "docs/guides/graphql.md"
       ],
@@ -885,12 +1144,17 @@
       "tests": [
         "tests/test_graphql.py"
       ],
-      "policy": "The schema is derived from ModelSpec, never hand-written, so GraphQL cannot drift from REST or from the database. Safety limits (document size, depth, complexity, aliases, token budget) are enforced during the parse and may be widened but not removed. Relationship fields resolve through Session._load_relationship so a selection is batched, never N+1. Introspection is opt-in."
+      "policy": "The schema is derived from ModelSpec, never hand-written, so GraphQL cannot drift from REST or from the database. Safety limits (document size, depth, complexity, aliases, token budget) are enforced during the parse and may be widened but not removed. max_complexity is charged twice against the same budget: the parser counts selections while reading, and _graphql/cost.py walks the parsed document against the schema afterwards and charges each field's declared cost= (column 1, relationship 5, list root 10, single root 1). The second pass cannot be folded into the parser -- a weight depends on what a name resolves to, and the schema is not known while parsing. It is additive rather than multiplicative (a list does not multiply its children; fan-out is what cost= is for), it expands fragments through execute._flatten so it cannot disagree with the executor about which fields run, and an unknown field or fragment costs nothing so a typo keeps its own error rather than becoming a complexity refusal. Relationship fields resolve through Session._load_relationship so a selection is batched, never N+1. Introspection is opt-in. What the schema withholds is asked of wreath.crud rather than restated here: sensitive-looking names (crud.SENSITIVE_FIELD) and retrieval columns (crud.retrieval_fields -- Vector, TsVector) are absent from the object types and from the SDL unless named in expose=, so the two generated surfaces publish the same set. expose= has no input half here, because no mutation is generated -- a GraphQL write is a resolver the application wrote."
     },
     {
       "name": "queries",
+      "capability": "Named, compiled reads over one model, sharing the driver's plan cache, and hybrid search that fuses a vector and a full-text search by reciprocal rank",
+      "replaces": [
+        "aiosql"
+      ],
       "guides": [
-        "docs/guides/orm.md"
+        "docs/guides/orm.md",
+        "docs/guides/hybrid-search.md"
       ],
       "reference": [
         "docs/reference/queries.md"
@@ -899,12 +1163,20 @@
         "src/wreath/queries.py"
       ],
       "tests": [
-        "tests/test_queries.py"
+        "tests/test_queries.py",
+        "tests/orm/test_hybrid_search.py"
       ],
-      "policy": "Reads only: writes belong to Session, whose one-way direction is an ORM invariant, so a layer that also wrote would duplicate that or work around it. A declaration's shape is fixed at class-definition time and only values vary, so it must compile once through the registry's existing plan cache -- a bound declaration's shape key stays byte-identical to the hand-written query's, and no second cache is added here (tested, not asserted). `Param` subclasses `RelatedColumnExpr` only to win operator dispatch against a column on the left; it never enters a tree, and the `_Placeholder` that does is deliberately not a `ValueExpr`, so one reaching `shape_of` raises rather than compiling a query with a hole in it. Validated at declaration time: the model, that every predicate column belongs to it, and that no `Param` sits in `order_by`/`limit`/`offset` where no caller could supply it."
+      "policy": "Reads only: writes belong to Session, whose one-way direction is an ORM invariant, so a layer that also wrote would duplicate that or work around it. A declaration's shape is fixed at class-definition time and only values vary, so it must compile once through the registry's existing plan cache -- a bound declaration's shape key stays byte-identical to the hand-written query's, and no second cache is added here (tested, not asserted). `Param` subclasses `RelatedColumnExpr` only to win operator dispatch against a column on the left; it never enters a tree, and the `_Placeholder` that does is deliberately not a `ValueExpr`, so one reaching `shape_of` raises rather than compiling a query with a hole in it. Validated at declaration time: the model, that every predicate column belongs to it, and that no `Param` sits in `order_by`/`limit`/`offset` where no caller could supply it. A `Param` *inside* an `order_by` expression is different and is allowed: `order_by(Document.embedding.cosine_distance(Param('q')))` fixes the SQL and varies only the vector, so the shape is still one shape. Operators spelled as methods reach `Param` through the `_as_placeholder` seam in `orm.expressions._bind` rather than through reflected comparison; `in_` is deliberately excluded, because its operand count is part of the shape. `fuse(a, b, k=60)` merges declared searches by reciprocal rank (`sum(1/(k + rank))`, ties by primary key) and is a separate declaration kind: `Queries.fusions()`, not `declarations()`, because the things that walk declarations want the one `Select` behind each. Every fused query must be ordered and limited, refused at class-definition time -- the rank is the position, and the bound is what keeps the merge over two shortlists and what the HNSW index answers. Fusion currently executes each search as its own statement and merges in Python; that is deliberately invisible from the API, so derived tables in `FROM` can later compile it to one statement without moving any public surface. A resolved fusion must hold the *same* declaration objects the class body resolved, because the registry keys prepared plans on declaration identity."
     },
     {
       "name": "docs-ssg",
+      "capability": "A documentation site generator: markdown, API reference from your docstrings, search, and themes, configured in typed Python",
+      "replaces": [
+        "mkdocs",
+        "mkdocs-material",
+        "mkdocstrings",
+        "sphinx"
+      ],
       "guides": [
         "docs/guides/docs-ssg.md",
         "docs/internals/index.md"
@@ -922,6 +1194,7 @@
     },
     {
       "name": "example",
+      "capability": null,
       "guides": [
         "docs/example/index.md",
         "docs/example/quickstart.md",

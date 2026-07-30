@@ -400,6 +400,14 @@ Because it emits *markdown*, the generated reference travels the same path as
 prose — same anchors, same table of contents. This is wreath's built-in stand-in
 for mkdocstrings.
 
+A directive naming a *module* documents what that module defines, plus anything
+its `__all__` re-exports from a **private** module of the same package — a name
+defined in `yourapp._impl` has no page of its own to be documented on, so it is
+rendered under the facade that publishes it. A facade over public submodules
+documents nothing itself: give the page a directive per submodule, so each name
+is rendered once, under the module whose docstrings describe it. A strict build
+fails on a module directive that would render nothing at all.
+
 Cross-references keep the mkdocstrings convention: a directive anchors its object
 at the full dotted path, so a link written `[`Site`](#wreath._docs.config.Site)`
 resolves to `::: wreath._docs.config.Site` — no rewrite needed when you move a
