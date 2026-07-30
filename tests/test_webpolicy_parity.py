@@ -26,6 +26,24 @@ def test_native_webpolicy_exports_when_core_is_built() -> None:
         (b"identity", None),
         (b"gzip;q=bogus", None),
         (b"GZip ; q=1.000", "gzip"),
+        # zstd is offered only to a client that named it. A bare wildcard still
+        # means gzip, so nothing that used to get gzip gets an unasked-for coding.
+        (b"*", "gzip"),
+        (b"*;q=0.5", "gzip"),
+        (b"zstd", "zstd"),
+        (b"ZStd ; q=1.000", "zstd"),
+        (b"zstd;q=0", None),
+        (b"zstd;q=bogus", None),
+        (b"br, zstd;q=0.1", "zstd"),
+        # Both acceptable: higher q wins, and a tie goes to zstd.
+        (b"gzip, zstd", "zstd"),
+        (b"zstd, gzip", "zstd"),
+        (b"gzip;q=1, zstd;q=0.5", "gzip"),
+        (b"zstd;q=0.5, gzip;q=0.4", "zstd"),
+        (b"gzip;q=0, zstd", "zstd"),
+        (b"zstd;q=0, gzip", "gzip"),
+        (b"gzip;q=0, zstd;q=0", None),
+        (b"gzip;q=0, zstd;q=0, *;q=1", None),
     ],
 )
 def test_encoding_selection(value: bytes, expected: str | None) -> None:

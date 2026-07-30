@@ -33,8 +33,20 @@ def _quality(parameters: list[bytes]) -> float:
 
 
 def select_content_encoding(accept_encoding: bytes) -> str | None:
-    gzip_quality: float | None = None
-    wildcard_quality: float | None = None
+    # Two codings, and they are not treated alike on purpose. `zstd` is offered
+    # only to a client that named it, while `gzip` is still reachable through a
+    # bare `*` -- so no request that used to get gzip gets a coding it did not
+    # ask for by name. RFC 9110 would permit reading `*` as consent to zstd, but
+    # a client sending `*` is far likelier to be old than to be new, and the
+    # decoder it lacks would show up as a corrupt body rather than as a 406.
+    # A quality of 0 already means "not acceptable", so it doubles as the
+    # not-offered sentinel and no separate `None` state is needed. Only `gzip`
+    # needs to know whether it was *named*, because that is what decides if the
+    # wildcard applies to it.
+    gzip_quality = 0.0
+    zstd_quality = 0.0
+    wildcard_quality = 0.0
+    gzip_named = False
     for raw_item in accept_encoding.split(b","):
         pieces = raw_item.split(b";")
         coding = pieces[0].strip().lower()
@@ -42,12 +54,20 @@ def select_content_encoding(accept_encoding: bytes) -> str | None:
             continue
         quality = _quality(pieces[1:])
         if coding == b"gzip":
+            gzip_named = True
             gzip_quality = quality
+        elif coding == b"zstd":
+            zstd_quality = quality
         elif coding == b"*":
             wildcard_quality = quality
-    if gzip_quality is not None:
-        return "gzip" if gzip_quality > 0 else None
-    return "gzip" if wildcard_quality is not None and wildcard_quality > 0 else None
+    if not gzip_named:
+        gzip_quality = wildcard_quality
+    # Ties go to zstd: it decodes faster and smaller at every level Wreath would
+    # pick, so an equal-preference client gets the better coding. A client that
+    # genuinely prefers gzip says so with a higher q and gets it.
+    if zstd_quality > 0 and zstd_quality >= gzip_quality:
+        return "zstd"
+    return "gzip" if gzip_quality > 0 else None
 
 
 def is_compressible_content_type(content_type: bytes) -> bool:

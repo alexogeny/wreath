@@ -59,7 +59,12 @@ wreath_select_content_encoding(PyObject *Py_UNUSED(self), PyObject *arg)
     if (PyObject_GetBuffer(arg, &view, PyBUF_SIMPLE) < 0) return NULL;
     const char *data = (const char *)view.buf;
     Py_ssize_t start = 0;
-    int gzip_seen = 0, gzip_q = 0, wildcard_seen = 0, wildcard_q = 0;
+    /* Qualities are thousandths, and 0 already means "not acceptable", so it
+     * doubles as the not-offered sentinel. Only gzip tracks whether it was
+     * *named*, because that is what decides whether the wildcard applies to it.
+     * Mirrors _pure/webpolicy.py::select_content_encoding exactly; the two are
+     * held equal by tests/test_webpolicy_parity.py. */
+    int gzip_named = 0, gzip_q = 0, zstd_q = 0, wildcard_q = 0;
     for (Py_ssize_t i = 0; i <= view.len; i++) {
         if (i < view.len && data[i] != ',') continue;
         const char *item = data + start;
@@ -94,15 +99,20 @@ wreath_select_content_encoding(PyObject *Py_UNUSED(self), PyObject *arg)
             parameter = end;
         }
         if (ascii_equal_ci(coding, coding_len, "gzip")) {
-            gzip_seen = 1;
+            gzip_named = 1;
             gzip_q = quality;
+        } else if (ascii_equal_ci(coding, coding_len, "zstd")) {
+            zstd_q = quality;
         } else if (coding_len == 1 && coding[0] == '*') {
-            wildcard_seen = 1;
             wildcard_q = quality;
         }
     }
     PyBuffer_Release(&view);
-    if ((gzip_seen && gzip_q > 0) || (!gzip_seen && wildcard_seen && wildcard_q > 0))
+    if (!gzip_named) gzip_q = wildcard_q;
+    /* Ties go to zstd; a client that prefers gzip says so with a higher q. */
+    if (zstd_q > 0 && zstd_q >= gzip_q)
+        return PyUnicode_FromString("zstd");
+    if (gzip_q > 0)
         return PyUnicode_FromString("gzip");
     Py_RETURN_NONE;
 }
