@@ -495,12 +495,15 @@ def _pytest_command() -> list[str]:
     """`pytest -q`, parallelised to fit the machine.
 
     The suite used to run in about 3.5 seconds, where an xdist worker's
-    re-import of the native extensions cost more than it saved. It has since
-    grown past 4,400 tests and 30 seconds, and the trade has inverted.
-    Measured here (12 cores, best of two runs): serial 30.7s, `-n 2` 16.8s,
+    re-import of the native extensions cost more than it saved. At 4,400 tests
+    the trade had inverted. Measured then (12 cores, best of two runs): serial 30.7s, `-n 2` 16.8s,
     `-n 4` 9.8s, `-n 6` 8.1s, `-n 8` 8.1s, `-n 12` 9.5s -- so the curve
     flattens at six and turns back up once workers outnumber the cores they
     have to share with the extensions they each load.
+
+    The default selection now collects more than 8,600 tests. Treat the timings
+    above as historical until the full curve is remeasured off battery power;
+    do not infer a new cap from a single run.
 
     Capped rather than `-n auto` for that last reason: `auto` is the core
     count, which is past the flat part on any machine this wide. A bare
