@@ -1,8 +1,16 @@
-"""Pure-Python facade over the stdlib native zlib implementation."""
+"""Pure-Python facade over the stdlib native zlib and zstd implementations."""
 
 from __future__ import annotations
 
 import zlib
+from compression import zstd
+
+# The valid range is asked of the stdlib rather than written down, because it is
+# libzstd's range and not ours; a build linked against a different libzstd would
+# otherwise have Wreath refusing a level that library accepts. Currently
+# (-131072, 22): the negatives are libzstd's "fast" modes.
+ZSTD_MIN_LEVEL, ZSTD_MAX_LEVEL = zstd.CompressionParameter.compression_level.bounds()
+ZSTD_DEFAULT_LEVEL = zstd.COMPRESSION_LEVEL_DEFAULT
 
 
 def gzip_compress(data: bytes, level: int = 5) -> bytes:
@@ -114,4 +122,136 @@ class GzipCompressor:
             self._compressor = None
 
 
-__all__ = ["GzipCompressor", "gzip_compress"]
+def zstd_compress(data: bytes, level: int = ZSTD_DEFAULT_LEVEL) -> bytes:
+    """One complete zstd frame for `data`, header and checksum included.
+
+    The whole-buffer counterpart of `ZstdCompressor`, and the same shape as
+    `gzip_compress`: hand it the bytes you have, get back something a client can
+    decompress on its own.
+
+    `level` runs from `ZSTD_MIN_LEVEL` to `ZSTD_MAX_LEVEL` — libzstd's range,
+    read from the stdlib rather than hardcoded — and defaults to
+    `ZSTD_DEFAULT_LEVEL` (3), which is the level whose speed is comparable to
+    gzip's default while compressing appreciably better. Levels below 1 are
+    libzstd's "fast" modes, not gzip's `0` store mode: **there is no zstd level
+    that stores without compressing.**
+
+    Compression itself is `compression.zstd`, which Python 3.14 added in PEP 784
+    and which is a C extension in every build that has it, so this needs no
+    third-party dependency.
+
+    Raises:
+        ValueError: `level` is outside `ZSTD_MIN_LEVEL`-`ZSTD_MAX_LEVEL`.
+    """
+    if not ZSTD_MIN_LEVEL <= level <= ZSTD_MAX_LEVEL:
+        raise ValueError(f"zstd level must be between {ZSTD_MIN_LEVEL} and {ZSTD_MAX_LEVEL}")
+    return zstd.compress(data, level=level)
+
+
+class ZstdCompressor:
+    """The streaming form of `zstd_compress`: feed it chunks, then finish.
+
+    The same three-state machine as `GzipCompressor` — open, finished, closed,
+    and only *open* accepts work — over `compression.zstd` instead of `zlib`, so
+    the two are interchangeable to a caller that only compresses a body:
+
+    ```python
+    encoder = ZstdCompressor(level=3)
+    for chunk in body:
+        yield encoder.compress(chunk)
+    yield encoder.finish()
+    ```
+
+    The state machine is load-bearing here in a way it is not for gzip, and this
+    is the reason this class exists rather than the stdlib object being used
+    directly. `zstd.ZstdCompressor.flush(FLUSH_FRAME)` called a second time does
+    not raise — it emits a **second, empty frame** (9 bytes). Those bytes are
+    valid zstd, so nothing downstream complains; a client decoding the response
+    just sees a body that ends where the first frame did, and a `Content-Length`
+    computed over both is 9 bytes too long. `finish()` raising `RuntimeError`
+    instead turns that into a visible error at the one place it can still be
+    attributed.
+
+    Abandon a stream that will never be finished with `close()`. It emits
+    nothing, drops the encoder, is idempotent, and never raises, so it is safe
+    in a `finally`.
+
+    Args:
+        level: `ZSTD_MIN_LEVEL` to `ZSTD_MAX_LEVEL`; `ZSTD_DEFAULT_LEVEL` (3) by
+            default.
+
+    Raises:
+        ValueError: `level` is outside `ZSTD_MIN_LEVEL`-`ZSTD_MAX_LEVEL`.
+    """
+
+    __slots__ = ("_compressor", "_state")
+
+    def __init__(self, level: int = ZSTD_DEFAULT_LEVEL) -> None:
+        if not ZSTD_MIN_LEVEL <= level <= ZSTD_MAX_LEVEL:
+            raise ValueError(f"zstd level must be between {ZSTD_MIN_LEVEL} and {ZSTD_MAX_LEVEL}")
+        self._compressor = zstd.ZstdCompressor(level=level)
+        self._state = "open"
+
+    def compress(self, data: bytes) -> bytes:
+        """Encode one chunk, returning whatever is ready to send.
+
+        **`b""` is a normal answer, not an error**, and zstd returns it more
+        often than gzip does: the encoder fills a block before emitting
+        anything, so a small chunk routinely produces no output at all and its
+        bytes come out of a later `compress` or out of `finish`. A caller that
+        treats an empty return as end-of-stream will truncate the body.
+
+        Raises:
+            RuntimeError: this compressor has already been finished or closed.
+        """
+        if self._state != "open":
+            raise RuntimeError("zstd compressor is not open")
+        compressor = self._compressor
+        assert compressor is not None
+        return compressor.compress(data)
+
+    def finish(self) -> bytes:
+        """Flush what is still buffered and close the frame.
+
+        The return value is the last thing to send: the frame epilogue carries
+        the content checksum, so a body that stops before it is incomplete no
+        matter how many chunks preceded it. Afterwards the compressor is
+        finished, and `compress` and `finish` both raise — see the class
+        docstring for why that refusal matters more here than it does for gzip.
+
+        Raises:
+            RuntimeError: this compressor has already been finished or closed.
+        """
+        if self._state != "open":
+            raise RuntimeError("zstd compressor is not open")
+        self._state = "finished"
+        compressor = self._compressor
+        assert compressor is not None
+        return compressor.flush(zstd.ZstdCompressor.FLUSH_FRAME)
+
+    def close(self) -> None:
+        """Abandon a still-open compressor without closing its frame.
+
+        For the stream that will not be completed — a client that disconnected,
+        a handler that raised part-way through a body. An open compressor
+        releases its encoder and becomes closed, after which `compress` and
+        `finish` raise; a compressor that is already finished or closed is left
+        exactly as it was.
+
+        Never raises, in any of the three states, which is what makes it safe in
+        a `finally` that does not know which one it is in.
+        """
+        if self._state == "open":
+            self._state = "closed"
+            self._compressor = None
+
+
+__all__ = [
+    "ZSTD_DEFAULT_LEVEL",
+    "ZSTD_MAX_LEVEL",
+    "ZSTD_MIN_LEVEL",
+    "GzipCompressor",
+    "ZstdCompressor",
+    "gzip_compress",
+    "zstd_compress",
+]
