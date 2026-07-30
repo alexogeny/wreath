@@ -913,3 +913,71 @@ Unchanged from session five: the `app` sweep (2751 mutants) has never produced a
 (`sweep_app.json` is 0 bytes), the psql re-check never ran, no `WREATH_PURE=1` sweep has
 ever run, and the manifest-attribution decision (80 of 438 test files own no subsystem)
 is still open. `_auth/jwt.py` at 103 non-killed is now the largest single concentration.
+
+### `users.py`: 0.6115 → 0.7059, non-killed 134 → 99
+
+The largest remaining concentration in any sweep after `binding.py`. The test Postgres
+was down again and started cleanly this time with `podman start wreath-test-pg` — no
+`podman restart` dance was needed.
+
+**A fifth way the sweep under-reports: `addopts` deselects four markers.**
+`pyproject.toml` sets `addopts = "-q -m 'not fuzz and not performance and not network
+and not thesis'"`, so passing the *right* `--tests` paths is still not enough — the
+default marker expression drops tests inside them, and a deselected test that would
+have killed a mutant reports it as a survivor. Pass
+`--pytest-arg=-m --pytest-arg="not fuzz and not performance"` to a sweep, which keeps
+`network` and `thesis` (they can kill) while leaving out the two slow ones. Note the
+`--pytest-arg=` spelling: `--pytest-arg ""` is eaten by argparse and errors.
+
+Pitfall #1 was worth 14 mutants again here. The manifest's `users` subsystem omits
+`tests/rgb/test_credentials.py`, `tests/rgb/test_hygiene_tail.py`,
+`tests/rgb/test_user_lifecycle.py`, `tests/security/test_web_framework_hardening.py`,
+`tests/test_app_factories.py` and `tests/test_cross_subsystem.py`.
+
+**82 of the 119 real gaps were in `second_factor_router`, and they were three shapes.**
+
+- **Every route's first two guards.** Each handler opens with `session is None` → 500
+  `session_middleware_required` and `user is None` → 401 `not_authenticated`, and the
+  suite reached them only through the happy path. The 500 arm needs an application that
+  mounted the router and **forgot `SessionMiddleware`** — a real deployment mistake, and
+  a shape the existing `_app` helper cannot produce because it always installs it. Two
+  parametrised tests over all eight routes killed thirteen of these at once.
+
+  Two details the tests had to be measured for rather than assumed: the listing route is
+  `/auth/2fa` and `/auth/2fa/` is a 405, and `verify`/`webauthn/verify/begin` answer
+  `no_pending_second_factor`, not `not_authenticated`, because they run *before* sign-in
+  completes and key on the pending marker. The expected error is a column in the route
+  table, since flattening it to "some 401" would let either guard be deleted.
+
+- **`_principal`'s four clauses — and why the first attempt killed none of them.** The
+  test planted malformed principals with a made-up subject, so deleting a guard still
+  ended in `users.get_by_id` returning `None` and the same 401. **The subject has to be a
+  real user id.** `InMemoryUserStore` hands out `"1"`, which makes `{"sub": 1}` — an
+  *integer* id, what a database hands an application that writes the principal itself,
+  the way `wreath._auth.oauth2` does — the sharp case: `_signed_in` calls
+  `get_by_id(str(principal["sub"]))`, so without `not isinstance(subject, str)` it signs
+  in as a real user. Likewise `{"sub": "1", "pending": True}` is a session that proved a
+  password and *not* a second factor, and treating it as signed in is the bypass the
+  router exists to prevent.
+
+- **A marker that is present but not usable.** `totp_confirm` has four checks after
+  `no_enrolment_in_progress` and nothing had ever planted a marker to reach them: a
+  non-numeric `at` (without the `isinstance` clause, `clock() - "recently"` raises
+  `TypeError` and the endpoint answers 500 instead of asking the user to start again), a
+  non-string secret, an undecodable base32 secret, and the **already-enrolled race**.
+  That last one is worth naming: `begin` refuses a second enrolment, so the same check
+  inside `confirm` is reachable only when the factor appears *between* this session's
+  begin and its confirm — going around the refusal rather than through it. Confirming
+  anyway mints a second secret and a second set of recovery codes and invalidates
+  neither.
+
+Two survivors are recorded as provably defensive rather than chased: `_principal`'s
+`not subject` (an empty id matches no row either way) and `_stamp`'s
+`isinstance(principal, dict)` (`_stamp` runs only after `_principal` returned non-`None`,
+so the principal is always a dict).
+
+Still open in `users.py`: `user_router` 23 (`verify_link`/password-reset token arms),
+the `enrolments=`-store path (`_load_record`'s handle validation, ~8), an inactive user
+completing a second factor (`user is None or not user.is_active`), and several
+`declaration.drop-keyword` mutants where a keyword argument falls back to the same
+default the caller passed.
