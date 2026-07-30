@@ -195,8 +195,30 @@ def page_params(request: Any) -> PageParams:
 
 
 def sortable_fields(model: type) -> tuple[str, ...]:
-    """Every column name of `model` -- the default sort/filter allow-list."""
-    return tuple(_as_model(model).__wreath_column_map__)
+    """Every column of `model` a caller may sort or filter by, in declared order.
+
+    The default allow-list for `apply_sort` and `apply_filters`, and every column
+    except the *retrieval* ones -- a `Vector` embedding and a `TsVector`.
+
+    Those are excluded because `?sort=embedding` is the same request-triggered
+    cost `MAX_PAGE` exists to bound, twenty lines above. pgvector gives `vector` a
+    btree opclass, so `ORDER BY embedding` is valid SQL that runs: a full sort of
+    the table on values that are kilobytes each, with no index that can serve it,
+    from a query string an anonymous caller controls. Ordering by one is also
+    meaningless -- a vector's btree order is a tie-break, not a ranking, and
+    ranking by similarity is what `Vector.cosine_distance` and `TsVector.rank`
+    are for.
+
+    This is the default, not a prohibition: `apply_sort(..., allow=("embedding",))`
+    still orders by it, for a caller who meant it.
+    """
+    from .orm.types import _is_retrieval_type
+
+    return tuple(
+        name
+        for name, item in _as_model(model).__wreath_column_map__.items()
+        if not _is_retrieval_type(item.pg_type)
+    )
 
 
 def _column(model: type, name: str, allowed: frozenset[str], what: str) -> Any:
@@ -212,9 +234,14 @@ def apply_sort(query: Select, sort: Iterable[str], *, allow: Iterable[str] | Non
     immutable, so a per-token `order_by` would recopy a growing tuple on every
     step -- O(k^2) in the request-controlled token count. Building the orderings
     once and applying them together keeps this O(k).
+
+    The default allow-list is `sortable_fields(model)`, which is every column
+    except the retrieval ones -- see there for why sorting by an embedding is a
+    scan a caller can ask for. Passing `allow=` explicitly overrides that in
+    both directions.
     """
     model = _as_model(query.model)
-    allowed = frozenset(allow) if allow is not None else frozenset(model.__wreath_column_map__)
+    allowed = frozenset(allow) if allow is not None else frozenset(sortable_fields(model))
     orderings = []
     for token in sort:
         descending = token[:1] == "-"
@@ -232,9 +259,13 @@ def apply_filters(
     Values are handed to the ORM, which coerces/validates them against the
     column's type -- an out-of-range or wrong-typed value fails at bind time.
     Richer operators (ranges, `in`, `ilike`) are a deliberate follow-up.
+
+    The allow-list defaults to `sortable_fields(model)`, so a retrieval column is
+    not filterable by default either: an equality test against a `tsvector` or a
+    1536-dimension embedding is a sequential scan that matches nothing.
     """
     model = _as_model(query.model)
-    allowed = frozenset(allow) if allow is not None else frozenset(model.__wreath_column_map__)
+    allowed = frozenset(allow) if allow is not None else frozenset(sortable_fields(model))
     predicates = []
     for name, value in filters.items():
         column = _column(model, name, allowed, "filter")

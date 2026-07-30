@@ -130,4 +130,25 @@ query = apply_filters(query, {"ranch_id": ranch_id}, allow=("ranch_id",))
 
 Both helpers fold every token into a **single** query-builder call, so applying a request full of `?sort=` fields costs time linear in their number, not quadratic — a client cannot turn a long sort string into disproportionate server work. (Pinned by the `pagination-apply-sort` complexity probe.)
 
+### Retrieval columns are not in the default allow-list
+
+`sortable_fields(Model)` — the allow-list both helpers fall back to when you pass
+no `allow=` — is every column **except** the retrieval ones: a `Vector`
+embedding and a `TsVector`.
+
+`?sort=embedding` is otherwise the same request-triggered cost `MAX_PAGE` exists
+to bound. pgvector gives `vector` a btree opclass, so `ORDER BY embedding` is
+valid SQL that runs — a full sort of the table on values that are kilobytes
+each, with no index that can serve it, from a query string an anonymous caller
+controls. It is also meaningless: a vector's btree order is a tie-break, not a
+ranking. Ranking by similarity is `Vector.cosine_distance` and `TsVector.rank`,
+which a [vector](vector-search.md) or [hybrid](hybrid-search.md) query declares
+explicitly.
+
+This is the default, not a prohibition. A caller who means it says so:
+
+```python
+query = apply_sort(query, params.sort, allow=("embedding",))
+```
+
 The total defaults to counting the rows that match the filtered query; pass an explicit `total=` if you already know it (or want to skip the count on a hot path).

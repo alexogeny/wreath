@@ -88,6 +88,43 @@ def test_apply_sort_allowlist_and_order():
         apply_sort(Widget.select(), ("secret",), allow=("name",))
 
 
+def _retrieval_model():
+    from wreath.orm import Mapped, Model, column
+    from wreath.orm.types import Int64, Text, TsVector, Vector
+
+    class Doc(Model, table="doc_pag_test"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        title: Mapped[str] = column(Text)
+        embedding: Mapped[list] = column(Vector(3))
+        search: Mapped[bytes] = column(
+            TsVector("english", sources=("title",)), index="gin"
+        )
+
+    return Doc
+
+
+def test_the_default_allowlist_holds_no_retrieval_column():
+    """`?sort=embedding` is the deep `OFFSET` again, twenty lines away.
+
+    pgvector gives `vector` a btree opclass, so `ORDER BY embedding` is valid SQL
+    that runs -- a full sort of the table on kilobyte values, with no index that
+    can serve it, on a query string an anonymous caller controls.
+    """
+    from wreath.pagination import apply_filters, apply_sort, sortable_fields
+
+    Doc = _retrieval_model()
+    assert sortable_fields(Doc) == ("id", "title")
+    for name in ("embedding", "search", "-embedding"):
+        with pytest.raises(ValueError, match="allow-list"):
+            apply_sort(Doc.select(), (name,))
+    with pytest.raises(ValueError, match="allow-list"):
+        apply_filters(Doc.select(), {"embedding": [1.0, 0.0, 0.0]})
+    # Ordinary columns are unaffected, and an explicit allow-list still wins:
+    # this is the default, not a prohibition.
+    assert len(apply_sort(Doc.select(), ("-title",)).orderings) == 1
+    assert len(apply_sort(Doc.select(), ("embedding",), allow=("embedding",)).orderings) == 1
+
+
 class _FakeSession:
     def __init__(self, items, total):
         self._items = items
@@ -136,3 +173,150 @@ async def test_paginate_prefers_the_efficient_count_when_available():
     # fetch call was the page query (projection wider than the lone PK).
     assert len(session.count_queries) == 1
     assert all(projection != 1 for _, _, projection in session.calls)
+
+
+# --- what `wreath mutant` found nothing was standing on -----------------------
+
+
+def test_the_ceilings_are_the_documented_numbers() -> None:
+    """`test_page_params_clamps_and_falls_back` cannot notice these moving.
+
+    It asserts `page == MAX_PAGE` after asking for `MAX_PAGE + 1`, so widening
+    the constant widens the expectation with it -- `value.widen-bound` pushed
+    both past reach and the test stayed green. These bounds are the ones an
+    anonymous caller runs into, so the numbers themselves are the contract:
+    `LIMIT/OFFSET` makes the database walk and discard every row before the
+    offset, and `MAX_SIZE` is how many rows one request may materialise.
+    """
+    from wreath.pagination import MAX_PAGE, MAX_SIZE
+
+    assert (MAX_SIZE, MAX_PAGE) == (100, 10_000)
+    assert page_params(_Q("page=999999&size=999999")) == PageParams(
+        page=10_000, size=100, sort=(),
+    )
+
+
+def test_parse_sort_drops_blanks_rather_than_producing_them() -> None:
+    """An empty token would reach `_column` as `""` and refuse the whole request.
+
+    `?sort=name,` and `?sort=,` are what a UI produces when a chip is removed,
+    so the blank has to go rather than become a lookup for a column named "".
+    """
+    assert parse_sort("name,") == ("name",)
+    assert parse_sort(",name") == ("name",)
+    assert parse_sort("name,,id") == ("name", "id")
+    assert parse_sort(", ,\t,") == ()
+    assert parse_sort("  ") == ()
+
+
+def test_a_blank_page_or_size_falls_back_rather_than_clamping_to_one() -> None:
+    """`?page=` is absent, not zero: the default is 1 and 20, not 1 and 1."""
+    assert page_params(_Q("page=&size=")) == PageParams(
+        page=1, size=DEFAULT_SIZE, sort=(),
+    )
+    assert page_params(_Q("page=%20&size=%20")).size == DEFAULT_SIZE
+    # And `sort=` absent or blank is no sort at all, not a one-element tuple.
+    assert page_params(_Q("sort=")).sort == ()
+    assert page_params(_Q("")).sort == ()
+
+
+def test_a_leading_minus_sorts_descending_and_its_absence_ascending() -> None:
+    """Both directions, because `expression.take-branch` survived both ways.
+
+    Nothing asserted that `-name` differs from `name` at all: the existing test
+    counts the orderings rather than reading them, so a build that ignored the
+    minus sign passed.
+    """
+    from wreath.pagination import apply_sort
+
+    Widget = _model()
+    ascending = apply_sort(Widget.select(), ("name",), allow=("name",)).orderings
+    descending = apply_sort(Widget.select(), ("-name",), allow=("name",)).orderings
+    assert [o.direction for o in ascending] == ["ASC"]
+    assert [o.direction for o in descending] == ["DESC"]
+
+    mixed = apply_sort(Widget.select(), ("name", "-id"), allow=("name", "id")).orderings
+    assert [o.direction for o in mixed] == ["ASC", "DESC"]
+
+
+def test_sorting_by_nothing_returns_the_query_unchanged() -> None:
+    """An empty sort must not append an empty `ORDER BY`."""
+    from wreath.pagination import apply_sort
+
+    Widget = _model()
+    query = Widget.select()
+    assert apply_sort(query, (), allow=("name",)) is query
+    assert apply_sort(query, ()).orderings == ()
+
+
+def test_filtering_by_nothing_returns_the_query_unchanged() -> None:
+    """The `WHERE`-building half, which no test reached at all."""
+    from wreath.pagination import apply_filters
+
+    Widget = _model()
+    query = Widget.select()
+    assert apply_filters(query, {}) is query
+
+    filtered = apply_filters(query, {"name": "a"}, allow=("name",))
+    assert filtered is not query
+    assert len(filtered.predicates) == 1
+    with pytest.raises(ValueError):
+        apply_filters(query, {"secret": "x"}, allow=("name",))
+
+
+def test_filters_default_to_the_same_allow_list_as_sorting() -> None:
+    """`allow=None` means `sortable_fields`, which excludes retrieval columns."""
+    from wreath.pagination import apply_filters
+
+    Widget = _model()
+    assert len(apply_filters(Widget.select(), {"name": "a"}).predicates) == 1
+
+
+def test_a_filter_allow_list_narrows_below_the_default() -> None:
+    """`allow=` must actually replace `sortable_fields`, not sit beside it.
+
+    The earlier test refuses a column the model does not have, which the default
+    allow-list refuses too -- so it passed with `allow=` ignored. This refuses a
+    column the model *does* have and the caller did not permit, which is the
+    only shape that tells the two apart.
+    """
+    from wreath.pagination import apply_filters, sortable_fields
+
+    Widget = _model()
+    assert "id" in sortable_fields(Widget)          # the default would allow it
+    with pytest.raises(ValueError):
+        apply_filters(Widget.select(), {"id": 1}, allow=("name",))
+    assert len(apply_filters(Widget.select(), {"id": 1}).predicates) == 1
+
+
+@pytest.mark.asyncio
+async def test_paginate_applies_the_sort_and_honours_allow_sort() -> None:
+    """`paginate`'s own sort branch, and the allow-list it forwards.
+
+    Both were invisible: every `paginate` test passed `PageParams` with no
+    `sort`, so the branch never ran, and `allow_sort=` was never given at all.
+    """
+    from wreath.pagination import paginate
+
+    Widget = _model()
+    session = _FakeSession(items=[{"id": 1}], total=1)
+
+    sorted_page = await paginate(
+        session, Widget.select(), PageParams(page=1, size=10, sort=("-name",)),
+        allow_sort=("name",), total=1,
+    )
+    assert sorted_page.total == 1
+
+    # A column the model has, that `allow_sort` withholds, is refused rather
+    # than quietly sorted by -- which is what forwarding `allow=` is for.
+    with pytest.raises(ValueError):
+        await paginate(
+            session, Widget.select(), PageParams(page=1, size=10, sort=("id",)),
+            allow_sort=("name",), total=1,
+        )
+
+    # And with no sort the query is untouched, so the branch is pinned both ways.
+    plain = await paginate(
+        session, Widget.select(), PageParams(page=1, size=10), total=1,
+    )
+    assert plain.total == 1
