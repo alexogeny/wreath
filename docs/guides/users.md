@@ -30,6 +30,15 @@ reset ends that user's other sessions. Without it the reset changes the
 credential and nothing more — whoever is already signed in stays signed in,
 which is the case that motivates most resets.
 
+If you renamed the session key — `user_router(session_key=...)`, matching
+`SessionIdentityBackend(session_key=...)` — give the store the same name:
+`PostgresSessionStore(database, session_key="account")`. The router hands its own
+key to `delete_for`, so a reset through the router is correct either way; the
+constructor is what keeps a direct `await store.delete_for(user_id)` — an admin
+"sign this person out everywhere" button, say — looking in the same place.
+`delete_for` used to read `principal` unconditionally, so on a renamed key it
+matched no row, ended nothing, and still answered `password_reset`.
+
 Failed sign-ins are throttled per identifier: `max_login_attempts` (10) within
 `login_window` (300s), answering `429` in the same shape as a wrong password so
 the response does not confirm the account exists. Reset-email issuance is
@@ -63,6 +72,15 @@ That mounts, under `/users`, the full set: `POST /register`, `POST /login`, `POS
 Passwords are hashed with stdlib `scrypt` and compared in constant time. Register and forgot-password return **uniform responses** whether or not the account exists (no user enumeration), and login does a dummy hash on an unknown user to keep the timing flat. Reset tokens are HMAC-signed, expiring, and **single-use** — bound to a fingerprint of the current password hash, so a token stops working the moment the password changes.
 
 Prefer to build the router yourself (custom prefix, a link builder that points at your frontend)? Call `user_router(store, secret=..., base_url=..., email_sender=...)` directly and `include_router` it.
+
+## Adding a second factor
+
+A password is one secret, and it will eventually be reused, phished, or turn up
+in somebody else's breach. `wreath.users` also ships the authenticator-app
+factor — TOTP, hashed single-use recovery codes, and a login that stays
+*pending* until the code arrives — with no new dependency. It is opt-in: pass
+`second_factors=` to `user_router` and mount `second_factor_router` beside it.
+See [Second factors](second-factors.md).
 
 ## Sending real email
 

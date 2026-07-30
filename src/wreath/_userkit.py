@@ -194,10 +194,52 @@ class UserRecord:
 class UserStore(Protocol):
     """Persistence seam for users — supply your own, or use InMemory/an ORM adapter."""
 
-    async def get_by_email(self, email: str) -> UserRecord | None: ...
-    async def get_by_id(self, user_id: str) -> UserRecord | None: ...
-    async def create(self, email: str, hashed_password: str) -> UserRecord: ...
-    async def update(self, user: UserRecord) -> UserRecord: ...
+    async def get_by_email(self, email: str) -> UserRecord | None:
+        """The user with this email address, or `None` if there is none.
+
+        The lookup every sign-in and every "forgot password" starts with.
+        `None` is an ordinary answer rather than an error, and the flows are
+        careful to respond identically whichever it is, so that a caller cannot
+        learn which addresses are registered.
+
+        Matching should be case- and whitespace-insensitive, as
+        `InMemoryUserStore` is: an address entered with a capital or a trailing
+        space is the same account.
+        """
+        ...
+
+    async def get_by_id(self, user_id: str) -> UserRecord | None:
+        """The user with this id, or `None` if there is none.
+
+        The id is `UserRecord.id`, which the store minted in `create` — it is
+        also what a verification or reset token carries as its subject, so this
+        is what turns a redeemed token back into a user.
+        """
+        ...
+
+    async def create(self, email: str, hashed_password: str) -> UserRecord:
+        """Create a user and return the stored record, with its id assigned.
+
+        `hashed_password` is already hashed — `wreath.users` hashes off the
+        event loop before calling, and a store must never be handed or asked to
+        handle a plaintext one. New users start `is_active=True` and
+        `is_verified=False`; verification is a later `update`.
+
+        Called only after `get_by_email` returned `None`, so a store need not
+        make the duplicate check its own — but it is registering an address as
+        unique, and a real one should enforce that.
+        """
+        ...
+
+    async def update(self, user: UserRecord) -> UserRecord:
+        """Persist a modified record and return what was stored.
+
+        The whole record, not a patch. The shipped flows use it for exactly two
+        things — marking an account verified, and replacing a password hash —
+        and both pass a copy of the record they read, so a store may treat the
+        record's id as the key.
+        """
+        ...
 
 
 def _normalize_email(email: str) -> str:
@@ -213,13 +255,22 @@ class InMemoryUserStore:
     _seq: int = 0
 
     async def get_by_email(self, email: str) -> UserRecord | None:
+        """The user registered under this address, trimmed and lower-cased first."""
         user_id = self._by_email.get(_normalize_email(email))
         return self._by_id.get(user_id) if user_id else None
 
     async def get_by_id(self, user_id: str) -> UserRecord | None:
+        """The user with this id, or `None`."""
         return self._by_id.get(user_id)
 
     async def create(self, email: str, hashed_password: str) -> UserRecord:
+        """Store a new user under the next id in a per-instance counter.
+
+        Ids are `"1"`, `"2"`, and so on, which is stable within one process and
+        means nothing outside it. The email is normalized before it is stored,
+        so the record carries the trimmed, lower-cased form. `created_at` and
+        `updated_at` are both set to now.
+        """
         self._seq += 1
         now = time.time()
         record = UserRecord(
@@ -231,6 +282,15 @@ class InMemoryUserStore:
         return record
 
     async def update(self, user: UserRecord) -> UserRecord:
+        """Store `user` against its own id, stamping `updated_at` to now.
+
+        An upsert: a record whose id is not present is simply inserted. The
+        email index gains an entry for the record's current address, and a
+        previous address the record no longer carries is **not** removed from
+        it, so a changed email stays resolvable under the old one. That has no
+        effect on the shipped flows, which never change an address — but it is a
+        reason not to reach for this store beyond development and tests.
+        """
         user.updated_at = time.time()
         self._by_id[user.id] = user
         self._by_email[_normalize_email(user.email)] = user.id
@@ -244,20 +304,53 @@ class InMemoryUserStore:
 class EmailSender(Protocol):
     """Delivery seam. `SmtpEmailSender` below is the shipped transport."""
 
-    async def send_verification(self, email: str, link: str) -> None: ...
-    async def send_password_reset(self, email: str, link: str) -> None: ...
+    async def send_verification(self, email: str, link: str) -> None:
+        """Deliver the "confirm your address" link to a newly registered user.
+
+        `link` is built by the application's `link_builder` and already carries
+        the signed token; the sender's job is delivery and nothing else.
+
+        Registration awaits this, so a slow or failing transport is a slow or
+        failing registration. It is also the last remaining timing signal that
+        distinguishes a new address from one already registered — the flow is
+        uniform in every other respect — so a transport that queues rather than
+        delivers inline closes that gap as well as the latency one.
+        """
+        ...
+
+    async def send_password_reset(self, email: str, link: str) -> None:
+        """Deliver the password-reset link to a user who asked for one.
+
+        The same contract as `send_verification`, and the same reason to be
+        quick: "forgot password" answers identically whether or not the address
+        is registered, and only the sender can make the timing match too.
+        """
+        ...
 
 
 class LogEmailSender:
-    """Default dev sender — prints the link instead of delivering it."""
+    """Default dev sender — prints the link instead of delivering it.
+
+    The default so that a freshly wired application works end to end with no
+    SMTP server: the verification link appears wherever `printer` writes, and
+    can be pasted into a browser. That also means **every link is printed in
+    clear text**, which is exactly what you do not want in production; put
+    `SmtpEmailSender` (or your own transport) in front of it there.
+
+    Args:
+        printer: Where a line goes. `print` by default; pass a logger's method
+            to route it somewhere durable.
+    """
 
     def __init__(self, printer: Callable[[str], None] = print) -> None:
         self._print = printer
 
     async def send_verification(self, email: str, link: str) -> None:
+        """Print one `[wreath.users] verify <email>: <link>` line."""
         self._print(f"[wreath.users] verify {email}: {link}")
 
     async def send_password_reset(self, email: str, link: str) -> None:
+        """Print one `[wreath.users] reset <email>: <link>` line."""
         self._print(f"[wreath.users] reset {email}: {link}")
 
 
@@ -269,9 +362,11 @@ class CapturingEmailSender:
     resets: list[tuple[str, str]] = field(default_factory=list)
 
     async def send_verification(self, email: str, link: str) -> None:
+        """Append `(email, link)` to `verifications`. Nothing is delivered."""
         self.verifications.append((email, link))
 
     async def send_password_reset(self, email: str, link: str) -> None:
+        """Append `(email, link)` to `resets`. Nothing is delivered."""
         self.resets.append((email, link))
 
 
@@ -297,6 +392,20 @@ class SmtpEmailSender:
 
     @classmethod
     def from_env(cls) -> SmtpEmailSender:
+        """Build a sender from the `WREATH_SMTP_*` environment variables.
+
+        `WREATH_SMTP_HOST` and `WREATH_SMTP_FROM` are required. `_PORT` defaults
+        to 587, `_USER` and `_PASSWORD` to unset (no login), and `_TLS` to on —
+        it is off only for the literal values `0`, `false` or `False`, so a
+        typo leaves TLS enabled rather than silently disabling it.
+
+        The subjects and the timeout are not read from the environment; set them
+        on the instance if you want them changed.
+
+        Raises:
+            KeyError: `WREATH_SMTP_HOST` or `WREATH_SMTP_FROM` is not set.
+            ValueError: `WREATH_SMTP_PORT` is not an integer.
+        """
         return cls(
             host=os.environ["WREATH_SMTP_HOST"],
             from_addr=os.environ["WREATH_SMTP_FROM"],
@@ -307,9 +416,21 @@ class SmtpEmailSender:
         )
 
     async def send_verification(self, email: str, link: str) -> None:
+        """Send a plain-text verification mail carrying `link`.
+
+        Subject is `verify_subject`. The connection is opened, used and closed
+        for this one message, on a worker thread, so the event loop is never
+        blocked by `smtplib`. Anything `smtplib` raises propagates — delivery
+        failure is not swallowed here.
+        """
         await self._send(email, self.verify_subject, f"Verify your email:\n\n{link}\n")
 
     async def send_password_reset(self, email: str, link: str) -> None:
+        """Send a plain-text password-reset mail carrying `link`.
+
+        Subject is `reset_subject`; otherwise identical to
+        `send_verification`, connection handling and all.
+        """
         await self._send(email, self.reset_subject, f"Reset your password:\n\n{link}\n")
 
     async def _send(self, to_addr: str, subject: str, body: str) -> None:
