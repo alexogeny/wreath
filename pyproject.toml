@@ -115,6 +115,12 @@ benchmark-panther = [
   "panther>=5.5",
 ]
 
+[project.entry-points.pytest11]
+# pytest imports this for anyone who has Wreath installed, so its fixtures
+# resolve with no conftest.py. Every fixture is `wreath_`-prefixed because this
+# loads in repositories that have their own `client`/`db` fixtures.
+wreath = "wreath._pytest_plugin"
+
 [project.scripts]
 wreath = "wreath.cli:main"
 # Maintenance commands for Wreath's C; see src/wreath/_devtools/.
