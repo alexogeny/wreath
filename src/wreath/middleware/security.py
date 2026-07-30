@@ -19,10 +19,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from ipaddress import AddressValueError, IPv6Address
-from urllib.parse import urlsplit
 
 from .._native import _core
-from .._webpolicy import append_missing_headers, origin_matches
+from .._webpolicy import append_missing_headers, normalize_origin, origin_matches
 from ..request import Request
 from ..response import ProblemResponse
 
@@ -117,6 +116,16 @@ class TrustedHostMiddleware:
             if pattern is None:
                 raise ValueError(f"invalid trusted-host pattern: {value!r}")
             patterns.append(pattern)
+        # Unreachable today, and kept deliberately. `_normalize_host(pattern=True)`
+        # admits `*` only as the whole pattern or as a leading `*.` label -- every
+        # other spelling fails its `_HOST_CHARS` check and is refused above -- so
+        # nothing containing `*` can reach here and fail this. It stays because it
+        # is the shape rule stated where a reader looks for it, and because the
+        # thing it backstops is an allowlist: `*example.com` reads like a
+        # subdomain rule and matches `evilexample.com`, and that mistake must not
+        # survive a future loosening of `_normalize_host`. The coupling is pinned
+        # by `test_normalize_host_is_the_gate_that_makes_the_shape_check_dead`,
+        # which fails if that ever stops being true.
         for pattern in patterns:
             if "*" in pattern and not (pattern == "*" or pattern.startswith("*.")):
                 raise ValueError(f"invalid trusted-host pattern: {pattern!r}")
@@ -142,31 +151,6 @@ class TrustedHostMiddleware:
         return None
 
 
-def _normalize_origin(value: str) -> bytes:
-    parsed = urlsplit(value)
-    if (
-        parsed.scheme.lower() not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or parsed.path not in {"", "/"}
-    ):
-        raise ValueError(f"invalid WebSocket origin: {value!r}")
-    scheme = parsed.scheme.lower()
-    host = parsed.hostname.lower()
-    if ":" in host:
-        host = f"[{host}]"
-    try:
-        port = parsed.port
-    except ValueError as error:
-        raise ValueError(f"invalid WebSocket origin: {value!r}") from error
-    default = 80 if scheme == "http" else 443
-    authority = host if port is None or port == default else f"{host}:{port}"
-    return f"{scheme}://{authority}".encode("ascii")
-
-
 class WebSocketOriginMiddleware:
     """Reject WebSocket handshakes outside an exact browser-origin allowlist."""
 
@@ -174,12 +158,32 @@ class WebSocketOriginMiddleware:
     __slots__ = ("allowed_origins",)
 
     def __init__(self, allowed_origins: Iterable[str]) -> None:
-        origins = tuple(_normalize_origin(origin) for origin in allowed_origins)
+        origins = tuple(normalize_origin(origin, label="WebSocket") for origin in allowed_origins)
         if not origins:
             raise ValueError("allowed WebSocket origins must not be empty")
         self.allowed_origins = origins
 
     async def before_websocket(self, request: Request):
+        """Admit the handshake, or refuse it with a 403 problem response.
+
+        `None` admits; a `ProblemResponse` refuses. **Every refusal is the same
+        403 with the same detail**, so a caller learns that the origin was not
+        accepted and nothing about which of the three reasons applied.
+
+        The three: no `Origin` header at all, more than one `Origin` header, and
+        an `Origin` that is not in the allowlist. A missing header is refused
+        rather than admitted — this middleware exists to gate browser clients,
+        and admitting the header-less case would let any non-browser caller past
+        by simply not sending one. A repeated header is refused for the same
+        reason `Authorization` is: a proxy and the application reading first,
+        last or joined would each check a different value.
+
+        Both sides are normalized the same way before they are compared —
+        scheme and host lower-cased, a default port dropped — and then matched
+        exactly. There is no wildcard and no suffix match, and an opaque
+        `Origin: null` can never match, because the constructor refuses `null`
+        as an allowlist entry.
+        """
         encoded: bytes | None = None
         for name, candidate in request.headers:
             if name != b"origin":

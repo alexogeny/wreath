@@ -395,3 +395,102 @@ async def test_trusted_host_validates_the_forwarded_host() -> None:
     )
     assert ok == 200
     assert rejected == 400
+
+
+# --- the three branches nothing was standing on ------------------------------
+#
+# `wreath mutant` survived all three. Each is a "leave it alone" branch, and a
+# leave-it-alone branch that stops working is the dangerous kind: nothing
+# errors, the request simply arrives carrying a value a client chose.
+
+
+@pytest.mark.asyncio
+async def test_a_request_with_no_peer_address_is_never_trusted() -> None:
+    """No `client` in the scope means no way to know who the peer is.
+
+    `_peer_trusted` has to answer False there -- it is the case the docstring
+    calls "the peer address is unavailable" -- and it was the one case no test
+    produced. A Unix-socket listener and some test harnesses both hand over a
+    scope with no client tuple, and treating that as trusted would honour
+    `X-Forwarded-For` from an entirely unknown source.
+    """
+    app = Wreath()
+    app.add_middleware(ProxyHeadersMiddleware(trusted=["127.0.0.0/8"]))
+
+    seen: dict[str, Any] = {}
+
+    @app.get("/")
+    async def index(request: Any) -> dict:
+        seen["client"] = request.client
+        seen["scheme"] = request.scheme
+        return {"ok": True}
+
+    for missing in ({"client": None}, {"client": ()}):
+        seen.clear()
+        status, _ = await _call(
+            app, missing,
+            headers={"x-forwarded-for": "203.0.113.9", "x-forwarded-proto": "https"},
+        )
+        assert status == 200                    # no crash ...
+        assert seen["client"] in (None, ())     # ... and nothing was rewritten
+        assert seen["scheme"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_forwarded_for_leaves_the_client_alone() -> None:
+    """`forwarded_client` answers None when the trusted boundary is unknowable.
+
+    `test_forwarded_client_walks_from_the_right` pins that it returns None; this
+    pins what the *middleware* does with that None. Overriding anyway would
+    replace a real peer address with nothing, and every downstream
+    address-keyed control -- rate limits, audit -- reads it afterwards.
+    """
+    app = Wreath()
+    app.add_middleware(ProxyHeadersMiddleware(trusted=["127.0.0.0/8"]))
+
+    seen: dict[str, Any] = {}
+
+    @app.get("/")
+    async def index(request: Any) -> dict:
+        seen["client"] = request.client
+        return {"ok": True}
+
+    status, _ = await _call(
+        app, {"client": ("127.0.0.1", 5000)},
+        headers={"x-forwarded-for": "unknown, 127.0.0.1"},
+    )
+    assert status == 200
+    assert seen["client"] == ("127.0.0.1", 5000)     # the real peer, untouched
+
+
+@pytest.mark.asyncio
+async def test_an_empty_forwarded_host_does_not_blank_the_host_header() -> None:
+    """`X-Forwarded-Host: ` must not overwrite `Host` with nothing.
+
+    `TrustedHostMiddleware` and `CSRFMiddleware` both read `Host`, and both
+    treat an empty one as a refusal -- so writing the empty value through turns
+    a stray proxy header into a 400 on every request behind that proxy.
+    """
+    app = Wreath()
+    app.add_middleware(ProxyHeadersMiddleware(trusted=["127.0.0.0/8"], trust_host=True))
+
+    seen: dict[str, Any] = {}
+
+    @app.get("/")
+    async def index(request: Any) -> dict:
+        seen["host"] = request.header("host")
+        return {"ok": True}
+
+    status, _ = await _call(
+        app, {"client": ("127.0.0.1", 5000)},
+        headers={"host": "real.example", "x-forwarded-host": ""},
+    )
+    assert status == 200
+    assert seen["host"] == "real.example"
+
+    # And a non-empty one still wins, so this is not "the override stopped".
+    status, _ = await _call(
+        app, {"client": ("127.0.0.1", 5000)},
+        headers={"host": "real.example", "x-forwarded-host": "front.example"},
+    )
+    assert seen["host"] == "front.example"

@@ -30,7 +30,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .._native import _core
-from .._webpolicy import append_vary, origin_matches, replace_cookie
+from .._webpolicy import append_vary, normalize_origin, origin_matches, replace_cookie
 from ..request import Request
 from ..response import ProblemResponse
 
@@ -72,31 +72,6 @@ _SEC_FETCH_SITE = b"sec-fetch-site"
 #: same place, and drawing it anywhere looser would make the header check weaker
 #: than the token check it fronts.
 _TRUSTED_SITES = frozenset({"same-origin", "none"})
-
-
-def _normalize_origin(value: str) -> bytes:
-    parsed = urlsplit(value)
-    if (
-        parsed.scheme.lower() not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or parsed.path not in {"", "/"}
-    ):
-        raise ValueError(f"invalid trusted origin: {value!r}")
-    scheme = parsed.scheme.lower()
-    host = parsed.hostname.lower()
-    if ":" in host:
-        host = f"[{host}]"
-    try:
-        port = parsed.port
-    except ValueError as error:
-        raise ValueError(f"invalid trusted origin: {value!r}") from error
-    default = 80 if scheme == "http" else 443
-    authority = host if port is None or port == default else f"{host}:{port}"
-    return f"{scheme}://{authority}".encode("ascii")
 
 
 def _referer_origin(value: str) -> bytes | None:
@@ -315,7 +290,9 @@ class CSRFMiddleware:
         self._max_age = max_age
         self._secure = secure
         self._same_site = normalized_same_site
-        self._trusted_origins = tuple(_normalize_origin(value) for value in trusted_origins)
+        self._trusted_origins = tuple(
+            normalize_origin(value, label="trusted") for value in trusted_origins
+        )
         self._exempt = exempt
         #: Times the `exempt` predicate raised. Each one was refused, so this is
         #: not a security hole -- it is how you find out the predicate itself is

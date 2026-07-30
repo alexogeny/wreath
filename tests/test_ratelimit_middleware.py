@@ -362,3 +362,78 @@ def test_middleware_binds_the_sync_path_for_the_memory_store() -> None:
     # and leaves the awaiting before hook unset.
     assert middleware.before is None
     assert middleware.before_sync.__name__ == "_before_local_sync"
+
+
+# --- the keyless request, and the limit that cannot work ---------------------
+#
+# `wreath mutant` survived three controls here. Two are the same scenario from
+# both ends: a request the key function cannot name. `principal_key` returns
+# None for one with no identity and no client address, and `_identify` turns
+# that None into the shared `UNKEYED` bucket -- because `None` is reserved for
+# "exempt", and a request nobody can key must still be limited rather than
+# waved through. Nothing exercised either half.
+
+
+def _scope(client: tuple[str, int] | None) -> dict[str, Any]:
+    scope: dict[str, Any] = {
+        "type": "http", "method": "GET", "scheme": "https", "path": "/",
+        "query_string": b"", "headers": [(b"host", b"example.test")],
+    }
+    if client is not None:
+        scope["client"] = client
+    return scope
+
+
+async def _receive_body() -> dict[str, Any]:
+    return {"type": "http.request", "body": b"", "more_body": False}
+
+
+def test_principal_key_is_none_when_there_is_nobody_and_no_address() -> None:
+    """A Unix-socket or in-process request has no client tuple to fall back to."""
+    from wreath.middleware import principal_key
+    from wreath.request import Request
+
+    assert principal_key(Request(_scope(("203.0.113.7", 5000)), _receive_body)) == (
+        "ip:203.0.113.7"
+    )
+    assert principal_key(Request(_scope(None), _receive_body)) is None
+
+
+async def test_a_request_nobody_can_key_is_still_limited() -> None:
+    """`UNKEYED` is a shared bucket, not an exemption.
+
+    Returning `None` from `_identify` means "do not limit this request", and it
+    is how `exempt=` works. A key function that simply could not name the caller
+    must not land in the same branch: that would make an un-addressable request
+    -- and any bug in a custom `key=` that returns None -- a way past the limit
+    entirely, which is the opposite of failing closed.
+    """
+    middleware = RateLimitMiddleware(limit=1, window=60.0, key=lambda request: None)
+    from wreath.request import Request
+
+    first = middleware.before_sync(Request(_scope(("203.0.113.7", 5000)), _receive_body))
+    second = middleware.before_sync(Request(_scope(("198.51.100.9", 5000)), _receive_body))
+    assert first is None                       # admitted
+    assert second is not None                  # ... and the next one is refused,
+    assert second.status == 429                # sharing one bucket rather than none
+
+
+async def test_an_exempt_request_is_the_only_thing_that_skips_the_bucket() -> None:
+    """The other side of the same distinction, so neither can absorb the other."""
+    middleware = RateLimitMiddleware(
+        limit=1, window=60.0, key=lambda request: None,
+        exempt=lambda request: True,
+    )
+    from wreath.request import Request
+
+    for _ in range(5):
+        assert middleware.before_sync(
+            Request(_scope(("203.0.113.7", 5000)), _receive_body)
+        ) is None
+
+
+def test_a_limit_that_admits_nobody_is_refused() -> None:
+    """Zero is a typo; `exempt` and not mounting it are how "never" is spelled."""
+    for limit in (0, -1):
+        with pytest.raises(ValueError, match="limit must be positive"):
+            RateLimitMiddleware(limit=limit, window=60.0)
