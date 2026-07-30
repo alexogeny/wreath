@@ -60,7 +60,7 @@
     },
     {
       "name": "routing",
-      "capability": null,
+      "capability": "Startup-compiled matching for static and parameterized routes, with bitset and decision-tree modes implemented by byte-identical pure and native backends",
       "guides": [
         "docs/guides/routing.md"
       ],
@@ -429,6 +429,7 @@
       "sources": [
         "src/wreath/postgres.py",
         "src/wreath/schema.py",
+        "src/wreath/_sparsevec.py",
         "src/wreath/_pure/postgres.py",
         "src/wreath/_native/postgres/"
       ],
@@ -497,9 +498,14 @@
         "tests/orm/",
         "tests/orm/test_native_shape_parity.py",
         "tests/orm/test_halfvec_codec.py",
-        "tests/orm/test_halfvec_live.py"
+        "tests/orm/test_halfvec_live.py",
+        "tests/orm/test_sparsevec_codec.py",
+        "tests/orm/test_sparsevec_live.py",
+        "tests/orm/test_bit_codec.py",
+        "tests/orm/test_bit_live.py",
+        "tests/orm/test_binary_quantization_queries.py"
       ],
-      "policy": "The dependency direction is one-way: wreath.orm imports wreath.postgres, never the reverse. Attribute access never performs I/O; loading is explicit (no lazy N+1). Pure and native storage must match behavior, not representation; the native query cache-key (orm_shape) must produce bytes identical to _shape_of_pure or the plan cache splits. An extension type's OID is assigned by CREATE EXTENSION and so differs between databases: it is resolved once at startup (orm/introspection.resolve_extension_types) and must never reach a plan-cache shape token or a model fingerprint, both of which are name-derived instead. ColumnSpec.oid reads through the type rather than snapshotting it, and native model storage -- which does bake the OID in at class definition -- is written back by rebind_storage_oid at the same moment. An ORDER BY key that is not a bare column (a vector distance) takes the pure keyer deliberately, because orm_shape.c reads ordering.expression.column. A generated column (`TsVector`) is the database's to write, never the application's: its expression names other columns, so it is rendered by orm/_generated.py once the registry knows their names and types, in PostgreSQL's own deparsed normal form -- a spelling that differs by one byte reports the column as drifted on every migration run, forever.\n\n**Wreath implements the client half of pgvector, never the server half.** The wire codec is ours -- `_pure/postgres.py` and `_native/postgres/codec.c` -- so no `pgvector` Python package is needed and `replaces` lists it for that reason. The `vector`/`halfvec` *types*, the `<->`/`<=>`/`<#>`/`<+>` operators and the HNSW/IVFFlat access methods are extension code inside PostgreSQL; `CREATE EXTENSION vector` is required and no client driver can substitute for it, because an index access method cannot be defined from outside the server. Migrations deliberately never emit `CREATE EXTENSION` (the privilege is usually not the runner's) and `doctor.check_extension_types` is the pre-flight.\n\n**`halfvec` is a second codec kind, not a variant of the first.** `EXT_KIND_VECTOR = 1` frames float4 elements and `EXT_KIND_HALFVEC = 2` frames float2; one OID must never mean two wire formats, since decoding one as the other yields a plausible vector of the wrong length. Adding a kind means a branch in *both* twins at all six dispatch sites (text/binary x encode/decode, plus the two `_decode_value` entry points) -- a missed site silently returns raw bytes, which is how this one was caught. The text form is shared: pgvector prints both types as `[1,2,3]`. Elements are bounded by binary16's largest finite value (65504, `MAX_HALF_MAGNITUDE`) at coercion *and* at encode, because a larger value rounds to an infinity pgvector then refuses. `Halfvec`'s `extension` is `\"vector\"`, not `\"halfvec\"` -- one extension provides both, and naming the type would send readers to install something nonexistent. Operator classes are per type (`halfvec_cosine_ops`).\n\n**A halfvec value's decimal depends on the result format**: the binary decoder widens the stored binary16 exactly (`0.0999755859375`), pgvector's text rendering prints nine significant digits (`0.099975586`). Different Python floats. Pinned in `tests/orm/test_halfvec_live.py`."
+      "policy": "The dependency direction is one-way: wreath.orm imports wreath.postgres, never the reverse. Attribute access never performs I/O; loading is explicit (no lazy N+1). Pure and native storage must match behavior, not representation; the native query cache-key (orm_shape) must produce bytes identical to _shape_of_pure or the plan cache splits. An extension type's OID is assigned by CREATE EXTENSION and so differs between databases: it is resolved once at startup (orm/introspection.resolve_extension_types) and must never reach a plan-cache shape token or a model fingerprint, both of which are name-derived instead. ColumnSpec.oid reads through the type rather than snapshotting it, and native model storage -- which does bake the OID in at class definition -- is written back by rebind_storage_oid at the same moment. An ORDER BY key that is not a bare column (a vector distance) takes the pure keyer deliberately, because orm_shape.c reads ordering.expression.column. A generated column (`TsVector`) is the database's to write, never the application's: its expression names other columns, so it is rendered by orm/_generated.py once the registry knows their names and types, in PostgreSQL's own deparsed normal form -- a spelling that differs by one byte reports the column as drifted on every migration run, forever.\n\n**Wreath implements the client half of pgvector, never the server half.** The wire codec is ours -- `_pure/postgres.py` and `_native/postgres/codec.c` -- so no `pgvector` Python package is needed and `replaces` lists it for that reason. The `vector`/`halfvec` *types*, the `<->`/`<=>`/`<#>`/`<+>` operators and the HNSW/IVFFlat access methods are extension code inside PostgreSQL; `CREATE EXTENSION vector` is required and no client driver can substitute for it, because an index access method cannot be defined from outside the server. Migrations deliberately never emit `CREATE EXTENSION` (the privilege is usually not the runner's) and `doctor.check_extension_types` is the pre-flight.\n\n**`halfvec` is a second codec kind, not a variant of the first.** `EXT_KIND_VECTOR = 1` frames float4 elements and `EXT_KIND_HALFVEC = 2` frames float2; one OID must never mean two wire formats, since decoding one as the other yields a plausible vector of the wrong length. Adding a kind means a branch in *both* twins at all six dispatch sites (text/binary x encode/decode, plus the two `_decode_value` entry points) -- a missed site silently returns raw bytes, which is how this one was caught. The text form is shared: pgvector prints both types as `[1,2,3]`. Elements are bounded by binary16's largest finite value (65504, `MAX_HALF_MAGNITUDE`) at coercion *and* at encode, because a larger value rounds to an infinity pgvector then refuses. `Halfvec`'s `extension` is `\"vector\"`, not `\"halfvec\"` -- one extension provides both, and naming the type would send readers to install something nonexistent. Operator classes are per type (`halfvec_cosine_ops`).\n\n**`sparsevec` is a third kind (`EXT_KIND_SPARSEVEC = 3`) and `bit` is not an extension type at all.** The same six-dispatch-site rule applies to `sparsevec`, plus a seventh consideration the first two did not have: its Python value is neither a list nor anything else a builtin can express, so `wreath._sparsevec.SparseVector` carries the dimension and the index-to-value mapping together. That module holds one class and imports nothing from wreath, because *both* codec twins need it -- `_pure/postgres.py` imports it directly and `codec.c` resolves it in module init beside `uuid.UUID`. Its validation is not restated in C: two copies of a bounds check are two chances to disagree about what pgvector accepts, and the sparse paths are cold. **`SparseVector` counts indices from 1** (pgvector's text form and its documentation do) while the binary wire counts from 0; the conversion lives in `_encode_sparsevec`/`_decode_sparsevec` and their C twins and nowhere else. It carries `_pg_oid` on a *copy* made by `to_wire`, for the same parameter-inference reason `WireList` exists, because the caller's own value may outlive the bind and be bound against another database.\n\n**`Bit` is PostgreSQL's own `bit`, OID 1560 -- a compile-time constant with no resolution step.** Only pgvector's `<~>` (hamming) and `<%>` (jaccard) operators over it, and the `bit_hamming_ops`/`bit_jaccard_ops` index classes, come from the extension, which is why `_bit_distance` gates on the OID rather than on `isinstance(pg_type, ExtensionType)`. The wire format packs bits MSB-first with the final byte padded on the right; reversed, every value still round-trips through the codec and every distance the server computes is wrong, so `tests/orm/test_bit_codec.py` asserts the packing against literal bytes rather than only through a round trip. Non-zero padding is refused rather than masked away, because masking would make two wire values decode to one string.\n\n**A halfvec value's decimal depends on the result format**: the binary decoder widens the stored binary16 exactly (`0.0999755859375`), pgvector's text rendering prints nine significant digits (`0.099975586`). Different Python floats. Pinned in `tests/orm/test_halfvec_live.py`."
     },
     {
       "name": "series",
@@ -541,7 +547,7 @@
       "tests": [
         "tests/migrations/"
       ],
-      "policy": "Readiness resolution is metal-only. The inverse `down` is derived from the same artifact as the forward migration and refuses to strand live ORM code unless --force. The DDL runner is still unshipped; see docs/reference/roadmap.md. A deferred migration declares its conversion beside the model rather than in a migration file, because artifacts are generated from the catalog and there is nothing to decorate. `Recode` (same type, new values) is guarded by a predicate scan that refuses ordered comparison, patterns, `GROUP BY`, `ORDER BY` and joins on a converting column; `Retype` (new type, two columns) is guarded by the gate instead, because an unconverted row reads NULL rather than reading wrong. Refusal is the default: a false refusal costs an argument, a false permission costs a silent incident. A scan that examined nothing refuses rather than reporting clean.",
+      "policy": "Readiness resolution is metal-only. The inverse `down` is derived from the same artifact as the forward migration and refuses to strand live ORM code unless --force. Single-schema `apply` ships; applying one artifact across a fleet of tenant schemas is still unshipped, as tracked in docs/reference/roadmap.md. A deferred migration declares its conversion beside the model rather than in a migration file, because artifacts are generated from the catalog and there is nothing to decorate. `Recode` (same type, new values) is guarded by a predicate scan that refuses ordered comparison, patterns, `GROUP BY`, `ORDER BY` and joins on a converting column; `Retype` (new type, two columns) is guarded by the gate instead, because an unconverted row reads NULL rather than reading wrong. Refusal is the default: a false refusal costs an argument, a false permission costs a silent incident. A scan that examined nothing refuses rather than reporting clean.",
       "decisions": [
         "docs/decisions/0014-migrations-are-generated-from-the-catalog.md",
         "docs/decisions/0016-validate-the-schema-at-startup.md"
@@ -935,7 +941,7 @@
     },
     {
       "name": "reactor",
-      "capability": null,
+      "capability": "An asyncio-compatible event loop for the experimental metal server tier, with inline completion for non-suspending requests and an optional native timing wheel",
       "guides": [
         "docs/guides/server.md"
       ],
@@ -1112,7 +1118,7 @@
     },
     {
       "name": "devtools",
-      "capability": null,
+      "capability": "Repository gates and measurement tools for native invariants, source maps, generated artifacts, request boundaries, complexity, and performance decomposition",
       "guides": [
         "docs/cookbook/agents/checks.md"
       ],
@@ -1139,7 +1145,7 @@
     },
     {
       "name": "performance",
-      "capability": null,
+      "capability": "Reproducible framework and server benchmarks using equivalent workloads, repeated trials, measured noise, and retained raw results",
       "guides": [
         "benchmarks/README.md"
       ],
@@ -1223,7 +1229,7 @@
     },
     {
       "name": "example",
-      "capability": null,
+      "capability": "A complete camera-trap application demonstrating Wreath routing, ORM, authorization, migrations, ingestion, and operational tooling end to end",
       "guides": [
         "docs/example/index.md",
         "docs/example/quickstart.md",
