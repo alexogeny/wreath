@@ -370,3 +370,195 @@ async def test_a_session_that_cannot_be_serialized_publishes_no_state() -> None:
         "a failed serialization must leave no session behind"
     )
     assert request.state.get("_session_loaded") is None
+
+
+# --- the signature and the clock, isolated ------------------------------------
+#
+# `wreath mutant` deleted the HMAC comparison in `_load_sid` and every test
+# stayed green -- including `test_a_forged_cookie_is_rejected_without_touching_
+# the_store`, whose comment says "signature checked first". Its cookie is
+# `a.b.c`, so with the signature check gone `int("b")` raises and the cookie is
+# still rejected: the test proves the store was not touched, not that the MAC
+# was verified. The cookie-only tamper test in `test_client_sessions_forms.py`
+# exercises a different code path entirely, because it has no store.
+#
+# A cookie that isolates the MAC has to be *otherwise perfect*: real structure,
+# a current timestamp, a correctly encoded id -- and one wrong signature.
+
+
+def _forge(sid: str, secret: bytes, *, stamp: int | None = None) -> str:
+    """A session cookie signed with `secret`, in the middleware's own format."""
+    import base64
+    import hashlib
+    import hmac
+    import time
+
+    if stamp is None:
+        stamp = int(time.time())
+    body = base64.urlsafe_b64encode(sid.encode("ascii")).decode("ascii").rstrip("=")
+    signed = f"{body}.{stamp}".encode("ascii")
+    mac = hmac.new(secret, signed, hashlib.sha256).hexdigest()
+    return f"{body}.{stamp}.{mac}"
+
+
+async def test_the_forging_helper_produces_a_cookie_the_middleware_accepts() -> None:
+    """The control for the two tests below.
+
+    Without this, a `_forge` with any mistake in it would make them pass for the
+    reason the cookie was malformed rather than the reason under test -- which
+    is exactly the defect this whole section exists to fix.
+    """
+    store = MemoryStore()
+    app, _ = _app(store)
+    client = TestClient(app)
+    store.rows["sid-1"] = {"user": "ada"}
+
+    good = _forge("sid-1", b"s" * 32)
+    who = await client.get("/whoami", headers={"cookie": f"wreath_session={good}"})
+    assert who.json() == {"user": "ada"}          # loaded, so the format is right
+
+
+async def test_a_cookie_signed_with_another_secret_is_rejected() -> None:
+    """Structure, timestamp and id all valid; only the MAC is wrong."""
+    store = MemoryStore()
+    app, _ = _app(store)
+    client = TestClient(app)
+    store.rows["sid-1"] = {"user": "ada"}
+    before = store.loads
+
+    forged = _forge("sid-1", b"attacker-secret-of-the-same-length")
+    who = await client.get("/whoami", headers={"cookie": f"wreath_session={forged}"})
+
+    assert who.json() == {"user": None}
+    assert store.loads == before                  # and the store was never asked
+
+
+async def test_a_cookie_whose_signature_is_one_character_off_is_rejected() -> None:
+    """`compare_digest` on the hex digest, not a prefix or a truncation."""
+    store = MemoryStore()
+    app, _ = _app(store)
+    client = TestClient(app)
+    store.rows["sid-1"] = {"user": "ada"}
+
+    good = _forge("sid-1", b"s" * 32)
+    body, stamp, mac = good.split(".")
+    flipped = mac[:-1] + ("0" if mac[-1] != "0" else "1")
+    tampered = f"{body}.{stamp}.{flipped}"
+
+    who = await client.get("/whoami", headers={"cookie": f"wreath_session={tampered}"})
+    assert who.json() == {"user": None}
+
+
+async def test_a_correctly_signed_but_expired_cookie_is_rejected() -> None:
+    """The stamp is inside the MAC, so an attacker cannot move it forward.
+
+    That makes the expiry check the only thing enforcing the lifetime, and it
+    had no test: every cookie the suite presented was minted moments earlier.
+    """
+    import time
+
+    store = MemoryStore()
+    app = Wreath()
+    app.add_middleware(SessionMiddleware(secret="s" * 32, store=store, max_age=60))
+
+    @app.get("/whoami")
+    async def whoami(request: Any) -> dict:
+        return {"user": request.state.session.get("user")}
+
+    client = TestClient(app)
+    store.rows["sid-1"] = {"user": "ada"}
+    before = store.loads
+
+    stale = _forge("sid-1", b"s" * 32, stamp=int(time.time()) - 61)
+    who = await client.get("/whoami", headers={"cookie": f"wreath_session={stale}"})
+    assert who.json() == {"user": None}
+    assert store.loads == before                  # expired before the store is asked
+
+    fresh = _forge("sid-1", b"s" * 32, stamp=int(time.time()) - 59)
+    who = await client.get("/whoami", headers={"cookie": f"wreath_session={fresh}"})
+    assert who.json() == {"user": "ada"}          # inside the window, still good
+
+
+async def test_a_session_secret_that_is_too_short_is_refused() -> None:
+    """A short HMAC key is a forgeable cookie, so it fails at startup."""
+    from wreath.middleware.sessions import MIN_SECRET_BYTES
+
+    with pytest.raises(ValueError, match="at least"):
+        SessionMiddleware(secret="s" * (MIN_SECRET_BYTES - 1))
+    assert SessionMiddleware(secret="s" * MIN_SECRET_BYTES) is not None
+
+
+class TouchableStore(MemoryStore):
+    """A store that can extend a row's life without rewriting it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.touches: list[tuple[str, int]] = []
+
+    async def touch(self, sid: str, max_age: int) -> None:
+        self.touches.append((sid, max_age))
+
+
+async def test_an_unchanged_session_in_use_has_its_expiry_extended() -> None:
+    """Sliding expiry, which was absolute until `touch` was added.
+
+    A session read on every request but never written would otherwise die
+    `max_age` after it was *created*, however active its owner was. `wreath
+    mutant` reported the `touch` call UNREACHED: `MemoryStore` has no such
+    method, so every test took the "store that cannot extend a row" branch and
+    the fix was never executed.
+    """
+    store = TouchableStore()
+    app = Wreath()
+    app.add_middleware(SessionMiddleware(secret="s" * 32, store=store, max_age=600))
+
+    @app.get("/read")
+    async def read(request: Any) -> dict:
+        return {"user": request.state.session.get("user")}
+
+    client = TestClient(app)
+    store.rows["sid-1"] = {"user": "ada"}
+    cookie = f"wreath_session={_forge('sid-1', b's' * 32)}"
+
+    saves = store.saves
+    response = await client.get("/read", headers={"cookie": cookie})
+
+    assert response.json() == {"user": "ada"}
+    assert store.touches == [("sid-1", 600)]     # extended ...
+    assert store.saves == saves                  # ... without rewriting the row
+    assert response.header("set-cookie") is None  # and without reissuing the cookie
+
+
+async def test_a_changed_session_is_saved_rather_than_touched() -> None:
+    """`touch` is the no-write path only. A write already resets the expiry."""
+    store = TouchableStore()
+    app = Wreath()
+    app.add_middleware(SessionMiddleware(secret="s" * 32, store=store, max_age=600))
+
+    @app.get("/write")
+    async def write(request: Any) -> dict:
+        request.state.session["seen"] = True
+        return {"ok": True}
+
+    client = TestClient(app)
+    store.rows["sid-1"] = {"user": "ada"}
+
+    await client.get("/write", headers={"cookie": f"wreath_session={_forge('sid-1', b's' * 32)}"})
+
+    assert store.touches == []
+    assert store.saves == 1
+
+
+async def test_a_store_that_cannot_extend_a_row_is_left_alone() -> None:
+    """The other branch: no `touch` attribute means no call and no error."""
+    store = MemoryStore()
+    app, _ = _app(store)
+    client = TestClient(app)
+    store.rows["sid-1"] = {"user": "ada"}
+
+    saves = store.saves
+    who = await client.get(
+        "/whoami", headers={"cookie": f"wreath_session={_forge('sid-1', b's' * 32)}"}
+    )
+    assert who.json() == {"user": "ada"}
+    assert store.saves == saves

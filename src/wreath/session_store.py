@@ -62,12 +62,29 @@ class PostgresSessionStore:
     Unlike the other two stores over that primitive, the lifetime is not the
     store's to decide: the cookie's `max_age` is what a session should outlive,
     so it is bound per write rather than fixed at construction.
+
+    Args:
+        database: the `Database` this store's statements run on.
+        table: the backing table, an unqualified plain identifier.
+        session_key: which session key holds the principal, matching
+            `user_router(session_key=...)` and
+            `SessionIdentityBackend(session_key=...)`. Only `delete_for` reads
+            inside the payload, so this affects nothing else -- but it affects
+            that, and it used to be hardcoded, so ending a user's other sessions
+            silently ended none whenever the application had renamed the key.
     """
 
-    __slots__ = ("_database", "_store")
+    __slots__ = ("_database", "_session_key", "_store")
 
-    def __init__(self, database: Any, *, table: str = "wreath_session") -> None:
+    def __init__(
+        self,
+        database: Any,
+        *,
+        table: str = "wreath_session",
+        session_key: str = "principal",
+    ) -> None:
         self._database = database
+        self._session_key = session_key
         self._store = PostgresStore(
             database,
             Keyed(
@@ -86,8 +103,13 @@ class PostgresSessionStore:
         )
         self._store.define(
             "delete_for",
+            # The key is bound, not interpolated: one prepared statement covers
+            # every session key, and the caller's string never reaches the SQL
+            # text. `$2::text` is explicit because `jsonb -> unknown` is
+            # ambiguous between the text and the integer operator, and an
+            # untyped parameter would leave PostgreSQL to guess.
             f"DELETE FROM {self._store.table} "
-            "WHERE data -> 'principal' ->> 'sub' = $1",
+            "WHERE data -> $2::text ->> 'sub' = $1",
         )
         self._store.define(
             "save",
@@ -164,15 +186,32 @@ class PostgresSessionStore:
         """
         await self._store.delete(sid)
 
-    async def delete_for(self, subject: str) -> int:
+    async def delete_for(self, subject: str, session_key: str | None = None) -> int:
         """Drop every session whose principal is `subject`.
 
         One statement over the payload, because the alternative -- read every
         row, decode each one, delete the matches -- is the whole table across
-        the network to end a handful of sessions. The predicate reads the same
-        `principal.sub` the session backend writes.
+        the network to end a handful of sessions.
+
+        The predicate has to read the key the session backend actually writes,
+        and that key is configurable. It was hardcoded to `principal` here, so a
+        deployment on `user_router(session_key=...)` /
+        `SessionIdentityBackend(session_key=...)` got a password reset that
+        matched no row, ended **no** sessions, and reported success -- a
+        security control silently doing nothing. `session_key` defaults to
+        whatever this store was constructed with, and `wreath.users` passes its
+        own so the two cannot drift apart.
+
+        Args:
+            subject: the principal's `sub`, as login wrote it.
+            session_key: the session key holding the principal. Defaults to the
+                store's own `session_key=`.
+
+        Returns:
+            How many rows were deleted, or 0 when the driver reported no count.
         """
-        status = await self._store.statement("delete_for").execute(subject)
+        key = self._session_key if session_key is None else session_key
+        status = await self._store.statement("delete_for").execute(subject, key)
         if not isinstance(status, str) or not status.startswith("DELETE"):
             return 0
         _, _, count = status.partition(" ")
