@@ -46,10 +46,35 @@ _BINARY_OPERATORS = frozenset({
     "=", "<>", "<", "<=", ">", ">=", "LIKE", "ILIKE",
     # jsonb / array operators; "= ANY"/"= ALL" render specially (see below).
     "@>", "<@", "?", "?|", "?&", "#>>", "#>", "&&", "= ANY", "= ALL",
+    # pgvector distances. These yield a number rather than a boolean, so they
+    # reach SQL as an ORDER BY key or as the left side of a comparison; `where()`
+    # refuses one on its own.
+    "<->", "<=>", "<#>", "<+>",
+    # Full-text search. Each token names its tsquery parser as well as its
+    # operation, so the allowlist still decides every byte reaching SQL.
+    "@@ websearch_to_tsquery", "@@ to_tsquery",
+    "ts_rank websearch_to_tsquery", "ts_rank to_tsquery",
 })
 #: Operators that render `left = ANY(right)` / `left = ALL(right)` rather
 #: than the ordinary infix form, with the array column on the right.
 _ARRAY_QUANTIFIERS = {"= ANY": "ANY", "= ALL": "ALL"}
+#: Full-text operators, split into the form they render and the tsquery parser
+#: they build their right operand with. `@@` is infix with a function call on
+#: the right; `ts_rank` wraps *both* operands in a call, which is why it needs a
+#: render path of its own rather than an entry in the infix table.
+_TEXT_SEARCH = {
+    "@@ websearch_to_tsquery": ("@@", "websearch_to_tsquery"),
+    "@@ to_tsquery": ("@@", "to_tsquery"),
+    "ts_rank websearch_to_tsquery": ("ts_rank", "websearch_to_tsquery"),
+    "ts_rank to_tsquery": ("ts_rank", "to_tsquery"),
+}
+#: A text-search configuration name. The configuration is a declaration-time
+#: constant off the column's own type, exactly as its name is, and reaches SQL
+#: as a quoted literal rather than a bind -- so it is re-checked here as well as
+#: at declaration, because this is the function that writes it out. Matched with
+#: `fullmatch`, never `match`: `$` also matches immediately before a trailing
+#: newline, and `^...$` let a config carrying one through to the quoted literal.
+_TS_CONFIG = re.compile(r"[a-z_][a-z0-9_]*")
 _BOOLEAN_OPERATORS = frozenset({"AND", "OR"})
 _UNARY_OPERATORS = frozenset({"NOT", "IS NULL", "IS NOT NULL"})
 _IN_OPERATORS = frozenset({"IN", "NOT IN"})
@@ -398,6 +423,11 @@ def compile_declared_values(
     program: list[tuple[str, Any, Any]] = []
     for predicate in select.predicates:
         _append_declared_values(predicate, placeholder, program)
+    if not select.plain_orderings:
+        # After the predicates and before the limit, matching the order the
+        # renderer emits placeholders in.
+        for item in select.orderings:
+            _append_declared_values(item.expression, placeholder, program)
 
     types: list[Any] = []
     literals: list[Any] = []
@@ -468,6 +498,13 @@ def _compile_bind_program(select: Select) -> Callable[[Select], tuple[Any, ...]]
     paths: list[tuple[str | int, ...]] = []
     for index, predicate in enumerate(select.predicates):
         _append_bind_paths(predicate, ("predicates", index), paths)
+    if not select.plain_orderings:
+        # After the predicates and before the limit, matching the order the
+        # renderer emits placeholders in.
+        for index, item in enumerate(select.orderings):
+            _append_bind_paths(
+                item.expression, ("orderings", index, "expression"), paths
+            )
 
     expressions: list[str] = []
     for path in paths:
@@ -757,13 +794,27 @@ def _build_plan(registry: Any, select: Select, spec: ModelSpec) -> _CachedPlan:
         )
     if select.orderings:
         builder.text(" ORDER BY ")
-        builder.text(
-            ", ".join(
-                f"{quote('t0')}.{quote(item.expression.column.database_name)} "
-                f"{_direction(item)}"
-                for item in select.orderings
+        if select.plain_orderings:
+            # `plain_orderings` is exactly the statement that every expression
+            # here is a ColumnExpr; `Select` computes it once, at construction.
+            builder.text(
+                ", ".join(
+                    f"{quote('t0')}."
+                    f"{quote(cast(ColumnExpr, item.expression).column.database_name)} "
+                    f"{_direction(item)}"
+                    for item in select.orderings
+                )
             )
-        )
+        else:
+            # A distance ordering carries a bound value, so it goes through the
+            # operand renderer rather than a join of column names -- and it must
+            # render *here*, between the WHERE and the LIMIT, because the
+            # builder numbers placeholders in the order they are emitted.
+            for index, item in enumerate(select.orderings):
+                if index:
+                    builder.text(", ")
+                _render_operand(item.expression, builder, "t0", filter_aliases)
+                builder.text(f" {_direction(item)}")
     if select.limit_ is not None:
         builder.text(f" LIMIT {builder.bind(select.limit_, _INT8_OID)}")
     if select.offset_ is not None:
@@ -1067,6 +1118,15 @@ def render_predicate(
             _render_operand(node.right, builder, alias, joins)
             builder.text(")")
             return
+        text_search = _TEXT_SEARCH.get(node.operator)
+        if text_search is not None:
+            if text_search[0] != "@@":
+                raise ORMError(
+                    f"cannot render {node.operator!r} as a predicate: it yields a "
+                    "relevance score, not a boolean"
+                )
+            _render_text_search(node, builder, alias, joins, *text_search)
+            return
         _render_operand(node.left, builder, alias, joins)
         builder.text(f" {node.operator} ")
         _render_operand(node.right, builder, alias, joins)
@@ -1166,6 +1226,14 @@ def _render_operand(
     if isinstance(node, BinaryExpr):
         if node.operator not in _BINARY_OPERATORS or node.operator in _ARRAY_QUANTIFIERS:
             raise ORMError(f"invalid SQL operator {node.operator!r}")
+        text_search = _TEXT_SEARCH.get(node.operator)
+        if text_search is not None:
+            # A rank is an ORDER BY key and the left side of a threshold, so it
+            # reaches SQL here far more often than as a predicate. It carries its
+            # own parentheses (it is a function call), which is why it takes this
+            # branch rather than the infix one below.
+            _render_text_search(node, builder, alias, joins, *text_search)
+            return
         builder.text("(")
         _render_operand(node.left, builder, alias, joins)
         builder.text(f" {node.operator} ")
@@ -1173,6 +1241,48 @@ def _render_operand(
         builder.text(")")
         return
     raise ORMError(f"cannot render {type(node).__name__} as an operand")
+
+
+def _render_text_search(
+    node: BinaryExpr,
+    builder: SqlBuilder,
+    alias: str,
+    joins: dict[tuple[Any, ...], str],
+    form: str,
+    parser: str,
+) -> None:
+    """Render `@@ <parser>(...)` or `ts_rank(column, <parser>(...))`.
+
+    The tsquery is built from the *column's* configuration rather than from
+    anything the caller passed: a query analysed under a different configuration
+    than the stored vector matches nothing, and that reads as missing data rather
+    than as a mistake. Both operands still bind normally, so the search text
+    never reaches SQL text.
+    """
+    config = _text_search_config(node)
+    if form == "ts_rank":
+        builder.text("ts_rank(")
+        _render_operand(node.left, builder, alias, joins)
+        builder.text(f", {parser}('{config}', ")
+        _render_operand(node.right, builder, alias, joins)
+        builder.text("))")
+        return
+    _render_operand(node.left, builder, alias, joins)
+    builder.text(f" @@ {parser}('{config}', ")
+    _render_operand(node.right, builder, alias, joins)
+    builder.text(")")
+
+
+def _text_search_config(node: BinaryExpr) -> str:
+    """The text-search configuration the left operand's column declares."""
+    column = getattr(node.left, "column", None)
+    config = getattr(getattr(column, "pg_type", None), "config", None)
+    if not isinstance(config, str) or not _TS_CONFIG.fullmatch(config):
+        raise ORMError(
+            f"cannot render {node.operator!r}: its left operand is not a TsVector "
+            "column naming a text-search configuration"
+        )
+    return config
 
 
 def _collect_binds_pure(select: Select) -> tuple[tuple[Any, ...], tuple[int, ...]]:
@@ -1185,6 +1295,9 @@ def _collect_binds_pure(select: Select) -> tuple[tuple[Any, ...], tuple[int, ...
     oids: list[int] = []
     if select.predicates:
         _walk_values(conjoin(select.predicates), values, oids)
+    if not select.plain_orderings:
+        for item in select.orderings:
+            _walk_values(item.expression, values, oids)
     if select.limit_ is not None:
         values.append(select.limit_)
         oids.append(_INT8_OID)
@@ -1207,6 +1320,11 @@ def _collect_binds_native(select: Select) -> tuple[tuple[Any, ...], tuple[int, .
             pg_type = node.pg_type
             values.append(pg_type.to_wire(node.value))
             oids.append(pg_type.oid)
+    # The native collector walks predicates only; an ordering that binds a value
+    # is rare enough that teaching C about it would cost more than this guard.
+    if not select.plain_orderings:
+        for item in select.orderings:
+            _walk_values(item.expression, values, oids)
     if select.limit_ is not None:
         values.append(select.limit_)
         oids.append(_INT8_OID)
@@ -1358,11 +1476,21 @@ def _shape_of_pure(registry: Any, select: Select) -> bytes:
         _shape_expression(item, out)
     out.append(b"|")
     for item in select.orderings:
-        out.append(
-            b"o"
-            + item.expression.column.shape_ref
-            + item.direction.encode("ascii")
-        )
+        expression = item.expression
+        if isinstance(expression, ColumnExpr):
+            # One element, byte-for-byte what `orm_shape.c` emits for the same
+            # ordering. The parity test pins it.
+            out.append(
+                b"o" + expression.column.shape_ref + item.direction.encode("ascii")
+            )
+            continue
+        # A distance ordering keys through the whole expression: the operator
+        # and the bound type both change the SQL text, and two searches over one
+        # column with different distances are two plans. Only the pure keyer
+        # sees these -- `shape_of` routes them here deliberately.
+        out.append(b"o")
+        _shape_expression(expression, out)
+        out.append(item.direction.encode("ascii"))
     _shape_loads(select.includes, out)
     out.append(b"f" if select.for_update_ else b"-")
     # Only presence matters: limits and offsets are bound, not inlined.
@@ -1408,7 +1536,16 @@ if _core is not None and hasattr(_core, "orm_shape"):
         extension silently keying two different queries the same way. A
         rebuild-order hazard that degrades to "slower" is worth keeping; the
         alternative degrades to a wrong plan.
+
+        An ordering that is not a bare column takes the pure path *before* the
+        call rather than through this fallback: the C keyer reads
+        `ordering.expression.column`, which a distance node does not have, and
+        that surfaces as an `AttributeError` -- not the `ORMError` this recovery
+        is built on. Deciding it from a flag the `Select` already computed is one
+        attribute read, and it keeps the contract above as narrow as it claims.
         """
+        if not select.plain_orderings:
+            return _shape_of_pure(registry, select)
         try:
             return _shape_of_native(registry, select)
         except ORMError:

@@ -8,13 +8,15 @@ a different storage index in each model that inherits it.
 from __future__ import annotations
 
 import datetime
+import re
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 from .constraints import Check, collect_checks, compile_column_validator
 from .errors import DeclarationError, UnloadedAttributeError
 from .expressions import ColumnExpr
-from .types import PgType
+from .types import GeneratedType, PgType
 
 
 class _Missing:
@@ -57,6 +59,8 @@ class Column:
         "deferrable",
         "index",
         "index_method",
+        "index_ops",
+        "index_with",
         "nullable",
         "on_delete",
         "on_update",
@@ -91,6 +95,8 @@ class Column:
         deferrable: bool = False,
         checks: tuple[Check, ...] = (),
         index_method: str | None = None,
+        index_ops: str | None = None,
+        index_with: tuple[tuple[str, str], ...] = (),
     ) -> None:
         global _ORDER
         _ORDER += 1
@@ -103,6 +109,15 @@ class Column:
         #: when it has no index. Kept separate from `indexed` so the column
         #: fingerprint (which encodes only index *presence*) is unchanged.
         self.index_method = index_method
+        #: The operator class this column's index is built with
+        #: ("vector_cosine_ops"), or None for the access method's default. It
+        #: is what makes an HNSW index answer a *cosine* search rather than an
+        #: L2 one, so it belongs to the index rather than to the query.
+        self.index_ops = index_ops
+        #: Index-method options as ordered `(name, value)` pairs, rendered as
+        #: `WITH (m = 16, ef_construction = 64)`. Ordered rather than a dict
+        #: because the rendered DDL has to be byte-stable across runs.
+        self.index_with = index_with
         self.default = default
         self.server_default = server_default
         self.references = references
@@ -142,6 +157,8 @@ class Column:
             deferrable=self.deferrable,
             checks=self.checks,
             index_method=self.index_method,
+            index_ops=self.index_ops,
+            index_with=self.index_with,
         )
         copy.order = self.order
         copy.owner = owner
@@ -172,6 +189,17 @@ class Column:
         return self.python_name
 
     @property
+    def generated(self) -> bool:
+        """Whether PostgreSQL computes this column rather than the application.
+
+        A property rather than a stored flag: it is read on the *rare* branch of
+        the constructor (a column with no supplied value and no default) and by
+        the migration descriptor, never per assignment -- assignment is refused
+        by the type's own `coerce`, which is already on that path.
+        """
+        return isinstance(self.pg_type, GeneratedType)
+
+    @property
     def expression(self) -> ColumnExpr:
         if self._expression is None:
             raise DeclarationError(
@@ -197,7 +225,98 @@ class Column:
 
 _FK_ACTIONS = frozenset({"no action", "restrict", "cascade", "set null", "set default"})
 
-_INDEX_METHODS = frozenset({"btree", "gin"})
+#: The access methods wreath renders `CREATE INDEX ... USING <method>` for.
+#: `hnsw` and `ivfflat` are pgvector's; both are only meaningful on a vector
+#: column, and both are expensive to build, which the migrations guide says out
+#: loud rather than leaving to be discovered during a deploy.
+_INDEX_METHODS = frozenset({"btree", "gin", "hnsw", "ivfflat"})
+
+#: The access methods whose index descriptor carries no operator-class field at
+#: all. Everything else spells its operator class and its method options, which
+#: is what makes a *default* operator class comparable: the catalog records a
+#: default as the empty string, so the desired side has to know this database's
+#: defaults to write the same thing. `wreath.migrations._registry_descriptor`
+#: and `wreath.orm.introspection.declared_index_methods` both read this, and
+#: `_SINGLE_CATALOG_SQL`'s `am.amname IN ('btree', 'gin')` is the third copy --
+#: it is SQL and cannot import.
+_IMPLICIT_OPCLASS_METHODS = frozenset({"btree", "gin"})
+
+#: An operator class or an index option name, as PostgreSQL spells them.
+#: Matched with `fullmatch`, never `match`: `$` also matches immediately before
+#: a trailing newline, so `^...$` accepted `"vector_cosine_ops\n"` into DDL text.
+_INDEX_TOKEN = re.compile(r"[a-z_][a-z0-9_]*")
+#: An index option value: a bare identifier such as `on`, or a number, which may
+#: be negative, fractional, or written with an exponent. Deliberately narrow: it
+#: is rendered into DDL text rather than bound, so anything else is refused at
+#: declaration rather than quoted at render.
+#:
+#: Spelled as an alternation rather than a character class because a class
+#: containing `-` accepts it in *any* position, and `index_with={"m": "--"}`
+#: rendered `WITH (m = --)` -- a comment introducer. Not an injection (nothing
+#: can follow it on the line, and `--` closes nothing), but a value that opens a
+#: comment is not a value, and the class already claimed to admit only numbers
+#: and identifiers.
+_INDEX_OPTION_VALUE = re.compile(
+    r"-?[0-9]+(?:\.[0-9]+)?(?:[eE]-?[0-9]+)?|[A-Za-z_][A-Za-z0-9_.]*"
+)
+
+
+def _resolve_index_ops(
+    index_method: str | None, index_ops: str | None
+) -> str | None:
+    if index_ops is None:
+        return None
+    if index_method is None:
+        raise DeclarationError("index_ops= requires an index= on the same column")
+    if not isinstance(index_ops, str) or not _INDEX_TOKEN.fullmatch(index_ops):
+        raise DeclarationError(
+            f"index_ops={index_ops!r} must be an operator class name such as "
+            "'vector_cosine_ops'"
+        )
+    return index_ops
+
+
+def _resolve_index_with(
+    index_method: str | None, index_with: Any
+) -> tuple[tuple[str, str], ...]:
+    if index_with is None:
+        return ()
+    if index_method is None:
+        raise DeclarationError("index_with= requires an index= on the same column")
+    if not isinstance(index_with, Mapping):
+        raise DeclarationError(
+            f"index_with= must be a mapping of option names to values, got "
+            f"{index_with!r}"
+        )
+    resolved: list[tuple[str, str]] = []
+    for name, value in index_with.items():
+        if not isinstance(name, str) or not _INDEX_TOKEN.fullmatch(name):
+            raise DeclarationError(
+                f"index_with option name {name!r} is not a PostgreSQL identifier"
+            )
+        if isinstance(value, bool):
+            text = "on" if value else "off"
+        elif isinstance(value, (int, float)):
+            text = repr(value)
+        elif isinstance(value, str):
+            text = value
+        else:
+            raise DeclarationError(
+                f"index_with[{name!r}] must be a number, string, or bool, got "
+                f"{value!r}"
+            )
+        if not _INDEX_OPTION_VALUE.fullmatch(text):
+            raise DeclarationError(
+                f"index_with[{name!r}]={value!r} is not a plain index-option value; "
+                "it would be rendered into DDL text rather than bound"
+            )
+        resolved.append((name, text))
+    # Sorted, not dict-ordered. `pg_class.reloptions` echoes back the order the
+    # index was created with, so the comparison only holds if the order wreath
+    # emits is a function of the option *names* -- a reordered dict literal
+    # would otherwise show up as drift on the next migration run.
+    resolved.sort()
+    return tuple(resolved)
 
 
 def _resolve_index(index: bool | str) -> tuple[bool, str | None]:
@@ -225,6 +344,8 @@ def column(
     nullable: bool = False,
     unique: bool = False,
     index: bool | str = False,
+    index_ops: str | None = None,
+    index_with: Mapping[str, Any] | None = None,
     default: Any = MISSING,
     server_default: str | None = None,
     references: Any = None,
@@ -239,7 +360,24 @@ def column(
     constructor omits the field. `index=True` declares one ordinary btree index
     on this column; `index="gin"` declares a GIN index instead (the right
     choice for `Jsonb` and `Array` columns queried with the containment and
-    key operators). `server_default` names a database-side
+    key operators), and `index="hnsw"` or `index="ivfflat"` declares a pgvector
+    index on a `Vector` column.
+
+    `index_ops` names the operator class the index is built with, which is what
+    decides *which* distance an approximate index can answer:
+
+    ```python
+    embedding: Mapped[list[float]] = column(
+        Vector(1536),
+        index="hnsw",
+        index_ops="vector_cosine_ops",
+        index_with={"m": 16, "ef_construction": 64},
+    )
+    ```
+    `index_with` passes index-method options through to
+    `WITH (m = 16, ef_construction = 64)`. Both require an `index=`, and both
+    are rendered into DDL rather than bound, so their values are restricted to
+    plain identifiers and numbers. `server_default` names a database-side
     default, which makes the column optional on insert and returned by
     `RETURNING`. `references` takes another model's column expression
     (`references=User.id`) and records a foreign key.
@@ -284,6 +422,8 @@ def column(
         unique=unique,
         indexed=indexed,
         index_method=index_method,
+        index_ops=_resolve_index_ops(index_method, index_ops),
+        index_with=_resolve_index_with(index_method, index_with),
         default=default,
         server_default=server_default,
         references=references,

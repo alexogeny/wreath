@@ -69,6 +69,12 @@ def test_only_reserved_or_unusual_identifiers_are_quoted() -> None:
     assert quote_identifier("group") == '"group"'
     assert quote_identifier("Mixed") == '"Mixed"'
     assert quote_identifier('od"d') == '"od""d"'
+    # `$` matches immediately before a trailing newline, so the anchored
+    # `^...$` here judged this bare and emitted it unquoted -- the one answer
+    # `quote_ident` never gives. Unlike its sibling validators this pattern
+    # decides *quoting* rather than acceptance, so being lax emitted broken
+    # SQL rather than merely admitting a value nothing could use.
+    assert quote_identifier("state\n") == '"state\n"'
 
 
 def test_a_single_element_in_is_refused_because_postgres_rewrites_it() -> None:

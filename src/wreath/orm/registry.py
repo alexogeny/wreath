@@ -13,6 +13,7 @@ from collections import OrderedDict
 from sys import getsizeof
 from typing import Any, Literal
 
+from ._generated import render_generation
 from ._index_predicate import render_predicate
 from .errors import DeclarationError, RegistryError
 from .expressions import ColumnExpr
@@ -32,6 +33,7 @@ from .schema import (
     fingerprint_registry_template,
 )
 from .table import Index
+from .types import GeneratedType
 
 ValidateSchema = Literal["off", "warn", "error"]
 _VALIDATE_MODES = frozenset({"off", "warn", "error"})
@@ -66,6 +68,7 @@ class Registry:
         "_prepared_shapes",
         "_specs",
         "database",
+        "default_opclasses",
         "fingerprint",
         "query_cache_bytes",
         "query_cache_size",
@@ -125,6 +128,13 @@ class Registry:
         # Empty until an app builds the image; an unstamped model records no
         # phase rather than attributing to a made-up ID.
         self._flight_model_ids: dict[type[Model], int] = {}
+        # `(access method, indexed type OID) -> default operator class`, read
+        # from this registry's database by
+        # `wreath.orm.introspection.resolve_default_opclasses`. `None` means not
+        # resolved yet; an empty dict means resolved and there are none, which is
+        # a different answer and must not trigger a second read. Nothing outside
+        # the migration descriptor consults it.
+        self.default_opclasses: dict[tuple[str, int], str] | None = None
         self.fingerprint = b""
         self.template_fingerprint = b""
         self.deployment_fingerprint = b""
@@ -220,7 +230,6 @@ class Registry:
                     database_name=item.database_name,
                     position=position,
                     pg_type=item.pg_type,
-                    oid=item.pg_type.oid,
                     nullable=item.nullable,
                     primary_key=item.primary_key,
                     unique=item.unique,
@@ -249,6 +258,16 @@ class Registry:
         # it at declaration time would be too early (no types) and at migration
         # time too late (a bad predicate must fail startup, not a deploy).
         by_db_name = {item.database_name: item for item in columns}
+        # A generated column's expression is rendered here for the same reason a
+        # partial index's predicate is: it names other columns, so it needs their
+        # database names and types, and it must fail startup rather than a deploy.
+        for item in columns:
+            if isinstance(item.pg_type, GeneratedType):
+                object.__setattr__(
+                    item,
+                    "generated_sql",
+                    render_generation(item.pg_type, by_db_name, model.__name__),
+                )
         table_indexes = tuple(
             declaration
             if declaration.where is None

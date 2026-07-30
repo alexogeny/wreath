@@ -1,10 +1,10 @@
 """Startup schema validation.
 
 Wreath never creates, alters, or drops database objects. It reads
-``pg_catalog`` once at startup and reports, deterministically, where the
+`pg_catalog` once at startup and reports, deterministically, where the
 database and the compiled models disagree.
 
-``information_schema`` is deliberately not used: it reports SQL-standard type
+`information_schema` is deliberately not used: it reports SQL-standard type
 names and loses the type OIDs and array element identity this comparison
 depends on.
 
@@ -12,17 +12,17 @@ depends on.
 PostgreSQL driver decodes a deliberately small set -- bool, the int and float
 widths, text/varchar, bytea, uuid, the date and timestamp types, numeric, json
 and jsonb -- and hands anything else back as the raw wire bytes. The catalog is
-made almost entirely of types outside that set: ``nspname``, ``relname`` and
-``attname`` are ``name``, ``atttypid`` and ``typelem`` are ``oid``, ``contype``
-is ``"char"``, ``conkey`` is ``int2[]`` and ``indkey`` is ``int2vector``. Read
-uncast, a column name arrives as ``b'id'`` and matches no declared column, so
+made almost entirely of types outside that set: `nspname`, `relname` and
+`attname` are `name`, `atttypid` and `typelem` are `oid`, `contype`
+is `"char"`, `conkey` is `int2[]` and `indkey` is `int2vector`. Read
+uncast, a column name arrives as `b'id'` and matches no declared column, so
 the validator reported every column of every table missing.
 
 The casts are not cosmetic, and they are not only about arrays. The raw bytes
-also differ between the two result formats -- ``atttypid`` is ``b'20'`` on a
-cold operation (text) and ``b'\\x00\\x00\\x00\\x14'`` once the plan is cached
+also differ between the two result formats -- `atttypid` is `b'20'` on a
+cold operation (text) and `b'\\x00\\x00\\x00\\x14'` once the plan is cached
 (binary) -- so an uncast read gives a different wrong answer on the first call
-than on the second. Casting to ``text``/``bigint`` makes both formats decode to
+than on the second. Casting to `text`/`bigint` makes both formats decode to
 the same Python value, which is why this file does not need to care whether the
 statement is cold or warm.
 """
@@ -33,8 +33,11 @@ import warnings
 from dataclasses import dataclass
 from typing import Any
 
-from .errors import SchemaMismatchError
+from .errors import ExtensionNotInstalledError, SchemaMismatchError
+from .fields import _IMPLICIT_OPCLASS_METHODS
+from .model import rebind_storage_oid
 from .schema import ModelSpec
+from .types import ExtensionType, bind_extension_oid
 
 #: One row per column of every table a registry maps.
 _COLUMNS_SQL = """
@@ -91,6 +94,242 @@ WHERE i.indisunique
 """
 
 
+#: One extension type's OID, resolved by name against the connection's own
+#: `search_path`. `to_regtype` returns NULL rather than raising for a type that
+#: does not exist, which is the answer this needs -- an absent extension is a
+#: readiness fact to report, not an error to catch. The extension and schema
+#: come back alongside it so the failure message can name where wreath looked.
+_EXTENSION_TYPE_SQL = """
+SELECT
+    COALESCE(pg_catalog.to_regtype($1::text)::oid::bigint, 0) AS type_oid,
+    COALESCE((
+        SELECT n.nspname
+        FROM pg_catalog.pg_type t
+        JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+        WHERE t.oid = pg_catalog.to_regtype($1::text)::oid
+    ), '')::text AS type_schema,
+    pg_catalog.current_schema()::text AS current_schema
+"""
+
+
+#: Every default operator class belonging to one of the named access methods.
+#:
+#: `opcdefault` is a property of a *pair* -- an access method and the type it
+#: indexes -- not of a method alone, because one method indexes several types
+#: and each of them has its own default. `ivfflat` over `vector` defaults to
+#: `vector_l2_ops`; `ivfflat` over `halfvec` defaults to something else. The key
+#: is therefore `(amname, opcintype)`, which is exactly the pair the catalog
+#: read in `wreath.migrations` blanks a default for.
+#:
+#: The method list arrives as one comma-joined text rather than an array because
+#: the driver decodes a deliberately small set of types and `text[]` is not in
+#: it -- the same reason every column here is cast.
+_DEFAULT_OPCLASS_SQL = """
+SELECT
+    am.amname::text AS access_method,
+    op.opcintype::bigint AS type_oid,
+    op.opcname::text AS operator_class
+FROM pg_catalog.pg_opclass op
+JOIN pg_catalog.pg_am am ON am.oid = op.opcmethod
+WHERE op.opcdefault
+  AND am.amname = ANY(pg_catalog.string_to_array($1::text, ','))
+ORDER BY am.amname, op.opcintype
+"""
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class ExtensionTypeResolution:
+    """Where one extension type's OID came from, or that it has none."""
+
+    type_name: str
+    extension: str
+    oid: int
+    schema: str
+    #: The schema the connection would have created the extension into, so a
+    #: failure can say where wreath looked rather than only what it wanted.
+    current_schema: str
+
+    @property
+    def installed(self) -> bool:
+        return self.oid != 0
+
+
+def declared_extension_columns(registry: Any) -> tuple[tuple[Any, Any], ...]:
+    """Every `(spec, column)` in `registry` whose type comes from an extension."""
+    return tuple(
+        (spec, column)
+        for spec in registry.specs
+        for column in spec.columns
+        if isinstance(column.pg_type, ExtensionType)
+    )
+
+
+async def probe_extension_types(
+    connection: Any, wanted: dict[str, str]
+) -> tuple[ExtensionTypeResolution, ...]:
+    """Read one OID per `{type_name: extension}` entry, without deciding anything.
+
+    Split out from `resolve_extension_types` because `wreath.doctor` needs the
+    same reading without the startup failure: a readiness report that raised
+    would be a worse tool than the startup check it duplicates.
+    """
+    found: list[ExtensionTypeResolution] = []
+    for type_name in sorted(wanted):
+        row = await connection.fetchrow(_EXTENSION_TYPE_SQL, type_name)
+        found.append(
+            ExtensionTypeResolution(
+                type_name=type_name,
+                extension=wanted[type_name],
+                oid=int(row[0]) if row is not None else 0,
+                schema=_text(row[1]) if row is not None else "",
+                current_schema=_text(row[2]) if row is not None else "",
+            )
+        )
+    return tuple(found)
+
+
+async def resolve_extension_types(registry: Any) -> tuple[ExtensionTypeResolution, ...]:
+    """Give this registry's extension-typed columns the OIDs this database uses.
+
+    Runs at startup, before anything binds a value. `pgvector`'s `vector` is not
+    a compile-time OID the way `bigint` is -- `CREATE EXTENSION` assigns it, and
+    a different database assigns a different one -- so the OID is read here once
+    and handed to the driver's codec table. Nothing resolves a type at request
+    time; that is the whole point of doing it here.
+
+    A registry that declares no extension type does no I/O at all.
+
+    Raises:
+        ExtensionNotInstalledError: a declared type has no OID in this database.
+            The message names the extension, the schema wreath looked in, and
+            the first column that wanted it, because the alternative is an
+            unrecognised-OID error at the first query with none of that in it.
+    """
+    columns = declared_extension_columns(registry)
+    if not columns:
+        return ()
+    wanted: dict[str, str] = {}
+    first_use: dict[str, str] = {}
+    for spec, column in columns:
+        pg_type = column.pg_type
+        wanted[pg_type.type_name] = pg_type.extension
+        first_use.setdefault(
+            pg_type.type_name,
+            f"{spec.model_type.__name__}.{column.python_name} "
+            f"({spec.qualified_name}.{column.database_name})",
+        )
+    workload = "read" if _has_workload(registry.database, "read") else "write"
+    connection = await registry.database.acquire(workload)
+    try:
+        found = await probe_extension_types(connection, wanted)
+    finally:
+        await registry.database.release(workload, connection)
+    for item in found:
+        if not item.installed:
+            raise ExtensionNotInstalledError(
+                f"{first_use[item.type_name]} declares the {item.type_name!r} type, "
+                f"which the {registry.database.name!r} database does not provide: the "
+                f"{item.extension!r} extension is not installed on the search path "
+                f"(current schema {item.current_schema or '?'!r}). Run "
+                f"CREATE EXTENSION IF NOT EXISTS {item.extension} in that database -- "
+                "some managed PostgreSQL tiers restrict who may do that, in which "
+                "case it has to be enabled by the provider.",
+                extension=item.extension,
+                schema=item.current_schema,
+            )
+        bind_extension_oid(item.type_name, item.oid)
+    # The types now know their OID; the compiled model storage still does not.
+    # It baked in 0 when the class was defined, and the native hydrate plan
+    # validates every result column against that -- so without this a vector
+    # query would fail on its first row with a type mismatch against OID 0.
+    for spec, column in columns:
+        rebind_storage_oid(spec.model_type, column.index, column.pg_type.oid)
+    return found
+
+
+def declared_index_methods(registry: Any) -> tuple[str, ...]:
+    """The access methods this registry declares that spell an operator class.
+
+    btree and GIN are excluded because their index descriptor carries no
+    operator-class field at all, so nothing about them can disagree with the
+    catalog over one. Sorted, so the probe below asks the same question in the
+    same order on every run.
+    """
+    return tuple(
+        sorted(
+            {
+                column.index_method
+                for spec in registry.specs
+                for column in spec.columns
+                if column.indexed
+                and column.index_method
+                and column.index_method not in _IMPLICIT_OPCLASS_METHODS
+            }
+        )
+    )
+
+
+async def probe_default_opclasses(
+    connection: Any, methods: tuple[str, ...]
+) -> dict[tuple[str, int], str]:
+    """Read `{(access method, indexed type OID): default operator class}`.
+
+    Split from `resolve_default_opclasses` for the same reason
+    `probe_extension_types` is split from `resolve_extension_types`: the reading
+    is useful without the binding, and a test that wants to know what this
+    server's defaults *are* should not have to build a registry to find out.
+
+    An access method with no default operator class -- and a method this server
+    has never heard of -- simply contributes no rows. There is nothing to raise
+    about: it means every declared operator class on that method is explicit,
+    which is the case the catalog already records verbatim.
+    """
+    if not methods:
+        return {}
+    rows = await connection.fetch(_DEFAULT_OPCLASS_SQL, ",".join(methods))
+    return {(_text(row[0]), int(row[1])): _text(row[2]) for row in rows}
+
+
+async def resolve_default_opclasses(
+    registry: Any, connection: Any | None = None
+) -> dict[tuple[str, int], str]:
+    """Give `registry` this database's default operator class per index method.
+
+    An index declared `index_ops="vector_l2_ops"` on `ivfflat` names pgvector's
+    *default* operator class for that method, and PostgreSQL does not remember
+    that it was named: `pg_get_indexdef` deparses it away, and wreath's catalog
+    read deliberately records a default as the empty string so that an index
+    declared without an operator class is not reported as drifted. Without this,
+    the desired descriptor keeps saying `vector_l2_ops` and the catalog keeps
+    saying nothing, so `detect` rediscovers drift on every run and `generate`
+    emits a `MANUAL` forever for an index that is already exactly right.
+
+    The answer belongs to the database, so it is read from one, once per
+    registry, and cached on it. A registry that declares no such index does no
+    I/O at all. `connection` is for the migration entry points, which already
+    hold one and are the only thing that builds a desired descriptor; passing
+    none borrows from the registry's own pool instead.
+    """
+    resolved = registry.default_opclasses
+    if resolved is not None:
+        return resolved
+    methods = declared_index_methods(registry)
+    if not methods:
+        registry.default_opclasses = {}
+        return registry.default_opclasses
+    if connection is not None:
+        found = await probe_default_opclasses(connection, methods)
+    else:
+        workload = "read" if _has_workload(registry.database, "read") else "write"
+        borrowed = await registry.database.acquire(workload)
+        try:
+            found = await probe_default_opclasses(borrowed, methods)
+        finally:
+            await registry.database.release(workload, borrowed)
+    registry.default_opclasses = found
+    return found
+
+
 @dataclass(frozen=True, slots=True, order=True)
 class SchemaIssue:
     """One disagreement, ordered so a diff is stable across runs."""
@@ -127,7 +366,7 @@ async def validate_registry(registry: Any) -> SchemaDiff:
     """Compare a registry's models to the live catalog.
 
     Runs on the registry's read pool when it has one, since validation is a
-    read. Returns the diff; raises or warns according to ``validate_schema``.
+    read. Returns the diff; raises or warns according to `validate_schema`.
     """
     mode = registry.validate_schema
     if mode == "off":
@@ -249,7 +488,7 @@ async def _column_names(
     table: str,
     columns: dict[tuple[str, str], dict[int, str]],
 ) -> dict[int, str]:
-    """The ``attnum -> name`` map for one table, read once per validation run.
+    """The `attnum -> name` map for one table, read once per validation run.
 
     A foreign key's target may be a model this registry maps, a table it does
     not, or a table in another schema entirely, so the map is fetched on demand
@@ -357,9 +596,9 @@ def _text(value: Any) -> str:
 def _positions(value: Any) -> list[int]:
     """Read a column position list out of a catalog vector.
 
-    The SQL casts both spellings to ``text``, and they render differently:
-    ``conkey`` is an ``int2[]`` and arrives as ``{1,2}``, while ``indkey`` is an
-    ``int2vector`` and arrives as ``1 2``. ``confkey`` is NULL on every
+    The SQL casts both spellings to `text`, and they render differently:
+    `conkey` is an `int2[]` and arrives as `{1,2}`, while `indkey` is an
+    `int2vector` and arrives as `1 2`. `confkey` is NULL on every
     constraint that is not a foreign key. All three are handled here so the
     callers do not branch on which catalog column they came from.
 
@@ -390,19 +629,19 @@ def _pairs(
 ) -> tuple[tuple[str, str], ...]:
     """Pair a foreign key's local columns with their targets, by *name*.
 
-    ``conkey`` and ``confkey`` are physical ``attnum`` vectors, and an ``attnum``
+    `conkey` and `confkey` are physical `attnum` vectors, and an `attnum`
     is the order PostgreSQL created the columns in, which is not the order the
     model declares them in -- wreath's own DDL generator sorts operations, so a
-    table declared ``id, name, slug`` is created ``name, ..., slug, id`` and
-    ``id`` is attnum 6. Comparing either vector against a declaration index is
+    table declared `id, name, slug` is created `name, ..., slug, id` and
+    `id` is attnum 6. Comparing either vector against a declaration index is
     therefore wrong on any table whose creation order differs, which is most of
     them; both sides are resolved to names here so the comparison is made in the
     only vocabulary the declaration and the catalog share.
 
     A position missing from its map is dropped rather than guessed at. On the
     local side that means a column the catalog does not have, already reported
-    as ``missing_column``; on the remote side, a target table that does not
-    exist, which surfaces as the ``missing_foreign_key`` this pairing feeds.
+    as `missing_column`; on the remote side, a target table that does not
+    exist, which surfaces as the `missing_foreign_key` this pairing feeds.
     """
     return tuple(
         (local_name, remote_name)
@@ -417,7 +656,7 @@ def _pairs(
 def _normalize_default(value: str) -> str:
     """Compare server defaults ignoring whitespace and PostgreSQL's casts.
 
-    Peels matched outer ``(...)`` pairs (stripping whitespace between them) using
+    Peels matched outer `(...)` pairs (stripping whitespace between them) using
     indices, so an input with N nested pairs copies the string once, not O(N^2).
     Semantics match the previous strip-and-reslice loop, including that it does
     not validate overall parenthesis balance.
@@ -437,4 +676,15 @@ def _normalize_default(value: str) -> str:
     return text[left:right].lower()
 
 
-__all__ = ["SchemaDiff", "SchemaIssue", "validate_registry"]
+__all__ = [
+    "ExtensionTypeResolution",
+    "SchemaDiff",
+    "SchemaIssue",
+    "declared_extension_columns",
+    "declared_index_methods",
+    "probe_default_opclasses",
+    "probe_extension_types",
+    "resolve_default_opclasses",
+    "resolve_extension_types",
+    "validate_registry",
+]

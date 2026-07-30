@@ -1,7 +1,7 @@
 """Frozen metadata produced by registry compilation.
 
 These objects are the only model description the request path reads. They are
-immutable: once ``Registry.compile()` returns, nothing re-derives them.
+immutable: once `Registry.compile()` returns, nothing re-derives them.
 """
 
 from __future__ import annotations
@@ -22,7 +22,9 @@ if TYPE_CHECKING:
 #: from different Wreath versions can never collide.
 FINGERPRINT_VERSION = b"wreath-orm-fingerprint-1"
 
-_SCHEMA_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_$]*$")
+#: Matched with `fullmatch`, never `match`: `$` also matches immediately before
+#: a trailing newline, so `^...$` accepted `schema="app\n"` into the emitted DDL.
+_SCHEMA_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_$]*")
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +71,7 @@ class SchemaMode:
 
 
 def _schema_identifier(value: str) -> str:
-    if not isinstance(value, str) or not _SCHEMA_IDENTIFIER.match(value):
+    if not isinstance(value, str) or not _SCHEMA_IDENTIFIER.fullmatch(value):
         raise DeclarationError(
             f"schema name {value!r} is not a valid unquoted PostgreSQL identifier"
         )
@@ -107,7 +109,6 @@ class ColumnSpec:
     database_name: str
     position: int
     pg_type: PgType
-    oid: int
     nullable: bool
     primary_key: bool
     unique: bool
@@ -116,15 +117,41 @@ class ColumnSpec:
     server_default: str | None
     reference: ColumnRef | None
     column: Column
+    #: The `GENERATED ALWAYS AS (...)` expression, in PostgreSQL's own normal
+    #: form, or None for an ordinary column. Filled in by `Registry.compile()`,
+    #: because the expression names other columns and their database names and
+    #: types are not known until then.
+    generated_sql: str | None = None
 
     @property
     def index(self) -> int:
         return self.column.index
 
     @property
+    def oid(self) -> int:
+        """This column's PostgreSQL type OID.
+
+        Read through the type rather than copied at compile time, because an
+        extension type's OID is not known until startup resolves it against the
+        live catalog -- a snapshot taken here would be 0 forever. Every built-in
+        type answers the same constant it always did.
+        """
+        return self.pg_type.oid
+
+    @property
     def index_method(self) -> str | None:
-        """The access method ("btree"/"gin") for this column's index, if any."""
+        """The access method for this column's index, if any."""
         return self.column.index_method
+
+    @property
+    def index_ops(self) -> str | None:
+        """The operator class this column's index uses, if it names one."""
+        return self.column.index_ops
+
+    @property
+    def index_with(self) -> tuple[tuple[str, str], ...]:
+        """This column's index-method options, as ordered `(name, value)` pairs."""
+        return self.column.index_with
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -196,7 +223,12 @@ def _encode_column(spec: ColumnSpec) -> bytes:
         spec.database_name.encode("utf-8"),
         str(spec.position).encode("ascii"),
         spec.pg_type.name.encode("ascii"),
-        str(spec.oid).encode("ascii"),
+        # `fingerprint_oid`, not `oid`: an extension type's real OID is assigned
+        # by CREATE EXTENSION and differs between databases, so recording it
+        # here would make the same models fingerprint differently against two
+        # databases and report drift that is not there. Identical to `oid` for
+        # every built-in type, so no existing fingerprint moves.
+        str(spec.pg_type.fingerprint_oid).encode("ascii"),
         b"1" if spec.nullable else b"0",
         b"1" if spec.primary_key else b"0",
         b"1" if spec.unique else b"0",
@@ -210,6 +242,13 @@ def _encode_column(spec: ColumnSpec) -> bytes:
         )
     else:
         parts.append(b"-")
+    # Appended only when there is one, so an ordinary column fingerprints
+    # exactly as it always did. It has to be here at all because a `tsvector`
+    # column's type name and OID are the same whatever it analyses: without the
+    # expression, changing a TsVector's config or its sources would move no
+    # fingerprint and the change would be invisible to drift detection.
+    if spec.generated_sql is not None:
+        parts.append(spec.generated_sql.encode("utf-8"))
     return b"\x1f".join(parts)
 
 
@@ -293,7 +332,9 @@ def fingerprint_registry_template(specs: tuple[ModelSpec, ...]) -> bytes:
             digest.update(column.python_name.encode("utf-8"))
             digest.update(b"\x00")
             digest.update(column.database_name.encode("utf-8"))
-            digest.update(column.oid.to_bytes(4, "big"))
+            # See `_encode_column`: the database-assigned OID would move this
+            # digest between databases, the name-derived one will not.
+            digest.update(column.pg_type.fingerprint_oid.to_bytes(4, "big"))
             digest.update(
                 bytes((column.nullable, column.primary_key, column.unique, column.indexed))
             )
@@ -306,11 +347,15 @@ def fingerprint_registry_template(specs: tuple[ModelSpec, ...]) -> bytes:
 
 
 __all__ = [
+    "CENTRAL_SCHEMA",
     "FINGERPRINT_VERSION",
+    "TENANT_SCHEMA",
     "ColumnRef",
     "ColumnSpec",
     "ModelSpec",
     "RelationshipSpec",
+    "SchemaMode",
+    "SchemaRef",
     "StorageSpec",
     "fingerprint_model",
     "fingerprint_registry",

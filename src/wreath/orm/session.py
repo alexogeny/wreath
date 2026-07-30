@@ -72,7 +72,7 @@ def _native_models() -> Any:
 class FromORM:
     """Marks a handler parameter as a request-scoped ORM session.
 
-    ``database`` names an ``app.orm()`` registry; it may be omitted when the
+    `database` names an `app.orm()` registry; it may be omitted when the
     application has exactly one.
     """
 
@@ -90,7 +90,7 @@ class RawQuery:
     """Unmodified SQL, executed on this session's leased connection.
 
     Wreath does not parse, rewrite, or cache the SQL; results come back as the
-    driver's own ``Record`` objects unless ``models()`` is used.
+    driver's own `Record` objects unless `models()` is used.
     """
 
     __slots__ = ("_args", "_session", "_sql")
@@ -128,7 +128,7 @@ class RawQuery:
         return await connection.fetchval(self._sql, *self._args)
 
     async def models(self, model: type) -> list[Any]:
-        """Hydrate this result into ``model`` instances.
+        """Hydrate this result into `model` instances.
 
         The result must contain every column of the model exactly once, named
         as in the database. Extra or missing columns are rejected rather than
@@ -238,7 +238,7 @@ _count_write_sql_builds = _count_write_sql_builds
 
 
 def _pk_offsets(spec: ModelSpec, columns: tuple[ColumnSpec, ...]) -> tuple[int, ...]:
-    """Where ``spec``'s primary-key columns sit within ``columns``.
+    """Where `spec`'s primary-key columns sit within `columns`.
 
     Depends only on the compiled projection, so it is resolved once per query
     and reused for every row. It used to be rebuilt inside `_hydrate`, which
@@ -282,15 +282,15 @@ def _join_cursors(steps: tuple[JoinedStep, ...]) -> tuple[_JoinCursor, ...]:
 class TenantContext:
     """A validated, request-scoped tenant binding for an isolated registry.
 
-    ``schema`` is the tenant's physical PostgreSQL schema; ``role`` is an
+    `schema` is the tenant's physical PostgreSQL schema; `role` is an
     optional database role selected transaction-locally when the deployment
     relies on PostgreSQL to enforce hostile-tenant isolation. Both are
     validated as unquoted identifiers at construction, so the transaction-local
-    ``SET LOCAL`` statements the session issues can never carry untrusted text.
+    `SET LOCAL` statements the session issues can never carry untrusted text.
 
     A context must be resolved from an application-owned tenant directory, never
     from a request host, path, header, or token. It is transaction-local by
-    construction: the session binds it after ``BEGIN`` and PostgreSQL discards
+    construction: the session binds it after `BEGIN` and PostgreSQL discards
     it at transaction end, so a pooled connection never leaks one tenant's
     binding into the next lease.
     """
@@ -533,11 +533,12 @@ class Session:
         """Tenant SQL runs only under a bound context transaction.
 
         A tenant registry compiles its tenant-template models to unqualified
-        SQL that resolves through ``search_path``. That binding is transaction
+        SQL that resolves through `search_path`. That binding is transaction
         local, so a statement outside a transaction would run with whatever
         namespace the pooled connection last held — a cross-tenant hazard. A
-        tenant session therefore requires an explicit ``async with
-        session.begin()`` around its work, exactly as ``for_update`` does.
+        tenant session therefore requires an explicit
+        `async with session.begin()` around its work, exactly as `for_update`
+        does.
         """
         if self._tenant is not None and self._depth == 0:
             raise SessionError(
@@ -561,7 +562,7 @@ class Session:
         return await self.fetch_one(query.limit(1))
 
     async def fetch(self, query: Select) -> list[Any]:
-        """Run ``query`` and hydrate every row."""
+        """Run `query` and hydrate every row."""
         self._check_usable()
         self._check_tenant_bound()
         compiled = compile_select(self._registry, query)
@@ -654,7 +655,7 @@ class Session:
     async def _fetch_recorded(
         self, model_ids: dict[Any, int], connection: Any, compiled: CompiledQuery
     ) -> list[Any]:
-        """``_fetch_objects`` under a recording app, timed and attributed.
+        """`_fetch_objects` under a recording app, timed and attributed.
 
         Split out so the ordinary path keeps its single branch and no clock
         reads. The phase carries the model's metadata-image ID, which is what
@@ -687,7 +688,7 @@ class Session:
         sql: str,
         args: tuple[Any, ...],
     ) -> list[Any]:
-        """Hydrate ``sql`` into models, natively when the shape allows it.
+        """Hydrate `sql` into models, natively when the shape allows it.
 
         Both paths share the identity map and the same cell semantics, so which
         one runs is not observable beyond allocation counts.
@@ -752,9 +753,9 @@ class Session:
         return plan
 
     async def fetch_one(self, query: Select) -> Any:
-        """Run ``query`` and return one object, or None.
+        """Run `query` and return one object, or None.
 
-        Raises ``MultipleResultsError`` when the query matches more than one
+        Raises `MultipleResultsError` when the query matches more than one
         row; a stricter limit set by the caller is left alone.
         """
         self._check_usable()
@@ -768,11 +769,11 @@ class Session:
         return results[0] if results else None
 
     async def count(self, query: Select) -> int:
-        """Count the rows ``query`` matches, without fetching or hydrating them.
+        """Count the rows `query` matches, without fetching or hydrating them.
 
-        Emits ``SELECT COUNT(*)`` with the query's filters (and any to-one
+        Emits `SELECT COUNT(*)` with the query's filters (and any to-one
         filter joins), ignoring its projection, ordering, and paging. This is
-        what :func:`wreath.pagination.paginate` uses for the page total, so a
+        what `wreath.pagination.paginate` uses for the page total, so a
         large result set costs one aggregate round trip rather than transferring
         and materializing every matching row.
         """
@@ -786,11 +787,11 @@ class Session:
     async def declared(self, sql: str, args: tuple[Any, ...]) -> list[Any]:
         """Run one statement rendered from a declaration, and return its rows.
 
-        The seam :mod:`wreath.series` executes through. It exists rather than
-        going via :meth:`raw` because a calculated view is compiled from model
-        metadata the same way a ``Select`` is, so it owes the same two checks a
-        ``Select`` gets: that the session is open, and that a tenant session is
-        inside the transaction its ``search_path`` is bound by. Statement text
+        The seam `wreath.series` executes through. It exists rather than
+        going via `raw` because a calculated view is compiled from model
+        metadata the same way a `Select` is, so it owes the same two checks a
+        `Select` gets: that the session is open, and that a tenant session is
+        inside the transaction its `search_path` is bound by. Statement text
         comes from the compiler, never from a caller.
         """
         self._check_usable()
@@ -806,7 +807,7 @@ class Session:
         return RawQuery(self, sql, args)
 
     async def load(self, target: Any, relationship: Any) -> None:
-        """Load ``relationship`` on one object or a sequence, in one batch."""
+        """Load `relationship` on one object or a sequence, in one batch."""
         self._check_usable()
         self._check_tenant_bound()
         if isinstance(relationship, RelationshipExpr):
@@ -1043,7 +1044,7 @@ class Session:
     # -- writes -------------------------------------------------------------
 
     def add(self, instance: Any) -> None:
-        """Schedule ``instance`` for insertion on the next flush."""
+        """Schedule `instance` for insertion on the next flush."""
         self._check_usable()
         _check_owned(self, instance)
         if instance._orm_state == PERSISTENT:
@@ -1056,7 +1057,7 @@ class Session:
         self._schedule_new(instance)
 
     def delete(self, instance: Any) -> None:
-        """Schedule ``instance`` for deletion on the next flush."""
+        """Schedule `instance` for deletion on the next flush."""
         self._check_usable()
         _check_owned(self, instance)
         spec = self._registry.spec_for(type(instance))
@@ -1078,8 +1079,8 @@ class Session:
         commits or rolls it back atomically.
 
         That is also what makes this safe for an isolated-tenant session without
-        the :meth:`_check_tenant_bound` guard the read paths carry: the
-        ``begin()`` below binds ``search_path`` before any statement runs, so
+        the `_check_tenant_bound` guard the read paths carry: the
+        `begin()` below binds `search_path` before any statement runs, so
         there is no window where tenant-template SQL sees the pooled
         connection's previous namespace. It is load-bearing rather than
         incidental -- do not "optimise" the transaction away for a single-
@@ -1339,20 +1340,20 @@ class Session:
     ) -> None:
         """Take a transaction-scoped PostgreSQL advisory lock on this session.
 
-        ``scope="xact"`` (the default and recommended form) takes a lock that
-        PostgreSQL releases automatically at ``COMMIT``/``ROLLBACK``; it must run
-        inside ``async with session.begin():`` and rides the connection the
+        `scope="xact"` (the default and recommended form) takes a lock that
+        PostgreSQL releases automatically at `COMMIT`/`ROLLBACK`; it must run
+        inside `async with session.begin():` and rides the connection the
         transaction already pins, so there is no explicit unlock and no
         connection-affinity bookkeeping.
 
-        Advisory locks ignore ``search_path``, so for an isolated-tenant session
+        Advisory locks ignore `search_path`, so for an isolated-tenant session
         the tenant schema is folded into the lock namespace automatically -- two
         tenants never collide on the same *key*. Pass *namespace* to override
         (for example, to take a deliberately fleet-global lock).
 
         Session-*scoped* locks (held beyond the transaction) are intentionally not
         offered here: releasing them correctly is bound to returning the pooled
-        connection, which ``database.lock(...)`` / ``database.try_lock(...)`` own.
+        connection, which `database.lock(...)` / `database.try_lock(...)` own.
         """
         self._check_usable()
         if mode not in ("exclusive", "shared"):
@@ -1512,7 +1513,7 @@ def _pad_to_width(
 ) -> tuple[tuple[Any, ...], ...]:
     """Round a batch up to the next allowed width by repeating its last key.
 
-    Never past ``limit`` -- the caller's key and bind-parameter bounds are the
+    Never past `limit` -- the caller's key and bind-parameter bounds are the
     real ceiling, and padding through one to reach a rounder number would trade
     a plan-cache entry for a statement the driver refuses.
     """
@@ -1574,7 +1575,7 @@ def _selectin_sql(
 def compile_session_binding(
     registries: Any, marker: FromORM
 ) -> tuple[str, Any]:
-    """Resolve ``marker`` to a registry at route-compile time."""
+    """Resolve `marker` to a registry at route-compile time."""
     name = marker.database
     if name is None:
         if len(registries) != 1:

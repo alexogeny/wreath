@@ -46,6 +46,7 @@ from .constraints import (
 from .errors import (
     DeclarationError,
     DetachedInstanceError,
+    ExtensionNotInstalledError,
     MappingError,
     MultipleResultsError,
     ORMError,
@@ -88,6 +89,7 @@ __all__ = [
     "CheckViolation",
     "DeclarationError",
     "DetachedInstanceError",
+    "ExtensionNotInstalledError",
     "FromORM",
     "Ge",
     "Gt",

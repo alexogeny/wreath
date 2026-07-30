@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from .errors import DeclarationError
-from .expressions import ColumnExpr, OrderExpr, Predicate
+from .expressions import BinaryExpr, ColumnExpr, OrderExpr, Predicate
 from .relations import LoadOption
 
 
@@ -24,6 +24,7 @@ class Select:
         "model",
         "offset_",
         "orderings",
+        "plain_orderings",
         "predicates",
         "projection",
     )
@@ -44,6 +45,14 @@ class Select:
         self.predicates = predicates
         self.includes = includes
         self.orderings = orderings
+        #: Whether every ordering is a bare column, which is the shape the
+        #: native plan-cache keyer and bind collector understand. An ordering by
+        #: a *distance* carries a bound value and an operator, and both have to
+        #: reach the key -- so those queries take the pure path deliberately
+        #: rather than by catching an AttributeError out of C.
+        self.plain_orderings = all(
+            isinstance(item.expression, ColumnExpr) for item in orderings
+        )
         self.limit_ = limit_
         self.offset_ = offset_
         self.for_update_ = for_update_
@@ -78,7 +87,42 @@ class Select:
                 raise TypeError(
                     f"where() takes SQL predicates such as User.id == 1, got {item!r}"
                 )
+            # One type test for both refusals, and only then the operator
+            # lookups: `where()` runs per query, and this is the guard, not the
+            # common case. Two `isinstance` calls here cost a measurable
+            # boundary crossing per request (`wreath-request-trace`).
+            if isinstance(item, BinaryExpr):
+                if item.is_distance:
+                    # A distance is a number. PostgreSQL would refuse it here
+                    # too, but with a message about "argument of WHERE must be
+                    # boolean" rather than about the line that wrote it.
+                    raise TypeError(
+                        f"where() takes a predicate, and {item.operator!r} yields a "
+                        "distance; compare it against a threshold "
+                        "(embedding.cosine_distance(q) < 0.3) or order by it"
+                    )
+                if item.is_rank:
+                    # Same shape, and the mistake is easier to make: `.rank()`
+                    # reads like a filter. `.matches()` is the predicate; the
+                    # rank orders what it kept.
+                    raise TypeError(
+                        f"where() takes a predicate, and {item.operator!r} yields a "
+                        "relevance score; filter with search.matches(terms) and order "
+                        "by search.rank(terms).desc(), or compare the rank against a "
+                        "threshold"
+                    )
         return self._replace(predicates=self.predicates + tuple(predicates))
+
+    def rebound_orderings(self, orderings: tuple[OrderExpr, ...]) -> Select:
+        """This query with its ORDER BY keys *replaced* rather than extended.
+
+        The ordering counterpart of `rebound`, and it exists for the same
+        caller: a declared vector search fixes `ORDER BY embedding <=> $n` at
+        class-definition time and substitutes the query vector per call. Same
+        invariant -- the replacements must have the same tree structure and
+        column types, because anything else is a different plan-cache key.
+        """
+        return self._replace(orderings=orderings)
 
     def rebound(self, predicates: tuple[Predicate, ...]) -> Select:
         """This query with its predicates *replaced* rather than extended.
@@ -104,15 +148,29 @@ class Select:
         return self._replace(includes=self.includes + tuple(load_options))
 
     def order_by(self, *expressions: Any) -> Select:
+        """Order rows by columns, `.asc()`/`.desc()`, or a vector distance.
+
+        A distance orders by similarity, which is the shape a vector search
+        actually has:
+
+        ```python
+        Document.select().order_by(Document.embedding.cosine_distance(query))
+        ```
+        Ordering by a distance is what an HNSW or IVFFlat index answers; a
+        distance in a `WHERE` is not, and the index will not be used for it.
+        """
         orderings = []
         for item in expressions:
             if isinstance(item, ColumnExpr):
                 item = item.asc()
+            elif isinstance(item, BinaryExpr):
+                item = item.asc()  # raises unless it is a distance
             elif not isinstance(item, OrderExpr):
                 raise TypeError(
-                    f"order_by() takes columns or .asc()/.desc(), got {item!r}"
+                    f"order_by() takes columns, .asc()/.desc(), or a vector "
+                    f"distance, got {item!r}"
                 )
-            _check_field(self.model, item.expression)
+            _check_ordering(self.model, item.expression)
             orderings.append(item)
         return self._replace(orderings=self.orderings + tuple(orderings))
 
@@ -157,6 +215,19 @@ def _check_field(model: type, field: Any) -> ColumnExpr:
             f"{field.column.python_name} is not a column of {model.__name__}"
         )
     return field
+
+
+def _check_ordering(model: type, expression: Any) -> None:
+    """Check an ORDER BY key belongs to `model`.
+
+    A bare column is checked as a projection is. A distance is checked through
+    its left operand, which is the column the index would be on -- the right
+    operand is the bound query vector and belongs to nobody.
+    """
+    if isinstance(expression, BinaryExpr):
+        _check_field(model, expression.left)
+        return
+    _check_field(model, expression)
 
 
 def _check_bound(value: int, name: str) -> int:

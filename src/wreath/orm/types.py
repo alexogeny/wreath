@@ -13,6 +13,9 @@ driver codec exchanges, and are the identity for everything except JSON.
 from __future__ import annotations
 
 import datetime
+import hashlib
+import math
+import re
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
@@ -20,12 +23,22 @@ from typing import Any
 
 from .._json import dumps as _json_dumps
 from .._json import loads as _json_loads
+from .errors import DeclarationError, ExtensionNotInstalledError
 
 
 class PgType:
     """One PostgreSQL type, its OID, and its Python conversion rules."""
 
-    __slots__ = ("_coerce", "_from_wire", "_to_wire", "name", "oid", "shape_value", "sql")
+    __slots__ = (
+        "_coerce",
+        "_from_wire",
+        "_to_wire",
+        "fingerprint_oid",
+        "name",
+        "oid",
+        "shape_value",
+        "sql",
+    )
 
     def __init__(
         self,
@@ -44,6 +57,13 @@ class PgType:
         #: the SQL, never the value, so this is constant -- and `shape_of` was
         #: rebuilding it per request.
         self.shape_value = b"v" + str(oid).encode("ascii")
+        #: The OID a *model fingerprint* records. Identical to `oid` for a
+        #: built-in type. An extension type's real OID is assigned by
+        #: `CREATE EXTENSION` and differs between databases, so it substitutes a
+        #: stable value derived from its SQL spelling -- a fingerprint that
+        #: changed when the same models were pointed at a second database would
+        #: report every model as drifted.
+        self.fingerprint_oid = oid
         self._coerce = coerce
         self._to_wire = to_wire
         self._from_wire = from_wire
@@ -89,6 +109,219 @@ class _ArrayType(PgType):
     ) -> None:
         super().__init__(name, oid, sql, coerce, to_wire=to_wire, from_wire=from_wire)
         self.element = element
+
+
+class GeneratedType(PgType):
+    """A type whose column value the *database* computes, never the application.
+
+    A column declared with one of these renders as
+    `GENERATED ALWAYS AS (<expression>) STORED`, so PostgreSQL recomputes it
+    inside the same statement that changed the columns it reads. That is what
+    keeps a derived index correct without a trigger, and it is also why such a
+    column is not writable: an INSERT or UPDATE naming one is an error, so
+    `coerce` refuses the value at the assignment rather than at the flush.
+
+    The expression itself is not held here. It names *other columns*, whose
+    database names and types are only known once the registry has compiled the
+    model, so it is rendered there -- see `wreath.orm._generated`.
+    """
+
+    __slots__ = ()
+
+
+#: Codec kinds the driver backends know how to frame. One per extension wire
+#: format, not one per type: `vector` and a future `halfvec` are different
+#: kinds, but every `Vector(dim)` shares kind 1.
+EXT_KIND_VECTOR = 1
+
+
+class WireList(list):
+    """A list-valued parameter that names its own PostgreSQL OID.
+
+    The driver infers a parameter's OID from the Python value it is handed, and
+    a bare list is deliberately refused: `[1, 2]` is equally `int4[]`, `int8[]`
+    or `numeric[]`, and `[]` names no element type at all. A pgvector value is a
+    list too, and it *does* know its type -- so it carries the answer.
+
+    A `list` subclass rather than a wrapper, so both codec twins keep taking the
+    sequence they already take: `PySequence_Fast` and `struct.pack` are unchanged
+    by this, and nothing in the encode path has to unwrap anything.
+    """
+
+    __slots__ = ("_pg_oid",)
+
+    def __init__(self, values: Any, oid: int) -> None:
+        super().__init__(values)
+        self._pg_oid = oid
+
+
+class ExtensionType(PgType):
+    """A type an extension adds, whose OID the *database* assigns.
+
+    Every built-in type here names a compile-time OID. An extension type cannot:
+    `CREATE EXTENSION vector` allocates `vector`'s OID from the same sequence as
+    everything else in that database, so it differs between one database and the
+    next, and between a schema and the one beside it if the extension was
+    installed twice.
+
+    Three consequences shape this class.
+
+    * `oid` starts at `0` and is filled in at startup, by
+      `wreath.orm.introspection.resolve_extension_types`, which reads
+      `pg_catalog` once and hands the answer to both driver backends. Binding a
+      value before that raises rather than encoding against OID 0.
+    * `shape_value` is derived from the type's *name*, never its OID. It is the
+      type's contribution to the plan-cache key: an OID in there would give the
+      same query two cache entries against two databases, and would change under
+      a reinstall of the extension. The failure mode is a silently duplicated
+      plan cache, which is invisible until someone profiles it.
+    * `fingerprint_oid` is likewise name-derived, for the same reason one layer
+      up: a model fingerprint that moved with the database would report drift
+      that is not there.
+
+    Nothing here is specific to pgvector. `hstore`, `citext`, and geometry would
+    all resolve through the same path.
+    """
+
+    __slots__ = ("extension", "type_name")
+
+    def __init__(
+        self,
+        extension: str,
+        type_name: str,
+        sql: str,
+        coerce: Callable[[Any], Any],
+        *,
+        kind: int,
+        to_wire: Callable[[Any], Any] | None = None,
+        from_wire: Callable[[Any], Any] | None = None,
+    ) -> None:
+        super().__init__(sql, 0, sql, coerce, to_wire=to_wire, from_wire=from_wire)
+        #: The extension that provides this type, as `CREATE EXTENSION` spells it.
+        self.extension = extension
+        #: The bare `pg_type.typname`, which is what the catalog is queried by
+        #: and what distinguishes `vector` from `halfvec`.
+        self.type_name = type_name
+        self.shape_value = b"x" + sql.encode("utf-8")
+        # A stable stand-in for the OID a fingerprint would otherwise record.
+        # md5 because this is a name, not a security boundary; the top bit is
+        # set so it can never collide with a real built-in OID.
+        self.fingerprint_oid = 0x80000000 | int.from_bytes(
+            hashlib.md5(sql.encode("utf-8"), usedforsecurity=False).digest()[:4], "big"
+        ) & 0x7FFFFFFF
+        _DECLARED_EXTENSION_TYPES.append(self)
+
+    def require_oid(self, doing: str) -> int:
+        """This type's resolved OID, refusing if resolution never reached it.
+
+        Call this wherever the OID decides something -- wire framing, a
+        migration descriptor -- and never where an unresolved type is the
+        legitimate state (declaration, fingerprinting, introspection, the
+        probe that is *about* to resolve it).
+
+        The unbound state is not only "startup has not run yet".
+        `bind_extension_oid` walks the types declared *when it is called*, so an
+        `ExtensionType` constructed afterwards -- a model class defined after
+        the application started -- keeps OID 0 until something resolves again.
+        Zero is a legal-looking OID that means "unspecified" on the wire and
+        "built-in" in a descriptor, so it has to be refused rather than framed.
+        """
+        oid = self.oid
+        if oid == 0:
+            raise ExtensionNotInstalledError(
+                f"the {self.type_name!r} type has no OID yet, so {doing} "
+                f"({self.sql}) cannot be decided: the {self.extension!r} extension "
+                "is resolved once, against a live catalog, by "
+                "wreath.orm.introspection.resolve_extension_types(registry) -- "
+                "which the application lifespan runs at startup. A model class "
+                "declared after that resolution was not there to be bound, and "
+                "must be resolved again before it is used.",
+                extension=self.extension,
+            )
+        return oid
+
+    def to_wire(self, value: Any) -> Any:
+        if self.oid == 0:
+            self.require_oid("the bind parameter's type")
+        wire = super().to_wire(value)
+        # The driver infers a parameter's OID from its Python value, and a bare
+        # list is refused there because it names no element type. An extension
+        # value is a list that *does* know its type, so it carries the answer;
+        # see `WireList`.
+        return WireList(wire, self.oid) if type(wire) is list else wire
+
+
+#: Every `ExtensionType` this process has declared, in declaration order.
+#: Bounded by the application's model declarations, appended to only while a
+#: class body runs, and read only by OID resolution at startup.
+_DECLARED_EXTENSION_TYPES: list[ExtensionType] = []
+
+
+def declared_extension_types() -> tuple[ExtensionType, ...]:
+    """Every extension type declared in this process, in declaration order."""
+    return tuple(_DECLARED_EXTENSION_TYPES)
+
+
+def bind_extension_oid(type_name: str, oid: int) -> int:
+    """Give every declared type named `type_name` the OID this database uses.
+
+    Returns how many types were bound. Idempotent for a repeated identical OID,
+    which is the ordinary case when several registries share one database.
+
+    Raises:
+        ValueError: the same type resolved to a *different* OID than a previous
+            call. One process holds one codec table, so two databases whose
+            `vector` OIDs disagree cannot both be served from it; that is
+            reported here rather than by decoding one database's rows with the
+            other's rules.
+    """
+    if oid <= 0:
+        raise ValueError(f"{type_name!r} resolved to an invalid OID {oid}")
+    bound = 0
+    kind = 0
+    for item in _DECLARED_EXTENSION_TYPES:
+        if item.type_name != type_name:
+            continue
+        if item.oid not in (0, oid):
+            raise ValueError(
+                f"the {type_name!r} type is already bound to OID {item.oid} in this "
+                f"process and this database assigns it {oid}; wreath resolves an "
+                "extension type once per process, so two databases whose extension "
+                "OIDs differ cannot share one interpreter"
+            )
+        item.oid = oid
+        kind = _EXTENSION_KINDS[type_name]
+        bound += 1
+    if bound:
+        from ..postgres import register_extension_codec
+
+        register_extension_codec(type_name, oid, kind)
+    return bound
+
+
+def _unbind_extension_oids() -> None:
+    """Return every declared extension type to its unresolved state.
+
+    **For tests, and only for tests.** An application resolves once at startup
+    and never again; calling this in a running process would leave a type
+    unresolvable-looking while connections are still decoding rows with the OID
+    it just forgot. It exists because a test process legitimately holds both a
+    made-up OID (for the pure codec suites, which need no server) and a real one
+    read from a live catalog, and `bind_extension_oid` is right to refuse those
+    at the same time.
+
+    The driver's codec table is deliberately *not* cleared: it is keyed by OID,
+    an OID it already knows stays correct, and unregistering one would be the
+    genuinely dangerous half of this.
+    """
+    for item in _DECLARED_EXTENSION_TYPES:
+        item.oid = 0
+
+
+#: The codec kind each extension type name is framed by. Adding a type means
+#: adding a kind here and a branch in both codec twins -- never a silent
+#: fall-through to "bytes".
+_EXTENSION_KINDS: dict[str, int] = {"vector": EXT_KIND_VECTOR}
 
 
 def _type_error(expected: str, value: object) -> TypeError:
@@ -287,6 +520,186 @@ def Array(element: PgType, *, nullable_elements: bool = False) -> _ArrayType:
     )
 
 
+#: pgvector's own ceiling on a `vector` column's dimension. Indexes stop at
+#: 2000, which is a planner limit rather than a storage one and so is not
+#: enforced here -- an unindexed 4000-dimension column is legal and useful.
+MAX_VECTOR_DIM = 16000
+
+
+def Vector(dim: int) -> ExtensionType:
+    """Declare a pgvector `vector(dim)` column.
+
+    The Python value is a `list[float]` of exactly `dim` finite floats.
+    Coercion is strict in both directions that matter: a wrong length is a
+    dimension mismatch the database would reject anyway, and NaN or infinity is
+    refused because pgvector stores neither and every distance involving one is
+    meaningless.
+
+    ```python
+    class Document(Model, table="documents"):
+        embedding: Mapped[list[float]] = column(
+            Vector(1536), index="hnsw", index_ops="vector_cosine_ops"
+        )
+    ```
+    Requires `CREATE EXTENSION vector` in the column's database. A registry that
+    declares one against a database without it fails at startup, naming the
+    extension and the schema, rather than at the first query with an OID error.
+    """
+    if dim.__class__ is not int or isinstance(dim, bool):
+        raise DeclarationError(f"Vector() requires an int dimension, got {dim!r}")
+    if not 1 <= dim <= MAX_VECTOR_DIM:
+        raise DeclarationError(
+            f"Vector({dim}) is out of range; pgvector allows 1 to {MAX_VECTOR_DIM} "
+            "dimensions"
+        )
+
+    def coerce(value: Any) -> list[float]:
+        if not isinstance(value, (list, tuple)):
+            raise _type_error("list or tuple of floats", value)
+        if len(value) != dim:
+            raise ValueError(
+                f"vector({dim}) requires exactly {dim} values, got {len(value)}"
+            )
+        out: list[float] = []
+        for item in value:
+            if isinstance(item, bool) or not isinstance(item, (int, float)):
+                raise _type_error("float", item)
+            number = float(item)
+            if not math.isfinite(number):
+                raise ValueError(
+                    "a vector element must be finite; pgvector stores neither NaN "
+                    "nor infinity and every distance involving one is undefined"
+                )
+            out.append(number)
+        return out
+
+    return ExtensionType(
+        "vector", "vector", f"vector({dim})", coerce, kind=EXT_KIND_VECTOR
+    )
+
+
+#: PostgreSQL's own `tsvector`. Full-text search needs no extension, so unlike
+#: pgvector's types this is a compile-time constant like every other built-in
+#: here -- none of the dynamic-OID machinery applies to it.
+TSVECTOR_OID = 3614
+
+#: A text-search configuration, as `to_tsvector('english', ...)` spells it. It
+#: reaches DDL and query text as a quoted literal rather than a bind, so the
+#: shape is fixed at declaration instead of escaped at render. Matched with
+#: `fullmatch`, never `match`: `$` also matches immediately before a trailing
+#: newline, so `^...$` accepted `TsVector("english\n")` into that literal.
+_TS_CONFIG = re.compile(r"[a-z_][a-z0-9_]*")
+
+
+def _refuse_tsvector_write(value: Any) -> Any:
+    raise TypeError(
+        "a tsvector column is generated: PostgreSQL derives it from its source "
+        "columns on every write, so assigning it would be discarded -- write the "
+        "source columns instead"
+    )
+
+
+class TsVectorType(GeneratedType):
+    """A `tsvector` PostgreSQL derives from other columns of the same row.
+
+    Carries the two things the DDL needs and nothing else: the text-search
+    `config` to analyse under, and the `sources` to analyse. The expression is
+    rendered once the registry knows those columns' database names and types.
+    """
+
+    __slots__ = ("config", "sources")
+
+    def __init__(self, config: str, sources: tuple[str, ...]) -> None:
+        super().__init__("tsvector", TSVECTOR_OID, "tsvector", _refuse_tsvector_write)
+        #: The text-search configuration, e.g. `english` or `simple`.
+        self.config = config
+        #: The columns this vector is derived from, in the order they concatenate.
+        self.sources = sources
+
+    def __repr__(self) -> str:
+        return f"<TsVector {self.config} over {', '.join(self.sources)}>"
+
+
+def TsVector(config: str = "english", *, sources: Any) -> TsVectorType:
+    """Declare a generated `tsvector` column over `sources`.
+
+    ```python
+    class Document(Model, table="documents"):
+        title: Mapped[str] = column(Text)
+        body: Mapped[str] = column(Text)
+        search: Mapped[bytes] = column(
+            TsVector("english", sources=("title", "body")), index="gin"
+        )
+    ```
+    That renders
+    `GENERATED ALWAYS AS (to_tsvector('english', coalesce(title,'') || ' ' ||
+    coalesce(body,''))) STORED`, which is the form that keeps the GIN index
+    correct without a trigger: PostgreSQL recomputes the column inside the same
+    statement that changed `title` or `body`, so there is no window where the
+    index disagrees with the row.
+
+    Each source must be a declared `Text` column of the same model. Other types
+    are refused because PostgreSQL's own deparsing of the expression casts them
+    (`(COALESCE(vch, ''::character varying))::text`), and a spelling wreath
+    cannot predict is a permanent, self-renewing migration drift -- the same
+    reason `wreath.orm._index_predicate` keeps its vocabulary small.
+
+    The value is the database's, not the application's: assigning one raises,
+    and passing one to the constructor raises. Query it with `.matches()` and
+    `.rank()` rather than reading it.
+    """
+    if not isinstance(config, str) or not _TS_CONFIG.fullmatch(config):
+        raise DeclarationError(
+            f"TsVector(config={config!r}) must name a text-search configuration "
+            "such as 'english' or 'simple'; it is rendered into DDL rather than "
+            "bound"
+        )
+    if isinstance(sources, str) or not isinstance(sources, (list, tuple)):
+        raise DeclarationError(
+            "TsVector(sources=...) takes a sequence of column names, such as "
+            "sources=('title', 'body')"
+        )
+    names = tuple(sources)
+    if not names:
+        raise DeclarationError(
+            "TsVector(sources=...) requires at least one column to analyse"
+        )
+    for name in names:
+        if not isinstance(name, str) or not name:
+            raise DeclarationError(f"TsVector source {name!r} is not a column name")
+    if len(set(names)) != len(names):
+        raise DeclarationError(
+            f"TsVector(sources={names!r}) names the same column twice; a repeated "
+            "source only weights it, which setweight() is for"
+        )
+    return TsVectorType(config, names)
+
+
+#: PostgreSQL type names that *index* content rather than carry it: pgvector's
+#: `vector` and PostgreSQL's own `tsvector`. Matched on the bare catalog name,
+#: so `vector(1536)` and `vector(3)` are one entry and a future `halfvec` is a
+#: one-word addition.
+_RETRIEVAL_TYPE_NAMES = frozenset({"tsvector", "vector"})
+
+
+def _is_retrieval_type(pg_type: PgType) -> bool:
+    """Whether a column of `pg_type` is a retrieval index rather than content.
+
+    Such a column is infrastructure: a `tsvector` is *derived* from columns that
+    are already in the same row, and an embedding is a lookup key for content
+    that lives elsewhere in it. Neither is something a person edits, both are
+    large -- a `Vector(1536)` is six kilobytes -- and neither sorts or filters
+    usefully. The generated layers therefore withhold them by default rather
+    than treating them as ordinary columns: see `wreath.crud.retrieval_fields`
+    and `wreath.pagination.sortable_fields`.
+
+    Kept here, beside the types themselves, so the two layers cannot disagree
+    about what counts and a third type is added in one place.
+    """
+    name = pg_type.type_name if isinstance(pg_type, ExtensionType) else pg_type.name
+    return name in _RETRIEVAL_TYPE_NAMES
+
+
 # PostgreSQL-spelled aliases for the integer and float widths.
 Int2 = Int16
 Int4 = Int32
@@ -320,12 +733,17 @@ TextArray = Array(Text)
 
 __all__ = [
     "BY_OID",
+    "EXT_KIND_VECTOR",
+    "MAX_VECTOR_DIM",
+    "TSVECTOR_OID",
     "Array",
     "Bool",
     "Bytea",
     "Date",
+    "ExtensionType",
     "Float4",
     "Float8",
+    "GeneratedType",
     "Float32",
     "Float64",
     "Int2",
@@ -342,6 +760,11 @@ __all__ = [
     "TextArray",
     "Timestamp",
     "TimestampTz",
+    "TsVector",
+    "TsVectorType",
     "Uuid",
     "Varchar",
+    "Vector",
+    "bind_extension_oid",
+    "declared_extension_types",
 ]

@@ -55,6 +55,21 @@ class SchemaMismatchError(ORMError):
         self.diff = diff
 
 
+class ExtensionNotInstalledError(ORMError):
+    """A column declares an extension type the database does not provide.
+
+    Raised at startup, while extension type OIDs are being resolved, so a
+    `Vector` column on a database without `CREATE EXTENSION vector` fails where
+    the message can name the extension and the schema -- not at the first query,
+    where it would surface as an unrecognised OID.
+    """
+
+    def __init__(self, message: str, extension: str = "", schema: str = "") -> None:
+        super().__init__(message)
+        self.extension = extension
+        self.schema = schema
+
+
 class SessionError(ORMError):
     """Invalid session use."""
 
@@ -70,6 +85,7 @@ class DetachedInstanceError(ORMError):
 __all__ = [
     "DeclarationError",
     "DetachedInstanceError",
+    "ExtensionNotInstalledError",
     "MappingError",
     "MultipleResultsError",
     "ORMError",

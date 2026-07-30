@@ -66,7 +66,11 @@ RESERVED_WORDS = frozenset(
     """.split()
 )
 
-_BARE = re.compile(r"^[a-z_][a-z0-9_$]*$")
+#: Matched with `fullmatch`, never `match`. This one decides *quoting* rather
+#: than acceptance, so `^...$` was worse than lax: `$` matches immediately before
+#: a trailing newline, so `"embedding\n"` was judged bare and emitted unquoted --
+#: the one answer `quote_ident` never gives.
+_BARE = re.compile(r"[a-z_][a-z0-9_$]*")
 
 #: Column types whose normal form this module reproduces exactly. Each maps to a
 #: literal renderer and the Python types it accepts.
@@ -81,7 +85,7 @@ _LITERAL = {
 
 def quote_identifier(name: str) -> str:
     """Quote *name* exactly when PostgreSQL's `quote_ident` would."""
-    if _BARE.match(name) and name not in RESERVED_WORDS:
+    if _BARE.fullmatch(name) and name not in RESERVED_WORDS:
         return name
     return '"' + name.replace('"', '""') + '"'
 

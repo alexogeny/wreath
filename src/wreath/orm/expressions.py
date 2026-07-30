@@ -47,6 +47,39 @@ OVERLAPS = "&&"
 ANY_EQ = "= ANY"
 ALL_EQ = "= ALL"
 
+# pgvector distance operators. Each yields a *number*, not a boolean, so the
+# node they build is only usable in an ORDER BY or as the left side of a
+# comparison -- `where()` refuses one on its own rather than letting PostgreSQL
+# refuse it later with a message about the argument of WHERE.
+L2_DISTANCE = "<->"
+COSINE_DISTANCE = "<=>"
+INNER_PRODUCT = "<#>"
+L1_DISTANCE = "<+>"
+DISTANCE_OPERATORS = frozenset(
+    {L2_DISTANCE, COSINE_DISTANCE, INNER_PRODUCT, L1_DISTANCE}
+)
+
+# Full-text search. `@@` answers a boolean and `ts_rank` answers a relevance
+# score, and both take a *tsquery* built by a parser function on the right-hand
+# side -- so the token names the parser as well as the operation, the way
+# "= ANY" names a quantifier. The compiler's allowlist therefore still decides
+# every byte that reaches SQL, and the choice of parser is a declaration rather
+# than an operand.
+#
+# `websearch_to_tsquery` is the default because it is the one that does not
+# raise on user input: quotes, `&`, `!` and a lone `:` are all just characters
+# to it. `to_tsquery` accepts operator syntax and raises on a syntax error,
+# which is a fine trade when the query is written by the application and a
+# 500 when it comes from a search box.
+MATCHES_WEBSEARCH = "@@ websearch_to_tsquery"
+MATCHES_TSQUERY = "@@ to_tsquery"
+RANK_WEBSEARCH = "ts_rank websearch_to_tsquery"
+RANK_TSQUERY = "ts_rank to_tsquery"
+TEXT_MATCH_OPERATORS = frozenset({MATCHES_WEBSEARCH, MATCHES_TSQUERY})
+TEXT_RANK_OPERATORS = frozenset({RANK_WEBSEARCH, RANK_TSQUERY})
+#: The tsquery parsers `.matches()` and `.rank()` accept.
+TSQUERY_PARSERS = ("websearch_to_tsquery", "to_tsquery")
+
 ASC = "ASC"
 DESC = "DESC"
 
@@ -78,6 +111,17 @@ class Predicate(Expression):
             "SQL predicates cannot be used in Python boolean context; "
             "combine them with & and | rather than and/or"
         )
+
+
+def _ts_operator(head: str, parser: str, method: str) -> str:
+    """The operator token for one text-search call, with its parser checked."""
+    if parser not in TSQUERY_PARSERS:
+        raise DeclarationError(
+            f".{method}(parser={parser!r}) must be one of "
+            f"{list(TSQUERY_PARSERS)}; websearch_to_tsquery is the default because "
+            "it is the one that does not raise on user input"
+        )
+    return f"{head} {parser}"
 
 
 def _as_predicate(value: Any) -> Predicate:
@@ -261,6 +305,108 @@ class ColumnExpr(Expression):
         element = self._require_array("all_eq")
         return BinaryExpr(ALL_EQ, _bind_as(value, element), self)
 
+    # -- pgvector distance operators --------------------------------------
+    #
+    # Each renders `column <op> $n` and evaluates to a number, so it is used as
+    # an ORDER BY key (the similarity search) or compared against a threshold
+    # (`.cosine_distance(q) < 0.3`). Named for what they compute rather than for
+    # the symbol, because `<#>` is not a thing anyone reads twice.
+
+    def l2_distance(self, other: Any) -> BinaryExpr:
+        """`self <-> other` -- Euclidean distance. Orderable."""
+        return self._distance(L2_DISTANCE, "l2_distance", other)
+
+    def cosine_distance(self, other: Any) -> BinaryExpr:
+        """`self <=> other` -- cosine distance, the common default. Orderable."""
+        return self._distance(COSINE_DISTANCE, "cosine_distance", other)
+
+    def inner_product(self, other: Any) -> BinaryExpr:
+        """`self <#> other` -- *negative* inner product, as pgvector defines it.
+
+        Negative so that ordering ascending still puts the most similar row
+        first, which is the whole reason pgvector spells it that way. Read a
+        result of `-0.9` as an inner product of `0.9`.
+        """
+        return self._distance(INNER_PRODUCT, "inner_product", other)
+
+    def l1_distance(self, other: Any) -> BinaryExpr:
+        """`self <+> other` -- taxicab (L1) distance. Orderable."""
+        return self._distance(L1_DISTANCE, "l1_distance", other)
+
+    def _distance(self, operator: str, method: str, other: Any) -> BinaryExpr:
+        from .types import ExtensionType
+
+        if not isinstance(self.column.pg_type, ExtensionType):
+            raise DeclarationError(
+                f".{method}() requires a Vector column, not "
+                f"{self.column.pg_type.name}"
+            )
+        return BinaryExpr(operator, self, _bind(self.column, other))
+
+    # -- full-text search --------------------------------------------------
+    #
+    # `matches` is the predicate and `rank` is the score, and they are separate
+    # calls on purpose: PostgreSQL evaluates `ts_rank` per surviving row and it
+    # cannot use the index, so a search filters with `@@` and *then* orders by
+    # the rank of what survived. Writing it as one call would hide which half
+    # costs what.
+
+    def matches(self, terms: Any, *, parser: str = "websearch_to_tsquery") -> BinaryExpr:
+        """`self @@ websearch_to_tsquery('<config>', terms)` -- a text-search predicate.
+
+        The configuration comes from the column's own `TsVector` declaration, so
+        the query is analysed exactly as the stored vector was; a query analysed
+        under a different configuration matches nothing and looks like missing
+        data.
+
+        Args:
+            terms: The search text, bound as a parameter. A `wreath.queries.Param`
+                works here as it does for the distance operators.
+            parser: `"websearch_to_tsquery"` (the default) or `"to_tsquery"`.
+                The default never raises on user input -- `"`, `&`, `!` and a
+                lone `:` are just characters to it. `to_tsquery` understands
+                `&`/`|`/`!`/`<->` and raises a syntax error on malformed input,
+                so choose it only where the query is the application's and the
+                error is handled.
+
+        Returns:
+            The predicate, ready for `.where()`.
+
+        Raises:
+            DeclarationError: This is not a `TsVector` column, or `parser` is
+                not one of the two.
+        """
+        self._require_tsvector("matches")
+        return BinaryExpr(
+            _ts_operator("@@", parser, "matches"), self, _bind_as(terms, Text)
+        )
+
+    def rank(self, terms: Any, *, parser: str = "websearch_to_tsquery") -> BinaryExpr:
+        """`ts_rank(self, websearch_to_tsquery('<config>', terms))` -- a relevance score.
+
+        A number, not a predicate: order by it (`.rank(t).desc()`) or compare it
+        against a threshold. `where()` refuses one on its own, because
+        PostgreSQL would refuse it later with a message about the argument of
+        WHERE rather than about the line that wrote it.
+
+        Takes the same arguments as `matches`, and should be given the same
+        `terms` and `parser` -- ranking one query while filtering by another is
+        a bug that looks like bad relevance.
+        """
+        self._require_tsvector("rank")
+        return BinaryExpr(
+            _ts_operator("ts_rank", parser, "rank"), self, _bind_as(terms, Text)
+        )
+
+    def _require_tsvector(self, method: str) -> None:
+        from .types import TsVectorType
+
+        if not isinstance(self.column.pg_type, TsVectorType):
+            raise DeclarationError(
+                f".{method}() requires a TsVector column, not "
+                f"{self.column.pg_type.name}"
+            )
+
     def _require_jsonb(self, method: str) -> None:
         if self.column.pg_type is not Jsonb:
             raise DeclarationError(
@@ -338,6 +484,68 @@ class BinaryExpr(Predicate):
         self.left = left
         self.right = right
 
+    # A distance node -- and a text-search one -- is a `BinaryExpr` on purpose
+    # rather than a class of its own: every walker in the compiler -- bind
+    # collection, the generated bind program, the plan-cache key, and their
+    # native twins -- already dispatches on this exact type and recurses through
+    # `left`/`right`. A new node type would have to be taught to each of them, in
+    # two languages, for a tree shape they already handle. `ts_rank(a, b)` is a
+    # function call rather than an infix operator, which the *renderer* special-
+    # cases by its token, exactly as it already does for "= ANY".
+
+    @property
+    def is_distance(self) -> bool:
+        """Whether this node evaluates to a distance rather than a boolean."""
+        return self.operator in DISTANCE_OPERATORS
+
+    @property
+    def is_rank(self) -> bool:
+        """Whether this node evaluates to a text-search relevance score."""
+        return self.operator in TEXT_RANK_OPERATORS
+
+    def _require_distance(self, method: str) -> None:
+        if not (self.is_distance or self.is_rank):
+            raise DeclarationError(
+                f".{method}() orders by a distance or a rank; {self.operator!r} "
+                "yields a boolean, and ordering by one is almost never what was "
+                "meant"
+            )
+
+    def asc(self) -> OrderExpr:
+        """Order by this distance or rank, smallest first."""
+        self._require_distance("asc")
+        return OrderExpr(self, ASC)
+
+    def desc(self) -> OrderExpr:
+        """Order by this distance or rank, largest first.
+
+        The one to reach for with `.rank()`: a relevance score is *higher* when
+        the row is a better match, which is the opposite of a distance.
+        """
+        self._require_distance("desc")
+        return OrderExpr(self, DESC)
+
+    def __lt__(self, other: Any) -> BinaryExpr:
+        return self._threshold(LT, other)
+
+    def __le__(self, other: Any) -> BinaryExpr:
+        return self._threshold(LE, other)
+
+    def __gt__(self, other: Any) -> BinaryExpr:
+        return self._threshold(GT, other)
+
+    def __ge__(self, other: Any) -> BinaryExpr:
+        return self._threshold(GE, other)
+
+    def _threshold(self, operator: str, other: Any) -> BinaryExpr:
+        from .types import Float64
+
+        if not (self.is_distance or self.is_rank):
+            raise TypeError(
+                f"cannot compare a {self.operator!r} predicate against a value"
+            )
+        return BinaryExpr(operator, self, _bind_as(other, Float64))
+
     def __repr__(self) -> str:
         return f"<BinaryExpr {self.left!r} {self.operator} {self.right!r}>"
 
@@ -410,9 +618,18 @@ class UnaryExpr(Predicate):
 
 
 class OrderExpr:
+    """One ORDER BY key: a column, or an expression that evaluates to one.
+
+    `expression` is a bare `ColumnExpr` for an ordinary sort, and a
+    `BinaryExpr` for the two kinds of ordering that are computed rather than
+    stored -- a vector distance and a text-search rank. The compiler branches on
+    which, because a computed key carries a bound value and so has to render
+    through the operand renderer rather than as a quoted column name.
+    """
+
     __slots__ = ("direction", "expression")
 
-    def __init__(self, expression: ColumnExpr, direction: str) -> None:
+    def __init__(self, expression: Expression, direction: str) -> None:
         self.expression = expression
         self.direction = direction
 
@@ -420,11 +637,9 @@ class OrderExpr:
         return f"<OrderExpr {self.expression!r} {self.direction}>"
 
 
-def _bind(column: Any, value: Any) -> ValueExpr:
+def _bind(column: Any, value: Any) -> Any:
     if isinstance(value, Expression):
-        raise TypeError(
-            "column-to-column comparison is not supported; compare against a value"
-        )
+        return _placeholder_or_refuse(value, column.pg_type)
     # Coercing here rejects a mistyped comparison at the call site rather than
     # at execution, and guarantees the bound value matches the column's OID.
     return ValueExpr(column.pg_type.coerce(value), column.pg_type)
@@ -433,10 +648,23 @@ def _bind(column: Any, value: Any) -> ValueExpr:
 def _bind_many(column: Any, values: Any) -> tuple[ValueExpr, ...]:
     if isinstance(values, (str, bytes)) or not hasattr(values, "__iter__"):
         raise TypeError("in_() requires an iterable of values, or a Select")
-    bound = tuple(_bind(column, item) for item in values)
+    # Deliberately `_bind`'s refusal rather than its placeholder seam: `in_`
+    # renders one placeholder per operand, so a declared query would have to
+    # promise how *many* values a parameter stands for, and that count is part
+    # of the query shape rather than of the call. Kept out until there is a
+    # spelling for it -- see `wreath.queries.Param`.
+    bound = tuple(_bind_element(column, item) for item in values)
     if not bound:
         raise ValueError("in_() requires at least one value")
     return bound
+
+
+def _bind_element(column: Any, value: Any) -> ValueExpr:
+    if isinstance(value, Expression):
+        raise TypeError(
+            "column-to-column comparison is not supported; compare against a value"
+        )
+    return ValueExpr(column.pg_type.coerce(value), column.pg_type)
 
 
 def _as_subquery(values: Any) -> Any:
@@ -534,7 +762,7 @@ def _refuse_related(node: Any, method: str) -> None:
             _refuse_related(child, method)
 
 
-def _bind_as(value: Any, pg_type: Any) -> ValueExpr:
+def _bind_as(value: Any, pg_type: Any) -> Any:
     """Bind `value` against an explicit type rather than the column's own.
 
     The jsonb key operators take `text`/`text[]` operands and `any_eq`
@@ -542,10 +770,30 @@ def _bind_as(value: Any, pg_type: Any) -> ValueExpr:
     `_bind` (which would coerce against the column type).
     """
     if isinstance(value, Expression):
+        return _placeholder_or_refuse(value, pg_type)
+    return ValueExpr(pg_type.coerce(value), pg_type)
+
+
+def _placeholder_or_refuse(value: Any, pg_type: Any) -> Any:
+    """A declared query's parameter, or the refusal every other node earns.
+
+    `wreath.queries.Param` intercepts the six comparison operators by being a
+    subclass of the column expression, which is why `Llama.id == Param("x")`
+    works. An operator spelled as a *method* -- `cosine_distance(...)` -- never
+    reaches that machinery, so the parameter arrives here as an ordinary
+    expression instead. `_as_placeholder` is the seam that lets it become the
+    placeholder it would have become on the operator path; anything without one
+    is a column-to-column comparison and is refused exactly as before.
+
+    Reached only when the operand *is* an expression, which is the error path
+    for every ordinary call, so nothing pays for it.
+    """
+    maker = getattr(value, "_as_placeholder", None)
+    if maker is None:
         raise TypeError(
             "column-to-column comparison is not supported; compare against a value"
         )
-    return ValueExpr(pg_type.coerce(value), pg_type)
+    return maker(pg_type)
 
 
 def _nonempty(values: Any, label: str) -> list[Any]:
@@ -675,6 +923,8 @@ __all__ = [
     "LE",
     "LIKE",
     "LT",
+    "MATCHES_TSQUERY",
+    "MATCHES_WEBSEARCH",
     "NE",
     "NOT",
     "NOT_IN",
@@ -682,6 +932,11 @@ __all__ = [
     "OVERLAPS",
     "PATH_JSON",
     "PATH_TEXT",
+    "RANK_TSQUERY",
+    "RANK_WEBSEARCH",
+    "TEXT_MATCH_OPERATORS",
+    "TEXT_RANK_OPERATORS",
+    "TSQUERY_PARSERS",
     "BinaryExpr",
     "BooleanExpr",
     "ColumnExpr",

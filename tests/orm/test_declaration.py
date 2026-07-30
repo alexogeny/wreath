@@ -113,7 +113,19 @@ def test_duplicate_python_names_are_rejected() -> None:
             id: Mapped[int] = column(Int64, primary_key=True)
 
 
-@pytest.mark.parametrize("name", ["Users", "user table", "1users", "user-table", ""])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Users",
+        "user table",
+        "1users",
+        "user-table",
+        "",
+        # `$` matches immediately before a trailing newline, so an anchored
+        # `^...$` accepted this and the table name reached DDL carrying it.
+        "users\n",
+    ],
+)
 def test_invalid_identifiers_are_rejected(name: str) -> None:
     with pytest.raises(DeclarationError, match="identifier"):
 

@@ -82,12 +82,14 @@ STATE_NAMES = {
 _UNLOADED: Any = object()
 
 # Unquoted PostgreSQL identifiers fold to lower case, so an upper-case name in
-# a declaration would silently disagree with the catalog.
-_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_$]*$")
+# a declaration would silently disagree with the catalog. Matched with
+# `fullmatch`, never `match`: `$` also matches immediately before a trailing
+# newline, so `^...$` accepted `table="users\n"` into the emitted DDL.
+_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_$]*")
 
 
 def validate_identifier(value: str, kind: str) -> str:
-    if not isinstance(value, str) or not _IDENTIFIER.match(value):
+    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
         raise DeclarationError(
             f"{kind} {value!r} is not a valid unquoted PostgreSQL identifier: "
             "use lower-case letters, digits, and underscores, starting with a "
@@ -310,6 +312,29 @@ def _storage_base(
     )
 
 
+def rebind_storage_oid(model_type: type, index: int, oid: int) -> None:
+    """Record a resolved extension OID on one already-compiled model.
+
+    Native storage bakes each column's OID in when the class is defined, and the
+    hydrate plan validates a result against it. That is right for every built-in
+    type, whose OID is a constant, and impossible for an extension type, whose
+    OID `CREATE EXTENSION` assigns -- at class-definition time it is 0, so every
+    result row for that column would be refused as a type mismatch.
+
+    So startup writes the answer back, once per such column, after
+    `wreath.orm.introspection.resolve_extension_types` has read it and before
+    any query runs. Only the recorded OID changes; the native side refuses a
+    rebind that would alter the cell's kind, because a rebind that moved a cell
+    would corrupt every instance already allocated against the old layout.
+
+    A no-op on the pure backend, which stores values as Python objects and reads
+    the OID from the column spec rather than from a layout.
+    """
+    if _native is None or not hasattr(_native, "_rebind_field_oid"):
+        return
+    _native._rebind_field_oid(model_type, index, oid)
+
+
 def _install_descriptors(
     cls: type,
     storage: type,
@@ -415,7 +440,16 @@ class Model(metaclass=ModelMeta):
             default = resolve_default(spec)
             if default is not MISSING:
                 self._orm_set(spec.index, default)
-            elif not (spec.nullable or spec.server_default or spec.primary_key):
+            elif not (
+                spec.nullable
+                or spec.server_default
+                or spec.primary_key
+                # A generated column has no value to supply: PostgreSQL computes
+                # it from other columns of the same row, and an INSERT naming one
+                # is an error. It stays unloaded, which is exactly what puts it in
+                # the statement's RETURNING list.
+                or spec.generated
+            ):
                 # Anything else would insert a NULL the column forbids.
                 raise TypeError(
                     f"{type(self).__name__}.{spec.python_name} is not nullable and has "

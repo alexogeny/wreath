@@ -110,6 +110,12 @@ def test_central_to_tenant_relationship_is_rejected() -> None:
         )
 
 
-def test_schema_mode_rejects_invalid_physical_identifiers() -> None:
+@pytest.mark.parametrize("name", ["not valid", "App", "1app", "app\n"])
+def test_schema_mode_rejects_invalid_physical_identifiers(name: str) -> None:
+    """`"app\\n"` is here because `$` matches before a trailing newline.
+
+    The anchored `^...$` this validator used accepted it, and a schema name
+    reaches every `CREATE SCHEMA` and every qualified reference as text.
+    """
     with pytest.raises(DeclarationError, match="schema name"):
-        SchemaMode.single("not valid")
+        SchemaMode.single(name)
