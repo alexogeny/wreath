@@ -159,6 +159,115 @@ anything similarity depends on — it is written down here so it does not surpri
 anyone, and pinned in
 `tests/orm/test_halfvec_live.py::test_the_result_format_decides_which_decimal_comes_back`.
 
+## Only the positions that matter: `Sparsevec`
+
+`Vector` and `Halfvec` store every position. Some vectors are not shaped like
+that. A bag-of-words over a 30,000-term vocabulary, or a SPLADE-style learned
+sparse expansion, has a dimension in the tens of thousands and perhaps forty
+values that are not zero. Storing 30,000 floats to say that is the problem
+`Sparsevec` exists to avoid:
+
+```python
+from wreath.orm.types import Sparsevec
+from wreath.postgres import SparseVector
+
+class Document(Model, table="documents"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    terms: Mapped[SparseVector] = column(
+        Sparsevec(30000), index="hnsw", index_ops="sparsevec_l2_ops"
+    )
+```
+
+**The Python value is a `SparseVector`, not a list.** This is the one type here
+that needs a value class of its own, and the reason is that no builtin says both
+halves at once: a `dict` names no dimension, a `list` defeats the point, and a
+`(dim, dict)` tuple is a shape every caller has to remember the order of.
+
+```python
+from wreath.postgres import SparseVector
+
+terms = SparseVector(30000, {17: 0.9, 4021: 1.4})     # index -> weight
+terms = SparseVector.from_dense(scores)               # drops the zeros for you
+
+terms.dim        # 30000 -- the positions that exist
+len(terms)       # 2     -- the positions that are stored (pgvector's nnz)
+terms.to_dict()  # {17: 0.9, 4021: 1.4}
+```
+
+**Indices count from 1**, matching how pgvector writes them — `'{1:1.5,3:3.5}/5'`
+is the first and third of five positions, and that is what `psql` shows you. The
+binary wire format counts from zero, and the conversion happens in the codec so
+the two numberings never both appear in your code.
+
+Three things are refused on assignment rather than at the server: a
+`SparseVector` whose dimension is not the column's, more than 16,000 non-zero
+elements (`MAX_SPARSEVEC_NNZ`, pgvector's own ceiling — a value denser than that
+wants `Vector`), and NaN or infinity, exactly as for `Vector`. An explicit zero
+is dropped rather than stored, because the server drops it too and a value
+should survive its own round trip.
+
+The same four distances apply as for a dense vector, and the operator classes are
+again the type's own: `sparsevec_l2_ops`, not `vector_l2_ops`. Note that pgvector
+indexes a `sparsevec` to 1,000 non-zero elements even though the column may hold
+16,000.
+
+## One bit per dimension: `Bit`
+
+Binary quantization replaces each element of an embedding with its sign. 1,536
+float4s (6,148 bytes) become 1,536 bits (192 bytes) — 32x smaller, index
+included — and enough of the geometry survives to *shortlist* candidates that a
+second pass over the real vectors then re-scores:
+
+```python
+from wreath.orm.types import Bit
+
+class Document(Model, table="documents"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    embedding: Mapped[list[float]] = column(Vector(1536))
+    signature: Mapped[str] = column(
+        Bit(1536), index="hnsw", index_ops="bit_hamming_ops"
+    )
+```
+
+The Python value is a `str` of `'0'` and `'1'`, exactly `length` of them — what
+`psql` shows and what `'101'::bit(3)` means. `bytes` is accepted on the way *in*,
+for the quantizers that produce it (`numpy.packbits(...).tobytes()`), and is
+unpacked using the declared length; the unused bits of the final byte must be
+zero, since they name positions the column does not have. A read always returns
+the `str`, because `bytes` would have to carry its own bit count to be
+unambiguous.
+
+**`bit` is PostgreSQL's own type; only the operators are pgvector's.** So a `Bit`
+column needs no extension to store and has no OID to resolve — but
+`hamming_distance` (`<~>`), `jaccard_distance` (`<%>`) and the
+`bit_hamming_ops` / `bit_jaccard_ops` index classes all come from
+`CREATE EXTENSION vector`.
+
+The two distances differ in what they count.
+[`hamming_distance`](../reference/orm.md#hamming_distance) counts the positions
+where two signatures disagree; it is the usual choice for a quantized dense
+embedding, where every position carries a sign.
+[`jaccard_distance`](../reference/orm.md#jaccard_distance) counts the bits set in
+both against the bits set in either, so it measures set overlap — the right
+choice when the bits are sparse *flags* (a feature is present or it is not) and
+the shared zeros that dominate Hamming are not evidence of similarity.
+
+The rerank is the point, and it is two ordinary queries:
+
+```python
+shortlist = await session.fetch(
+    Document.select()
+    .order_by(Document.signature.hamming_distance(query_signature))
+    .limit(200)
+)
+best = sorted(shortlist, key=lambda row: cosine(row.embedding, query))[:10]
+```
+
+Keep the full-precision column. Binary quantization is a *filter* over a cheap
+index, not a replacement for the vectors — the shortlist is approximate, and
+without the second pass the ranking it produces is visibly worse than the one
+`cosine_distance` gives you directly.
+
 ## Searching
 
 A search is an **ordering**, not a filter. That is the shape the feature actually
@@ -425,15 +534,11 @@ No embedding generation, no chunking strategy, no re-embedding on write. Those
 are your pipeline, not framework surface. No client for a separate vector
 database either — the pitch is that you do not need one.
 
-`sparsevec` is not implemented. The mechanism that resolves `vector`'s OID is
-general, so it is additive when someone asks for it -- what it needs beyond the
-codec is a distinct Python value type, since a sparse vector is a dimension plus a
-mapping of index to value rather than a `list[float]`.
-
 **Wreath implements the client half of pgvector, not the server half.** The wire
 codec is ours -- `wreath` needs no `pgvector` Python package, and the framing lives
 in `_pure/postgres.py` and `_native/postgres/codec.c` like every other type. But
-the `vector` and `halfvec` *types*, the `<->`/`<=>`/`<#>` operators, and the HNSW
+the `vector`, `halfvec` and `sparsevec` *types*, the
+`<->`/`<=>`/`<#>`/`<+>`/`<~>`/`<%>` operators, and the HNSW
 and IVFFlat access methods are PostgreSQL extension code running inside the
 server, and `CREATE EXTENSION vector` is what creates them. No client driver can
 substitute for that: an index access method cannot be defined from outside the
