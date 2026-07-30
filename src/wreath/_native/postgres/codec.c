@@ -69,6 +69,7 @@ wreath_pg_decode_hex_bytea(const unsigned char *data, Py_ssize_t length)
 #define PG_FLOAT4 700
 #define PG_FLOAT8 701
 #define PG_VARCHAR 1043
+#define PG_BIT 1560
 #define PG_DATE 1082
 #define PG_TIMESTAMP 1114
 #define PG_TIMESTAMPTZ 1184
@@ -155,7 +156,12 @@ array_element_oid(uint32_t oid)
 #define WREATH_PG_EXT_MAX 16
 #define WREATH_PG_EXT_VECTOR 1
 #define WREATH_PG_EXT_HALFVEC 2
+#define WREATH_PG_EXT_SPARSEVEC 3
 #define WREATH_PG_EXT_NAME_MAX 63
+
+/* pgvector's SPARSEVEC_MAX_NNZ, matching _sparsevec.py::MAX_SPARSEVEC_NNZ. A
+ * decoder bounds the count before it trusts it as a length. */
+#define WREATH_PG_SPARSEVEC_MAX_NNZ 16000
 
 /* The largest finite IEEE-754 binary16. A halfvec element beyond it rounds to an
  * infinity, which pgvector refuses on the way in -- so the encode would succeed
@@ -192,7 +198,8 @@ codec_register_extension_type(PyObject *module, PyObject *args)
     if (!PyArg_ParseTuple(
             args, "s#Ii:_register_extension_type", &name, &name_length, &oid, &kind))
         return NULL;
-    if (kind != WREATH_PG_EXT_VECTOR && kind != WREATH_PG_EXT_HALFVEC) {
+    if (kind != WREATH_PG_EXT_VECTOR && kind != WREATH_PG_EXT_HALFVEC &&
+        kind != WREATH_PG_EXT_SPARSEVEC) {
         PyErr_Format(PyExc_ValueError, "unknown extension codec kind %d for '%s'",
                      kind, name);
         return NULL;
@@ -649,11 +656,450 @@ decode_halfvec(const unsigned char *raw, Py_ssize_t length)
     return list;
 }
 
+/* `wreath._sparsevec.SparseVector`, resolved in module init beside uuid.UUID and
+ * decimal.Decimal. A `sparsevec` is a dimension plus its non-zero elements, and
+ * no builtin says both, so unlike `vector` this codec cannot answer in a list.
+ * The validation stays in the Python class rather than being restated here: it
+ * is declaration-time work on a cold path, and two copies of a bounds check are
+ * two chances to disagree about what pgvector accepts. */
+static PyObject *sparsevec_type = NULL;
+
+static void
+write_be_uint32(unsigned char *out, uint32_t value)
+{
+    out[0] = (unsigned char)(value >> 24);
+    out[1] = (unsigned char)(value >> 16);
+    out[2] = (unsigned char)(value >> 8);
+    out[3] = (unsigned char)value;
+}
+
+static uint32_t
+read_be_uint32(const unsigned char *raw)
+{
+    return ((uint32_t)raw[0] << 24) | ((uint32_t)raw[1] << 16) |
+           ((uint32_t)raw[2] << 8) | (uint32_t)raw[3];
+}
+
+static int
+check_sparsevec(PyObject *value)
+{
+    int is_sparse;
+    if (sparsevec_type == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "the SparseVector type is unavailable");
+        return -1;
+    }
+    is_sparse = PyObject_IsInstance(value, sparsevec_type);
+    if (is_sparse < 0) return -1;
+    if (!is_sparse) {
+        PyErr_SetString(
+            PyExc_TypeError,
+            "sparsevec codec requires a SparseVector; a dict names no dimension "
+            "and a list is the dense type. wreath.postgres.SparseVector(dim, "
+            "{index: value}) or SparseVector.from_dense([...])");
+        return -1;
+    }
+    return 0;
+}
+
+/* pgvector's binary `sparsevec`: int32 dim, nnz, unused, then nnz int32 indices,
+ * then nnz big-endian float4 values. The indices on the wire are **0-based** and
+ * `SparseVector`'s are 1-based (pgvector's own text form counts from one); this
+ * function and `decode_sparsevec` are the only two places the two meet. */
+static PyObject *
+encode_sparsevec(PyObject *value)
+{
+    PyObject *dim_object = NULL, *indices = NULL, *values = NULL;
+    PyObject *index_seq = NULL, *value_seq = NULL, *result = NULL;
+    Py_ssize_t count;
+    long dim;
+    unsigned char *out;
+
+    if (check_sparsevec(value) < 0) return NULL;
+    dim_object = PyObject_GetAttrString(value, "dim");
+    indices = PyObject_GetAttrString(value, "indices");
+    values = PyObject_GetAttrString(value, "values");
+    if (dim_object == NULL || indices == NULL || values == NULL) goto done;
+    dim = PyLong_AsLong(dim_object);
+    if (dim == -1 && PyErr_Occurred()) goto done;
+    index_seq = PySequence_Fast(indices, "sparsevec indices must be a sequence");
+    value_seq = PySequence_Fast(values, "sparsevec values must be a sequence");
+    if (index_seq == NULL || value_seq == NULL) goto done;
+    count = PySequence_Fast_GET_SIZE(index_seq);
+    if (count != PySequence_Fast_GET_SIZE(value_seq)) {
+        PyErr_SetString(PyExc_ValueError,
+                        "sparsevec indices and values differ in length");
+        goto done;
+    }
+    result = PyBytes_FromStringAndSize(NULL, 12 + count * 8);
+    if (result == NULL) goto done;
+    out = (unsigned char *)PyBytes_AS_STRING(result);
+    write_be_uint32(out, (uint32_t)dim);
+    write_be_uint32(out + 4, (uint32_t)count);
+    write_be_uint32(out + 8, 0);
+    for (Py_ssize_t index = 0; index < count; index++) {
+        long position = PyLong_AsLong(PySequence_Fast_GET_ITEM(index_seq, index));
+        double number;
+        if (position == -1 && PyErr_Occurred()) {
+            Py_CLEAR(result);
+            goto done;
+        }
+        write_be_uint32(out + 12 + index * 4, (uint32_t)(position - 1));
+        number = PyFloat_AsDouble(PySequence_Fast_GET_ITEM(value_seq, index));
+        if (number == -1.0 && PyErr_Occurred()) {
+            Py_CLEAR(result);
+            goto done;
+        }
+#ifdef WREATH_PG_FAST_FLOAT4
+        write_be_float4((char *)out + 12 + count * 4 + index * 4, number);
+#else
+        if (PyFloat_Pack4(number, (char *)out + 12 + count * 4 + index * 4, 0) < 0) {
+            Py_CLEAR(result);
+            goto done;
+        }
+#endif
+    }
+done:
+    Py_XDECREF(dim_object);
+    Py_XDECREF(indices);
+    Py_XDECREF(values);
+    Py_XDECREF(index_seq);
+    Py_XDECREF(value_seq);
+    return result;
+}
+
+static PyObject *
+decode_sparsevec(const unsigned char *raw, Py_ssize_t length)
+{
+    uint32_t dim, count, unused;
+    PyObject *mapping, *dim_object, *result;
+
+    if (length < 12) {
+        PyErr_SetString(PyExc_ValueError, "binary sparsevec header is truncated");
+        return NULL;
+    }
+    dim = read_be_uint32(raw);
+    count = read_be_uint32(raw + 4);
+    unused = read_be_uint32(raw + 8);
+    if (unused != 0) {
+        PyErr_Format(PyExc_ValueError, "unsupported binary sparsevec flags %u", unused);
+        return NULL;
+    }
+    if ((int32_t)dim < 1) {
+        PyErr_Format(PyExc_ValueError, "binary sparsevec dimension %d is not positive",
+                     (int)(int32_t)dim);
+        return NULL;
+    }
+    if (count > WREATH_PG_SPARSEVEC_MAX_NNZ) {
+        PyErr_Format(PyExc_ValueError,
+                     "binary sparsevec element count %u is out of range", count);
+        return NULL;
+    }
+    if (length != 12 + (Py_ssize_t)count * 8) {
+        PyErr_SetString(PyExc_ValueError,
+                        "binary sparsevec length does not match its element count");
+        return NULL;
+    }
+    if (sparsevec_type == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "the SparseVector type is unavailable");
+        return NULL;
+    }
+    mapping = PyDict_New();
+    if (mapping == NULL) return NULL;
+    for (uint32_t index = 0; index < count; index++) {
+        int32_t position = (int32_t)read_be_uint32(raw + 12 + index * 4);
+        const unsigned char *cell = raw + 12 + count * 4 + index * 4;
+        PyObject *key, *item;
+        int stored;
+        if (position < 0 || (uint32_t)position >= dim) {
+            Py_DECREF(mapping);
+            PyErr_Format(PyExc_ValueError,
+                         "binary sparsevec index %d is outside 0..%u",
+                         (int)position, dim - 1);
+            return NULL;
+        }
+#ifdef WREATH_PG_FAST_FLOAT4
+        item = PyFloat_FromDouble(read_be_float4(cell));
+#else
+        {
+            double number = PyFloat_Unpack4((const char *)cell, 0);
+            if (number == -1.0 && PyErr_Occurred()) {
+                Py_DECREF(mapping);
+                return NULL;
+            }
+            item = PyFloat_FromDouble(number);
+        }
+#endif
+        key = PyLong_FromLong((long)position + 1);
+        if (key == NULL || item == NULL) {
+            Py_XDECREF(key);
+            Py_XDECREF(item);
+            Py_DECREF(mapping);
+            return NULL;
+        }
+        stored = PyDict_SetItem(mapping, key, item);
+        Py_DECREF(key);
+        Py_DECREF(item);
+        if (stored < 0) {
+            Py_DECREF(mapping);
+            return NULL;
+        }
+    }
+    dim_object = PyLong_FromUnsignedLong(dim);
+    if (dim_object == NULL) {
+        Py_DECREF(mapping);
+        return NULL;
+    }
+    result = PyObject_CallFunctionObjArgs(sparsevec_type, dim_object, mapping, NULL);
+    Py_DECREF(dim_object);
+    Py_DECREF(mapping);
+    return result;
+}
+
+/* pgvector's text `sparsevec`: `{1:1.5,3:3.5}/5`. Each value is rendered by
+ * `repr()` rather than by a C format, because the pure twin renders it that way
+ * and the two must agree byte for byte -- `%g` and `repr` disagree about how
+ * many digits a float4 deserves. */
+static PyObject *
+encode_sparsevec_text(PyObject *value)
+{
+    PyObject *dim_object = NULL, *indices = NULL, *values = NULL;
+    PyObject *pieces = NULL, *comma = NULL, *body = NULL, *text = NULL;
+    PyObject *result = NULL;
+    Py_ssize_t count;
+
+    if (check_sparsevec(value) < 0) return NULL;
+    dim_object = PyObject_GetAttrString(value, "dim");
+    indices = PyObject_GetAttrString(value, "indices");
+    values = PyObject_GetAttrString(value, "values");
+    if (dim_object == NULL || indices == NULL || values == NULL) goto done;
+    count = PySequence_Size(indices);
+    if (count < 0) goto done;
+    pieces = PyList_New(count);
+    if (pieces == NULL) goto done;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *position = PySequence_GetItem(indices, index);
+        PyObject *number = PySequence_GetItem(values, index);
+        PyObject *piece = NULL;
+        if (position != NULL && number != NULL) {
+            piece = PyUnicode_FromFormat("%S:%R", position, number);
+        }
+        Py_XDECREF(position);
+        Py_XDECREF(number);
+        if (piece == NULL) goto done;
+        PyList_SET_ITEM(pieces, index, piece);
+    }
+    comma = PyUnicode_FromString(",");
+    if (comma == NULL) goto done;
+    body = PyUnicode_Join(comma, pieces);
+    if (body == NULL) goto done;
+    text = PyUnicode_FromFormat("{%U}/%S", body, dim_object);
+    if (text == NULL) goto done;
+    result = PyUnicode_AsEncodedString(text, "ascii", "strict");
+done:
+    Py_XDECREF(dim_object);
+    Py_XDECREF(indices);
+    Py_XDECREF(values);
+    Py_XDECREF(pieces);
+    Py_XDECREF(comma);
+    Py_XDECREF(body);
+    Py_XDECREF(text);
+    return result;
+}
+
+static PyObject *
+decode_sparsevec_text(const unsigned char *raw, Py_ssize_t length)
+{
+    PyObject *text = NULL, *split = NULL, *body = NULL, *dim_object = NULL;
+    PyObject *inner = NULL, *parts = NULL, *mapping = NULL, *result = NULL;
+    Py_ssize_t size;
+
+    text = PyUnicode_DecodeASCII((const char *)raw, length, "strict");
+    if (text == NULL) return NULL;
+    Py_SETREF(text, PyObject_CallMethod(text, "strip", NULL));
+    if (text == NULL) return NULL;
+    /* rpartition, so a `/` inside the braces could never be mistaken for the
+       one that introduces the dimension. */
+    split = PyObject_CallMethod(text, "rpartition", "s", "/");
+    if (split == NULL || PyTuple_GET_SIZE(split) != 3) goto malformed;
+    body = Py_NewRef(PyTuple_GET_ITEM(split, 0));
+    dim_object = Py_NewRef(PyTuple_GET_ITEM(split, 2));
+    if (PyUnicode_GET_LENGTH(PyTuple_GET_ITEM(split, 1)) == 0) goto malformed;
+    size = PyUnicode_GET_LENGTH(body);
+    if (size < 2 || PyUnicode_READ_CHAR(body, 0) != '{' ||
+        PyUnicode_READ_CHAR(body, size - 1) != '}') {
+        goto malformed;
+    }
+    inner = PySequence_GetSlice(body, 1, size - 1);
+    if (inner == NULL) goto done;
+    Py_SETREF(inner, PyObject_CallMethod(inner, "strip", NULL));
+    if (inner == NULL) goto done;
+    Py_SETREF(dim_object, PyNumber_Long(dim_object));
+    if (dim_object == NULL) goto done;
+    mapping = PyDict_New();
+    if (mapping == NULL) goto done;
+    if (PyUnicode_GET_LENGTH(inner) != 0) {
+        parts = PyObject_CallMethod(inner, "split", "s", ",");
+        if (parts == NULL) goto done;
+        for (Py_ssize_t index = 0; index < PyList_GET_SIZE(parts); index++) {
+            PyObject *piece = PyList_GET_ITEM(parts, index);  /* borrowed */
+            Py_ssize_t size = PyUnicode_GET_LENGTH(piece);
+            /* Split at the colon by index rather than by calling `partition`:
+               a method call inside a loop re-resolves the attribute by name
+               every iteration (NC005), and a find plus two slices is what the
+               method would have done anyway. */
+            Py_ssize_t colon = PyUnicode_FindChar(piece, ':', 0, size, 1);
+            PyObject *key = NULL, *item = NULL, *number = NULL;
+            int stored;
+            if (colon == -2) goto done;
+            if (colon < 0) goto malformed;
+            key = PySequence_GetSlice(piece, 0, colon);
+            number = PySequence_GetSlice(piece, colon + 1, size);
+            if (key != NULL) Py_SETREF(key, PyNumber_Long(key));
+            if (number != NULL) item = PyFloat_FromString(number);
+            Py_XDECREF(number);
+            if (key == NULL || item == NULL) {
+                Py_XDECREF(key);
+                Py_XDECREF(item);
+                goto done;
+            }
+            stored = PyDict_SetItem(mapping, key, item);
+            Py_DECREF(key);
+            Py_DECREF(item);
+            if (stored < 0) goto done;
+        }
+    }
+    if (sparsevec_type == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "the SparseVector type is unavailable");
+        goto done;
+    }
+    result = PyObject_CallFunctionObjArgs(sparsevec_type, dim_object, mapping, NULL);
+    goto done;
+malformed:
+    PyErr_SetString(PyExc_ValueError,
+                    "text-format sparsevec is not '{index:value,...}/dim'");
+done:
+    Py_XDECREF(text);
+    Py_XDECREF(split);
+    Py_XDECREF(body);
+    Py_XDECREF(dim_object);
+    Py_XDECREF(inner);
+    Py_XDECREF(parts);
+    Py_XDECREF(mapping);
+    return result;
+}
+
+/* PostgreSQL's binary `bit`: int32 bit count, then the bits MSB-first, the final
+ * byte padded on the right with zeros. A 3-bit '101' is one byte 0b10100000, not
+ * 0b00000101 -- reversed, it is a value the server accepts and pgvector's hamming
+ * distance then reads as a different signature entirely. */
+static PyObject *
+encode_bit(PyObject *value)
+{
+    const char *bits;
+    Py_ssize_t length, width;
+    PyObject *result;
+    unsigned char *out;
+
+    if (!PyUnicode_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "bit codec requires a str of '0' and '1'");
+        return NULL;
+    }
+    bits = PyUnicode_AsUTF8AndSize(value, &length);
+    if (bits == NULL) return NULL;
+    width = (length + 7) / 8;
+    result = PyBytes_FromStringAndSize(NULL, 4 + width);
+    if (result == NULL) return NULL;
+    out = (unsigned char *)PyBytes_AS_STRING(result);
+    write_be_uint32(out, (uint32_t)length);
+    memset(out + 4, 0, (size_t)width);
+    for (Py_ssize_t index = 0; index < length; index++) {
+        if (bits[index] == '1') {
+            out[4 + (index >> 3)] |= (unsigned char)(0x80u >> (index & 7));
+        }
+        else if (bits[index] != '0') {
+            Py_DECREF(result);
+            PyErr_SetString(PyExc_ValueError,
+                            "a bit string may hold only '0' and '1'");
+            return NULL;
+        }
+    }
+    return result;
+}
+
+static PyObject *
+decode_bit(const unsigned char *raw, Py_ssize_t length)
+{
+    int32_t bits;
+    Py_ssize_t width;
+    int padding;
+    PyObject *result;
+    Py_UCS1 *out;
+
+    if (length < 4) {
+        PyErr_SetString(PyExc_ValueError, "binary bit header is truncated");
+        return NULL;
+    }
+    bits = (int32_t)read_be_uint32(raw);
+    if (bits < 0) {
+        PyErr_Format(PyExc_ValueError, "binary bit length %d is negative", (int)bits);
+        return NULL;
+    }
+    width = ((Py_ssize_t)bits + 7) / 8;
+    if (length != 4 + width) {
+        PyErr_SetString(PyExc_ValueError,
+                        "binary bit length does not match its payload");
+        return NULL;
+    }
+    padding = (int)(width * 8 - bits);
+    if (padding != 0 && (raw[4 + width - 1] & ((1u << padding) - 1u)) != 0) {
+        PyErr_SetString(PyExc_ValueError, "binary bit has non-zero padding bits");
+        return NULL;
+    }
+    result = PyUnicode_New((Py_ssize_t)bits, 127);
+    if (result == NULL) return NULL;
+    out = PyUnicode_1BYTE_DATA(result);
+    for (Py_ssize_t index = 0; index < bits; index++) {
+        out[index] = (raw[4 + (index >> 3)] & (0x80u >> (index & 7))) ? '1' : '0';
+    }
+    return result;
+}
+
+/* The text form of `bit` is the string itself, so both directions only have to
+   establish that it is one -- and that it holds nothing but '0' and '1', which
+   the binary encoder would otherwise be the first to notice. */
+static PyObject *
+check_bit_string(PyObject *text)
+{
+    const char *bits;
+    Py_ssize_t length;
+
+    if (!PyUnicode_Check(text)) {
+        PyErr_SetString(PyExc_TypeError, "bit codec requires a str of '0' and '1'");
+        return NULL;
+    }
+    bits = PyUnicode_AsUTF8AndSize(text, &length);
+    if (bits == NULL) return NULL;
+    for (Py_ssize_t index = 0; index < length; index++) {
+        if (bits[index] != '0' && bits[index] != '1') {
+            PyErr_SetString(PyExc_ValueError,
+                            "a bit string may hold only '0' and '1'");
+            return NULL;
+        }
+    }
+    return Py_NewRef(text);
+}
+
 PyObject *
 wreath_pg_decode_extension(
     const unsigned char *data, Py_ssize_t length, int format, uint32_t oid)
 {
     int kind = wreath_pg_extension_kind(oid);
+    if (kind == WREATH_PG_EXT_SPARSEVEC) {
+        if (format == 1) return decode_sparsevec(data, length);
+        if (format == 0) return decode_sparsevec_text(data, length);
+        PyErr_Format(PyExc_ValueError, "invalid field format code %d", format);
+        return NULL;
+    }
     if (kind != WREATH_PG_EXT_VECTOR && kind != WREATH_PG_EXT_HALFVEC) {
         PyErr_Format(PyExc_ValueError, "no decoder for extension OID %u", oid);
         return NULL;
@@ -1315,12 +1761,24 @@ wreath_pg_encode_text_value(PyObject *value, uint32_t oid)
     case PG_JSON:
     case PG_JSONB:
         return json_utf8(value);
+    case PG_BIT: {
+        PyObject *checked = check_bit_string(value);
+        PyObject *encoded;
+        if (checked == NULL) return NULL;
+        encoded = PyUnicode_AsEncodedString(checked, "ascii", "strict");
+        Py_DECREF(checked);
+        return encoded;
+    }
     default:
         {
-            /* Both kinds print "[1,2,3]", so one text encoder serves them. */
+            /* `vector` and `halfvec` both print "[1,2,3]", so one text encoder
+             * serves them; `sparsevec` prints "{1:1.5}/5" and needs its own. */
             int kind = wreath_pg_extension_kind(oid);
             if (kind == WREATH_PG_EXT_VECTOR || kind == WREATH_PG_EXT_HALFVEC) {
                 return encode_vector_text(value);
+            }
+            if (kind == WREATH_PG_EXT_SPARSEVEC) {
+                return encode_sparsevec_text(value);
             }
         }
         return ascii_string(value);
@@ -1478,6 +1936,8 @@ wreath_pg_encode_binary_value(PyObject *value, uint32_t oid)
         Py_DECREF(payload);
         return versioned;
     }
+    case PG_BIT:
+        return encode_bit(value);
     default: {
         uint32_t element_oid = array_element_oid(oid);
         if (element_oid != 0) {
@@ -1487,6 +1947,7 @@ wreath_pg_encode_binary_value(PyObject *value, uint32_t oid)
             int kind = wreath_pg_extension_kind(oid);
             if (kind == WREATH_PG_EXT_VECTOR) return encode_vector(value);
             if (kind == WREATH_PG_EXT_HALFVEC) return encode_halfvec(value);
+            if (kind == WREATH_PG_EXT_SPARSEVEC) return encode_sparsevec(value);
         }
         PyErr_Format(PyExc_TypeError, "no binary encoder for PostgreSQL OID %u", oid);
         return NULL;
@@ -1792,6 +2253,14 @@ wreath_pg_decode_value(uint32_t oid, int format, PyObject *data)
         case PG_JSON:
         case PG_JSONB:
             return PyUnicode_DecodeUTF8((const char *)raw, length, "strict");
+        case PG_BIT: {
+            PyObject *text = PyUnicode_DecodeASCII((const char *)raw, length, "strict");
+            PyObject *checked;
+            if (text == NULL) return NULL;
+            checked = check_bit_string(text);
+            Py_DECREF(text);
+            return checked;
+        }
         default:
             if (array_element_oid(oid) != 0) {
                 PyErr_SetString(
@@ -1800,10 +2269,14 @@ wreath_pg_decode_value(uint32_t oid, int format, PyObject *data)
                 return NULL;
             }
             {
-                /* Both kinds print "[1,2,3]", so one text decoder serves them. */
+                /* `vector` and `halfvec` both print "[1,2,3]", so one text
+                 * decoder serves them; `sparsevec` prints "{1:1.5}/5". */
                 int kind = wreath_pg_extension_kind(oid);
                 if (kind == WREATH_PG_EXT_VECTOR || kind == WREATH_PG_EXT_HALFVEC) {
                     return decode_vector_text(raw, length);
+                }
+                if (kind == WREATH_PG_EXT_SPARSEVEC) {
+                    return decode_sparsevec_text(raw, length);
                 }
             }
             return Py_NewRef(data);
@@ -1898,6 +2371,9 @@ wreath_pg_decode_value(uint32_t oid, int format, PyObject *data)
         }
         return PyUnicode_DecodeUTF8((const char *)raw + 1, length - 1, "strict");
     }
+    if (oid == PG_BIT) {
+        return decode_bit(raw, length);
+    }
     if (array_element_oid(oid) != 0) {
         return decode_binary_array(raw, length);
     }
@@ -1905,6 +2381,7 @@ wreath_pg_decode_value(uint32_t oid, int format, PyObject *data)
         int kind = wreath_pg_extension_kind(oid);
         if (kind == WREATH_PG_EXT_VECTOR) return decode_vector(raw, length);
         if (kind == WREATH_PG_EXT_HALFVEC) return decode_halfvec(raw, length);
+        if (kind == WREATH_PG_EXT_SPARSEVEC) return decode_sparsevec(raw, length);
     }
     return Py_NewRef(data);
 }
@@ -2059,6 +2536,18 @@ wreath_pg_codec_init(PyObject *module)
         if (str_as_tuple == NULL) return -1;
     }
 
+    {
+        /* `wreath._sparsevec` imports nothing from wreath, so resolving it here
+           -- while `wreath.postgres` is still executing its own module body to
+           select this backend -- cannot close an import cycle. It is a separate
+           module for exactly that reason. */
+        PyObject *sparsevec_module = PyImport_ImportModule("wreath._sparsevec");
+        if (sparsevec_module == NULL) return -1;
+        sparsevec_type = PyObject_GetAttrString(sparsevec_module, "SparseVector");
+        Py_DECREF(sparsevec_module);
+        if (sparsevec_type == NULL) return -1;
+    }
+
     datetime_module = PyImport_ImportModule("datetime");
     if (datetime_module == NULL) return -1;
     date_type = PyObject_GetAttrString(datetime_module, "date");
@@ -2093,6 +2582,7 @@ wreath_pg_codec_fini(void)
 {
     Py_CLEAR(uuid_type);
     Py_CLEAR(decimal_type);
+    Py_CLEAR(sparsevec_type);
     Py_CLEAR(str_as_tuple);
     Py_CLEAR(utc_timezone);
     Py_CLEAR(date_fromisoformat);

@@ -39,6 +39,7 @@ from ._flight_markers import (
     phase_marker as _phase_marker,
 )
 from ._locks import AdvisoryLock, AdvisoryTryLock, SingletonRunner
+from ._sparsevec import MAX_SPARSEVEC_DIM, MAX_SPARSEVEC_NNZ, SparseVector
 
 Workload = Literal["security_read", "read", "write"]
 _READ_ONLY = frozenset({"security_read", "read"})
@@ -864,9 +865,10 @@ def _pool_config(value: PoolConfig | Mapping[str, Any]) -> PoolConfig:
 
 
 __all__ = [
+    "MAX_SPARSEVEC_DIM", "MAX_SPARSEVEC_NNZ",
     "AdvisoryLock", "AdvisoryTryLock", "Connection", "Database", "FromDatabase",
     "InterfaceError", "OperationalError", "PipelineFullError", "Pool", "PoolConfig",
     "PoolSnapshot", "PostgresError", "ProtocolError", "Record", "SingletonRunner",
-    "Statement",
+    "SparseVector", "Statement",
     "Workload", "connect",
 ]

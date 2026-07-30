@@ -20,6 +20,8 @@ from decimal import Decimal
 from typing import Any, Literal, NamedTuple, overload
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from .._sparsevec import MAX_SPARSEVEC_NNZ, SparseVector
+
 _IMPLEMENTATION = "pure"
 _implementation = _IMPLEMENTATION
 _MAX_MESSAGE_BYTES = 64 * 1024 * 1024
@@ -95,6 +97,7 @@ _VARCHAR = 1043
 _DATE = 1082
 _TIMESTAMP = 1114
 _TIMESTAMPTZ = 1184
+_BIT = 1560
 _NUMERIC = 1700
 _UUID = 2950
 _JSONB = 3802
@@ -108,12 +111,19 @@ _JSONB = 3802
 # (_native/postgres/codec.c) keeps the identical table with the identical bound.
 _EXT_KIND_VECTOR = 1
 _EXT_KIND_HALFVEC = 2
+_EXT_KIND_SPARSEVEC = 3
 _MAX_EXTENSION_TYPES = 16
 
 #: Codec kinds this twin can frame. A kind absent from here is refused at
 #: registration rather than falling through to `bytes` at decode time, which is
 #: what "never a silent fall-through" means one layer down in `orm/types.py`.
-_EXT_KINDS = frozenset((_EXT_KIND_VECTOR, _EXT_KIND_HALFVEC))
+_EXT_KINDS = frozenset((_EXT_KIND_VECTOR, _EXT_KIND_HALFVEC, _EXT_KIND_SPARSEVEC))
+
+#: The kinds whose text form is pgvector's bracketed list, `[1,2,3]`. `sparsevec`
+#: is deliberately not one of them: it prints `{1:1.5,3:3.5}/5`, and a decoder
+#: that guessed wrong here would return a plausible dense vector for a sparse
+#: column rather than raising.
+_EXT_DENSE_KINDS = frozenset((_EXT_KIND_VECTOR, _EXT_KIND_HALFVEC))
 
 #: The largest finite IEEE-754 binary16. A `halfvec` element beyond it does not
 #: saturate, it becomes an infinity -- which pgvector then refuses on the way in,
@@ -229,6 +239,132 @@ def _encode_vector_text(value: object) -> bytes:
     if not isinstance(value, (list, tuple)):
         raise TypeError("vector codec requires a list or tuple of floats")
     return ("[" + ",".join(repr(_as_float(item)) for item in value) + "]").encode("ascii")
+
+
+def _as_sparsevec(value: object) -> SparseVector:
+    if not isinstance(value, SparseVector):
+        raise TypeError(
+            "sparsevec codec requires a SparseVector; a dict names no dimension "
+            "and a list is the dense type. wreath.postgres.SparseVector(dim, "
+            "{index: value}) or SparseVector.from_dense([...])"
+        )
+    return value
+
+
+def _encode_sparsevec(value: object) -> bytes:
+    """pgvector's binary `sparsevec`: int32 dim, nnz, unused, then indices, then values.
+
+    The indices on the wire are **0-based**; `SparseVector` is 1-based, because
+    that is what pgvector's text form and its documentation use. This function
+    and `_decode_sparsevec` are the only two places the two numberings meet.
+    """
+    sparse = _as_sparsevec(value)
+    count = len(sparse.indices)
+    return struct.pack(
+        f"!iii{count}i{count}f",
+        sparse.dim,
+        count,
+        0,
+        *[index - 1 for index in sparse.indices],
+        *sparse.values,
+    )
+
+
+def _decode_sparsevec(data: bytes) -> SparseVector:
+    if len(data) < 12:
+        raise ProtocolError("binary sparsevec header is truncated")
+    dim, count, unused = struct.unpack_from("!iii", data, 0)
+    if unused != 0:
+        raise ProtocolError(f"unsupported binary sparsevec flags {unused}")
+    if dim < 1:
+        raise ProtocolError(f"binary sparsevec dimension {dim} is not positive")
+    if not 0 <= count <= MAX_SPARSEVEC_NNZ:
+        raise ProtocolError(f"binary sparsevec element count {count} is out of range")
+    if len(data) != 12 + count * 8:
+        raise ProtocolError("binary sparsevec length does not match its element count")
+    indices = struct.unpack_from(f"!{count}i", data, 12)
+    values = struct.unpack_from(f"!{count}f", data, 12 + count * 4)
+    for index in indices:
+        if not 0 <= index < dim:
+            raise ProtocolError(
+                f"binary sparsevec index {index} is outside 0..{dim - 1}"
+            )
+    return SparseVector(
+        dim, dict(zip((index + 1 for index in indices), values, strict=True))
+    )
+
+
+def _encode_sparsevec_text(value: object) -> bytes:
+    """pgvector's text `sparsevec`: `{1:1.5,3:3.5}/5`, with 1-based indices."""
+    sparse = _as_sparsevec(value)
+    body = ",".join(
+        f"{index}:{number!r}"
+        for index, number in zip(sparse.indices, sparse.values, strict=True)
+    )
+    return f"{{{body}}}/{sparse.dim}".encode("ascii")
+
+
+def _decode_sparsevec_text(data: bytes) -> SparseVector:
+    text = data.decode("ascii").strip()
+    body, separator, dimension = text.rpartition("/")
+    if not separator or not body.startswith("{") or not body.endswith("}"):
+        raise ProtocolError("text-format sparsevec is not '{index:value,...}/dim'")
+    inner = body[1:-1].strip()
+    try:
+        dim = int(dimension)
+        elements = {}
+        if inner:
+            for item in inner.split(","):
+                index, colon, number = item.partition(":")
+                if not colon:
+                    raise ProtocolError(f"text-format sparsevec element {item!r} "
+                                        "is not 'index:value'")
+                elements[int(index)] = float(number)
+    except ValueError as error:
+        raise ProtocolError(f"malformed text-format sparsevec: {error}") from error
+    return SparseVector(dim, elements)
+
+
+def _as_bit_string(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("bit codec requires a str of '0' and '1'")
+    if len(value) != value.count("0") + value.count("1"):
+        raise ValueError("a bit string may hold only '0' and '1'")
+    return value
+
+
+def _encode_bit(value: object) -> bytes:
+    """PostgreSQL's binary `bit`: int32 bit count, then the bits MSB-first.
+
+    The final byte is padded on the *right* with zeros -- the bits run from the
+    high end down -- so a 3-bit `'101'` is one byte `0b10100000`, not `0b00000101`.
+    Getting that backwards produces a value the server accepts and pgvector's
+    hamming distance then reads as a different vector entirely.
+    """
+    bits = _as_bit_string(value)
+    length = len(bits)
+    if length == 0:
+        return struct.pack("!i", 0)
+    padding = -length % 8
+    packed = (int(bits, 2) << padding).to_bytes((length + 7) // 8, "big")
+    return struct.pack("!i", length) + packed
+
+
+def _decode_bit(data: bytes) -> str:
+    if len(data) < 4:
+        raise ProtocolError("binary bit header is truncated")
+    length = struct.unpack_from("!i", data, 0)[0]
+    if length < 0:
+        raise ProtocolError(f"binary bit length {length} is negative")
+    if len(data) != 4 + (length + 7) // 8:
+        raise ProtocolError("binary bit length does not match its payload")
+    if length == 0:
+        return ""
+    padding = -length % 8
+    number = int.from_bytes(data[4:], "big")
+    if padding and number & ((1 << padding) - 1):
+        raise ProtocolError("binary bit has non-zero padding bits")
+    return format(number >> padding, f"0{length}b")
 
 
 def _as_float(value: object) -> float:
@@ -444,6 +580,13 @@ def _infer_oid(value: object) -> int:
             "by however many values you actually have. An array *column* is a "
             "different path: its OID comes from the declaration, not from here."
         )
+    # Last, after every built-in shape has missed: an extension value that is
+    # not a sequence at all. `sparsevec` is the first -- its Python value is a
+    # `SparseVector`, and like `WireList` it answers for itself rather than
+    # being guessed at. Read here so no ordinary parameter pays for the lookup.
+    declared = getattr(value, "_pg_oid", 0)
+    if declared:
+        return declared
     raise TypeError(f"unsupported PostgreSQL value type: {type(value).__name__}")
 
 
@@ -617,10 +760,15 @@ def _encode_text(value: object, oid: int) -> bytes | None:
         return str(_as_decimal(value)).encode("ascii")
     if oid in {_JSON, _JSONB}:
         return _as_json(value).encode("utf-8")
-    if _extension_kinds.get(oid) in _EXT_KINDS:
+    if oid == _BIT:
+        return _as_bit_string(value).encode("ascii")
+    extension_kind = _extension_kinds.get(oid)
+    if extension_kind in _EXT_DENSE_KINDS:
         # `vector` and `halfvec` print identically -- "[1,2,3]" -- so one text
         # codec serves both. Only the binary framing differs (float4 vs float2).
         return _encode_vector_text(value)
+    if extension_kind == _EXT_KIND_SPARSEVEC:
+        return _encode_sparsevec_text(value)
     return str(value).encode("utf-8")
 
 
@@ -684,11 +832,15 @@ def _encode_binary(value: object, oid: int) -> bytes | None:
         return _as_json(value).encode("utf-8")
     if oid == _JSONB:
         return b"\x01" + _as_json(value).encode("utf-8")
+    if oid == _BIT:
+        return _encode_bit(value)
     extension_kind = _extension_kinds.get(oid)
     if extension_kind == _EXT_KIND_VECTOR:
         return _encode_vector(value)
     if extension_kind == _EXT_KIND_HALFVEC:
         return _encode_halfvec(value)
+    if extension_kind == _EXT_KIND_SPARSEVEC:
+        return _encode_sparsevec(value)
     raise TypeError(f"no binary encoder for PostgreSQL OID {oid}")
 
 
@@ -716,8 +868,13 @@ def _decode_value(oid: int, format_code: int, data: bytes | None) -> object:
             return Decimal(data.decode("ascii"))
         if oid in {_JSON, _JSONB}:
             return data.decode("utf-8")
-        if _extension_kinds.get(oid) in _EXT_KINDS:
+        if oid == _BIT:
+            return _as_bit_string(data.decode("ascii"))
+        extension_kind = _extension_kinds.get(oid)
+        if extension_kind in _EXT_DENSE_KINDS:
             return _decode_vector_text(data)
+        if extension_kind == _EXT_KIND_SPARSEVEC:
+            return _decode_sparsevec_text(data)
         return data
     if format_code != 1:
         raise ProtocolError(f"invalid field format code {format_code}")
@@ -768,11 +925,15 @@ def _decode_value(oid: int, format_code: int, data: bytes | None) -> object:
         if len(data) < 1 or data[0] != 1:
             raise ProtocolError("unsupported jsonb wire version")
         return data[1:].decode("utf-8")
+    if oid == _BIT:
+        return _decode_bit(data)
     extension_kind = _extension_kinds.get(oid)
     if extension_kind == _EXT_KIND_VECTOR:
         return _decode_vector(data)
     if extension_kind == _EXT_KIND_HALFVEC:
         return _decode_halfvec(data)
+    if extension_kind == _EXT_KIND_SPARSEVEC:
+        return _decode_sparsevec(data)
     return data
 
 
