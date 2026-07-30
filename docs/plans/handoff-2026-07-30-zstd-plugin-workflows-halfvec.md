@@ -1,55 +1,44 @@
 # Handoff — 2026-07-30
 
-Written mid-session because the human had to leave. Everything below is in the
-working tree, **uncommitted** (per AGENTS.md). One gate is red and is the first
-thing to pick up.
+Written mid-session because the human had to leave, and **appended to on
+2026-07-30 by a later session**. The original text below described work that was
+uncommitted at the time; all of it has since been committed (`4fe7fae`
+through `a6b6ec4`). Read "## Session two" near the bottom for what is true now.
 
-## The one open problem
+## The one open problem — resolved, and not by the hypothesis below
 
-`uv run pytest -n 6` (the full suite, as `wreath-check` runs it) fails 9 tests in
-`tests/orm/test_vector_queries.py`:
+`uv run pytest -n 6` failed 9 tests in `tests/orm/test_vector_queries.py`, green
+serially. It was **flaky, not deterministic**: a later session saw two runs green
+and two red with a *different* subset of those 9 each time, which is the tell
+that it depends on which xdist worker drew which file.
 
-```
-test_each_operator_compiles_to_its_symbol[l2_distance-<->]      (and the 3 siblings)
-test_a_distance_orders_descending_too
-test_the_order_by_value_binds_between_the_where_and_the_limit
-test_a_threshold_comparison_is_a_predicate
-test_ordering_by_a_distance_and_a_column_together
-test_a_declared_query_binds_the_vector_per_call
-```
+**The actual cause was not the module-scoped bind in `test_vector_codec.py`.** It
+was `_vector_oid()`'s early return. That helper returned the first declared
+`vector` type that had an OID and, having found one, never called
+`bind_extension_oid` — so `Document.embedding` stayed on OID 0 and
+`to_wire` raised `ExtensionNotInstalledError`.
 
-**They pass when `tests/orm` is run serially.** `uv run pytest tests/orm -q` is
-all dots. So this is a parallel/ordering interaction, not a logic error in the
-vector query compiler.
+What put a bound-but-unrelated type in front of it was the "already fixed, same
+family" change recorded in the original text:
+`test_require_oid_returns_the_oid_once_the_type_is_resolved` builds a throwaway
+`Vector(4)` and assigns `column.oid = 987001` directly. `ExtensionType.__init__`
+appends **every** instance to the process-global `_DECLARED_EXTENSION_TYPES`,
+permanently, so that throwaway is a `vector` entry carrying a foreign OID for the
+rest of the process. That fix cured its own symptom and moved the failure next
+door.
 
-**Not yet established: whether this is pre-existing or something I introduced.**
-That is the first question to answer, and AGENTS.md's rule applies — "pre-existing
-is a diagnosis, not a disposition". The next command to run (it was interrupted
-before it finished) is:
+**The fix**: bind unconditionally rather than returning early. `bind_extension_oid`
+is idempotent for a repeated identical OID and walks *all* declared types, so
+binding again is the cheap way to reach declarations that did not exist when
+someone else bound. Applied to both copies of the helper
+(`test_vector_queries.py` and `test_extension_oid.py`).
 
-```bash
-uv run pytest tests/orm/test_vector_queries.py -q -n 6      # same file alone, parallel
-uv run pytest tests/orm/test_vector_queries.py::test_a_threshold_comparison_is_a_predicate -q
-```
+**The general lesson, worth carrying to the next extension type:** finding *a*
+bound instance does not mean *this module's* instance is bound. Any test that
+assigns `.oid` on a locally-constructed extension type leaves a permanent global
+entry that can satisfy someone else's early return.
 
-**Leading hypothesis.** Extension OID binding is *process-global*
-(`bind_extension_oid` writes a codec table keyed by type name, and
-`_DECLARED_EXTENSION_TYPES` is a module-level list). `tests/orm/test_vector_codec.py`
-binds `vector` to a made-up OID (987654) in a module-scoped autouse fixture, and
-`test_vector_queries.py` may be relying on that having happened. Adding two new
-files to `tests/orm` changes how xdist distributes tests across workers, so
-`test_vector_queries.py` can now land on a worker where nothing bound `vector`.
-
-If that is it, the fix belongs in `test_vector_queries.py` (bind what it needs
-itself, rather than inheriting another module's global side effect) — not in the
-new files. Worth checking whether `tests/orm/conftest.py` should own the binding.
-
-**Already fixed, same family, for reference:** my
-`test_require_oid_returns_the_oid_once_the_type_is_resolved` originally called
-`bind_extension_oid("vector", 987001)` and failed *only* in a full-directory run,
-because `test_vector_codec.py` had already bound a different number. It now
-assigns `column.oid` on a local instance and touches no global state. That is the
-shape of fix the 9 failures probably want.
+`tests/orm -q -n 6` is now green across repeated runs.
 
 ## What shipped this session (all green, all gates clean except the above)
 
@@ -162,11 +151,8 @@ documentary and are worth a decision rather than a drive-by edit.
 
 ## Still not done
 
-- **`sparsevec`.** Documented in `docs/guides/vector-search.md` as unimplemented.
-  Additive, but it needs a distinct Python value type (a dimension plus an
-  index→value mapping, not a `list[float]`), so it is more than a codec kind.
-- **`bit` + hamming/jaccard** (`<~>`, `<%>`) for binary quantization — zero
-  presence in the tree.
+- ~~**`sparsevec`**~~ and ~~**`bit` + hamming/jaccard**~~ — both shipped in
+  session two; see below.
 - **The broad psql mutant sweep the human asked for.** Measured cost:
   ~0.66 s/mutant against `tests/orm`. Extrapolating ~16k lines of psql code at
   roughly a mutant per six lines is ~2,600 mutants, and against the full DB test
@@ -174,6 +160,127 @@ documentary and are worth a decision rather than a drive-by edit.
   of continuous CPU.** Deferred deliberately: the human is on battery. `orm/types.py`
   is done (0.96). Next highest value is probably `orm/compiler.py` (1,576 lines),
   `orm/session.py` (1,594) and `migrations.py`.
+
+## Deferred test-infrastructure warning
+
+The deliberate crash tests in `tests/test_flight_reproduce.py` and
+`tests/test_flight_ring_file.py` call `os.fork()`. Under the six-worker suite,
+CPython 3.14 warns because the xdist worker is multi-threaded and a fork from a
+multi-threaded process may deadlock. Four warnings remain after the ordinary
+pytest warning cleanup. Do not silence them: later, move child creation behind
+a spawn- or forkserver-safe helper while preserving the properties these tests
+actually assert -- shared recorder files, termination by signal, and a parent
+that can inspect the child's wait status.
+
+## Session two — `sparsevec`, `bit`, hamming and jaccard
+
+Uncommitted in the working tree, per AGENTS.md. A second agent was working in the
+same tree throughout; nothing below touches its files except one deliberate
+overlap noted at the end.
+
+### `Sparsevec(dim)` — `EXT_KIND_SPARSEVEC = 3`
+
+The distinct Python value type the original text predicted is
+`src/wreath/_sparsevec.py::SparseVector`: a dimension plus its non-zero elements.
+It lives in its own module holding one class and **no wreath imports**, because
+both codec twins need it — `_pure/postgres.py` imports it directly and
+`codec.c` resolves it in module init beside `uuid.UUID` and `decimal.Decimal`.
+Anything reaching back into the package from there would be an import cycle.
+Re-exported from `wreath.postgres` and `wreath.orm.types`.
+
+**Indices are 1-based in Python and 0-based on the binary wire.** pgvector's text
+form (`{1:1.5,3:3.5}/5`) and its documentation count from one, so that is what
+`SparseVector` exposes; the conversion lives in `_encode_sparsevec` /
+`_decode_sparsevec` and their C twins and nowhere else. This is the type's one
+real trap, and `test_sparsevec_codec.py` asserts it against literal bytes rather
+than only through a round trip — a round trip is exactly what stays green when
+both directions are wrong.
+
+Other decisions worth not re-litigating:
+
+- Explicit zeros are dropped at construction. The server drops them too, so
+  keeping them would mean a value did not survive its own round trip.
+- Validation stays in the Python class and is **not** restated in C. Two copies
+  of a bounds check are two chances to disagree about what pgvector accepts, and
+  the sparse paths are cold. `decode_sparsevec` builds a dict and calls the class.
+- `_pg_oid` rides on a *copy* made by `to_wire`, not on the caller's object,
+  which may outlive the bind and be bound against another database. Same problem
+  `WireList` solves for `vector`, different shape.
+- `_infer_oid` gained a final `getattr(value, "_pg_oid", 0)` branch, after every
+  built-in shape has missed, for extension values that are not sequences at all.
+
+### `Bit(length)` — a built-in, not an extension type
+
+`bit` is PostgreSQL's own type, OID 1560, a compile-time constant with no
+resolution step and no `ExtensionNotInstalledError` path. Only pgvector's
+operators over it come from `CREATE EXTENSION vector`, which is why
+`_bit_distance` gates on the OID rather than on
+`isinstance(pg_type, ExtensionType)`.
+
+The value is a `str` of `'0'`/`'1'`. `bytes` is accepted at *coercion* only —
+the column knows the length, the codec does not — with non-zero padding in the
+final byte refused rather than masked, since masking would make two wire values
+decode to one string.
+
+**The wire packs MSB-first, final byte padded on the right.** Reversed, every
+value still round-trips through our own codec, still stores, still indexes, and
+still returns *an* ordering — just the wrong one, on a column whose whole job is
+approximate ranking, where a real bug looks like "slightly worse recall".
+`test_bit_codec.py` asserts the packing against literal bytes for that reason.
+
+### `hamming_distance` (`<~>`) and `jaccard_distance` (`<%>`)
+
+In `DISTANCE_OPERATORS` and the compiler allowlist, and type-gated both ways: a
+`bit` column refuses the four dense operators and a `vector`/`halfvec`/`sparsevec`
+column refuses the two bit ones. `_distance`'s message now names all three dense
+types, which required updating
+`test_vector_queries.py::test_a_distance_requires_a_vector_column`.
+
+### Six dispatch sites, again
+
+Exactly as the halfvec note warned, plus `wreath_pg_decode_extension` and the
+kind guard in `codec_register_extension_type`. Both twins verified byte-identical
+across binary and text, in both directions, for every new type.
+
+### What was run, and what was not
+
+Clean: `ruff`, `ty`, `wreath-native-lint` (0 — one NC005 was found and fixed, a
+`PyObject_CallMethod` inside the text-decode loop, replaced with
+`PyUnicode_FindChar` plus two slices), `wreath-map-lint`, `wreath-roadmap-lint`,
+`wreath-request-trace --check` (no added crossings), `wreath-docs` (177 pages).
+Tests: `tests/orm tests/postgres tests/test_docs_ssg.py` → 1209 passed;
+`tests/rgb tests/migrations tests/test_cross_subsystem.py` → 612 passed.
+`tests/orm -n 6` green across three consecutive runs.
+
+**`uv run wreath-check` was not run** — the human was on battery and asked for it
+to be skipped.
+
+**The 15 live tests have never executed.** `tests/orm/test_sparsevec_live.py` (7)
+and `tests/orm/test_bit_live.py` (8) collect and skip cleanly, but no container
+was started. They are the only thing that proves our framing matches the
+*server* rather than merely matching the other twin, so they are the first thing
+to run when `wreath-test-pg` is next up. Three facts asserted in them and in the
+guide come from reading pgvector's source rather than from a running server, and
+should be treated as unconfirmed until those tests pass: `SPARSEVEC_MAX_NNZ` is
+16,000, `SPARSEVEC_MAX_DIM` is 1e9, and HNSW indexes a `sparsevec` to 1,000
+non-zero elements.
+
+### One overlap with the concurrent agent
+
+That agent added two rows to `docs/reference/roadmap.md` — "Sparse vectors — Not
+shipped" and "Binary-quantized vector search — Not shipped", each with an
+`<!-- absent: -->` marker — at the same time these features were being
+implemented. The rows became false, so they were removed and
+`wreath-roadmap-lint` is clean. That is the only place this session touched the
+other agent's work, and it is worth a glance from whoever reconciles the two.
+
+### Still open here
+
+- `sparsevec` has no `wreath.migrations` round-trip test of its own. The
+  extension-typed-column path is generic and `sparsevec(dim)` renders like
+  `vector(dim)`, so it is expected to work; nothing has demonstrated it.
+- No mutant run over the new code. `orm/types.py` was at 0.96 before these two
+  types were added to it.
 
 ## Environment notes
 
