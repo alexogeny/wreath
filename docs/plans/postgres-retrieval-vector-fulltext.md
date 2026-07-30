@@ -1,8 +1,16 @@
 # Prescriptive plan: vector and full-text retrieval in the ORM
 
-Status: **stages 1-4 implemented** (July 2026). `Halfvec`/`Sparsevec` are not
-built — the codec table makes both additive, as intended. Three deliberate
-deviations from the text below, all documented where a reader will meet them:
+Status: **stages 1-4 implemented** (July 2026), and the codec table proved as
+additive as intended: `Halfvec`, `Sparsevec`, and `Bit` (with pgvector's
+`<~>`/`<%>` over it) all followed stage 2 without reopening the mechanism. Each
+needed a branch at the same six dispatch sites in both twins and nothing more.
+See `docs/plans/handoff-2026-07-30-zstd-plugin-workflows-halfvec.md` for what
+running their live suites found — including three built-in types that could not be
+migrated at all, which had nothing to do with vectors and had been broken far
+longer.
+
+Three deliberate deviations from the text below, all documented where a reader
+will meet them:
 
 - **Stage 4 is a fusion over two declared queries, not an expression in the
   query DSL.** The plan asked for reciprocal-rank fusion "expressed in the DSL";
