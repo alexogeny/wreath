@@ -155,25 +155,38 @@ async def test_hamming_distance_counts_the_bits_that_differ(live) -> None:
 
 
 async def test_jaccard_distance_measures_overlap_rather_than_agreement(live) -> None:
-    """The difference from Hamming, on a pair Hamming would rank the other way.
+    """The two operators rank the same two pairs in opposite orders.
 
-    `11110000` and `00001111` share no set bits, so their Jaccard distance is 1 --
-    maximally dissimilar -- while `11110000` against `11111111` overlaps in four
-    of eight and is closer. Hamming scores both pairs at four bits and cannot
-    tell them apart, which is the whole reason to have the second operator.
+    Jaccard ignores the positions where both values are zero; Hamming counts them
+    as agreement. So the two disagree exactly when the shared zeros outnumber
+    everything else, which for a quantized signature is the common case:
+
+    - `11110000` against `11111111` differs in four positions and overlaps in four
+      of the four-or-eight it could -- Hamming 4, Jaccard 1 - 4/8 = 0.5.
+    - `10000000` against `01000000` differs in only two positions, but shares no
+      set bit at all -- Hamming 2, Jaccard 1 - 0/2 = 1, the maximum.
+
+    Hamming calls the second pair the closer one; Jaccard calls the first. That
+    inversion is the whole reason to have the second operator, and it is why a
+    sparse signature ranked by Hamming drifts toward whichever rows are emptiest.
     """
     database, connection = live
     await _needs_pgvector(connection)
     rows = await connection.fetch(
-        "SELECT (B'11110000' <~> B'00001111')::float8 AS hamming_far, "
-        "(B'11110000' <~> B'11111111')::float8 AS hamming_near, "
-        "(B'11110000' <%> B'00001111')::float8 AS jaccard_far, "
-        "(B'11110000' <%> B'11111111')::float8 AS jaccard_near"
+        "SELECT (B'11110000' <~> B'11111111')::float8 AS hamming_overlapping, "
+        "(B'11110000' <%> B'11111111')::float8 AS jaccard_overlapping, "
+        "(B'10000000' <~> B'01000000')::float8 AS hamming_disjoint, "
+        "(B'10000000' <%> B'01000000')::float8 AS jaccard_disjoint"
     )
     row = rows[0]
-    assert row["hamming_far"] == row["hamming_near"] == 4.0
-    assert row["jaccard_far"] == 1.0
-    assert row["jaccard_near"] < row["jaccard_far"]
+    assert row["hamming_overlapping"] == 4.0
+    assert row["jaccard_overlapping"] == 0.5
+    assert row["hamming_disjoint"] == 2.0
+    assert row["jaccard_disjoint"] == 1.0
+    # The inversion itself, stated as the comparison rather than left to the
+    # reader to perform on the four constants above.
+    assert row["hamming_disjoint"] < row["hamming_overlapping"]
+    assert row["jaccard_overlapping"] < row["jaccard_disjoint"]
 
 
 async def test_an_hnsw_index_over_bit_uses_the_bit_opclasses(live) -> None:
@@ -199,6 +212,16 @@ async def test_a_quantized_signature_is_thirty_two_times_smaller_on_disk(live) -
     Same 256 rows at 512 dimensions: one table of `vector(512)`, one of the
     `bit(512)` signature of the same thing. Toast and page overhead keep this
     from being exactly 32x, so the assertion is a generous factor of eight.
+
+    **The size function must be `pg_table_size`, not `pg_relation_size`.** A
+    `vector(512)` is 2,056 bytes, past the ~2KB threshold at which PostgreSQL
+    moves a value out of line, so the dense table's *main* fork holds pointers
+    and measures 16KB while its TOAST relation holds the 800KB of actual floats.
+    The `bit(512)` is 64 bytes and stays inline, so by `pg_relation_size` the
+    quantized table looks two times *larger* than the dense one it shrinks by
+    fourteen. `pg_table_size` counts the TOAST relation; it also excludes
+    indexes, which is wanted here, since the identical `bigint` primary key on
+    both sides is noise this comparison should not carry.
     """
     database, connection = live
     await _needs_pgvector(connection)
@@ -223,7 +246,7 @@ async def test_a_quantized_signature_is_thirty_two_times_smaller_on_disk(live) -
         # The identifier is interpolated rather than bound: `regclass` has no
         # binary bind encoder, and both halves of this name are ours.
         rows = await connection.fetch(
-            f"SELECT pg_relation_size('\"{_SCHEMA}\".{table}'::regclass) AS bytes"
+            f"SELECT pg_table_size('\"{_SCHEMA}\".{table}'::regclass) AS bytes"
         )
         sizes[table] = int(rows[0]["bytes"])
     assert sizes["signed"] * 8 < sizes["dense"], sizes

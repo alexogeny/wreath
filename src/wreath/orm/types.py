@@ -562,7 +562,11 @@ def Vector(dim: int) -> ExtensionType:
     declares one against a database without it fails at startup, naming the
     extension and the schema, rather than at the first query with an OID error.
     """
-    if dim.__class__ is not int or isinstance(dim, bool):
+    # `__class__` rather than `isinstance`, for the reason `_integer` gives above:
+    # bool is an int subclass, and `Vector(True)` is a mistake rather than a
+    # one-dimensional column. That also makes an `isinstance(dim, bool)` clause
+    # here unreachable -- it was one, and a mutant sweep reported it as dead.
+    if dim.__class__ is not int:
         raise DeclarationError(f"Vector() requires an int dimension, got {dim!r}")
     if not 1 <= dim <= MAX_VECTOR_DIM:
         raise DeclarationError(
@@ -642,7 +646,7 @@ def Halfvec(dim: int) -> ExtensionType:
 
     Requires `CREATE EXTENSION vector` (the same extension provides both types).
     """
-    if dim.__class__ is not int or isinstance(dim, bool):
+    if dim.__class__ is not int:
         raise DeclarationError(f"Halfvec() requires an int dimension, got {dim!r}")
     if not 1 <= dim <= MAX_HALFVEC_DIM:
         raise DeclarationError(
@@ -722,7 +726,7 @@ def Sparsevec(dim: int) -> ExtensionType:
     not `vector_l2_ops` -- and that pgvector indexes a `sparsevec` to 1,000
     non-zero elements even though the column may hold 16,000.
     """
-    if dim.__class__ is not int or isinstance(dim, bool):
+    if dim.__class__ is not int:
         raise DeclarationError(f"Sparsevec() requires an int dimension, got {dim!r}")
     if not 1 <= dim <= MAX_SPARSEVEC_DIM:
         raise DeclarationError(
@@ -786,7 +790,7 @@ def Bit(length: int) -> PgType:
     and there is no OID to resolve -- but a query that ranks by one of those
     distances does.
     """
-    if length.__class__ is not int or isinstance(length, bool):
+    if length.__class__ is not int:
         raise DeclarationError(f"Bit() requires an int length, got {length!r}")
     if not 1 <= length <= MAX_BIT_LENGTH:
         raise DeclarationError(
@@ -898,7 +902,7 @@ def TsVector(config: str = "english", *, sources: Any) -> TsVectorType:
             "such as 'english' or 'simple'; it is rendered into DDL rather than "
             "bound"
         )
-    if isinstance(sources, str) or not isinstance(sources, (list, tuple)):
+    if not isinstance(sources, (list, tuple)):
         raise DeclarationError(
             "TsVector(sources=...) takes a sequence of column names, such as "
             "sources=('title', 'body')"

@@ -15,6 +15,7 @@ trip is exactly the thing that stays green when both directions are wrong.
 
 from __future__ import annotations
 
+import contextlib
 import struct
 
 import pytest
@@ -293,6 +294,27 @@ def test_a_nonsense_dimension_is_refused_at_declaration() -> None:
         Sparsevec(3.0)
 
 
+@contextlib.contextmanager
+def _fake_oid(column):
+    """Lend `column` this suite's invented OID, then take it back.
+
+    Assigning `.oid` directly is the right narrow setup -- these tests are about
+    `to_wire` reading it, not about codec registration -- but it cannot be left in
+    place. `ExtensionType.__init__` appends *every* instance to the process-global
+    `_DECLARED_EXTENSION_TYPES`, permanently, so a throwaway that keeps a made-up
+    OID is a `sparsevec` entry that disagrees with the server for the rest of the
+    interpreter. The next `bind_extension_oid("sparsevec", real_oid)` then refuses,
+    which is how `tests/orm/test_sparsevec_live.py` came to fail five ways in a
+    full-directory run while passing on its own. Zero means "unresolved" and
+    binding accepts it, so restoring it makes the lingering entry harmless.
+    """
+    column.oid = SPARSEVEC_OID
+    try:
+        yield column
+    finally:
+        column.oid = 0
+
+
 def test_the_shape_token_is_name_derived_like_every_extension_type() -> None:
     """An OID in a plan-cache key would split the cache between databases."""
     assert Sparsevec(30).shape_value == b"xsparsevec(30)"
@@ -301,15 +323,15 @@ def test_the_shape_token_is_name_derived_like_every_extension_type() -> None:
 def test_a_bound_value_carries_its_oid_without_mutating_the_callers() -> None:
     """`SparseVector` solves for itself what `WireList` solves for `vector`."""
     column = Sparsevec(5)
-    column.oid = SPARSEVEC_OID
-    mine = SparseVector(5, {1: 1.5})
-    bound = column.to_wire(mine)
-    assert bound == mine
-    assert bound._pg_oid == SPARSEVEC_OID
-    assert mine._pg_oid == 0
+    with _fake_oid(column):
+        mine = SparseVector(5, {1: 1.5})
+        bound = column.to_wire(mine)
+        assert bound == mine
+        assert bound._pg_oid == SPARSEVEC_OID
+        assert mine._pg_oid == 0
 
 
 def test_a_bound_value_is_what_parameter_inference_reads() -> None:
     column = Sparsevec(5)
-    column.oid = SPARSEVEC_OID
-    assert pure._infer_oid(column.to_wire(SparseVector(5, {1: 1.5}))) == SPARSEVEC_OID
+    with _fake_oid(column):
+        assert pure._infer_oid(column.to_wire(SparseVector(5, {1: 1.5}))) == SPARSEVEC_OID

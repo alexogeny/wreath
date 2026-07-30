@@ -18,6 +18,7 @@ import os
 
 import pytest
 
+from wreath._sparsevec import MAX_SPARSEVEC_DIM, MAX_SPARSEVEC_NNZ
 from wreath.postgres import PostgresError, SparseVector
 
 _DSN = os.environ.get("WREATH_TEST_POSTGRES_DSN")
@@ -218,11 +219,100 @@ async def test_an_hnsw_index_over_sparsevec_needs_its_own_opclass(live) -> None:
         )
 
 
+async def test_our_declared_bounds_are_the_bounds_the_server_enforces(live) -> None:
+    """`MAX_SPARSEVEC_DIM` and `MAX_SPARSEVEC_NNZ` against pgvector's own refusals.
+
+    Both constants were read out of pgvector's source rather than measured, which
+    makes them exactly the kind of fact that is right until the version changes.
+    A bound that is too *low* refuses values the server would have taken; one that
+    is too *high* turns our own clear error into a driver-level surprise. So each
+    is pinned from both sides: the largest accepted value and the smallest refused
+    one, with the refusal coming from the server rather than from us.
+    """
+    database, connection = live
+    await connection.execute(f'CREATE TABLE "{_SCHEMA}"."bounds" (e sparsevec)')
+
+    # The dimension ceiling. A one-element value carries the declared dimension,
+    # so this costs nothing to insert at either size.
+    await connection.execute(
+        f'INSERT INTO "{_SCHEMA}"."bounds" (e) VALUES ($1::text::sparsevec)',
+        f"{{1:1}}/{MAX_SPARSEVEC_DIM}",
+    )
+    with pytest.raises(PostgresError) as dim_refusal:
+        await connection.execute(
+            f'INSERT INTO "{_SCHEMA}"."bounds" (e) VALUES ($1::text::sparsevec)',
+            f"{{1:1}}/{MAX_SPARSEVEC_DIM + 1}",
+        )
+    assert "1000000000 dimensions" in str(dim_refusal.value)
+
+    # The non-zero ceiling, which is independent of the dimension above it.
+    nnz_dim = MAX_SPARSEVEC_NNZ + 1
+    at_limit = ",".join(f"{i}:1" for i in range(1, MAX_SPARSEVEC_NNZ + 1))
+    await connection.execute(
+        f'INSERT INTO "{_SCHEMA}"."bounds" (e) VALUES ($1::text::sparsevec)',
+        f"{{{at_limit}}}/{nnz_dim}",
+    )
+    over_limit = ",".join(f"{i}:1" for i in range(1, MAX_SPARSEVEC_NNZ + 2))
+    with pytest.raises(PostgresError) as nnz_refusal:
+        await connection.execute(
+            f'INSERT INTO "{_SCHEMA}"."bounds" (e) VALUES ($1::text::sparsevec)',
+            f"{{{over_limit}}}/{nnz_dim}",
+        )
+    assert "16000 non-zero elements" in str(nnz_refusal.value)
+
+    # And our own class refuses the same two, so the error a caller sees comes
+    # from Wreath before a round trip rather than from the server after one.
+    with pytest.raises(ValueError):
+        SparseVector(MAX_SPARSEVEC_DIM + 1, {1: 1.0})
+    with pytest.raises(ValueError):
+        SparseVector(nnz_dim, dict.fromkeys(range(1, MAX_SPARSEVEC_NNZ + 2), 1.0))
+
+
+async def test_hnsw_indexes_a_sparsevec_to_a_thousand_non_zero_elements(live) -> None:
+    """The documented HNSW limit, which is far below the column's own 16,000.
+
+    This is the third fact the guide states from reading pgvector's source, and
+    the one most likely to bite: a `sparsevec(20000)` column accepts 16,000
+    non-zero elements happily until an HNSW index exists on it, after which the
+    same insert fails. The limit belongs to the access method, not the type, so
+    nothing about the column declaration reveals it.
+    """
+    database, connection = live
+    await connection.execute(
+        f'CREATE TABLE "{_SCHEMA}"."indexed" (id bigint PRIMARY KEY, e sparsevec(20000))'
+    )
+    await connection.execute(
+        f'CREATE INDEX indexed_hnsw ON "{_SCHEMA}"."indexed" '
+        "USING hnsw (e sparsevec_l2_ops)"
+    )
+    at_limit = ",".join(f"{i}:1" for i in range(1, 1001))
+    await connection.execute(
+        f'INSERT INTO "{_SCHEMA}"."indexed" (id, e) VALUES (1, $1::text::sparsevec)',
+        f"{{{at_limit}}}/20000",
+    )
+    over_limit = ",".join(f"{i}:1" for i in range(1, 1002))
+    with pytest.raises(PostgresError) as refusal:
+        await connection.execute(
+            f'INSERT INTO "{_SCHEMA}"."indexed" (id, e) VALUES (2, $1::text::sparsevec)',
+            f"{{{over_limit}}}/20000",
+        )
+    assert "1000 non-zero elements for hnsw" in str(refusal.value)
+
+
 async def test_a_sparse_column_costs_what_it_stores_not_what_it_declares(live) -> None:
     """The claim the type is chosen for, measured rather than asserted from theory.
 
     Same 256 rows: one table of dense `vector(512)`, one of `sparsevec(512)` with
     four non-zero elements each. The sparse table must be appreciably smaller.
+
+    **The size function must be `pg_table_size`, not `pg_relation_size`.** A
+    `vector(512)` is 2,056 bytes, past the ~2KB threshold at which PostgreSQL
+    moves a value out of line, so the dense table's *main* fork holds pointers
+    and measures 16KB while its TOAST relation holds the 800KB of actual floats.
+    A four-element `sparsevec` is 40 bytes and stays inline, so by
+    `pg_relation_size` the sparse table looks larger than the dense one it
+    shrinks by fourteen. `pg_table_size` counts the TOAST relation, and excludes
+    the identical primary-key index on both sides.
     """
     database, connection = live
     await connection.execute(
@@ -246,7 +336,7 @@ async def test_a_sparse_column_costs_what_it_stores_not_what_it_declares(live) -
         # The identifier is interpolated rather than bound: `regclass` has no
         # binary bind encoder, and both halves of this name are ours.
         rows = await connection.fetch(
-            f"SELECT pg_relation_size('\"{_SCHEMA}\".{table}'::regclass) AS bytes"
+            f"SELECT pg_table_size('\"{_SCHEMA}\".{table}'::regclass) AS bytes"
         )
         sizes[table] = int(rows[0]["bytes"])
     assert sizes["sparse"] < sizes["dense"], sizes

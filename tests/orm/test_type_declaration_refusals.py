@@ -22,6 +22,7 @@ from decimal import Decimal
 
 import pytest
 
+from wreath._sparsevec import MAX_SPARSEVEC_DIM, MAX_SPARSEVEC_NNZ, SparseVector
 from wreath.orm.errors import DeclarationError
 from wreath.orm.types import (
     Array,
@@ -300,10 +301,24 @@ def test_require_oid_returns_the_oid_once_the_type_is_resolved() -> None:
     different number by the time this runs -- so calling it here raised, and only in
     a full-directory run. `require_oid` reads `self.oid` and nothing else, so the
     narrower setup is also the more honest one.
+
+    **The assignment has to be undone, and avoiding `bind_extension_oid` is not
+    enough on its own.** `ExtensionType.__init__` appends *every* instance to the
+    process-global `_DECLARED_EXTENSION_TYPES`, permanently -- so this throwaway
+    stays a `vector` entry carrying a foreign OID for the rest of the interpreter,
+    and the next `bind_extension_oid("vector", real_oid)` refuses: 987001 is
+    neither 0 nor the OID the server assigned. That made every test in
+    `test_vector_queries.py` error at setup, but only once a live `pgvector`
+    supplied a real OID to disagree with -- so it stayed hidden for as long as
+    nobody ran `tests/orm` with `WREATH_TEST_POSTGRES_DSN` set. Restoring 0 leaves
+    the entry harmless, because 0 means "unresolved" and binding accepts it.
     """
     column = Vector(4)
-    column.oid = 987001
-    assert column.require_oid("a test") == 987001
+    try:
+        column.oid = 987001
+        assert column.require_oid("a test") == 987001
+    finally:
+        column.oid = 0
 
 
 def test_a_none_element_stays_null_through_both_wire_directions() -> None:
@@ -355,3 +370,111 @@ def test_an_unbound_extension_type_refuses_to_name_its_oid() -> None:
         column.require_oid("a test")
     with pytest.raises(ExtensionNotInstalledError):
         column.to_wire([0.0] * 8)
+
+
+# -- SparseVector: the value class, whose validation lives in Python only -------
+#
+# `_sparsevec.py` deliberately does not restate its bounds in C -- two copies of a
+# check are two chances to disagree about what pgvector accepts -- which makes this
+# module the *only* place a bad sparse value is refused. A mutant sweep found every
+# one of these branches unreached: the codec tests build valid values and round
+# trip them, and `test_sparsevec_live.py` covers the bounds but skips without a
+# DSN, so an unguarded build reported the refusals as untested.
+
+
+def test_a_sparse_vector_refuses_a_non_int_dimension() -> None:
+    """`dim.__class__ is not int`, which is also what rejects a bool.
+
+    `True` is an `int` by inheritance, so `isinstance` would accept it; comparing
+    `__class__` is what makes `SparseVector(True)` a refusal rather than a
+    one-dimensional vector.
+    """
+    for bad in (1.0, "5", None, True, False, Decimal(5)):
+        with pytest.raises(TypeError, match="dimension must be int"):
+            SparseVector(bad, {1: 1.0})
+
+
+@pytest.mark.parametrize("dim", [0, -1, MAX_SPARSEVEC_DIM + 1])
+def test_a_sparse_vector_refuses_a_dimension_out_of_pgvectors_range(dim: int) -> None:
+    with pytest.raises(ValueError, match="out of range"):
+        SparseVector(dim, {1: 1.0})
+
+
+def test_the_largest_dimension_pgvector_allows_is_accepted() -> None:
+    """The other side of the bound, which is what makes it a bound.
+
+    Without this, widening `MAX_SPARSEVEC_DIM` past anything reachable leaves the
+    suite green -- the refusal test above only pins that *something* is refused.
+    `tests/orm/test_sparsevec_live.py` proves this number is pgvector's own.
+    """
+    value = SparseVector(MAX_SPARSEVEC_DIM, {MAX_SPARSEVEC_DIM: 1.0})
+    assert value.dim == MAX_SPARSEVEC_DIM
+    assert value.indices == (MAX_SPARSEVEC_DIM,)
+
+
+def test_a_sparse_vector_refuses_a_non_int_index() -> None:
+    with pytest.raises(TypeError, match="must be int"):
+        SparseVector(5, {"1": 1.0})
+
+
+@pytest.mark.parametrize("index", [0, -1, 6])
+def test_a_sparse_vector_refuses_an_index_outside_its_dimension(index: int) -> None:
+    """Indices are 1-based, so 0 is out of range and `dim` itself is not."""
+    with pytest.raises(ValueError, match="1-based"):
+        SparseVector(5, {index: 1.0})
+
+
+def test_the_first_and_last_index_are_both_inside_the_range() -> None:
+    """The 1-based boundary from both ends, since an off-by-one hides at exactly these."""
+    assert SparseVector(5, {1: 1.0}).indices == (1,)
+    assert SparseVector(5, {5: 1.0}).indices == (5,)
+
+
+def test_more_non_zero_elements_than_pgvector_stores_is_refused() -> None:
+    dense = dict.fromkeys(range(1, MAX_SPARSEVEC_NNZ + 2), 1.0)
+    with pytest.raises(ValueError, match="at most 16000 non-zero"):
+        SparseVector(MAX_SPARSEVEC_NNZ + 1, dense)
+
+
+def test_exactly_as_many_non_zero_elements_as_pgvector_stores_is_accepted() -> None:
+    """The bound's accepting side, without which it can be widened undetectably."""
+    dense = dict.fromkeys(range(1, MAX_SPARSEVEC_NNZ + 1), 1.0)
+    value = SparseVector(MAX_SPARSEVEC_NNZ, dense)
+    assert len(value.indices) == MAX_SPARSEVEC_NNZ
+
+
+def test_elements_may_be_any_mapping_or_pair_sequence_not_only_a_dict() -> None:
+    """`elements if isinstance(elements, dict) else dict(elements)` -- both arms.
+
+    A dict is used as given; anything else is converted. Nothing distinguished the
+    two paths before this, so a mutant pinning either arm survived, and the
+    documented "or an iterable of pairs" half of the signature was never exercised.
+    """
+    from collections import OrderedDict
+
+    as_dict = SparseVector(5, {3: 1.5, 1: 0.5})
+    as_pairs = SparseVector(5, [(3, 1.5), (1, 0.5)])
+    as_generator = SparseVector(5, ((index, value) for index, value in ((3, 1.5), (1, 0.5))))
+    as_ordered = SparseVector(5, OrderedDict(((3, 1.5), (1, 0.5))))
+    # Ascending by index whichever way it arrived, so the wire order is not the
+    # caller's insertion order.
+    for built in (as_dict, as_pairs, as_generator, as_ordered):
+        assert built.indices == (1, 3)
+        assert built.values == (0.5, 1.5)
+        assert built == as_dict
+
+
+def test_a_matching_dimension_passes_the_sparsevec_column_coercion() -> None:
+    """The accepting side of `Sparsevec`'s `value.dim != dim` guard.
+
+    The refusal is covered in `test_sparsevec_codec.py`; forcing that guard to
+    fire *always* left the suite green, which means nothing asserted that a
+    correctly dimensioned value gets through at all.
+    """
+    from wreath.orm.types import Sparsevec
+
+    pg_type = Sparsevec(5)
+    value = SparseVector(5, {2: 1.0})
+    assert pg_type.coerce(value) is value
+    with pytest.raises(ValueError, match="dimension 5"):
+        pg_type.coerce(SparseVector(4, {2: 1.0}))
