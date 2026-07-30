@@ -137,13 +137,17 @@ constraint_is_foreign_key(const WreathSqlOperation *operation)
 }
 
 
+static int column_signature_is_generated(
+    const unsigned char *data, Py_ssize_t length);
+
+
 static uint32_t
 operation_rank(const WreathSqlOperation *operation)
 {
-    /* Drops run inner-to-outer (foreign key, index, key, column, table); adds
-       run outer-to-inner (table, column, alter, key, index, foreign key). The
-       reverse of any forward plan is therefore itself a valid forward-shaped
-       plan.
+    /* Drops run inner-to-outer (foreign key, index, key, generated column,
+       column, table); adds run outer-to-inner (table, column, generated column,
+       alter, key, index, foreign key). The reverse of any forward plan is
+       therefore itself a valid forward-shaped plan.
 
        A foreign key is ranked apart from the primary and unique keys because it
        *depends* on one: PostgreSQL rejects "REFERENCES t (c)" until a unique
@@ -153,18 +157,30 @@ operation_rank(const WreathSqlOperation *operation)
        down to which hash sorted first. Foreign keys therefore go after the keys
        *and* after the indexes, since a unique index is also a valid target;
        dropping reverses that, taking foreign keys out before anything they
-       might reference. */
+       might reference.
+
+       A generated column has the same shape of dependency one level down: its
+       expression names sibling columns, so PostgreSQL rejects
+       "generated always as (to_tsvector('english', title))" until `title`
+       exists, and rejects dropping `title` while the generated column still
+       reads it. Without a rank of its own the order inside the column block is
+       again decided by a content hash, and whether a table with a tsvector
+       column creates at all comes down to which hash sorted first. */
     if (operation->action == OP_DROP && operation->kind == KIND_CONSTRAINT)
         return constraint_is_foreign_key(operation) ? 0 : 2;
     if (operation->action == OP_DROP && operation->kind == KIND_INDEX) return 1;
-    if (operation->action == OP_DROP && operation->kind == KIND_COLUMN) return 3;
-    if (operation->action == OP_DROP && operation->kind == KIND_TABLE) return 4;
-    if (operation->action == OP_ADD && operation->kind == KIND_TABLE) return 5;
-    if (operation->action == OP_ADD && operation->kind == KIND_COLUMN) return 6;
-    if (operation->action == OP_ALTER && operation->kind == KIND_COLUMN) return 7;
+    if (operation->action == OP_DROP && operation->kind == KIND_COLUMN)
+        return column_signature_is_generated(
+            operation->before, operation->before_length) ? 3 : 4;
+    if (operation->action == OP_DROP && operation->kind == KIND_TABLE) return 5;
+    if (operation->action == OP_ADD && operation->kind == KIND_TABLE) return 6;
+    if (operation->action == OP_ADD && operation->kind == KIND_COLUMN)
+        return column_signature_is_generated(
+            operation->after, operation->after_length) ? 8 : 7;
+    if (operation->action == OP_ALTER && operation->kind == KIND_COLUMN) return 9;
     if (operation->action == OP_ADD && operation->kind == KIND_CONSTRAINT)
-        return constraint_is_foreign_key(operation) ? 10 : 8;
-    if (operation->action == OP_ADD && operation->kind == KIND_INDEX) return 9;
+        return constraint_is_foreign_key(operation) ? 12 : 10;
+    if (operation->action == OP_ADD && operation->kind == KIND_INDEX) return 11;
     return 99;
 }
 
@@ -339,6 +355,21 @@ part_equals(const WreathSqlPart *part, const char *value)
 }
 
 
+/* Whether a column signature describes a stored generated column: field 5 is
+   `attgenerated`, and 's' is the only value wreath renders. Used by
+   `operation_rank`, which sorts before any signature has been parsed, so a
+   signature it cannot split is simply "not generated" -- the renderer is where a
+   malformed one becomes a MANUAL statement. */
+static int
+column_signature_is_generated(const unsigned char *data, Py_ssize_t length)
+{
+    WreathSqlPart parts[7];
+    if (data == NULL || length == 0) return 0;
+    if (split_value(data, length, 0x1f, parts, 7) < 0) return 0;
+    return part_equals(parts, "column") && part_equals(parts + 5, "s");
+}
+
+
 static int
 parse_oid(const WreathSqlPart *part, uint32_t *oid_out)
 {
@@ -372,6 +403,9 @@ sql_type_for_oid(uint32_t oid)
         case 1184: return "timestamp with time zone";
         case 1700: return "numeric";
         case 2950: return "uuid";
+        /* tsvector is built in, so unlike pgvector's types it has a fixed OID
+           and needs no spelling in the descriptor. */
+        case 3614: return "tsvector";
         case 3802: return "jsonb";
         /* One-dimensional array types, spelled with a trailing "[]". */
         case 1000: return "boolean[]";
@@ -394,6 +428,58 @@ sql_type_for_oid(uint32_t oid)
 }
 
 
+/* A type spelling an extension supplied, such as "vector(1536)". An extension's
+   OIDs are assigned by CREATE EXTENSION, so `sql_type_for_oid` cannot map them
+   and the descriptor carries the text instead. It is emitted into DDL rather
+   than bound, so only the shape PostgreSQL's own `format_type` produces for a
+   parameterised type is accepted -- an identifier, optionally followed by a
+   parenthesised list of digits and commas. Anything else falls back to MANUAL
+   rather than being written out verbatim. */
+static int
+spelling_is_safe(const WreathSqlPart *part)
+{
+    Py_ssize_t index = 0;
+    int in_parens = 0;
+    if (part->length == 0 || part->length > 128) return 0;
+    for (; index < part->length; index++) {
+        const unsigned char byte = part->data[index];
+        if (in_parens) {
+            if (byte == ')') {
+                /* A closing paren must be the last byte. */
+                return index + 1 == part->length;
+            }
+            if ((byte < '0' || byte > '9') && byte != ',' && byte != ' ') return 0;
+            continue;
+        }
+        if (byte == '(') {
+            if (index == 0) return 0;
+            in_parens = 1;
+            continue;
+        }
+        if (byte >= 'a' && byte <= 'z') continue;
+        if (byte >= '0' && byte <= '9' && index > 0) continue;
+        if (byte == '_' && index > 0) continue;
+        return 0;
+    }
+    return !in_parens;
+}
+
+
+static int
+render_column_type(WreathPgBuffer *statement, const WreathSqlPart *spelling, uint32_t oid)
+{
+    const char *type;
+    if (spelling->length != 0) {
+        if (!spelling_is_safe(spelling)) return 1;
+        return wreath_pg_buffer_append(statement, spelling->data, spelling->length) < 0
+            ? -1 : 0;
+    }
+    type = sql_type_for_oid(oid);
+    if (type == NULL) return 1;
+    return append_literal(statement, type) < 0 ? -1 : 0;
+}
+
+
 static int
 render_column_definition(
     WreathPgBuffer *statement,
@@ -402,13 +488,23 @@ render_column_definition(
 {
     WreathSqlPart parts[7];
     uint32_t oid;
-    const char *type;
+    int rendered;
+    int stored;
     if (split_value(signature, signature_length, 0x1f, parts, 7) < 0 ||
         !part_equals(parts, "column") || parse_oid(parts + 1, &oid) < 0)
         return 1;
-    type = sql_type_for_oid(oid);
-    if (type == NULL || parts[5].length != 0) return 1;
-    if (append_literal(statement, type) < 0) return -1;
+    /* Field 5 is `attgenerated`. 's' is a stored generated column, whose
+       expression shares field 6 with an ordinary default -- PostgreSQL keeps
+       both in pg_attrdef, so a column has one or the other and never both. Any
+       other code (PostgreSQL 18's virtual 'v') is a form this renderer does not
+       know, and falls back to MANUAL rather than being written out as stored. */
+    stored = part_equals(parts + 5, "s");
+    if (!stored && parts[5].length != 0) return 1;
+    /* Identity and generated are mutually exclusive in PostgreSQL, so a
+       descriptor claiming both is malformed rather than something to render. */
+    if (stored && parts[4].length != 0) return 1;
+    rendered = render_column_type(statement, parts + 2, oid);
+    if (rendered != 0) return rendered;
     if (part_equals(parts + 4, "a")) {
         if (append_literal(statement, " generated always as identity") < 0) return -1;
     }
@@ -416,7 +512,18 @@ render_column_definition(
         if (append_literal(statement, " generated by default as identity") < 0) return -1;
     }
     else if (parts[4].length != 0) return 1;
-    if (parts[6].length != 0) {
+    if (stored) {
+        /* Emitted verbatim, exactly as a default is: the expression was written
+           by wreath's own renderer (orm/_generated.py) in PostgreSQL's normal
+           form, or read straight back from pg_get_expr. Reformatting it here
+           would be the drift that design exists to avoid. */
+        if (parts[6].length == 0) return 1;
+        if (append_literal(statement, " generated always as (") < 0 ||
+            wreath_pg_buffer_append(statement, parts[6].data, parts[6].length) < 0 ||
+            append_literal(statement, ") stored") < 0)
+            return -1;
+    }
+    else if (parts[6].length != 0) {
         if (append_literal(statement, " default ") < 0 ||
             wreath_pg_buffer_append(statement, parts[6].data, parts[6].length) < 0)
             return -1;
@@ -449,6 +556,7 @@ render_column_change(
     WreathSqlPart after[7];
     uint32_t before_oid, after_oid;
     int wrote = 0;
+    int retyped;
     if (split_value(
             operation->before, operation->before_length, 0x1f, before, 7) < 0 ||
         split_value(
@@ -460,12 +568,22 @@ render_column_change(
         before[5].length != 0 || after[5].length != 0 ||
         (!part_equals(before + 3, "0") && !part_equals(before + 3, "1")) ||
         (!part_equals(after + 3, "0") && !part_equals(after + 3, "1"))) return 1;
-    if (before_oid != after_oid) {
-        const char *type = sql_type_for_oid(after_oid);
-        if (type == NULL || append_alter_column_prefix(statement, operation) < 0 ||
-            append_literal(statement, " type ") < 0 ||
-            append_literal(statement, type) < 0 || append_literal(statement, ";") < 0)
-            return type == NULL ? 1 : -1;
+    /* A changed *spelling* at the same OID is the re-dimension case:
+       `vector(1536)` to `vector(3)` keeps pgvector's `vector` OID and is still
+       a full table rewrite. Emitting it as an ALTER TYPE rather than skipping
+       it is the difference between an operator seeing the cost and a silent
+       no-op that leaves the stored data the wrong width. */
+    retyped = before_oid != after_oid ||
+              before[2].length != after[2].length ||
+              (after[2].length != 0 &&
+               memcmp(before[2].data, after[2].data, (size_t)after[2].length) != 0);
+    if (retyped) {
+        int typed;
+        if (append_alter_column_prefix(statement, operation) < 0 ||
+            append_literal(statement, " type ") < 0) return -1;
+        typed = render_column_type(statement, after + 2, after_oid);
+        if (typed != 0) return typed;
+        if (append_literal(statement, ";") < 0) return -1;
         wrote = 1;
     }
     if (before[6].length != after[6].length ||
@@ -545,20 +663,146 @@ index_form(
 }
 
 
-/* The predicate a partial index carries, if any: the signature is the ':'-joined
-   form followed by 0x1f and the predicate exactly as pg_get_expr deparses it.
-   Returns 1 and fills *predicate when present, 0 when the index is total. */
-static int
-index_predicate(const WreathSqlOperation *operation, WreathSqlPart *predicate)
+/* The 0x1f-separated fields an index signature carries after its ':'-joined
+   head: [0] the predicate a partial index was declared with, [1] the operator
+   class per column, [2] the access method's options. Absent trailing fields
+   come back empty, which is how a btree signature -- head only, or head plus a
+   predicate -- stays byte-identical to what it always was. */
+#define INDEX_EXTRA_FIELDS 3
+
+static void
+index_extras(const WreathSqlOperation *operation, WreathSqlPart fields[INDEX_EXTRA_FIELDS])
 {
+    Py_ssize_t start = -1;
+    int found = 0;
+    for (int slot = 0; slot < INDEX_EXTRA_FIELDS; slot++) {
+        fields[slot].data = operation->after;
+        fields[slot].length = 0;
+    }
     for (Py_ssize_t index = 0; index < operation->after_length; index++) {
-        if (operation->after[index] == 0x1f) {
-            predicate->data = operation->after + index + 1;
-            predicate->length = operation->after_length - index - 1;
-            return predicate->length > 0;
+        if (operation->after[index] != 0x1f) continue;
+        if (start >= 0) {
+            fields[found].data = operation->after + start;
+            fields[found].length = index - start;
+            if (++found == INDEX_EXTRA_FIELDS) return;
         }
+        start = index + 1;
+    }
+    if (start >= 0 && found < INDEX_EXTRA_FIELDS) {
+        fields[found].data = operation->after + start;
+        fields[found].length = operation->after_length - start;
+    }
+}
+
+
+/* An operator class or an index-option name, as PostgreSQL spells them. Both
+   reach DDL text rather than a bind, so the shape is checked here and anything
+   else falls back to MANUAL. */
+static int
+is_lower_identifier(const unsigned char *data, Py_ssize_t length)
+{
+    if (length == 0 || length > 63) return 0;
+    if ((data[0] < 'a' || data[0] > 'z') && data[0] != '_') return 0;
+    for (Py_ssize_t index = 1; index < length; index++) {
+        const unsigned char byte = data[index];
+        if ((byte < 'a' || byte > 'z') && (byte < '0' || byte > '9') && byte != '_')
+            return 0;
+    }
+    return 1;
+}
+
+
+/* `(col opclass, col2)` -- the operator class list is positional, one entry per
+   index column, and an empty entry means "the access method's default", which
+   is spelled by writing nothing. */
+static int
+append_index_columns(
+    WreathPgBuffer *buffer, const WreathSqlPart *columns, const WreathSqlPart *opclasses)
+{
+    Py_ssize_t column_start = 0;
+    Py_ssize_t opclass_start = 0;
+    Py_ssize_t index;
+    int first = 1;
+    if (columns->length == 0) return 1;
+    for (index = 0; index <= columns->length; index++) {
+        Py_ssize_t opclass_end;
+        if (index != columns->length && columns->data[index] != ',') continue;
+        if (index == column_start) return 1;
+        if (!first && append_literal(buffer, ", ") < 0) return -1;
+        if (append_identifier(
+                buffer, columns->data + column_start, index - column_start) < 0)
+            return -1;
+        first = 0;
+        column_start = index + 1;
+        /* Walk the opclass list in step; it is exhausted when the signature
+           carried none, which is the ordinary btree case. */
+        if (opclass_start > opclasses->length) continue;
+        opclass_end = opclass_start;
+        while (opclass_end < opclasses->length && opclasses->data[opclass_end] != ',')
+            opclass_end++;
+        if (opclass_end > opclass_start) {
+            if (!is_lower_identifier(
+                    opclasses->data + opclass_start, opclass_end - opclass_start))
+                return 1;
+            if (append_literal(buffer, " ") < 0 ||
+                wreath_pg_buffer_append(
+                    buffer, opclasses->data + opclass_start,
+                    opclass_end - opclass_start) < 0)
+                return -1;
+        }
+        opclass_start = opclass_end + 1;
     }
     return 0;
+}
+
+
+/* `with (m = 16, ef_construction = 64)` from the packed `m=16,ef_construction=64`
+   the descriptor and `pg_class.reloptions` both spell. */
+static int
+append_index_options(WreathPgBuffer *buffer, const WreathSqlPart *options)
+{
+    Py_ssize_t start = 0;
+    int first = 1;
+    if (options->length == 0) return 0;
+    if (append_literal(buffer, " with (") < 0) return -1;
+    for (Py_ssize_t index = 0; index <= options->length; index++) {
+        Py_ssize_t split;
+        if (index != options->length && options->data[index] != ',') continue;
+        split = start;
+        while (split < index && options->data[split] != '=') split++;
+        if (split == index || split == start) return 1;
+        if (!is_lower_identifier(options->data + start, split - start)) return 1;
+        for (Py_ssize_t at = split + 1; at < index; at++) {
+            const unsigned char byte = options->data[at];
+            if ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
+                (byte >= '0' && byte <= '9') || byte == '_' || byte == '.' ||
+                byte == '-')
+                continue;
+            return 1;
+        }
+        if (index == split + 1) return 1;
+        if ((!first && append_literal(buffer, ", ") < 0) ||
+            wreath_pg_buffer_append(buffer, options->data + start, split - start) < 0 ||
+            append_literal(buffer, " = ") < 0 ||
+            wreath_pg_buffer_append(
+                buffer, options->data + split + 1, index - split - 1) < 0)
+            return -1;
+        first = 0;
+        start = index + 1;
+    }
+    return append_literal(buffer, ")") < 0 ? -1 : 0;
+}
+
+
+/* The access methods wreath renders. Anything else falls back to a MANUAL
+   statement rather than injecting the token verbatim. */
+static int
+index_method_is_known(const WreathSqlPart *method)
+{
+    return (method->length == 5 && memcmp(method->data, "btree", 5) == 0) ||
+           (method->length == 3 && memcmp(method->data, "gin", 3) == 0) ||
+           (method->length == 4 && memcmp(method->data, "hnsw", 4) == 0) ||
+           (method->length == 7 && memcmp(method->data, "ivfflat", 7) == 0);
 }
 
 
@@ -567,31 +811,35 @@ render_index(WreathPgBuffer *statement, const WreathSqlOperation *operation)
 {
     WreathSqlPart parts[4];
     WreathSqlPart method;
-    WreathSqlPart predicate;
+    WreathSqlPart extras[INDEX_EXTRA_FIELDS];
     int unique;
-    int is_btree, is_gin, partial;
+    int is_btree;
+    int rendered;
     if (!index_form(operation, parts, &unique, &method)) return 1;
+    if (!index_method_is_known(&method)) return 1;
     is_btree = method.length == 5 && memcmp(method.data, "btree", 5) == 0;
-    is_gin = method.length == 3 && memcmp(method.data, "gin", 3) == 0;
-    /* Only the access methods wreath emits are honored; anything else falls
-       back to a MANUAL statement rather than injecting the token verbatim. */
-    if (!is_btree && !is_gin) return 1;
-    partial = index_predicate(operation, &predicate);
+    index_extras(operation, extras);
     if (append_literal(statement, unique ? "create unique index " : "create index ") < 0 ||
         append_derived_object_name(statement, operation) < 0 ||
         append_literal(statement, " on ") < 0 ||
         append_qualified(statement, operation) < 0) return -1;
-    if (is_gin && append_literal(statement, " using gin") < 0) return -1;
-    if (append_literal(statement, " (") < 0 ||
-        append_identifier_list(statement, parts + 1) < 0 ||
-        append_literal(statement, ")") < 0) return -1;
+    if (!is_btree) {
+        if (append_literal(statement, " using ") < 0 ||
+            wreath_pg_buffer_append(statement, method.data, method.length) < 0) return -1;
+    }
+    if (append_literal(statement, " (") < 0) return -1;
+    rendered = append_index_columns(statement, parts + 1, extras + 1);
+    if (rendered != 0) return rendered;
+    if (append_literal(statement, ")") < 0) return -1;
+    rendered = append_index_options(statement, extras + 2);
+    if (rendered != 0) return rendered;
     /* The predicate is emitted verbatim because it was produced by wreath's own
        renderer (orm/_index_predicate.py) or read straight back from
        pg_get_expr -- in both cases it is already PostgreSQL's normal form, and
        reformatting it here would be the drift this design exists to avoid. */
-    if (partial) {
+    if (extras[0].length > 0) {
         if (append_literal(statement, " where ") < 0 ||
-            wreath_pg_buffer_append(statement, predicate.data, predicate.length) < 0)
+            wreath_pg_buffer_append(statement, extras[0].data, extras[0].length) < 0)
             return -1;
     }
     if (append_literal(statement, ";") < 0) return -1;
@@ -606,6 +854,7 @@ render_drop_index(WreathPgBuffer *statement, const WreathSqlOperation *operation
     WreathSqlPart method;
     int unique;
     if (!index_form(operation, parts, &unique, &method)) return 1;
+    if (!index_method_is_known(&method)) return 1;
     if (append_literal(statement, "drop index ") < 0 ||
         append_identifier(statement, operation->schema, operation->schema_length) < 0 ||
         append_literal(statement, ".") < 0 ||

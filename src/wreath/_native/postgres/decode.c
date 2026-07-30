@@ -207,8 +207,18 @@ wreath_pg_select_decoder(uint32_t oid, int format)
     case PG_BYTEA:
         return decode_bytea;
     default:
-        return decode_fallback;
+        break;
     }
+    /* An extension OID cannot be a case above -- CREATE EXTENSION assigns it --
+       so it is resolved from the codec's registration table instead. Selecting
+       the decoder here rather than falling through matters for `vector`: the
+       fallback copies the field into a bytes object first, which for a
+       1536-dimension embedding is a 6KB copy per row that the direct decoder
+       does not make. */
+    if (wreath_pg_extension_kind(oid) != 0) {
+        return wreath_pg_decode_extension;
+    }
+    return decode_fallback;
 }
 
 static int

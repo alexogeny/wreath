@@ -1391,6 +1391,60 @@ configure_model_errors(PyObject *module, PyObject *args)
     Py_RETURN_NONE;
 }
 
+/* Record the OID an extension type turned out to have, on one already-compiled
+   field.
+ *
+ * Every other OID in a layout is a compile-time constant and is baked in when
+ * the model class is defined. An extension type's is not: `CREATE EXTENSION`
+ * assigns it, so at class-definition time it is 0, and the hydrate plan built
+ * from this layout would then refuse every result row for that column -- the
+ * result really does carry the live OID, and 0 really does not match it.
+ *
+ * Startup calls this once per such column, after resolution and before any
+ * query. It changes *only* the recorded OID: the cell kind, offset, size, and
+ * the instance's basicsize are all unchanged, which is checked here rather than
+ * assumed, because a rebind that moved a cell would corrupt every instance
+ * already allocated against the old layout. Both the unresolved OID (0) and
+ * every extension OID land on WREATH_CELL_OBJECT, so the check passes for the
+ * intended use and fails for anything else. */
+static PyObject *
+rebind_field_oid(PyObject *module, PyObject *args)
+{
+    PyObject *storage_type;
+    Py_ssize_t index;
+    unsigned int oid;
+    WreathPgModelLayout *layout;
+    WreathPgModelField *field;
+    (void)module;
+
+    if (!PyArg_ParseTuple(args, "OnI:_rebind_field_oid", &storage_type, &index, &oid))
+        return NULL;
+    if (!PyType_Check(storage_type)) {
+        PyErr_SetString(PyExc_TypeError, "expected a model storage class");
+        return NULL;
+    }
+    layout = wreath_pg_model_layout_for_type((PyTypeObject *)storage_type);
+    if (layout == NULL) {
+        PyErr_SetString(PyExc_TypeError, "model has no native storage layout");
+        return NULL;
+    }
+    if (index < 0 || index >= layout->field_count) {
+        PyErr_Format(PyExc_IndexError, "column index %zd is out of range", index);
+        return NULL;
+    }
+    field = &layout->fields[index];
+    if (cell_kind_for_oid(oid) != field->kind) {
+        PyErr_Format(
+            PyExc_ValueError,
+            "OID %u would need cell kind %u but column %zd was compiled as kind %u; "
+            "a rebind may only record a resolved OID, never change a cell's shape",
+            oid, (unsigned)cell_kind_for_oid(oid), index, (unsigned)field->kind);
+        return NULL;
+    }
+    field->oid = oid;
+    Py_RETURN_NONE;
+}
+
 /* These references pin wreath.orm.errors, and through it the ORM package, so they
    must be dropped when the module goes away. */
 void
@@ -1406,6 +1460,7 @@ static PyMethodDef model_methods[] = {
     {"_make_column_descriptor", make_column_descriptor, METH_VARARGS, NULL},
     {"_make_relation_descriptor", make_relation_descriptor, METH_VARARGS, NULL},
     {"_configure_model_errors", configure_model_errors, METH_VARARGS, NULL},
+    {"_rebind_field_oid", rebind_field_oid, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}
 };
 

@@ -73,6 +73,30 @@ _DEFAULT_CONNECTOR = connect
 Connector = Callable[[str], Awaitable[Any]]
 
 
+def register_extension_codec(name: str, oid: int, kind: int) -> None:
+    """Teach the active codec that `oid` carries an extension wire format.
+
+    Every built-in OID is a compile-time constant the codec dispatches on
+    directly. An extension type's OID is assigned by `CREATE EXTENSION`, so it
+    cannot be one -- the codec instead keeps a small fixed table, consulted only
+    after every built-in OID has already missed, and this is what writes into it.
+
+    Called once per type per process, from
+    `wreath.orm.introspection.resolve_extension_types`, before any statement
+    binds a value of that type. The table is read-only afterwards; re-registering
+    the same name with the same OID is a no-op, and re-registering it with a
+    different one raises, because a codec table that changed under a running
+    connection would decode rows with the wrong rules.
+
+    Args:
+        name: The catalog type name, such as `"vector"`.
+        oid: The OID this database assigned it.
+        kind: Which wire format to frame it with -- one of the `EXT_KIND_*`
+            constants in `wreath.orm.types`.
+    """
+    _backend._register_extension_type(name, oid, kind)
+
+
 @dataclass(frozen=True, slots=True)
 class PoolConfig:
     min_size: int = 1
@@ -164,6 +188,13 @@ class Pool:
 
     @property
     def borrowed(self) -> int:
+        """How many connections are leased out right now.
+
+        A lease is exclusive, so this is also how many are unavailable to the
+        next `acquire`. `snapshot()` reports it alongside the idle count, the
+        queue depth and the high-water mark, and is the one to reach for when
+        more than one of them is wanted at a consistent moment.
+        """
         return len(self._borrowed)
 
     def snapshot(self) -> PoolSnapshot:
@@ -178,6 +209,12 @@ class Pool:
 
     @property
     def started(self) -> bool:
+        """Whether `start()` has completed and `acquire()` will be answered.
+
+        False before the first `start()`, and false again after `stop()`
+        returns. It does not go false while a stop is draining — use it to ask
+        "has this pool been brought up", not "is it still healthy".
+        """
         return self._started
 
     async def _open(self) -> Any:
@@ -194,6 +231,18 @@ class Pool:
         return connection
 
     async def start(self) -> None:
+        """Open `min_size` connections and begin accepting acquisitions.
+
+        Each connection is opened, set read-only when this pool serves a
+        read workload, and has every statement registered for that workload
+        prepared on it before it joins the idle set — so a `Statement` never
+        pays a prepare on the request path.
+
+        All-or-nothing: if any of them fails, the ones already opened are closed
+        and the exception propagates with the pool still unstarted, rather than
+        leaving a half-sized pool that works until it doesn't. Calling it on an
+        already-started pool does nothing.
+        """
         if self._started:
             return
         self._stopping = False
@@ -210,6 +259,23 @@ class Pool:
         self._started = True
 
     async def acquire(self) -> Any:
+        """Lease one connection exclusively. Always pair it with `release`.
+
+        Three outcomes, tried in this order: an idle connection is handed over
+        immediately; otherwise a new one is opened if the pool is below
+        `max_size`; otherwise the caller queues until somebody releases one.
+
+        Every way of failing is an exception rather than a `None`, and each says
+        which limit was hit:
+
+        Raises:
+            InterfaceError: the pool has not started, or is shutting down, or
+                the wait queue already holds `max_queue` callers. A full queue
+                refuses immediately rather than growing without bound.
+            TimeoutError: `acquire_timeout` seconds elapsed while queued. The
+                deadline covers the wait only — a connection being opened for
+                this caller is not interrupted by it.
+        """
         if not self._started or self._stopping:
             raise InterfaceError("PostgreSQL pool is not accepting acquisitions")
         loop = asyncio.get_running_loop()
@@ -263,6 +329,20 @@ class Pool:
                     self._waiters -= 1
 
     async def release(self, connection: Any) -> None:
+        """Return a leased connection, and wake one waiter.
+
+        The connection goes back to the idle set and is reused — unless the pool
+        is shutting down or the connection reports itself closed, in which case
+        it is dropped from the pool and closed here instead. Either way a waiter
+        is notified, so a connection that turned out to be dead still frees the
+        capacity it was holding.
+
+        Raises:
+            InterfaceError: this connection was not leased from this pool.
+                Releasing twice is the usual way to see it, and it is refused
+                rather than tolerated because a double release would put one
+                connection in the idle set twice and hand it to two callers.
+        """
         async with self._condition:
             if connection not in self._borrowed:
                 raise InterfaceError("connection was not borrowed from this pool")
@@ -278,6 +358,21 @@ class Pool:
             await connection.close()
 
     async def stop(self, grace_period: float) -> None:
+        """Stop accepting acquisitions, drain for `grace_period`, then close everything.
+
+        Draining is best-effort: the pool waits up to `grace_period` seconds for
+        leased connections to come back, and then closes what is still out
+        anyway. A caller still holding one at that point has it closed
+        underneath it — the grace period is the promise, not the outcome.
+
+        Waiting callers are woken immediately rather than left on the queue, and
+        `acquire` refuses from the first moment of the stop. Calling this on a
+        pool that never started does nothing.
+
+        Args:
+            grace_period: Seconds to wait for leases to be returned. Zero closes
+                everything at once.
+        """
         if not self._started:
             return
         self._stopping = True
@@ -326,6 +421,31 @@ def _encode_db_rows(rows: Any) -> bytes:
 
 
 class Statement:
+    """One named, prepared SQL statement bound to a database and a workload.
+
+    Register with `Database.statement(name, sql, workload=...)` rather than
+    constructing directly; that is what makes the pools prepare it on every
+    connection they open, so running it never pays a parse.
+
+    A statement carries its `workload`, and that is the whole of its routing:
+    each call acquires a connection from *that* pool, runs, and releases it
+    before returning. Nothing is held between calls, so two statements never
+    share a transaction — for that, use a session.
+
+    The four run methods differ only in what they ask the connection for, and
+    each takes the query parameters as positional arguments, bound by position
+    (`$1`, `$2`, ...). `map` runs the same statement over many argument sets on
+    one connection.
+
+    Attributes:
+        database: The `Database` this was registered on.
+        name: The registered name, unique within that database.
+        sql: The statement text.
+        workload: Which pool its connections come from — `"read"`,
+            `"security_read"` or `"write"`. The two read workloads open their
+            connections with `default_transaction_read_only`.
+    """
+
     __slots__ = ("database", "name", "sql", "workload")
 
     def __init__(self, database: Database, name: str, sql: str, workload: Workload) -> None:
@@ -363,15 +483,37 @@ class Statement:
             await self.database.release(self.workload, connection)
 
     async def execute(self, *args: object) -> str:
+        """Run the statement for its effect and return the command tag.
+
+        The tag is PostgreSQL's own summary of what happened — `"INSERT 0 1"`,
+        `"UPDATE 3"` — so it is where a row count comes from when there are no
+        rows to fetch. Rows the statement does produce are discarded.
+        """
         return cast(str, await self._call("execute", args))
 
     async def fetch(self, *args: object) -> list[Any]:
+        """Run the statement and return every row, as a list of `Record`.
+
+        The whole result is materialized; there is no cursor here. A statement
+        that can match an unbounded number of rows should carry its own `LIMIT`.
+        """
         return cast(list[Any], await self._call("fetch", args))
 
     async def fetchrow(self, *args: object) -> Any:
+        """Run the statement and return its first row, or `None` for no rows.
+
+        `None` means the query matched nothing. It is not an error, and a
+        statement whose first column can itself be null is better read with
+        this than with `fetchval`, which cannot tell the two apart.
+        """
         return await self._call("fetchrow", args)
 
     async def fetchval(self, *args: object) -> Any:
+        """Run the statement and return the first column of the first row.
+
+        `None` for no rows *and* for a first column that is null — the two are
+        indistinguishable here, which is what `fetchrow` is for.
+        """
         return await self._call("fetchval", args)
 
     async def map(
@@ -463,6 +605,13 @@ class Database:
 
     @property
     def name(self) -> str:
+        """The logical name this database was registered under.
+
+        The handle an application knows it by — the `name` given to
+        `Wreath.postgres`, which is also what `Wreath.orm(database=...)` and
+        the other database-taking helpers name — rather than anything
+        PostgreSQL itself knows. Required, non-empty, and fixed at construction.
+        """
         return self._name
 
     def statement(self, name: str, sql: str, *, workload: Workload = "read") -> Statement:
@@ -498,6 +647,20 @@ class Database:
         return tuple(item for item in self._statements.values() if item.workload == workload)
 
     async def start(self) -> None:
+        """Build a `Pool` per configured workload and start them all.
+
+        Each pool gets the workload's own DSN when one was supplied and the
+        database's otherwise, opens read-only for `read` and `security_read`,
+        and prepares that workload's registered statements on every connection.
+
+        All-or-nothing across pools as well as within them: if one fails to
+        start, the pools already up are stopped, the set is cleared, and the
+        exception propagates with `started` still false. Calling it twice does
+        nothing the second time.
+
+        A workload first named by `statement()` once this call has begun is not
+        started here, and `pool()` raises `KeyError` for it.
+        """
         if self.started:
             return
         # Snapshot under the registration lock rather than iterating the live
@@ -544,6 +707,14 @@ class Database:
         self.started = True
 
     async def stop(self) -> None:
+        """Stop every pool, in reverse start order, within one shared deadline.
+
+        `shutdown_timeout` is the budget for the *whole* shutdown, not for each
+        pool: whatever an earlier pool spends draining is taken off what the
+        next one gets, and a pool reached after the deadline has passed is
+        stopped with no grace at all. Calling it on a database that never
+        started does nothing.
+        """
         if not self.started:
             return
         deadline = asyncio.get_running_loop().time() + self.shutdown_timeout
@@ -553,6 +724,20 @@ class Database:
         self.started = False
 
     def pool(self, workload: Workload) -> Pool:
+        """The pool serving `workload`.
+
+        Available only once the database has started. Before that, the call
+        exists to answer one question — *is this workload configured at all?* —
+        and answers it by raising one of two different errors, which are worth
+        telling apart.
+
+        Raises:
+            KeyError: this workload is not configured on this database, whether
+                or not it has started.
+            InterfaceError: the workload is configured, but the database has not
+                started, so there is no pool to hand back yet. Inspecting a pool
+                before startup is deliberately unsupported.
+        """
         workload = _workload(workload)
         try:
             return self._pools[workload] if self.started else self._configured_pool(workload)
@@ -567,6 +752,15 @@ class Database:
         raise InterfaceError("PostgreSQL pool has not started")
 
     async def acquire(self, workload: Workload = "read") -> Any:
+        """Lease a connection from `workload`'s pool. Pair it with `release`.
+
+        The one acquisition seam in this module: `Statement`, `Statement.map`
+        and direct callers all come through here, which is why the Flight
+        Recorder's pool-wait phase can be attributed from this single point.
+
+        Raises whatever `Pool.acquire` raises, plus `KeyError` when the workload
+        is not configured.
+        """
         # Armed-request pool-wait phase; every other request pays exactly the
         # ContextVar read. This is the one acquisition seam, so Statement,
         # Statement.map, and direct acquire callers are all covered.
@@ -580,6 +774,12 @@ class Database:
         return connection
 
     async def release(self, workload: Workload, connection: Any) -> None:
+        """Return a connection to the pool it was leased from.
+
+        `workload` must be the one it was acquired with — the connection is
+        handed to that pool, and a pool refuses a connection it did not lease
+        with `InterfaceError`.
+        """
         await self.pool(workload).release(connection)
 
     # -- distributed advisory locks ----------------------------------------

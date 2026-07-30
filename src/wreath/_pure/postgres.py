@@ -99,6 +99,91 @@ _NUMERIC = 1700
 _UUID = 2950
 _JSONB = 3802
 
+# --- extension types ---------------------------------------------------------
+#
+# An extension's OIDs are assigned by CREATE EXTENSION, so they cannot be
+# constants here the way every OID above is. They arrive at startup through
+# `_register_extension_type` and land in one bounded table, consulted only after
+# every built-in OID has already missed. The native twin
+# (_native/postgres/codec.c) keeps the identical table with the identical bound.
+_EXT_KIND_VECTOR = 1
+_MAX_EXTENSION_TYPES = 16
+
+#: OID -> codec kind, written once at startup and read-only afterwards.
+#:
+#: Keyed by OID rather than by type name, because the OID is what a decoder
+#: dispatches on and one name can legitimately arrive at two OIDs -- two
+#: databases install the same extension and each assigns its own. What must
+#: never happen is one OID meaning two different wire formats, and that is the
+#: collision this dict is able to see.
+_extension_kinds: dict[int, int] = {}
+
+
+def _register_extension_type(name: str, oid: int, kind: int) -> None:
+    """Bind one extension type name to the OID this database assigned it."""
+    if kind != _EXT_KIND_VECTOR:
+        raise ValueError(f"unknown extension codec kind {kind} for {name!r}")
+    if oid <= 0:
+        raise ValueError(f"invalid OID {oid} for extension type {name!r}")
+    existing = _extension_kinds.get(oid)
+    if existing is not None:
+        if existing != kind:
+            raise ValueError(
+                f"OID {oid} is already registered as codec kind {existing}; "
+                f"re-registering it as {kind} for {name!r} would decode live rows "
+                "with the wrong codec"
+            )
+        return
+    if len(_extension_kinds) >= _MAX_EXTENSION_TYPES:
+        raise ValueError(
+            f"at most {_MAX_EXTENSION_TYPES} extension types can be registered"
+        )
+    _extension_kinds[oid] = kind
+
+
+def _encode_vector(value: object) -> bytes:
+    """pgvector's binary `vector`: uint16 dim, uint16 unused, dim big-endian float4."""
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("vector codec requires a list or tuple of floats")
+    count = len(value)
+    if count > 0xFFFF:
+        raise OverflowError("a vector may hold at most 65535 dimensions")
+    return struct.pack(f"!HH{count}f", count, 0, *value)
+
+
+def _decode_vector(data: bytes) -> list[float]:
+    if len(data) < 4:
+        raise ProtocolError("binary vector header is truncated")
+    count, unused = struct.unpack_from("!HH", data, 0)
+    if unused != 0:
+        raise ProtocolError(f"unsupported binary vector flags {unused}")
+    if len(data) != 4 + count * 4:
+        raise ProtocolError("binary vector length does not match its dimension")
+    return list(struct.unpack_from(f"!{count}f", data, 4))
+
+
+def _decode_vector_text(data: bytes) -> list[float]:
+    text = data.decode("ascii").strip()
+    if not text.startswith("[") or not text.endswith("]"):
+        raise ProtocolError("text-format vector is not bracketed")
+    body = text[1:-1].strip()
+    if not body:
+        return []
+    return [float(item) for item in body.split(",")]
+
+
+def _encode_vector_text(value: object) -> bytes:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("vector codec requires a list or tuple of floats")
+    return ("[" + ",".join(repr(_as_float(item)) for item in value) + "]").encode("ascii")
+
+
+def _as_float(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("vector codec requires int or float elements")
+    return float(value)
+
+
 # `numeric` is base-10000 digit groups plus a sign and a display scale, which is
 # what lets it hold values no float can. `float()` was the wrong landing type,
 # not merely a lossy one: it collapses distinct values onto one.
@@ -124,11 +209,11 @@ class PostgresError(Exception):
     """An error reported by PostgreSQL.
 
     A subclass that stands for exactly one SQLSTATE declares it as a class
-    attribute; anything raised from a server ``ErrorResponse`` passes the code
-    it actually carried. Both spellings answer to ``.sqlstate``.
+    attribute; anything raised from a server `ErrorResponse` passes the code
+    it actually carried. Both spellings answer to `.sqlstate`.
     """
 
-    #: The condition this class always means, or ``None`` when it depends on
+    #: The condition this class always means, or `None` when it depends on
     #: what the server said. Declared here so `.sqlstate` resolves on every
     #: instance without the constructor having to write one.
     sqlstate: str | None = None
@@ -289,6 +374,13 @@ def _infer_oid(value: object) -> int:
     if isinstance(value, datetime.date):
         return _DATE
     if isinstance(value, (list, tuple, set, frozenset)):
+        # An extension value is a list that knows its own OID -- pgvector's
+        # `vector` is the first -- and says so rather than being guessed at.
+        # Read here, inside the branch that would otherwise refuse, so no
+        # ordinary parameter pays an attribute lookup for it.
+        declared = getattr(value, "_pg_oid", 0)
+        if declared:
+            return declared
         raise TypeError(
             f"unsupported PostgreSQL value type: {type(value).__name__}. "
             "Inference binds one scalar per placeholder and a sequence has no "
@@ -472,6 +564,8 @@ def _encode_text(value: object, oid: int) -> bytes | None:
         return str(_as_decimal(value)).encode("ascii")
     if oid in {_JSON, _JSONB}:
         return _as_json(value).encode("utf-8")
+    if _extension_kinds.get(oid) == _EXT_KIND_VECTOR:
+        return _encode_vector_text(value)
     return str(value).encode("utf-8")
 
 
@@ -535,6 +629,8 @@ def _encode_binary(value: object, oid: int) -> bytes | None:
         return _as_json(value).encode("utf-8")
     if oid == _JSONB:
         return b"\x01" + _as_json(value).encode("utf-8")
+    if _extension_kinds.get(oid) == _EXT_KIND_VECTOR:
+        return _encode_vector(value)
     raise TypeError(f"no binary encoder for PostgreSQL OID {oid}")
 
 
@@ -562,6 +658,8 @@ def _decode_value(oid: int, format_code: int, data: bytes | None) -> object:
             return Decimal(data.decode("ascii"))
         if oid in {_JSON, _JSONB}:
             return data.decode("utf-8")
+        if _extension_kinds.get(oid) == _EXT_KIND_VECTOR:
+            return _decode_vector_text(data)
         return data
     if format_code != 1:
         raise ProtocolError(f"invalid field format code {format_code}")
@@ -612,6 +710,8 @@ def _decode_value(oid: int, format_code: int, data: bytes | None) -> object:
         if len(data) < 1 or data[0] != 1:
             raise ProtocolError("unsupported jsonb wire version")
         return data[1:].decode("utf-8")
+    if _extension_kinds.get(oid) == _EXT_KIND_VECTOR:
+        return _decode_vector(data)
     return data
 
 
@@ -1131,11 +1231,11 @@ class Connection:
         self._plans_bytes = 0
 
     async def listen(self, channel: str) -> None:
-        """Subscribe this connection to asynchronous ``NOTIFY`` on ``channel``.
+        """Subscribe this connection to asynchronous `NOTIFY` on `channel`.
 
-        Issues ``LISTEN`` and registers interest so the reader task stays alive
+        Issues `LISTEN` and registers interest so the reader task stays alive
         while idle and routes incoming notifications into the ring. Notifications
-        are delivered through ``notifications()``. A dedicated connection should
+        are delivered through `notifications()`. A dedicated connection should
         be held for listening: leasing it back to a pool between notifications
         would stop draining them (that lifecycle is the caller's concern).
         """
@@ -1151,18 +1251,18 @@ class Connection:
             raise
 
     async def unlisten(self, channel: str) -> None:
-        """Stop listening on ``channel`` (issues ``UNLISTEN``).
+        """Stop listening on `channel` (issues `UNLISTEN`).
 
         The channel is deregistered immediately; if it was the last one the
         idle reader may stay parked on the socket until the next message or
-        ``close()`` before it observes the empty channel set and exits.
+        `close()` before it observes the empty channel set and exits.
         """
         name = _validate_channel(channel)
         self._listen_channels.discard(name)
         await self.execute(f'UNLISTEN "{name}"')
 
     async def notifications(self) -> AsyncIterator[Notification]:
-        """Yield captured ``NOTIFY`` messages, awaiting new ones when drained.
+        """Yield captured `NOTIFY` messages, awaiting new ones when drained.
 
         The iterator ends when the connection closes. It never blocks while the
         ring is non-empty, so a burst is delivered without interleaved awaits.
@@ -1211,17 +1311,17 @@ class Connection:
         *,
         max_in_flight: int = 32,
     ) -> list[Any]:
-        """Run one ``method`` operation per argument set, preserving input order.
+        """Run one `method` operation per argument set, preserving input order.
 
         Every input produces a distinct extended-protocol operation with its own
-        ``Sync``; duplicate inputs run twice and are never coalesced into an
-        ``IN (...)`` or deduplicated. Results come back in input order. At most
-        ``max_in_flight`` operations are queued at once, so a generator input
+        `Sync`; duplicate inputs run twice and are never coalesced into an
+        `IN (...)` or deduplicated. Results come back in input order. At most
+        `max_in_flight` operations are queued at once, so a generator input
         keeps pipeline depth and retained results bounded. Inside an explicit
         transaction the driver already forbids concurrent operations, so the
         window collapses to one and the operations run strictly in order.
 
-        ``statement`` may be a SQL string or any object exposing ``.sql``.
+        `statement` may be a SQL string or any object exposing `.sql`.
         """
         if method not in ("execute", "fetch", "fetchrow", "fetchval"):
             raise ValueError(f"unsupported map method: {method!r}")
@@ -1265,9 +1365,9 @@ class Connection:
     def transaction(self) -> _Transaction:
         """An explicit transaction scope over this connection.
 
-        ``async with connection.transaction() as tx:`` issues ``BEGIN`` on entry
-        and ``COMMIT`` on clean exit, or ``ROLLBACK`` if the body raises. Reads
-        and writes issued through ``tx`` run in order, so a read group completes
+        `async with connection.transaction() as tx:` issues `BEGIN` on entry
+        and `COMMIT` on clean exit, or `ROLLBACK` if the body raises. Reads
+        and writes issued through `tx` run in order, so a read group completes
         before a dependent write group begins. If synchronization cannot be
         proven on rollback, the connection is discarded rather than reused.
         """

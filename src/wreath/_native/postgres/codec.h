@@ -14,6 +14,17 @@ PyObject *wreath_pg_decode_value(uint32_t oid, int format, PyObject *data);
  * marker. Returns an exact bytes object, or NULL with ValueError set on an odd
  * length or a non-hex byte. */
 PyObject *wreath_pg_decode_hex_bytea(const unsigned char *data, Py_ssize_t length);
+/* The codec kind registered for `oid`, or 0 when it is not an extension type.
+ * Extension OIDs are assigned by CREATE EXTENSION and so cannot be switch
+ * cases; this reads the small fixed table `_register_extension_type` fills at
+ * startup. Cheap enough to sit in a `default:` arm, which is the only place it
+ * is reached from. */
+int wreath_pg_extension_kind(uint32_t oid);
+/* Decode one registered extension field straight from the wire buffer, without
+ * boxing it as bytes first. Signature matches WreathPgRawDecoder so the field
+ * tape can install it as a column decoder. */
+PyObject *wreath_pg_decode_extension(
+    const unsigned char *data, Py_ssize_t length, int format, uint32_t oid);
 int wreath_pg_codec_init(PyObject *module);
 void wreath_pg_codec_fini(void);
 
