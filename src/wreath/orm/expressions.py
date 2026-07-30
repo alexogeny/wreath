@@ -55,8 +55,23 @@ L2_DISTANCE = "<->"
 COSINE_DISTANCE = "<=>"
 INNER_PRODUCT = "<#>"
 L1_DISTANCE = "<+>"
+
+# The two pgvector distances over PostgreSQL's built-in `bit` -- the query half
+# of binary quantization. They are grouped apart from the four above because
+# they apply to a different set of column types, not because they render
+# differently: `where()` refuses all six alike.
+HAMMING_DISTANCE = "<~>"
+JACCARD_DISTANCE = "<%>"
+
 DISTANCE_OPERATORS = frozenset(
-    {L2_DISTANCE, COSINE_DISTANCE, INNER_PRODUCT, L1_DISTANCE}
+    {
+        L2_DISTANCE,
+        COSINE_DISTANCE,
+        INNER_PRODUCT,
+        L1_DISTANCE,
+        HAMMING_DISTANCE,
+        JACCARD_DISTANCE,
+    }
 )
 
 # Full-text search. `@@` answers a boolean and `ts_rank` answers a relevance
@@ -333,13 +348,48 @@ class ColumnExpr(Expression):
         """`self <+> other` -- taxicab (L1) distance. Orderable."""
         return self._distance(L1_DISTANCE, "l1_distance", other)
 
+    def hamming_distance(self, other: Any) -> BinaryExpr:
+        """`self <~> other` -- how many bits differ. Orderable.
+
+        The query half of binary quantization: over a `Bit` column, this counts
+        the positions where two signatures disagree, which is the cheap
+        stand-in for distance that lets a 32x smaller index shortlist
+        candidates before the real vectors re-score them.
+        """
+        return self._bit_distance(HAMMING_DISTANCE, "hamming_distance", other)
+
+    def jaccard_distance(self, other: Any) -> BinaryExpr:
+        """`self <%> other` -- one minus the Jaccard similarity. Orderable.
+
+        Set overlap rather than positional agreement: it counts the bits set in
+        both against the bits set in either, so two sparse signatures that share
+        their few set bits are close even though most positions agree trivially
+        by being zero in both. That is the difference from
+        `hamming_distance`, which those shared zeros dominate.
+        """
+        return self._bit_distance(JACCARD_DISTANCE, "jaccard_distance", other)
+
     def _distance(self, operator: str, method: str, other: Any) -> BinaryExpr:
         from .types import ExtensionType
 
         if not isinstance(self.column.pg_type, ExtensionType):
             raise DeclarationError(
-                f".{method}() requires a Vector column, not "
+                f".{method}() requires a Vector, Halfvec or Sparsevec column, not "
                 f"{self.column.pg_type.name}"
+            )
+        return BinaryExpr(operator, self, _bind(self.column, other))
+
+    def _bit_distance(self, operator: str, method: str, other: Any) -> BinaryExpr:
+        from .types import BIT_OID
+
+        # By OID rather than by class: `Bit` is a plain built-in `PgType`, not an
+        # `ExtensionType`, because `bit` is PostgreSQL's own type and only these
+        # two operators over it are pgvector's.
+        if self.column.pg_type.oid != BIT_OID:
+            raise DeclarationError(
+                f".{method}() requires a Bit column, not {self.column.pg_type.name}. "
+                "It is pgvector's distance over PostgreSQL's `bit`, so a `vector` "
+                "column takes .l2_distance()/.cosine_distance() instead"
             )
         return BinaryExpr(operator, self, _bind(self.column, other))
 

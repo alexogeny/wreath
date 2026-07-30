@@ -48,8 +48,9 @@ _BINARY_OPERATORS = frozenset({
     "@>", "<@", "?", "?|", "?&", "#>>", "#>", "&&", "= ANY", "= ALL",
     # pgvector distances. These yield a number rather than a boolean, so they
     # reach SQL as an ORDER BY key or as the left side of a comparison; `where()`
-    # refuses one on its own.
-    "<->", "<=>", "<#>", "<+>",
+    # refuses one on its own. The last two are the `bit` distances, which differ
+    # only in the column type they are declared over.
+    "<->", "<=>", "<#>", "<+>", "<~>", "<%>",
     # Full-text search. Each token names its tsquery parser as well as its
     # operation, so the allowlist still decides every byte reaching SQL.
     "@@ websearch_to_tsquery", "@@ to_tsquery",

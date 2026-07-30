@@ -60,19 +60,22 @@ class Document(Model, table="documents", schema="app"):
 
 
 def _vector_oid() -> int:
-    """The OID this process holds for `vector`, binding a plausible one if none.
+    """The OID this process holds for `vector`, binding every declaration.
 
     A process resolves an extension type exactly once -- that is the invariant
     `tests/orm/test_extension_oid.py` pins -- so a suite that needs no server
     must not insist on its *own* made-up OID when a live suite has already read
     the real one out of a catalog. Whichever it is, it is consistent within the
-    run, which is all these assertions need.
+    run, which is all these assertions need. Re-running the idempotent binder
+    also reaches declarations constructed since the first resolution.
     """
+    oid = VECTOR_OID
     for item in declared_extension_types():
         if item.type_name == "vector" and item.oid:
-            return item.oid
-    bind_extension_oid("vector", VECTOR_OID)
-    return VECTOR_OID
+            oid = item.oid
+            break
+    bind_extension_oid("vector", oid)
+    return oid
 
 
 def _fingerprint(spec: Any) -> bytes:

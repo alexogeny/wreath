@@ -64,19 +64,24 @@ class Documents(Queries[Document]):
 
 
 def _vector_oid() -> int:
-    """The OID this process holds for `vector`, binding a plausible one if none.
+    """The OID this process holds for `vector`, binding every declaration.
 
     A process resolves an extension type exactly once -- that is the invariant
     `tests/orm/test_extension_oid.py` pins -- so a suite that needs no server
     must not insist on its *own* made-up OID when a live suite has already read
     the real one out of a catalog. Whichever it is, it is consistent within the
-    run, which is all these assertions need.
+    run, which is all these assertions need. Finding one bound instance does
+    not mean every instance is bound: another test can assign an OID directly
+    to one local type. Run the idempotent binder even in that case so this
+    module's model declaration cannot inherit an order-dependent OID 0.
     """
+    oid = VECTOR_OID
     for item in declared_extension_types():
         if item.type_name == "vector" and item.oid:
-            return item.oid
-    bind_extension_oid("vector", VECTOR_OID)
-    return VECTOR_OID
+            oid = item.oid
+            break
+    bind_extension_oid("vector", oid)
+    return oid
 
 
 @pytest.fixture
@@ -213,7 +218,10 @@ def test_a_distance_alone_is_not_a_predicate() -> None:
 
 
 def test_a_distance_requires_a_vector_column() -> None:
-    with pytest.raises(DeclarationError, match="requires a Vector column"):
+    # Three column types carry these four operators now -- `vector`, `halfvec`
+    # and `sparsevec` -- so the refusal names all three. `bit` is the one that
+    # does not; see `tests/orm/test_binary_quantization_queries.py`.
+    with pytest.raises(DeclarationError, match="Vector, Halfvec or Sparsevec"):
         Document.body.cosine_distance(QUERY)
 
 

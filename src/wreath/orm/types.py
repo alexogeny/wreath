@@ -23,6 +23,7 @@ from typing import Any
 
 from .._json import dumps as _json_dumps
 from .._json import loads as _json_loads
+from .._sparsevec import MAX_SPARSEVEC_DIM, MAX_SPARSEVEC_NNZ, SparseVector
 from .errors import DeclarationError, ExtensionNotInstalledError
 
 
@@ -135,6 +136,7 @@ class GeneratedType(PgType):
 #: every `Halfvec(dim)` shares kind 2.
 EXT_KIND_VECTOR = 1
 EXT_KIND_HALFVEC = 2
+EXT_KIND_SPARSEVEC = 3
 
 
 class WireList(list):
@@ -251,7 +253,15 @@ class ExtensionType(PgType):
         # list is refused there because it names no element type. An extension
         # value is a list that *does* know its type, so it carries the answer;
         # see `WireList`.
-        return WireList(wire, self.oid) if type(wire) is list else wire
+        if type(wire) is list:
+            return WireList(wire, self.oid)
+        # `sparsevec` is the same problem in a different shape: its value is not
+        # a list at all, so it carries the OID on a copy rather than on the
+        # caller's own object, which may outlive this bind and be bound again
+        # against another database.
+        if type(wire) is SparseVector:
+            return wire._with_oid(self.oid)
+        return wire
 
 
 #: Every `ExtensionType` this process has declared, in declaration order.
@@ -327,6 +337,7 @@ def _unbind_extension_oids() -> None:
 _EXTENSION_KINDS: dict[str, int] = {
     "vector": EXT_KIND_VECTOR,
     "halfvec": EXT_KIND_HALFVEC,
+    "sparsevec": EXT_KIND_SPARSEVEC,
 }
 
 
@@ -673,6 +684,144 @@ def Halfvec(dim: int) -> ExtensionType:
     )
 
 
+def Sparsevec(dim: int) -> ExtensionType:
+    """Declare a pgvector `sparsevec(dim)` column -- only the non-zero positions.
+
+    The Python value is a `SparseVector`, not a list. That is the whole
+    difference from `Vector`: a dimension here can be a million, and storing a
+    million floats to say that nine of them are non-zero is what the type exists
+    to avoid. A `dict` alone would not do, because it names no dimension, and
+    the dimension is not recoverable from the elements.
+
+    ```python
+    from wreath.postgres import SparseVector
+
+    class Document(Model, table="documents"):
+        terms: Mapped[SparseVector] = column(
+            Sparsevec(30000), index="hnsw", index_ops="sparsevec_l2_ops"
+        )
+
+    await session.add(Document(terms=SparseVector(30000, {17: 0.9, 4021: 1.4})))
+    ```
+
+    Indices are **1-based**, matching pgvector's own text form
+    (`'{1:1.5,3:3.5}/5'`); the binary wire format is 0-based and the conversion
+    lives in the codec, so the two numberings never both appear in application
+    code.
+
+    The dimension is checked at coercion: a `SparseVector` declaring a different
+    one is refused here rather than by the server, because the server's message
+    names neither the column nor which of the two dimensions it expected.
+
+    At most `MAX_SPARSEVEC_NNZ` (16,000) elements may be non-zero, whatever the
+    dimension -- pgvector's own ceiling, and a value denser than that wants
+    `Vector` or `Halfvec` instead.
+
+    Requires `CREATE EXTENSION vector` (the same extension provides all three
+    types). Note the operator classes are the type's own -- `sparsevec_l2_ops`,
+    not `vector_l2_ops` -- and that pgvector indexes a `sparsevec` to 1,000
+    non-zero elements even though the column may hold 16,000.
+    """
+    if dim.__class__ is not int or isinstance(dim, bool):
+        raise DeclarationError(f"Sparsevec() requires an int dimension, got {dim!r}")
+    if not 1 <= dim <= MAX_SPARSEVEC_DIM:
+        raise DeclarationError(
+            f"Sparsevec({dim}) is out of range; pgvector allows 1 to "
+            f"{MAX_SPARSEVEC_DIM} dimensions"
+        )
+
+    def coerce(value: Any) -> SparseVector:
+        if not isinstance(value, SparseVector):
+            raise _type_error("SparseVector", value)
+        if value.dim != dim:
+            raise ValueError(
+                f"sparsevec({dim}) requires a SparseVector of dimension {dim}, got "
+                f"one of dimension {value.dim}"
+            )
+        return value
+
+    return ExtensionType(
+        "vector", "sparsevec", f"sparsevec({dim})", coerce, kind=EXT_KIND_SPARSEVEC
+    )
+
+
+#: PostgreSQL's own `bit`. Binary quantization needs no extension for the *type*
+#: -- only for the operators over it -- so this is a compile-time constant like
+#: every other built-in here, and none of the dynamic-OID machinery applies.
+BIT_OID = 1560
+
+#: How long a `bit` column wreath will declare. PostgreSQL's own limit is
+#: `INT_MAX` bits; this one is `Vector`'s ceiling times the 32 bits a float4
+#: quantizes down to, which is the largest embedding anyone is quantizing.
+MAX_BIT_LENGTH = 512000
+
+
+def Bit(length: int) -> PgType:
+    """Declare a PostgreSQL `bit(length)` column -- one bit per dimension.
+
+    This is the storage half of *binary quantization*: an embedding whose
+    elements are replaced by their signs, so 1,536 float4s (6,148 bytes) become
+    1,536 bits (192 bytes), a 32x reduction that keeps enough of the geometry to
+    rank candidates before a re-scoring pass over the real vectors.
+
+    ```python
+    class Document(Model, table="documents"):
+        signature: Mapped[str] = column(
+            Bit(1536), index="hnsw", index_ops="bit_hamming_ops"
+        )
+    ```
+
+    The Python value is a `str` of `'0'` and `'1'`, exactly `length` of them --
+    what `psql` shows and what `'101'::bit(3)` means. `bytes` is accepted on the
+    way *in* as a convenience for the quantizers that produce it
+    (`numpy.packbits(...).tobytes()`), and is unpacked using the declared
+    length; the trailing bits of the final byte must be zero, since they name
+    positions the column does not have. A read always returns the `str`, because
+    a `bytes` return would have to carry its own bit count to be unambiguous.
+
+    **`bit` is a built-in type; the *operators* are pgvector's.**
+    `hamming_distance` and `jaccard_distance` (`<~>` and `<%>`) and the
+    `bit_hamming_ops` / `bit_jaccard_ops` index classes come from
+    `CREATE EXTENSION vector`. So a `Bit` column needs no extension to *store*,
+    and there is no OID to resolve -- but a query that ranks by one of those
+    distances does.
+    """
+    if length.__class__ is not int or isinstance(length, bool):
+        raise DeclarationError(f"Bit() requires an int length, got {length!r}")
+    if not 1 <= length <= MAX_BIT_LENGTH:
+        raise DeclarationError(
+            f"Bit({length}) is out of range; wreath declares 1 to {MAX_BIT_LENGTH} bits"
+        )
+    width = (length + 7) // 8
+
+    def coerce(value: Any) -> str:
+        if isinstance(value, (bytes, bytearray)):
+            if len(value) != width:
+                raise ValueError(
+                    f"bit({length}) packs into {width} bytes, got {len(value)}"
+                )
+            padding = -length % 8
+            number = int.from_bytes(value, "big")
+            if padding and number & ((1 << padding) - 1):
+                raise ValueError(
+                    f"bit({length}) leaves {padding} unused bits in the last byte "
+                    "and they must be zero; they name positions this column does "
+                    "not have"
+                )
+            return format(number >> padding, f"0{length}b")
+        if not isinstance(value, str):
+            raise _type_error("str of '0' and '1', or packed bytes", value)
+        if len(value) != length:
+            raise ValueError(
+                f"bit({length}) requires exactly {length} bits, got {len(value)}"
+            )
+        if len(value) != value.count("0") + value.count("1"):
+            raise ValueError("a bit string may hold only '0' and '1'")
+        return value
+
+    return PgType(f"bit({length})", BIT_OID, f"bit({length})", coerce)
+
+
 #: PostgreSQL's own `tsvector`. Full-text search needs no extension, so unlike
 #: pgvector's types this is a compile-time constant like every other built-in
 #: here -- none of the dynamic-OID machinery applies to it.
@@ -827,15 +976,21 @@ for _element in (
 TextArray = Array(Text)
 
 __all__ = [
+    "BIT_OID",
     "BY_OID",
     "EXT_KIND_HALFVEC",
+    "EXT_KIND_SPARSEVEC",
     "EXT_KIND_VECTOR",
     "Halfvec",
+    "MAX_BIT_LENGTH",
     "MAX_HALFVEC_DIM",
     "MAX_HALF_MAGNITUDE",
+    "MAX_SPARSEVEC_DIM",
+    "MAX_SPARSEVEC_NNZ",
     "MAX_VECTOR_DIM",
     "TSVECTOR_OID",
     "Array",
+    "Bit",
     "Bool",
     "Bytea",
     "Date",
@@ -855,6 +1010,8 @@ __all__ = [
     "Jsonb",
     "Numeric",
     "PgType",
+    "SparseVector",
+    "Sparsevec",
     "Text",
     "TextArray",
     "Timestamp",
