@@ -808,3 +808,108 @@ its host port forwarder had died, so `pg_isready` passed *inside* while
 prematurely") and a plain `podman start` after it worked. The DSN made **no
 difference** to any jobs number: those suites are in-memory, and only 5 of the 85
 tests in `tests/jobs/` are DB-gated.
+
+## Session six — `binding.py`, and a lint suppression that hid the real answer
+
+**`binding.py`: 0.6650 → 0.8192, non-killed 196 → 95, `unreached` 61 → 13.** It was
+the largest single concentration left in any sweep (the authz sweep's 196, ahead of
+`_auth/jwt.py`'s 103). Nothing is committed; the tree stays dirty per AGENTS.md.
+
+The sweep data from sessions four and five was recovered from the previous session's
+`/tmp` scratchpad and copied forward — it is 8.7 MB of `sweep_*.json` and it had
+survived, but re-earning the psql sweep alone costs 66 minutes, so it should not live
+only in `/tmp`.
+
+### Pitfall #3 is closed; pitfall #1 was worth 41 mutants on its own
+
+`grep -rln spec_from_file_location tests/` returns five files and **all five now try
+`importlib.import_module` first**, so there are no free recoveries of that kind left
+anywhere in the suite. Checked first because session five said to.
+
+Pitfall #1 was still worth a great deal. The manifest attributes seven test files to
+the `binding` subsystem and omits `test_binding_unresolvable_annotations.py`,
+`test_dependency_and_path_refusals.py`, `test_lazy_scope.py`, `tests/orm/test_binding.py`,
+`tests/orm/test_validation.py` and `tests/security/test_web_framework_hardening.py`.
+Unioning those in — 208 tests, 1.6 s — **killed 41 of the 196 with no test written.**
+The remaining 155 were then real.
+
+### The pattern: a compound guard needs one input per clause
+
+Session four found overlapping *ordered* guards masking each other; session five found
+a guard whose neighbour answered for it. Here it is neither. It is that a clause is
+only held by an input that isolates it, and almost every survivor was one of:
+
+- **Two spellings of one idea.** `annotation is Any or annotation is inspect.Parameter.empty`,
+  `annotation is None or annotation is _NONE_TYPE`, `annotation is Instant or annotation
+  is _datetime.datetime`. A test using one spelling leaves the other clause deletable.
+  `Parameter.empty` reaches `_convert_scalar` only through an **unannotated path
+  parameter** — a path parameter binds by name and needs no marker, which is the one
+  parameter shape that can arrive without an annotation at all.
+- **An accumulator that had only ever been empty.** `errors = invalid.errors if errors
+  is None else [*errors, *invalid.errors]` appears once per parameter kind, and each
+  needs *two* requests: one where that kind fails first (`errors is None`) and one where
+  it fails after another kind. No test had ever sent a request that failed in two places,
+  so a client that got three things wrong would have been told about one. The path-param
+  site needs two bad segments in one route, because nothing runs before it.
+- **A branch reachable only from a shape nobody builds.** `compile_binder`'s twenty
+  `() if spec is None else spec.<field>` expressions: `inspect_handler` returns `None`
+  for a `(request)`-only handler and `compile_binder` returns it untouched — *unless*
+  route-level `dependencies` were passed, which is the sole path where `spec is None`
+  and the body still runs. One test for that shape (a side-effect-only dependency on a
+  handler that binds nothing) reached all twenty.
+
+Also closed: the four connection-injection refusals (`security_read`, unnamed-with-0
+and unnamed-with-2 databases, an unknown name), an absent header or cookie falling back
+to its default, `Optional[T]` on a scalar source, `Mapped[T]`/`Optional[T]`/
+`Mapped[T] | None` peeling in `_unwrap_form_type`, and `_compile_plan` — the *native*
+plan compiler, which mirrors `_validate` "exactly" and had never been exercised through
+a request, the only thing that runs a plan.
+
+**One finding worth more than its mutant count: the validation bomb had no test at all.**
+`_VALIDATE_MAX_STEPS = 2_000_000` is a denial-of-service bound whose own comment
+describes the attack, and nothing had ever triggered it. A nest of 23 two-arm unions
+(~200 bytes of JSON) exhausts it in 1.9 s and must report exactly one `too_complex`
+error at the root. Note the mutants that *remove* the bound turn the bomb back into
+unbounded work and are reported `timeout` — a removed DoS bound really is a hang, which
+is session five's `jobs.py:808` situation again, and undecided is the honest outcome.
+
+### The `noqa` that inverted its own test — now a rule in AGENTS.md
+
+`_validate`'s `args[0] if args else Any` and `args[1] if len(args) == 2 else Any`
+fallbacks (and their `_compile_plan` twins) are reached only by an annotation with an
+origin and **no args**. Measured: the only spellings that produce one are the deprecated
+`typing.List`/`typing.Dict`, plus a synthetic `types.GenericAlias(list, ())`. Every
+modern spelling either has no origin (`list`, `collections.abc.Sequence`) or has args.
+
+Four `# noqa: UP006`s went in to reach them, and the episode is why AGENTS.md now
+forbids suppressing a lint to pass your own new code:
+
+- `ruff check --fix` had already rewritten one *unsuppressed* use to bare `list`, which
+  **inverted what the test asserted** — bare `list` has no origin and *is* `unsupported`.
+  It passed alone (nothing had run before it) and failed in the suite. A test that
+  asserts the opposite of its docstring is worse than no test.
+- The correct answer was not a suppression. Those fallbacks are **not dead** — a
+  *caller's* handler may be annotated `typing.List`, and their lint config is not ours —
+  they are simply unmeasurable from inside this repository. The four surviving arms are
+  honestly undecided, and deciding them means allowing the alias in one declared,
+  scoped `per-file-ignores` entry, which is a policy call for a human.
+
+The test now pins what *is* true and modern (bare `list`/`dict` are reported
+`unsupported`, naming the annotation) and records the limit in its docstring.
+
+### What is left in `binding.py`, and what is next
+
+95 non-killed: `compile_binder` 38 (the dependency-cache and resource-release paths —
+`marker.use_cache`, `borrowed or opened`, `defer_release`, `StreamingResponse`),
+`_compile_dep` 13, `inspect_handler` 11, `_form_model_fields` 6, `_release` 6,
+`AppScope` 7 (concurrency: `future.done()` races and `aclose` error aggregation, one
+already `timeout`), `_compile_plan` 3, `_validate` 3, `_unwrap_form_type` 2.
+
+The `AppScope`/`_release` group is the hard one — it needs two coroutines racing for the
+same app-scoped dependency, and one mutant there is already hang-shaped. The
+`compile_binder` resource group is ordinary work.
+
+Unchanged from session five: the `app` sweep (2751 mutants) has never produced a file
+(`sweep_app.json` is 0 bytes), the psql re-check never ran, no `WREATH_PURE=1` sweep has
+ever run, and the manifest-attribution decision (80 of 438 test files own no subsystem)
+is still open. `_auth/jwt.py` at 103 non-killed is now the largest single concentration.
