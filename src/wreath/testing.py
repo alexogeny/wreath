@@ -551,38 +551,9 @@ class TestClient:
         Raises:
             RuntimeError: The application returned without sending any response message.
         """
-        raw_headers = [
-            (name.lower().encode("latin-1"), value.encode("latin-1"))
-            for name, value in {**self._headers, **(headers or {})}.items()
-        ]
-        if json is not None:
-            content = _json_dumps(json)
-            raw_headers.append((b"content-type", b"application/json"))
-        if content:
-            raw_headers.append((b"content-length", str(len(content)).encode()))
-        path_part, _, existing_query = path.partition("?")
-        query = existing_query.encode("ascii")
-        if params:
-            encoded = urlencode(params).encode("ascii")
-            query = query + b"&" + encoded if query else encoded
-        scope = {
-            "type": "http",
-            "asgi": _DEFAULT_ASGI,
-            "http_version": "1.1",
-            "method": method.upper(),
-            "scheme": "http",
-            "path": path_part,
-            "raw_path": quote(path_part).encode("ascii"),
-            "query_string": query,
-            "headers": raw_headers,
-            "server": ("testclient", 80),
-            "client": ("testclient", 50000),
-            "root_path": "",
-        }
-        if self._identity is not None:
-            # On the scope rather than on the backend, so two clients acting as
-            # different people can have requests in flight at the same time.
-            scope[_SCOPE_IDENTITY] = self._identity
+        scope, content = self._scope(
+            method, path, headers=headers, params=params, content=content, json=json
+        )
 
         sent: list[Message] = []
         body = content
@@ -605,6 +576,58 @@ class TestClient:
             m.get("body", b"") for m in sent if m["type"] == "http.response.body"
         )
         return TestResponse(first["status"], list(first["headers"]), payload)
+
+    def _scope(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+        content: bytes = b"",
+        json: Any = None,
+    ) -> tuple[dict[str, Any], bytes]:
+        """The ASGI scope for one request, and the body to feed it.
+
+        Split out of `request()` so a caller that must consume the response
+        *incrementally* -- an SSE stream that never ends on its own is the case
+        that needs it -- can drive `self.app` itself without rebuilding a scope
+        by hand. `request()` collects, which is right for every assertion in a
+        test and wrong for a stream something is reading as it arrives.
+        """
+        raw_headers = [
+            (name.lower().encode("latin-1"), value.encode("latin-1"))
+            for name, value in {**self._headers, **(headers or {})}.items()
+        ]
+        if json is not None:
+            content = _json_dumps(json)
+            raw_headers.append((b"content-type", b"application/json"))
+        if content:
+            raw_headers.append((b"content-length", str(len(content)).encode()))
+        path_part, _, existing_query = path.partition("?")
+        query = existing_query.encode("ascii")
+        if params:
+            encoded = urlencode(params).encode("ascii")
+            query = query + b"&" + encoded if query else encoded
+        scope: dict[str, Any] = {
+            "type": "http",
+            "asgi": _DEFAULT_ASGI,
+            "http_version": "1.1",
+            "method": method.upper(),
+            "scheme": "http",
+            "path": path_part,
+            "raw_path": quote(path_part).encode("ascii"),
+            "query_string": query,
+            "headers": raw_headers,
+            "server": ("testclient", 80),
+            "client": ("testclient", 50000),
+            "root_path": "",
+        }
+        if self._identity is not None:
+            # On the scope rather than on the backend, so two clients acting as
+            # different people can have requests in flight at the same time.
+            scope[_SCOPE_IDENTITY] = self._identity
+        return scope, content
 
     async def get(self, path: str, **kwargs: Any) -> TestResponse:
         """Send a GET request; keywords are those of `request()`."""

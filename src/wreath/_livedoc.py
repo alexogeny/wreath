@@ -261,6 +261,12 @@ class LiveDocument:
 
     @property
     def channel(self) -> str:
+        """The bus channel this document's change notifications travel on.
+
+        Fixed at construction, and read back from the bridge rather than stored
+        twice. It names the channel whether or not a bus was supplied — an
+        unattached document is one nobody publishes on, not one with no name.
+        """
         return self._bridge.channel
 
     @property
@@ -270,10 +276,25 @@ class LiveDocument:
 
     @property
     def subscribers(self) -> int:
+        """How many streams are open right now, across every principal.
+
+        The number `max_subscribers` is checked against, so it is also how close
+        this document is to refusing the next `subscribe`. It counts slots, not
+        people: one principal holding four tabs is four.
+        """
         return self._count
 
     @property
     def keepalive(self) -> float:
+        """Seconds a stream waits before it ticks, 15.0 by default.
+
+        The idle timeout every stream over this document uses unless it was
+        opened with a `keepalive` of its own. A tick emits an SSE comment, which
+        keeps a proxy from closing an idle stream and is also how a vanished
+        client is discovered; it is also when the stream re-reads `fingerprint`,
+        so this is the upper bound on how long a policy set replaced in-process
+        can go unnoticed by an already-open subscriber.
+        """
         return self._keepalive
 
     @property

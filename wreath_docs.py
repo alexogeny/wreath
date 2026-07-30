@@ -16,6 +16,7 @@ from wreath._docs import THEMES, Link, Nav, Page, Repo, Section, Site
 
 nav = Nav(
     Page("Home", "index.md"),
+    Page("What you don't have to install", "capabilities.md"),
     Section(
         "Getting started",
         Page("Installation and first app", "getting-started/index.md"),
@@ -57,6 +58,9 @@ nav = Nav(
             Page("PostgreSQL", "guides/postgres.md"),
             Page("ORM", "guides/orm.md"),
             Page("JSONB and arrays", "guides/jsonb-arrays.md"),
+            Page("Vector search", "guides/vector-search.md"),
+            Page("Full-text search", "guides/full-text-search.md"),
+            Page("Hybrid search", "guides/hybrid-search.md"),
             Page("Pagination, filtering, and sorting", "guides/pagination.md"),
             Page("Calculated views", "guides/calculated-views.md"),
             Page("Generating CRUD", "guides/crud.md"),
@@ -68,6 +72,7 @@ nav = Nav(
             Page("Authentication and authorization", "guides/auth.md"),
             Page("Permissions in the UI", "guides/permissions.md"),
             Page("User management", "guides/users.md"),
+            Page("Second factors (TOTP and passkeys)", "guides/second-factors.md"),
             Page("Idempotent writes", "guides/idempotency.md"),
         ),
         Section(
@@ -82,6 +87,7 @@ nav = Nav(
             "Talking to other services",
             Page("Outbound HTTP and webhooks", "guides/http-client.md"),
             Page("Calling another service", "guides/service-client.md"),
+            Page("Serving MCP tools", "guides/mcp.md"),
             Page("Object storage", "guides/objects.md"),
         ),
         Section(
@@ -110,6 +116,7 @@ nav = Nav(
         Section(
             "Testing and quality",
             Page("Testing", "guides/testing.md"),
+            Page("Would your tests notice?", "guides/mutant.md"),
             Page("Finding the N+1 query", "guides/n-plus-one.md"),
             Page("Auditing (a11y & performance)", "guides/auditing.md"),
         ),
@@ -127,6 +134,7 @@ nav = Nav(
             "Users, auth, and security",
             Page("Add OIDC / OAuth2 login", "cookbook/recipes/oauth2-login.md"),
             Page("Authenticate with an API key", "cookbook/recipes/api-key-auth.md"),
+            Page("Turn on an authenticator app (TOTP)", "cookbook/recipes/enable-totp.md"),
             Page("Authorize with Cedar (RBAC)", "cookbook/recipes/cedar-rbac.md"),
             Page("Make a POST safe to retry", "cookbook/recipes/idempotent-writes.md"),
         ),
@@ -135,6 +143,9 @@ nav = Nav(
             Page("Paginate, sort, and filter", "cookbook/recipes/paginate-a-list.md"),
             Page("Build an admin console", "cookbook/recipes/build-an-admin-console.md"),
             Page("Query JSONB and arrays", "cookbook/recipes/jsonb-query.md"),
+            Page("Search text with PostgreSQL", "cookbook/recipes/search-documents.md"),
+            Page("Search by meaning with embeddings", "cookbook/recipes/semantic-search.md"),
+            Page("Combine keyword and semantic search", "cookbook/recipes/hybrid-search.md"),
             Page("Run a transaction", "cookbook/recipes/unit-of-work.md"),
             Page("Generate CRUD safely", "cookbook/recipes/safe-crud.md"),
             Page("Manage a database pool", "cookbook/recipes/database-lifespan.md"),
@@ -152,6 +163,7 @@ nav = Nav(
             Page("Call a service with a token", "cookbook/recipes/call-a-service.md"),
             Page("Send a signed webhook", "cookbook/recipes/send-webhook.md"),
             Page("Presign an upload", "cookbook/recipes/presign-upload.md"),
+            Page("Serve your first MCP tool", "cookbook/recipes/serve-mcp-tools.md"),
         ),
         Section(
             "Speed and delivery",
@@ -176,6 +188,8 @@ nav = Nav(
             "Migrating and quality",
             Page("Move a FastAPI + Alembic SaaS app", "cookbook/recipes/fastapi-alembic-saas.md"),
             Page("Fuzz your own routes", "cookbook/recipes/fuzz-your-routes.md"),
+            Page("Find the controls your tests do not watch",
+                 "cookbook/recipes/find-unwatched-controls.md"),
         ),
         Section(
             "For coding agents",
@@ -241,6 +255,8 @@ nav = Nav(
         Page("State", "reference/state.md"),
         Page("OpenAPI", "reference/openapi.md"),
         Page("Client type generation", "reference/typegen.md"),
+        Page("MCP", "reference/mcp.md"),
+        Page("Mutation testing", "reference/mutant.md"),
         Page("Exceptions", "reference/exceptions.md"),
         Page("CLI", "reference/cli.md"),
         Page("Reserved and in-progress surfaces", "reference/roadmap.md"),

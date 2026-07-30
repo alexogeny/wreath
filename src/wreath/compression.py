@@ -18,9 +18,9 @@ while it is open; after `finish()` or `close()` either raises
 `RuntimeError`, so a stream cannot be silently continued past its trailer.
 `close()` is idempotent and never raises.
 
-Both are re-exports from `wreath._pure.compression` and so are documented here
-rather than below: the `:::` reference generator renders only the members a
-module defines itself.
+Both are re-exports from `wreath._pure.compression`, which is private and so has
+no reference page of its own; the `:::` generator renders them under this module
+for that reason, and their signatures are below.
 """
 
 from __future__ import annotations

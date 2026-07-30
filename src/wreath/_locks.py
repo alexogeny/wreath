@@ -123,14 +123,14 @@ def _exit_held(database: Database, workload: Workload) -> None:
 
 
 class AdvisoryLock:
-    """A blocking, session-scoped advisory lock held for an ``async with`` block.
+    """A blocking, session-scoped advisory lock held for an `async with` block.
 
-    The lock pins a single connection from *workload* (default ``"write"``, i.e.
+    The lock pins a single connection from *workload* (default `"write"`, i.e.
     the primary) for the lifetime of the block and releases it -- and the lock --
     on exit. Because a session-scoped lock is bound to its backend connection,
     the connection is *withheld from the pool* while held; hold enough of these
-    concurrently and ordinary queries can starve on ``acquire``. Prefer the
-    xact-scoped :meth:`Session.lock` for request-path exclusion and reserve this
+    concurrently and ordinary queries can starve on `acquire`. Prefer the
+    xact-scoped `Session.lock` for request-path exclusion and reserve this
     for a handful of long-lived fleet locks.
     """
 
@@ -186,9 +186,9 @@ class AdvisoryLock:
 class AdvisoryTryLock:
     """A non-blocking (or timeout-bounded) session-scoped advisory lock.
 
-    Used as ``async with db.try_lock(key) as held:`` -- *held* is the lock handle
-    when acquired, or ``None`` when it could not be taken. With ``timeout`` set,
-    acquisition blocks up to that many seconds using PostgreSQL's ``lock_timeout``
+    Used as `async with db.try_lock(key) as held:` -- *held* is the lock handle
+    when acquired, or `None` when it could not be taken. With `timeout` set,
+    acquisition blocks up to that many seconds using PostgreSQL's `lock_timeout`
     (which inherits the server's fair-ish lock queue), not a client-side spin.
     """
 
@@ -279,12 +279,12 @@ class AdvisoryTryLock:
 class SingletonRunner:
     """Run one coroutine at a time across the whole fleet, via an advisory lock.
 
-    ``work`` is a zero-argument callable returning a *fresh* awaitable each time
+    `work` is a zero-argument callable returning a *fresh* awaitable each time
     it is invoked (a coroutine can only be awaited once, and leadership may be
     re-established after a failover). The winner holds a dedicated connection and
-    the advisory lock for as long as ``work()`` runs; if the process dies, its
+    the advisory lock for as long as `work()` runs; if the process dies, its
     backend connection drops, PostgreSQL releases the lock, and a follower is
-    promoted within one ``poll_interval``. The guarded work must be idempotent --
+    promoted within one `poll_interval`. The guarded work must be idempotent --
     failover can hand leadership over mid-flight.
     """
 
@@ -323,7 +323,7 @@ class SingletonRunner:
     def lead_errors(self) -> int:
         """How many leadership attempts ended in a failure rather than a return.
 
-        A ``work()`` that fails every time is otherwise invisible: leadership is
+        A `work()` that fails every time is otherwise invisible: leadership is
         acquired, dropped, and re-contended on a timer, so the fleet looks busy
         while nothing is being done. This is the only signal that distinguishes
         "nobody has needed to lead yet" from "leading has never once worked".
