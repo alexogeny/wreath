@@ -24,6 +24,7 @@ from pathlib import Path
 
 from . import (
     apidoc,
+    capabilities,
     charts,
     codeblocks,
     figures,
@@ -179,6 +180,10 @@ class _RenderedPage:
     keywords: str = ""
     #: Front-matter `boost:` — a multiplier on this page's search score.
     boost: float = 1.0
+    #: Generated search aliases — currently the capability map's package names.
+    #: Kept apart from `keywords` because they are scored lower: nobody wrote
+    #: them, so they are weaker evidence than a term the page claims for itself.
+    aliases: str = ""
 
 
 def build(site: Site, root: Path | None = None) -> BuildReport:
@@ -231,6 +236,7 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
         description = _field(front, _FM_DESC) or site.description
         keywords = _field(front, _FM_KEYWORDS)
         boost = float(_field(front, _FM_BOOST) or 1.0)
+        aliases = ""
         # The Python in the page, checked against the real objects before the
         # markdown is touched. Structural checks pass a page whose first line
         # raises `AttributeError`; five such pages shipped in one week.
@@ -242,6 +248,18 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
             unpublished_chart_sources if orphan else chart_sources)
         text, figure_tokens = figures.extract(text)
         text, hero_tokens = hero.extract(text)
+        if capabilities.has_directive(text):
+            # The capability map, minted from the subsystem manifest. Same
+            # bargain as the reference directive: strict fails, a preview keeps
+            # the note and carries on.
+            text = capabilities.expand(
+                text, source_dir, page.source, errors if site.strict else warnings
+            )
+            # ... and the reverse index: the packages the map names are also the
+            # words a reader arrives already knowing, so they are searchable as
+            # more than a mention in a table cell — but in their own, lower-
+            # scored field, because the page never claimed them for itself.
+            aliases = capabilities.alias_text(source_dir)
         if apidoc.has_directives(text):
             # Strict builds fail on a directive that could not be rendered; a
             # non-strict preview keeps the inline note and carries on.
@@ -256,7 +274,7 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
             page, _output_path(page.source),
             rendered.title or hero.title_of(hero_tokens) or page.title,
             html, rendered.toc, frozenset(e.slug for e in rendered.toc), description,
-            keywords, boost))
+            keywords, boost, aliases))
 
     slugs_by_page = {
         rp.out_rel: rp.slugs for rp in [*rendered_pages, *rendered_orphans]}
@@ -322,6 +340,8 @@ def build(site: Site, root: Path | None = None) -> BuildReport:
             record["c"] = breadcrumbs[rp.out_rel]
         if rp.keywords:
             record["k"] = rp.keywords
+        if rp.aliases:
+            record["a"] = rp.aliases
         if rp.boost != 1.0:
             record["b"] = rp.boost
         index_pages.append(record)

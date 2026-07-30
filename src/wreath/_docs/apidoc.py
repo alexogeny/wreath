@@ -35,6 +35,7 @@ _REST_ROLE = re.compile(r":(?:mod|class|func|meth|attr|exc|data|obj|ref|term|doc
 _REST_BLOCK = re.compile(r"(?<!:)::\s*$", re.M)
 _FENCE = re.compile(r"^```.*?^```", re.M | re.S)
 
+
 def has_directives(source: str) -> bool:
     return any(_DIRECTIVE.match(line) for line in source.splitlines())
 
@@ -86,7 +87,18 @@ def expand(source: str, page: str = "", sink: list[str] | None = None) -> str:
     That check reports through the same `sink`, so a strict build fails on it
     for the same reason it fails on an unrenderable target: the page would
     otherwise ship damaged and say nothing about it.
+
+    So is a directive that resolves to a module and renders *no members*. That
+    one is ADR 0024's shape exactly: `::: wreath.orm` produced the package
+    docstring and nothing else from the day the page was written, and an empty
+    section builds clean, so nothing ever said so. `_empty_module_finding` has
+    the one allowance and what it costs.
     """
+    targets = [
+        match.group(1)
+        for line in source.splitlines()
+        if (match := _DIRECTIVE.match(line)) is not None
+    ]
     out: list[str] = []
     for line in source.splitlines():
         match = _DIRECTIVE.match(line)
@@ -104,15 +116,51 @@ def expand(source: str, page: str = "", sink: list[str] | None = None) -> str:
             continue
         out.append(rendered)
         if sink is not None:
+            where = f"{page}: " if page else ""
             found = sorted(set(rest_markup(rendered)))
             if found:
-                where = f"{page}: " if page else ""
                 sink.append(
                     f"{where}::: {path} renders reST markup markdown cannot show: "
                     f"{', '.join(found[:5])}{' ...' if len(found) > 5 else ''}"
                     " -- wreath docstrings use single backticks"
                 )
+            empty = _empty_module_finding(path, targets)
+            if empty is not None:
+                sink.append(f"{where}{empty}")
     return "\n".join(out)
+
+
+def _empty_module_finding(path: str, targets: list[str]) -> str | None:
+    """Report a module directive whose section would contain no API at all.
+
+    The only allowance is structural rather than a list of blessed pages: a
+    facade may render nothing when the same page also carries a directive for
+    one of its submodules. That is the shape `docs/reference/middleware.md`
+    established and `docs/reference/orm.md` now follows -- the facade directive
+    contributes the package docstring as the page's intro, and the submodule
+    sections beneath it carry the API. It is checked against the page's own
+    directives, so a page that keeps the facade and deletes the submodules goes
+    red rather than quietly emptying out.
+
+    There used to be a second allowance, `EMPTY_MODULE_OK`: five facades over
+    *private* packages, which no submodule directive can reach, and which
+    therefore rendered nothing at all. `_documented_here` renders those, so the
+    waiver has nothing left to buy and is gone rather than sitting here reading
+    as permission. A page that empties out now has to be fixed, not listed.
+    """
+    try:
+        target = _import(path)
+    except TargetNotFound:
+        return None
+    if not inspect.ismodule(target) or _module_members(target):
+        return None
+    if any(other.startswith(f"{path}.") for other in targets):
+        return None
+    return (
+        f"::: {path} resolves to a module and renders no members -- every public "
+        "name is defined elsewhere. Add a directive per submodule, as "
+        "docs/reference/middleware.md does, so the API is on the page"
+    )
 
 
 def _pin_anchor(markdown: str, path: str) -> str:
@@ -175,15 +223,148 @@ def _public_names(module: object) -> list[str]:
     return [n for n in dir(module) if not n.startswith("_")]
 
 
-def _render_module(module: Any, path: str) -> str:
-    parts = [f"## `{path}`", "", _docstring(inspect.getdoc(module)), ""]
+def _module_members(module: Any) -> list[tuple[str, Any, str]]:
+    """Every public name a module directive documents: `(name, object, kind)`.
+
+    One function rather than a loop inside `_render_module`, because the
+    emptiness gate in `expand` asks exactly the question the renderer answers.
+    Asking it twice, in two places, is how a gate ends up agreeing with a
+    renderer it no longer matches -- and this gate exists precisely because a
+    section that renders nothing looked fine from the outside.
+
+    A member is documented here when this module *defines* it, or when it is
+    re-exported from a private module of the same package -- see
+    `_documented_here`. A facade over public submodules therefore still
+    documents nothing of its own, and its page carries a directive per
+    submodule instead, so each name is rendered once under the module whose
+    docstrings describe it.
+    """
     own = module.__name__
+    exported = getattr(module, "__all__", None)
+    declared = frozenset(exported) if exported is not None else frozenset()
+    found: list[tuple[str, Any, str]] = []
     for name in _public_names(module):
         member = getattr(module, name, None)
-        if inspect.isclass(member) and member.__module__ == own:
+        here = name in declared
+        if inspect.isclass(member) and _documented_here(member.__module__, own, here):
+            found.append((name, member, "class"))
+        elif inspect.isroutine(member) and _documented_here(
+            getattr(member, "__module__", None), own, here
+        ):
+            found.append((name, member, "function"))
+        elif _is_documentable_value(member, own, here):
+            found.append((name, member, "value"))
+    return found
+
+
+def _documented_here(source: str | None, own: str, declared: bool) -> bool:
+    """Does a member *defined* in `source` belong in `own`'s reference section?
+
+    Two ways in, and the second is what a facade over a private package needs.
+
+    * **This module defines it.** The ordinary case: a name is rendered under
+      the module whose docstrings describe it, once.
+    * **It is re-exported from a private module of this package, and this
+      module's `__all__` names it.** A `:::` directive can only name an
+      importable module, and a page does not document `wreath._auth.jwt` --
+      so a public name defined in a private module is reachable from no
+      directive at all, and the page that exports it is the only place it can
+      be rendered. Five reference pages were entirely empty because of this.
+
+    The second condition asks `__all__` rather than `_public_names`, and that
+    is load-bearing rather than incidental. For a name this module defines,
+    `__module__` already separates an export from an import; for a re-export it
+    cannot, because an implementation detail imported for internal use has the
+    same private `__module__` as the API beside it. `__all__` is the only place
+    a module states which of the two a name is, so a module that does not
+    declare one documents only what it defines -- otherwise `wreath.app` would
+    publish `merge_requirements` and `CompiledRouter` as public API on the
+    strength of having imported them.
+
+    The source must also be private *within this package*: `__future__` and
+    the stdlib's private modules are somebody else's implementation, and a
+    value bound from one is not thereby this module's API.
+    """
+    if source == own:
+        return True
+    if not declared or not isinstance(source, str):
+        return False
+    if source.partition(".")[0] != own.partition(".")[0]:
+        return False
+    return any(part.startswith("_") for part in source.split("."))
+
+
+def _is_documentable_value(value: Any, own: str, declared: bool = False) -> bool:
+    """Is `value` a module-level *instance* that is API in its own right?
+
+    Some of this framework's public surface is values, not classes or
+    functions: an ORM column is declared `column(Int64)`, and `Int64` is an
+    instance of `PgType`. A renderer that only knows classes and functions
+    emits nothing for the entire scalar type vocabulary.
+
+    Three conditions, and each one is load-bearing against this becoming a
+    general object dumper:
+
+    * **It is not a class, a function, or a module.** Those already have
+      renderers, and a module bound as a name is an import, not an export.
+    * **Its type is defined by this module**, or by a private module of this
+      package when `__all__` names the value (`_documented_here`). A module
+      that imports `os` or binds a stdlib constant is not thereby documenting
+      them; a value whose type lives here is one this module minted on
+      purpose. This is the condition that keeps the rule general -- it never
+      mentions `PgType`.
+    * **It can show the reader something**: a `__repr__` of its own, or a
+      docstring of its own. `object.__repr__` prints a heap address, so a page
+      built twice would differ; a value with neither has nothing to render but
+      its name, which the module's prose already carries.
+    """
+    if value is None or inspect.isclass(value) or inspect.isroutine(value):
+        return False
+    if inspect.ismodule(value):
+        return False
+    cls = type(value)
+    if not _documented_here(getattr(cls, "__module__", None), own, declared):
+        return False
+    return cls.__repr__ is not object.__repr__ or _instance_doc(value) is not None
+
+
+def _instance_doc(value: Any) -> str | None:
+    """A docstring the *instance* carries, never the one it inherits from its
+    class -- that one is already rendered under the class itself."""
+    doc = getattr(value, "__doc__", None)
+    if not isinstance(doc, str) or doc is getattr(type(value), "__doc__", None):
+        return None
+    return inspect.cleandoc(doc)
+
+
+def _render_value(value: Any, name: str, level: int) -> str:
+    """One module-level value: what it is an instance of, and what it holds.
+
+    The repr is included only when the type supplies one, for the reason
+    `_is_documentable_value` states -- `<PgType int8 oid=20>` is the OID a
+    reader came to check, and `<... object at 0x7f...>` is noise that changes
+    between builds.
+    """
+    parts = [f"{'#' * level} `{name}` *(value)*", ""]
+    declaration = f"{name}: {type(value).__name__}"
+    if type(value).__repr__ is not object.__repr__:
+        declaration += f" = {value!r}"
+    parts.append(f"```python\n{declaration}\n```")
+    doc = _instance_doc(value)
+    if doc:
+        parts += ["", _docstring(doc)]
+    return "\n".join(parts)
+
+
+def _render_module(module: Any, path: str) -> str:
+    parts = [f"## `{path}`", "", _docstring(inspect.getdoc(module)), ""]
+    for name, member, kind in _module_members(module):
+        if kind == "class":
             parts.append(_render_class(member, level=3))
-        elif inspect.isfunction(member) and getattr(member, "__module__", None) == own:
+        elif kind == "function":
             parts.append(_render_callable(member, name, level=3))
+        else:
+            parts.append(_render_value(member, name, level=3))
     return "\n".join(parts)
 
 
@@ -244,10 +425,38 @@ def _classify(raw: Any) -> tuple[str | None, Any]:
     return None, None
 
 
+def _class_doc(cls: type) -> str | None:
+    """The docstring this class means -- never one borrowed from another project.
+
+    `inspect.getdoc` walks the MRO, which is what a reader wants from a wreath
+    base class and exactly wrong from a foreign one: a `Protocol` subclass with
+    no docstring of its own renders `typing.Protocol`'s "Base class for protocol
+    classes" under the subclass's name, an `IntEnum` renders "Enum where members
+    are also (and must be) ints", and an `Exception` subclass renders "Common
+    base class for all non-exit exceptions". Each is prose about the stdlib,
+    printed as though it described wreath's API, and the first of those also
+    drags reST into the page.
+
+    Same rule and same reason as `_members`, which already stops inheritance at
+    classes this package does not own: what a foreign base contributes is
+    mechanism, not contract.
+    """
+    root = cls.__module__.partition(".")[0]
+    for base in cls.__mro__:
+        if base is object:
+            return None
+        doc = base.__dict__.get("__doc__")
+        if isinstance(doc, str) and doc.strip():
+            if base.__module__.partition(".")[0] != root:
+                return None
+            return inspect.cleandoc(doc)
+    return None
+
+
 def _render_class(cls: type, level: int) -> str:
     hashes = "#" * level
     parts = [f"{hashes} `{cls.__name__}`", ""]
-    doc = inspect.getdoc(cls)
+    doc = _class_doc(cls)
     if doc:
         parts += [_docstring(doc), ""]
     init = cls.__dict__.get("__init__")
@@ -321,9 +530,18 @@ def _return_annotation(func: Any) -> str:
 #: something the reader writes, so they are removed.
 _QUOTED_ANNOTATION = re.compile(r"(?<=[:>]\s)'([^']*)'")
 
+#: A default value with no `__repr__` of its own prints its heap address --
+#: `identity: IdentityMapper = <function default_identity at 0x7f...>`. The
+#: address is different on every run, so two builds of the same source produce
+#: different bytes for the same page, and a reader is shown a number that means
+#: nothing to them. The name is the informative half and is kept; this is the
+#: same rule `_is_documentable_value` applies to a value's own repr, one layer
+#: down in the signature.
+_HEAP_ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+(?=>)")
+
 
 def _unquote(text: str) -> str:
-    return _QUOTED_ANNOTATION.sub(r"\1", text)
+    return _HEAP_ADDRESS.sub("", _QUOTED_ANNOTATION.sub(r"\1", text))
 
 
 def _signature_block(name: str, func: Any, skip_self: bool) -> str:

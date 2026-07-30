@@ -281,6 +281,7 @@ _RUNTIME = r"""
     var body = section.x.toLowerCase();
     var words = section.w || '';
     var keywords = (page.k || '').toLowerCase();
+    var aliases = (page.a || '').toLowerCase();
     var total = 0;
     for (var i = 0; i < terms.length; i++) {
       var term = terms[i];
@@ -289,8 +290,9 @@ _RUNTIME = r"""
       var t = inField(title, term, stemmed);
       var b = inField(body, term, stemmed);
       var k = inField(keywords, term, stemmed);
+      var a = inField(aliases, term, stemmed);
       var w = words.indexOf(stemmed) >= 0 ? 1 : 0;
-      if (!h && !t && !b && !k && !w) { return 0; }
+      if (!h && !t && !b && !k && !a && !w) { return 0; }
       if (h) {
         var weight = heading === term ? 200 : heading.indexOf(term) === 0 ? 120 : 60;
         total += h === 2 ? weight : weight / 2;
@@ -302,13 +304,22 @@ _RUNTIME = r"""
       /* A keyword is the author saying "people look for this here" — worth more
          than a passing mention in the prose, less than the heading it points at. */
       if (k) { total += k === 2 ? 80 : 40; }
+      /* An alias is generated, not authored — a third-party package name that a
+         page happens to name, which is weaker evidence than anything the page
+         claims about itself. Half a keyword, and below even the loosest heading
+         match (60), so `limits` still answers with `RequestLimits` and not with
+         the map that lists a package called `limits`. Above prose, because
+         being merely mentioned is what it was already worth and the whole point
+         is that a package name is worth more than a mention. */
+      if (a) { total += a === 2 ? 40 : 20; }
       if (b) { total += b === 2 ? 8 : 4; }
       else if (w) { total += 3; }
     }
     /* The whole query, in order, in one field. "query parameters" as a phrase is
        a far better answer than a page that says "query" and, elsewhere,
        "parameters" — which is exactly how a SQL query builder outranked the
-       page about URLs. */
+       page about URLs. Aliases get no phrase bonus: the field is a comma list of
+       distribution names, so a phrase found in it spans two of them. */
     if (phrase) {
       if (heading.indexOf(phrase) >= 0) { total += 140; }
       if (keywords.indexOf(phrase) >= 0) { total += 120; }
