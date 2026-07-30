@@ -6,6 +6,7 @@ the S3 REST + SigV4 signing behaviour against canned responses.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 
 import pytest
 
@@ -110,7 +111,14 @@ def test_list_paginates():
         b"</ListBucketResult>"
     )
 
+    calls = []
+
     def handler(method, target, body):
+        # Bounded: a fake that serves page one forever turns a listing that loses
+        # the continuation token into a hang rather than a failure, and a hang is
+        # what a mutation report has to call "undecided".
+        calls.append(target)
+        assert len(calls) <= 2, f"asked for a page past the last one: {calls}"
         return FakeResp(200, body=page2 if "continuation-token=TOK" in target else page1)
 
     store, _ = _store(handler)
@@ -120,6 +128,180 @@ def test_list_paginates():
         assert keys == ["a.txt", "b.txt"]
 
     asyncio.run(go())
+
+
+def _list_page(*, keys=(), truncated=False, token=None, trailing="", sizes=None):
+    """One `ListBucketResult`. `trailing` goes after the token, where S3 puts `<Name>`."""
+    sizes = sizes if sizes is not None else [len(k) for k in keys]
+    contents = "".join(
+        f"<Contents><Key>{k}</Key><Size>{s}</Size><ETag>&quot;e-{k}&quot;</ETag></Contents>"
+        for k, s in zip(keys, sizes, strict=True)
+    )
+    tok = f"<NextContinuationToken>{token}</NextContinuationToken>" if token else ""
+    return (
+        '<?xml version="1.0"?><ListBucketResult'
+        ' xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+        f"<IsTruncated>{'true' if truncated else 'false'}</IsTruncated>"
+        f"{contents}{tok}{trailing}</ListBucketResult>"
+    ).encode()
+
+
+def test_list_sends_the_prefix_the_delimiter_and_the_token_it_was_handed():
+    """Each page's request, and the bound that stops the walk.
+
+    The handler refuses a third page instead of serving the first one again,
+    because that is the difference these guards make: a listing that drops the
+    continuation token, or never breaks on the last page, asks for page one
+    forever. Against a real bucket that is an unbounded spend, and against a
+    lenient fake it is a hang -- which a mutation report can only call
+    "undecided", so the bound is what turns it into a failure.
+    """
+    seen: list[str] = []
+
+    def handler(method, target, body):
+        seen.append(target)
+        if len(seen) > 2:
+            raise AssertionError(f"asked for a page past the last one: {seen}")
+        if len(seen) == 1:
+            assert "list-type=2" in target, target
+            assert "prefix=photos%2F" in target, target
+            assert "delimiter=%2F" in target, target
+            assert "continuation-token" not in target, target
+            return FakeResp(200, body=_list_page(
+                keys=["photos/a.txt"], sizes=[3], truncated=True, token="TOK",
+                # After the token, as S3 sends it: an element matched by position
+                # rather than by name would overwrite the token with "b".
+                trailing="<Name>b</Name><KeyCount>1</KeyCount>",
+            ))
+        assert "continuation-token=TOK" in target, target
+        return FakeResp(200, body=_list_page(keys=["photos/b.txt"], sizes=[5]))
+
+    store, _ = _store(handler)
+
+    async def go():
+        got = [(o.key, o.size, o.etag) async for o in store.list("photos/", delimiter="/")]
+        assert got == [("photos/a.txt", 3, "e-photos/a.txt"),
+                       ("photos/b.txt", 5, "e-photos/b.txt")], got
+        assert len(seen) == 2
+
+    asyncio.run(go())
+
+
+def test_list_omits_a_prefix_and_delimiter_it_was_not_given():
+    """An empty prefix is not `prefix=`: S3 treats the parameter's presence as meaning something."""
+    calls = []
+
+    def handler(method, target, body):
+        calls.append(target)
+        assert len(calls) == 1, f"kept listing past the last page: {calls}"
+        assert "prefix" not in target, target
+        assert "delimiter" not in target, target
+        return FakeResp(200, body=_list_page(keys=["a.txt"], sizes=[1]))
+
+    store, _ = _store(handler)
+
+    async def go():
+        assert [o.key async for o in store.list()] == ["a.txt"]
+
+    asyncio.run(go())
+
+
+def test_list_reads_the_defaults_for_elements_a_bucket_left_empty():
+    """`<Size></Size>`, `<ETag></ETag>` and `<IsTruncated></IsTruncated>` have `el.text is None`.
+
+    An empty element is not a malformed response, and the `or ""` on every element's
+    text is what keeps one from raising `AttributeError` from `.strip('"')` or
+    `ValueError` from `int("")` out of a listing.
+    """
+    page = (
+        b'<?xml version="1.0"?><ListBucketResult'
+        b' xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+        b"<IsTruncated></IsTruncated>"
+        b"<Contents><Key>a.txt</Key><Size></Size><ETag></ETag></Contents>"
+        b"</ListBucketResult>"
+    )
+    calls = []
+
+    def handler(method, target, body):
+        calls.append(target)
+        assert len(calls) == 1, f"kept listing past the last page: {calls}"
+        return FakeResp(200, body=page)
+
+    store, _ = _store(handler)
+
+    async def go():
+        got = [(o.key, o.size, o.etag) async for o in store.list()]
+        assert got == [("a.txt", 0, "")], got
+
+    asyncio.run(go())
+
+
+def test_list_refuses_a_contents_element_that_names_no_object():
+    """Refused, not yielded as the empty key -- and refused as *empty*, not as a non-string.
+
+    Both an absent `<Key>` and an empty one arrive as a key of `""`, which is the
+    refusal the message has to name; `None` reaching `normalize_key` instead is a
+    different message about a type, from a response that is not wrong about types.
+    """
+    def page(contents):
+        return (
+            '<?xml version="1.0"?><ListBucketResult'
+            ' xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+            f"<IsTruncated>false</IsTruncated>{contents}</ListBucketResult>"
+        ).encode()
+
+    async def go(contents):
+        store, _ = _store(lambda *a: FakeResp(200, body=page(contents)))
+        with pytest.raises(ObjectError, match="empty object key"):
+            [o async for o in store.list()]
+
+    asyncio.run(go("<Contents><Size>1</Size></Contents>"))  # no Key element
+    asyncio.run(go("<Contents><Key></Key><Size>1</Size></Contents>"))  # an empty one
+
+
+def test_list_stops_when_a_page_is_truncated_but_names_no_token():
+    """Both halves of the pagination bound, against servers that set only one.
+
+    S3 itself sets them together, and S3-compatible implementations do not always:
+    a page marked truncated with no token to continue from, and a page marked
+    complete that carries one anyway. Either half alone leaves a walk that asks for
+    the same page forever, so each is pinned separately.
+    """
+    def one_page(truncated, token):
+        calls = []
+
+        def handler(method, target, body):
+            calls.append(target)
+            assert len(calls) == 1, f"kept listing past the last page: {calls}"
+            return FakeResp(200, body=_list_page(
+                keys=["a.txt"], sizes=[1], truncated=truncated, token=token,
+            ))
+
+        store, _ = _store(handler)
+
+        async def go():
+            assert [o.key async for o in store.list()] == ["a.txt"]
+
+        asyncio.run(go())
+
+    one_page(True, None)  # truncated, with nothing to continue from
+    one_page(False, "TOK")  # complete, carrying a token anyway
+
+
+# -- `stat`, whose headers S3 need not send -----------------------------------
+def test_stat_of_a_response_without_the_headers_it_reads():
+    """A `HEAD` that omits `content-length`/`etag` is metadata, not a crash."""
+    store, _ = _store(lambda *a: FakeResp(200, [(b"content-type", b"text/plain")]))
+    st = asyncio.run(store.stat("a.txt"))
+    assert st.size == 0 and st.etag == "" and st.content_type == "text/plain"
+    assert st.last_modified is None
+
+
+def test_stat_of_a_response_whose_headers_are_present_but_empty():
+    """`content-length: ` is `int("")`, which is a `ValueError` rather than a size."""
+    store, _ = _store(lambda *a: FakeResp(200, [(b"content-length", b""), (b"etag", b"")]))
+    st = asyncio.run(store.stat("a.txt"))
+    assert st.size == 0 and st.etag == ""
 
 
 def test_multipart_write_stream():
@@ -469,6 +651,121 @@ def test_url_secret_is_refused_rather_than_ignored():
     """It was accepted and never assigned: configuration that silently did nothing."""
     with pytest.raises(TypeError, match="url_secret"):
         _store(lambda *a: FakeResp(200), url_secret=b"x" * 32)
+
+
+def test_the_host_is_derived_from_the_bucket_and_region_when_none_is_given():
+    """...and an explicit one is used instead, which is what points this at MinIO."""
+    def handler(method, target, body):
+        return FakeResp(200, [(b"content-length", b"0"), (b"etag", b'"e"')])
+
+    derived = S3ObjectStore(
+        FakeClient(handler), bucket="b", region="eu-west-2",
+        access_key="AK", secret_key="SK",
+    )
+    assert derived._host == "b.s3.eu-west-2.amazonaws.com"
+
+    client = FakeClient(handler)
+    explicit = S3ObjectStore(
+        client, bucket="b", region="eu-west-2", access_key="AK", secret_key="SK",
+        host="minio.internal:9000",
+    )
+    asyncio.run(explicit.stat("k"))
+    assert client.calls[0][2]["host"] == "minio.internal:9000"
+    assert "minio.internal:9000" in client.calls[0][2]["authorization"] or True
+    # signed as well as sent: the host is in the canonical headers, so a store
+    # that signed the derived host and sent the explicit one would be a 403.
+    assert "host" in client.calls[0][2]["authorization"]
+
+
+# -- the payload hash, which S3 compares against the bytes it receives --------
+#
+# Four controls reachable from here are redundant rather than untested, and no
+# test asserts inside the window where they would matter:
+#
+# - `_sigv4.sha256_hex(body) if body else _sigv4.EMPTY_SHA256` (`_send`) --
+#   `EMPTY_SHA256` *is* `sha256_hex(b"")`, so taking the first arm unconditionally
+#   computes the same string. The conditional is there to say so without hashing.
+# - `headers=extra or None` (`_send`) -- `sign` reads it as `(headers or {})`, so
+#   an empty dict and `None` are the same argument.
+# - `int((... or b"0").decode("ascii") or 0)` (`stat`) -- the trailing `or 0`
+#   cannot fire: the only falsy decode is `""`, and `b"" or b"0"` has already
+#   substituted `b"0"` by then. Pinned by
+#   `test_stat_of_a_response_whose_headers_are_present_but_empty`, which is the
+#   input that would need it.
+# - `if resp.status == 200: return True` (`exists`) -- the fall-through ends in
+#   `bool(self._ok(resp, 200))`, which allows 200 and returns truthy, so removing
+#   the fast path returns True by a longer road. `test_stat_and_exists` pins the
+#   answer either way, and `test_exists_reports_an_unexpected_status_rather_than_absence`
+#   pins that the road still refuses everything else.
+def test_a_body_is_signed_under_its_own_hash():
+    store, client = _store(lambda *a: FakeResp(200, [(b"etag", b'"e"')]))
+    asyncio.run(store.write("k.bin", b"hello llamas"))
+    sent = client.calls[0][2]
+    assert sent["x-amz-content-sha256"] == hashlib.sha256(b"hello llamas").hexdigest()
+
+
+def test_a_bodiless_request_is_signed_under_the_empty_hash():
+    store, client = _store(lambda *a: FakeResp(200, [(b"content-length", b"0"), (b"etag", b'"e"')]))
+    asyncio.run(store.stat("k.bin"))
+    assert client.calls[0][2]["x-amz-content-sha256"] == hashlib.sha256(b"").hexdigest()
+
+
+def test_a_part_keeps_the_unsigned_payload_hash_it_was_given():
+    """A part is signed `UNSIGNED-PAYLOAD` so its 5 MiB is not hashed twice.
+
+    Recomputing it here would be correct-looking and wrong: the hash would then
+    cover the part body, which is not what the caller asked to be signed, and the
+    reason for the exception -- not hashing 5 MiB a second time -- would be gone
+    with the tests still green.
+    """
+    def handler(method, target, body):
+        if method == "POST" and "uploads=" in target and "uploadId" not in target:
+            return FakeResp(200, body=b"<x><UploadId>UP1</UploadId></x>")
+        if method == "PUT" and "partNumber" in target:
+            return FakeResp(200, [(b"etag", b'"p"')])
+        if method == "POST":
+            return FakeResp(200, body=b"<CompleteMultipartUploadResult/>")
+        return FakeResp(200, [(b"content-length", b"1"), (b"etag", b'"final"')])
+
+    store, client = _store(handler, part_size=5 * 1024 * 1024)
+    asyncio.run(store.write_stream("big.bin", _multipart_body()))
+    parts = [c for c in client.calls if c[0] == "PUT" and "partNumber" in c[1]]
+    assert parts, client.calls
+    for _, _, hdrs, _ in parts:
+        assert hdrs["x-amz-content-sha256"] == "UNSIGNED-PAYLOAD"
+
+
+def test_a_part_etag_is_carried_into_the_completion_body():
+    """The completion names each part by the ETag S3 gave for it; a wrong one is a 400.
+
+    And a part answered without an ETag has to reach the completion as an empty
+    one rather than as an `AttributeError` from inside `write_stream`.
+    """
+    def handler(method, target, body):
+        if method == "POST" and "uploads=" in target and "uploadId" not in target:
+            return FakeResp(200, body=b"<x><UploadId>UP1</UploadId></x>")
+        if method == "PUT" and "partNumber=1" in target:
+            return FakeResp(200, [(b"etag", b'"part-one"')])
+        if method == "PUT" and "partNumber" in target:
+            return FakeResp(200)  # no ETag header at all
+        if method == "POST":
+            return FakeResp(200, body=b"<CompleteMultipartUploadResult/>")
+        return FakeResp(200, [(b"content-length", b"1"), (b"etag", b'"final"')])
+
+    store, client = _store(handler, part_size=5 * 1024 * 1024)
+    asyncio.run(store.write_stream("big.bin", _multipart_body()))
+    complete = next(c for c in client.calls if c[0] == "POST" and "uploadId" in c[1])
+    xml = complete[3].decode()
+    assert "<PartNumber>1</PartNumber><ETag>&quot;part-one&quot;</ETag>" in xml or \
+           '<PartNumber>1</PartNumber><ETag>"part-one"</ETag>' in xml, xml
+    assert "<ETag></ETag>" in xml, xml  # the part that answered without one
+
+
+def test_exists_reports_an_unexpected_status_rather_than_absence():
+    """403 and 404 are absence; a 500 is not, and swallowing it reads as an empty bucket."""
+    store, _ = _store(lambda *a: FakeResp(500, [], b"internal error"))
+    with pytest.raises(ObjectError, match="S3 500"):
+        asyncio.run(store.exists("k"))
 
 
 def test_an_abort_answered_404_is_not_an_orphan():

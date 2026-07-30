@@ -294,3 +294,174 @@ def test_storagepath_ergonomics(tmp_path):
         s.close()
 
     _run(go())
+
+
+# --- the url secret, which decides whether another process can verify a URL ---
+#
+# `test_local_presign_sign_and_verify` signs and verifies with one store, so it
+# holds for a store that ignored `url_secret` and signed with a random key: the
+# same instance verifies its own signature either way. What a secret is *for* is
+# that another process -- the next worker, after a restart -- verifies a URL this
+# one issued, so these use a second store as the verifier.
+
+_SECRET = b"fixed-secret-32-bytes-length!!!!"
+_OTHER = b"another-secret-32-bytes-long!!!!"
+
+
+def _signed(store, key="reports/q3.csv"):
+    q = _query(store.url(key, expires=900, method="GET"))
+    return dict(method="GET", expires=int(q["expires"]), signature=q["signature"])
+
+
+def test_a_second_store_with_the_same_url_secret_verifies_the_first_ones_url(tmp_path):
+    for issuer, verifier, stranger in (
+        (
+            LocalObjectStore(tmp_path, url_secret=_SECRET),
+            LocalObjectStore(tmp_path, url_secret=_SECRET),
+            LocalObjectStore(tmp_path, url_secret=_OTHER),
+        ),
+        (
+            MemoryObjectStore(url_secret=_SECRET),
+            MemoryObjectStore(url_secret=_SECRET),
+            MemoryObjectStore(url_secret=_OTHER),
+        ),
+    ):
+        claim = _signed(issuer)
+        assert verifier.verify_local_url("reports/q3.csv", **claim)
+        assert not stranger.verify_local_url("reports/q3.csv", **claim)
+        for store in (issuer, verifier, stranger):
+            if isinstance(store, LocalObjectStore):
+                store.close()
+
+
+def test_a_store_given_no_url_secret_signs_with_one_only_it_knows(tmp_path):
+    """The fallback is a random key, not no key: an unsigned URL would verify anywhere."""
+    a = LocalObjectStore(tmp_path)
+    b = LocalObjectStore(tmp_path)
+    claim = _signed(a)
+    assert a.verify_local_url("reports/q3.csv", **claim)
+    assert not b.verify_local_url("reports/q3.csv", **claim)
+    a.close()
+    b.close()
+
+    m, n = MemoryObjectStore(), MemoryObjectStore()
+    claim = _signed(m)
+    assert m.verify_local_url("reports/q3.csv", **claim)
+    assert not n.verify_local_url("reports/q3.csv", **claim)
+
+
+def test_a_url_secret_that_is_not_bytes_is_refused_by_type_and_by_name():
+    """A `str` gets the hint that would fix it; anything else gets its own type named.
+
+    `Wreath.objects()` takes `**options`, so a `str` reaches here from a config
+    file with nothing to stop it, and the hint is the difference between naming the
+    option and raising from inside `hmac.new` on the first `url()` call.
+    """
+    for factory in (MemoryObjectStore, lambda **kw: LocalObjectStore("/tmp", **kw)):
+        with pytest.raises(TypeError) as text:
+            factory(url_secret="a-string-secret")
+        assert "url_secret must be bytes, not str" in str(text.value)
+        assert "encode it" in str(text.value)
+
+        with pytest.raises(TypeError) as number:
+            factory(url_secret=32)
+        assert "url_secret must be bytes, not int" in str(number.value)
+        assert "encode it" not in str(number.value)  # there is nothing to encode
+
+
+def test_a_bytes_like_url_secret_is_accepted_and_copied():
+    for secret in (bytearray(_SECRET), memoryview(_SECRET)):
+        store = MemoryObjectStore(url_secret=secret)
+        assert store.verify_local_url("k", **_signed(store, "k"))
+
+
+# --- refusals the backends make that nothing exercised ------------------------
+
+def test_normalize_key_refuses_a_delete_character():
+    """0x7F is a control character above the 0x20 range, and not covered by it."""
+    with pytest.raises(ObjectError, match="control character"):
+        normalize_key("reports/q3\x7f.csv")
+    with pytest.raises(ObjectError, match="control character"):
+        normalize_key("reports/\x1f.csv")
+
+
+def test_a_directory_component_that_is_a_symlink_is_refused(tmp_path):
+    """A symlinked parent is how a key that normalises cleanly still leaves the root."""
+    (tmp_path / "real").mkdir()
+    os.symlink(tmp_path / "real", tmp_path / "link")
+
+    async def go():
+        s = LocalObjectStore(tmp_path)
+        with pytest.raises(ObjectError, match="refusing symlink component"):
+            await s.write("link/f.txt", b"x")
+        assert not (tmp_path / "real" / "f.txt").exists()
+        s.close()
+
+    _run(go())
+
+
+def test_deleting_beneath_a_directory_that_is_not_there_creates_nothing(tmp_path):
+    """`delete` walks parents with `create=False`, and swallows the refusal.
+
+    Which is why the refusal has to be there: without it the walk falls through to
+    `mkdir`, and a delete of a key that was never written leaves the directories
+    behind -- silently, since `delete` treats "not there" as success either way.
+    """
+    async def go():
+        s = LocalObjectStore(tmp_path)
+        await s.delete("no/such/dir/f.txt")  # not an error
+        assert not (tmp_path / "no").exists()
+        s.close()
+
+    _run(go())
+
+
+def test_stat_reports_a_symlink_that_leaves_the_root_as_a_storage_error(tmp_path):
+    """`ContainmentError` is an internal type; a caller catches `ObjectError`."""
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"not yours")
+    os.symlink(outside, root / "esc")
+
+    async def go():
+        s = LocalObjectStore(root)
+        with pytest.raises(ObjectError):
+            await s.stat("esc/secret.txt")
+        with pytest.raises(ObjectError):
+            await s.read("esc/secret.txt")
+        s.close()
+
+    _run(go())
+
+
+def test_a_read_stream_is_chunked_rather_than_read_whole(tmp_path):
+    """64 KiB per chunk is the bound on what a read holds in memory at once."""
+    payload = b"wreath!!" * 40_000  # 320 KiB, not a multiple of the chunk
+
+    async def go():
+        local = LocalObjectStore(tmp_path)
+        memory = MemoryObjectStore()
+        for store in (local, memory):
+            await store.write("big.bin", payload)
+            sizes = [len(c) async for c in store.read_stream("big.bin")]
+            assert sum(sizes) == len(payload)
+            assert len(sizes) > 1, sizes
+            assert set(sizes[:-1]) == {1 << 16}, sizes
+            assert sizes[-1] <= 1 << 16
+        local.close()
+
+    _run(go())
+
+
+def test_memory_list_matches_the_prefix_it_was_given(tmp_path):
+    async def go():
+        s = MemoryObjectStore()
+        for key in ("a/1.txt", "a/2.txt", "b/3.txt"):
+            await s.write(key, b"x")
+        assert [o.key async for o in s.list("a/")] == ["a/1.txt", "a/2.txt"]
+        assert [o.key async for o in s.list("b/")] == ["b/3.txt"]
+        assert [o.key async for o in s.list()] == ["a/1.txt", "a/2.txt", "b/3.txt"]
+
+    _run(go())

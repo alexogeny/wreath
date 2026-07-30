@@ -1,20 +1,30 @@
 """Prometheus exposition bridge — renderer format + bridge behavior.
 
-The renderer is duck-typed over a projector snapshot, so these load
+The renderer is duck-typed over a projector snapshot, so these fall back to loading
 ``src/wreath/_prometheus.py`` by path and run under a bare ``/usr/bin/python3``
 (no native build). The handler test needs the built package (``Response``) and is
 skipped when it is absent.
+
+The real ``wreath._prometheus`` is preferred whenever it imports, following
+``test_statsd.py``. A by-path load defeats `wreath mutant`: it execs pristine source
+into a *second* module object, so a mutation applied to ``wreath._prometheus`` in the
+forked child's memory never reaches the code under test and every mutant here reports
+`survived` while these tests pass.
 """
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import pathlib
 import re
 
 _PROM_PATH = pathlib.Path(__file__).resolve().parents[1] / "src" / "wreath" / "_prometheus.py"
-_spec = importlib.util.spec_from_file_location("_wreath_prometheus_standalone", _PROM_PATH)
-prom = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(prom)  # top-level imports are stdlib only
+try:
+    prom = importlib.import_module("wreath._prometheus")
+except ImportError:
+    _spec = importlib.util.spec_from_file_location("wreath._prometheus", _PROM_PATH)
+    prom = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(prom)  # top-level imports are stdlib only
 
 
 # --- duck-typed snapshot fixtures ------------------------------------------
