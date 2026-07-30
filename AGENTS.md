@@ -71,6 +71,27 @@ while a sibling is running tests produces failures nobody can attribute.
   free-threaded build. Those already have their rules above, including the banner
   that makes the skip visible, and they are gated on something the reader can go
   install.
+- **Never add a `noqa` to make your own new code pass.** Write it to the modern
+  standard instead. A suppression is a claim that the rule is wrong *here*, and
+  that claim belongs in `[tool.ruff.lint.per-file-ignores]` in `pyproject.toml`
+  where it is declared, scoped, reviewed, and carries the comment explaining it --
+  the way `src/wreath/_port/rules.py` earns its `E501`. An inline directive on a
+  line you just wrote is the same move as `xfail`: it converts "this does not meet
+  the standard" into a third state that passes the gate silently.
+
+  If a lint rule blocks the **only** way to express a test, that is a finding, not
+  an obstacle. Say so in the test that gets as close as it can, and leave the rest
+  undecided for a human. This rule exists because a mutation-testing session
+  wanted to cover `binding.py`'s `args[0] if args else Any` fallbacks, which are
+  reachable only from the deprecated `typing.List`/`typing.Dict` aliases that
+  UP006 forbids. Four `# noqa: UP006`s went in to reach them. Ruff's `--fix` had
+  already rewritten one of the *unsuppressed* uses to `list`, which inverted what
+  the test asserted -- it passed in isolation for the wrong reason and failed in
+  the suite -- and the correct answer was that those fallbacks exist for a
+  *caller's* annotations and cannot be measured from inside this repository at all.
+  The suppression would have hidden a real design note behind four green lines.
+
+  Deleting a `noqa` that no longer applies is always in scope; see the next rule.
 - **"Pre-existing" is a diagnosis, not a disposition.** When a test or a lint is
   already failing before you touched anything, say so — attributing it correctly
   matters — and then spend a minute finding out whether it is *fixable*. Most
