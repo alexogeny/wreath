@@ -32,7 +32,7 @@ import ast
 import copy
 import sys
 from dataclasses import dataclass, field
-from types import CodeType, FunctionType, ModuleType
+from types import CodeType, FunctionType, MethodType, ModuleType
 from typing import Any
 
 _UNSET = object()
@@ -70,7 +70,20 @@ def resolve_scope(module: ModuleType, scope: str) -> FunctionType:
 def _unwrap(obj: Any) -> Any:
     seen = 0
     while seen < 16:
-        if isinstance(obj, staticmethod | classmethod):
+        # `MethodType` first, and it is the case that actually fires. A
+        # `classmethod` reached through `getattr` -- which is how `resolve_scope`
+        # walks a dotted path -- has already been *invoked* as a descriptor, so
+        # what arrives here is a method bound to the class and never the
+        # `classmethod` object below. That made every control inside every
+        # classmethod unmutatable, reported as an `error` outcome rather than as a
+        # gap, which is the shape a blind spot takes when nobody counts it: 51
+        # classmethods across 25 files contributed nothing to any score.
+        #
+        # The `staticmethod | classmethod` branch is still reachable for an object
+        # read straight out of a `__dict__`, so it stays.
+        if isinstance(obj, MethodType):
+            obj = obj.__func__
+        elif isinstance(obj, staticmethod | classmethod):
             obj = obj.__func__
         elif isinstance(obj, property):
             obj = obj.fget

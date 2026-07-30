@@ -499,3 +499,147 @@ def test_a_refusal_no_test_ever_triggers_is_reported_unreached_not_survived(
         if m["operator"] == "guard.remove-raise" and m["outcome"] == "unreached"
     ]
     assert unreached, sample_run["mutants"]
+
+
+# -- resolve_scope: what a dotted path actually yields --------------------------
+#
+# Nothing tested `resolve_scope`, and it had a bug that cost real coverage: it
+# walks a dotted `Class.method` path with `getattr`, and `getattr` *invokes* a
+# descriptor. So a `classmethod` arrives as a method bound to the class, not as the
+# `classmethod` object `_unwrap` was checking for, and every mutation inside every
+# classmethod was refused with "is method, not a function".
+#
+# The refusal was reported as an `error` outcome. That is the part worth keeping in
+# mind: it did not read as "51 classmethods across 25 files are unmeasurable", it
+# read as eight lines of noise in a report whose score was computed without them.
+
+
+class _Subject:
+    """One class carrying every callable shape `resolve_scope` claims to unwrap."""
+
+    LIMIT = 3
+
+    def plain(self) -> bool:
+        return self.LIMIT > 0
+
+    @classmethod
+    def made(cls, value: int) -> bool:
+        return value <= cls.LIMIT
+
+    @staticmethod
+    def free(value: int) -> bool:
+        return value > 0
+
+    @property
+    def ready(self) -> bool:
+        return self.LIMIT > 0
+
+
+def _wrapped_target() -> bool:
+    return True
+
+
+def _decorate(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def outer():
+        return fn()
+
+    return outer
+
+
+decorated = _decorate(_wrapped_target)
+
+
+@pytest.mark.parametrize(
+    "scope,qualname",
+    [
+        ("_Subject.plain", "_Subject.plain"),
+        ("_Subject.made", "_Subject.made"),
+        ("_Subject.free", "_Subject.free"),
+        ("_Subject.ready", "_Subject.ready"),
+        ("decorated", "_wrapped_target"),
+    ],
+)
+def test_resolve_scope_reaches_the_function_behind_every_callable_shape(
+    scope: str, qualname: str
+) -> None:
+    """A method, a classmethod, a staticmethod, a property, and a wrapped function.
+
+    `_Subject.made` is the arm that was failing. The others passed already and are
+    here so that a future change to `_unwrap`'s ordering cannot fix one shape by
+    breaking another -- the branches are tried in sequence and `MethodType` now
+    comes first, which is the kind of ordering that gets 'tidied'.
+    """
+    from types import FunctionType
+
+    import tests.test_mutant as this_module
+    from wreath._mutant.patch import resolve_scope
+
+    resolved = resolve_scope(this_module, scope)
+    assert isinstance(resolved, FunctionType), (scope, type(resolved).__name__)
+    assert resolved.__qualname__.endswith(qualname), (scope, resolved.__qualname__)
+
+
+def test_resolve_scope_still_refuses_something_that_is_not_callable_at_all() -> None:
+    """The refusal has to survive the fix, or a typo becomes a silent no-op."""
+    import tests.test_mutant as this_module
+    from wreath._mutant.patch import PatchError, resolve_scope
+
+    with pytest.raises(PatchError, match="not a function"):
+        resolve_scope(this_module, "_Subject.LIMIT")
+
+
+def test_no_real_module_reports_a_scope_it_cannot_patch(module: Path) -> None:
+    """The blind spot itself, stated as the absence of its error message.
+
+    A unit test on `resolve_scope` proves the helper resolves each shape. This
+    proves the planner then *builds* for them, which is the part that failed and the
+    part a caller sees. It runs over real wreath modules rather than a throwaway
+    package because `build_plan` resolves a target by importing it by name: a
+    fixture package would have to be put on `sys.path` to be importable at all, and
+    the modules that ship are both importable already and the ones that matter.
+
+    Before the `MethodType` branch in `_unwrap`, `_auth/cedar_engine.py` alone
+    produced eight of these -- one per control inside `EntityUid.parse` -- and they
+    were counted as `error`, not as unmeasured, so the score was computed as though
+    those controls did not exist.
+    """
+    targets = [
+        Path("src/wreath/_auth/cedar_engine.py"),
+        Path("src/wreath/orm/types.py"),
+        Path("src/wreath/_sparsevec.py"),
+        module,
+    ]
+    plan = build_plan([p for p in targets if p.exists()], Path("."))
+    unpatchable = [pair for pair in plan.errors if "not a function" in pair[1]]
+    assert unpatchable == [], unpatchable
+
+
+def test_a_control_inside_a_classmethod_is_planned_not_skipped() -> None:
+    """Every classmethod holding a control contributes a mutation, by name.
+
+    The scopes are derived from the module's own AST rather than hard-coded, so this
+    keeps meaning what it says when `cedar_engine` gains or loses a classmethod --
+    and it fails, rather than passing vacuously, if the module ever has none.
+    """
+    target = Path("src/wreath/_auth/cedar_engine.py")
+    tree = ast.parse(target.read_text(encoding="utf-8"))
+    classmethods = {
+        f"{outer.name}.{inner.name}"
+        for outer in ast.walk(tree)
+        if isinstance(outer, ast.ClassDef)
+        for inner in outer.body
+        if isinstance(inner, ast.FunctionDef | ast.AsyncFunctionDef)
+        and any(isinstance(d, ast.Name) and d.id == "classmethod" for d in inner.decorator_list)
+    }
+    assert classmethods, "this module has no classmethod left; move this test"
+
+    plan = build_plan([target], Path("."))
+    planned = {m.site.scope for m in plan.mutations if m.patch is not None}
+    reached = classmethods & planned
+    assert reached, (
+        f"no classmethod contributed a mutation; classmethods={sorted(classmethods)} "
+        f"planned={sorted(planned)}"
+    )
