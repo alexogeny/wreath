@@ -51,6 +51,26 @@ while a sibling is running tests produces failures nobody can attribute.
 - Use safe, understandable Python first. Document any generated code or interpreter-specific trick.
 - Treat free-threading and the optional JIT as separately tested execution modes, not assumptions.
 - Add focused tests for every behavior change and regression.
+- **Never `xfail`, and never `skip`, to park a test for something unbuilt.** A
+  test exists to be green or to be red. `xfail` invents a third state that means
+  "we know", and a checklist of `xfail`s is worse than no checklist: it reports
+  success for work nobody did, it survives every gate, and `strict=True` does not
+  save it -- that only moves the alarm to whenever the feature lands, which is the
+  one moment somebody was already looking.
+
+  So: if a surface is worth a test, implement the surface. If it is not ready to
+  implement, write the contract down as **prose** -- a row in
+  `docs/reference/roadmap.md`, which is the single place that answer lives -- and
+  leave `tests/` alone. Red-green TDD is welcome and is not this: writing a
+  failing test and *then making it pass in the same change* is the good version.
+  Committing the red half on its own is not a checklist, it is a broken gate with
+  a note attached.
+
+  The narrow exception is a test skipped on a **missing capability of the
+  environment**, not of Wreath -- no `WREATH_TEST_POSTGRES_DSN`, no `pgvector`, no
+  free-threaded build. Those already have their rules above, including the banner
+  that makes the skip visible, and they are gated on something the reader can go
+  install.
 - **"Pre-existing" is a diagnosis, not a disposition.** When a test or a lint is
   already failing before you touched anything, say so — attributing it correctly
   matters — and then spend a minute finding out whether it is *fixable*. Most
