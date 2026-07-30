@@ -15,10 +15,11 @@ from wreath.auth import SessionIdentityBackend
 from wreath.middleware import SessionMiddleware
 
 app = Wreath()
-# Global, not `add_middleware`: `SessionIdentityBackend` reads the session while
-# it authenticates, and route middleware runs *after* authorization. Registered
-# the other way, every protected route answers 401 to a valid session cookie —
-# so wreath refuses that combination when the routes compile.
+# Global, not route-scoped: `SessionIdentityBackend` reads the session while it
+# authenticates, and route middleware runs *after* authorization. Registered any
+# other way — `add_middleware`, `Router(middleware=[...])`, or `middleware=[...]`
+# on one route — every protected route answers 401 to a valid session cookie, so
+# Wreath refuses all of those when the routes compile.
 app.add_global_middleware(SessionMiddleware(secret=os.environ["SESSION_SECRET"]))
 
 # 1. an HTTP client pinned to the issuer origin
@@ -51,5 +52,10 @@ Sending a browser to `/auth/login` starts the flow; after the callback,
 `@authenticated()` and Cedar authorization work unchanged. The `http_client`
 origin pin is the anti-SSRF guard: every endpoint the provider reaches must live
 on the exact issuer origin, so a tampered discovery document can't redirect the
-exchange elsewhere. For machine-to-machine calls instead of a browser login,
-reach for `ClientCredentials` from the same module.
+exchange elsewhere. **All three discovered endpoints are pinned**, including
+`authorization_endpoint` — which is not a fetch but the URL the browser is sent
+to, so it stays absolute and is checked during discovery instead. A document
+naming somebody else's host there fails startup rather than sending every
+sign-in, with your `client_id` and `state`, to an attacker's login page. For
+machine-to-machine calls instead of a browser login, reach for
+`ClientCredentials` from the same module.

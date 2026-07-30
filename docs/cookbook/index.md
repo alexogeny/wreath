@@ -24,6 +24,7 @@ There are two circles of readers here, and each gets its own set.
 
 - [Add OIDC / OAuth2 login](recipes/oauth2-login.md)
 - [Authenticate with an API key](recipes/api-key-auth.md)
+- [Turn on an authenticator app (TOTP)](recipes/enable-totp.md)
 - [Authorize with Cedar policies (RBAC)](recipes/cedar-rbac.md)
 - [Make a POST safe to retry](recipes/idempotent-writes.md)
 
@@ -31,6 +32,9 @@ There are two circles of readers here, and each gets its own set.
 
 - [Paginate, sort, and filter a list](recipes/paginate-a-list.md)
 - [Query JSONB and array columns](recipes/jsonb-query.md)
+- [Search text with PostgreSQL](recipes/search-documents.md)
+- [Search by meaning with embeddings](recipes/semantic-search.md)
+- [Combine keyword and semantic search](recipes/hybrid-search.md)
 - [Run a transaction (unit of work)](recipes/unit-of-work.md)
 - [Generate CRUD without leaking secrets](recipes/safe-crud.md)
 - [Manage a database pool with the lifespan](recipes/database-lifespan.md)
@@ -41,12 +45,14 @@ There are two circles of readers here, and each gets its own set.
 - [Broadcast to many WebSocket clients](recipes/websocket-broadcast.md)
 - [Enqueue a durable job with retries](recipes/durable-job.md)
 - [Run work after the response](recipes/background-jobs.md)
+- [Write it exactly once, end to end](recipes/exactly-once.md)
 
 ### Talking to other services
 
 - [Call a service with an auto-refreshing token](recipes/call-a-service.md)
 - [Send a signed webhook with retries](recipes/send-webhook.md)
 - [Let a client upload straight to object storage](recipes/presign-upload.md)
+- [Serve your first MCP tool](recipes/serve-mcp-tools.md)
 
 ### Speed and delivery
 
@@ -55,6 +61,7 @@ There are two circles of readers here, and each gets its own set.
 ### Your API's surface
 
 - [Generate a typed TypeScript client](recipes/typed-client.md)
+- [Build an admin console](recipes/build-an-admin-console.md)
 - [Turn on the interactive API docs (safely)](recipes/interactive-docs.md)
 - [Build a docs site with `wreath docs`](recipes/build-a-docs-site.md)
 
@@ -71,3 +78,4 @@ There are two circles of readers here, and each gets its own set.
 
 - [Move a schema-per-tenant SaaS application from Alembic](recipes/fastapi-alembic-saas.md)
 - [Fuzz your own routes](recipes/fuzz-your-routes.md)
+- [Find the controls your tests do not watch](recipes/find-unwatched-controls.md)

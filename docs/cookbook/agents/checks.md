@@ -69,9 +69,14 @@ you see the banner, your green tick covers less than it looks like it does.
 ```bash
 docker run -d --name wreath-test-pg -e POSTGRES_PASSWORD=wreath \
   -e POSTGRES_USER=wreath -e POSTGRES_DB=wreath_test -p 55432:5432 \
-  postgres:17-alpine -c max_connections=200 -c fsync=off -c synchronous_commit=off
+  pgvector/pgvector:pg17 -c max_connections=200 -c fsync=off -c synchronous_commit=off
 export WREATH_TEST_POSTGRES_DSN="postgresql://wreath:wreath@127.0.0.1:55432/wreath_test"
 ```
+
+The image is `pgvector/pgvector:pg17` rather than `postgres:17-alpine`: it is
+stock PostgreSQL 17 with `pgvector` available to `CREATE EXTENSION`, and the
+vector suites skip without it — the same invisible-skip problem this section is
+about, one layer down.
 
 `podman` and `nerdctl` work as well. A few database suites also carry the
 `network` mark and so are excluded by the default marker expression outright —
