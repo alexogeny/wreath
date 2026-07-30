@@ -473,8 +473,10 @@
         "pgvector",
         "chromadb",
         "qdrant-client",
-        "pinecone-client",
-        "weaviate-client"
+        "pinecone",
+        "weaviate-client",
+        "elasticsearch",
+        "opensearch-py"
       ],
       "guides": [
         "docs/guides/orm.md",
@@ -493,9 +495,11 @@
       ],
       "tests": [
         "tests/orm/",
-        "tests/orm/test_native_shape_parity.py"
+        "tests/orm/test_native_shape_parity.py",
+        "tests/orm/test_halfvec_codec.py",
+        "tests/orm/test_halfvec_live.py"
       ],
-      "policy": "The dependency direction is one-way: wreath.orm imports wreath.postgres, never the reverse. Attribute access never performs I/O; loading is explicit (no lazy N+1). Pure and native storage must match behavior, not representation; the native query cache-key (orm_shape) must produce bytes identical to _shape_of_pure or the plan cache splits. An extension type's OID is assigned by CREATE EXTENSION and so differs between databases: it is resolved once at startup (orm/introspection.resolve_extension_types) and must never reach a plan-cache shape token or a model fingerprint, both of which are name-derived instead. ColumnSpec.oid reads through the type rather than snapshotting it, and native model storage -- which does bake the OID in at class definition -- is written back by rebind_storage_oid at the same moment. An ORDER BY key that is not a bare column (a vector distance) takes the pure keyer deliberately, because orm_shape.c reads ordering.expression.column. A generated column (`TsVector`) is the database's to write, never the application's: its expression names other columns, so it is rendered by orm/_generated.py once the registry knows their names and types, in PostgreSQL's own deparsed normal form -- a spelling that differs by one byte reports the column as drifted on every migration run, forever."
+      "policy": "The dependency direction is one-way: wreath.orm imports wreath.postgres, never the reverse. Attribute access never performs I/O; loading is explicit (no lazy N+1). Pure and native storage must match behavior, not representation; the native query cache-key (orm_shape) must produce bytes identical to _shape_of_pure or the plan cache splits. An extension type's OID is assigned by CREATE EXTENSION and so differs between databases: it is resolved once at startup (orm/introspection.resolve_extension_types) and must never reach a plan-cache shape token or a model fingerprint, both of which are name-derived instead. ColumnSpec.oid reads through the type rather than snapshotting it, and native model storage -- which does bake the OID in at class definition -- is written back by rebind_storage_oid at the same moment. An ORDER BY key that is not a bare column (a vector distance) takes the pure keyer deliberately, because orm_shape.c reads ordering.expression.column. A generated column (`TsVector`) is the database's to write, never the application's: its expression names other columns, so it is rendered by orm/_generated.py once the registry knows their names and types, in PostgreSQL's own deparsed normal form -- a spelling that differs by one byte reports the column as drifted on every migration run, forever.\n\n**Wreath implements the client half of pgvector, never the server half.** The wire codec is ours -- `_pure/postgres.py` and `_native/postgres/codec.c` -- so no `pgvector` Python package is needed and `replaces` lists it for that reason. The `vector`/`halfvec` *types*, the `<->`/`<=>`/`<#>`/`<+>` operators and the HNSW/IVFFlat access methods are extension code inside PostgreSQL; `CREATE EXTENSION vector` is required and no client driver can substitute for it, because an index access method cannot be defined from outside the server. Migrations deliberately never emit `CREATE EXTENSION` (the privilege is usually not the runner's) and `doctor.check_extension_types` is the pre-flight.\n\n**`halfvec` is a second codec kind, not a variant of the first.** `EXT_KIND_VECTOR = 1` frames float4 elements and `EXT_KIND_HALFVEC = 2` frames float2; one OID must never mean two wire formats, since decoding one as the other yields a plausible vector of the wrong length. Adding a kind means a branch in *both* twins at all six dispatch sites (text/binary x encode/decode, plus the two `_decode_value` entry points) -- a missed site silently returns raw bytes, which is how this one was caught. The text form is shared: pgvector prints both types as `[1,2,3]`. Elements are bounded by binary16's largest finite value (65504, `MAX_HALF_MAGNITUDE`) at coercion *and* at encode, because a larger value rounds to an infinity pgvector then refuses. `Halfvec`'s `extension` is `\"vector\"`, not `\"halfvec\"` -- one extension provides both, and naming the type would send readers to install something nonexistent. Operator classes are per type (`halfvec_cosine_ops`).\n\n**A halfvec value's decimal depends on the result format**: the binary decoder widens the stored binary16 exactly (`0.0999755859375`), pgvector's text rendering prints nine significant digits (`0.099975586`). Different Python floats. Pinned in `tests/orm/test_halfvec_live.py`."
     },
     {
       "name": "series",
@@ -580,6 +584,28 @@
         "tests/test_rooms.py"
       ],
       "policy": "PostgreSQL is the queue; there is no broker to operate. The service supervisor starts after databases and before user startup handlers, and stops in reverse: stop fetching, drain bounded in-flight work, then cancel. Watchable work: `JobRunner(progress=ProgressRegistry(...))` makes the job id the task id -- one identifier, no correlation -- and `launch()` seeds it `queued` so a client polling before a worker claims it does not get a 404. The runner owns the terminal states because only it can tell a retry from a dead-letter: success reports `done`, dead-letter reports `failed` with the error, and a retry leaves the task `running`. A handler never reports terminal state itself. `ProgressRegistry(bus)` carries reports to every worker on one channel with the rooms.py origin guard (apply locally, publish once, never relay what arrived); at-most-once, and a bus failure cannot fail the work being reported on. Cross-worker transport discipline is one primitive: `_busbridge.BusBridge` owns the channel, the origin tag that drops a worker's own NOTIFY echo, and the deferred publish, and there is deliberately **no path from its receive to a publish** -- never-relaying is structural, not a flag. `rooms.py`, `progress.py`, and `_orm_events.WriteBroadcast` each keep only their payload shape and local apply. The one real difference is preserved: rooms publishes inline and unsuppressed (its caller is awaiting the fan-out), the other two are fire-and-forget and swallow (the row already committed; a percentage is commentary). Durable subscriber groups are discovered fleet-wide from a `message_groups` table, **unioned** with local registrations so a missing table degrades to the old behaviour and shipping before the DDL cannot regress; the snapshot is refreshed on a timer (`group_refresh`, 30s) rather than read per publish, because a query inside the caller's `tx` would abort *their* transaction if the table were absent. Registry failures are counted (`group_registry_errors`), never raised. A publish routed to nobody stays a no-op but increments `unrouted_publishes`; `require_group=True` raises `NoSubscriberGroup` instead. The doorbell's held LISTEN connection is supervised: it reconnects with jittered exponential backoff (50 ms to 5 s, no reset for a connection that flaps), counts losses and failed opens in `doorbell_reconnects`, and counts ephemeral handler exceptions separately in `handler_errors` so a bug in user code cannot read as a dropped connection. A handler is cancelled at `deadline_for(task)` -- `task(timeout=...)`, defaulting to `DEADLINE_FRACTION` (0.8) of the lease, and refused at registration if it is not shorter than the lease. There is no heartbeat, so a handler still running when its lease expires is reclaimed and run again by another worker: the fence stops the loser's bookkeeping landing, never the duplicate side effect. `drive()` passes a pass's own `shift` as its deadline rather than taking the default, because that bound is already declared and already checked. A cancelled handler charges an attempt and retries (a deadline miss is usually a slow dependency) and counts in `run_timeouts`, apart from `run_errors`: nothing failed, work was stopped."
+    },
+    {
+      "name": "workflows",
+      "capability": "Durable multi-step sagas: ordered steps whose results are recorded before the next starts, resume from the first unrecorded step, and compensation newest-first when one raises",
+      "replaces": [
+        "temporalio",
+        "prefect",
+        "dagster"
+      ],
+      "guides": [
+        "docs/guides/workflows.md"
+      ],
+      "reference": [
+        "docs/reference/workflows.md"
+      ],
+      "sources": [
+        "src/wreath/workflows.py"
+      ],
+      "tests": [
+        "tests/test_workflows_checklist.py"
+      ],
+      "policy": "**A completed step never runs twice.** Each step's return value is recorded before the next one starts, so `resume` re-enters at the first step with no record and reads the *recorded* result rather than recomputing it. That is the whole difference from a loop over callables.\n\n**Compensation runs newest-first, and the step that raised is not compensated** -- it never completed, so there is nothing of its to undo, and an undo against state that was never established turns a recoverable failure into a corrupt one.\n\n**A compensation that raises is counted, not swallowed** (AGENTS.md's third tier: broad catch, counted, waived in place with a reason). The undos behind a failed one still run, or the saga is left more broken than if nothing had been undone. The count is durable on the instance and read with `Workflow.status`, because a run that compensates re-raises the step's own exception -- so the summary cannot come back as a return value, and a half-compensated saga has to be findable later by someone without the traceback.\n\n**Renaming a step of a live instance raises `WorkflowDefinitionChanged`.** Completion is keyed on the step *name*, so a rename leaves a record matching nothing and a naive resume redoes completed work and reports success. The stored step list is written at `begin` for exactly this comparison. This is the one failure here that would otherwise be invisible.\n\n`PostgresWorkflowStore` keeps its two tables in a dedicated system schema with a `tenant` column and never relies on `search_path`, which is `jobs`'s rule for the same reason. Its resume path is covered against a live server by `tests/test_workflows_checklist.py::test_postgres_store_survives_a_crash_between_steps` (marked `network`, gated on `WREATH_TEST_POSTGRES_DSN`), because the in-memory store satisfies the resume contract only within one process -- precisely not the situation sagas exist for."
     },
     {
       "name": "passes",
@@ -1044,9 +1070,10 @@
     },
     {
       "name": "testing",
-      "capability": "An in-process test client that runs the real lifespan, including WebSocket sessions",
+      "capability": "An in-process test client that runs the real lifespan, including WebSocket sessions, plus a `pytest11` plugin so the fixtures resolve from an install alone",
       "replaces": [
-        "httpx"
+        "httpx",
+        "pytest-django"
       ],
       "guides": [
         "docs/guides/testing.md"
@@ -1055,13 +1082,15 @@
         "docs/reference/testing.md"
       ],
       "sources": [
-        "src/wreath/testing.py"
+        "src/wreath/testing.py",
+        "src/wreath/_pytest_plugin.py"
       ],
       "tests": [
         "tests/test_framework_features.py",
-        "tests/test_client_sessions_forms.py"
+        "tests/test_client_sessions_forms.py",
+        "tests/test_pytest_plugin.py"
       ],
-      "policy": "TestClient is async and drives the real pipeline in-process; responses expose .status."
+      "policy": "TestClient is async and drives the real pipeline in-process; responses expose .status.\n\n**The pytest plugin loads by entry point, in every repository that installs Wreath**, so every fixture it declares is `wreath_`-prefixed: a bare `client` or `db` would shadow a fixture of the user's own, in a file they did not write, and the collision would read as their bug. `tests/test_pytest_plugin.py::test_plugin_declares_only_prefixed_fixtures` holds that line. `wreath_app` is the one fixture meant to be overridden rather than used; its shipped default raises with the three lines to write. The async fixtures use `pytest_asyncio.fixture` when it is installed so they work under `asyncio_mode = strict` as well as `auto`, and fall back to `pytest.fixture` for anyio. The database fixtures are gated on `WREATH_TEST_POSTGRES_DSN` and their skip reason names the variable -- an invisible skip is the failure this repository already paid for once."
     },
     {
       "name": "port",
