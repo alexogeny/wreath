@@ -154,7 +154,14 @@ array_element_oid(uint32_t oid)
  * only at startup, so this is a fixed-cost lookup, not a growing one. */
 #define WREATH_PG_EXT_MAX 16
 #define WREATH_PG_EXT_VECTOR 1
+#define WREATH_PG_EXT_HALFVEC 2
 #define WREATH_PG_EXT_NAME_MAX 63
+
+/* The largest finite IEEE-754 binary16. A halfvec element beyond it rounds to an
+ * infinity, which pgvector refuses on the way in -- so the encode would succeed
+ * and the INSERT would fail with a message naming neither the element nor the
+ * column. Checked here, matching _pure/postgres.py::_MAX_HALF. */
+#define WREATH_PG_MAX_HALF 65504.0
 
 typedef struct {
     uint32_t oid;
@@ -185,7 +192,7 @@ codec_register_extension_type(PyObject *module, PyObject *args)
     if (!PyArg_ParseTuple(
             args, "s#Ii:_register_extension_type", &name, &name_length, &oid, &kind))
         return NULL;
-    if (kind != WREATH_PG_EXT_VECTOR) {
+    if (kind != WREATH_PG_EXT_VECTOR && kind != WREATH_PG_EXT_HALFVEC) {
         PyErr_Format(PyExc_ValueError, "unknown extension codec kind %d for '%s'",
                      kind, name);
         return NULL;
@@ -524,15 +531,140 @@ decode_vector_text(const unsigned char *raw, Py_ssize_t length)
     return list;
 }
 
+/* pgvector's binary `halfvec`: the same uint16 dim / uint16 unused header as
+ * `vector`, then dim big-endian float2. PyFloat_Pack2/Unpack2 rather than a
+ * hand-rolled conversion: the float4 path is hand-written because it measured
+ * faster than PyFloat_Pack4 (see the comment above encode_vector), and that
+ * result does not transfer -- binary16 packing needs subnormal and overflow
+ * handling that the CPython helper already has, and halfvec exists to halve
+ * *storage*, not to be the hot path. Measure before hand-rolling this one too. */
+static PyObject *
+encode_halfvec(PyObject *value)
+{
+    PyObject *seq;
+    PyObject *result = NULL;
+    Py_ssize_t count;
+    char *out;
+
+    seq = PySequence_Fast(value, "halfvec codec requires a list or tuple of floats");
+    if (seq == NULL) return NULL;
+    count = PySequence_Fast_GET_SIZE(seq);
+    if (count > 0xFFFF) {
+        Py_DECREF(seq);
+        PyErr_SetString(PyExc_OverflowError,
+                        "a halfvec may hold at most 65535 dimensions");
+        return NULL;
+    }
+    result = PyBytes_FromStringAndSize(NULL, 4 + count * 2);
+    if (result == NULL) {
+        Py_DECREF(seq);
+        return NULL;
+    }
+    out = PyBytes_AS_STRING(result);
+    out[0] = (char)(unsigned char)(count >> 8);
+    out[1] = (char)(unsigned char)count;
+    out[2] = 0;
+    out[3] = 0;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *item = PySequence_Fast_GET_ITEM(seq, index);  /* borrowed */
+        double number;
+        if (PyFloat_CheckExact(item)) {
+            number = PyFloat_AS_DOUBLE(item);
+        }
+        else {
+            if (PyBool_Check(item) || (!PyFloat_Check(item) && !PyLong_Check(item))) {
+                Py_DECREF(seq);
+                Py_DECREF(result);
+                PyErr_SetString(PyExc_TypeError,
+                                "halfvec codec requires int or float elements");
+                return NULL;
+            }
+            number = PyFloat_AsDouble(item);
+            if (number == -1.0 && PyErr_Occurred()) {
+                Py_DECREF(seq);
+                Py_DECREF(result);
+                return NULL;
+            }
+        }
+        if (number != number || number > WREATH_PG_MAX_HALF
+            || number < -WREATH_PG_MAX_HALF) {
+            Py_DECREF(seq);
+            Py_DECREF(result);
+            /* PyErr_Format supports no float conversion -- `%.1f` raises
+             * SystemError at runtime, which the refusal tests caught. The bound is
+             * a compile-time constant anyway, so it is written into the literal. */
+            PyErr_Format(PyExc_ValueError,
+                         "halfvec element %zd is out of binary16 range (+/-65504) or "
+                         "not a number; pgvector stores neither NaN nor infinity",
+                         index);
+            return NULL;
+        }
+        if (PyFloat_Pack2(number, out + 4 + index * 2, 0) < 0) {
+            Py_DECREF(seq);
+            Py_DECREF(result);
+            return NULL;
+        }
+    }
+    Py_DECREF(seq);
+    return result;
+}
+
+static PyObject *
+decode_halfvec(const unsigned char *raw, Py_ssize_t length)
+{
+    uint32_t count, unused;
+    PyObject *list;
+
+    if (length < 4) {
+        PyErr_SetString(PyExc_ValueError, "binary halfvec header is truncated");
+        return NULL;
+    }
+    count = (uint32_t)((raw[0] << 8) | raw[1]);
+    unused = (uint32_t)((raw[2] << 8) | raw[3]);
+    if (unused != 0) {
+        PyErr_Format(PyExc_ValueError, "unsupported binary halfvec flags %u", unused);
+        return NULL;
+    }
+    if (length != 4 + (Py_ssize_t)count * 2) {
+        PyErr_SetString(PyExc_ValueError,
+                        "binary halfvec length does not match its dimension");
+        return NULL;
+    }
+    list = PyList_New((Py_ssize_t)count);
+    if (list == NULL) return NULL;
+    for (uint32_t index = 0; index < count; index++) {
+        double number = PyFloat_Unpack2((const char *)(raw + 4 + index * 2), 0);
+        PyObject *item;
+        if (number == -1.0 && PyErr_Occurred()) {
+            Py_DECREF(list);
+            return NULL;
+        }
+        item = PyFloat_FromDouble(number);
+        if (item == NULL) {
+            Py_DECREF(list);
+            return NULL;
+        }
+        PyList_SET_ITEM(list, (Py_ssize_t)index, item);
+    }
+    return list;
+}
+
 PyObject *
 wreath_pg_decode_extension(
     const unsigned char *data, Py_ssize_t length, int format, uint32_t oid)
 {
-    if (wreath_pg_extension_kind(oid) != WREATH_PG_EXT_VECTOR) {
+    int kind = wreath_pg_extension_kind(oid);
+    if (kind != WREATH_PG_EXT_VECTOR && kind != WREATH_PG_EXT_HALFVEC) {
         PyErr_Format(PyExc_ValueError, "no decoder for extension OID %u", oid);
         return NULL;
     }
-    if (format == 1) return decode_vector(data, length);
+    /* The text form is byte-identical for both -- "[1,2,3]" -- so only the
+     * binary framing (float4 vs float2) dispatches on the kind. */
+    if (format == 1) {
+        return kind == WREATH_PG_EXT_HALFVEC
+            ? decode_halfvec(data, length)
+            : decode_vector(data, length);
+    }
     if (format == 0) return decode_vector_text(data, length);
     PyErr_Format(PyExc_ValueError, "invalid field format code %d", format);
     return NULL;
@@ -1184,8 +1316,12 @@ wreath_pg_encode_text_value(PyObject *value, uint32_t oid)
     case PG_JSONB:
         return json_utf8(value);
     default:
-        if (wreath_pg_extension_kind(oid) == WREATH_PG_EXT_VECTOR) {
-            return encode_vector_text(value);
+        {
+            /* Both kinds print "[1,2,3]", so one text encoder serves them. */
+            int kind = wreath_pg_extension_kind(oid);
+            if (kind == WREATH_PG_EXT_VECTOR || kind == WREATH_PG_EXT_HALFVEC) {
+                return encode_vector_text(value);
+            }
         }
         return ascii_string(value);
     }
@@ -1347,8 +1483,10 @@ wreath_pg_encode_binary_value(PyObject *value, uint32_t oid)
         if (element_oid != 0) {
             return encode_binary_array(value, element_oid);
         }
-        if (wreath_pg_extension_kind(oid) == WREATH_PG_EXT_VECTOR) {
-            return encode_vector(value);
+        {
+            int kind = wreath_pg_extension_kind(oid);
+            if (kind == WREATH_PG_EXT_VECTOR) return encode_vector(value);
+            if (kind == WREATH_PG_EXT_HALFVEC) return encode_halfvec(value);
         }
         PyErr_Format(PyExc_TypeError, "no binary encoder for PostgreSQL OID %u", oid);
         return NULL;
@@ -1661,8 +1799,12 @@ wreath_pg_decode_value(uint32_t oid, int format, PyObject *data)
                     "text-format array decoding is not supported; request binary results");
                 return NULL;
             }
-            if (wreath_pg_extension_kind(oid) == WREATH_PG_EXT_VECTOR) {
-                return decode_vector_text(raw, length);
+            {
+                /* Both kinds print "[1,2,3]", so one text decoder serves them. */
+                int kind = wreath_pg_extension_kind(oid);
+                if (kind == WREATH_PG_EXT_VECTOR || kind == WREATH_PG_EXT_HALFVEC) {
+                    return decode_vector_text(raw, length);
+                }
             }
             return Py_NewRef(data);
         }
@@ -1759,8 +1901,10 @@ wreath_pg_decode_value(uint32_t oid, int format, PyObject *data)
     if (array_element_oid(oid) != 0) {
         return decode_binary_array(raw, length);
     }
-    if (wreath_pg_extension_kind(oid) == WREATH_PG_EXT_VECTOR) {
-        return decode_vector(raw, length);
+    {
+        int kind = wreath_pg_extension_kind(oid);
+        if (kind == WREATH_PG_EXT_VECTOR) return decode_vector(raw, length);
+        if (kind == WREATH_PG_EXT_HALFVEC) return decode_halfvec(raw, length);
     }
     return Py_NewRef(data);
 }

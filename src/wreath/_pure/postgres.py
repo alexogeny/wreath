@@ -107,7 +107,19 @@ _JSONB = 3802
 # every built-in OID has already missed. The native twin
 # (_native/postgres/codec.c) keeps the identical table with the identical bound.
 _EXT_KIND_VECTOR = 1
+_EXT_KIND_HALFVEC = 2
 _MAX_EXTENSION_TYPES = 16
+
+#: Codec kinds this twin can frame. A kind absent from here is refused at
+#: registration rather than falling through to `bytes` at decode time, which is
+#: what "never a silent fall-through" means one layer down in `orm/types.py`.
+_EXT_KINDS = frozenset((_EXT_KIND_VECTOR, _EXT_KIND_HALFVEC))
+
+#: The largest finite IEEE-754 binary16. A `halfvec` element beyond it does not
+#: saturate, it becomes an infinity -- which pgvector then refuses on the way in,
+#: so the value would be rejected by the server after a successful encode. Caught
+#: here instead, where the message can name the element.
+_MAX_HALF = 65504.0
 
 #: OID -> codec kind, written once at startup and read-only afterwards.
 #:
@@ -121,7 +133,7 @@ _extension_kinds: dict[int, int] = {}
 
 def _register_extension_type(name: str, oid: int, kind: int) -> None:
     """Bind one extension type name to the OID this database assigned it."""
-    if kind != _EXT_KIND_VECTOR:
+    if kind not in _EXT_KINDS:
         raise ValueError(f"unknown extension codec kind {kind} for {name!r}")
     if oid <= 0:
         raise ValueError(f"invalid OID {oid} for extension type {name!r}")
@@ -160,6 +172,47 @@ def _decode_vector(data: bytes) -> list[float]:
     if len(data) != 4 + count * 4:
         raise ProtocolError("binary vector length does not match its dimension")
     return list(struct.unpack_from(f"!{count}f", data, 4))
+
+
+def _encode_halfvec(value: object) -> bytes:
+    """pgvector's binary `halfvec`: the `vector` header, then dim big-endian float2.
+
+    Byte-for-byte the same framing as `_encode_vector` with a two-byte element, so
+    the header, the dimension ceiling and the element type checks are shared. What
+    is *not* shared is the range check: `struct`'s `e` raises `OverflowError` for a
+    magnitude above binary16's largest finite value, and its message names neither
+    the element nor the type, so the bound is checked here first.
+    """
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("halfvec codec requires a list or tuple of floats")
+    count = len(value)
+    if count > 0xFFFF:
+        raise OverflowError("a halfvec may hold at most 65535 dimensions")
+    numbers = [_as_float(item) for item in value]
+    for index, number in enumerate(numbers):
+        if number != number or number in (float("inf"), float("-inf")):
+            raise ValueError(
+                f"halfvec element {index} is {number!r}; pgvector stores neither NaN "
+                "nor infinity"
+            )
+        if not -_MAX_HALF <= number <= _MAX_HALF:
+            raise ValueError(
+                f"halfvec element {index} is {number!r}, outside binary16's range of "
+                f"+/-{_MAX_HALF}; a half-precision column cannot hold it, and it would "
+                "round to an infinity that pgvector then refuses"
+            )
+    return struct.pack(f"!HH{count}e", count, 0, *numbers)
+
+
+def _decode_halfvec(data: bytes) -> list[float]:
+    if len(data) < 4:
+        raise ProtocolError("binary halfvec header is truncated")
+    count, unused = struct.unpack_from("!HH", data, 0)
+    if unused != 0:
+        raise ProtocolError(f"unsupported binary halfvec flags {unused}")
+    if len(data) != 4 + count * 2:
+        raise ProtocolError("binary halfvec length does not match its dimension")
+    return list(struct.unpack_from(f"!{count}e", data, 4))
 
 
 def _decode_vector_text(data: bytes) -> list[float]:
@@ -564,7 +617,9 @@ def _encode_text(value: object, oid: int) -> bytes | None:
         return str(_as_decimal(value)).encode("ascii")
     if oid in {_JSON, _JSONB}:
         return _as_json(value).encode("utf-8")
-    if _extension_kinds.get(oid) == _EXT_KIND_VECTOR:
+    if _extension_kinds.get(oid) in _EXT_KINDS:
+        # `vector` and `halfvec` print identically -- "[1,2,3]" -- so one text
+        # codec serves both. Only the binary framing differs (float4 vs float2).
         return _encode_vector_text(value)
     return str(value).encode("utf-8")
 
@@ -629,8 +684,11 @@ def _encode_binary(value: object, oid: int) -> bytes | None:
         return _as_json(value).encode("utf-8")
     if oid == _JSONB:
         return b"\x01" + _as_json(value).encode("utf-8")
-    if _extension_kinds.get(oid) == _EXT_KIND_VECTOR:
+    extension_kind = _extension_kinds.get(oid)
+    if extension_kind == _EXT_KIND_VECTOR:
         return _encode_vector(value)
+    if extension_kind == _EXT_KIND_HALFVEC:
+        return _encode_halfvec(value)
     raise TypeError(f"no binary encoder for PostgreSQL OID {oid}")
 
 
@@ -658,7 +716,7 @@ def _decode_value(oid: int, format_code: int, data: bytes | None) -> object:
             return Decimal(data.decode("ascii"))
         if oid in {_JSON, _JSONB}:
             return data.decode("utf-8")
-        if _extension_kinds.get(oid) == _EXT_KIND_VECTOR:
+        if _extension_kinds.get(oid) in _EXT_KINDS:
             return _decode_vector_text(data)
         return data
     if format_code != 1:
@@ -710,8 +768,11 @@ def _decode_value(oid: int, format_code: int, data: bytes | None) -> object:
         if len(data) < 1 or data[0] != 1:
             raise ProtocolError("unsupported jsonb wire version")
         return data[1:].decode("utf-8")
-    if _extension_kinds.get(oid) == _EXT_KIND_VECTOR:
+    extension_kind = _extension_kinds.get(oid)
+    if extension_kind == _EXT_KIND_VECTOR:
         return _decode_vector(data)
+    if extension_kind == _EXT_KIND_HALFVEC:
+        return _decode_halfvec(data)
     return data
 
 
