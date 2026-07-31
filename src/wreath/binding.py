@@ -11,6 +11,13 @@ inspecting the signature once at route-compile time (never per request):
 - every remaining scalar-annotated parameter comes from the **query string**,
   falling back to the handler default when absent.
 
+The same compiled validator understands dataclasses, unions, literals, enums,
+UUIDs, decimals, dates and instants, bytes, mappings, and list/set/tuple
+containers. `Annotated[..., Field(...)]` supplies a wire alias, documentation
+and numeric, length, or pattern constraints. A supported return annotation is
+also a response contract: undeclared dataclass attributes are filtered and an
+invalid result is refused before emission.
+
 ```python
 @dataclass
 class NewItem:
@@ -50,15 +57,20 @@ not JSON at all is a 400 instead, because nothing could be validated.
 from __future__ import annotations
 
 import asyncio
+import base64
 import dataclasses
 import datetime as _datetime
+import enum
 import inspect
+import re
 import sys as _sys
 import types
 import typing
 from collections.abc import Awaitable, Callable, Mapping
+from decimal import Decimal, InvalidOperation
 from time import monotonic_ns as _monotonic_ns
 from typing import Any
+from uuid import UUID
 
 from ._codecs import parse_qs
 from ._flight_markers import COV_PYTHON as _COV_PYTHON
@@ -75,6 +87,53 @@ Handler = Callable[..., Awaitable[Any]]
 _MISSING = dataclasses.MISSING
 _NONE_TYPE = type(None)
 _BINDING_SPEC_UNSET = object()
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Field:
+    """Describe and constrain one value inside `Annotated`.
+
+    The same metadata drives request validation, response filtering, OpenAPI,
+    MCP, and generated clients. `alias` changes the wire name of a dataclass
+    field while the Python attribute keeps its declared name.
+    """
+
+    alias: str | None = None
+    description: str | None = None
+    examples: tuple[Any, ...] = ()
+    gt: int | float | Decimal | None = None
+    ge: int | float | Decimal | None = None
+    lt: int | float | Decimal | None = None
+    le: int | float | Decimal | None = None
+    min_length: int | None = None
+    max_length: int | None = None
+    pattern: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.alias == "":
+            raise ValueError("Field alias must not be empty")
+        if self.min_length is not None and self.min_length < 0:
+            raise ValueError("Field min_length must be non-negative")
+        if self.max_length is not None and self.max_length < 0:
+            raise ValueError("Field max_length must be non-negative")
+        if (
+            self.min_length is not None
+            and self.max_length is not None
+            and self.min_length > self.max_length
+        ):
+            raise ValueError("Field min_length exceeds max_length")
+        if self.pattern is not None:
+            re.compile(self.pattern)
+
+
+def _field_annotation(annotation: Any) -> tuple[Any, Field | None]:
+    if typing.get_origin(annotation) is not typing.Annotated:
+        return annotation, None
+    base, *metadata = typing.get_args(annotation)
+    fields = [item for item in metadata if isinstance(item, Field)]
+    if len(fields) > 1:
+        raise TypeError("an annotation may carry at most one Field")
+    return base, fields[0] if fields else None
 
 # Body-validation plan opcodes. These mirror the enum in
 # src/wreath/_native/validate.c; the native validator executes a plan compiled
@@ -104,7 +163,14 @@ def _compile_plan(annotation: Any, seen: frozenset[type]) -> tuple[Any, ...]:
     (currently recursive dataclasses), signalling a pure-validator fallback.
     Semantics mirror :func:`_validate` exactly.
     """
-    if annotation is Any or annotation is inspect.Parameter.empty:
+    annotation, field = _field_annotation(annotation)
+    if field is not None:
+        # Advanced annotations are uncommon and remain on the pure reference
+        # path until the native plan has opcodes for every constraint. Falling
+        # back is safe; compiling a partial plan would let native and pure
+        # validation disagree.
+        raise _PlanUnsupported
+    if annotation in (Any, object) or annotation is inspect.Parameter.empty:
         return (_OP_ANY,)
     if annotation is None or annotation is _NONE_TYPE:
         return (_OP_NULL,)
@@ -122,12 +188,30 @@ def _compile_plan(annotation: Any, seen: frozenset[type]) -> tuple[Any, ...]:
             if annotation in seen:
                 raise _PlanUnsupported
             child_seen = seen | {annotation}
-            fields = tuple(
-                (name, _compile_plan(field_annotation, child_seen), 1 if required else 0)
-                for name, field_annotation, required in _dataclass_spec(annotation)
-            )
+            fields_list: list[tuple[str, tuple[Any, ...], int]] = []
+            for name, wire_name, field_annotation, required in _dataclass_wire_spec(
+                annotation
+            ):
+                if wire_name != name:
+                    raise _PlanUnsupported
+                fields_list.append(
+                    (
+                        name,
+                        _compile_plan(field_annotation, child_seen),
+                        1 if required else 0,
+                    )
+                )
+            fields = tuple(fields_list)
             return (_OP_DATACLASS, annotation, fields)
+        if (
+            annotation in (Decimal, UUID, bytes, _datetime.date, _datetime.datetime, Instant)
+            or isinstance(annotation, type)
+            and issubclass(annotation, enum.Enum)
+        ):
+            raise _PlanUnsupported
         return (_OP_UNSUPPORTED, f"unsupported annotation {annotation!r}")
+    if origin is typing.Literal:
+        raise _PlanUnsupported
     if origin in (types.UnionType, typing.Union):
         options = typing.get_args(annotation)
         has_none = 1 if _NONE_TYPE in options else 0
@@ -135,9 +219,11 @@ def _compile_plan(annotation: Any, seen: frozenset[type]) -> tuple[Any, ...]:
             _compile_plan(option, seen) for option in options if option is not _NONE_TYPE
         )
         return (_OP_UNION, has_none, compiled, f"value matches no option of {annotation}")
-    if origin is list or origin is tuple:
+    if origin is list:
         args = typing.get_args(annotation)
         return (_OP_LIST, _compile_plan(args[0] if args else Any, seen))
+    if origin in (tuple, set, frozenset):
+        raise _PlanUnsupported
     if origin is dict:
         args = typing.get_args(annotation)
         return (_OP_DICT, _compile_plan(args[1] if len(args) == 2 else Any, seen))
@@ -167,6 +253,19 @@ class ValidationError(Exception):
         """Keep `errors` and set the exception message to a count summary."""
         super().__init__(f"{len(errors)} validation error(s)")
         self.errors = errors
+
+
+class ResponseValidationError(Exception):
+    """A handler returned a value that violates its declared public contract.
+
+    This is deliberately distinct from `ValidationError`: bad request data is a
+    caller error and answers 422, while a bad response is an application defect
+    and passes through the ordinary 500 boundary.
+    """
+
+    def __init__(self, errors: list[dict[str, Any]]) -> None:
+        self.errors = errors
+        super().__init__(f"{len(errors)} response validation error(s)")
 
 
 def _error(loc: tuple[Any, ...], message: str, kind: str) -> dict[str, Any]:
@@ -234,12 +333,19 @@ def validate(annotation: Any, value: Any, loc: tuple[Any, ...] = ()) -> Any:
 
 def _validate(annotation: Any, value: Any, loc: tuple[Any, ...], errors: list,
               budget: list) -> Any:
+    annotation, field = _field_annotation(annotation)
+    if field is not None:
+        before = len(errors)
+        result = _validate(annotation, value, loc, errors, budget)
+        if len(errors) == before and budget[0] >= 0:
+            _validate_field(field, result, loc, errors)
+        return result
     if budget[0] <= 0:
         # Budget exhausted: mark it (negative sentinel) and stop descending.
         budget[0] = -1
         return value
     budget[0] -= 1
-    if annotation is Any or annotation is inspect.Parameter.empty:
+    if annotation in (Any, object) or annotation is inspect.Parameter.empty:
         return value
     if annotation is None or annotation is _NONE_TYPE:
         if value is not None:
@@ -271,11 +377,69 @@ def _validate(annotation: Any, value: Any, loc: tuple[Any, ...], errors: list,
                 return value
             errors.append(_error(loc, "value is not a string", "str"))
             return value
+        if annotation is Decimal:
+            if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+                errors.append(_error(loc, "value is not a decimal", "decimal"))
+                return value
+            try:
+                return Decimal(str(value))
+            except InvalidOperation:
+                errors.append(_error(loc, "value is not a decimal", "decimal"))
+                return value
+        if annotation is UUID:
+            if not isinstance(value, str):
+                errors.append(_error(loc, "value is not a UUID", "uuid"))
+                return value
+            try:
+                return UUID(value)
+            except ValueError:
+                errors.append(_error(loc, "value is not a UUID", "uuid"))
+                return value
+        if annotation is bytes:
+            if not isinstance(value, str):
+                errors.append(_error(loc, "value is not base64 text", "bytes"))
+                return value
+            try:
+                return base64.b64decode(value, validate=True)
+            except ValueError:
+                errors.append(_error(loc, "value is not base64 text", "bytes"))
+                return value
+        if annotation is Instant or annotation is _datetime.datetime:
+            if not isinstance(value, str):
+                errors.append(_error(loc, "value is not an ISO-8601 instant", "instant"))
+                return value
+            try:
+                return Instant.parse(value)
+            except TemporalError as error:
+                errors.append(_error(loc, str(error), "instant"))
+                return value
+        if annotation is _datetime.date:
+            if not isinstance(value, str):
+                errors.append(_error(loc, "value is not an ISO-8601 date", "date"))
+                return value
+            try:
+                return _datetime.date.fromisoformat(value)
+            except ValueError:
+                errors.append(_error(loc, "value is not an ISO-8601 date", "date"))
+                return value
+        if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
+            try:
+                return annotation(value)
+            except (TypeError, ValueError):
+                errors.append(_error(loc, "value is not an allowed enum member", "enum"))
+                return value
         if dataclasses.is_dataclass(annotation):
             return _validate_dataclass(annotation, value, loc, errors, budget)
         errors.append(
             _error(loc, f"unsupported annotation {annotation!r}", "unsupported")
         )
+        return value
+
+    if origin is typing.Literal:
+        choices = typing.get_args(annotation)
+        if any(type(value) is type(choice) and value == choice for choice in choices):
+            return value
+        errors.append(_error(loc, "value is not one of the allowed literals", "literal"))
         return value
 
     if origin in (types.UnionType, typing.Union):
@@ -299,16 +463,42 @@ def _validate(annotation: Any, value: Any, loc: tuple[Any, ...], errors: list,
         )
         return value
 
-    if origin is list or origin is tuple:
+    if origin in (list, tuple, set, frozenset):
         if not isinstance(value, list):
             errors.append(_error(loc, "value is not an array", "list"))
             return value
         args = typing.get_args(annotation)
+        if origin is tuple and args and not (len(args) == 2 and args[1] is Ellipsis):
+            if len(value) != len(args):
+                errors.append(
+                    _error(loc, f"array must contain exactly {len(args)} items", "tuple")
+                )
+                return value
+            result = tuple(
+                _validate(item_type, item, (*loc, index), errors, budget)
+                for index, (item_type, item) in enumerate(zip(args, value, strict=True))
+            )
+            return result
         item_type = args[0] if args else Any
-        return [
+        items = [
             _validate(item_type, item, (*loc, index), errors, budget)
             for index, item in enumerate(value)
         ]
+        if origin is tuple:
+            return tuple(items)
+        if origin is set:
+            try:
+                return set(items)
+            except TypeError:
+                errors.append(_error(loc, "array items are not hashable", "set"))
+                return value
+        if origin is frozenset:
+            try:
+                return frozenset(items)
+            except TypeError:
+                errors.append(_error(loc, "array items are not hashable", "set"))
+                return value
+        return items
 
     if origin is dict:
         if not isinstance(value, dict):
@@ -325,9 +515,160 @@ def _validate(annotation: Any, value: Any, loc: tuple[Any, ...], errors: list,
     return value
 
 
+def _validate_field(
+    field: Field,
+    value: Any,
+    loc: tuple[Any, ...],
+    errors: list[dict[str, Any]],
+) -> None:
+    for bound, comparison, message, kind in (
+        (field.gt, lambda item, limit: item > limit, "value must be >", "gt"),
+        (field.ge, lambda item, limit: item >= limit, "value must be >=", "ge"),
+        (field.lt, lambda item, limit: item < limit, "value must be <", "lt"),
+        (field.le, lambda item, limit: item <= limit, "value must be <=", "le"),
+    ):
+        if bound is None:
+            continue
+        try:
+            valid = comparison(value, bound)
+        except TypeError:
+            errors.append(_error(loc, f"{kind} requires a comparable value", kind))
+            return
+        if not valid:
+            errors.append(_error(loc, f"{message} {bound}", kind))
+            return
+    if field.min_length is not None:
+        try:
+            valid = len(value) >= field.min_length
+        except TypeError:
+            errors.append(_error(loc, "min_length requires a sized value", "min_length"))
+            return
+        if not valid:
+            errors.append(
+                _error(loc, f"length must be >= {field.min_length}", "min_length")
+            )
+            return
+    if field.max_length is not None:
+        try:
+            valid = len(value) <= field.max_length
+        except TypeError:
+            errors.append(_error(loc, "max_length requires a sized value", "max_length"))
+            return
+        if not valid:
+            errors.append(
+                _error(loc, f"length must be <= {field.max_length}", "max_length")
+            )
+            return
+    if field.pattern is not None:
+        if not isinstance(value, str) or re.search(field.pattern, value) is None:
+            errors.append(_error(loc, f"value does not match {field.pattern!r}", "pattern"))
+
+
+def _response_input(annotation: Any, value: Any) -> Any:
+    """Project a raw handler value onto its declared response shape."""
+    annotation, _field = _field_annotation(annotation)
+    if dataclasses.is_dataclass(annotation):
+        if isinstance(value, annotation):
+            return value
+        if not isinstance(value, Mapping):
+            return value
+        return {
+            wire_name: _response_input(field_annotation, value[wire_name])
+            for _name, wire_name, field_annotation, _required in _dataclass_wire_spec(
+                annotation
+            )
+            if wire_name in value
+        }
+    origin = typing.get_origin(annotation)
+    args = typing.get_args(annotation)
+    if origin in (list, set, frozenset) and isinstance(value, (list, tuple, set, frozenset)):
+        item_type = args[0] if args else Any
+        return [_response_input(item_type, item) for item in value]
+    if origin is tuple and isinstance(value, (list, tuple)):
+        if len(args) == 2 and args[1] is Ellipsis:
+            return [_response_input(args[0], item) for item in value]
+        return [
+            _response_input(item_type, item)
+            for item_type, item in zip(args, value, strict=False)
+        ]
+    if origin is dict and isinstance(value, Mapping):
+        item_type = args[1] if len(args) == 2 else Any
+        return {key: _response_input(item_type, item) for key, item in value.items()}
+    return value
+
+
+def _jsonable(annotation: Any, value: Any) -> Any:
+    annotation, _field = _field_annotation(annotation)
+    if dataclasses.is_dataclass(annotation) and isinstance(value, annotation):
+        return {
+            wire_name: _jsonable(field_annotation, getattr(value, name))
+            for name, wire_name, field_annotation, _required in _dataclass_wire_spec(
+                annotation
+            )
+        }
+    if isinstance(value, enum.Enum):
+        return value.value
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, (_datetime.datetime, _datetime.date, _datetime.time)):
+        return value.isoformat()
+    origin = typing.get_origin(annotation)
+    args = typing.get_args(annotation)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        item_type = args[0] if args else Any
+        return [_jsonable(item_type, item) for item in value]
+    if isinstance(value, Mapping):
+        item_type = args[1] if origin is dict and len(args) == 2 else Any
+        return {key: _jsonable(item_type, item) for key, item in value.items()}
+    return value
+
+
+def compile_response_validator(handler: Handler, annotation: Any) -> Handler:
+    """Filter and validate a handler's annotated return value.
+
+    Response objects retain full control of their wire representation. Plain
+    values are projected onto the annotation (dropping undeclared dataclass
+    fields), validated, and converted to dependency-free JSON primitives.
+    """
+    if annotation is Any or annotation is inspect.Parameter.empty:
+        return handler
+    if annotation in (dict, list, tuple, set, frozenset):
+        # An unsubscripted container says nothing about its contents, so it is
+        # documentation rather than an enforceable output contract. Existing
+        # handlers commonly use ``-> dict``; wrapping those as though they had
+        # declared a complete schema turned every successful response into a
+        # response-validation 500.
+        return handler
+    from .response import FileResponse, PreparedResponse, Response, StreamingResponse
+
+    response_types = (Response, StreamingResponse, FileResponse, PreparedResponse)
+    if isinstance(annotation, type) and issubclass(annotation, response_types):
+        return handler
+
+    async def checked(request: Request) -> Any:
+        value = await handler(request)
+        if isinstance(value, response_types):
+            return value
+        projected = _response_input(annotation, value)
+        try:
+            validated = validate(annotation, projected, ("response",))
+        except ValidationError as error:
+            raise ResponseValidationError(error.errors) from error
+        return _jsonable(annotation, validated)
+
+    checked.__name__ = getattr(handler, "__name__", "checked")
+    checked.__qualname__ = getattr(handler, "__qualname__", "checked")
+    return checked
+
+
 # Resolved field specs per dataclass: (name, annotation, required). Type-hint
 # evaluation is expensive; it must happen once per class, never per request.
 _DATACLASS_SPECS: dict[type, tuple[tuple[str, Any, bool], ...]] = {}
+_DATACLASS_WIRE_SPECS: dict[type, tuple[tuple[str, str, Any, bool], ...]] = {}
 
 
 def _dataclass_spec(cls: type) -> tuple[tuple[str, Any, bool], ...]:
@@ -347,6 +688,35 @@ def _dataclass_spec(cls: type) -> tuple[tuple[str, Any, bool], ...]:
     return spec
 
 
+def _dataclass_wire_spec(cls: type) -> tuple[tuple[str, str, Any, bool], ...]:
+    spec = _DATACLASS_WIRE_SPECS.get(cls)
+    if spec is None:
+        label = f"body model {getattr(cls, '__qualname__', cls)!s}"
+        hints = _resolve_hints(cls, label, extras=True)
+        entries: list[tuple[str, str, Any, bool]] = []
+        wire_names: set[str] = set()
+        for field in dataclasses.fields(cls):
+            annotation = hints.get(field.name, Any)
+            _base, metadata = _field_annotation(annotation)
+            wire_name = metadata.alias if metadata is not None and metadata.alias else field.name
+            if wire_name in wire_names:
+                raise TypeError(
+                    f"body model {cls.__qualname__} maps two fields to {wire_name!r}"
+                )
+            wire_names.add(wire_name)
+            entries.append(
+                (
+                    field.name,
+                    wire_name,
+                    annotation,
+                    field.default is _MISSING and field.default_factory is _MISSING,
+                )
+            )
+        spec = tuple(entries)
+        _DATACLASS_WIRE_SPECS[cls] = spec
+    return spec
+
+
 def _validate_dataclass(cls: Any, value: Any, loc: tuple[Any, ...], errors: list,
                         budget: list) -> Any:
     if isinstance(value, cls):
@@ -355,14 +725,16 @@ def _validate_dataclass(cls: Any, value: Any, loc: tuple[Any, ...], errors: list
         errors.append(_error(loc, "value is not an object", "dict"))
         return value
     kwargs: dict[str, Any] = {}
-    spec = _dataclass_spec(cls)
-    for name, annotation, required in spec:
-        if name in value:
-            kwargs[name] = _validate(annotation, value[name], (*loc, name), errors, budget)
+    spec = _dataclass_wire_spec(cls)
+    for name, wire_name, annotation, required in spec:
+        if wire_name in value:
+            kwargs[name] = _validate(
+                annotation, value[wire_name], (*loc, wire_name), errors, budget
+            )
         elif required:
-            errors.append(_error((*loc, name), "field is required", "missing"))
+            errors.append(_error((*loc, wire_name), "field is required", "missing"))
     if len(value) > len(kwargs):
-        known = {name for name, _, _ in spec}
+        known = {wire_name for _name, wire_name, _annotation, _required in spec}
         # Insertion order (not set-difference order) so the error list is
         # deterministic and matches the native validator byte-for-byte.
         for extra in value:
@@ -1220,7 +1592,7 @@ def _path_placeholders(path: str) -> frozenset[str]:
     names = set()
     for segment in path.split("/"):
         if segment.startswith("{") and segment.endswith("}") and len(segment) > 2:
-            names.add(segment[1:-1])
+            names.add(segment[1:-1].split(":", 1)[0])
     return frozenset(names)
 
 
@@ -1316,7 +1688,9 @@ def _resolve_hints(obj: Any, label: str, *, extras: bool = True) -> dict[str, An
         ) from error
 
 
-def inspect_handler(handler: Handler, path: str) -> BindingSpec | None:
+def inspect_handler(
+    handler: Handler, path: str, host: str | None = None
+) -> BindingSpec | None:
     """Read a handler signature once and resolve every parameter to a source.
 
     Called at route-compile time, never per request. Markers in `Annotated`
@@ -1360,6 +1734,8 @@ def inspect_handler(handler: Handler, path: str) -> BindingSpec | None:
         return None
 
     placeholders = _path_placeholders(path)
+    if host is not None:
+        placeholders = placeholders | _path_placeholders("/" + host.replace(".", "/"))
     path_specs: list[tuple[str, str, Any]] = []
     query_specs: list[tuple[str, str, Any, Any]] = []
     query_constraints: list[tuple[str, ScalarConstraint]] = []
@@ -1505,7 +1881,7 @@ def inspect_handler(handler: Handler, path: str) -> BindingSpec | None:
     # and an unresolvable annotation inside a model is a declaration error,
     # which belongs at compile time and not in a 500 the caller cannot place.
     if body_spec is not None and dataclasses.is_dataclass(body_spec[1]):
-        _dataclass_spec(body_spec[1])
+        _dataclass_wire_spec(body_spec[1])
     if form_model_spec is not None:
         _form_model_fields(form_model_spec[1])
     return BindingSpec(
@@ -1879,13 +2255,16 @@ __all__ = [
     "Cookie",
     "AppScope",
     "Depends",
+    "Field",
     "File",
     "Form",
     "Header",
     "Path",
     "Query",
+    "ResponseValidationError",
     "ValidationError",
     "compile_binder",
+    "compile_response_validator",
     "inspect_handler",
     "validate",
 ]

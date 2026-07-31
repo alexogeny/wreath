@@ -14,7 +14,7 @@ doesn't fit becomes a structured `422` before your handler runs.
 from typing import Annotated
 
 from wreath import Request
-from wreath.binding import Path, Query, Header, Cookie, Body, Form, File, Depends
+from wreath.binding import Body, Cookie, Depends, Field, File, Form, Header, Path, Query
 
 @app.get("/items/{id}")
 async def show(
@@ -42,6 +42,33 @@ of `"error"` (a structured `422`) or `"clamp"` (pin to the nearest bound, the
 right answer for pagination). Query, header, and cookie values are scalars:
 `str`, `int`, `float`, `bool`, or optional unions of them. Anything more
 structured belongs in the body.
+
+Dataclass bodies understand UUID, Decimal, Enum, Literal, aware instants, dates,
+base64 bytes, fixed and variadic tuples, sets, mappings, unions, and nested
+dataclasses. `Field` carries the contract shared by input validation, response
+filtering, OpenAPI, and typed clients:
+
+```python
+@dataclass
+class NewItem:
+    display_name: Annotated[
+        str,
+        Field(
+            alias="displayName",
+            min_length=3,
+            max_length=80,
+            pattern=r"^[A-Z]",
+            description="Public item name",
+            examples=("Wreath",),
+        ),
+    ]
+    rating: Annotated[int, Field(ge=1, le=5)]
+```
+
+Unknown fields are rejected on input. On output, a dataclass return annotation
+projects a mapping onto its declared wire fields, so an accidental internal key
+cannot escape, then validates and serializes it. A violation is a server defect
+and answers 500, never a caller-facing 422.
 
 ## User story: a search endpoint with safe bounds
 

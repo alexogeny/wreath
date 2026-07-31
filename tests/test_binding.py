@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as _dt
+import enum
 import json
 from dataclasses import dataclass, field
-from typing import Annotated, Any
+from decimal import Decimal
+from typing import Annotated, Any, Literal, cast
+from uuid import UUID
 
 import pytest
 
@@ -21,11 +24,21 @@ from wreath.binding import (
     Query,
     ValidationError,
     compile_binder,
+    compile_response_validator,
     validate,
+)
+from wreath.binding import (
+    Field as SchemaField,
 )
 from wreath.orm.session import Session
 from wreath.postgres import Connection, FromDatabase
-from wreath.response import TextResponse
+from wreath.response import (
+    FileResponse,
+    PreparedResponse,
+    Response,
+    StreamingResponse,
+    TextResponse,
+)
 
 
 @dataclass
@@ -40,6 +53,11 @@ class Item:
 class Order:
     item: Item
     quantity: int
+
+
+@dataclass
+class PublicItem:
+    name: str
 
 
 # --- validate() -----------------------------------------------------------------
@@ -85,6 +103,126 @@ def test_validate_list_and_dict() -> None:
     assert validate(dict[str, float], {"a": 1}) == {"a": 1.0}
     with pytest.raises(ValidationError):
         validate(list[int], [1, "two"])
+
+
+class ItemState(enum.StrEnum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
+@dataclass
+class RichBody:
+    item_id: UUID
+    amount: Decimal
+    state: ItemState
+    kind: Literal["sale"]
+    due: _dt.date
+    display_name: Annotated[
+        str,
+        SchemaField(
+            alias="displayName",
+            min_length=3,
+            max_length=12,
+            pattern=r"^[A-Z]",
+            description="Public item name",
+            examples=("Wreath",),
+        ),
+    ]
+    rating: Annotated[int, SchemaField(ge=1, le=5)]
+    tags: Annotated[set[str], SchemaField(min_length=1, max_length=2)]
+
+
+def test_validate_rich_types_constraints_and_field_aliases() -> None:
+    item_id = UUID("cbfb7892-bbe8-4d26-9c5d-e12d17f404e2")
+
+    result = validate(
+        RichBody,
+        {
+            "item_id": str(item_id),
+            "amount": "12.340",
+            "state": "active",
+            "kind": "sale",
+            "due": "2026-08-01",
+            "displayName": "Wreath",
+            "rating": 5,
+            "tags": ["python", "asgi"],
+        },
+    )
+
+    assert result.item_id == item_id
+    assert result.amount == Decimal("12.340")
+    assert result.state is ItemState.ACTIVE
+    assert result.due == _dt.date(2026, 8, 1)
+    assert result.display_name == "Wreath"
+    assert result.tags == {"python", "asgi"}
+
+
+def test_validate_reports_constraints_at_the_wire_alias() -> None:
+    with pytest.raises(ValidationError) as caught:
+        validate(
+            RichBody,
+            {
+                "item_id": "not-a-uuid",
+                "amount": "not-a-decimal",
+                "state": "unknown",
+                "kind": "refund",
+                "due": "tomorrow",
+                "displayName": "x",
+                "rating": 9,
+                "tags": [],
+            },
+        )
+
+    errors = {tuple(error["loc"]): error["type"] for error in caught.value.errors}
+    assert errors[("item_id",)] == "uuid"
+    assert errors[("amount",)] == "decimal"
+    assert errors[("state",)] == "enum"
+    assert errors[("kind",)] == "literal"
+    assert errors[("due",)] == "date"
+    assert errors[("displayName",)] == "min_length"
+    assert errors[("rating",)] == "le"
+    assert errors[("tags",)] == "min_length"
+
+
+@pytest.mark.asyncio
+async def test_return_annotation_filters_and_serializes_the_response() -> None:
+    from wreath.testing import TestClient
+
+    app = Wreath()
+
+    @app.get("/item")
+    async def item(request: Any) -> PublicItem:
+        return cast(PublicItem, {"name": "visible", "secret": "hidden"})
+
+    async with TestClient(app) as client:
+        response = await client.get("/item")
+
+    assert response.status == 200
+    assert response.json() == {"name": "visible"}
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        Response,
+        TextResponse,
+        StreamingResponse,
+        FileResponse,
+        PreparedResponse,
+        dict,
+        list,
+        tuple,
+        set,
+        frozenset,
+    ],
+)
+def test_explicit_response_annotations_need_no_runtime_contract_wrapper(
+    annotation: type,
+) -> None:
+    async def endpoint(request: Any) -> Response:
+        return Response(b"ok")
+
+    assert compile_response_validator(endpoint, annotation) is endpoint
 
 
 # --- handler binding through the app ---------------------------------------------
