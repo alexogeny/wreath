@@ -20,21 +20,16 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     "route.websocket": ("route", "routing", NEEDS_REVIEW, "Move this websocket handler onto the app itself: wreath registers websockets with @app.websocket, and a Router has no .websocket. Import WebSocket and WebSocketDisconnect from wreath.websocket, and read path parameters from ws.path_params."),
     "ws.json_method": ("websocket", "other", NEEDS_REVIEW, "Wreath's websocket sends and receives text, not JSON. Replace send_json(x) with send_text(json.dumps(x)) and receive_json() with json.loads(await receive_text())."),
     # -- route options (not floor-checked; counted in overall) ----------------
-    "route.response_model": ("route_option", "other", TRANSLATED, "Drop response_model=. wreath reads the schema from the handler's return annotation instead. Note that FastAPI also *filtered* the response through that model at runtime; wreath does not, so return only what you mean to publish."),
-    # `status_code=` has no wreath slot: the status lives on the response the
-    # handler returns. Whether that is a mechanical change depends on what the
-    # handler returns, and for a *literal* return wreath's own coercion table
-    # decides it — `coerce_json` for a dict/list/number, `coerce_text` for a str
-    # (app._to_response). Wrapping such a return in the class wreath would have
-    # picked anyway changes the status and nothing else, which is why these are
-    # determined and a `return some_name` is not.
-    "route.status_code": ("route_option", "other", NEEDS_REVIEW, "Wreath puts the status on the response the handler returns, not on the route. This handler's return value could be anything, so pick the wrapper that matches it: JSONResponse for a dict, list or number, TextResponse for a string, and dataclasses.asdict first if it returns a dataclass."),
+    "route.response_model": ("route_option", "other", TRANSLATED, "Drop response_model= and put the public model on the handler's return annotation. Wreath filters and validates plain return values through that annotation at runtime; an explicit Response keeps ownership of its wire body."),
+    # `status_code=` is a route slot for coerced values. An explicitly returned
+    # Response still owns its own status, so those shapes remain distinct.
+    "route.status_code": ("route_option", "other", NEEDS_REVIEW, "Keep status_code= on the route. It applies to plain coerced values and the OpenAPI success response; an explicit Response still owns its own status, so confirm which return shape this handler uses."),
     "route.status_code_return": ("route_option", "other", TRANSLATED, "Return JSONResponse(<value>, status=<number>) and drop status_code= from the route. wreath already sends a dict, list or number as JSON, so only the status changes."),
     "route.status_code_text": ("route_option", "other", TRANSLATED, "Return TextResponse(<value>, status=<number>) and drop status_code= from the route. A string is text/plain in wreath, so JSONResponse would change the content type as well as the status."),
     "route.status_code_response": ("route_option", "other", TRANSLATED, "Drop status_code= from the route and pass status= to the response this handler already returns. The route-level value was doing nothing: the returned response's own status wins."),
     "route.status_code_empty": ("route_option", "other", TRANSLATED, "Return Response(status=<number>). A handler that returns nothing would otherwise answer 200 with a JSON null, and Response leaves out content-length for a status that carries no body."),
     "route.status_code_empty_body": ("route_option", "other", NEEDS_REVIEW, "This route says 204 or 304, which must have no body, but the handler returns one. FastAPI let that through. Decide which is right before porting: drop the return, or use a status that allows a body."),
-    "route.include_in_schema": ("route_option", "other", NEEDS_REVIEW, "This route was hidden from the API docs. Wreath has no per-route switch for that: leave it out of what app.enable_docs() publishes, or accept that it will now be listed."),
+    "route.include_in_schema": ("route_option", "other", NEEDS_REVIEW, "Keep include_in_schema= on the route; false withholds it from OpenAPI and generated clients. Confirm that hiding the operation remains intentional."),
     # -- params ---------------------------------------------------------------
     "param.query": ("param", "params", TRANSLATED, "Query(default, ge=, le=) -> Annotated[T, Query(minimum=, maximum=)] = default"),
     "param.query_strconstraint": ("param", "params", NEEDS_REVIEW, "Wreath's Query marker carries a minimum and a maximum for numbers and nothing else, so a length or pattern rule on a query parameter has no home. Either check it in the handler and raise UnprocessableEntity, or move the value into a request body where a model can validate it."),
@@ -48,18 +43,16 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     # -- pydantic models ------------------------------------------------------
     "pydantic.model": ("model", "pydantic_models", TRANSLATED, "class X(BaseModel) -> @dataclass"),
     # A dataclass has one slot per field -- the default -- so a `Field(...)`
-    # translates when everything it carries either is that default or is
-    # documentation wreath has nowhere to keep. `description=`/`title=`/
-    # `examples=` are the second kind: `openapi.py` documents operations, not
-    # properties, so they are dropped, which costs schema prose and no behaviour.
-    "pydantic.field": ("field", "pydantic_models", TRANSLATED, "plain field maps 1:1: `Field(default=x)`/`Field(x)` -> `= x`, `Field(default_factory=f)` -> `= field(default_factory=f)`, a required `Field(...)`/`Field(description=...)` -> a bare annotation, and a list/dict/set default -> field(default_factory=...). Any `description`/`title`/`examples` is dropped -- wreath's OpenAPI describes operations, not properties"),
+    # translates when everything it carries is a default. Documentation and
+    # constraints now have a runtime home in Annotated[wreath.binding.Field].
+    "pydantic.field": ("field", "pydantic_models", TRANSLATED, "plain field maps 1:1: `Field(default=x)`/`Field(x)` -> `= x`, `Field(default_factory=f)` -> `= field(default_factory=f)`, and a list/dict/set default -> field(default_factory=...). Keep descriptions, examples, aliases and constraints in Annotated[T, wreath.binding.Field(...)]."),
     # Pydantic does not care what order defaulted and required fields are
     # declared in. `@dataclass` does, and raises at class-creation time -- which
     # `ast.parse` and `compile` both accept, so this port used to fail only when
     # the module was first imported, and it is an ordinary shape to write.
     "pydantic.model_kw_only": ("model", "pydantic_models", NEEDS_REVIEW, "A field with no default is declared after one that has a default. Pydantic does not mind; a dataclass refuses to be built at all. This is now @dataclass(kw_only=True), which fixes it and is how wreath builds request bodies anyway. The one thing to check: anything that constructs this model with positional arguments has to switch to keywords."),
-    "pydantic.field_marker": ("field", "pydantic_models", NEEDS_REVIEW, "This Field() carries something a plain dataclass field cannot hold. alias= is the one that matters -- wreath reads a body field by the field's own name, so dropping the alias renames it for every client. Rename the field to match the wire, or keep converting by hand. discriminator=, exclude= and strict= have no equivalent either."),
-    "pydantic.field_constraint": ("field", "pydantic_models", NEEDS_REVIEW, "This field has a limit on its value, and wreath keeps limits where they can be enforced rather than on the model. Three places to choose from: put it on the database column as column(..., check=Ge(1)) if this model mirrors a table, which guards the API and the database at once; write it as Annotated[int, Query(minimum=1, maximum=100)] if the value really arrives as a query parameter; or check it in the handler and raise UnprocessableEntity. Only the first two still answer 422 automatically."),
+    "pydantic.field_marker": ("field", "pydantic_models", NEEDS_REVIEW, "Move alias, description and examples to Annotated[T, wreath.binding.Field(...)]. discriminator=, exclude= and strict= still need a design decision."),
+    "pydantic.field_constraint": ("field", "pydantic_models", NEEDS_REVIEW, "Move gt/ge/lt/le, min_length/max_length and pattern to Annotated[T, wreath.binding.Field(...)]. Keep a matching ORM check as well when the value is persisted."),
     # -- pydantic extras (not floor-checked) ----------------------------------
     "pydantic.config_forbid": ("config", "other", TRANSLATED, "Drop extra='forbid'. Rejecting unknown fields is already what wreath does."),
     "pydantic.config_ignore": ("config", "other", NEEDS_REVIEW, "extra='ignore' means unknown fields were dropped quietly. Wreath always rejects them with a 422 and cannot be told otherwise, so any client sending extra keys will start getting errors. Either stop sending them or add the fields to the model."),
@@ -86,15 +79,13 @@ RULES: dict[str, tuple[str, str, str, str]] = {
     # defaults is a mechanical rewrite: pydantic-settings' default source reads
     # the field name (case-insensitively, so upper-case is the canonical
     # spelling) with `env_prefix` in front, no default means required, and
-    # `str`/`int`/`float`/`bool` are the four conversions `load_env`'s
-    # `dict[str, str]` needs. It stops being mechanical at a validator, a
-    # container type, a computed default, or a sub-group — so the class-level
-    # verdict is "every field is mechanical", not "it is a BaseSettings".
-    "settings.class": ("settings", "settings", NEEDS_REVIEW, "Replace this settings class with load_env('.env', apply=True) and a plain dataclass that reads env['NAME'] for each field. It could not be done automatically because at least one field is more than a plain string, number or flag with a fixed default -- see the note on that field."),
-    "settings.class_env": ("settings", "settings", TRANSLATED, "This becomes env = load_env('.env', apply=True) and a plain dataclass whose fields read env['NAME']. Each field's literal default stays as the dataclass default; each field without one has to be listed in run(app, required_env=[...]) so the app refuses to start without it."),
-    "settings.field": ("settings", "settings", TRANSLATED, "One env[...] lookup: a string as it comes, a number through int() or float(), and a flag through value.lower() in {'1','true','t','yes','y','on'} -- environment variables are always strings, and bool('false') is True."),
-    "settings.field_complex": ("settings", "settings", NEEDS_REVIEW, "pydantic-settings would parse this value out of the environment variable for you (a list, a dict, an optional, or something a Field() built). load_env hands over the raw string, so write the parsing yourself -- usually a split on commas or a json.loads."),
-    "settings.nested": ("settings", "settings", NEEDS_REVIEW, "This settings class contains another one as a group. The inner fields still read their own environment variables, so the values carry across, but two habits do not: pydantic-settings would also accept the whole group as one JSON value, and every settings.<group>.<field> read changes if you flatten it. Decide whether to keep the group as a nested dataclass or flatten it, then update the readers."),
+    # Environment.bind owns conversion, nested groups, aggregate errors and
+    # defaults. Validators and JSON-valued settings still require judgment.
+    "settings.class": ("settings", "settings", NEEDS_REVIEW, "Make this an ordinary dataclass and construct it with Environment.load('.env').bind(Settings, prefix=...). Field validators and JSON-valued settings still need an explicit conversion decision."),
+    "settings.class_env": ("settings", "settings", TRANSLATED, "Make this an ordinary dataclass and bind it with Environment.load('.env').bind(Settings, prefix=...). Required fields, literal defaults and scalar conversion are automatic."),
+    "settings.field": ("settings", "settings", TRANSLATED, "Environment.bind converts the annotated scalar and uses the dataclass default when the key is absent."),
+    "settings.field_complex": ("settings", "settings", NEEDS_REVIEW, "Environment.bind supports optionals, unions and comma-separated containers. A JSON object encoded into one variable or a custom validator still needs an explicit adapter."),
+    "settings.nested": ("settings", "settings", NEEDS_REVIEW, "Decide whether to keep the nested dataclass or flatten its access path. Environment.bind reads a kept group's fields with a double underscore, such as APP_DATABASE__HOST; a pydantic-settings JSON value for the whole group still needs an explicit adapter."),
     # -- queries ---------------------------------------------------------------
     #
     # `.objects.` is the largest single construct in a real ormar codebase — of
