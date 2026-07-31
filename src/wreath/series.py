@@ -68,10 +68,11 @@ from ._series.compile import (
     CURRENT,
     PREVIOUS,
     compile_aggregate,
+    compile_cells,
     compile_events,
     compile_series,
 )
-from ._series.envelope import aggregate_rows, fill, series_rows
+from ._series.envelope import aggregate_rows, cell_rows, fill, series_rows
 from ._series.settle import (
     Seal,
     SealState,
@@ -90,6 +91,7 @@ from ._series.tiers import Ladder, Segment, Tier
 from ._series.tiers import build as _build_ladder
 from ._series.tiers import plan as _plan_tiers
 from ._series.tiers import width as _grain_width
+from .geospatial import grid as _grid
 from .orm.compiler import check_predicate_columns, compile_rebind
 from .orm.errors import DeclarationError
 from .orm.expressions import ColumnExpr, Predicate, RelatedColumnExpr
@@ -123,6 +125,9 @@ __all__ = [
     "Aggregate",
     "AggregateResult",
     "AggregateRow",
+    "Cell",
+    "Cells",
+    "CellsResult",
     "Measure",
     "Range",
     "Series",
@@ -186,6 +191,13 @@ MAX_EVENTS = 100
 #: silently dropping some of them draws a chart that is wrong rather than
 #: absent.
 DEFAULT_GROUP_LIMIT = 50
+
+#: How many cells a `Cells` declaration may produce before it refuses.
+#: Every cell is a row on the wire whether or not anything is in it — that is
+#: the point of a dense axis — so the ceiling is on the lattice rather than on
+#: the rows that matched. 10 000 is a 100x100 map, which is already more cells
+#: than a screen has room to distinguish.
+DEFAULT_CELL_LIMIT = 10_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,6 +486,15 @@ class AggregateResult:
 
 
 @dataclass(frozen=True, slots=True)
+class _CellAxis:
+    """The spatial axis: two columns and the lattice they are bucketed onto."""
+
+    lat: ColumnExpr
+    lon: ColumnExpr
+    grid: Any
+
+
+@dataclass(frozen=True, slots=True)
 class _Declaration:
     """What both shapes have in common, kept immutable so it can be shared."""
 
@@ -482,6 +503,7 @@ class _Declaration:
     predicates: tuple[Predicate, ...] = ()
     group: Any = None
     fills: dict[str, Any] = field(default_factory=dict)
+    cell: _CellAxis | None = None
 
 
 class _Builder:
@@ -512,6 +534,16 @@ class _Builder:
     @property
     def group(self) -> Any:
         return self._d.group
+
+    @property
+    def cell(self) -> Any:
+        """The spatial axis, or `None` on a declaration that has no place."""
+        return self._d.cell
+
+    @property
+    def fills(self) -> dict[str, Any]:
+        """Per-measure overrides for what an empty bucket or cell reads as."""
+        return self._d.fills
 
     @property
     def sources(self) -> tuple[type, ...]:
@@ -705,6 +737,174 @@ class _Builder:
         return tuple(
             predicate if binder is None else binder(values)
             for predicate, binder in zip(self._d.predicates, binders, strict=True)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Cell:
+    """One cell of a heatmap: where it is, and what was in it."""
+
+    #: Index from the extent's south-west corner.
+    row: int
+    column: int
+    #: The ground the cell covers, and the point a renderer pins a marker to.
+    bounds: Any
+    centre: Any
+    values: dict[str, Any]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "row": self.row,
+            "column": self.column,
+            "bounds": {
+                "lat_min": self.bounds.lat_min,
+                "lat_max": self.bounds.lat_max,
+                "lon_min": self.bounds.lon_min,
+                "lon_max": self.bounds.lon_max,
+            },
+            "centre": {"lat": self.centre.lat, "lon": self.centre.lon},
+            "values": dict(self.values),
+        }
+
+    def __jsonable__(self) -> dict[str, Any]:
+        return self.as_dict()
+
+
+@dataclass(frozen=True, slots=True)
+class CellsResult:
+    """Every cell of the lattice, in row-major order."""
+
+    cells: tuple[Cell, ...]
+    measures: tuple[str, ...]
+    grid: Any
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "cells": [cell.as_dict() for cell in self.cells],
+            "measures": list(self.measures),
+            "grid": {
+                "rows": self.grid.rows,
+                "columns": self.grid.columns,
+                "metres": self.grid.metres,
+                "distortion": self.grid.distortion,
+                "extent": {
+                    "lat_min": self.grid.extent.lat_min,
+                    "lat_max": self.grid.extent.lat_max,
+                    "lon_min": self.grid.extent.lon_min,
+                    "lon_max": self.grid.extent.lon_max,
+                },
+            },
+        }
+
+    def __jsonable__(self) -> dict[str, Any]:
+        return self.as_dict()
+
+
+class Cells(_Builder):
+    """A quantity per cell over an extent — a heatmap as a declaration.
+
+    The spatial sibling of `Series`, and it exists for the same reason.
+    Every cell in the extent is present whether or not anything happened in it,
+    and fill is decided per measure, so a quiet cell is a zero count and an
+    undefined average rather than a hole in the map or a plunge to the floor.
+
+    ```python
+    heat = (
+        Cells(Sighting)
+            .where(Sighting.species == Param("species"))
+            .measure(seen=count(), mean_weight=avg(Sighting.weight_kg))
+            .over(Sighting.lat, Sighting.lon, metres=10_000, extent=reserve)
+    )
+    ```
+
+    The lattice is a declaration-time fact, so the number of cells a request
+    will produce is knowable before it runs — which is what lets the ceiling be
+    enforced where a reviewer reads it rather than after the database has done
+    the work.
+    """
+
+    __slots__ = ()
+
+    def __init__(self, model: type, *, _state: _Declaration | None = None) -> None:
+        self._d = _state if _state is not None else _Declaration(model=model)
+
+    def _with(self, **changes: Any) -> Cells:
+        return Cells(self._d.model, _state=replace_declaration(self._d, **changes))
+
+    @property
+    def grid(self) -> Any:
+        """The lattice this declaration buckets onto, or `None` before `over`."""
+        return None if self._d.cell is None else self._d.cell.grid
+
+    def over(
+        self,
+        lat: Any,
+        lon: Any,
+        *,
+        metres: float,
+        extent: Any,
+        limit: int = DEFAULT_CELL_LIMIT,
+    ) -> Cells:
+        """Bucket onto a lattice of `metres` cells covering `extent`.
+
+        The ceiling is declared rather than passed per request, for the same
+        reason `by(limit=)` is: it lives where it is reviewed instead of in a
+        query parameter a client can set to a million. It is checked here, not
+        at run time, because `rows * columns` is arithmetic on the extent.
+        """
+        for name, column in (("lat", lat), ("lon", lon)):
+            if not isinstance(column, ColumnExpr):
+                raise SeriesError(
+                    f"over({name}=...) takes a model column such as "
+                    f"Sighting.{name}, got {column!r}"
+                )
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise SeriesError(f"over(limit=) must be a positive integer, got {limit!r}")
+        lattice = _grid(extent, metres=metres)
+        if lattice.count > limit:
+            raise SeriesError(
+                f"this extent at {lattice.metres:g} m is {lattice.rows}x"
+                f"{lattice.columns} = {lattice.count} cells, past the {limit} "
+                f"ceiling. Every cell is a row on the wire whether or not "
+                f"anything is in it, so widen the cells, narrow the extent, or "
+                f"raise the ceiling in the declaration with over(..., limit=N)"
+            )
+        return self._with(cell=_CellAxis(lat=lat, lon=lon, grid=lattice))
+
+    async def run(self, session: Any, **values: Any) -> CellsResult:
+        """Run this declaration on `session` and assemble every cell."""
+        if not self._d.measures:
+            raise SeriesError("this view declares no measures; there is nothing to compute")
+        if self._d.cell is None:
+            raise SeriesError(
+                "this view declares no spatial axis; call over(lat, lon, "
+                "metres=..., extent=...)"
+            )
+        predicates = self._bind(values)
+        sql, args, _oids = compile_cells(session.registry, self, predicates)
+        rows = await session.declared(sql, args)
+        lattice = self._d.cell.grid
+        return CellsResult(
+            cells=tuple(
+                Cell(
+                    row=row,
+                    column=column,
+                    bounds=lattice.cell(row, column),
+                    centre=lattice.centre(row, column),
+                    values=found,
+                )
+                for row, column, found in cell_rows(self, rows)
+            ),
+            measures=tuple(name for name, _measure in self._d.measures),
+            grid=lattice,
+        )
+
+    def __repr__(self) -> str:
+        lattice = self.grid
+        shape = "-" if lattice is None else f"{lattice.rows}x{lattice.columns}"
+        return (
+            f"<Cells {self._d.model.__name__} "
+            f"measures={len(self._d.measures)} grid={shape}>"
         )
 
 

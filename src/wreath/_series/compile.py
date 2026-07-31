@@ -44,6 +44,10 @@ _ONE_TICK = "interval '1 microsecond'"
 CURRENT = "current"
 PREVIOUS = "previous"
 
+#: `float8`. The extent's edges bind as this so PostgreSQL compares them to a
+#: declared latitude or longitude column without an inferred cast.
+_FLOAT8_OID = 701
+
 
 def _column_sql(expression: Any, aliases: dict[tuple[Any, ...], str]) -> str:
     """A column reference, qualified by whichever alias holds it.
@@ -142,6 +146,13 @@ def _plan(
     reached: list[Any] = list(predicates)
     if declaration.group is not None:
         reached.append(declaration.group)
+    cell = getattr(declaration, "cell", None)
+    if cell is not None:
+        # The spatial axis joins through the same planner as everything else,
+        # so a latitude on a to-one relation costs the join it needs and a
+        # to-many one is refused with the message the ORM already gives.
+        reached.append(cell.lat)
+        reached.append(cell.lon)
     for _name, measure in declaration.measures:
         if measure.column is not None:
             reached.append(measure.column)
@@ -180,6 +191,99 @@ def compile_aggregate(
         builder.text(" ORDER BY 2 DESC NULLS LAST, 1 ASC")
         builder.text(f" LIMIT {builder.bind(declaration.limit + 1, _INT8_OID)}")
     return builder.sql(), tuple(builder.values), tuple(builder.oids)
+
+
+def compile_cells(
+    registry: Any, declaration: Any, predicates: tuple[Any, ...]
+) -> tuple[str, tuple[Any, ...], tuple[int, ...]]:
+    """Every cell of the declared lattice, whether or not anything is in it.
+
+    The spatial twin of `compile_series`, and deliberately the same
+    four-part shape: an aggregate grouped by cell index, a spine that generates
+    the whole lattice, and a `LEFT JOIN` so an empty cell arrives as a row of
+    nulls rather than as an absence the caller has to notice. A heatmap with
+    missing cells lies about a gap in exactly the way a line chart with missing
+    days does.
+
+    The spine is two `generate_series` calls crossed, because a lattice is a
+    product of two dense axes -- the same reason the temporal spine is one.
+
+    **Cell assignment mirrors `Grid.index_of` deliberately.** The window is
+    inclusive at both edges, matching `BoundingBox.contains`, and the
+    computed index is clamped into range -- so a point sitting exactly on the
+    extent's far edge belongs to the edge cell here and in Python both. Two
+    spellings of one rule is how they drift apart, so
+    `test_sql_cell_assignment_matches_index_of` pins them together against a
+    live server.
+    """
+    spec, joins, aliases = _plan(registry, declaration, predicates)
+    cell = declaration.cell
+    lattice = cell.grid
+    lat_sql = _column_sql(cell.lat, aliases)
+    lon_sql = _column_sql(cell.lon, aliases)
+    builder = SqlBuilder()
+
+    builder.text(f"WITH {quote('agg')} AS (SELECT ")
+    lat_origin = builder.bind(lattice.extent.lat_min, _FLOAT8_OID)
+    lat_step = builder.bind(lattice.lat_step, _FLOAT8_OID)
+    top_row = builder.bind(lattice.rows - 1, _INT8_OID)
+    builder.text(
+        f"LEAST(GREATEST(FLOOR(({lat_sql} - {lat_origin}) / {lat_step})::int8, 0), "
+        f"{top_row}) AS {quote('cy')}, "
+    )
+    lon_origin = builder.bind(lattice.extent.lon_min, _FLOAT8_OID)
+    lon_step = builder.bind(lattice.lon_step, _FLOAT8_OID)
+    top_column = builder.bind(lattice.columns - 1, _INT8_OID)
+    builder.text(
+        f"LEAST(GREATEST(FLOOR(({lon_sql} - {lon_origin}) / {lon_step})::int8, 0), "
+        f"{top_column}) AS {quote('cx')}"
+    )
+    for index, (_name, measure) in enumerate(declaration.measures):
+        builder.text(f", {_measure_sql(measure, aliases)} AS {quote(f'm{index}')}")
+    _from_clause(builder, spec, joins)
+    _where(builder, predicates, aliases)
+    builder.text(" AND " if predicates else " WHERE ")
+    builder.text(_extent(builder, lat_sql, lon_sql, lattice.extent))
+    builder.text(" GROUP BY 1, 2), ")
+
+    rows_bind = builder.bind(lattice.rows - 1, _INT8_OID)
+    columns_bind = builder.bind(lattice.columns - 1, _INT8_OID)
+    builder.text(
+        f"{quote('spine')} AS (SELECT {quote('gy')}.{quote('cy')} AS {quote('cy')}, "
+        f"{quote('gx')}.{quote('cx')} AS {quote('cx')} "
+        f"FROM generate_series(0::int8, {rows_bind}) AS {quote('gy')}({quote('cy')}) "
+        f"CROSS JOIN generate_series(0::int8, {columns_bind}) "
+        f"AS {quote('gx')}({quote('cx')})) "
+    )
+
+    builder.text(f"SELECT {quote('s')}.{quote('cy')}, {quote('s')}.{quote('cx')}")
+    for index in range(len(declaration.measures)):
+        builder.text(f", {quote('a')}.{quote(f'm{index}')}")
+    builder.text(
+        f" FROM {quote('spine')} AS {quote('s')} LEFT JOIN {quote('agg')} AS {quote('a')} "
+        f"ON {quote('a')}.{quote('cy')} = {quote('s')}.{quote('cy')} "
+        f"AND {quote('a')}.{quote('cx')} = {quote('s')}.{quote('cx')} "
+        f"ORDER BY 1, 2"
+    )
+    return builder.sql(), tuple(builder.values), tuple(builder.oids)
+
+
+def _extent(builder: SqlBuilder, lat_sql: str, lon_sql: str, extent: Any) -> str:
+    """A point inside the declared extent, on the same rule as `contains`.
+
+    Inclusive at both edges rather than half-open. A time axis is half-open
+    because instants are dense and a bucket boundary belongs to exactly one
+    bucket; an extent is a region a reader drew, and a sighting exactly on its
+    northern edge is inside the region they asked about.
+    """
+    lat_low = builder.bind(extent.lat_min, _FLOAT8_OID)
+    lat_high = builder.bind(extent.lat_max, _FLOAT8_OID)
+    lon_low = builder.bind(extent.lon_min, _FLOAT8_OID)
+    lon_high = builder.bind(extent.lon_max, _FLOAT8_OID)
+    return (
+        f"({lat_sql} >= {lat_low} AND {lat_sql} <= {lat_high} "
+        f"AND {lon_sql} >= {lon_low} AND {lon_sql} <= {lon_high})"
+    )
 
 
 def compile_series(
