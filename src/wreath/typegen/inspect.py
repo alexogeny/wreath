@@ -395,6 +395,21 @@ def _is_wreath_model(annotation: Any) -> bool:
     return getattr(annotation, "__wreath_table__", None) is not None
 
 
+def _operation_behaviours(app: Any, definition: Any, method: str) -> tuple[str, ...]:
+    """The behaviours the tape declares for this operation, in stable order.
+
+    Asked of the same collector `generate_openapi` uses, so a generated client
+    and the document it was generated beside cannot disagree about which
+    operations honour an `Idempotency-Key`.
+    """
+    from ..openapi import _collect_contracts
+
+    contracts = _collect_contracts(app, definition, method)
+    return tuple(
+        sorted({name for contract in contracts for name in contract.behaviours})
+    )
+
+
 def build_api_model(
     app: Any,
     *,
@@ -444,6 +459,7 @@ def build_api_model(
                     tags=tuple(definition.tags),
                     summary=definition.summary,
                     description=doc or None,
+                    behaviours=_operation_behaviours(app, definition, method),
                 )
             )
 

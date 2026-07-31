@@ -30,6 +30,8 @@ class TypegenOptions:
     factory: bool = False
     title: str = "Wreath"
     version: str = "0.1.0"
+    #: Python target only: the name of the generated `ServiceClient` subclass.
+    class_name: str = "GeneratedServiceClient"
 
 
 class TypegenCliError(Exception):
@@ -38,9 +40,18 @@ class TypegenCliError(Exception):
         self.exit_code = exit_code
 
 
+#: Targets this CLI can emit. Named here so an unknown one is refused with the
+#: list rather than a bare "unknown target".
+TARGETS = ("typescript", "python")
+
+
 def _generate(app: object, options: TypegenOptions) -> dict[str, str]:
-    if options.target != "typescript":
-        raise TypegenCliError(f"unknown typegen target {options.target!r}", exit_code=2)
+    if options.target not in TARGETS:
+        raise TypegenCliError(
+            f"unknown typegen target {options.target!r}; "
+            f"known targets are {', '.join(TARGETS)}",
+            exit_code=2,
+        )
     try:
         api = build_api_model(
             app,
@@ -50,6 +61,16 @@ def _generate(app: object, options: TypegenOptions) -> dict[str, str]:
         )
     except TypegenError as error:
         raise TypegenCliError(str(error)) from error
+    if options.target == "python":
+        from ..openapi import generate_openapi
+        from .targets.python import render_python
+
+        # The digest pins the *document*, not the model, because the document
+        # is what `compare_openapi` reasons about.
+        document = generate_openapi(app, title=options.title, version=options.version)
+        return render_python(
+            api, document=document, class_name=options.class_name
+        )
     return render_typescript(
         api,
         react_query=options.react_query,
