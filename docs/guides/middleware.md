@@ -163,4 +163,53 @@ otherwise be made as if the connection were insecure. The
 [Deploy behind a proxy](../cookbook/recipes/behind-a-proxy.md) recipe shows the
 full setup.
 
+## What the tape tells the document
+
+Your application already knows it rate-limits, that it reads an
+`Idempotency-Key`, that it emits a `Cache-Control`. Until a middleware says so,
+none of that reaches your OpenAPI document, and so none of it reaches the client
+you generate from it — every consumer learns it from prose, and the prose stops
+being true the day you change the tape.
+
+A middleware says so by answering `describe()`:
+
+```python
+from wreath.middleware.base import HeaderSpec, MiddlewareContract
+
+class SignedRequestMiddleware:
+    async def before(self, request): ...
+
+    def describe(self) -> MiddlewareContract:
+        return MiddlewareContract(
+            request_headers=(HeaderSpec("X-Signature", required=True),),
+            methods=frozenset({"POST", "PUT", "PATCH", "DELETE"}),
+        )
+```
+
+`generate_openapi` collects these by *asking* every middleware on a route's
+tape, the same way `schema_components()` asks for `component()`. There is no
+registry to keep in step: a middleware that offers nothing contributes nothing,
+which is what every middleware did before this existed.
+
+Three properties make the result trustworthy enough to generate a client from.
+
+**A contract describes the instance, not the class.** A
+`RateLimitMiddleware(limit=60, window=60.0)` documents `RateLimit-Policy:
+60;w=60`, because `describe()` reads the very tuple the refusal path appends. A
+`ServerTimingMiddleware(emit_header=False)` documents no header at all. The
+document and the wire cannot drift, because there is only one copy of the value.
+
+**Scope is honest.** Global middleware wraps every request, so it decorates
+every operation. Route middleware is filtered by the same `applies_to` predicate
+the tape itself evaluates, so a limiter you mounted on one router never appears
+on a route outside it. This is not fussiness: a document claiming a `429` on an
+operation that cannot answer one teaches a generated client to retry a permanent
+failure.
+
+**A route's own declaration wins.** A route that documents its own `429` keeps
+its wording; the middleware fills in only what the route left unsaid.
+
+Because `describe()` runs at startup and never per request, none of this costs a
+request anything — `wreath-request-trace` records no added boundary crossing.
+
 **Reference:** [`wreath.middleware`](../reference/middleware.md).

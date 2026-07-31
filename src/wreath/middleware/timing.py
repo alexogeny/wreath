@@ -96,6 +96,32 @@ class ServerTimingMiddleware:
         self._metric = metric.encode("ascii")
         self._emit = emit_header
 
+    def describe(self) -> Any:
+        """`Server-Timing`, and only when this instance was told to emit it.
+
+        Built with `emit_header=False` the middleware still times the request
+        for `request.state`, but the client never sees anything -- so the
+        contract is empty, not a header nobody sends.
+        """
+        from .base import HeaderSpec, MiddlewareContract
+
+        if not self._emit:
+            return MiddlewareContract()
+        return MiddlewareContract(
+            response_headers=(
+                (
+                    None,
+                    HeaderSpec(
+                        "Server-Timing",
+                        description=(
+                            f"Server-side duration as the `{self._metric.decode('ascii')}` "
+                            "metric, in milliseconds."
+                        ),
+                    ),
+                ),
+            ),
+        )
+
     def before_sync(self, request: Request) -> None:
         """Start the timer for this request."""
         request.state.__setattr__(_STATE_START, time.perf_counter())

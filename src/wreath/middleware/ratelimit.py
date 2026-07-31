@@ -495,6 +495,67 @@ class RateLimitMiddleware:
     #: to let a request past deliberately.
     UNKEYED = "\x00unkeyed"
 
+    def describe(self) -> Any:
+        """The 429 this limiter can answer, and the headers it puts on it.
+
+        Derived from `self._policy_headers` -- the same tuple `_limited`
+        appends to the refusal -- so the document cannot drift from the wire.
+        A second format string here would be a second source of truth, and the
+        two would agree only until someone changed one of them.
+        """
+        from ..openapi import ResponseSpec
+        from .base import HeaderSpec, MiddlewareContract
+
+        policy = {
+            name.decode("ascii"): value.decode("ascii")
+            for name, value in self._policy_headers
+        }
+        return MiddlewareContract(
+            responses=(
+                (
+                    429,
+                    ResponseSpec(
+                        description="Rate limit exceeded",
+                        media_type="application/problem+json",
+                    ),
+                ),
+            ),
+            response_headers=(
+                (
+                    429,
+                    HeaderSpec(
+                        "Retry-After",
+                        description="Whole seconds to wait before retrying; never 0.",
+                    ),
+                ),
+                (
+                    429,
+                    HeaderSpec(
+                        "X-RateLimit-Limit",
+                        description="Requests permitted per window.",
+                        const=policy.get("x-ratelimit-limit"),
+                    ),
+                ),
+                (
+                    429,
+                    HeaderSpec(
+                        "RateLimit-Policy",
+                        description="The configured policy, as limit;w=window.",
+                        const=policy.get("ratelimit-policy"),
+                    ),
+                ),
+                (
+                    429,
+                    HeaderSpec(
+                        "X-RateLimit-Remaining",
+                        description="Always 0 on a refusal.",
+                        const="0",
+                    ),
+                ),
+            ),
+            behaviours=frozenset({"retry-after"}),
+        )
+
     def _identify(self, request: Request) -> str | None:
         if self._exempt is not None and self._exempt(request):
             return None

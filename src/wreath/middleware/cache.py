@@ -40,6 +40,38 @@ class CacheControlMiddleware:
         self.default = default
         self.policy = policy
 
+    def describe(self):
+        """The `Cache-Control` floor, with its value when configuration fixes it.
+
+        A `policy` chooses per response, so the value is only a constant when
+        `default` alone is in play. Documenting a const that a policy can
+        override would be a claim this middleware cannot keep.
+        """
+        from .base import HeaderSpec, MiddlewareContract
+
+        fixed = (
+            self.default.to_header().decode("latin-1")
+            if self.default is not None and self.policy is None
+            else None
+        )
+        if self.default is None and self.policy is None:
+            return MiddlewareContract()
+        return MiddlewareContract(
+            response_headers=(
+                (
+                    None,
+                    HeaderSpec(
+                        "Cache-Control",
+                        description=(
+                            "Default cache policy, applied only when the response "
+                            "does not already carry one."
+                        ),
+                        const=fixed,
+                    ),
+                ),
+            ),
+        )
+
     async def after(self, request: Request, response):
         """Append the selected `Cache-Control` header, or return the response as is."""
         headers = response.headers

@@ -158,6 +158,40 @@ class CompressionMiddleware:
         self.compress_streaming = compress_streaming
         self.compress_authenticated = compress_authenticated
 
+    def describe(self):
+        """What negotiation this middleware takes part in.
+
+        No `const` on `Content-Encoding`: which codec is chosen depends on the
+        request's `Accept-Encoding` and on the body, so a fixed value would be
+        a guess. The header's presence is the contract; its value is not.
+        """
+        from .base import HeaderSpec, MiddlewareContract
+
+        return MiddlewareContract(
+            request_headers=(
+                HeaderSpec(
+                    "Accept-Encoding",
+                    description="Codecs the client accepts; `zstd` and `gzip` are served.",
+                ),
+            ),
+            response_headers=(
+                (
+                    None,
+                    HeaderSpec(
+                        "Content-Encoding",
+                        description="Present when the body was compressed.",
+                    ),
+                ),
+                (
+                    None,
+                    HeaderSpec(
+                        "Vary",
+                        description="Includes `Accept-Encoding` once this middleware ran.",
+                    ),
+                ),
+            ),
+        )
+
     async def after(self, request: Request, response):
         """Compress the response when every eligibility condition holds.
 

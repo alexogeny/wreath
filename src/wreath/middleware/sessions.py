@@ -174,6 +174,25 @@ class SessionMiddleware:
 
     # --- signing -------------------------------------------------------------
 
+    def describe(self):
+        """The session cookie, named as this instance configured it."""
+        from .base import HeaderSpec, MiddlewareContract
+
+        return MiddlewareContract(
+            response_headers=(
+                (
+                    None,
+                    HeaderSpec(
+                        "Set-Cookie",
+                        description=(
+                            f"The `{self._cookie}` session cookie, when the "
+                            "session changed during this request."
+                        ),
+                    ),
+                ),
+            ),
+        )
+
     def _sign(self, payload: bytes, issued_at: int) -> str:
         body = base64.urlsafe_b64encode(payload).rstrip(b"=")
         stamp = str(issued_at).encode("ascii")
