@@ -137,7 +137,9 @@
         "tests/test_protobuf.py",
         "tests/test_protobuf_structures.py",
         "tests/test_protobuf_plan.py",
-        "tests/test_protobuf_parity.py"
+        "tests/test_protobuf_parity.py",
+        "tests/test_negotiation_protobuf.py",
+        "tests/test_protobuf_is_message.py"
       ],
       "decisions": [
         "docs/decisions/0007-native-code-owns-no-process-global-state.md",
@@ -247,7 +249,9 @@
         "tests/test_typegen.py",
         "tests/test_typegen_cli.py",
         "tests/typegen/",
-        "tests/test_typegen_python_target.py"
+        "tests/test_typegen_python_target.py",
+        "tests/test_typegen_proto_target.py",
+        "tests/test_typegen_contract_gate.py"
       ],
       "policy": "Python owns annotation analysis; renderers consume prevalidated tuples and are byte-identical pure/native; generation adds no request-time work; the native renderer is benchmark-gated and currently not justified. OpenAPI refuses unsupported annotations instead of publishing an empty schema. Field metadata, query bounds, primary/additional responses, deprecation, visibility and explicitly registered security schemes render from the same route image. compare_openapi reports stable breaking request/response changes. Docs endpoints are opt-in via enable_docs()."
     },
@@ -539,7 +543,8 @@
       ],
       "tests": [
         "tests/series/",
-        "tests/postgres/test_series_integration.py"
+        "tests/postgres/test_series_integration.py",
+        "tests/postgres/test_cells_integration.py"
       ],
       "policy": "Chart data as a declaration over one source model, with a bounded result. Bucketing is a timezone problem before it is an aggregation problem: the bucket is assigned and the spine generated on the local wall clock, then converted back, because generate_series stepping naive timestamps advances a calendar day while stepping timestamptz advances exactly 24 hours -- the DST bug, twice a year, in one bucket. Ranges are half-open and stated once, for the filter and the spine bounds alike. Fill is per measure: count and sum fill with 0, avg/min/max stay null, because an average of no rows is undefined and drawing it as zero reads as a collapse rather than an absence. A series is identified by a stable key from the grouping value, never by rank, so a filter change cannot repaint a legend. Multiple measures are multiple named series and are never merged -- two units on one pair of axes is a dual-axis chart, whose alignment is arbitrary. Top-N folds (it preserves the total) and the fold is applied before aggregation, so the remainder's average is a real average and not an average of averages; every other ceiling refuses rather than truncating. Not plan-cached, following compile_count: a declaration runs once per chart request, not once per row. Bucket vocabulary lives in wreath.temporal because sealing will need end_of() too."
     },
@@ -676,6 +681,31 @@
         "tests/storage/"
       ],
       "policy": "Blob/object storage: the `ObjectStore` protocol with `MemoryObjectStore` (the dev/test twin), a symlink-safe `LocalObjectStore` on the same `openat` containment as static files, and `S3ObjectStore` over `http_client` signed with zero-dependency SigV4. `normalize_key` is the single containment gate for every backend -- a key is validated there, not per backend. Named `objects` because \"store\" meant two unrelated things: this, and the small keyed tables behind rate limiting, idempotency, and sessions (`wreath.store`). `src/wreath/storage.py` is a deprecating alias that re-exports the old names (`Storage`/`S3Storage`/`StoragePath`/`StorageError`) and warns; it exists so the rename cannot break an existing import, and is removable once callers have moved."
+    },
+    {
+      "name": "grpc",
+      "capability": "Serve gRPC methods over the native HTTP/2 server, declared as routes so one authorization vocabulary covers REST and gRPC alike",
+      "replaces": [
+        "grpcio",
+        "grpclib"
+      ],
+      "guides": [
+        "docs/guides/grpc.md"
+      ],
+      "reference": [
+        "docs/reference/grpc.md"
+      ],
+      "sources": [
+        "src/wreath/grpc.py"
+      ],
+      "tests": [
+        "tests/test_grpc.py",
+        "tests/test_grpc_interop.py"
+      ],
+      "policy": "A gRPC method is a *route*, registered as `POST /{service}/{method}` on an ordinary `Router`. That is not a convenience: it is what makes `@roles`, `@authorize`, `permissions=` and `dependencies=` mean the same thing here as on a REST route, enforced by the same tape and read by `permissions_router` and `wreath mutant` from the same place -- there is no second authorization model to drift. The route registers a *wrapper* around the user's function, so `GrpcService.router` copies the `AuthRequirement` the auth decorators recorded on their function onto the wrapper; without that copy a `@roles` on a gRPC method would read as enforcement and enforce nothing, which is precisely the unwatched control the mutation tester exists to find. `_GrpcResponse` subclasses `StreamingResponse` because the application's return-value coercion is a closed isinstance check over four response types -- duck-typing `__call__(send)` is not enough -- and inheriting also picks up the deferred-cleanup contract that releases a borrowed database connection. It drives `http.response.start(trailers=True)`, bodies, then `http.response.trailers` itself, which is the only path to the ASGI trailers extension: the native HTTP/2 server implements it in C and nothing else in `wreath.response` ever sends those messages. The HTTP status is always 200, including for a refusal, because in gRPC the transport succeeded whenever the server was reached and the outcome is the `grpc-status` trailer; a handler that fails after its first message is already on the wire reports its status there rather than re-raising, since re-raising aborts the stream with no status and a client reads that as an unexplained transport error instead of the refusal it was. An unrecognised exception maps to UNKNOWN and never to UNAVAILABLE or ABORTED, both of which tell a client to retry. The four-byte length prefix is attacker-controlled and is checked against `max_message_bytes` before anything is allocated. Two transport constraints come from the server and not from here: gRPC needs response trailers, which only wreath's own server emits, and wreath negotiates h2 through ALPN and never sniffs the first application bytes, so prior-knowledge h2c is unavailable and gRPC requires TLS. **ASGI offers no way to learn at startup which protocols the server will speak**, so the refusal for a foreign server is the first thing every call does rather than a startup check. Server reflection is not built and is coupled to `wreath.protobuf` deliberately not building descriptors; a gRPC *client* is not built because `http_client` has no HTTP/2 at all.",
+      "decisions": [
+        "docs/decisions/0002-no-mandatory-runtime-dependencies.md"
+      ]
     },
     {
       "name": "mcp",
@@ -858,6 +888,7 @@
         "src/wreath/_replay_adapters.py",
         "src/wreath/_replay_plan.py",
         "src/wreath/_otlp.py",
+        "src/wreath/_otlp_proto.py",
         "src/wreath/_prometheus.py",
         "src/wreath/_statsd.py",
         "src/wreath/_cloudwatch_emf.py",
@@ -876,6 +907,7 @@
         "tests/test_flight_projector.py",
         "tests/test_flight_inspector.py",
         "tests/test_flight_otlp.py",
+        "tests/test_otlp_protobuf.py",
         "tests/test_flight_recording.py",
         "tests/test_replay.py",
         "tests/test_replay_faults.py",
@@ -1067,7 +1099,8 @@
       ],
       "tests": [
         "tests/test_temporal.py",
-        "tests/test_temporal_surfaces.py"
+        "tests/test_temporal_surfaces.py",
+        "tests/test_temporal_protobuf.py"
       ],
       "policy": "An `Instant` is always aware; a naive value is refused, never assumed UTC -- that assumption is the bug the module exists to prevent. Dependency-free over stdlib datetime/zoneinfo, because the core cannot take arrow and those are the applications being ported. One declaration settles every surface: ORM column, binding coercion, REST JSON, OpenAPI format, typegen alias, GraphQL scalar -- they used to be five places that drifted. Temporal JSON encoding is a *retry* in the `_json` facade (encode as-is; only a TypeError triggers rewrite-and-retry), never a pre-pass, so a payload with no timestamps pays one un-raised try and the ordinary response path is untouched. Body validation is deliberately NOT wired: it has a byte-for-byte C twin in `_native/validate.c`, and a silent divergence there is worse than the gap. The relative formatter is the single locale-keyed seam, so i18n is a table entry rather than a migration. ISO durations reject years/months: neither is a fixed number of seconds and a timedelta cannot hold one honestly."
     },
@@ -1092,7 +1125,13 @@
       "tests": [
         "tests/test_geospatial.py",
         "tests/test_geospatial_bounds.py",
-        "tests/test_geospatial_parity.py"
+        "tests/test_geospatial_parity.py",
+        "tests/test_geospatial_grid.py",
+        "tests/test_geospatial_orm.py",
+        "tests/orm/test_geospatial_queries.py",
+        "tests/orm/test_geospatial_live.py",
+        "tests/orm/test_geospatial_codec_parity.py",
+        "tests/test_geospatial_surfaces.py"
       ],
       "policy": "A `Coordinate` is keyword-only and a bare pair is refused, for the reason `wreath.temporal` refuses a naive datetime: GeoJSON orders [lon, lat], humans say 'lat, lon', and a positional pair silently picks one -- the symptom is not an exception, it is a wrong place. Bounds are inclusive, since the poles and the antimeridian are real coordinates. Distance is haversine on the IUGG mean-radius sphere (6_371_008.8 m), not an ellipsoid: the guide states the ~0.5% modelling error rather than implying exactness, because a fleet billing by distance will care. The law of cosines is deliberately not used -- `acos` of a value within an ulp of 1 loses every significant figure, and consecutive GPS fixes are the common case. A proximity search is a bounding box an index can answer ANDed with the exact filter, never a bare distance comparison, in the same discipline vector search already enforces. `bounding_boxes` returns TWO boxes across the antimeridian (no comparison operator understands a wrapped edge) and widens to every longitude at a pole; both are answered rather than refused, because a fleet on the date line and a station near a pole are ordinary. The native/pure twins are held to a stated tolerance rather than byte-for-byte, unlike the codec twins: libm transcendentals are not required to be correctly rounded, so bit equality would fail on another platform's libm for no defect. Tier 1 needs no extension; PostGIS is the opt-in tier in the pgvector shape and is not yet built.",
       "decisions": [
