@@ -78,11 +78,19 @@ from ._flight_markers import PH_DI_CONSTRUCT as _PH_DI_CONSTRUCT
 from ._flight_markers import phase_marker as _phase_marker
 from ._json import loads as _json_loads
 from ._native import _core
+
+if _core is not None and hasattr(_core, "b64encode"):
+    _b64encode_str = _core.b64encode
+else:
+    def _b64encode_str(value: bytes) -> str:
+        return base64.b64encode(value).decode("ascii")
 from .exceptions import BadRequest
 from .request import Request
 from .temporal import Instant, TemporalError
 
-Handler = Callable[..., Awaitable[Any]]
+#: Mirrors `_routing.Handler`: a route handler may be `def` as well as
+#: `async def`, so what it returns is awaited only when it is awaitable.
+Handler = Callable[..., Awaitable[Any] | Any]
 
 _MISSING = dataclasses.MISSING
 _NONE_TYPE = type(None)
@@ -611,7 +619,7 @@ def _jsonable(annotation: Any, value: Any) -> Any:
     if isinstance(value, Decimal):
         return str(value)
     if isinstance(value, bytes):
-        return base64.b64encode(value).decode("ascii")
+        return _b64encode_str(value)
     if isinstance(value, (_datetime.datetime, _datetime.date, _datetime.time)):
         return value.isoformat()
     origin = typing.get_origin(annotation)
@@ -623,6 +631,294 @@ def _jsonable(annotation: Any, value: Any) -> Any:
         item_type = args[1] if origin is dict and len(args) == 2 else Any
         return {key: _jsonable(item_type, item) for key, item in value.items()}
     return value
+
+
+#: Error path every response check reports under, built once rather than per
+#: response.
+_RESPONSE_LOC = ("response",)
+
+
+def _identity(value: Any) -> Any:
+    return value
+
+
+#: Types that are already JSON primitives and cannot be anything else.
+#:
+#: Tested with `type(value) in`, never `isinstance`, and that is the whole
+#: point: `class Color(str, Enum)` *is* a `str`, and `_jsonable` must still
+#: reduce it to `value.value`. An exact-type test lets the plain scalars --
+#: which is nearly every leaf of nearly every response -- leave before the
+#: six-branch `isinstance` ladder, while every subclass falls into it.
+_JSON_SCALARS = frozenset({str, int, float, bool, type(None)})
+
+
+def _jsonable_any(value: Any) -> Any:
+    """`_jsonable(Any, value)`, with the annotation walk removed.
+
+    `Any` is where every compiled walk bottoms out -- an unparameterized
+    container's item type, a union arm's fallback, a dataclass field declared
+    `Any`. Compiling it like the rest would recurse forever (its item type is
+    `Any` again), so it is written once, closed over itself.
+    """
+    if type(value) in _JSON_SCALARS:
+        return value
+    if isinstance(value, enum.Enum):
+        return value.value
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, bytes):
+        return _b64encode_str(value)
+    if isinstance(value, (_datetime.datetime, _datetime.date, _datetime.time)):
+        return value.isoformat()
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [
+            item if type(item) in _JSON_SCALARS else _jsonable_any(item)
+            for item in value
+        ]
+    if isinstance(value, Mapping):
+        return {
+            key: (item if type(item) in _JSON_SCALARS else _jsonable_any(item))
+            for key, item in value.items()
+        }
+    return value
+
+
+def _compile_response_input(
+    annotation: Any, seen: frozenset[Any] = frozenset()
+) -> Callable[[Any], Any]:
+    """Compile `_response_input`'s annotation walk once, at route-compile time.
+
+    `_response_input` reads the annotation and the value together, so it pays
+    `typing.get_origin`, `typing.get_args` and `_field_annotation` at every node
+    of the annotation on every single response. None of that can differ between
+    responses: the annotation is fixed when the route compiles.
+
+    So the walk happens here instead, and what comes back is a closure that
+    descends only the *value*. `_response_input` stays as the definition the
+    compiled form is crossed against -- see
+    `tests/test_binding_response_compilation.py`.
+    """
+    annotation, _field = _field_annotation(annotation)
+    if dataclasses.is_dataclass(annotation):
+        if annotation in seen:
+            # Self-referential: the walk cannot be finite. Interpret this node
+            # and let the compiled parents keep their gain.
+            return lambda value, _a=annotation: _response_input(_a, value)
+        child_seen = seen | {annotation}
+        fields = tuple(
+            (wire_name, _compile_response_input(field_annotation, child_seen))
+            for _name, wire_name, field_annotation, _required in _dataclass_wire_spec(
+                annotation
+            )
+        )
+
+        def project_dataclass(value: Any, _cls: Any = annotation, _fields: Any = fields) -> Any:
+            if isinstance(value, _cls) or not isinstance(value, Mapping):
+                return value
+            return {
+                wire_name: project(value[wire_name])
+                for wire_name, project in _fields
+                if wire_name in value
+            }
+
+        return project_dataclass
+
+    origin = typing.get_origin(annotation)
+    args = typing.get_args(annotation)
+    if origin in (list, set, frozenset):
+        item = _compile_response_input(args[0] if args else Any, seen)
+
+        def project_sequence(value: Any, _item: Any = item) -> Any:
+            if isinstance(value, (list, tuple, set, frozenset)):
+                return [_item(entry) for entry in value]
+            return value
+
+        return project_sequence
+    if origin is tuple:
+        if len(args) == 2 and args[1] is Ellipsis:
+            item = _compile_response_input(args[0], seen)
+
+            def project_variadic_tuple(value: Any, _item: Any = item) -> Any:
+                if isinstance(value, (list, tuple)):
+                    return [_item(entry) for entry in value]
+                return value
+
+            return project_variadic_tuple
+        items = tuple(_compile_response_input(arg, seen) for arg in args)
+
+        def project_tuple(value: Any, _items: Any = items) -> Any:
+            if isinstance(value, (list, tuple)):
+                return [
+                    item(entry) for item, entry in zip(_items, value, strict=False)
+                ]
+            return value
+
+        return project_tuple
+    if origin is dict:
+        item = _compile_response_input(args[1] if len(args) == 2 else Any, seen)
+
+        def project_mapping(value: Any, _item: Any = item) -> Any:
+            if isinstance(value, Mapping):
+                return {key: _item(entry) for key, entry in value.items()}
+            return value
+
+        return project_mapping
+    return _identity
+
+
+def _projection_is_identity(annotation: Any, seen: frozenset[Any] = frozenset()) -> bool:
+    """Whether `_response_input` provably returns its input for every value.
+
+    The projection does exactly two things: it filters a mapping down to a
+    dataclass's declared wire names, and it rebuilds containers. So it can only
+    change a value when the annotation tree holds a dataclass -- something to
+    filter -- or a sequence origin, which turns a `tuple` or `set` input into a
+    `list` on the way out.
+
+    `dict[str, Any]` is neither, and it is the shape an idiomatic JSON handler
+    returns. Recognizing it here removes a walk that allocated a new mapping
+    with the same contents and handed it straight to the validator.
+
+    Deliberately conservative: `list[int]` is *usually* identity too, but only
+    when the handler already returned a list, and a compiler cannot know that.
+    Answering `True` there would change what the validator is handed.
+    """
+    annotation, _field = _field_annotation(annotation)
+    if annotation in seen:
+        return False
+    if dataclasses.is_dataclass(annotation):
+        return False
+    origin = typing.get_origin(annotation)
+    if origin in (list, set, frozenset, tuple):
+        return False
+    args = typing.get_args(annotation)
+    if origin is dict:
+        return len(args) != 2 or _projection_is_identity(args[1], seen | {annotation})
+    if args:
+        child = seen | {annotation}
+        return all(_projection_is_identity(arg, child) for arg in args)
+    return True
+
+
+def _compile_jsonable(
+    annotation: Any, seen: frozenset[Any] = frozenset()
+) -> Callable[[Any], Any]:
+    """Compile `_jsonable`'s annotation walk once, at route-compile time.
+
+    The same hoist as `_compile_response_input`, and the same contract: the
+    returned closure dispatches on the *value's* runtime type exactly as
+    `_jsonable` does -- a `UUID` inside a `list[Any]` still stringifies -- and
+    consults the annotation only for what the compiler already resolved.
+    """
+    annotation, _field = _field_annotation(annotation)
+    if annotation is Any or annotation is object or annotation is inspect.Parameter.empty:
+        return _jsonable_any
+    if dataclasses.is_dataclass(annotation):
+        if annotation in seen:
+            return lambda value, _a=annotation: _jsonable(_a, value)
+        child_seen = seen | {annotation}
+        fields = tuple(
+            (name, wire_name, _compile_jsonable(field_annotation, child_seen))
+            for name, wire_name, field_annotation, _required in _dataclass_wire_spec(
+                annotation
+            )
+        )
+        # A handler annotated with a dataclass may still return a mapping or a
+        # list; `_jsonable` falls through to its value dispatch in that case,
+        # with `Any` item types, and so does this.
+        def jsonable_dataclass(
+            value: Any, _cls: Any = annotation, _fields: Any = fields
+        ) -> Any:
+            if isinstance(value, _cls):
+                # The scalar test is inlined rather than left to `to_json`,
+                # which would answer it identically one function call later.
+                # Nearly every field of nearly every model is a plain scalar,
+                # so that call was the largest remaining cost of serializing
+                # one -- see the walrus, which binds the attribute exactly once.
+                return {
+                    wire_name: (
+                        field
+                        if type(field := getattr(value, name)) in _JSON_SCALARS
+                        else to_json(field)
+                    )
+                    for name, wire_name, to_json in _fields
+                }
+            return _jsonable_any(value)
+
+        return jsonable_dataclass
+
+    origin = typing.get_origin(annotation)
+    args = typing.get_args(annotation)
+    sequence_item = _compile_jsonable(args[0], seen) if args else _jsonable_any
+    mapping_item = (
+        _compile_jsonable(args[1], seen)
+        if origin is dict and len(args) == 2
+        else _jsonable_any
+    )
+
+    def jsonable_value(
+        value: Any, _sequence: Any = sequence_item, _mapping: Any = mapping_item
+    ) -> Any:
+        if type(value) in _JSON_SCALARS:
+            return value
+        if isinstance(value, enum.Enum):
+            return value.value
+        if isinstance(value, UUID):
+            return str(value)
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, bytes):
+            return _b64encode_str(value)
+        if isinstance(value, (_datetime.datetime, _datetime.date, _datetime.time)):
+            return value.isoformat()
+        # Same inlining as the dataclass arm: a scalar element answers here
+        # rather than one call down, and elements are overwhelmingly scalars.
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return [
+                entry if type(entry) in _JSON_SCALARS else _sequence(entry)
+                for entry in value
+            ]
+        if isinstance(value, Mapping):
+            return {
+                key: (entry if type(entry) in _JSON_SCALARS else _mapping(entry))
+                for key, entry in value.items()
+            }
+        return value
+
+    return jsonable_value
+
+
+def _compile_response_check(annotation: Any) -> Callable[[Any], Any]:
+    """Compile the response's validation step, natively where the plan allows.
+
+    The request body has executed a flat native plan since `_body_validator`
+    was written; the response side kept walking the annotation in Python for
+    every value it checked, which is the same work at eleven times the price.
+    This closes that gap -- same plan compiler, same validator, same error
+    ordering.
+    """
+    if _core is not None:
+        try:
+            plan = _compile_plan(annotation, frozenset())
+        except _PlanUnsupported:
+            plan = None
+        if plan is not None:
+            run_validation = _core.run_validation
+
+            def native_check(value: Any, _plan: Any = plan, _run: Any = run_validation) -> Any:
+                result, errors = _run(_plan, value, _RESPONSE_LOC)
+                if errors:
+                    raise ValidationError(errors)
+                return result
+
+            return native_check
+
+    def pure_check(value: Any, _annotation: Any = annotation) -> Any:
+        return validate(_annotation, value, _RESPONSE_LOC)
+
+    return pure_check
 
 
 def compile_response_validator(handler: Handler, annotation: Any) -> Handler:
@@ -647,16 +943,39 @@ def compile_response_validator(handler: Handler, annotation: Any) -> Handler:
     if isinstance(annotation, type) and issubclass(annotation, response_types):
         return handler
 
-    async def checked(request: Request) -> Any:
-        value = await handler(request)
+    # Three walks of the same fixed annotation, hoisted out of the request --
+    # and the first of them dropped entirely where it provably does nothing.
+    check = _compile_response_check(annotation)
+    if not _projection_is_identity(annotation):
+        project = _compile_response_input(annotation)
+        validate_only = check
+
+        def check(value: Any, _project: Any = project, _check: Any = validate_only) -> Any:
+            return _check(_project(value))
+
+    to_json = _compile_jsonable(annotation)
+
+    def _validated(value: Any) -> Any:
         if isinstance(value, response_types):
             return value
-        projected = _response_input(annotation, value)
         try:
-            validated = validate(annotation, projected, ("response",))
+            validated = check(value)
         except ValidationError as error:
             raise ResponseValidationError(error.errors) from error
-        return _jsonable(annotation, validated)
+        return to_json(validated)
+
+    checked: Handler
+    if inspect.iscoroutinefunction(handler):
+
+        async def checked(request: Request) -> Any:  # type: ignore[no-redef]
+            return _validated(await handler(request))
+
+    else:
+        # A `def` handler stays `def` through this wrapper, so a synchronous
+        # route keeps its synchronous call convention all the way to dispatch
+        # rather than acquiring a coroutine here.
+        def checked(request: Request) -> Any:  # type: ignore[no-redef]
+            return _validated(handler(request))
 
     checked.__name__ = getattr(handler, "__name__", "checked")
     checked.__qualname__ = getattr(handler, "__qualname__", "checked")
@@ -1204,6 +1523,38 @@ class AppScope:
             raise failure
 
 
+_GENERATOR_TYPE = types.GeneratorType
+_COROUTINE_TYPE = types.CoroutineType
+_ITERABLE_COROUTINE = inspect.CO_ITERABLE_COROUTINE
+
+
+def _awaitable(value: Any) -> bool:
+    """`inspect.isawaitable`, without its price.
+
+    A dependency written `def` may still hand back something to await, so the
+    check cannot be dropped -- but `inspect.isawaitable` costs ~390ns, because
+    it finishes on `isinstance(value, collections.abc.Awaitable)` and an ABC
+    instance check is ~220ns of that on its own. It ran on the return value of
+    every synchronous dependency, which is why a `def` dependency measured
+    *dearer* than an `async def` one: the async branch short-circuits before it.
+
+    `collections.abc.Awaitable` decides membership by looking for `__await__`
+    on the type, so asking the type directly answers the same question at a
+    fifth of the cost. The two disagree on exactly one input: a class
+    `register()`ed onto the ABC without defining `__await__`. That object was
+    never awaitable -- `await` looks the method up on the type too -- so the old
+    answer only bought a `TypeError` one line later.
+    """
+    cls = value.__class__
+    if hasattr(cls, "__await__"):
+        return True
+    # A generator decorated with `@types.coroutine` is awaitable and carries no
+    # `__await__`; it is the one shape the type alone cannot answer.
+    if cls is _GENERATOR_TYPE:
+        return bool(value.gi_code.co_flags & _ITERABLE_COROUTINE)
+    return False
+
+
 def _compile_dependency(
     fn: Callable[..., Any],
     seen: tuple,
@@ -1323,19 +1674,23 @@ def _compile_dep(
         active_order.pop()
     is_async_gen = inspect.isasyncgenfunction(fn)
     is_coroutine = inspect.iscoroutinefunction(fn)
+    # Keyed by (callable, scope): the same factory used at both scopes is two
+    # different values with two different lifetimes and must not collide in one
+    # request's cache. Both halves are fixed when the graph compiles, so the key
+    # is built here rather than rebuilt for every dependency of every request.
+    nested_plan = tuple(
+        (name, (marker.fn, marker.scope), marker.use_cache, resolver)
+        for name, marker, resolver in nested
+    )
 
     async def _construct(request: Request, cache: dict, cleanups: list) -> Any:
         kwargs: dict[str, Any] = {}
-        for name, marker, resolver in nested:
-            # Keyed by (callable, scope): the same factory used at both scopes
-            # is two different values with two different lifetimes, and must
-            # not collide in one request's cache.
-            key = (marker.fn, marker.scope)
-            if marker.use_cache and key in cache:
+        for name, key, use_cache, resolver in nested_plan:
+            if use_cache and key in cache:
                 kwargs[name] = cache[key]
             else:
                 value = await resolver(request, cache, cleanups)
-                if marker.use_cache:
+                if use_cache:
                     cache[key] = value
                 kwargs[name] = value
         if is_async_gen:
@@ -1344,7 +1699,7 @@ def _compile_dep(
             cleanups.append(generator)
             return value
         result = fn(request, **kwargs)
-        if is_coroutine or inspect.isawaitable(result):
+        if is_coroutine or _awaitable(result):
             return await result
         return result
 
@@ -1948,6 +2303,14 @@ def compile_binder(
     path_specs = () if spec is None else spec.path_params
     query_specs = () if spec is None else spec.query_params
     query_constraints = {} if spec is None else dict(spec.query_constraints)
+    # Each query parameter carries its own constraint, resolved here. The bind
+    # loop used to ask `query_constraints.get(name)` per parameter per request
+    # for a mapping that has not changed since compilation. `spec.query_params`
+    # keeps its published shape, because OpenAPI and typegen read it.
+    query_plan = tuple(
+        (name, alias, annotation, default, query_constraints.get(name))
+        for name, alias, annotation, default in query_specs
+    )
     header_specs = () if spec is None else spec.header_params
     cookie_specs = () if spec is None else spec.cookie_params
     form_specs = () if spec is None else spec.form_params
@@ -1967,14 +2330,29 @@ def compile_binder(
             _body_validator(form_model_spec[1]),
         )
     )
-    resolvers: tuple[tuple[str, Depends, Resolver], ...] = tuple(
-        (name, marker, _compile_dependency(
-            marker.fn, (), scope=marker.scope, app_scope=app_scope))
+    # Each entry carries its own cache key and cache flag, both fixed here. The
+    # request loop below used to rebuild `(marker.fn, marker.scope)` and re-read
+    # `marker.use_cache` per dependency per request for an answer that cannot
+    # change after compilation.
+    resolvers: tuple[tuple[str, tuple[Any, str], bool, Resolver], ...] = tuple(
+        (
+            name,
+            (marker.fn, marker.scope),
+            marker.use_cache,
+            _compile_dependency(
+                marker.fn, (), scope=marker.scope, app_scope=app_scope
+            ),
+        )
         for name, marker in (() if spec is None else spec.depends)
     )
     side_effect_resolvers = tuple(
-        (marker, _compile_dependency(
-            marker.fn, (), scope=marker.scope, app_scope=app_scope))
+        (
+            (marker.fn, marker.scope),
+            marker.use_cache,
+            _compile_dependency(
+                marker.fn, (), scope=marker.scope, app_scope=app_scope
+            ),
+        )
         for marker in dependencies
     )
     configured = databases or {}
@@ -2055,7 +2433,7 @@ def compile_binder(
             values: dict[str, str] = {}
             for key, value in query:
                 values.setdefault(key, value)
-            for name, alias, annotation, default in query_specs:
+            for name, alias, annotation, default, constraint in query_plan:
                 raw = values.get(alias)
                 if raw is None:
                     if default is inspect.Parameter.empty:
@@ -2066,7 +2444,6 @@ def compile_binder(
                 else:
                     try:
                         converted = _convert_scalar(annotation, raw, ("query", alias))
-                        constraint = query_constraints.get(name)
                         if constraint is not None:
                             converted = _apply_constraint(
                                 converted, constraint, ("query", alias)
@@ -2142,7 +2519,12 @@ def compile_binder(
         _extract_scalars(request, kwargs)
         if needs_body:
             await _decode_body(request, kwargs)
-        return await handler(request, **kwargs)
+        # A `def` handler is called, not awaited; see `docs/guides/routing.md`.
+        # The binder itself has to stay `async` here because binding a body is
+        # asynchronous, so the convention is decided per call rather than
+        # compiled away as it is in `compile_response_validator`.
+        result = handler(request, **kwargs)
+        return await result if result.__class__ is _COROUTINE_TYPE else result
 
     async def bound(request: Request) -> Any:
         kwargs: dict[str, Any] = {}
@@ -2172,23 +2554,23 @@ def compile_binder(
                         by_key[key] = session
                         opened.append(session)
                     kwargs[name] = session
-            for marker, resolver in side_effect_resolvers:
-                key = (marker.fn, marker.scope)
-                if marker.use_cache and key in cache:
+            for key, use_cache, resolver in side_effect_resolvers:
+                if use_cache and key in cache:
                     continue
                 value = await resolver(request, cache, cleanups)
-                if marker.use_cache:
+                if use_cache:
                     cache[key] = value
-            for name, marker, resolver in resolvers:
-                key = (marker.fn, marker.scope)
-                if marker.use_cache and key in cache:
+            for name, key, use_cache, resolver in resolvers:
+                if use_cache and key in cache:
                     kwargs[name] = cache[key]
                 else:
                     value = await resolver(request, cache, cleanups)
-                    if marker.use_cache:
+                    if use_cache:
                         cache[key] = value
                     kwargs[name] = value
-            result = await handler(request, **kwargs)
+            result = handler(request, **kwargs)
+            if result.__class__ is _COROUTINE_TYPE:
+                result = await result
             if borrowed or opened:
                 from .response import StreamingResponse
 
