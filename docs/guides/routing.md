@@ -47,6 +47,34 @@ name. Host-specific routes are checked ahead of a host-agnostic route at the
 same path. Ordinary static and single-segment routes stay on the native compiled
 table; host and trailing-path routes use an ordered startup-compiled fallback.
 
+## Synchronous handlers
+
+A handler may be `def` instead of `async def` when it never awaits anything:
+
+```python
+@app.get("/healthz")
+def healthz(request) -> dict[str, str]:
+    return {"status": "ok"}
+```
+
+Binding, validation, and the response contract work exactly as they do for an
+`async def` handler — the only difference is the call convention. A `def`
+handler is called directly, so it costs no coroutine object and no suspension
+machinery, which is the same trade `before_sync` and `after_sync` make for
+middleware.
+
+The word to weigh is *never*. A synchronous handler runs **on the event loop**,
+not in a thread pool, so anything that blocks inside one blocks every other
+connection this worker is serving — a `requests.get`, a `time.sleep`, a
+synchronous database driver. Wreath does not move a `def` handler to a thread
+behind your back, because doing so would silently cost more than the coroutine
+it saved and would make the fast spelling the slow one. Reach for `def` when the
+handler is pure computation over what it was handed, and for `async def`
+everywhere else.
+
+A `def` handler's return value is not awaited. Returning a coroutine from one is
+a mistake rather than a shorthand: write `async def` and await it.
+
 ## User story: a resource with a typed id
 
 > *As an API author, I'm exposing an `orders` resource: fetch one by id, and

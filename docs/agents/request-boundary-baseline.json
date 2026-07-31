@@ -4,16 +4,16 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 127,
+        "c": 126,
         "python": 2
       },
       "pre_activation": {
-        "c": 40,
+        "c": 39,
         "python": 1
       },
       "phases": {
         "ingress": {
-          "c": 31,
+          "c": 30,
           "python": 1
         },
         "routing": {
@@ -58,8 +58,7 @@
         "time.time": 1,
         "wreath._native._core.csrf_new_token": 1,
         "wreath._native._core.find_header": 1,
-        "posix.urandom": 1,
-        "bytes.hex": 1,
+        "wreath._native._core.random_hex": 1,
         "BitsetRouteTable.classify": 1,
         "str.partition": 1,
         "wreath._native._core.build_capability_mask": 1,
@@ -102,16 +101,16 @@
     "minimal": {
       "status": 200,
       "totals": {
-        "c": 9,
+        "c": 8,
         "python": 1
       },
       "pre_activation": {
-        "c": 5,
+        "c": 4,
         "python": 1
       },
       "phases": {
         "ingress": {
-          "c": 3,
+          "c": 2,
           "python": 1
         },
         "routing": {
@@ -128,12 +127,12 @@
         }
       },
       "c_calls": {
-        "builtins.len": 2,
         "dict.get": 2,
         "builtins.isinstance": 2,
         "BitsetRouteTable.classify": 1,
         "wreath._native._core.json_dumps": 1,
-        "object.__new__": 1
+        "object.__new__": 1,
+        "builtins.len": 1
       },
       "python_frames": {
         "src/wreath/app.py:__call__": 1

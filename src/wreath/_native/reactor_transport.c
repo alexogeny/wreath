@@ -97,6 +97,7 @@ typedef struct {
      * write buffer drains only after every retained payload has left. */
     PyObject *send_queue;        /* PyList FIFO, lazily created */
     Py_ssize_t send_queue_head;
+    PyObject *empty_waiter;      /* future resolved once nothing is pending */
     PyObject *send_obj;          /* exact-bytes payload being sent */
     Py_ssize_t send_obj_off;     /* bytes of send_obj already accepted */
     Py_ssize_t send_queued_bytes; /* unsent bytes across send_obj + queue */
@@ -477,6 +478,43 @@ st_pump_egress(SocketTransport *t)
 /* Shared completion tail: on full drain honour a pending close() or
  * half-close; on a partial synchronous write keep the writer registered so
  * the rest drains. */
+/* Complete a pending `_empty_waiter()`, if any. Called from the drain tail and
+ * from connection loss, so a waiter cannot outlive the transport it is waiting
+ * on -- a sendfile blocked on a future nobody will ever resolve is a hung
+ * request, which is worse than the error it replaces. */
+static void
+st_settle_empty_waiter(SocketTransport *t, PyObject *exc_type, const char *message)
+{
+    PyObject *waiter = t->empty_waiter;
+    if (waiter == NULL) {
+        return;
+    }
+    t->empty_waiter = NULL;
+    PyObject *done = PyObject_CallMethod(waiter, "done", NULL);
+    int already = done != NULL && PyObject_IsTrue(done);
+    Py_XDECREF(done);
+    if (done == NULL) {
+        PyErr_Clear();
+    }
+    if (!already) {
+        PyObject *result;
+        if (exc_type != NULL) {
+            PyObject *exc = PyObject_CallFunction(exc_type, "s", message);
+            result = exc == NULL
+                ? NULL : PyObject_CallMethod(waiter, "set_exception", "O", exc);
+            Py_XDECREF(exc);
+        }
+        else {
+            result = PyObject_CallMethod(waiter, "set_result", "O", Py_None);
+        }
+        Py_XDECREF(result);
+        if (result == NULL) {
+            PyErr_Clear();
+        }
+    }
+    Py_DECREF(waiter);
+}
+
 static void
 st_egress_epilogue(SocketTransport *t)
 {
@@ -486,6 +524,7 @@ st_egress_epilogue(SocketTransport *t)
                 t->whead = 0;
             }
         }
+        st_settle_empty_waiter(t, NULL, NULL);
         if (t->writing) {
             if (st_remove_writer_cb(t) < 0) {
                 PyErr_Clear();
@@ -1181,9 +1220,63 @@ st_call_connection_lost(PyObject *op, PyObject *exc)
     }
     Py_CLEAR(t->protocol);
     Py_CLEAR(t->server);
+    st_settle_empty_waiter(t, PyExc_ConnectionResetError,
+                           "connection lost while waiting for the write buffer to drain");
     st_clear_send_queue(t);
     metal_detach_transport(t);
     Py_RETURN_NONE;
+}
+
+/* _empty_waiter() -> awaitable resolved once nothing is left to send.
+ *
+ * The caller is `EventLoop.sendfile`, which must not put file bytes on the
+ * wire in front of a response head that is still queued. Corked writes are
+ * flushed first: the cork exists to coalesce a synchronous request drive into
+ * one send, and a waiter that did not flush it would wait for bytes that are
+ * deliberately being held back -- which is a hang, not a slow path.
+ */
+static PyObject *
+st_empty_waiter(PyObject *op, PyObject *Py_UNUSED(ignored))
+{
+    SocketTransport *t = (SocketTransport *)op;
+    if (t->empty_waiter != NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "empty waiter is already set");
+        return NULL;
+    }
+    if (t->cork) {
+        st_flush_cork(t);
+        if (PyErr_Occurred()) {
+            return NULL;
+        }
+    }
+    PyObject *future = PyObject_CallMethod(t->loop, "create_future", NULL);
+    if (future == NULL) {
+        return NULL;
+    }
+    if (t->conn_lost) {
+        PyObject *exc = PyObject_CallFunction(
+            PyExc_ConnectionResetError, "s", "connection lost");
+        PyObject *set = exc == NULL
+            ? NULL : PyObject_CallMethod(future, "set_exception", "O", exc);
+        Py_XDECREF(exc);
+        Py_XDECREF(set);
+        if (set == NULL) {
+            Py_DECREF(future);
+            return NULL;
+        }
+        return future;
+    }
+    if (st_pending_write_size(t) == 0 && !st_send_busy(t)) {
+        PyObject *set = PyObject_CallMethod(future, "set_result", "O", Py_None);
+        if (set == NULL) {
+            Py_DECREF(future);
+            return NULL;
+        }
+        Py_DECREF(set);
+        return future;
+    }
+    t->empty_waiter = Py_NewRef(future);
+    return future;
 }
 
 static PyObject *
@@ -1406,6 +1499,7 @@ static PyMethodDef st_methods[] = {
     {"can_write_eof", st_can_write_eof, METH_NOARGS, NULL},
     {"write_eof", st_write_eof, METH_NOARGS, NULL},
     /* internal callbacks (scheduled onto the loop) */
+    {"_empty_waiter", st_empty_waiter, METH_NOARGS, NULL},
     {"_read_ready", st_read_ready, METH_NOARGS, NULL},
     {"_write_ready", st_write_ready, METH_NOARGS, NULL},
     {"_start_reading", st_start_reading, METH_NOARGS, NULL},
@@ -1658,6 +1752,7 @@ st_traverse(PyObject *op, visitproc visit, void *arg)
     SocketTransport *t = (SocketTransport *)op;
     Py_VISIT(t->loop);
     Py_VISIT(t->poller_obj);
+    Py_VISIT(t->empty_waiter);
     Py_VISIT(t->sock);
     Py_VISIT(t->protocol);
     Py_VISIT(t->server);
@@ -1689,6 +1784,7 @@ st_clear(PyObject *op)
     SocketTransport *t = (SocketTransport *)op;
     metal_detach_transport(t);
     t->metal = NULL;
+    Py_CLEAR(t->empty_waiter);
     Py_CLEAR(t->poller_obj);
     Py_CLEAR(t->loop);
     Py_CLEAR(t->sock);

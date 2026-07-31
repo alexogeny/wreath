@@ -1,6 +1,8 @@
 /* Byte-level web codecs: percent decoding, query strings, cookies. */
 #include "wreathcore.h"
 
+#include "simd.h"
+
 static inline int
 hexval(uint8_t c)
 {
@@ -73,6 +75,12 @@ component_to_str(const uint8_t *src, Py_ssize_t len)
 {
     if (len == 0) {
         return PyUnicode_New(0, 127);
+    }
+    /* Nothing to decode is the common case for a query value. Two vectorised
+     * `memchr`s establish that and hand the source straight to the decoder,
+     * skipping the scratch allocation and the byte loop entirely. */
+    if (memchr(src, '%', (size_t)len) == NULL && memchr(src, '+', (size_t)len) == NULL) {
+        return PyUnicode_DecodeUTF8((const char *)src, len, "replace");
     }
     uint8_t *scratch = PyMem_Malloc((size_t)len);
     if (scratch == NULL) {
@@ -158,10 +166,13 @@ wreath_parse_cookies(PyObject *Py_UNUSED(self), PyObject *args)
     const uint8_t *data = header.buf;
     Py_ssize_t len = header.len;
     Py_ssize_t start = 0;
-    for (Py_ssize_t i = 0; i <= len; i++) {
-        if (i < len && data[i] != ';') {
-            continue;
-        }
+    while (start <= len) {
+        /* Both delimiter searches go through `memchr`: a cookie header is one
+         * of the longest a browser sends, and the C library's scan is
+         * vectorised where a byte-at-a-time loop is not. */
+        const uint8_t *sep = start < len
+            ? memchr(data + start, ';', (size_t)(len - start)) : NULL;
+        Py_ssize_t i = sep == NULL ? len : (Py_ssize_t)(sep - data);
         Py_ssize_t lo = start;
         Py_ssize_t hi = i;
         start = i + 1;
@@ -174,20 +185,23 @@ wreath_parse_cookies(PyObject *Py_UNUSED(self), PyObject *args)
         if (lo >= hi) {
             continue;
         }
-        Py_ssize_t eq = lo;
-        while (eq < hi && data[eq] != '=') {
-            eq++;
+        const uint8_t *split = memchr(data + lo, '=', (size_t)(hi - lo));
+        if (split == NULL) {
+            continue; /* no '=': ignore the fragment */
         }
-        if (eq == lo || eq >= hi) {
-            continue; /* no name or no '=': ignore the fragment */
+        Py_ssize_t eq = (Py_ssize_t)(split - data);
+        if (eq == lo) {
+            continue; /* no name */
         }
         PyObject *name = PyUnicode_DecodeLatin1((const char *)data + lo, eq - lo, NULL);
         PyObject *value =
             PyUnicode_DecodeLatin1((const char *)data + eq + 1, hi - eq - 1, NULL);
         int failed = (name == NULL || value == NULL);
-        /* First value wins for duplicate cookie names. */
-        if (!failed && PyDict_Contains(cookies, name) == 0) {
-            failed = PyDict_SetItem(cookies, name, value) < 0;
+        /* First value wins for duplicate cookie names. `SetDefaultRef` says
+         * exactly that in one hash and one probe, where `Contains` followed by
+         * `SetItem` paid for both twice. */
+        if (!failed) {
+            failed = PyDict_SetDefaultRef(cookies, name, value, NULL) < 0;
         }
         Py_XDECREF(name);
         Py_XDECREF(value);
@@ -199,4 +213,43 @@ wreath_parse_cookies(PyObject *Py_UNUSED(self), PyObject *args)
     }
     PyBuffer_Release(&header);
     return cookies;
+}
+
+/* b64encode(data, urlsafe=False, pad=True) -> str
+ *
+ * `base64.b64encode` runs a scalar table loop at roughly 0.5 bytes/ns and hands
+ * back `bytes` that every caller here immediately decodes to `str`. This
+ * encodes at the widest width the CPU has and builds the ASCII string
+ * directly, so the intermediate object never exists.
+ */
+PyObject *
+wreath_b64encode(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
+{
+    static char *keywords[] = {"data", "urlsafe", "pad", NULL};
+    Py_buffer data;
+    int urlsafe = 0;
+    int pad = 1;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "y*|pp:b64encode", keywords,
+                                     &data, &urlsafe, &pad)) {
+        return NULL;
+    }
+    Py_ssize_t room = ((data.len + 2) / 3) * 4;
+    PyObject *result = PyUnicode_New(room, 127);
+    if (result == NULL) {
+        PyBuffer_Release(&data);
+        return NULL;
+    }
+    ptrdiff_t written = wreath_b64_encode(
+        (const unsigned char *)data.buf, (ptrdiff_t)data.len,
+        (char *)PyUnicode_1BYTE_DATA(result), urlsafe, pad);
+    PyBuffer_Release(&data);
+    if ((Py_ssize_t)written == room) {
+        return result;
+    }
+    /* Unpadded output is shorter than the padded bound; PyUnicode has no
+     * resize for a finished object, so the exact-length copy is made here. */
+    PyObject *exact = PyUnicode_FromKindAndData(
+        PyUnicode_1BYTE_KIND, PyUnicode_1BYTE_DATA(result), (Py_ssize_t)written);
+    Py_DECREF(result);
+    return exact;
 }

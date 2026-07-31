@@ -1,6 +1,8 @@
 /* WebSocket frame primitives: XOR masking and frame parsing (RFC 6455). */
 #include "wreathcore.h"
 
+#include "simd.h"
+
 /* Raw header parser shared with sibling extensions via WREATH_CORE_CAPI. */
 int
 wreath_ws_parse_header_raw(const uint8_t *buf, Py_ssize_t len, WreathWsFrameHeader *out)
@@ -52,26 +54,13 @@ wreath_ws_parse_header_raw(const uint8_t *buf, Py_ssize_t len, WreathWsFrameHead
 }
 
 
-/* XOR src into dst with the 4-byte key, one machine word at a time. */
+/* XOR src into dst with the 4-byte key. The widest arm the CPU has: a frame
+ * carries as much payload as the peer chose to send, so this is one of the few
+ * places in the server where the byte count is unbounded. */
 static void
 xor_mask(uint8_t *dst, const uint8_t *src, Py_ssize_t len, const uint8_t *key)
 {
-    uint8_t pattern_bytes[8] = {
-        key[0], key[1], key[2], key[3], key[0], key[1], key[2], key[3],
-    };
-    uint64_t pattern;
-    memcpy(&pattern, pattern_bytes, 8);
-
-    Py_ssize_t i = 0;
-    for (; i + 8 <= len; i += 8) {
-        uint64_t word;
-        memcpy(&word, src + i, 8);
-        word ^= pattern;
-        memcpy(dst + i, &word, 8);
-    }
-    for (; i < len; i++) {
-        dst[i] = src[i] ^ key[i & 3];
-    }
+    wreath_xor_mask(dst, src, (ptrdiff_t)len, key);
 }
 
 

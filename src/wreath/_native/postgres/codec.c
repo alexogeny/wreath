@@ -1,5 +1,7 @@
 #include "codec.h"
 
+#include "../simd.h"
+
 #include "buffer.h"
 
 #include <datetime.h>
@@ -8,23 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Nibble value per ASCII byte; 0xFF marks a non-hex byte. Decoding `bytea`
- * through this table replaces a per-field `binascii` import and method call. */
-static const unsigned char wreath_pg_hex_nibble[256] = {
-    ['0'] = 0, ['1'] = 1, ['2'] = 2, ['3'] = 3, ['4'] = 4,
-    ['5'] = 5, ['6'] = 6, ['7'] = 7, ['8'] = 8, ['9'] = 9,
-    ['a'] = 10, ['b'] = 11, ['c'] = 12, ['d'] = 13, ['e'] = 14, ['f'] = 15,
-    ['A'] = 10, ['B'] = 11, ['C'] = 12, ['D'] = 13, ['E'] = 14, ['F'] = 15,
-    /* Every other byte stays 0, so a lone table lookup cannot distinguish '0'
-     * from an invalid byte; wreath_pg_hex_valid below carries that distinction. */
-};
-
-static const unsigned char wreath_pg_hex_valid[256] = {
-    ['0'] = 1, ['1'] = 1, ['2'] = 1, ['3'] = 1, ['4'] = 1,
-    ['5'] = 1, ['6'] = 1, ['7'] = 1, ['8'] = 1, ['9'] = 1,
-    ['a'] = 1, ['b'] = 1, ['c'] = 1, ['d'] = 1, ['e'] = 1, ['f'] = 1,
-    ['A'] = 1, ['B'] = 1, ['C'] = 1, ['D'] = 1, ['E'] = 1, ['F'] = 1,
-};
+/* The nibble table and the decoder live in `simd.h`, which picks a width per
+ * call: a `bytea` column arrives as two characters per byte, so the scan is as
+ * long as the value is wide. */
 
 PyObject *
 wreath_pg_decode_hex_bytea(const unsigned char *data, Py_ssize_t length)
@@ -46,17 +34,15 @@ wreath_pg_decode_hex_bytea(const unsigned char *data, Py_ssize_t length)
         return NULL;
     }
     out = PyBytes_AS_STRING(result);
-    for (Py_ssize_t i = 0; i < length; i += 2) {
-        unsigned char hi = data[i];
-        unsigned char lo = data[i + 1];
-        if (!wreath_pg_hex_valid[hi] || !wreath_pg_hex_valid[lo]) {
-            /* Report the first invalid byte, matching binascii's strictness. */
-            Py_DECREF(result);
-            PyErr_SetString(PyExc_ValueError,
-                            "bytea hex data contains a non-hexadecimal digit");
-            return NULL;
-        }
-        out[i / 2] = (char)((wreath_pg_hex_nibble[hi] << 4) | wreath_pg_hex_nibble[lo]);
+    /* The odd-length case is already refused above, so -1 here can only mean a
+     * byte that is not a hex digit -- the two errors stay distinguishable
+     * without the decoder having to report which it was. */
+    if (wreath_hex_decode((const char *)data, (ptrdiff_t)length,
+                          (unsigned char *)out) < 0) {
+        Py_DECREF(result);
+        PyErr_SetString(PyExc_ValueError,
+                        "bytea hex data contains a non-hexadecimal digit");
+        return NULL;
     }
     return result;
 }

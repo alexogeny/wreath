@@ -6,6 +6,8 @@
  */
 #include "wreathcore.h"
 
+#include "simd.h"
+
 #define template_render_chunks 256  /* tape instructions between cancellation checks */
 
 /* Owned references installed by template_configure(); the module never imports
@@ -81,28 +83,42 @@ outbuf_append(outbuf *b, const char *src, Py_ssize_t n)
 static int
 append_escaped(outbuf *b, const char *s, Py_ssize_t n)
 {
-    Py_ssize_t start = 0;
-    for (Py_ssize_t i = 0; i < n; i++) {
-        const char *rep = NULL;
-        Py_ssize_t rlen = 0;
+    Py_ssize_t i = 0;
+    while (i < n) {
+        /* Interpolated text is overwhelmingly free of the five: find the next
+         * one a register at a time and copy everything before it in one go,
+         * rather than deciding per byte. */
+        Py_ssize_t start = i;
+        const char *rep;
+        Py_ssize_t rlen;
+        i += (Py_ssize_t)wreath_html_run(s + i, (ptrdiff_t)(n - i));
+        if (i > start && outbuf_append(b, s + start, i - start) < 0) {
+            return -1;
+        }
+        if (i == n) {
+            break;
+        }
         switch (s[i]) {
         case '&': rep = "&amp;"; rlen = 5; break;
         case '<': rep = "&lt;"; rlen = 4; break;
         case '>': rep = "&gt;"; rlen = 4; break;
         case '"': rep = "&#34;"; rlen = 5; break;
-        case '\'': rep = "&#39;"; rlen = 5; break;
-        default: continue;
+        default: rep = "&#39;"; rlen = 5; break;
         }
-        if (i > start && outbuf_append(b, s + start, i - start) < 0) {
+        /* Entities are four or five bytes and there is one per special, so
+         * dense text pays this far more often than it pays the scan. Copy the
+         * fixed width directly instead of calling out to a general append that
+         * re-derives the bound and dispatches to `memcpy` for five bytes. */
+        if (b->len + rlen > b->max) {
+            b->overflow = 1;
             return -1;
         }
-        if (outbuf_append(b, rep, rlen) < 0) {
+        if (b->len + 5 > b->cap && outbuf_reserve(b, 5) < 0) {
             return -1;
         }
-        start = i + 1;
-    }
-    if (n > start && outbuf_append(b, s + start, n - start) < 0) {
-        return -1;
+        memcpy(b->data + b->len, rep, 5);
+        b->len += rlen;
+        i++;
     }
     return 0;
 }

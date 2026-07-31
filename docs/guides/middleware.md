@@ -53,6 +53,86 @@ An egress hook still runs only if that middleware was entered. If an earlier
 hook short-circuits, Wreath unwinds exactly the entered portion of the chain in
 reverse order.
 
+## Scoping a global middleware to some routes
+
+Global middleware covers every request by design — that is what makes it the
+right place for ingress checks and response headers. When one genuinely does not
+belong on a route, give it `applies_to(method, path)`:
+
+```python
+class Auditing:
+    global_scope = True
+
+    def before_sync(self, request):
+        ...
+
+    def applies_to(self, method: str, path: str) -> bool:
+        return path != "/health"
+```
+
+`applies_to` is called **once per route when routes compile**, never per
+request. A route that declines a middleware dispatches through a tape compiled
+without it, so declining costs nothing at request time — there is no predicate
+to evaluate and no hook to skip. Both arguments are the route's, not a live
+request's, which is what makes the answer cacheable; scope on the *request*
+(a header, a client address) belongs inside the hook, where it has always
+belonged.
+
+The method is passed because it is the most useful axis: CSRF matters on unsafe
+methods, and a route declaring `GET` and `POST` may answer differently for each.
+
+Skipping the middleware on a route skips **both** its hooks — a middleware that
+declines a route neither inspects its requests nor decorates its responses.
+
+Two limits, both deliberate:
+
+- A request that does not match a route runs the **whole** stack. Compartments
+  need the route to be known, and a miss has none; this also keeps a rate
+  limiter counting the `404`s it is documented to count, and stops the set of
+  middleware that ran from advertising whether a path exists.
+- A route behind authentication runs the whole stack too, because which route a
+  ticket resolves to is not known until the identity is.
+
+`applies_to` raising fails the compile rather than being caught. It stands on a
+security decision often enough that guessing a direction is worse than stopping:
+the safe guess silently discards a policy you believed was in effect.
+
+## Answering CORS preflights without entering Python
+
+A preflight — `OPTIONS` carrying both `Origin` and
+`Access-Control-Request-Method` — is answerable from configuration alone. It has
+no route, no handler and no body, yet by default it costs a full trip through
+the global tape to produce a reply that was decided when the app booted.
+
+```python
+app = Wreath(middleware="native")
+app.add_middleware(CORSMiddleware(allow_origins=["https://app.example"]))
+```
+
+At startup Wreath records every answer your `CORSMiddleware` can give a
+preflight, by asking it. The server then serves them directly — before the tape,
+before routing, before a `Request` object exists. **Measured at 10.89 µs →
+3.32 µs, a 70% saving on preflights**, with byte-identical responses.
+
+Nothing else changes: every other request runs the Python tape exactly as
+before, and a preflight the table does not cover (an origin spelled differently
+from the configured one, say) falls through to `CORSMiddleware` as usual.
+
+It is opt-in rather than automatic because it **changes what earlier middleware
+sees**. A preflight answered by the server never reaches the tape, so middleware
+registered before CORS no longer observes it:
+
+- a rate limiter does not count preflights against the bucket
+- `ProxyHeadersMiddleware` does not rewrite their client address
+
+Neither changes the response a browser receives — `CORSMiddleware` short-circuits
+ahead of the route either way — but both are visible in metrics. If you
+deliberately rate-limit preflights, leave the default `middleware="python"`.
+
+A middleware whose answers are not reproducible is declined and left in Python:
+each probe runs twice at boot, and anything consulting a clock or a counter
+rather than the origin and requested method is not compiled.
+
 ## User story: put a ceiling on abusive clients
 
 > *As an API author, a few clients hammer my API and occasionally knock it over.
