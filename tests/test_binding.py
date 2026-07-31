@@ -77,6 +77,17 @@ def test_validate_rejects_bool_as_int() -> None:
         validate(int, True)
 
 
+def test_validate_refuses_more_than_one_field_annotation() -> None:
+    annotation = Annotated[
+        int,
+        SchemaField(gt=0),
+        SchemaField(lt=10),
+    ]
+
+    with pytest.raises(TypeError, match="at most one Field"):
+        validate(annotation, 5)
+
+
 def test_validate_dataclass_defaults_and_optionals() -> None:
     item = validate(Item, {"name": "spanner", "price": 9})
     assert item == Item(name="spanner", price=9.0, tags=[], note=None)
@@ -426,6 +437,31 @@ async def test_generator_dependency_cleanup_runs_on_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resource_release_runs_every_leg_and_reraises_first_failure() -> None:
+    from wreath.binding import _release
+
+    events: list[str] = []
+
+    class BrokenSession:
+        async def close(self) -> None:
+            events.append("close session")
+            raise RuntimeError("session close failed")
+
+    class BrokenDatabase:
+        async def release(self, workload: str, connection: object) -> None:
+            events.append(f"release {workload}")
+            raise ValueError("connection release failed")
+
+    with pytest.raises(RuntimeError, match="session close failed"):
+        await _release(
+            [(BrokenDatabase(), object(), "request")],
+            [BrokenSession()],
+        )
+
+    assert events == ["close session", "release request"]
+
+
+@pytest.mark.asyncio
 async def test_depends_combines_with_typed_params() -> None:
     def get_prefix(request: Any) -> str:
         return "item"
@@ -467,6 +503,17 @@ def test_circular_dependency_rejected() -> None:
         ]
     )
     with pytest.raises(TypeError, match="circular"):
+        compile_binder(handler, "/x")
+
+
+def test_dependency_later_required_parameter_is_rejected() -> None:
+    def dependency(request: Any, missing: int) -> int:
+        return missing
+
+    async def handler(request: Any, value: int = Depends(dependency)) -> int:
+        return value
+
+    with pytest.raises(TypeError, match="must be a Depends or have a default"):
         compile_binder(handler, "/x")
 
 
@@ -761,6 +808,22 @@ def test_a_body_cannot_be_combined_with_form_or_file_parameters() -> None:
 
     with pytest.raises(TypeError, match="body and form/file"):
         compile_binder(handler, "/")
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_multipart_form_is_a_bad_request() -> None:
+    app = Wreath()
+
+    @app.post("/form")
+    async def handler(request: Any, name: Annotated[str, Form()]) -> str:
+        return name
+
+    scope = scope_for("/form", "POST")
+    scope["headers"] = [(b"content-type", b"multipart/form-data")]
+    status, raw = await call(app, scope, body=b"not a multipart body")
+
+    assert status == 400
+    assert json.loads(raw)["detail"].startswith("invalid form body:")
 
 
 def test_an_annotation_naming_something_module_scope_cannot_see_is_blamed() -> None:
@@ -1375,6 +1438,30 @@ class _PlanShapes:
 @dataclass
 class _PlanOddField:
     weird: complex
+
+
+@dataclass
+class _PlanAliasedField:
+    value: Annotated[int, SchemaField(alias="wireValue")]
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        Annotated[int, SchemaField(gt=0)],
+        _PlanAliasedField,
+        Decimal,
+        Literal["one", "two"],
+        tuple[int, int],
+    ],
+)
+def test_native_plan_falls_back_for_shapes_it_cannot_represent(
+    annotation: Any,
+) -> None:
+    from wreath.binding import _compile_plan, _PlanUnsupported
+
+    with pytest.raises(_PlanUnsupported):
+        _compile_plan(annotation, frozenset())
 
 
 def _plan_payload(**overrides: Any) -> bytes:

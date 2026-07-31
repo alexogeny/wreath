@@ -189,11 +189,9 @@ def _compile_plan(annotation: Any, seen: frozenset[type]) -> tuple[Any, ...]:
                 raise _PlanUnsupported
             child_seen = seen | {annotation}
             fields_list: list[tuple[str, tuple[Any, ...], int]] = []
-            for name, wire_name, field_annotation, required in _dataclass_wire_spec(
+            for name, _wire_name, field_annotation, required in _dataclass_wire_spec(
                 annotation
             ):
-                if wire_name != name:
-                    raise _PlanUnsupported
                 fields_list.append(
                     (
                         name,
