@@ -223,6 +223,9 @@ def test_the_shared_normaliser_names_the_setting_each_caller_configured() -> Non
     assert normalize_origin("https://App.Example:443", label="trusted") == (
         b"https://app.example"
     )
+    assert normalize_origin("https://[2001:DB8::1]:443", label="trusted") == (
+        b"https://[2001:db8::1]"
+    )
     with pytest.raises(ValueError, match="invalid trusted origin"):
         normalize_origin("ftp://x", label="trusted")
     with pytest.raises(ValueError, match="invalid WebSocket origin"):

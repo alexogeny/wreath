@@ -24,6 +24,15 @@ def test_native_trusted_host_matcher_matches_pure_reference() -> None:
             assert _core.host_allowed(host, patterns) is expected
 
 
+def test_trusted_host_matchers_share_their_runtime_type_boundary() -> None:
+    invalid: Any = None
+    with pytest.raises(TypeError):
+        pure_host_allowed(invalid, ("example.com",))
+    if _core is not None:
+        with pytest.raises(TypeError):
+            _core.host_allowed(invalid, ("example.com",))
+
+
 @pytest.mark.asyncio
 async def test_trusted_host_rejects_before_handler_and_accepts_subdomains() -> None:
     app = Wreath()
@@ -181,6 +190,35 @@ def test_a_websocket_origin_list_that_allows_nothing_is_refused() -> None:
         WebSocketOriginMiddleware([])
 
 
+@pytest.mark.asyncio
+async def test_websocket_origin_requests_are_matched_exactly_and_required() -> None:
+    from wreath.middleware.security import WebSocketOriginMiddleware
+    from wreath.request import Request
+
+    middleware = WebSocketOriginMiddleware(["https://app.example"])
+
+    def request(*origins: bytes) -> Request:
+        return Request(
+            {
+                "type": "websocket",
+                "path": "/socket",
+                "headers": [(b"origin", origin) for origin in origins],
+            },
+            None,
+            None,
+        )
+
+    assert await middleware.before_websocket(request(b"https://app.example")) is None
+    for refused in (
+        request(),
+        request(b"https://evil.example"),
+        request(b"https://app.example", b"https://evil.example"),
+    ):
+        response = await middleware.before_websocket(refused)
+        assert response is not None
+        assert response.status == 403
+
+
 @pytest.mark.parametrize(
     "origin",
     [
@@ -236,6 +274,25 @@ def test_hsts_settings_that_contradict_each_other_are_refused() -> None:
     for bad in (-1, "31536000", True):
         with pytest.raises(ValueError, match="non-negative integer"):
             SecurityHeadersMiddleware(hsts_max_age=bad)
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"hsts_max_age": 31_536_000, "hsts_preload": True},
+        {"hsts_include_subdomains": True, "hsts_preload": True},
+        {
+            "hsts_max_age": 31_535_999,
+            "hsts_include_subdomains": True,
+            "hsts_preload": True,
+        },
+    ],
+)
+def test_hsts_preload_requires_each_prerequisite(
+    settings: dict[str, Any],
+) -> None:
+    with pytest.raises(ValueError, match="HSTS preload requires"):
+        SecurityHeadersMiddleware(**settings)
 
 
 def test_normalize_host_is_the_gate_that_makes_the_shape_check_dead() -> None:

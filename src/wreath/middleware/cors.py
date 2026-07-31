@@ -28,12 +28,7 @@ def _normalize_origin(value: str) -> str:
     An origin's scheme and authority are case-insensitive; the rest of a URL is
     not, but an origin has no rest.
     """
-    if value == "*":
-        return value
-    scheme, separator, authority = value.partition("://")
-    if not separator:
-        return value.lower()
-    return f"{scheme.lower()}://{authority.lower()}"
+    return value.lower()
 
 
 class CORSMiddleware:
@@ -132,7 +127,7 @@ class CORSMiddleware:
         self._allow_methods = frozenset(method.upper() for method in allow_methods)
 
     def _origin_header(self, origin: str) -> tuple[bytes, bytes] | None:
-        if self._allow_all_origins and not self._allow_credentials:
+        if self._allow_all_origins:
             return (b"access-control-allow-origin", b"*")
         # Exact match first: an origin arrives already lower-cased from every
         # browser, so normalizing before comparing put string work on every
@@ -141,8 +136,7 @@ class CORSMiddleware:
         # `HTTPS://App.Example` the same origin as `https://app.example`
         # (RFC 9110 §4.2.3 -- scheme and authority are case-insensitive).
         if (
-            self._allow_all_origins
-            or origin in self._allow_origins
+            origin in self._allow_origins
             or _normalize_origin(origin) in self._allow_origins
         ):
             # Echoed as the client sent it, which is what it will compare against.
@@ -194,7 +188,7 @@ class CORSMiddleware:
         response = Response(b"", status=204, media_type=None)
         response.headers.append(allowed)
         response.headers.extend(self._preflight_headers)
-        if not self._allow_all_origins or self._allow_credentials:
+        if not self._allow_all_origins:
             response.headers.append((b"vary", b"origin"))
         return response
 
@@ -253,7 +247,7 @@ class CORSMiddleware:
         ):
             headers.append(allowed)
             headers.extend(self._simple_headers)
-            if not self._allow_all_origins or self._allow_credentials:
+            if not self._allow_all_origins:
                 append_vary(headers, b"origin")
     def after_sync(self, request: Request, response: Any) -> Any:
         """Compatibility transformer; compiled middleware mutates in place."""

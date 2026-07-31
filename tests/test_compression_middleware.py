@@ -231,6 +231,16 @@ def test_zstd_level_is_validated_against_libzstd() -> None:
         CompressionMiddleware(zstd_level=ZSTD_MIN_LEVEL - 1)
 
 
+def test_minimum_size_and_gzip_level_are_validated() -> None:
+    CompressionMiddleware(minimum_size=0, gzip_level=0)
+    CompressionMiddleware(gzip_level=9)
+    with pytest.raises(ValueError, match="minimum_size"):
+        CompressionMiddleware(minimum_size=-1)
+    for level in (-1, 10):
+        with pytest.raises(ValueError, match="gzip_level"):
+            CompressionMiddleware(gzip_level=level)
+
+
 @pytest.mark.asyncio
 async def test_no_transform_and_incompressible_types_refuse_zstd_too() -> None:
     app = Wreath()

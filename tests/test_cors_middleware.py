@@ -11,22 +11,11 @@ That last one is the quiet failure. A preflight answered without `Vary: Origin`
 is a response a shared cache may replay to a *different* origin, which turns one
 allowed origin into every origin without any code being wrong on its face.
 
-**Four survivors here are equivalents, and are meant to stay that way.** All of
-them fall out of the constructor already refusing `allow_origins=["*"]` with
-`allow_credentials=True`:
-
-* `_origin_header`'s `not self._allow_credentials` -- if `_allow_all_origins` is
-  true then credentials are false, so the operand cannot change the answer.
-* the `self._allow_all_origins` operand in the branch below it, for the same
-  reason: that branch is only reached when there is no wildcard at all.
-* `origin in self._allow_origins` -- a deliberate fast path in front of the
-  normalized compare, which the module's own comment describes as such. The
-  normalized compare alone is correct; the exact one only saves the string work.
-* `_normalize_origin`'s `value == "*"` -- `"*".partition("://")` finds no
-  separator, so the fallback lower-cases `"*"` to `"*"` anyway.
-
-Do not "fix" those by weakening the constructor's refusal, which is what makes
-them equivalent in the first place.
+**One survivor here is equivalent, and is meant to stay that way:**
+`origin in self._allow_origins` is a deliberate fast path in front of the
+normalized compare, which the module's own comment describes as such. The
+normalized compare alone is correct; the exact one avoids string work for the
+ordinary already-normalized browser header.
 """
 
 from __future__ import annotations
@@ -37,6 +26,7 @@ import pytest
 
 from wreath import Wreath
 from wreath.middleware import CORSMiddleware
+from wreath.request import Request
 from wreath.testing import TestClient
 
 pytestmark = pytest.mark.asyncio
@@ -77,6 +67,13 @@ async def test_an_options_request_with_both_headers_is_answered_as_a_preflight()
     assert response.status == 204
     assert _header(response, "access-control-allow-origin") == ALLOWED
     assert _header(response, "access-control-max-age") is not None
+    assert _header(response, "access-control-allow-credentials") is None
+    assert _header(response, "access-control-expose-headers") is None
+
+
+async def test_a_wildcard_origin_cannot_be_combined_with_credentials() -> None:
+    with pytest.raises(ValueError, match="cannot be combined"):
+        CORSMiddleware(allow_origins=["*"], allow_credentials=True)
 
 
 async def test_a_get_carrying_the_preflight_header_is_not_a_preflight() -> None:
@@ -189,6 +186,24 @@ async def test_a_request_with_no_origin_is_left_exactly_as_it_was() -> None:
     assert _headers(response, "vary") == []
 
 
+@pytest.mark.parametrize("origin", [ALLOWED, "https://evil.example"])
+async def test_a_headerless_response_is_left_alone_for_any_origin(origin: str) -> None:
+    middleware = CORSMiddleware(allow_origins=[ALLOWED])
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/thing",
+            "query_string": b"",
+            "headers": [(b"origin", origin.encode("ascii"))],
+        },
+        None,
+        None,
+    )
+
+    middleware.after_inplace(request, object())
+
+
 # --- Vary, which is the cache-poisoning control -------------------------------
 
 
@@ -210,6 +225,8 @@ async def test_a_named_origin_response_varies_on_origin() -> None:
         simple = await client.get("/thing", headers={"origin": ALLOWED})
     for response in (preflight, simple):
         assert b"origin" in b",".join(_headers(response, "vary")).lower()
+    assert _header(simple, "access-control-expose-headers") is None
+    assert _header(simple, "access-control-allow-credentials") is None
 
 
 async def test_a_pure_wildcard_response_does_not_need_to_vary() -> None:
