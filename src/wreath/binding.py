@@ -79,6 +79,7 @@ from ._flight_markers import phase_marker as _phase_marker
 from ._json import loads as _json_loads
 from ._native import _core
 from .exceptions import BadRequest
+from .geospatial import Coordinate
 from .request import Request
 from .temporal import Instant, TemporalError
 
@@ -202,7 +203,16 @@ def _compile_plan(annotation: Any, seen: frozenset[type]) -> tuple[Any, ...]:
             fields = tuple(fields_list)
             return (_OP_DATACLASS, annotation, fields)
         if (
-            annotation in (Decimal, UUID, bytes, _datetime.date, _datetime.datetime, Instant)
+            annotation
+            in (
+                Decimal,
+                UUID,
+                bytes,
+                _datetime.date,
+                _datetime.datetime,
+                Instant,
+                Coordinate,
+            )
             or isinstance(annotation, type)
             and issubclass(annotation, enum.Enum)
         ):
@@ -410,6 +420,27 @@ def _validate(annotation: Any, value: Any, loc: tuple[Any, ...], errors: list,
                 return Instant.parse(value)
             except TemporalError as error:
                 errors.append(_error(loc, str(error), "instant"))
+                return value
+        if annotation is Coordinate:
+            # An object, never a bare pair. GeoJSON orders `[lon, lat]` and
+            # people say "lat, lon", so a two-element array is ambiguous at
+            # exactly the moment it matters -- and `Coordinate(...)` refuses
+            # positional arguments for that reason. Accepting one here would
+            # reopen the trap at the wire.
+            if not isinstance(value, dict):
+                errors.append(
+                    _error(loc, "value is not a {lat, lon} object", "coordinate")
+                )
+                return value
+            if set(value) != {"lat", "lon"}:
+                errors.append(
+                    _error(loc, "value needs exactly lat and lon", "coordinate")
+                )
+                return value
+            try:
+                return Coordinate(lat=value["lat"], lon=value["lon"])
+            except (TypeError, ValueError) as error:
+                errors.append(_error(loc, str(error), "coordinate"))
                 return value
         if annotation is _datetime.date:
             if not isinstance(value, str):
