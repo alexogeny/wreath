@@ -74,10 +74,14 @@ class RoomRegistry:
         channel: Bus channel carrying every room; must be a valid SQL identifier.
     """
 
-    __slots__ = ("_bridge", "_rooms")
+    __slots__ = ("_bridge", "_grade_errors", "_rooms")
 
     def __init__(self, bus: Any = None, *, channel: str = DEFAULT_CHANNEL) -> None:
         self._rooms: dict[str, set[Any]] = {}
+        #: Sockets skipped because their grade callable raised. Counted rather
+        #: than swallowed: a grade that always raises delivers to nobody, which
+        #: is fail-closed and completely silent without this.
+        self._grade_errors = 0
         # The channel, the origin tag that drops this worker's own echo, and the
         # malformed-payload rejection are all the bridge's; what stays here is
         # the room name in the payload and the local fan-out.
@@ -139,8 +143,40 @@ class RoomRegistry:
 
     # -- broadcast -----------------------------------------------------------
 
-    async def broadcast(self, room: str, payload: str | bytes) -> int:
+    @property
+    def grade_errors(self) -> int:
+        """Sockets skipped because their `grade` callable raised.
+
+        A grade that raises for every socket delivers to nobody. That is the
+        fail-closed direction and the right one, but it is indistinguishable
+        from an empty room without a number to read.
+        """
+        return self._grade_errors
+
+    async def broadcast(
+        self,
+        room: str,
+        payload: str | bytes,
+        *,
+        grade: Callable[[Any], Any] | None = None,
+        render: Callable[[Any, Any], Any] | None = None,
+    ) -> int:
         """Send `payload` to every socket in `room`, on every worker.
+
+        Pass `grade` and `render` together to deliver **one event at each
+        subscriber's own authorization outcome** -- two watchers of one incident
+        seeing the same position at different precisions, because the authorizer
+        said so. `grade(websocket)` runs per socket and answers what that
+        connection may see; `render(grade, payload)` runs once per distinct
+        grade and shapes the payload for it, returning `None` to send that grade
+        nothing. Passing only one of the two is refused, since a grade nothing
+        renders would silently deliver the ungraded payload to everyone.
+
+        Grading is **local**. A graded broadcast is not published to other
+        workers, because the grade of a socket on another worker cannot be
+        computed here and shipping the ungraded payload for the far side to
+        shape would put the authorization decision on the wire. Fan a graded
+        event out from each worker, or grade after receipt.
 
         Local delivery happens first and is complete before this returns. A
         socket whose `send` raises is dropped from the room and not counted;
@@ -163,16 +199,31 @@ class RoomRegistry:
 
         Args:
             payload: `str` or `bytes`; `bytes` is delivered to sockets as a binary frame.
+            grade: `(websocket) -> hashable`, this connection's authorization outcome.
+            render: `(grade, payload) -> payload | None`, once per distinct grade.
 
         Returns:
             The number of sockets on *this* worker the payload was delivered to.
+
+        Raises:
+            ValueError: exactly one of `grade` and `render` was given.
         """
+        if (grade is None) != (render is None):
+            raise ValueError(
+                "broadcast(grade=..., render=...) takes both or neither: a grade "
+                "with nothing to render it would deliver the ungraded payload to "
+                "every subscriber, which is the failure grading exists to prevent"
+            )
         # Built first, and deliberately: a payload transform that raised after
         # local delivery would report failure for a broadcast that had already
         # partly happened. Nothing in `_bus_payload` raises today; the ordering
         # is what keeps that true for whoever edits it next.
-        remote = self._bus_payload(room, payload) if self._bridge.attached else None
-        delivered = await self._deliver_local(room, payload)
+        remote = (
+            self._bus_payload(room, payload)
+            if self._bridge.attached and grade is None
+            else None
+        )
+        delivered = await self._deliver_local(room, payload, grade, render)
         if remote is not None:
             # Awaited, not deferred: the caller asked for this fan-out and is
             # waiting on its result, so a bus failure is theirs to see. That is
@@ -205,10 +256,18 @@ class RoomRegistry:
                 "encoding": "base64",
             }
 
-    async def _deliver_local(self, room: str, payload: str | bytes) -> int:
+    async def _deliver_local(
+        self,
+        room: str,
+        payload: str | bytes,
+        grade: Callable[[Any], Any] | None = None,
+        render: Callable[[Any, Any], Any] | None = None,
+    ) -> int:
         members = self._rooms.get(room)
         if not members:
             return 0
+        if grade is not None and render is not None:
+            return await self._deliver_graded(room, payload, grade, render)
         # Fan-out is the one part of a room that scales with something the
         # application does not control, so it is worth its own phase: the
         # recorder shows both how long the room took and how big it was.
@@ -235,6 +294,75 @@ class RoomRegistry:
             marker(
                 _PH_WS_FANOUT, delivered, _COV_PYTHON, _monotonic_ns() - started
             )
+        return delivered
+
+    async def _deliver_graded(
+        self,
+        room: str,
+        payload: str | bytes,
+        grade: Callable[[Any], Any],
+        render: Callable[[Any, Any], Any],
+    ) -> int:
+        """Deliver one event at each subscriber's own authorization outcome.
+
+        Two callables with deliberately different costs, because the two halves
+        of this problem scale differently:
+
+        * `grade(websocket)` runs **once per socket per broadcast**. It answers
+          "what may this connection see?" and is expected to be a read of state
+          the connection already holds.
+        * `render(grade, payload)` runs **once per distinct grade**. It is the
+          expensive half -- coarsening a position, dropping a field -- and a
+          room of two hundred watchers at three grades pays for three.
+
+        **Why `grade` is not cached across broadcasts.** Grouping subscribers by
+        authorization outcome is only sound while the outcome holds, and a
+        policy or a flag can change mid-stream. Calling `grade` per broadcast
+        makes a grade backed by live state fresh by construction, so the
+        framework never serves an event under a grant that has been revoked.
+        An application that chooses to cache its own grade has made that
+        trade-off explicitly, and `regrade` is how it takes it back. Silently
+        reusing a stale grant is the one option not on offer.
+
+        A `grade` that raises drops that socket from the broadcast rather than
+        aborting it, on the same argument as a `send` that raises: one bad peer
+        does not end a fan-out. The socket is *not* removed from the room,
+        because failing to answer "what may you see" is not evidence the
+        connection is dead.
+        """
+        members = self._rooms.get(room)
+        if not members:
+            return 0
+        marker = _phase_marker.get(None)
+        started = _monotonic_ns() if marker is not None else 0
+        graded: dict[Any, list[Any]] = {}
+        for websocket in tuple(members):
+            try:
+                key = grade(websocket)
+            except Exception:  # noqa: BLE001 - counted below, and per-socket
+                self._grade_errors += 1
+                continue
+            graded.setdefault(key, []).append(websocket)
+        delivered = 0
+        dead: list[Any] = []
+        for key, sockets in graded.items():
+            shaped = render(key, payload)
+            if shaped is None:
+                # This grade sees nothing at all -- the fan-out equivalent of a
+                # withheld field. Not an error, and not an empty frame either:
+                # sending "nothing" would still announce that an event happened.
+                continue
+            for websocket in sockets:
+                try:
+                    await websocket.send(shaped)
+                except Exception:  # noqa: BLE001 - one dead socket is not a failure
+                    dead.append(websocket)
+                else:
+                    delivered += 1
+        for websocket in dead:
+            await self.leave(room, websocket)
+        if marker is not None:
+            marker(_PH_WS_FANOUT, delivered, _COV_PYTHON, _monotonic_ns() - started)
         return delivered
 
     async def _apply(self, payload: dict[str, Any]) -> None:
