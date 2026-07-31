@@ -38,6 +38,15 @@ NOT_IN = "NOT IN"
 # ordinary `left <op> right` and only widen the operator allowlist.
 CONTAINS = "@>"
 CONTAINED_BY = "<@"
+#: Geospatial tokens. Each is a `BinaryExpr` operator rather than a node type of
+#: its own, for the reason `BinaryExpr` already documents for the distance and
+#: text-search nodes: every walker in the compiler dispatches on that type and
+#: recurses through `left`/`right`, so a new token costs three renderer cases and
+#: no change in either language. `point` and `box` are function calls the
+#: renderer builds from both operands, as `ts_rank` already is.
+GEO_POINT = "point"
+GEO_BOX = "box"
+GEO_DISTANCE = "geo_distance"
 HAS_KEY = "?"
 HAS_ANY = "?|"
 HAS_ALL = "?&"
@@ -71,6 +80,10 @@ DISTANCE_OPERATORS = frozenset(
         L1_DISTANCE,
         HAMMING_DISTANCE,
         JACCARD_DISTANCE,
+        # Great-circle metres. A distance like the pgvector ones, and ordered by
+        # the same way -- smallest first, with a ceiling, which is the only
+        # shape an index answers.
+        GEO_DISTANCE,
     }
 )
 
@@ -470,6 +483,103 @@ class ColumnExpr(Expression):
                 f".{method}() requires an Array column, not {pg_type.name}"
             )
         return pg_type.element
+
+    def _require_point(self, method: str) -> None:
+        from .types import Point
+
+        if self.column.pg_type is not Point:
+            raise DeclarationError(
+                f".{method}() requires a Point column, not {self.column.pg_type.name}"
+            )
+
+    def within(self, centre: Any, metres: Any) -> Predicate:
+        """Rows whose point is within `metres` of `centre`, great-circle.
+
+        Renders as two things ANDed, and both halves are load-bearing:
+
+        * `self <@ box(point(...), point(...))` -- the degree-aligned bounding
+          box, which is the only form a GiST `point_ops` index can answer, and
+          therefore the only reason this does not read the whole table.
+        * the exact haversine distance, compared against `metres`.
+
+        The box is a *superset* of the circle -- its corners reach about 40%
+        further than its edges -- so dropping the second half would return
+        rows that are not within the radius. Dropping the first half would be
+        correct and would scan everything. Neither is optional.
+
+        A circle crossing the antimeridian produces two boxes, ORed, because
+        `<@` has no notion of a wrapped edge; one reaching a pole produces a
+        box spanning every longitude. `wreath.geospatial.bounding_boxes` makes
+        that decision and this method only renders it.
+        """
+        from ..geospatial import bounding_boxes
+        from .types import Float64
+
+        self._require_point("within")
+        boxes = bounding_boxes(centre, metres)
+        contained = [
+            BinaryExpr(
+                CONTAINED_BY,
+                self,
+                BinaryExpr(
+                    GEO_BOX,
+                    BinaryExpr(GEO_POINT, _bind_as(box.lon_min, Float64),
+                               _bind_as(box.lat_min, Float64)),
+                    BinaryExpr(GEO_POINT, _bind_as(box.lon_max, Float64),
+                               _bind_as(box.lat_max, Float64)),
+                ),
+            )
+            for box in boxes
+        ]
+        # `or_` of one predicate is that predicate, so the single-box case needs
+        # no branch of its own. A mutant that always took `or_` survived, which
+        # is the tool reporting a redundant condition rather than a missing test.
+        box_test = or_(*contained)
+        exact = BinaryExpr(
+            "<=", self._distance_to(centre), _bind_as(float(metres), Float64)
+        )
+        return and_(box_test, exact)
+
+    def nearest(self, centre: Any) -> BinaryExpr:
+        """Great-circle distance to `centre` -- an order key, not a predicate.
+
+        `order_by(Model.at.nearest(here))` with a `limit` is the shape an
+        index answers. A number rather than a boolean, exactly as the pgvector
+        distances and `ts_rank` are, so `where()` refuses it on its own.
+        """
+        self._require_point("nearest")
+        return self._distance_to(centre)
+
+    def _distance_to(self, centre: Any) -> BinaryExpr:
+        from ..geospatial import Coordinate
+        from .types import Float64
+
+        if type(centre) is not Coordinate:
+            raise TypeError(
+                "a geospatial query takes a Coordinate centre; build one with "
+                "Coordinate(lat=..., lon=...)"
+            )
+        # Three leaves, not two, and the count is load-bearing. The bind
+        # *program* walks this tree once and emits one value per ValueExpr
+        # node, while the renderer emits one placeholder per render -- so a
+        # node rendered twice would desynchronise them and the statement would
+        # be prepared with more parameters than the plan supplies. The haversine
+        # needs the centre's latitude twice (once in the delta, once in
+        # `cos phi2`) and its longitude once, so the tree carries exactly that,
+        # in exactly the order `_render_geo_distance` emits them.
+        return BinaryExpr(
+            GEO_DISTANCE,
+            self,
+            BinaryExpr(
+                GEO_POINT,
+                _bind_as(centre.lat, Float64),
+                BinaryExpr(
+                    GEO_POINT,
+                    _bind_as(centre.lat, Float64),
+                    _bind_as(centre.lon, Float64),
+                ),
+            ),
+        )
 
     def asc(self) -> OrderExpr:
         return OrderExpr(self, ASC)
