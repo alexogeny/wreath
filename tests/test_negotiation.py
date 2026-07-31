@@ -1,6 +1,8 @@
 """Content negotiation + the pure MessagePack encoder (spec byte-vectors)."""
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from wreath._pure.msgpack import packb
@@ -11,6 +13,7 @@ from wreath.negotiation import (
     parse_accept,
     serialize,
 )
+from wreath.request import Request
 
 
 class _Req:
@@ -19,6 +22,10 @@ class _Req:
 
     def header(self, name: str, default=None):
         return self._accept if name.lower() == "accept" else default
+
+
+def _request(accept: str) -> Request:
+    return cast(Request, _Req(accept))
 
 
 # --- MessagePack encoder vs the spec's byte layout --------------------------
@@ -63,6 +70,20 @@ def test_parse_accept_orders_by_q_then_specificity() -> None:
     assert parsed[-1][0] == "*/*"                    # q=0.1
 
 
+def test_parse_accept_uses_specificity_when_quality_is_equal() -> None:
+    assert parse_accept("*/*, application/*, application/json") == [
+        ("application/json", 1.0),
+        ("application/*", 1.0),
+        ("*/*", 1.0),
+    ]
+
+
+def test_parse_accept_ignores_empty_elements_and_media_ranges() -> None:
+    assert parse_accept(", ;q=0.5, application/json, ") == [
+        ("application/json", 1.0)
+    ]
+
+
 def test_negotiate_defaults_to_json() -> None:
     assert negotiate(None) is JSON
     assert negotiate("*/*") is JSON
@@ -80,16 +101,16 @@ def test_negotiate_unsatisfiable_returns_none() -> None:
 
 
 def test_serialize_picks_format_and_sets_headers() -> None:
-    json_response = serialize(_Req("application/json"), {"a": 1})
+    json_response = serialize(_request("application/json"), {"a": 1})
     assert json_response.status == 200
     assert (b"content-type", b"application/json") in json_response.headers
     assert (b"vary", b"Accept") in json_response.headers
 
-    mp_response = serialize(_Req("application/msgpack"), {"a": 1})
+    mp_response = serialize(_request("application/msgpack"), {"a": 1})
     assert (b"content-type", b"application/msgpack") in mp_response.headers
     assert mp_response.body == packb({"a": 1})
 
 
 def test_serialize_406_when_unsatisfiable() -> None:
-    response = serialize(_Req("application/xml"), {"a": 1})
+    response = serialize(_request("application/xml"), {"a": 1})
     assert response.status == 406

@@ -97,8 +97,6 @@ def parse_accept(header: str | None) -> list[tuple[str, float]]:
     ranges: list[tuple[str, float, int]] = []
     for index, part in enumerate(header.split(",")):
         token = part.strip()
-        if not token:
-            continue
         media, _, params = token.partition(";")
         media = media.strip().lower()
         if not media:
