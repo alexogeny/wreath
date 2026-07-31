@@ -51,6 +51,31 @@ while a sibling is running tests produces failures nobody can attribute.
 - Use safe, understandable Python first. Document any generated code or interpreter-specific trick.
 - Treat free-threading and the optional JIT as separately tested execution modes, not assumptions.
 - Add focused tests for every behavior change and regression.
+- **A mutant killed in one execution mode and surviving in another has
+  survived.** `wreath mutant` reports per run, and a module with a native/pure
+  fork has to be swept in both (`WREATH_PURE=1` for the second). When combining
+  those runs, the rule is **survived wins**, never "killed in either":
+
+  | native | pure | combined |
+  | --- | --- | --- |
+  | killed | killed | killed |
+  | killed | unreached | killed |
+  | unreached | killed | killed |
+  | **killed** | **survived** | **survived** |
+  | survived | anything | survived |
+  | unreached | unreached | unreached |
+
+  `unreached` is absence of evidence — that mode simply does not execute the
+  line, so it neither confirms nor denies. `survived` is evidence: the line *was*
+  executed and no test objected, so a regression on it ships undetected to
+  everyone running that mode. Taking the optimistic union instead reports a
+  module as covered when one of its two shipped configurations is not, which is
+  the same lie as a wrong `--tests` set, in the same direction.
+
+  This is not hypothetical: `_auth/jwt.py` has four mutants that one mode catches
+  and the other does not, and scoring them optimistically overstated the module
+  by four. Three are caught only by the pure suite (the native path answers in C,
+  so the Python guard never runs) and one only by the native suite.
 - **Never `xfail`, and never `skip`, to park a test for something unbuilt.** A
   test exists to be green or to be red. `xfail` invents a third state that means
   "we know", and a checklist of `xfail`s is worse than no checklist: it reports
