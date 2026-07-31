@@ -52,14 +52,15 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import struct
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Final, Literal, Protocol, runtime_checkable
 from urllib.parse import quote
 
 from ._userkit import verify_password
@@ -1346,3 +1347,219 @@ async def _webauthn_credential(
         if hmac.compare_digest(stored.credential_id, credential_id):
             return row, stored
     raise WebAuthnError("no such credential for this user")
+
+
+# --- single-use ceremony challenges ------------------------------------------
+#
+# A ceremony challenge is spent exactly once, by the user who began it. The
+# property is *atomic* consumption, and it is why these live on
+# `wreath.store`'s keyed table rather than in the session: a read followed by a
+# delete lets two concurrent completions both conclude they were first, and a
+# challenge carried in a cookie is not single-use at all -- a caller who kept
+# an older copy of the cookie kept the challenge with it.
+#
+# The user binding is part of the consuming statement, never a check after it.
+# Consuming first and comparing afterwards would let anyone holding a handle
+# burn the rightful user's ceremony, which is a denial of service against
+# somebody else's login rather than a defence of it.
+
+#: Kinds a challenge may carry. The kind is part of the consuming condition, so
+#: a registration challenge cannot be spent to answer an assertion.
+#: Both WebAuthn ceremonies share one kind because they share one session key
+#: and one namespace; which ceremony a challenge was minted for is a field in
+#: the payload (`ceremony`), checked by the caller after the consume.
+CHALLENGE_WEBAUTHN: Final = "webauthn"
+CHALLENGE_ENROLMENT: Final = "totp-enrolment"
+
+#: The table wreath keeps its challenges in. Wreath owns its own furniture, so
+#: this never belongs in a user's migration artifact -- it arrives through the
+#: schema component and is applied at lifespan startup.
+CHALLENGE_TABLE: Final = "wreath_second_factor_challenges"
+
+
+def challenge_declaration(
+    *, table: str = CHALLENGE_TABLE, prefix: str = "wreath_2fa"
+) -> Any:
+    """The `Keyed` declaration behind a challenge store.
+
+    `ttl=None`: a challenge's lifetime is the caller's, because a WebAuthn
+    ceremony and a TOTP enrolment are offerable for different lengths of time
+    and one table holds both. `claim=False`: the generated claim is an
+    insert-or-reclaim, and what a challenge needs is the consumption of a row
+    that already exists.
+    """
+    from .store import Column, Keyed
+
+    return Keyed(
+        table=table,
+        columns=(
+            Column("user_id", "text", null=False),
+            Column("kind", "text", null=False),
+            Column("payload", "jsonb", null=False),
+        ),
+        key="handle",
+        stamp="expires",
+        deadline=True,
+        ttl=None,
+        index_stamp=True,
+        claim=False,
+        prefix=prefix,
+    )
+
+
+@runtime_checkable
+class ChallengeStore(Protocol):
+    """Where a begun ceremony's challenge waits to be spent exactly once."""
+
+    async def put(
+        self, handle: str, *, user_id: str, kind: str, payload: dict[str, Any], ttl: float
+    ) -> None:
+        """Hold `payload` under `handle` for `ttl` seconds, bound to `user_id`."""
+        ...
+
+    async def consume(
+        self, handle: str, *, user_id: str, kind: str
+    ) -> dict[str, Any] | None:
+        """Spend the challenge and return its payload, or None.
+
+        None covers every way it is not spendable -- absent, expired, already
+        spent, another user's, another kind -- and the row is left untouched
+        whenever the answer is None.
+        """
+        ...
+
+    async def discard(self, handle: str) -> None:
+        """Drop `handle`, spent or not. Not an error when it is already gone."""
+        ...
+
+
+class MemoryChallengeStore:
+    """Challenges in one worker's memory: bounded, TTL'd, single-use.
+
+    Being synchronous between the read and the delete is what makes `consume`
+    atomic -- there is no await for another task on this loop to interleave at,
+    which is the in-process counterpart of the single DELETE the PostgreSQL twin
+    issues. Enough for a single-worker deployment; behind more than one worker a
+    ceremony begun on one is not spendable on another, so pass a
+    `PostgresChallengeStore` there.
+
+    Bounded because a challenge store is reachable by anyone who can begin a
+    ceremony, and an unbounded one is a way to spend a server's memory.
+    """
+
+    __slots__ = ("_cache", "_clock")
+
+    def __init__(
+        self, *, max_entries: int = 4096, clock: Callable[[], float] = time.monotonic
+    ) -> None:
+        from .cache import BoundedCache
+
+        # `ttl=None`: the deadline is per-entry and kept in the value, because
+        # one store holds ceremonies with different lifetimes. The cache's own
+        # bound is what evicts whatever is never spent.
+        self._cache: Any = BoundedCache(max_entries=max_entries, ttl=None, clock=clock)
+        self._clock = clock
+
+    async def put(
+        self, handle: str, *, user_id: str, kind: str, payload: dict[str, Any], ttl: float
+    ) -> None:
+        self._cache.set(handle, (user_id, kind, dict(payload), self._clock() + float(ttl)))
+
+    async def consume(
+        self, handle: str, *, user_id: str, kind: str
+    ) -> dict[str, Any] | None:
+        entry = self._cache.get(handle)
+        if entry is None:
+            return None
+        held_user, held_kind, payload, deadline = entry
+        if self._clock() >= deadline:
+            self._cache.delete(handle)
+            return None
+        if held_user != user_id or held_kind != kind:
+            # Refused *without* consuming: the row belongs to whoever began the
+            # ceremony, and an attempt on it must not cost them their challenge.
+            return None
+        self._cache.delete(handle)
+        return payload
+
+    async def discard(self, handle: str) -> None:
+        self._cache.delete(handle)
+
+
+class PostgresChallengeStore:
+    """Challenges in a table every worker shares.
+
+    `consume` is one `DELETE ... WHERE handle AND user_id AND kind AND live
+    RETURNING payload`. Exactly one concurrent statement can return the row, so
+    **the returned row is the consumption** -- no owner column, no second round
+    trip, and no window in which two completions both proceed. A mismatched user
+    or kind matches no row, so it deletes nothing and the challenge survives for
+    whoever began it.
+    """
+
+    __slots__ = ("_store",)
+
+    def __init__(
+        self, database: Any, *, table: str = CHALLENGE_TABLE, prefix: str = "wreath_2fa"
+    ) -> None:
+        from .store import PostgresStore
+
+        declaration = challenge_declaration(table=table, prefix=prefix)
+        store = PostgresStore(database, declaration)
+        # Registered through `define` so these get the same lazy preparation and
+        # the same statement naming as the generated ones. The store's own
+        # `read`/`delete`/`purge` are generated and used as they stand.
+        store.define(
+            "put",
+            f"INSERT INTO {table} (handle, user_id, kind, payload, expires)\n"
+            f"VALUES ($1, $2, $3, $4::jsonb, {store.window('$5')})\n"
+            "ON CONFLICT (handle) DO UPDATE SET\n"
+            "    user_id = EXCLUDED.user_id,\n"
+            "    kind = EXCLUDED.kind,\n"
+            "    payload = EXCLUDED.payload,\n"
+            "    expires = EXCLUDED.expires",
+        )
+        store.define(
+            "consume",
+            f"DELETE FROM {table}\n"
+            "WHERE handle = $1 AND user_id = $2 AND kind = $3\n"
+            "  AND expires > clock_timestamp()\n"
+            "RETURNING payload",
+        )
+        self._store = store
+
+    @property
+    def declaration(self) -> Any:
+        """The `Keyed` this store was built from."""
+        return self._store.declaration
+
+    def component(self, *, name: str = "second_factor_challenges") -> Any:
+        """This store's claim on the wreath schema."""
+        return self._store.component(name=name)
+
+    def schema_sql(self) -> str:
+        """DDL for the backing table, semicolon-joined."""
+        return self._store.schema_sql()
+
+    async def put(
+        self, handle: str, *, user_id: str, kind: str, payload: dict[str, Any], ttl: float
+    ) -> None:
+        await self._store.statement("put").execute(
+            handle, user_id, kind, json.dumps(payload), float(ttl)
+        )
+
+    async def consume(
+        self, handle: str, *, user_id: str, kind: str
+    ) -> dict[str, Any] | None:
+        row = await self._store.statement("consume").fetchrow(handle, user_id, kind)
+        if row is None:
+            return None
+        payload = row[0]
+        return json.loads(payload) if isinstance(payload, (str, bytes)) else payload
+
+    async def discard(self, handle: str) -> None:
+        await self._store.delete(handle)
+
+    async def purge_count(self) -> int | None:
+        """Drop every expired challenge, reporting how many went."""
+        return await self._store.purge_count()
