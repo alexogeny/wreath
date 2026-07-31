@@ -314,3 +314,268 @@ async def test_a_malformed_jwk_is_counted_not_silent():
 
     assert await cache.resolve("good") is not None
     assert cache.malformed_keys == 3
+
+
+# --- RSA: the refusing side, which neither family had ---------------------------
+#
+# A mutation sweep reported `_verify_ps` as replaceable, whole, by `return True`:
+# every internal check -- signature length, `s >= n`, the 0xbc trailer, the top-bits
+# mask, the DB padding, the 0x01 separator, the salt slice -- could be deleted and the
+# suite stayed green. `test_rsa_valid_token_verifies` parametrises PS256/384/512 but
+# only over tokens that *should* verify, and the one tampered-signature test covers
+# RS256 alone. So RSA-PSS had no negative test at all: a verifier that accepted any
+# signature would have passed CI, and forging a token needs no key at that point.
+#
+# The code turned out to be correct -- every forgery below was already refused. What
+# was missing was the proof, which is the part a regression needs.
+
+
+def _rsa_verifier(pem: bytes, alg: str) -> JwtVerifier:
+    return JwtVerifier(
+        algorithms=(alg,), key=key_from_pem(pem),
+        issuer="https://issuer.example", audience="my-api", leeway=0,
+    )
+
+
+def _resign(token: str, signature: bytes) -> str:
+    """Same header and payload, a different signature."""
+    head, _, _ = token.rpartition(".")
+    return f"{head}.{_b64u(signature)}"
+
+
+_RSA_ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512"]
+
+
+@pytest.mark.parametrize("alg", _RSA_ALGORITHMS)
+def test_every_rsa_algorithm_rejects_a_flipped_bit(rsa_keypair, alg):
+    """One bit of a genuine signature, for every algorithm rather than just RS256.
+
+    This is the mutant that matters most: it is the only assertion that fails if the
+    verifier is replaced by `return True`, and until now five of the six algorithms
+    had nothing making that claim.
+    """
+    private, pem = rsa_keypair
+    token = _rs_token(private, _claims(), alg=alg)
+    _, _, signature = token.rpartition(".")
+    raw = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
+    flipped = bytes([raw[0] ^ 0x01]) + raw[1:]
+
+    assert _rsa_verifier(pem, alg)(token) is not None       # the genuine one still passes
+    assert _rsa_verifier(pem, alg)(_resign(token, flipped)) is None
+
+
+@pytest.mark.parametrize("alg", _RSA_ALGORITHMS)
+def test_a_signature_over_different_content_is_rejected(rsa_keypair, alg):
+    """A real signature, made with the real key, over something else.
+
+    Distinct from a flipped bit: this one is *well formed* all the way through the
+    padding checks and fails only on the final comparison, so it is what proves the
+    verifier reads the signing input rather than merely parsing the envelope.
+    """
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    private, pem = rsa_keypair
+    algo = {"256": hashes.SHA256, "384": hashes.SHA384, "512": hashes.SHA512}[alg[2:]]()
+    pad = (
+        padding.PSS(mgf=padding.MGF1(algo), salt_length=algo.digest_size)
+        if alg.startswith("PS")
+        else padding.PKCS1v15()
+    )
+    elsewhere = private.sign(b"a different signing input entirely", pad, algo)
+    token = _rs_token(private, _claims(), alg=alg)
+    assert _rsa_verifier(pem, alg)(_resign(token, elsewhere)) is None
+
+
+@pytest.mark.parametrize("alg", _RSA_ALGORITHMS)
+@pytest.mark.parametrize("delta", [-1, 1], ids=["one-short", "one-long"])
+def test_a_signature_of_the_wrong_length_is_refused(rsa_keypair, alg, delta):
+    """`len(signature) != k`, from both sides.
+
+    A modular exponentiation on a wrong-length buffer is not a verification, and
+    without the check `int.from_bytes` would happily consume it.
+    """
+    private, pem = rsa_keypair
+    token = _rs_token(private, _claims(), alg=alg)
+    assert _rsa_verifier(pem, alg)(_resign(token, b"\x00" * (256 + delta))) is None
+
+
+@pytest.mark.parametrize("alg", _RSA_ALGORITHMS)
+def test_a_signature_numerically_at_the_modulus_is_refused(rsa_keypair, alg):
+    """`s >= key.n` — right length, out of range.
+
+    RSA is arithmetic modulo `n`, so `s` and `s + n` exponentiate identically. Without
+    this check a signature would have unboundedly many accepted spellings, which is
+    the same class of bug as accepting base64 padding on a segment: one token, many
+    strings, and any deployment that blocklists a leaked token by its value loses.
+    """
+    private, pem = rsa_keypair
+    modulus = private.public_key().public_numbers().n
+    token = _rs_token(private, _claims(), alg=alg)
+    at_modulus = modulus.to_bytes(256, "big")
+    assert _rsa_verifier(pem, alg)(_resign(token, at_modulus)) is None
+
+
+@pytest.mark.parametrize(
+    ("signed_as", "verified_as"),
+    [("RS256", "PS256"), ("PS256", "RS256")],
+    ids=["pkcs1v15-signature-as-pss", "pss-signature-as-pkcs1v15"],
+)
+def test_the_two_rsa_paddings_are_not_interchangeable(rsa_keypair, signed_as, verified_as):
+    """A genuine signature from the genuine key, under the other padding scheme.
+
+    Both families share a key type and a modulus, so nothing structural stops a
+    PKCS#1 v1.5 signature being offered where PSS is expected. If the verifier
+    dispatched on the key rather than on `alg`, this would pass — and an attacker who
+    could get one signature could present it under whichever scheme was weaker.
+    """
+    private, pem = rsa_keypair
+    token = _rs_token(private, _claims(), alg=signed_as)
+    head, _, signature = token.rpartition(".")
+    header, payload = head.split(".")
+    # Re-label the header as the other algorithm, keeping the original signature.
+    relabelled = _b64u(json.dumps({"alg": verified_as, "typ": "JWT"}).encode())
+    forged = f"{relabelled}.{payload}.{signature}"
+    assert _rsa_verifier(pem, verified_as)(forged) is None
+
+
+@pytest.mark.parametrize("alg", ["PS256", "PS384", "PS512"])
+@pytest.mark.parametrize(
+    "filler",
+    [b"\x00", b"\xff", b"\x01", b"\xbc"],
+    ids=["all-zero", "all-ones", "all-one-bytes", "all-trailer-bytes"],
+)
+def test_pss_refuses_structurally_invalid_signatures(rsa_keypair, alg, filler):
+    """Right length, in range, and nothing behind it.
+
+    The PSS checks are ordered, so one crafted signature only ever reaches the first
+    guard it fails. These four spread across them: an all-zero `em` fails the 0xbc
+    trailer, an all-ones `em` fails the top-bits mask, and the others land in the DB
+    padding and the 0x01 separator. Deterministic byte patterns rather than random
+    ones, so a failure names a shape instead of a seed.
+    """
+    private, pem = rsa_keypair
+    token = _rs_token(private, _claims(), alg=alg)
+    assert _rsa_verifier(pem, alg)(_resign(token, filler * 256)) is None
+
+
+# --- PSS internals: one forgery per guard ---------------------------------------
+#
+# The tests above prove `_verify_ps` is not `return True`, but its checks are ordered
+# and each crafted signature stops at the first one it fails, so most of the interior
+# stayed unproven -- the trailer byte, the top-bits mask, the DB padding, the 0x01
+# separator and the salt could each be deleted with the suite green.
+#
+# Reaching them needs a signature that is valid right up to the guard under test. The
+# private key makes that possible: recover the genuine encoded message with the public
+# exponent (`em = s**e mod n`), change exactly one field, and re-sign the result with
+# the private exponent so the verifier's own `pow(s, e, n)` reproduces it. The control
+# case below re-signs an *unperturbed* `em`, which must still verify -- without it
+# every case here could pass because the harness was broken rather than because the
+# guard fired.
+
+
+def _pss_forgery(private, perturb) -> tuple[str, bytes]:
+    """A PS256 token whose encoded message is `perturb(em, parts)`.
+
+    `_mgf1` is imported from the module under test rather than reimplemented. That is
+    deliberate and narrow: the mask is not what is being tested here -- the guards
+    reading the unmasked DB are -- and it is already proven by every passing
+    signature above. Reimplementing it would be testing a copy against itself.
+    """
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    from wreath._auth.jwt import _mgf1
+
+    numbers = private.public_key().public_numbers()
+    n, e, d = numbers.n, numbers.e, private.private_numbers().d
+    k = (n.bit_length() + 7) // 8
+    em_bits = n.bit_length() - 1
+    em_len = (em_bits + 7) // 8
+    h_len = s_len = 32
+    pad_len = em_len - h_len - s_len - 2
+
+    header = _b64u(json.dumps({"alg": "PS256", "typ": "JWT"}).encode())
+    payload = _b64u(json.dumps(_claims()).encode())
+    signing_input = f"{header}.{payload}".encode()
+
+    algo = hashes.SHA256()
+    genuine = private.sign(
+        signing_input, padding.PSS(mgf=padding.MGF1(algo), salt_length=h_len), algo
+    )
+    em = pow(int.from_bytes(genuine, "big"), e, n).to_bytes(em_len, "big")
+
+    h = em[em_len - h_len - 1 : em_len - 1]
+    db_mask = _mgf1(h, em_len - h_len - 1, "sha256")
+    db = bytes(a ^ b for a, b in zip(em[: em_len - h_len - 1], db_mask, strict=True))
+    db = bytes([db[0] & 0x7F]) + db[1:]
+
+    def remask(new_db: bytes) -> bytes:
+        masked = bytes(a ^ b for a, b in zip(new_db, db_mask, strict=True))
+        return bytes([masked[0] & 0x7F]) + masked[1:] + h + b"\xbc"
+
+    forged_em = perturb(em, db, pad_len, em_len, remask, n)
+    value = int.from_bytes(forged_em, "big")
+    assert value < n, "the crafted encoded message must be in range to reach the guard"
+    signature = pow(value, d, n).to_bytes(k, "big")
+    return f"{header}.{payload}.{_b64u(signature)}", genuine
+
+
+def _unperturbed(em, db, pad_len, em_len, remask, n):
+    return em
+
+
+def _wrong_trailer(em, db, pad_len, em_len, remask, n):
+    return em[:-1] + b"\x00"
+
+
+def _top_bit_set(em, db, pad_len, em_len, remask, n):
+    # 2**em_bits with a correct trailer: always below `n` (a modulus is a product of
+    # two odd primes and so is strictly greater than its own leading power of two),
+    # which is what lets this reach the mask check rather than the range check.
+    return ((1 << (n.bit_length() - 1)) | 0xBC).to_bytes(em_len, "big")
+
+
+def _padding_not_zero(em, db, pad_len, em_len, remask, n):
+    return remask(bytes(pad_len - 1) + b"\x01" + db[pad_len:])
+
+
+def _separator_not_one(em, db, pad_len, em_len, remask, n):
+    return remask(db[:pad_len] + b"\x02" + db[pad_len + 1 :])
+
+
+def _salt_altered(em, db, pad_len, em_len, remask, n):
+    return remask(
+        db[: pad_len + 1] + bytes([db[pad_len + 1] ^ 0xFF]) + db[pad_len + 2 :]
+    )
+
+
+def test_the_pss_forgery_harness_reproduces_a_valid_signature(rsa_keypair):
+    """The control. Re-signing an unmodified `em` must still verify.
+
+    If this fails, every rejection below is meaningless — they would be refusing the
+    harness rather than the forgery.
+    """
+    private, pem = rsa_keypair
+    token, _ = _pss_forgery(private, _unperturbed)
+    assert _rsa_verifier(pem, "PS256")(token) is not None
+
+
+@pytest.mark.parametrize(
+    "perturb",
+    [_wrong_trailer, _top_bit_set, _padding_not_zero, _separator_not_one, _salt_altered],
+    ids=["trailer-not-0xbc", "top-bits-not-cleared", "db-padding-not-zero",
+         "separator-not-0x01", "salt-altered"],
+)
+def test_each_pss_structural_check_refuses_its_own_forgery(rsa_keypair, perturb):
+    """One crafted encoded message per guard, valid up to the guard under test.
+
+    `top-bits-not-cleared` is the subtle one. EMSA-PSS encodes into `em_bits` bits but
+    `em_len` bytes, so the leading `8 * em_len - em_bits` bits must be zero; without
+    that check the same signature has more than one valid encoding, which is the
+    forgery-malleability class RFC 8017 §9.1.2 step 4 exists to close.
+    """
+    private, pem = rsa_keypair
+    token, _ = _pss_forgery(private, perturb)
+    assert _rsa_verifier(pem, "PS256")(token) is None

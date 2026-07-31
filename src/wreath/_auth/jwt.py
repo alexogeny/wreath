@@ -24,6 +24,7 @@ is still deferred per the C-first directive.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -292,10 +293,33 @@ def _rsa_public_from_der(der: bytes, kind: str) -> tuple[int, int]:
 
 
 def _b64url_decode(data: str) -> bytes:
+    """Decode one unpadded base64url string, as strictly as native `jose.c`.
+
+    Native `jose_b64url_decode` documents itself "strict, unpadded, URL-safe" and
+    raises `ValueError` on anything else. The stdlib is none of those three:
+    `urlsafe_b64decode` re-pads, translates `-`/`_` to `+`/`/` and then accepts
+    `+`/`/` as input too, and discards characters outside the alphabet entirely.
+
+    So the fallback used to accept key material the shipped build refuses -- and
+    because `-` and `+` decode to the same six bits, two different spellings of one
+    JWK produced the *same* key. `_B64URL_SEGMENT`'s comment describes this hazard
+    for token segments, where `_parse_compact` guards against it; this is the
+    general case, reached by `key_from_jwk` and `peek_header`, which do no
+    segment-level charset check of their own. Found by differentially testing the
+    two twins over generated input rather than by a failing test.
+    """
     if _native_b64 is not None:
         return _native_b64(data)
-    padding = "=" * (-len(data) % 4)
-    return base64.urlsafe_b64decode(data + padding)
+    if len(data) > _MAX_TOKEN_BYTES:
+        raise ValueError("base64url input too large")
+    if not _B64URL_SEGMENT.issuperset(data):
+        raise ValueError("invalid base64url")
+    try:
+        return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+    except binascii.Error:
+        # A length one more than a multiple of four: in the alphabet, still not a
+        # base64 string. Native reports it the same way.
+        raise ValueError("invalid base64url") from None
 
 
 def _parse_compact(token: str) -> tuple[dict[str, Any], dict[str, Any], bytes, bytes]:
@@ -311,17 +335,49 @@ def _parse_compact(token: str) -> tuple[dict[str, Any], dict[str, Any], bytes, b
         if len(token) > _MAX_TOKEN_BYTES:
             raise ValueError("compact JWT exceeds maximum size")
         parts = token.split(".")
-        if len(parts) != 3 or not all(parts):
-            raise ValueError("compact JWT must have three non-empty segments")
-        # Bound each base64url segment before decoding (decoded ~= 3/4 * encoded).
-        max_segment_b64 = (_MAX_SEGMENT_BYTES * 4) // 3 + 4
-        if any(len(part) > max_segment_b64 for part in parts):
+        # Split the way native jose.c does. It counts separators before looking at
+        # the segments, so a wrong dot count and a right count with an empty part
+        # are different diagnoses; answering both with one message told the caller
+        # less than the shipped path does.
+        if len(parts) != 3:
+            raise ValueError("compact JWT must have exactly two dots")
+        if not all(parts):
+            raise ValueError("compact JWT has an empty segment")
+        # Bound each base64url segment before decoding. This is native's test
+        # (`b64len / 4 * 3 > max_seg`) written out, integer division included,
+        # rather than an approximation of it: an earlier
+        # `(_MAX_SEGMENT_BYTES * 4) // 3 + 4` bound differed by two characters, so
+        # segments of exactly 21848 and 21849 bytes were refused by the native path
+        # and accepted here -- one token, two verdicts, decided by which build was
+        # installed. Deriving both sides from the same expression is what stops that
+        # recurring; `tests/test_jwt_pure_parse_caps.py` pins the boundary in both
+        # modes.
+        if any(len(part) // 4 * 3 > _MAX_SEGMENT_BYTES for part in parts):
             raise ValueError("JWT segment exceeds size cap")
         if any(not _B64URL_SEGMENT.issuperset(part) for part in parts):
             raise ValueError("a compact JWT segment must be unpadded base64url")
-        header_bytes = _b64url_decode(parts[0])
-        payload_bytes = _b64url_decode(parts[1])
-        signature = _b64url_decode(parts[2])
+        try:
+            header_bytes = _b64url_decode(parts[0])
+            payload_bytes = _b64url_decode(parts[1])
+            signature = _b64url_decode(parts[2])
+        except ValueError:
+            # The charset check above passes a segment whose *length* is still not
+            # a valid unpadded base64 length -- one character more than a multiple
+            # of four. Without this, `binascii.Error` escaped carrying a stdlib
+            # message ("Invalid base64-encoded string: number of data characters
+            # ..."), so the same token was refused with wreath's wording on the
+            # native path and CPython's here. It is a `ValueError` subclass, so
+            # callers caught it either way and nothing failed loudly; what leaked
+            # was an implementation detail, and only in the fallback build.
+            #
+            # `ValueError` rather than `binascii.Error` because `_b64url_decode` is
+            # now strict itself and raises the former; catching only the latter
+            # would let *its* wording through and reopen the divergence one layer
+            # down. This is the more specific message of the two -- it names the
+            # segment -- so it stays.
+            raise ValueError(
+                "a compact JWT segment must be unpadded base64url"
+            ) from None
         signing_input = (parts[0] + "." + parts[1]).encode("ascii")
     header = json.loads(header_bytes)
     claims = json.loads(payload_bytes)
