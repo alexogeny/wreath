@@ -721,6 +721,50 @@ class EventLoop(_LoopBase):
             return
         return super()._stop_serving(sock)
 
+    async def sendfile(self, transport, file, offset=0, count=None, *, fallback=True):
+        """Send a file over `transport`, including the native C transport.
+
+        asyncio decides how to send a file by reading `_sendfile_compatible`
+        off the transport and defaulting it to *unsupported*, which raises
+        rather than falling back. The native transport is not an
+        `asyncio` `_SelectorSocketTransport`, so it carried no such attribute
+        and `wreath.file` -- every `FileResponse`, and all of
+        `wreath.staticfiles` -- raised `RuntimeError` on the metal tier while
+        working everywhere else.
+
+        Neither stock path can simply be switched on for it. The native path
+        reaches into `loop._transports[transp._sock_fd]`, `transp._sock`, and
+        `transp._make_empty_waiter()`; the fallback path refuses any transport
+        that is not an `asyncio` `_FlowControlMixin` subclass. So the sequence
+        is done here, over the surface the native transport does have.
+
+        Reading is paused for the duration -- the descriptor is about to be
+        written by `os.sendfile` rather than by the transport -- and the head
+        of the response is drained first, because sendfile writes to the socket
+        directly and would otherwise overtake it.
+        """
+        if type(transport) is not _wheel_ext.SocketTransport:
+            return await super().sendfile(
+                transport, file, offset, count, fallback=fallback
+            )
+        if transport.is_closing():
+            raise RuntimeError("Transport is closing")
+        sock = transport.get_extra_info("socket")
+        if sock is None:
+            raise RuntimeError("transport has no socket to send on")
+        # `sock_sendfile` validates mode, offset and count itself, so there is
+        # nothing to add here beyond having a socket to send on.
+        resume_reading = transport.is_reading()
+        transport.pause_reading()
+        try:
+            await transport._empty_waiter()
+            return await self.sock_sendfile(
+                sock, file, offset, count, fallback=False
+            )
+        finally:
+            if resume_reading and not transport.is_closing():
+                transport.resume_reading()
+
     def _make_socket_transport(self, sock, protocol, waiter=None, *,
                                extra=None, server=None):
         if self._native_transport:
