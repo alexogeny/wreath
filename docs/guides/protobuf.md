@@ -160,3 +160,32 @@ corpus that walks every width transition, and `WREATH_PURE=1` selects the
 reference if you ever need to rule the C out.
 
 Reference: [`wreath.protobuf`](../reference/protobuf.md).
+
+## Where the codec is wired
+
+Three surfaces consume it, and each is opt-in rather than automatic:
+
+**Responses.** `wreath.negotiation.PROTOBUF` serves `application/x-protobuf`
+from an ordinary handler — see
+[Content negotiation](content-negotiation.md#protocol-buffers). It is not one of
+the default serializers, because protobuf can only encode a declared message and
+most handlers return a dict.
+
+**Timestamps.** `wreath.temporal.Timestamp` is the well-known
+`google.protobuf.Timestamp`, with `to_timestamp` / `from_timestamp` either side
+— see [Dates and times](dates-and-times.md#on-the-protobuf-wire). The zone does
+not travel; the moment does.
+
+**Wreath's own OTLP export.** `OtlpHttpExporter` sends OTLP over protobuf by
+default, using this codec rather than a dependency — see
+[Observability](observability.md#the-otlp-encoding).
+
+**Request bodies are not wired yet.** `wreath.binding` still decodes JSON and
+form bodies only, so a protobuf request body is decoded in the handler:
+
+```python
+@app.post("/readings")
+async def ingest(request) -> Response:
+    reading = decode(Reading, await request.body())
+    ...
+```
