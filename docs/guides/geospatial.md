@@ -135,6 +135,106 @@ Every fix must carry a timezone-aware timestamp. A naive one makes `duration`
 wrong across a DST boundary and `speed` wrong with it, so it is refused at
 construction in the same spirit as everything else here.
 
+## In the database
+
+A `Coordinate` column is `Point`, which is core PostgreSQL's `point` — OID 600,
+in the catalog rather than allocated by `CREATE EXTENSION`. That is what makes
+the no-extension claim true rather than aspirational, because core also ships
+the GiST `point_ops` operator class the index needs.
+
+```python
+from wreath.geospatial import Coordinate
+from wreath.orm import Mapped, Model, column
+from wreath.orm.types import Int64, Point, Text
+
+class Station(Model, table="stations"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    name: Mapped[str] = column(Text)
+    at: Mapped[Coordinate] = column(Point, index="gist")
+```
+
+### Proximity
+
+```python
+Station.select().where(Station.at.within(here, 5_000))          # metres
+Station.select().order_by(Station.at.nearest(here)).limit(10)
+```
+
+`within()` renders **two** things, ANDed, and both are load-bearing:
+
+```sql
+"t0"."at" <@ box(point($1, $2), point($3, $4))
+AND (2 * 6371008.8 * asin(sqrt(...))) <= $8
+```
+
+The box is the half a GiST index can answer, and it is the only reason the query
+does not read the whole table. The haversine is the half that makes the answer
+*right*: a box is a superset of the circle, and its corners reach about 1.41×
+further than its edges, so the box alone returns rows that are not within the
+radius. Dropping either one gives you a query that is fast and wrong, or correct
+and unusable.
+
+A circle crossing the antimeridian renders two boxes, ORed. `<@` has no notion of
+a wrapped edge, and searching only one side is the classic date-line bug.
+
+`nearest()` is a **distance, not a predicate** — the same treatment the pgvector
+distances get. `where()` refuses it by name, and ordering by it **requires a
+limit**: an unbounded proximity search sorts the whole table and no index can
+answer it.
+
+### What this costs to have
+
+Two implementations of the haversine already existed (Python and C); the SQL
+above is a third, and the sphere radius is written once in the renderer and
+pinned against the module constant by a live test rather than retyped.
+
+`point` also needed a binary parameter encoder in **both** driver twins, because
+the prepared path binds parameters in binary and neither twin has a shared
+fallback for an unenumerated OID. Reading needs no such thing: the driver hands
+back an OID it does not know as raw bytes, and `Point.from_wire` reads them.
+
+## One declaration, every surface
+
+A `Coordinate` in a model settles what happens at each boundary it crosses,
+the way an `Instant` does for time:
+
+| Surface | What it becomes |
+| --- | --- |
+| ORM column | PostgreSQL `point`, with its GiST index |
+| Binding | `{"lat": …, "lon": …}`, range-checked |
+| OpenAPI | an object with `format: coordinate` and bounded `lat`/`lon` |
+| TypeScript | `{ lat: number; lon: number }` |
+| Python client | the real `wreath.geospatial.Coordinate` |
+| `.proto` | `message Coordinate { double lat = 1; double lon = 2; }` |
+
+**Every one of those is an object with named components, never a pair.** That
+is the same refusal the constructor makes, carried to each surface that could
+otherwise reintroduce it: GeoJSON orders `[lon, lat]`, people say "lat, lon",
+and a two-element array is ambiguous exactly where being wrong is most
+expensive. A generated client cannot transpose what was never positional.
+
+Note the inversion worth knowing about: the database stores `point` as
+`(x=lon, y=lat)`, the PostGIS convention. The wire shape is keyword `lat`/`lon`
+regardless. Storage order and wire order are different questions, and the
+declaration is what keeps them from being confused.
+
+```python
+@dataclass
+class Station:
+    id: int
+    at: Coordinate
+
+# {"id": 1, "at": {"lat": -33.8, "lon": 151.2}}  ->  Station(at=Coordinate(...))
+# [-33.8, 151.2]                                 ->  refused
+```
+
+**One gap, stated rather than discovered:** returning a bare `Coordinate` from
+a handler does not encode yet — the type needs a `__jsonable__` hook, which
+`wreath.temporal.jsonable` keeps opt-in so that "serialize any dataclass" can
+never put a withheld field on the wire. Binding *in* works; the way out is not
+wired. Return a dataclass containing the coordinate, or convert it yourself,
+until that lands.
+
 ## What this deliberately is not
 
 Everything above needs **no PostgreSQL extension**. That is the point of it: the
@@ -149,3 +249,48 @@ pgvector: wreath implements the client side, `CREATE EXTENSION postgis` is
 required and always will be. See the roadmap for where that stands.
 
 Reference: [`wreath.geospatial`](../reference/geospatial.md).
+
+## Tiling a region
+
+A `Grid` is a lattice of approximately-square cells over an extent — the
+spatial analogue of a bucket width, and what a heatmap is drawn on.
+
+```python
+from wreath.geospatial import BoundingBox, grid
+
+reserve = BoundingBox(lat_min=-30.0, lat_max=-29.0, lon_min=150.0, lon_max=151.0)
+lattice = grid(reserve, metres=10_000)
+
+lattice.rows, lattice.columns   # known before any query runs
+lattice.count                   # rows * columns
+lattice.cell(0, 0)              # a BoundingBox
+lattice.centre(0, 0)            # a Coordinate
+lattice.index_of(position)      # (row, column), or None if off the extent
+```
+
+Cells are indexed from the extent's south-west corner, and the lattice always
+reaches *past* the far edge rather than dropping a partial cell — narrowing the
+region the reader asked for is the one thing a dense axis must not do.
+
+Because `rows` and `columns` are arithmetic on the extent, the number of cells
+a declaration will produce is a **declaration-time fact**. That is what lets
+[`Cells`](calculated-views.md) enforce a ceiling where a reviewer reads it,
+rather than after the database has already done the work.
+
+### Approximately square, and the refusal that keeps it honest
+
+Latitude steps are constant. Longitude steps are computed once, at the extent's
+middle latitude, because the metres in a degree of longitude shrink towards the
+poles. Across a modest extent that is a fraction of a per cent, and
+`lattice.distortion` reports where a given one sits.
+
+Across a *tall* extent it is the difference between a 10 km cell at one edge
+and a 5 km cell at the other, with one legend covering both — so `grid` refuses
+past 10% variation and names the measured figure. High latitude is fine; it is
+variation *across* the extent that is the problem, and a library that refused
+Tromsø would simply be unusable there.
+
+An extent crossing the antimeridian is also refused, because a lattice
+generated over a wrapped longitude range runs backwards. `bounding_boxes`
+already returns two boxes for that case, so the caller has the tool to grid
+each half.
