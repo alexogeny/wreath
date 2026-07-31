@@ -686,8 +686,12 @@ class Wreath:
             *self._job_runners.values(),
             *self._message_buses.values(),
             *self._webhook_hubs.values(),
-            *self._global_middleware,
-            *self._middleware,
+            # The middleware registries hold `(priority, order, middleware)`.
+            # Walking the tuples asked a tuple for `component()`, so every
+            # middleware-owned table -- the session, rate-limit and idempotency
+            # stores this docstring names -- was silently never collected.
+            *(item[2] for item in self._global_middleware),
+            *(item[2] for item in self._middleware),
         ]
         seen: dict[str, Any] = {}
         for holder in holders:
@@ -779,8 +783,10 @@ class Wreath:
             *self._job_runners.values(),
             *self._message_buses.values(),
             *self._webhook_hubs.values(),
-            *self._global_middleware,
-            *self._middleware,
+            # See `schema_components`: these registries hold tuples, and the
+            # middleware is the third element.
+            *(item[2] for item in self._global_middleware),
+            *(item[2] for item in self._middleware),
         ]
         for holder in holders:
             for candidate in (holder, *getattr(holder, "schema_owners", ())):
