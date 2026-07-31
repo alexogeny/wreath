@@ -120,7 +120,9 @@
         "src/wreath/_native/sse.c",
         "src/wreath/protobuf.py",
         "src/wreath/_pure/protobuf.py",
-        "src/wreath/_native/protobuf.c"
+        "src/wreath/_native/protobuf.c",
+        "src/wreath/_native/simd.h",
+        "src/wreath/_native/simd.c"
       ],
       "tests": [
         "tests/test_request.py",
@@ -137,7 +139,8 @@
         "tests/test_protobuf.py",
         "tests/test_protobuf_structures.py",
         "tests/test_protobuf_plan.py",
-        "tests/test_protobuf_parity.py"
+        "tests/test_protobuf_parity.py",
+        "tests/test_native_simd.py"
       ],
       "decisions": [
         "docs/decisions/0007-native-code-owns-no-process-global-state.md",
@@ -966,7 +969,8 @@
         "src/wreath/reactor.py"
       ],
       "tests": [
-        "tests/reactor/"
+        "tests/reactor/",
+        "tests/test_server_metal_sendfile.py"
       ],
       "policy": "The metal tier's loop. Free-threading and the optional JIT are separately tested execution modes, not assumptions. See tests/reactor/README.md for the tier layout and counter contracts.",
       "decisions": [
