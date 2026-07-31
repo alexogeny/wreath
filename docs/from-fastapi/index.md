@@ -113,15 +113,15 @@ under [What is genuinely different](#what-is-genuinely-different).
 | `app.add_middleware(CORSMiddleware, allow_origins=[...])` | `app.add_middleware(CORSMiddleware(allow_origins=[...]))` | An instance, not class + kwargs; global middleware via `add_global_middleware` |
 | `@app.exception_handler(SomeError)` | `@app.exception_handler(SomeError)` | Plus `add_status_handler(404, ...)` keyed by status |
 | `raise HTTPException(status_code=404, detail=...)` | `raise NotFound("...")` | One class per status in `wreath.exceptions`; rendered as RFC 9457 problem+json |
-| `app.mount("/static", StaticFiles(directory="static"))` | `app.static("/static", "static")` | Consulted only when no route matches |
+| `app.mount("/service", child)` | `app.mount("/service", child)` | Generic ASGI child; `app.static()` is the optimized filesystem form |
 | `/docs` and `/openapi.json` by default | `app.enable_docs()` | Off until you ask; same paths once enabled |
-| `response_model=` | Nothing — return what you mean | The return annotation feeds OpenAPI; see below |
-| `status_code=201` on the decorator | `JSONResponse(data, status=201)` | Status lives on the response |
+| `response_model=` | Return annotation | Filters and validates plain outputs at runtime and feeds OpenAPI |
+| `status_code=201` on the decorator | Same | Applies to coerced values and the documented response |
 | `TestClient(app)`, sync calls | `async with TestClient(app)`, `await client.get(...)` | Runs lifespan; responses expose `.status`, not `.status_code` |
 | `Security`, `OAuth2PasswordBearer` | `app.configure_auth(BearerTokenBackend(...))`, `@authenticated`, `roles`, `permissions` | See [Authentication and authorization](../guides/auth.md) |
 | Hand-rolled permission logic | `@authorize(...)` + the built-in Cedar policy engine (`CedarPolicies`) | Policies parse at startup; forbid overrides permit; default deny |
 | `@app.websocket(path)` | `@app.websocket(path)` | Handler receives one `WebSocket` |
-| Pydantic `BaseSettings` | `wreath.config.load_env` + `WREATH_*` variables | See [Pydantic and validation](pydantic.md#settings) |
+| Pydantic `BaseSettings` | `Environment.load(...).bind(Settings, prefix=...)` | Typed dataclasses, nested keys, aggregate errors, secrets and provenance |
 | SQLModel / SQLAlchemy | `wreath.orm` over the native PostgreSQL driver | See [SQLModel, SQLAlchemy, and the ORM](sqlmodel.md) |
 | Alembic | Keep Alembic for DDL; `wreath migrations detect / check / show` | See [Alembic and migrations](alembic.md) |
 
@@ -274,10 +274,12 @@ every call is awaited; responses expose `.status`, `.json()`, `.text`, and
 `.header(name)`. If your test suite is already `pytest-asyncio`-shaped, this is
 a mechanical change.
 
-**Routers are declarative, and there is no `mount()` for sub-applications.**
+**Routers are declarative; mounts are runtime composition.**
 Including a router snapshots its routes and folds prefixes, tags, middleware,
 dependencies, and permissions into each one — what you see in the file is what
-runs. The only mounting is `app.static()` for files on disk.
+runs. `app.mount()` instead dispatches an arbitrary ASGI child with `path`
+stripped and `root_path` extended; `app.static()` remains the optimized file
+server.
 
 **The database story is PostgreSQL, natively.** `wreath.orm` sits on Wreath's
 own PostgreSQL driver — there is no dialect layer and no other backend. If that

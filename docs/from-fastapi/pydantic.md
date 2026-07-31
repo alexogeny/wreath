@@ -61,9 +61,9 @@ The defaults are strict in the places Pydantic v2 made configurable:
 - **Malformed JSON is a `400`**, before validation begins; a well-formed body
   with wrong shapes is a `422`.
 
-There is no `model_dump()` on the way out because there is no output model:
-return a `dict` (or a response object) from the handler. `dataclasses.asdict`
-covers the case where you want to echo a validated body back.
+The return annotation is the output model. A plain mapping is filtered to its
+declared dataclass fields, validated, and serialized; returning a response object
+bypasses projection because it owns the wire representation explicitly.
 
 ## `Field(ge=..., le=...)` → constraints where they belong
 
@@ -102,7 +102,10 @@ many as you'll give me", not "please fail". String constraints on query
 parameters don't exist; a value constrained enough to need them belongs in the
 body, validated by a model.
 
-**Model data** takes its constraints on the ORM column, where the same rule
+**Dataclass API models** use `Annotated[T, Field(...)]` for aliases,
+`gt`/`ge`/`lt`/`le`, length bounds, patterns, descriptions, and examples. The
+same metadata drives request validation, response filtering, OpenAPI and typed
+clients. **ORM model data** takes durable constraints on the ORM column, where the same rule
 guards both the API and the database:
 
 ```python
@@ -187,22 +190,27 @@ validation.
 
 `BaseSettings` bundles environment parsing, type conversion, and defaults into
 a model. Wreath [keeps configuration and state apart](../guides/config-state.md)
-and keeps environment reading deliberately literal:
+and binds an immutable environment snapshot into an ordinary dataclass:
 
 ```python
-from wreath.config import load_env
-from wreath.server import run
+from dataclasses import dataclass
+from wreath.config import Environment, Secret
 
-env = load_env(".env", apply=True)   # strict KEY=value; no expansion, no quoting rules
-run(app, required_env=["DATABASE_URL", "SECRET_KEY"])
+@dataclass(frozen=True)
+class Settings:
+    database_url: str
+    secret_key: Secret[str]
+    workers: int = 4
+
+settings = Environment.load(".env").bind(Settings, prefix="APP")
 ```
 
 Server settings bind from `WREATH_*` variables (`WREATH_HOST`, `WREATH_PORT`,
 and the rest — `wreath run --help` lists them), and `required_env` names the
-variables you cannot boot without, so a missing secret is a warning at startup
-rather than a failure on the first request. There is no settings class to
-subclass; read the environment, keep the values where you need them, and let
-`app.state` hold what the application builds from them.
+variables you cannot boot without. Application settings aggregate missing and
+invalid keys into one `SettingsError`; nested dataclasses use `__`, `Env` names
+an absolute alias, `Secret` is implicitly redacted, and `source()` reports the
+winning process or dotenv source.
 
 ## Quick reference
 
@@ -211,10 +219,11 @@ subclass; read the environment, keep the values where you need them, and let
 | `class X(BaseModel)` body | `@dataclass` body, auto-detected from the annotation |
 | Model that mirrors a table | One `wreath.orm` model doing both jobs |
 | `Field(ge=, le=)` on query input | `Annotated[int, Query(minimum=, maximum=, overflow=)]` |
-| `Field` constraints on model data | `column(..., check=Ge(...) / Length(...) / Pattern(...) / OneOf(...))` |
+| `Field` constraints on API data | `Annotated[T, Field(ge=..., min_length=..., pattern=...)]` |
+| Durable ORM constraints | `column(..., check=Ge(...) / Length(...) / Pattern(...) / OneOf(...))` |
 | `@field_validator` | `narrow("field", ...)` or plain handler code |
 | `@model_validator` | `@rule("a", "b", at="a")` |
 | `extra="forbid"` | Always on |
-| `model_dump()` | Return a `dict`; `dataclasses.asdict` if echoing a body |
+| `model_dump()` / `response_model` | Return annotation filters and serializes a plain value |
 | `{"detail": [...]}` errors | RFC 9457 problem+json with an `errors` list |
-| `BaseSettings` | `wreath.config.load_env` + `WREATH_*` + `required_env` |
+| `BaseSettings` | `Environment.load(...).bind(Settings, prefix=...)` |
