@@ -99,6 +99,50 @@ async def test_memory_refuses_an_expired_challenge() -> None:
     assert await store.consume("h1", user_id="u1", kind="webauthn-register") is None
 
 
+async def test_memory_peek_reads_without_consuming() -> None:
+    """`peek` is the non-consuming read, and it must leave the row spendable."""
+    store = MemoryChallengeStore()
+    await store.put("h1", user_id="u1", kind="totp-enrolment", payload={"s": "x"}, ttl=60)
+    row = await store.peek("h1")
+    assert row is not None
+    assert (row.user_id, row.kind, row.payload) == ("u1", "totp-enrolment", {"s": "x"})
+    # Twice, because a read that spends on the second call is not a read.
+    assert (await store.peek("h1")) is not None
+    assert await store.consume("h1", user_id="u1", kind="totp-enrolment") == {"s": "x"}
+
+
+async def test_memory_peek_answers_none_for_absent_and_expired() -> None:
+    """The two cases a caller must not tell apart from each other, only from
+    "it exists and is not yours"."""
+    ticks = [0.0]
+    store = MemoryChallengeStore(clock=lambda: ticks[0])
+    assert await store.peek("nope") is None
+    await store.put("h1", user_id="u1", kind="k", payload={}, ttl=60)
+    ticks[0] = 61.0
+    assert await store.peek("h1") is None
+
+
+async def test_memory_peek_does_not_apply_the_binding() -> None:
+    """It reports who the row belongs to; it never decides whether you may have
+    it. That is `consume`'s job, and keeping them apart is what makes `peek`
+    safe to call after a refusal purely to choose an error code."""
+    store = MemoryChallengeStore()
+    await store.put("h1", user_id="u1", kind="k", payload={"c": "x"}, ttl=60)
+    row = await store.peek("h1")
+    assert row is not None and row.user_id == "u1"
+    assert await store.consume("h1", user_id="u2", kind="k") is None
+
+
+async def test_memory_peek_mutation_does_not_reach_the_stored_row() -> None:
+    """A caller editing what it read must not edit what is still stored."""
+    store = MemoryChallengeStore()
+    await store.put("h1", user_id="u1", kind="k", payload={"c": "x"}, ttl=60)
+    row = await store.peek("h1")
+    assert row is not None
+    row.payload["c"] = "tampered"
+    assert await store.consume("h1", user_id="u1", kind="k") == {"c": "x"}
+
+
 async def test_memory_discards_a_challenge() -> None:
     store = MemoryChallengeStore()
     await store.put("h1", user_id="u1", kind="webauthn-register", payload={"c": "x"}, ttl=60)
@@ -184,6 +228,39 @@ async def test_postgres_refuses_another_user_without_consuming() -> None:
         assert await store.consume("h1", user_id="u2", kind="webauthn-register") is None
         # Still there for whoever began it -- the attempt cost them nothing.
         assert await store.consume("h1", user_id="u1", kind="webauthn-register") == {"c": "x"}
+    finally:
+        await _drop(db, table)
+
+
+@requires_db
+async def test_postgres_peek_reads_without_consuming() -> None:
+    table = _table("peek")
+    db, store = await _store(table)
+    try:
+        await store.put(
+            "h1", user_id="u1", kind="totp-enrolment", payload={"s": "x"}, ttl=60
+        )
+        row = await store.peek("h1")
+        assert row is not None
+        assert (row.user_id, row.kind, row.payload) == ("u1", "totp-enrolment", {"s": "x"})
+        # Still spendable afterwards: the read cost the ceremony nothing.
+        assert await store.consume("h1", user_id="u1", kind="totp-enrolment") == {"s": "x"}
+        assert await store.peek("h1") is None
+    finally:
+        await _drop(db, table)
+
+
+@requires_db
+async def test_postgres_peek_refuses_an_expired_row_like_consume_does() -> None:
+    """Same deadline, same clock source -- otherwise `peek` would report a row
+    that `consume` has already decided is gone, and the error code would lie."""
+    table = _table("peekexp")
+    db, store = await _store(table)
+    try:
+        await store.put("h1", user_id="u1", kind="k", payload={"c": "x"}, ttl=0.001)
+        await asyncio.sleep(0.05)
+        assert await store.consume("h1", user_id="u1", kind="k") is None
+        assert await store.peek("h1") is None
     finally:
         await _drop(db, table)
 

@@ -91,10 +91,12 @@ something you do to your own account, from inside it.
 
 ### Where the unconfirmed secret waits
 
-It has to survive one round trip, and *where* is worth a decision. Pass
-`enrolments=` — the same [`SessionStore`](../reference/session_store.md) you gave
-`SessionMiddleware` — and it waits server-side under an opaque id, while the
-cookie carries only that id:
+It has to survive one round trip, and it waits **server-side, always**. The
+cookie carries an opaque handle and never the secret. There is no configuration
+in which it rides in the session, and nothing to remember to switch on.
+
+By default it goes to a `ChallengeStore` the router builds for itself — the
+same place a WebAuthn challenge goes. Name a store and it goes there instead:
 
 ```python
 store = PostgresSessionStore(app.postgres("main"))
@@ -102,30 +104,44 @@ app.add_middleware(SessionMiddleware(secret=SECRET, store=store))
 app.include_router(second_factor_router(users, factors, enrolments=store))
 ```
 
-Without it the secret rides in the session itself, which is a cookie unless the
-session middleware also has a store. The usual argument for that being fine —
-the `begin` response already handed the same secret to the same browser — is
-true and incomplete: a response body is transient, and a cookie is written down.
-It can reach a disk, a proxy log, or the next person to use a shared machine.
-The secret is not a credential either way (nothing refers to it until a code
-verifies), but there is no reason to leave it lying about, and the store also
-makes an abandoned enrolment revocable.
+The usual argument for a cookie being fine — the `begin` response already handed
+the same secret to the same browser — is true and incomplete: a response body is
+transient, and a cookie is written down. It can reach a disk, a proxy log, or the
+next person to use a shared machine. The secret is not a credential either way
+(nothing refers to it until a code verifies), but there is no reason to leave it
+lying about, and a store also makes an abandoned enrolment revocable.
 
-Building the router without `enrolments=` is not an error — an in-memory
-development app is a legitimate thing to run, and a mandatory store would break
-every one of them — but it does warn, once, where the router is written:
+!!! note "This used to be a warning, and the warning is gone"
 
+    Earlier versions emitted a `UserWarning` when the router was built without
+    `enrolments=`, because the secret and the challenge then rode in the session.
+    It could only ever name *half* its condition: a router is built before any
+    application exists, so it cannot tell whether your `SessionMiddleware` was
+    given a `store=`. A warning nobody can act on with certainty is one people
+    learn to ignore. The property now simply holds, so there is nothing left to
+    warn about.
+
+### Which store, and the one behaviour change
+
+`MemoryChallengeStore` is the default and bounds a single worker. Behind more
+than one, a ceremony begun on one worker is not spendable on another — pass
+`challenges=PostgresChallengeStore(app.postgres("main"))` for a fleet:
+
+```python
+app.include_router(
+    second_factor_router(
+        users, factors, rp_id="example.test",
+        challenges=PostgresChallengeStore(app.postgres("main")),
+    )
+)
 ```
-UserWarning: second_factor_router was given no enrolments= store, so a pending
-TOTP secret and a WebAuthn challenge are held in the session itself. ...
-```
 
-The warning names half a condition, because that is the half it can see. This
-router is built before any application exists, so it cannot tell whether your
-`SessionMiddleware` was given a `store=`. If it was, the state is already
-server-side and the warning is telling you nothing you have not already fixed —
-pass the same store as `enrolments=` and it goes quiet. If it was not, the
-warning is the whole story.
+**This is a real change for one deployment shape**: multiple workers, cookie
+sessions, and no store named. A challenge used to ride in the cookie there, so
+any worker could finish it; now only the worker that began it can. That fails
+*closed* — the caller is refused and begins again — which is the safe direction,
+but it is a change rather than a strict improvement, and `challenges=` is the
+answer to it.
 
 The enrolment is bound to the user who began it, so a session that changes hands
 cannot confirm the secret the previous person started with.
@@ -253,21 +269,38 @@ transcribed from the [W3C WebAuthn Level 3 specification's own test
 vectors](https://www.w3.org/TR/2026/CR-webauthn-3-20260526/#sctn-test-vectors-none-es256)
 (§16.2, `none` attestation over ES256) and verified as they stand.
 
-### The challenge is single-use, and where it waits decides how single
+### The challenge is single-use, unconditionally
 
 `begin` mints it, binds it to the user who began the ceremony, and `confirm` or
 `verify` **spends it before verifying anything** — success, failure, expired,
-wrong person, all the same. A challenge that survived a failed attempt would let
-a recorded assertion be posted again until it timed out.
+all the same. A challenge that survived a failed attempt would let a recorded
+assertion be posted again until it timed out.
 
-Pass `enrolments=` and that deletion is real: the challenge lives in the session
-store under an opaque id and the cookie carries only the id. Without a store it
-rides in the session itself, and a caller who kept an older copy of that cookie
-kept the challenge with it — which is what the startup warning above is about.
-The binding to the user holds either way — a browser
-that signs out and signs back in as somebody else cannot finish the previous
-person's ceremony, and session rotation carrying the contents across is exactly
-why that check has to exist.
+Spending it is one statement:
+
+```sql
+DELETE FROM wreath_second_factor_challenges
+WHERE handle = $1 AND user_id = $2 AND kind = $3 AND expires > clock_timestamp()
+RETURNING payload
+```
+
+Two properties fall out of that shape, and neither is a check written beside it:
+
+- **The returned row *is* the consumption.** Exactly one concurrent statement can
+  return it, so two completions of one challenge cannot both proceed.
+- **The user binding is a `WHERE` clause, not an afterthought.** A mismatched
+  attempt matches no row, so it deletes nothing and the rightful user's ceremony
+  survives it. Checking *after* consuming would let anyone holding a handle burn
+  somebody else's login.
+
+Who the caller may be is derived from the session — a half-finished login first,
+then whoever is signed in — and handed to that statement as a *precondition*. It
+is never read back out of the record: a record that names its own owner means
+whoever holds a handle defines who they are.
+
+A browser that signs out and signs back in as somebody else therefore cannot
+finish the previous person's ceremony, and session rotation carrying the session
+contents across is exactly why that binding has to exist.
 
 Challenges expire after five minutes (`webauthn_ttl`).
 
