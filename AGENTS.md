@@ -317,6 +317,98 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
 - `benchmarks/`: equivalent competitor applications and benchmark tooling
 - `docs/`: user documentation, API reference, cookbooks, agent guidance, design notes, and conformance reports
 
+## Traps that have already cost someone a day
+
+Each of these was found the expensive way. They share a shape: **the tool reports
+success, or the test passes, and the thing you wanted to happen did not happen.**
+None is discoverable by reading the code you are changing.
+
+- **`wreath mutant --limit N` samples the *head* of a file.** It takes the first
+  N candidates in line order, so a bound pass over a long module never reaches
+  code you appended to it — and it reports a clean-looking score for somebody
+  else's function. Three separate sessions spent their whole window on unrelated
+  pre-existing lines this way. **Use `--changed <ref>`**, which selects only
+  lines changed against a git ref. `--only` works too, but its `operator@path:line`
+  is where the operator *anchors*, not where the control reads: a keyword carries
+  its *value*'s line, so line numbers read off the source match nothing. A
+  selector that matches nothing now exits 2 rather than reporting a vacuous pass.
+- **A new `.c` file must be registered in two places, and only the first fails
+  loudly.** `setup.py` builds the extension; `tools/sanitizers/setup_core.py` has
+  its own source list. Miss the second and the sanitized `_core.so` has an
+  undefined symbol, *every* test fails to import, and `wreath-sanitize` reports
+  "0 passed … clean" — the exact false success its own docstring warns about.
+  Two sessions hit this; `wreath-map-lint`'s MAP008 catches the omission from the
+  other direction.
+- **`uv run` does not reliably rebuild after a `.c` edit.** A stale `.so` has
+  produced two confident, wrong diagnoses. `uv sync --reinstall-package wreath`
+  is the rebuild that works.
+- **The native driver subclasses the pure one.** `_native._postgres.Connection`
+  inherits from `_pure.postgres.Connection`, so grepping for a wire constant and
+  finding it only under `_pure/` does **not** mean the native path lacks the
+  feature. One session concluded cancellation was unimplemented natively on
+  exactly that evidence; the MRO says otherwise.
+- **`execute("LISTEN ...")` registers with PostgreSQL but not with the driver**,
+  so notifications are never pumped and a listener receives nothing at all.
+  `connection.listen()` is the API, and it is why `Doorbell` holds its own
+  connection.
+- **`typing.Union is types.UnionType` on 3.14.** They were unified, so a clause
+  testing both is the same test written twice. Two such clauses have been deleted
+  as dead code after a mutant survived on them.
+- **A decorator annotated `(cls: type) -> type` erases the class**, so a
+  synthesised `__init__` becomes unknown and a nested declaration becomes an
+  invalid type form. `@typing.dataclass_transform(field_specifiers=(...))` plus
+  `def deco[T](cls: type[T]) -> type[T]` fixes it. This stays hidden while the
+  decorator is only used from `tests/`, because `[tool.ty.src] include = ["src"]`
+  — the first *source* module to use it is where `ty` finally objects.
+- **A handler's return value must subclass one of the response classes.**
+  `app.py`'s coercion ends in a closed `isinstance` check, so a duck-typed object
+  with a correct `__call__(send)` dies with `handlers must return a
+  response-compatible value`. Subclassing `StreamingResponse` also picks up the
+  deferred-cleanup contract that releases a borrowed database connection.
+- **`tenant: Query[str]` is a bug, not a spelling.** It produces no query
+  parameter *and* silently retypes the path parameter. Write
+  `Annotated[str, Query()]` at module scope.
+
+## Tests that pass without proving anything
+
+The same failure in test form. `AGENTS.md`'s rules above say what to write; these
+say how a written test still manages to assert nothing.
+
+- **Falsify the harness before trusting it.** Point `WREATH_TEST_POSTGRES_DSN` at
+  a dead port and confirm the gated tests *fail* rather than skip; neuter the
+  implementation and confirm the test goes red. Several suites have looked green
+  while executing nothing, and a suite that runs in 0.17s usually is not.
+- **A refusal test that asserts only the field name proves nothing**, because
+  every refusal message contains the field name — so it passes whichever branch
+  fired, including the fallthrough. Assert the distinct message text.
+- **Centre a geometric test off the interesting case and it proves nothing.** A
+  bounding-box superset property caught 48/72 bearings at latitude 60 and 29/72
+  at the date line — and **0/72 at the equator**, where it was first written.
+  Parameterise across the cases the maths actually distinguishes.
+- **An index assertion needs enough rows.** On a handful the planner picks a
+  sequential scan however indexable the predicate is, so assert the `EXPLAIN`
+  plan over a realistic seed (4020 rows, in the case that found this), not the
+  result set.
+- **A mutant survivor is often redundant code, not a missing test.** Five
+  sessions have now resolved one by *deleting* a clause the guard above it
+  already subsumed. Two spellings of one condition is how they drift apart later,
+  so deletion is frequently the better answer — but prove the redundancy rather
+  than assuming it.
+
+## Working in parallel worktrees
+
+- **A worktree forks from `HEAD`, not from the working tree.** Uncommitted work
+  in the main checkout is invisible to a new worktree, however green it is. If a
+  directive claims a subsystem is present, verify it before building on it, and
+  import what you need with a `diff` first to confirm nothing unrelated rode
+  along.
+- **`.plans/` is excluded from git**, so it does not exist in a fresh worktree.
+  Copy in the plan you are working from.
+- **`git apply` is atomic.** A failure on one file aborts the whole patch — the
+  per-file "Applied patch to X cleanly" lines are the 3-way merge reporting
+  progress, not a record of what survived. Re-check the tree rather than trusting
+  the log.
+
 ## Documentation rules
 
 - The machine-oriented docs live under `docs/cookbook/agents/`; start at its
