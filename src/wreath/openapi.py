@@ -174,6 +174,37 @@ def _openapi_schema(ref: TypeRef) -> dict[str, Any]:
         return {"anyOf": [_openapi_schema(arg) for arg in ref.arguments]}
     if ref.kind == "literal":
         return {"enum": list(ref.literals)}
+    if ref.kind == "coordinate":
+        # An object with named components, never a two-element array: GeoJSON
+        # orders `[lon, lat]` and people say "lat, lon", so a positional pair is
+        # ambiguous exactly where it is most expensive. `format` names it so a
+        # reader (and a generator) can tell it from any other lat/lon object.
+        return {
+            "type": "object",
+            "format": "coordinate",
+            "properties": {
+                "lat": {"type": "number", "minimum": -90, "maximum": 90},
+                "lon": {"type": "number", "minimum": -180, "maximum": 180},
+            },
+            "required": ["lat", "lon"],
+        }
+    if ref.kind == "page":
+        # Inlined rather than a `$ref`, because `Page` is generic: one component
+        # schema cannot describe `Page[Llama]` and `Page[Herd]` at once, and
+        # minting `PageLlama`/`PageHerd` components would put a generated name
+        # in the contract that the Python target then has to un-generate to
+        # reach `wreath.pagination.Page`.
+        element = _openapi_schema(ref.arguments[0]) if ref.arguments else {}
+        return {
+            "type": "object",
+            "properties": {
+                "items": {"type": "array", "items": element},
+                "total": {"type": "integer"},
+                "page": {"type": "integer"},
+                "size": {"type": "integer"},
+            },
+            "required": ["items", "total", "page", "size"],
+        }
     raise ValueError(
         f"no OpenAPI schema for TypeKind {ref.kind!r}. A kind added to "
         "`wreath.typegen.model.TypeKind` must be rendered here and in "
