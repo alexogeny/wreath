@@ -143,14 +143,13 @@ def generate_openapi(
     builder = _Builder(allow_unknown=False)
 
     def schema(annotation: Any) -> dict[str, Any]:
-        if annotation is Any or annotation is inspect.Parameter.empty:
-            return {}
         from .response import FileResponse, PreparedResponse, Response, StreamingResponse
 
-        if isinstance(annotation, type) and issubclass(
-            annotation, (Response, StreamingResponse, FileResponse, PreparedResponse)
-        ):
-            return {}
+        if isinstance(annotation, type):
+            if issubclass(
+                annotation, (Response, StreamingResponse, FileResponse, PreparedResponse)
+            ):
+                return {}
         before = len(builder.diagnostics)
         reference = builder.type_ref(annotation)
         if len(builder.diagnostics) != before:
@@ -223,14 +222,13 @@ def generate_openapi(
                         }
                         if default is not inspect.Parameter.empty and default is not None:
                             parameter["schema"]["default"] = default
-                        if location == "query":
-                            constraint = query_constraints.get(_parameter_name)
-                            if constraint is not None:
-                                minimum, maximum, _overflow = constraint
-                                if minimum is not None:
-                                    parameter["schema"]["minimum"] = minimum
-                                if maximum is not None:
-                                    parameter["schema"]["maximum"] = maximum
+                        constraint = query_constraints.get(_parameter_name)
+                        if constraint is not None:
+                            minimum, maximum, _overflow = constraint
+                            if minimum is not None:
+                                parameter["schema"]["minimum"] = minimum
+                            if maximum is not None:
+                                parameter["schema"]["maximum"] = maximum
                         parameters.append(parameter)
                 if spec.body is not None:
                     operation["requestBody"] = {
@@ -266,8 +264,10 @@ def generate_openapi(
                     }
             else:
                 # Untyped handler: still document path placeholders as strings.
+                # Route registration has already established that a segment
+                # starting with "{" is a complete, well-formed placeholder.
                 for segment in definition.path.split("/"):
-                    if segment.startswith("{") and segment.endswith("}"):
+                    if segment.startswith("{"):
                         parameters.append(
                             {
                                 "name": segment[1:-1],

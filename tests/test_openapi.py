@@ -14,7 +14,10 @@ import pytest
 import wreath.binding as binding
 from wreath import Wreath
 from wreath.binding import Field as SchemaField
+from wreath.binding import File, Form, Query
 from wreath.openapi import ResponseSpec, compare_openapi, generate_openapi
+from wreath.request import UploadedFile
+from wreath.response import Response
 
 
 @dataclass
@@ -184,6 +187,170 @@ def test_route_tags_and_summary() -> None:
     operation = spec["paths"]["/tagged"]["get"]
     assert operation["tags"] == ["items", "public"]
     assert operation["summary"] == "List the things"
+
+
+def test_empty_route_metadata_and_components_are_omitted() -> None:
+    app = Wreath()
+
+    @app.get("/plain")
+    async def plain(request: Any) -> Any:
+        raise NotImplementedError
+
+    spec = generate_openapi(app)
+    operation = spec["paths"]["/plain"]["get"]
+
+    assert set(operation) == {"operationId", "responses"}
+    assert operation["responses"] == {
+        "200": {"description": "Successful response"}
+    }
+    assert "components" not in spec
+
+
+def test_response_and_parameterized_return_annotations_have_distinct_schemas() -> None:
+    app = Wreath()
+
+    @app.get("/response")
+    async def response(request: Any) -> Response:
+        raise NotImplementedError
+
+    @app.get("/names")
+    async def names(request: Any) -> list[str]:
+        raise NotImplementedError
+
+    spec = generate_openapi(app)
+    assert spec["paths"]["/response"]["get"]["responses"]["200"] == {
+        "description": "Successful response"
+    }
+    assert spec["paths"]["/names"]["get"]["responses"]["200"]["content"] == {
+        "application/json": {
+            "schema": {"type": "array", "items": {"type": "string"}}
+        }
+    }
+
+
+def test_query_defaults_and_one_sided_bounds_are_exact() -> None:
+    app = Wreath()
+
+    @app.get("/filters")
+    async def filters(
+        request: Any,
+        required: int,
+        optional: int | None = None,
+        minimum_only: Annotated[int, Query(minimum=1)] = 1,
+        maximum_only: Annotated[int, Query(maximum=10)] = 10,
+    ) -> Any:
+        raise NotImplementedError
+
+    operation = generate_openapi(app)["paths"]["/filters"]["get"]
+    parameters = {
+        parameter["name"]: parameter
+        for parameter in operation["parameters"]
+    }
+    assert parameters["required"]["required"] is True
+    assert "default" not in parameters["required"]["schema"]
+    assert parameters["optional"]["required"] is False
+    assert "default" not in parameters["optional"]["schema"]
+    assert parameters["minimum_only"]["schema"]["minimum"] == 1
+    assert "maximum" not in parameters["minimum_only"]["schema"]
+    assert parameters["maximum_only"]["schema"]["maximum"] == 10
+    assert "minimum" not in parameters["maximum_only"]["schema"]
+    assert "requestBody" not in operation
+
+
+def test_multipart_form_and_file_schema_tracks_required_fields() -> None:
+    app = Wreath()
+
+    @app.post("/upload")
+    async def upload(
+        request: Any,
+        title: Annotated[str, Form()],
+        attachment: Annotated[UploadedFile, File()],
+        note: Annotated[str, Form()] = "",
+    ) -> Any:
+        raise NotImplementedError
+
+    request_body = generate_openapi(app)["paths"]["/upload"]["post"]["requestBody"]
+    schema = request_body["content"]["multipart/form-data"]["schema"]
+    assert request_body["required"] is True
+    assert schema == {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "note": {"type": "string"},
+            "attachment": {"type": "string", "format": "binary"},
+        },
+        "required": ["title", "attachment"],
+    }
+
+
+def test_form_only_and_file_only_routes_each_produce_multipart_schemas() -> None:
+    app = Wreath()
+
+    @app.post("/form")
+    async def form(
+        request: Any,
+        note: Annotated[str, Form()] = "",
+    ) -> Any:
+        raise NotImplementedError
+
+    @app.post("/file")
+    async def file(
+        request: Any,
+        attachment: Annotated[UploadedFile, File()],
+    ) -> Any:
+        raise NotImplementedError
+
+    paths = generate_openapi(app)["paths"]
+    form_body = paths["/form"]["post"]["requestBody"]
+    assert form_body == {
+        "required": False,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "properties": {"note": {"type": "string"}},
+                }
+            }
+        },
+    }
+    file_body = paths["/file"]["post"]["requestBody"]
+    assert file_body["required"] is True
+    assert file_body["content"]["multipart/form-data"]["schema"] == {
+        "type": "object",
+        "properties": {
+            "attachment": {"type": "string", "format": "binary"},
+        },
+        "required": ["attachment"],
+    }
+
+
+def test_untyped_path_parameters_are_still_documented() -> None:
+    app = Wreath()
+
+    @app.get("/raw/{slug}")
+    async def raw(request):
+        raise NotImplementedError
+
+    operation = generate_openapi(app)["paths"]["/raw/{slug}"]["get"]
+    assert operation["parameters"] == [
+        {
+            "name": "slug",
+            "in": "path",
+            "required": True,
+            "schema": {"type": "string"},
+        }
+    ]
+
+
+def test_additional_response_without_a_model_has_no_empty_content_schema() -> None:
+    app = Wreath()
+
+    @app.get("/health", responses={204: ResponseSpec(description="No content")})
+    async def health(request: Any) -> Any:
+        raise NotImplementedError
+
+    operation = generate_openapi(app)["paths"]["/health"]["get"]
+    assert operation["responses"]["204"] == {"description": "No content"}
 
 
 @dataclass
