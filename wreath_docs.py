@@ -32,7 +32,12 @@ nav = Nav(
         Page("Charts and calculated views", "example/analysis.md"),
     ),
     Page("Performance", "perf/index.md"),
-    Page("Under the hood", "internals/index.md"),
+    Section(
+        "Under the hood",
+        Page("The request path", "internals/index.md"),
+        Page("Scanning bytes in bulk", "internals/vectorisation.md"),
+        Page("Work moved out of the request", "internals/compile-time.md"),
+    ),
     Section(
         "Coming from FastAPI",
         Page("Wreath for FastAPI developers", "from-fastapi/index.md"),
