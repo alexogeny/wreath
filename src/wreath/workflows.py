@@ -63,10 +63,24 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import _nplusone
+from . import telemetry as _telemetry
 
 #: The system schema durable workflow state lives in, matching `wreath.jobs`.
 DEFAULT_SCHEMA = "wreath_system"
 DEFAULT_TABLE = "workflow_steps"
+
+
+def _captured_trace() -> str | None:
+    """The traceparent to record on an instance, or None when untraced.
+
+    The traceparent only, for the reason `wreath.jobs.JobRunner.enqueue` gives
+    and which applies with more force here: `tracestate` is vendor routing for
+    the *next hop of a live call*, and a saga that resumes an hour later is
+    resuming a trace rather than continuing a conversation. Storing it would age
+    in the instance row exactly as it would age in the queue.
+    """
+    bound = _telemetry.outbound_context.get()
+    return bound[0] if bound else None
 
 
 class WorkflowError(Exception):
@@ -156,6 +170,7 @@ class InMemoryWorkflowStore:
                 "steps": list(steps),
                 "results": {},
                 "state": "running",
+                "trace_context": _captured_trace(),
             }
             self._instances[key] = record
         return record
@@ -187,7 +202,7 @@ class PostgresWorkflowStore:
     tenant's worker because someone set a search path wrong.
     """
 
-    __slots__ = ("_database", "_schema", "_table", "_tenant", "_workload")
+    __slots__ = ("_database", "_schema", "_table", "_tenant", "_trace_column", "_workload")
 
     def __init__(
         self,
@@ -203,6 +218,41 @@ class PostgresWorkflowStore:
         self._table = table
         self._tenant = tenant
         self._workload = workload
+        #: Tri-state: None until probed, then whether the instances table has the
+        #: `trace_context` column. A build newer than its schema must keep
+        #: working -- losing the trace is a degradation, losing the saga is not.
+        self._trace_column: bool | None = None
+
+    async def _carries_trace(self) -> bool:
+        """Whether this database's instances table has `trace_context`.
+
+        Probed once and cached, off the execution path rather than inside it:
+        `begin` runs per instance, and a catalog lookup per saga would be a query
+        nobody asked for. The same shape `wreath.jobs` uses, and for the same
+        reason its first draft had to be moved off `_claim`.
+        """
+        if self._trace_column is None:
+            instances = f"{self._table}_instances"
+            connection = await self._database.acquire(self._workload)
+            try:
+                self._trace_column = bool(
+                    await connection.fetchval(
+                        "SELECT true FROM pg_attribute a "
+                        "JOIN pg_class k ON k.oid = a.attrelid "
+                        "JOIN pg_namespace n ON n.oid = k.relnamespace "
+                        # `::text` because `nspname` is `name`: without the cast
+                        # PostgreSQL infers the parameter as `name` too, which
+                        # the driver cannot encode. `wreath-sql-lint` SQL002.
+                        "WHERE n.nspname = $1::text AND k.relname = $2::text "
+                        "AND a.attname = 'trace_context' "
+                        "AND a.attnum > 0 AND NOT a.attisdropped",
+                        self._schema,
+                        instances,
+                    )
+                )
+            finally:
+                await self._database.release(self._workload, connection)
+        return self._trace_column
 
     @classmethod
     def schema_sql(
@@ -226,6 +276,12 @@ class PostgresWorkflowStore:
                 "  steps jsonb NOT NULL,\n"
                 "  state text NOT NULL DEFAULT 'running',\n"
                 "  compensation_errors int NOT NULL DEFAULT 0,\n"
+                # The traceparent of the run that began the instance, so a
+                # resume in another process continues one trace rather than
+                # starting a second. Nullable: an instance begun untraced is
+                # ordinary, and a table created by an older build has no such
+                # column at all -- see `_carries_trace`.
+                "  trace_context text,\n"
                 "  created_at timestamptz NOT NULL DEFAULT now(),\n"
                 "  updated_at timestamptz NOT NULL DEFAULT now(),\n"
                 "  PRIMARY KEY (tenant, key)\n"
@@ -254,16 +310,36 @@ class PostgresWorkflowStore:
         from ._json import dumps as _dumps
 
         instances = f'"{self._schema}"."{self._table}_instances"'
+        parent = _captured_trace()
+        # No short-circuit on `parent is None`: the `load` two statements below
+        # probes unconditionally (it must, to know whether to select the column),
+        # so guarding here saved nothing and only gave the same question two
+        # spellings. `wreath mutant` reported the guard as survivable, which is
+        # what redundant code looks like from the outside.
+        carries = await self._carries_trace()
         connection = await self._connection()
         try:
-            await connection.execute(
-                f"INSERT INTO {instances} (key, tenant, workflow, steps) "
-                "VALUES ($1, $2, $3, $4::jsonb) ON CONFLICT (tenant, key) DO NOTHING",
-                key,
-                self._tenant,
-                workflow,
-                _dumps(list(steps)).decode("utf-8"),
-            )
+            if carries:
+                await connection.execute(
+                    f"INSERT INTO {instances} "
+                    "(key, tenant, workflow, steps, trace_context) "
+                    "VALUES ($1, $2, $3, $4::jsonb, $5) "
+                    "ON CONFLICT (tenant, key) DO NOTHING",
+                    key,
+                    self._tenant,
+                    workflow,
+                    _dumps(list(steps)).decode("utf-8"),
+                    parent,
+                )
+            else:
+                await connection.execute(
+                    f"INSERT INTO {instances} (key, tenant, workflow, steps) "
+                    "VALUES ($1, $2, $3, $4::jsonb) ON CONFLICT (tenant, key) DO NOTHING",
+                    key,
+                    self._tenant,
+                    workflow,
+                    _dumps(list(steps)).decode("utf-8"),
+                )
         finally:
             await self._database.release(self._workload, connection)
         record = await self.load(key)
@@ -288,11 +364,14 @@ class PostgresWorkflowStore:
 
         instances = f'"{self._schema}"."{self._table}_instances"'
         steps_table = f'"{self._schema}"."{self._table}"'
+        # Selected only where the column exists, so a build newer than its schema
+        # resumes the saga untraced instead of failing on an unknown column.
+        trace = ", trace_context" if await self._carries_trace() else ""
         connection = await self._connection()
         try:
             rows = await connection.fetch(
-                f"SELECT workflow, steps, state, compensation_errors FROM {instances} "
-                "WHERE tenant = $1 AND key = $2",
+                f"SELECT workflow, steps, state, compensation_errors{trace} "
+                f"FROM {instances} WHERE tenant = $1 AND key = $2",
                 self._tenant,
                 key,
             )
@@ -319,6 +398,10 @@ class PostgresWorkflowStore:
             "results": {entry["name"]: _loads(entry["result"]) for entry in done},
             "state": row["state"],
             "compensation_errors": row["compensation_errors"],
+            # Absent from the row when the column is not there; `_execute` reads
+            # it with `.get`, so an older schema resumes untraced rather than
+            # raising a KeyError from a stack frame that says nothing useful.
+            "trace_context": row["trace_context"] if trace else None,
         }
 
     async def complete_step(self, key: str, name: str, result: Any) -> None:
@@ -557,6 +640,36 @@ class Workflow:
         )
 
     async def _execute(
+        self, *, store: Any, key: str, record: dict[str, Any], compensate: bool, progress: Any
+    ) -> Outcome:
+        """Bind the instance's trace, then execute under it.
+
+        The binding wraps the whole of `_execute_bound`, so the undo chain runs
+        under it too -- the plan's requirement that a compensation is *visibly
+        part of* the saga rather than an orphan beside it.
+
+        The instance's context wins over whatever the resuming worker holds, and
+        that is the point: `run` and `resume` are the same trace even when they
+        are different processes on different days. An instance begun untraced
+        binds `None` rather than leaving the ambient value in place, for the same
+        reason the request pipeline and the job runner both bind `None` -- not
+        binding leaks the previous occupant's context, and a trace that names the
+        wrong cause is worse than one that names none.
+        """
+        parent = record.get("trace_context")
+        token = _telemetry.outbound_context.set((parent, "") if parent else None)
+        try:
+            return await self._execute_bound(
+                store=store,
+                key=key,
+                record=record,
+                compensate=compensate,
+                progress=progress,
+            )
+        finally:
+            _telemetry.outbound_context.reset(token)
+
+    async def _execute_bound(
         self, *, store: Any, key: str, record: dict[str, Any], compensate: bool, progress: Any
     ) -> Outcome:
         results: dict[str, Any] = dict(record.get("results") or {})
