@@ -35,12 +35,15 @@ if TYPE_CHECKING:
 #: system, hence `...`. Narrowing this to `[Request]` would reject the framework's
 #: own documented signature -- `async def hello(request: Request, name: str)` --
 #: and every handler in the guides with it.
-Handler = Callable[..., Awaitable[Any]]
+#: The return type is `Awaitable[Any] | Any` because a handler may be `def` as
+#: well as `async def` -- dispatch calls it and awaits only what came back
+#: awaitable. See `docs/guides/routing.md#synchronous-handlers`.
+Handler = Callable[..., Awaitable[Any] | Any]
 
 #: What the dispatcher calls once compilation has bound the extra parameters away.
 #: Assignable to `Handler`, so the route table can hold either: it is loaded with
 #: declared handlers at registration and reloaded with compiled ones at startup.
-CompiledHandler = Callable[["Request"], Awaitable[Any]]
+CompiledHandler = Callable[["Request"], Awaitable[Any] | Any]
 
 RoutingMode = Literal["decision", "trie", "bitset"]
 
