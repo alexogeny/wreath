@@ -33,8 +33,10 @@ from typing import Any
 from ._nplusone import (
     Finding,
     NPlusOneDetected,
+    Origin,
     QueryLedger,
     Repetition,
+    _raise,
     find_n_plus_one,
     query_ledger,
     watch,
@@ -46,6 +48,7 @@ __all__ = [
     "check_logging_streams",
     "NPlusOneDetected",
     "NPlusOneGuard",
+    "Origin",
     "Repetition",
     "diagnose_n_plus_one",
     "find_n_plus_one",
@@ -112,9 +115,18 @@ class NPlusOneGuard:
         watch()
 
     async def before(self, request: Any) -> None:
+        # Deliberately *not* `_nplusone.watching`, though it is the same
+        # ledger and the same `Origin`. The middleware protocol splits bind
+        # and reset across two calls, so using the context manager would mean
+        # holding a suspended generator on `request.state` -- and a suspended
+        # generator is finalized when it becomes unreachable, which runs its
+        # `finally` and unbinds the ledger the moment the request object is
+        # collected rather than when the request ends. A plain token has no
+        # finalizer and cannot do that. `watching` is for callers that have a
+        # block; this is the caller that does not.
         ledger = QueryLedger(
             limit=self._limit,
-            route=f"{request.method} {request.path}",
+            origin=Origin(kind="request", label=f"{request.method} {request.path}"),
             on_exceeded=self._on_detect or _raise,
         )
         request.state.__setattr__(_STATE_TOKEN, query_ledger.set(ledger))
@@ -128,10 +140,6 @@ class NPlusOneGuard:
             # anyway dies with the request's task.
             query_ledger.reset(token)
         return response
-
-
-def _raise(finding: Finding) -> None:
-    raise NPlusOneDetected(finding)
 
 
 # --- extension readiness -----------------------------------------------------
