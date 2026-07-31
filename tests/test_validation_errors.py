@@ -45,9 +45,11 @@ def _app() -> Wreath:
         ("fr", ["en", "fr"], "fr"),
         ("fr-CA", ["en", "fr"], "fr"),                  # prefix match
         ("fr", ["en", "fr-CA"], "fr-CA"),               # reverse prefix match
+        ("fr-CA", ["en", "fr", "fr-CA"], "fr-CA"),      # exact beats prefix
         ("de", ["en", "fr"], "en"),                     # no match -> fallback
         ("de,fr;q=0.8", ["en", "fr"], "fr"),
         ("fr;q=0.2,en;q=0.9", ["en", "fr"], "en"),      # highest q wins
+        ("en;q=0.9,fr;q=0.2", ["en", "fr"], "en"),      # lower q cannot replace
         ("*", ["en", "fr"], "en"),                      # wildcard -> first
         ("en;q=0,*", ["en", "fr"], "fr"),               # refused, wildcard next
         ("en;q=0", ["en", "fr"], "en"),                 # refused, no wildcard

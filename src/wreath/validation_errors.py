@@ -108,8 +108,6 @@ def select_language(accept_language: str | bytes | None, offered: Sequence[str])
     for item in accept_language.split(","):
         pieces = item.split(";")
         tag = pieces[0].strip().lower()
-        if not tag:
-            continue
         quality = _quality(pieces[1:])
         if tag == "*":
             wildcard_quality = max(wildcard_quality, quality)
@@ -117,9 +115,6 @@ def select_language(accept_language: str | bytes | None, offered: Sequence[str])
         # `en-GB` matches an offered `en`; an offered `en-GB` also matches a
         # requested `en`. Exact match wins, then the prefix relationship.
         match = available.get(tag)
-        if match is None:
-            base = tag.partition("-")[0]
-            match = available.get(base)
         if match is None:
             for lowered, original in available.items():
                 if lowered.partition("-")[0] == tag.partition("-")[0]:
