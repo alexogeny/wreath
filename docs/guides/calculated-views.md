@@ -272,6 +272,64 @@ With no `by`, it is one row: a KPI. With two measures and a `by`, it is a
 scatter — two quantities per entity. That is a declared ceiling rather than a
 separate type, which is why there is no third class here.
 
+## With a place axis instead
+
+`Cells` is the same core again, bucketed by *where* rather than *when* — a
+heatmap as a declaration, with the same obligation a line chart has.
+
+```python
+from wreath.geospatial import BoundingBox
+from wreath.series import Cells, avg, count
+
+reserve = BoundingBox(lat_min=-30.0, lat_max=-29.0, lon_min=150.0, lon_max=151.0)
+
+heat = (
+    Cells(Sighting)
+        .where(Sighting.species == Param("species"))
+        .measure(seen=count(), mean_weight=avg(Sighting.weight_kg, unit="kg"))
+        .over(Sighting.lat, Sighting.lon, metres=10_000, extent=reserve)
+)
+
+result = await heat.run(session, species="llama")
+for cell in result.cells:
+    cell.row, cell.column     # index from the extent's south-west corner
+    cell.bounds               # the ground it covers, a BoundingBox
+    cell.centre               # a Coordinate, for pinning a marker
+    cell.values["seen"]
+```
+
+**Every cell in the extent is present, and fill is per measure** — the same two
+rules as the time axis, taken from the same function rather than restated. A
+cell nothing fell into reads `seen: 0` and `mean_weight: None`, because a count
+of nothing is zero and an average of nothing is undefined. A heatmap with
+missing cells lies about a gap in exactly the way a line chart with missing days
+does, and one that fills every measure with zero puts a hole in the map on the
+quietest ground.
+
+The lattice comes from [`grid`](geospatial.md), so the number of cells is known
+before the query runs. `over` refuses past a declared ceiling — every cell is a
+row on the wire whether or not anything is in it, which is the point of a dense
+axis and also its cost:
+
+```python
+wide = (
+    Cells(Sighting)
+        .measure(seen=count())
+        .over(
+            Sighting.lat,
+            Sighting.lon,
+            metres=10_000,
+            extent=reserve,
+            limit=50_000,
+        )
+)
+```
+
+The refusal happens at declaration time, where a reviewer reads it, rather than
+after the database has already scanned. `grid`'s own refusals — an extent
+crossing the antimeridian, or one too tall for a single longitude step to tile
+squarely — surface here too.
+
 ## Where it stops
 
 A calculated view takes **one source model, declared measures, and a bounded
