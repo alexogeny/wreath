@@ -107,6 +107,8 @@ ext_modules = [
                 "src/wreath/_native/multipart.c",
                 "src/wreath/_native/json.c",
                 "src/wreath/_native/msgpack.c",
+                "src/wreath/_native/geospatial.c",
+                "src/wreath/_native/protobuf.c",
                 "src/wreath/_native/sse.c",
                 "src/wreath/_native/templates.c",
                 "src/wreath/_native/http.c",
