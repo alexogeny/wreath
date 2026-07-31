@@ -246,8 +246,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     typegen_parser.add_argument("target", help="application target as module:attribute")
     typegen_parser.add_argument("--target", dest="typegen_target", default="typescript",
-                                choices=("typescript",), metavar="TARGET",
-                                help="output target (default: typescript)")
+                                choices=("typescript", "python"), metavar="TARGET",
+                                help="output target: typescript or python (default: typescript)")
+    typegen_parser.add_argument("--class-name", dest="typegen_class_name",
+                                default="GeneratedServiceClient", metavar="NAME",
+                                help="python target: name of the generated "
+                                     "ServiceClient subclass")
     typegen_parser.add_argument("--output", required=True, metavar="PATH")
     typegen_parser.add_argument("--react-query", action="store_true")
     typegen_parser.add_argument("--base-url-env", metavar="NAME", default=None)
@@ -1313,6 +1317,7 @@ def execute_typegen(namespace: argparse.Namespace) -> int:
         factory=namespace.factory,
         title=namespace.title,
         version=namespace.api_version,
+        class_name=namespace.typegen_class_name,
     )
     try:
         return run(app, options)
@@ -1697,23 +1702,47 @@ def execute_doctor(namespace: argparse.Namespace) -> int:
     return 1 if findings and namespace.strict else 0
 
 
+#: How each scope is named in the report, and the order the groups print in --
+#: requests first because they are what a reader came for, then the background
+#: scopes in the order they are hardest to reproduce.
+_SCOPE_LABELS: tuple[tuple[str, str], ...] = (
+    ("request", "request(s)"),
+    ("job", "job attempt(s)"),
+    ("step", "workflow step(s)"),
+    ("shift", "pass shift(s)"),
+)
+
+
 def _print_n_plus_one(findings: list, threshold: int) -> None:
     if not findings:
         print(
-            f"no request queried one model {threshold} or more times. "
+            f"nothing queried one model {threshold} or more times. "
             "Note this reads sampled traces: a Detailed recorder sees more."
         )
         return
-    print(f"{len(findings)} request(s) queried one model {threshold}+ times:\n")
+    grouped: dict[str, list] = {}
     for finding in findings:
-        print(f"  {finding.describe()}")
-        for repetition in finding.repetitions:
-            millis = repetition.total_us / 1000
-            print(
-                f"      {repetition.model:<24} {repetition.count:>5} queries "
-                f"{millis:>8.1f}ms"
-            )
-        print(f"      replay it: wreath replay --request {finding.request_id}\n")
+        grouped.setdefault(getattr(finding.origin, "kind", "request"), []).append(finding)
+    known = dict(_SCOPE_LABELS)
+    # Ordered groups first, then anything a newer producer invented, so an
+    # unrecognised scope is reported rather than dropped.
+    order = [kind for kind, _ in _SCOPE_LABELS if kind in grouped]
+    order += sorted(kind for kind in grouped if kind not in known)
+    for kind in order:
+        group = grouped[kind]
+        noun = known.get(kind, f"{kind}(s)")
+        print(f"{len(group)} {noun} queried one model {threshold}+ times:\n")
+        for finding in group:
+            print(f"  {finding.describe()}")
+            for repetition in finding.repetitions:
+                millis = repetition.total_us / 1000
+                print(
+                    f"      {repetition.model:<24} {repetition.count:>5} queries "
+                    f"{millis:>8.1f}ms"
+                )
+            if finding.request_id:
+                print(f"      replay it: wreath replay --request {finding.request_id}")
+            print()
     print("An eager load usually collapses these into one statement.")
 
 
