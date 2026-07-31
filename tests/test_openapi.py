@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import date
+from decimal import Decimal
+from typing import Annotated, Any, Literal
+from uuid import UUID
 
 import pytest
 
 import wreath.binding as binding
 from wreath import Wreath
-from wreath.openapi import generate_openapi
+from wreath.binding import Field as SchemaField
+from wreath.openapi import ResponseSpec, compare_openapi, generate_openapi
 
 
 @dataclass
@@ -180,3 +184,195 @@ def test_route_tags_and_summary() -> None:
     operation = spec["paths"]["/tagged"]["get"]
     assert operation["tags"] == ["items", "public"]
     assert operation["summary"] == "List the things"
+
+
+@dataclass
+class RichWidget:
+    widget_id: UUID
+    amount: Decimal
+    kind: Literal["physical", "digital"]
+    due: date
+    display_name: Annotated[
+        str,
+        SchemaField(
+            alias="displayName",
+            min_length=3,
+            max_length=40,
+            pattern=r"^[A-Z]",
+            description="Customer-facing name",
+            examples=("Wreath",),
+        ),
+    ]
+    score: Annotated[int, SchemaField(gt=0, ge=1, lt=6, le=5)]
+
+
+@dataclass
+class ConflictBody:
+    code: str
+
+
+def test_schema_metadata_and_query_constraints_share_the_runtime_contract() -> None:
+    app = Wreath()
+
+    @app.post("/widgets")
+    async def create(
+        request: Any,
+        body: RichWidget,
+        limit: Annotated[int, binding.Query(minimum=1, maximum=100)] = 20,
+    ) -> RichWidget:
+        raise NotImplementedError
+
+    spec = generate_openapi(app)
+    model = spec["components"]["schemas"]["RichWidget"]
+    assert model["properties"]["widget_id"] == {
+        "type": "string",
+        "format": "uuid",
+    }
+    assert model["properties"]["amount"] == {
+        "type": "string",
+        "format": "decimal",
+    }
+    assert model["properties"]["kind"] == {"enum": ["physical", "digital"]}
+    assert model["properties"]["due"] == {"type": "string", "format": "date"}
+    assert model["properties"]["displayName"] == {
+        "type": "string",
+        "description": "Customer-facing name",
+        "examples": ["Wreath"],
+        "minLength": 3,
+        "maxLength": 40,
+        "pattern": r"^[A-Z]",
+    }
+    assert model["properties"]["score"]["minimum"] == 1
+    assert model["properties"]["score"]["maximum"] == 5
+    assert model["properties"]["score"]["exclusiveMinimum"] == 0
+    assert model["properties"]["score"]["exclusiveMaximum"] == 6
+    parameter = spec["paths"]["/widgets"]["post"]["parameters"][0]
+    assert parameter["schema"]["minimum"] == 1
+    assert parameter["schema"]["maximum"] == 100
+
+
+def test_operation_responses_security_deprecation_and_visibility() -> None:
+    app = Wreath()
+    app.add_security_scheme(
+        "bearerAuth",
+        {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"},
+    )
+
+    @app.post(
+        "/widgets",
+        status_code=201,
+        response_description="Created widget",
+        responses={
+            400: ConflictBody,
+            409: ResponseSpec(ConflictBody, description="Name conflict"),
+        },
+        deprecated=True,
+        security={"bearerAuth": ()},
+    )
+    async def create(request: Any, body: RichWidget) -> RichWidget:
+        raise NotImplementedError
+
+    @app.get("/internal", include_in_schema=False)
+    async def internal(request: Any) -> Any:
+        raise NotImplementedError
+
+    spec = generate_openapi(app)
+    operation = spec["paths"]["/widgets"]["post"]
+    assert operation["deprecated"] is True
+    assert operation["security"] == [{"bearerAuth": []}]
+    assert operation["responses"]["201"]["description"] == "Created widget"
+    assert operation["responses"]["409"] == {
+        "description": "Name conflict",
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/ConflictBody"}
+            }
+        },
+    }
+    assert operation["responses"]["400"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ConflictBody"
+    }
+    assert spec["components"]["securitySchemes"]["bearerAuth"]["scheme"] == "bearer"
+    assert "/internal" not in spec["paths"]
+
+
+@pytest.mark.asyncio
+async def test_declared_success_status_is_the_runtime_status() -> None:
+    from wreath.testing import TestClient
+
+    app = Wreath()
+
+    @app.post("/widgets", status_code=201)
+    async def create(request: Any) -> dict[str, bool]:
+        return {"created": True}
+
+    async with TestClient(app) as client:
+        response = await client.post("/widgets")
+
+    assert response.status == 201
+
+
+def test_openapi_compatibility_reports_breaking_contract_changes() -> None:
+    previous = {
+        "paths": {
+            "/widgets": {
+                "get": {
+                    "parameters": [
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "integer"},
+                        }
+                    ],
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        }
+    }
+    current = {
+        "paths": {
+            "/widgets": {
+                "get": {
+                    "parameters": [
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "integer"},
+                        }
+                    ],
+                    "responses": {"201": {"description": "ok"}},
+                }
+            }
+        }
+    }
+
+    changes = compare_openapi(previous, current)
+
+    assert {(change.kind, change.location) for change in changes} == {
+        ("parameter-became-required", "GET /widgets query:limit"),
+        ("response-removed", "GET /widgets 200"),
+    }
+
+
+def test_openapi_refuses_an_unsupported_annotation_instead_of_empty_schema() -> None:
+    app = Wreath()
+
+    @app.get("/unsupported")
+    async def unsupported(request: Any) -> complex:
+        raise NotImplementedError
+
+    with pytest.raises(TypeError, match="unsupported annotation"):
+        generate_openapi(app)
+
+
+def test_openapi_refuses_a_route_that_names_an_undeclared_security_scheme() -> None:
+    app = Wreath()
+
+    @app.get("/private", security={"missing": ()})
+    async def private(request: Any) -> Any:
+        raise NotImplementedError
+
+    with pytest.raises(ValueError, match="undeclared OpenAPI security scheme"):
+        generate_openapi(app)

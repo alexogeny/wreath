@@ -8,14 +8,17 @@ app = Wreath()
 app.enable_docs()          # /openapi.json and /docs
 ```
 Dataclass bodies become component schemas; typed path/query parameters become
-parameter objects; a dataclass or scalar return annotation becomes the 200
-response schema. Handlers without typed signatures still appear with their
-paths and methods.
+parameter objects; and supported return annotations become response schemas at
+the route's declared status. Field constraints, additional responses, security,
+deprecation and schema visibility share the route metadata used at runtime.
+An unsupported annotation is refused instead of silently becoming `{}`.
 """
 
 from __future__ import annotations
 
 import inspect
+import re
+from dataclasses import dataclass
 from typing import Any
 
 from .typegen.inspect import _Builder, _return_annotation, resolve_operation_ids
@@ -28,6 +31,26 @@ _TYPE_KEYS: dict[str, dict[str, Any]] = {
     "number": {"type": "number"},
     "string": {"type": "string"},
 }
+
+_PATH_CONVERTER = re.compile(r"\{([^}:]+):path\}")
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseSpec:
+    """One additional OpenAPI response declared on a route."""
+
+    model: Any = Any
+    description: str = "Response"
+    media_type: str = "application/json"
+
+
+@dataclass(frozen=True, slots=True)
+class CompatibilityChange:
+    """One backwards-incompatible change between two OpenAPI documents."""
+
+    kind: str
+    location: str
+    detail: str
 
 
 def _openapi_schema(ref: TypeRef) -> dict[str, Any]:
@@ -74,7 +97,31 @@ def _openapi_schema(ref: TypeRef) -> dict[str, Any]:
 
 
 def _component_schema(model: Model) -> dict[str, Any]:
-    properties = {field.wire_name: _openapi_schema(field.type) for field in model.fields}
+    properties: dict[str, dict[str, Any]] = {}
+    for field in model.fields:
+        field_schema = _openapi_schema(field.type)
+        if field.description is not None:
+            field_schema["description"] = field.description
+        if field.examples:
+            field_schema["examples"] = list(field.examples)
+        for value, key in (
+            (field.gt, "exclusiveMinimum"),
+            (field.ge, "minimum"),
+            (field.lt, "exclusiveMaximum"),
+            (field.le, "maximum"),
+        ):
+            if value is not None:
+                field_schema[key] = value
+        length_prefix = "Items" if field.type.kind in ("array", "tuple") else "Length"
+        if field.min_length is not None:
+            field_schema[f"min{length_prefix}"] = field.min_length
+        if field.max_length is not None:
+            field_schema[f"max{length_prefix}"] = field.max_length
+        if field.pattern is not None:
+            field_schema["pattern"] = field.pattern
+        if field.unique_items:
+            field_schema["uniqueItems"] = True
+        properties[field.wire_name] = field_schema
     required = [field.wire_name for field in model.fields if field.required]
     schema: dict[str, Any] = {
         "type": "object",
@@ -93,12 +140,22 @@ def generate_openapi(
     title: str = "Wreath",
     version: str = "0.1.0",
 ) -> dict[str, Any]:
-    # OpenAPI tolerates unresolved annotations as an empty schema, so the shared
-    # builder runs with allow_unknown behaviour (diagnostics are not raised).
-    builder = _Builder(allow_unknown=True)
+    builder = _Builder(allow_unknown=False)
 
     def schema(annotation: Any) -> dict[str, Any]:
-        return _openapi_schema(builder.type_ref(annotation))
+        if annotation is Any or annotation is inspect.Parameter.empty:
+            return {}
+        from .response import FileResponse, PreparedResponse, Response, StreamingResponse
+
+        if isinstance(annotation, type) and issubclass(
+            annotation, (Response, StreamingResponse, FileResponse, PreparedResponse)
+        ):
+            return {}
+        before = len(builder.diagnostics)
+        reference = builder.type_ref(annotation)
+        if len(builder.diagnostics) != before:
+            raise TypeError(builder.diagnostics[-1].message)
+        return _openapi_schema(reference)
 
     image = app._application_image
     routes = list(image.routes())
@@ -107,7 +164,10 @@ def generate_openapi(
     paths: dict[str, dict[str, Any]] = {}
 
     for index, definition in enumerate(routes):
-        operations = paths.setdefault(definition.path, {})
+        if not definition.include_in_schema:
+            continue
+        openapi_path = _PATH_CONVERTER.sub(r"{\1}", definition.path)
+        operations = paths.setdefault(openapi_path, {})
         spec = binding_specs[index]
         returns = _return_annotation(definition.endpoint)
         for method in definition.methods:
@@ -118,11 +178,28 @@ def generate_openapi(
                 operation["tags"] = list(definition.tags)
             if definition.summary:
                 operation["summary"] = definition.summary
+            if definition.deprecated:
+                operation["deprecated"] = True
+            if definition.security:
+                missing = [
+                    name
+                    for name, _scopes in definition.security
+                    if name not in app._openapi_security_schemes
+                ]
+                if missing:
+                    raise ValueError(
+                        f"route {method} {definition.path} names undeclared OpenAPI "
+                        f"security scheme(s): {', '.join(missing)}"
+                    )
+                operation["security"] = [
+                    {name: list(scopes)} for name, scopes in definition.security
+                ]
             doc = inspect.getdoc(definition.endpoint)
             if doc:
                 operation["description"] = doc
             parameters: list[dict[str, Any]] = []
             if spec is not None:
+                query_constraints = dict(spec.query_constraints)
                 for _parameter_name, alias, annotation in spec.path_params:
                     parameters.append(
                         {
@@ -146,6 +223,14 @@ def generate_openapi(
                         }
                         if default is not inspect.Parameter.empty and default is not None:
                             parameter["schema"]["default"] = default
+                        if location == "query":
+                            constraint = query_constraints.get(_parameter_name)
+                            if constraint is not None:
+                                minimum, maximum, _overflow = constraint
+                                if minimum is not None:
+                                    parameter["schema"]["minimum"] = minimum
+                                if maximum is not None:
+                                    parameter["schema"]["maximum"] = maximum
                         parameters.append(parameter)
                 if spec.body is not None:
                     operation["requestBody"] = {
@@ -193,11 +278,25 @@ def generate_openapi(
                         )
             if parameters:
                 operation["parameters"] = parameters
-            response: dict[str, Any] = {"description": "Successful response"}
+            response: dict[str, Any] = {"description": definition.response_description}
             response_schema = schema(returns)
             if response_schema:
-                response["content"] = {"application/json": {"schema": response_schema}}
-            operation["responses"] = {"200": response}
+                response["content"] = {
+                    definition.response_media_type: {"schema": response_schema}
+                }
+            operation_responses = {str(definition.status_code): response}
+            for status, declared in definition.responses:
+                response_spec = (
+                    declared if isinstance(declared, ResponseSpec) else ResponseSpec(declared)
+                )
+                additional: dict[str, Any] = {"description": response_spec.description}
+                additional_schema = schema(response_spec.model)
+                if additional_schema:
+                    additional["content"] = {
+                        response_spec.media_type: {"schema": additional_schema}
+                    }
+                operation_responses[str(status)] = additional
+            operation["responses"] = operation_responses
             operations[method.lower()] = operation
 
     components = {model.name: _component_schema(model) for model in builder.registry.models()}
@@ -206,9 +305,83 @@ def generate_openapi(
         "info": {"title": title, "version": version},
         "paths": paths,
     }
+    component_document: dict[str, Any] = {}
     if components:
-        document["components"] = {"schemas": components}
+        component_document["schemas"] = components
+    if app._openapi_security_schemes:
+        component_document["securitySchemes"] = {
+            name: dict(value) for name, value in app._openapi_security_schemes.items()
+        }
+    if component_document:
+        document["components"] = component_document
     return document
+
+
+def compare_openapi(
+    previous: dict[str, Any], current: dict[str, Any]
+) -> tuple[CompatibilityChange, ...]:
+    """Return backwards-incompatible operation changes in stable order.
+
+    The first lifecycle gate covers removals and request tightening: removed
+    operations, newly required parameters, optional parameters made required,
+    and removed response statuses. Additions are compatible and omitted.
+    """
+    changes: list[CompatibilityChange] = []
+    current_paths = current.get("paths", {})
+    for path, old_path in previous.get("paths", {}).items():
+        new_path = current_paths.get(path)
+        for method, old_operation in old_path.items():
+            method_name = method.upper()
+            if new_path is None or method not in new_path:
+                changes.append(
+                    CompatibilityChange(
+                        "operation-removed",
+                        f"{method_name} {path}",
+                        "operation no longer exists",
+                    )
+                )
+                continue
+            new_operation = new_path[method]
+            old_parameters = {
+                (item["in"], item["name"]): item
+                for item in old_operation.get("parameters", ())
+            }
+            new_parameters = {
+                (item["in"], item["name"]): item
+                for item in new_operation.get("parameters", ())
+            }
+            for key, new_parameter in new_parameters.items():
+                old_parameter = old_parameters.get(key)
+                if not new_parameter.get("required", False):
+                    continue
+                location = f"{method_name} {path} {key[0]}:{key[1]}"
+                if old_parameter is None:
+                    changes.append(
+                        CompatibilityChange(
+                            "required-parameter-added",
+                            location,
+                            "a new required parameter was added",
+                        )
+                    )
+                elif not old_parameter.get("required", False):
+                    changes.append(
+                        CompatibilityChange(
+                            "parameter-became-required",
+                            location,
+                            "an optional parameter became required",
+                        )
+                    )
+            old_responses = old_operation.get("responses", {})
+            new_responses = new_operation.get("responses", {})
+            for status in old_responses.keys() - new_responses.keys():
+                changes.append(
+                    CompatibilityChange(
+                        "response-removed",
+                        f"{method_name} {path} {status}",
+                        "a documented response status was removed",
+                    )
+                )
+    return tuple(changes)
 
 
 # Self-contained API-docs renderer. No CDN, no external assets: the page is
