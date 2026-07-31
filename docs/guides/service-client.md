@@ -65,3 +65,22 @@ await svc.delete("/things/1")
 Per-call headers merge on top of the defaults, and the `Authorization` header is
 added for you. Everything else — pooling, timeouts, retries, rate limiting — is
 the underlying [`http_client`](http-client.md) doing its job.
+
+## Don't write the methods; generate them
+
+Written by hand, the calls above are stringly typed: a path built with an
+f-string, a response that is `Any`, and a shape the caller re-parses. If the
+service on the other end is also a wreath application, generate the client
+instead:
+
+```bash
+wreath typegen llama_service:app --target python --output ./llama_api \
+  --class-name LlamaClient
+```
+
+The result subclasses the `ServiceClient` on this page — it adds typed methods
+and nothing else, so everything above still applies. Responses come back as
+dataclasses, validated by the same binding layer the provider uses, and a
+breaking change on the provider's side can be made to fail your build rather
+than your requests. See
+[OpenAPI and typed clients](openapi-typegen.md#calling-a-sibling-service-typed).
