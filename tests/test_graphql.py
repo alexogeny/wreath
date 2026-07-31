@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1436,6 +1437,29 @@ async def test_a_mutation_is_weighed_against_the_mutation_roots(
 
 
 @pytest.mark.asyncio
+async def test_root_fragments_are_matched_against_the_operation_type(
+    registry: Registry,
+) -> None:
+    """A root spread uses Query or Mutation, not one fixed root type."""
+    api = GraphQL(registry, models=[User])
+
+    @api.mutation("costlyWrite", returns="Int", cost=99)
+    async def costly_write(info):
+        return 1
+
+    api.validate()
+    assert _weighed(
+        api,
+        "query { ...Read } fragment Read on Query { users { id } }",
+    ) == 10 + 1
+    assert _weighed(
+        api,
+        "mutation { ...Write } "
+        "fragment Write on Mutation { costlyWrite }",
+    ) == 99
+
+
+@pytest.mark.asyncio
 async def test_fragments_are_expanded_before_they_are_weighed(
     registry: Registry,
 ) -> None:
@@ -1481,6 +1505,35 @@ async def test_an_unknown_field_or_fragment_costs_nothing_and_keeps_its_own_erro
     body = await api.run("{ nope { id } }", Session(registry, "read"))
     assert body["errors"][0].get("extensions", {}).get("code") != "complexity"
     assert "nope" in body["errors"][0]["message"]      # named, as it should be
+
+
+def test_an_unknown_declared_result_type_costs_only_its_root() -> None:
+    """A stale declaration stays the executor's schema error, not a cost crash."""
+    from wreath._graphql.cost import weigh
+
+    document = parse("{ ghost { id } }")
+    schema = SimpleNamespace(
+        roots={"ghost": SimpleNamespace(cost=7, type_name="Ghost")},
+        mutations={},
+        type_of=lambda _name: None,
+    )
+    assert weigh(
+        schema,
+        document,
+        document.operation(),
+        max_complexity=100,
+    ) == 7
+
+
+def test_costing_tolerates_missing_object_selection_sets(
+    registry: Registry,
+) -> None:
+    """The cost pass does not dereference a selection set the client omitted."""
+    api = GraphQL(registry, models=[User, Post])
+    api.validate()
+
+    assert _weighed(api, "{ user(id: 1) }") == 1
+    assert _weighed(api, "{ users { posts } }") == 10 + 5
 
 
 @pytest.mark.asyncio

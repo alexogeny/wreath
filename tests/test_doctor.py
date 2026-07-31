@@ -175,6 +175,15 @@ def _no_ledger_leaks():
     query_ledger.reset(token)
 
 
+def test_n_plus_one_limits_must_be_positive() -> None:
+    for factory in (
+        lambda: QueryLedger(limit=0),
+        lambda: NPlusOneGuard(limit=0),
+    ):
+        with pytest.raises(ValueError, match="limit must be >= 1"):
+            factory()
+
+
 @pytest.mark.asyncio
 async def test_the_guard_binds_a_ledger_for_the_request() -> None:
     guard = NPlusOneGuard(limit=5)
@@ -187,6 +196,12 @@ async def test_the_guard_binds_a_ledger_for_the_request() -> None:
 
     await guard.after(request, "response")
     assert query_ledger.get(None) is None      # and unbound again afterwards
+
+
+@pytest.mark.asyncio
+async def test_the_guard_after_hook_is_safe_when_before_never_ran() -> None:
+    guard = NPlusOneGuard(limit=5)
+    assert await guard.after(Req(), "response") == "response"
 
 
 @pytest.mark.asyncio
@@ -446,6 +461,89 @@ async def test_the_doctor_survives_a_server_with_no_model_table() -> None:
     client = StubInspector([_herd_trace(50)], tables={"routes": ROUTES})
     (finding,) = await diagnose_n_plus_one(client, threshold=10)
     assert finding.worst.model == "model:5"
+
+
+@pytest.mark.asyncio
+async def test_extension_check_skips_a_registry_without_extension_columns(
+    monkeypatch,
+) -> None:
+    from wreath.doctor import check_extension_types
+    from wreath.orm import introspection
+
+    class Database:
+        name = "primary"
+
+        async def acquire(self, workload):
+            pytest.fail("an empty registry must not acquire a connection")
+
+    registry = type("Registry", (), {"database": Database()})()
+    monkeypatch.setattr(introspection, "declared_extension_columns", lambda registry: ())
+
+    assert await check_extension_types(registry) == []
+
+
+@pytest.mark.asyncio
+async def test_extension_check_reports_only_missing_types_and_releases(
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from wreath.doctor import check_extension_types
+    from wreath.orm import introspection
+    from wreath.orm.introspection import ExtensionTypeResolution
+
+    vector_type = SimpleNamespace(type_name="vector", extension="vector")
+    vector_column = SimpleNamespace(
+        pg_type=vector_type,
+        python_name="embedding",
+    )
+    sparse_type = SimpleNamespace(type_name="sparsevec", extension="vector")
+    sparse_column = SimpleNamespace(
+        pg_type=sparse_type,
+        python_name="sparse_embedding",
+    )
+    model_type = type("Document", (), {})
+    spec = SimpleNamespace(model_type=model_type)
+    released: list[tuple[str, object]] = []
+    connection = object()
+
+    class Database:
+        name = "primary"
+
+        async def acquire(self, workload):
+            assert workload == "write"
+            return connection
+
+        async def release(self, workload, released_connection):
+            released.append((workload, released_connection))
+
+    registry = type("Registry", (), {"database": Database()})()
+    monkeypatch.setattr(
+        introspection,
+        "declared_extension_columns",
+        lambda registry: ((spec, vector_column), (spec, sparse_column)),
+    )
+
+    async def probe(connection, wanted):
+        assert wanted == {"vector": "vector", "sparsevec": "vector"}
+        return (
+            ExtensionTypeResolution("vector", "vector", 0, "", ""),
+            ExtensionTypeResolution("sparsevec", "vector", 0, "", "tenant"),
+            ExtensionTypeResolution("halfvec", "vector", 12, "public", "public"),
+        )
+
+    monkeypatch.setattr(introspection, "probe_extension_types", probe)
+
+    assert await check_extension_types(registry) == [
+        "the 'vector' extension is not installed on 'primary' (current schema '?'), "
+        "so the 'vector' type used by Document.embedding has no OID; run "
+        "CREATE EXTENSION IF NOT EXISTS vector",
+        "the 'vector' extension is not installed on 'primary' "
+        "(current schema 'tenant'), so the 'sparsevec' type used by "
+        "Document.sparse_embedding has no OID; run "
+        "CREATE EXTENSION IF NOT EXISTS vector",
+    ]
+    assert released == [("write", connection)]
 
 
 def _same_named_key(module: str) -> str:

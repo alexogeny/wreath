@@ -28,6 +28,7 @@ def test_negotiate_version():
     assert negotiate_version(Req("2"), default="1", supported=supported) == "2"
     assert negotiate_version(Req("9"), default="1", supported=supported) == "1"  # unsupported
     assert negotiate_version(Req(None), default="1", supported=supported) == "1"  # absent
+    assert negotiate_version(Req(2), default="1", supported=supported) == "1"  # not text
     assert negotiate_version(object(), default="1", supported=supported) == "1"  # no accessor
 
 
