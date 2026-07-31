@@ -19,7 +19,12 @@ from typing import Any
 from .model import Outcome
 from .operators import OPERATORS
 from .report import render, render_json
-from .runner import DEFAULT_MAX_CANDIDATES, DEFAULT_TIMEOUT, execute
+from .runner import (
+    DEFAULT_MAX_CANDIDATES,
+    DEFAULT_TIMEOUT,
+    ChangedUnavailable,
+    execute,
+)
 
 #: Directories that look like a project's own source, in preference order.
 _SOURCE_HINTS = ("src", "app", "application")
@@ -82,7 +87,14 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--limit", type=int, default=0, metavar="N",
-        help="stop after the first N mutants (a smoke test of the setup)",
+        help="stop after the first N mutants, in line order (a smoke test of "
+             "the setup; to bound a pass onto code you just wrote, reach for "
+             "--changed instead)",
+    )
+    parser.add_argument(
+        "--changed", metavar="REF", default=None,
+        help="only mutants on lines that differ from REF (e.g. HEAD, main). "
+             "Untracked files count entirely. Composes with --limit.",
     )
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.add_argument(
@@ -109,19 +121,51 @@ def execute_mutant(namespace: Any) -> int:
         return 2
 
     with tempfile.TemporaryDirectory(prefix="wreath-mutant-") as tmp:
-        report = execute(
-            repo=repo,
-            roots=roots,
-            tests=tests,
-            workdir=Path(tmp),
-            operators=tuple(namespace.operators),
-            only=tuple(namespace.only),
-            extra=tuple(namespace.pytest_arg),
-            timeout=namespace.timeout,
-            max_candidates=namespace.max_candidates,
-            limit=namespace.limit,
-            progress=not namespace.quiet,
-        )
+        try:
+            report = execute(
+                repo=repo,
+                roots=roots,
+                tests=tests,
+                workdir=Path(tmp),
+                operators=tuple(namespace.operators),
+                only=tuple(namespace.only),
+                extra=tuple(namespace.pytest_arg),
+                timeout=namespace.timeout,
+                max_candidates=namespace.max_candidates,
+                limit=namespace.limit,
+                changed=namespace.changed,
+                progress=not namespace.quiet,
+            )
+        except ChangedUnavailable as error:
+            print(f"wreath: error: --changed needs git: {error}", file=sys.stderr)
+            return 2
+
+    # A bound that selects nothing must not read as a clean run: the report
+    # says `0 killed, 0 survived` and exits 0, which is a check that passes
+    # because it has nothing to check. Each selector gets the advice that fits
+    # it -- a wrong hint costs as much as no hint.
+    if not report.verdicts:
+        if namespace.only:
+            print(
+                f"wreath: error: --only {', '.join(repr(s) for s in namespace.only)} "
+                f"matched no mutations. The line in `operator@path:line` is where "
+                f"the operator anchors -- an operand inside a compound condition, a "
+                f"keyword's *value* in a declaration -- which is often not the line "
+                f"the control reads on. Run without --only and copy an id from the "
+                f"report.",
+                file=sys.stderr,
+            )
+            return 2
+        if namespace.changed is not None:
+            print(
+                f"wreath: error: --changed {namespace.changed!r} matched no "
+                f"mutations: nothing under the scanned path differs from that ref, "
+                f"or what differs carries no control. Check `git diff --stat "
+                f"{namespace.changed}` against the --path you gave. Note that "
+                f"`wreath._mutant` is never mutated (it is this tool).",
+                file=sys.stderr,
+            )
+            return 2
     if namespace.format == "json":
         print(render_json(report))
     else:

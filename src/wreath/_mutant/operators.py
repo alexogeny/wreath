@@ -63,12 +63,13 @@ CONTROL_TOKENS: frozenset[str] = frozenset({
 #: is the source-level spelling of "this control was never declared".
 CONTROL_KEYWORDS: frozenset[str] = frozenset({
     "action", "algorithms", "allow", "allow_list", "allowed", "audience",
-    "authenticated", "burst", "challenge", "cost", "csrf", "dependencies",
-    "elicitation", "exempt", "expose", "http_only", "identify", "issuer",
-    "key", "limit", "limits", "max_age", "middleware", "origins", "policies",
-    "policy", "permissions", "rate_limit", "readonly", "require_user_verification",
-    "requirement", "resource", "roles", "rp_id", "same_site", "sampling",
-    "scopes", "second_factor", "secure", "sensitive", "skew", "sortable_fields",
+    "authenticated", "authorize", "authorizer", "burst", "challenge", "cost",
+    "csrf", "dependencies", "elicitation", "exempt", "expose", "http_only",
+    "identify", "issuer", "key", "limit", "limits", "max_age", "middleware",
+    "object_authorizer", "origins", "policies", "policy", "permissions",
+    "rate_limit", "readonly", "require_user_verification", "requirement",
+    "resource", "roles", "rp_id", "same_site", "sampling", "scopes",
+    "second_factor", "secure", "sensitive", "skew", "sortable_fields",
     "verifier", "window",
 })
 
@@ -300,6 +301,51 @@ def _looks_like_a_route(node: ast.Call) -> bool:
     )
 
 
+#: Call sites that *declare* controls but whose callee routinely cannot be
+#: resolved, mapped to the keywords that are controls on them.
+#:
+#: `_resolve_callee` answers by walking attributes to a module global, so it
+#: succeeds for `crud_router(...)` imported at the top of a factory and fails
+#: for the two spellings applications actually reach for: `application.crud(...)`
+#: where the receiver is a *parameter* (the camera-trap example's `mount`), and
+#: `mcp.tool(...)` where the receiver is a *local* built inside the factory. In
+#: both cases the operator declined for every keyword, so the newest
+#: authorization surfaces in the framework were mutated not at all.
+#:
+#: This is the same argument `_route_metadata` already makes one layer down: the
+#: name and the keyword together are specific enough to answer without resolving
+#: the callee. It is a heuristic, exactly as `CONTROL_TOKENS` is, and it is
+#: consulted *only* when resolution has already failed -- so a callee that can be
+#: asked is still asked, and this table never overrides a real signature.
+_DECLARING_CALLS: dict[str, frozenset[str]] = {
+    # `crud_router(model, opener, ...)` and the `app.crud(...)` sugar for it.
+    "crud": frozenset({
+        "authorize", "object_authorizer", "expose", "readonly", "exclude",
+        "operations", "page_size",
+    }),
+    "crud_router": frozenset({
+        "authorize", "object_authorizer", "expose", "readonly", "exclude",
+        "operations", "page_size",
+    }),
+    # `@mcp.tool(...)`, and the resource/prompt declarations beside it.
+    "tool": frozenset({
+        "action", "resource", "rate_limit", "second_factor", "sampling",
+        "elicitation",
+    }),
+    "resource": frozenset({"action", "rate_limit", "second_factor"}),
+    "prompt": frozenset({"action", "rate_limit", "second_factor"}),
+}
+
+
+def _declared_controls(node: ast.Call) -> frozenset[str] | None:
+    """The control keywords for a declaring call whose callee did not resolve."""
+    func = node.func
+    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+    if name is None:
+        return None
+    return _DECLARING_CALLS.get(name)
+
+
 def _defaulted_keywords(callee: Any) -> frozenset[str] | None:
     try:
         signature = inspect.signature(callee)
@@ -360,6 +406,69 @@ def _set_keyword(index: int, value: ast.expr) -> Callable[[ast.AST], ast.AST]:
     def mutate(node: ast.AST) -> ast.AST:
         call = _want(node, ast.Call)
         call.keywords[index].value = value
+        return call
+
+    return mutate
+
+
+def _drop_mapping_entry(kw_index: int, key_index: int) -> Callable[[ast.AST], ast.AST]:
+    """Remove one key from a mapping passed as a keyword.
+
+    The per-operation half of `authorize={...}`: dropping the whole keyword
+    removes every operation's control at once, and a suite that exercises any
+    one of them kills that mutant while the rest stay unverified.
+    """
+
+    def mutate(node: ast.AST) -> ast.AST:
+        call = _want(node, ast.Call)
+        mapping = _want(call.keywords[kw_index].value, ast.Dict)
+        mapping.keys = [k for i, k in enumerate(mapping.keys) if i != key_index]
+        mapping.values = [v for i, v in enumerate(mapping.values) if i != key_index]
+        return call
+
+    return mutate
+
+
+def _widen_mapping_entry(
+    kw_index: int, key_index: int, method: str
+) -> Callable[[ast.AST], ast.AST]:
+    """Rewrite one mapping entry's `Access.deny()` into `Access.public()`.
+
+    The receiver expression is *reused* rather than rebuilt from a name, so the
+    mutant introduces no identifier the module might not have imported. A
+    mutation that raises `NameError` is a broken mutant, and a broken mutant
+    that kills a test inflates the score with something the suite did not catch.
+    """
+
+    def mutate(node: ast.AST) -> ast.AST:
+        call = _want(node, ast.Call)
+        mapping = _want(call.keywords[kw_index].value, ast.Dict)
+        inner = _want(mapping.values[key_index], ast.Call)
+        attribute = _want(inner.func, ast.Attribute)
+        mapping.values[key_index] = ast.Call(
+            func=ast.Attribute(value=attribute.value, attr=method, ctx=ast.Load()),
+            args=[],
+            keywords=[],
+        )
+        return call
+
+    return mutate
+
+
+def _drop_sequence_element(kw_index: int, element: int) -> Callable[[ast.AST], ast.AST]:
+    """Remove one entry from a tuple/list passed as a keyword.
+
+    `readonly=("id", "created_at")` is one control per column, so dropping the
+    keyword makes every column writable in a single mutant. One at a time names
+    which column nobody checks.
+    """
+
+    def mutate(node: ast.AST) -> ast.AST:
+        call = _want(node, ast.Call)
+        sequence = call.keywords[kw_index].value
+        if not isinstance(sequence, ast.Tuple | ast.List):  # pragma: no cover
+            raise TypeError(f"expected a sequence, got {type(sequence).__name__}")
+        sequence.elts = [e for i, e in enumerate(sequence.elts) if i != element]
         return call
 
     return mutate
@@ -576,7 +685,12 @@ def _declaration_operators(context: _Context) -> Iterator[Candidate]:
             # controls would go unmutated. The verb, the literal path and the
             # keyword together are specific enough to answer without it.
             defaults = _route_metadata()
+        if defaults is None:
+            # The same argument for the other declaring call sites: a crud
+            # router mounted off a parameter, an MCP tool registered on a local.
+            defaults = _declared_controls(node)
         label = _short(node.func, 40)
+        yield from _mapping_entry_operators(node, node_id, scope, label, defaults)
         for index, keyword in enumerate(node.keywords):
             if keyword.arg is None:
                 continue
@@ -607,6 +721,89 @@ def _declaration_operators(context: _Context) -> Iterator[Candidate]:
                     node_id=node_id,
                     watch=(node.lineno, node.func.lineno),
                     mutate=_set_keyword(index, ast.Constant(value=_WIDE)),
+                )
+
+
+#: Keywords whose value is a per-operation mapping of controls.
+_MAPPING_CONTROLS: frozenset[str] = frozenset({"authorize", "policies"})
+
+#: Keywords whose value is a sequence of column names, each one its own control.
+_SEQUENCE_CONTROLS: frozenset[str] = frozenset({"readonly", "exclude"})
+
+#: The permissive twin of a refusal, for `crud.widen-access`. `Access.deny()`
+#: answers 403 with the route present; `Access.public()` is the same declaration
+#: with the refusal taken out.
+_PERMISSIVE_ACCESS = "public"
+
+
+def _mapping_entry_operators(
+    node: ast.Call,
+    node_id: int,
+    scope: tuple[str, ...],
+    label: str,
+    defaults: frozenset[str] | None,
+) -> Iterator[Candidate]:
+    """Per-entry operators for controls declared as a mapping or a sequence.
+
+    `authorize={"list": ..., "create": Access.deny()}` is four controls wearing
+    one keyword. Removing the keyword removes all of them at once, so any test
+    that exercises any operation kills the mutant and the rest are reported as
+    covered without ever having been checked.
+    """
+    if defaults is None:
+        return
+    for index, keyword in enumerate(node.keywords):
+        name = keyword.arg
+        if name is None or name not in defaults:
+            continue
+        value = keyword.value
+
+        if name in _MAPPING_CONTROLS and isinstance(value, ast.Dict):
+            for position, key in enumerate(value.keys):
+                if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                    continue
+                operation = key.value
+                yield Candidate(
+                    operator="crud.drop-operation-authorize",
+                    control=f"the `{operation}` entry of `{name}=` on "
+                            f"`{label}(...)` (that operation falls back)",
+                    line=getattr(key, "lineno", node.lineno),
+                    scope=scope,
+                    node_id=node_id,
+                    watch=(node.lineno, node.func.lineno),
+                    mutate=_drop_mapping_entry(index, position),
+                )
+                entry = value.values[position]
+                if isinstance(entry, ast.Call) and isinstance(entry.func, ast.Attribute):
+                    if entry.func.attr == _PERMISSIVE_ACCESS:
+                        continue
+                    yield Candidate(
+                        operator="crud.widen-access",
+                        control=f"the `{operation}` rule "
+                                f"`{_short(entry, 32)}` (widened to "
+                                f"`{_PERMISSIVE_ACCESS}`)",
+                        line=getattr(entry, "lineno", node.lineno),
+                        scope=scope,
+                        node_id=node_id,
+                        watch=(node.lineno, node.func.lineno),
+                        mutate=_widen_mapping_entry(index, position, _PERMISSIVE_ACCESS),
+                    )
+
+        elif name in _SEQUENCE_CONTROLS and isinstance(value, ast.Tuple | ast.List):
+            for position, element in enumerate(value.elts):
+                if not isinstance(element, ast.Constant) or not isinstance(
+                    element.value, str
+                ):
+                    continue
+                yield Candidate(
+                    operator="crud.unprotect-column",
+                    control=f"`{element.value}` in `{name}=` on `{label}(...)` "
+                            f"(that column alone loses its protection)",
+                    line=getattr(element, "lineno", node.lineno),
+                    scope=scope,
+                    node_id=node_id,
+                    watch=(node.lineno, node.func.lineno),
+                    mutate=_drop_sequence_element(index, position),
                 )
 
 
@@ -770,6 +967,9 @@ OPERATORS: tuple[str, ...] = (
     "guard.drop-statement",
     "declaration.drop-keyword",
     "declaration.widen-bound",
+    "crud.drop-operation-authorize",
+    "crud.widen-access",
+    "crud.unprotect-column",
     "cedar.flip-effect",
     "cedar.drop-condition",
     "cedar.delete-policy",
