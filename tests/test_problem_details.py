@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from wreath import Wreath
-from wreath.exceptions import Forbidden
+from wreath.exceptions import Forbidden, MethodNotAllowed, Unauthorized
 from wreath.response import ProblemDetail, ProblemResponse
 from wreath.testing import TestClient
 
@@ -22,6 +22,20 @@ def test_problem_response_serializes_rfc_9457_members() -> None:
     )
     assert response.status == 409
     assert (b"content-type", b"application/problem+json") in response.headers
+
+
+def test_unauthorized_challenge_header_is_explicitly_optional() -> None:
+    assert Unauthorized(challenge='Basic realm="admin"').headers == (
+        (b"www-authenticate", b'Basic realm="admin"'),
+    )
+    assert Unauthorized(challenge=None).headers == ()
+
+
+def test_method_not_allowed_only_emits_allow_for_declared_methods() -> None:
+    assert MethodNotAllowed(allow=("GET", "HEAD")).headers == (
+        (b"allow", b"GET, HEAD"),
+    )
+    assert MethodNotAllowed().headers == ()
 
 
 @pytest.mark.asyncio

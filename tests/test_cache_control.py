@@ -7,6 +7,7 @@ import pytest
 from wreath import Response, Wreath
 from wreath.cache_control import CacheControl
 from wreath.middleware import CacheControlMiddleware
+from wreath.request import Request
 from wreath.testing import TestClient
 
 
@@ -17,6 +18,127 @@ def test_cache_control_validation_and_serialization() -> None:
         CacheControl(public=True, private=True)
     with pytest.raises(ValueError):
         CacheControl(immutable=True)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"public": True},
+        {"private": True},
+        {"max_age": 0},
+    ],
+)
+def test_cache_control_accepts_each_independent_boundary(
+    options: dict[str, Any],
+) -> None:
+    CacheControl(**options)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "max_age",
+        "shared_max_age",
+        "stale_while_revalidate",
+        "stale_if_error",
+    ],
+)
+@pytest.mark.parametrize("value", [True, 1.5, -1])
+def test_cache_control_rejects_every_invalid_duration(
+    name: str,
+    value: Any,
+) -> None:
+    with pytest.raises(ValueError, match=rf"^{name} must be"):
+        CacheControl(**{name: value})
+
+
+def test_immutable_cache_control_requires_strictly_positive_max_age() -> None:
+    with pytest.raises(ValueError, match="positive max_age"):
+        CacheControl(immutable=True, max_age=0)
+
+
+def _request() -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "query_string": b"",
+            "headers": [],
+        },
+        None,
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cache_middleware_preserves_one_explicit_header() -> None:
+    middleware = CacheControlMiddleware(CacheControl(public=True))
+    response = Response(b"ok", headers=[(b"cache-control", b"no-cache")])
+    original_headers = response.headers.copy()
+
+    result = await middleware.after(_request(), response)
+
+    assert result is response
+    assert response.headers == original_headers
+
+
+@pytest.mark.asyncio
+async def test_cache_middleware_policy_wins_over_default() -> None:
+    middleware = CacheControlMiddleware(
+        CacheControl(public=True),
+        policy=lambda request, response: CacheControl(private=True),
+    )
+    response = Response(b"ok")
+
+    await middleware.after(_request(), response)
+
+    assert response.headers[-1] == (b"cache-control", b"private")
+
+
+@pytest.mark.asyncio
+async def test_cache_middleware_declining_policy_uses_default() -> None:
+    middleware = CacheControlMiddleware(
+        CacheControl(no_cache=True),
+        policy=lambda request, response: None,
+    )
+    response = Response(b"ok")
+
+    await middleware.after(_request(), response)
+
+    assert response.headers[-1] == (b"cache-control", b"no-cache")
+
+
+@pytest.mark.asyncio
+async def test_cache_middleware_without_a_policy_or_default_is_a_noop() -> None:
+    middleware = CacheControlMiddleware()
+    response = Response(b"ok", headers=[(b"x-test", b"kept")])
+    original_headers = response.headers.copy()
+
+    result = await middleware.after(_request(), response)
+
+    assert result is response
+    assert response.headers == original_headers
+
+
+@pytest.mark.asyncio
+async def test_public_cache_policy_without_a_cookie_stays_public() -> None:
+    middleware = CacheControlMiddleware(CacheControl(public=True))
+    response = Response(b"ok")
+
+    await middleware.after(_request(), response)
+
+    assert response.headers[-1] == (b"cache-control", b"public")
+
+
+@pytest.mark.asyncio
+async def test_private_cache_policy_with_a_cookie_stays_private() -> None:
+    middleware = CacheControlMiddleware(CacheControl(private=True))
+    response = Response(b"ok", headers=[(b"set-cookie", b"session=x")])
+
+    await middleware.after(_request(), response)
+
+    assert response.headers[-1] == (b"cache-control", b"private")
 
 
 @pytest.mark.asyncio

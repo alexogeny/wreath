@@ -6,12 +6,18 @@ both the default build and ``WREATH_PURE=1``.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
 from wreath import Wreath
 from wreath.testing import TestClient
+
+
+@dataclass
+class DocPayload:
+    name: str
 
 
 def _app(summary: str | None = None, **docs_kwargs: Any) -> Wreath:
@@ -62,6 +68,10 @@ async def test_present_in_listed_environment() -> None:
         body = docs.body.decode("utf-8")
         assert "unpkg.com" not in body
         assert "swagger" not in body.lower()
+        assert "<h2>things</h2>" in body
+        assert "<table>" not in body
+        assert "Schemas" not in body
+        assert "Try it" not in body
         spec = await client.get("/openapi.json")
         assert spec.status == 200
         assert dict(spec.headers).get(b"content-type") == b"application/json"
@@ -132,6 +142,40 @@ async def test_try_it_out_inherits_docs_gate() -> None:
         assert (await client.request("GET", "/docs")).status == 401
         ok = {"authorization": "Bearer letmein"}
         assert (await client.request("GET", "/docs", headers=ok)).status == 200
+
+
+@pytest.mark.asyncio
+async def test_docs_render_operation_parameters_body_models_and_try_script() -> None:
+    app = Wreath()
+
+    @app.post("/things", tags=("things",), summary="Create a thing")
+    async def create(
+        request: Any,
+        payload: DocPayload,
+        required: int,
+        optional: int = 1,
+    ) -> DocPayload:
+        """Create one thing."""
+        return payload
+
+    app.enable_api_docs(
+        environments=("dev",),
+        env="dev",
+        try_it_out=True,
+    )
+    async with TestClient(app) as client:
+        body = (await client.get("/docs")).body.decode("utf-8")
+
+    assert "<h2>things</h2>" in body
+    assert "Create one thing." in body
+    assert "<table>" in body
+    assert "<td>yes</td>" in body
+    assert "<td>no</td>" in body
+    assert "Request body" in body
+    assert "Try it" in body
+    assert "Schemas" in body
+    assert "<code>DocPayload</code>" in body
+    assert "document.querySelectorAll" in body
 
 
 @pytest.mark.asyncio

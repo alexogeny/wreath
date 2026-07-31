@@ -7,11 +7,15 @@ must agree, including first-value-wins duplicate handling.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from wreath.exceptions import ClientDisconnect, PayloadTooLarge
+from wreath.exceptions import (
+    ClientDisconnect,
+    PayloadTooLarge,
+    RequestHeaderFieldsTooLarge,
+)
 from wreath.request import Request, RequestLimits, StreamConsumed, _multipart_boundary
 
 HEADERS = [
@@ -54,6 +58,56 @@ def test_header_without_headers_in_scope() -> None:
     request = _request(headers=None)
     assert request.header("host") is None
     assert request.header("host", "d") == "d"
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    ["scope", "method", "path", "client", "scheme", "query_string", "headers"],
+)
+def test_an_unbacked_request_refuses_scope_dependent_properties(
+    attribute: str,
+) -> None:
+    request = Request(None, _no_receive)
+
+    with pytest.raises(RuntimeError):
+        getattr(request, attribute)
+
+
+def test_an_unbacked_request_refuses_scope_dependent_writes() -> None:
+    request = Request(None, _no_receive)
+
+    with pytest.raises(RuntimeError, match="scope is unavailable"):
+        request._set_client(("127.0.0.1", 80))
+    with pytest.raises(RuntimeError, match="scope is unavailable"):
+        request._set_scheme("https")
+
+
+def test_reverse_urls_require_an_attached_application() -> None:
+    request = _request()
+
+    with pytest.raises(RuntimeError, match="not attached"):
+        request.url_path_for("missing")
+    with pytest.raises(RuntimeError, match="not attached"):
+        request.url_for("missing")
+
+
+def test_an_absolute_reverse_url_requires_a_host_or_server_address() -> None:
+    from wreath import Wreath
+
+    app = Wreath()
+
+    @app.get("/items", name="items")
+    async def items(request: Any) -> None:
+        pass
+
+    request = Request(
+        {"type": "http", "scheme": "http", "headers": []},
+        _no_receive,
+        app=app,
+    )
+
+    with pytest.raises(RuntimeError, match="without a host"):
+        request.url_for("items")
 
 
 @pytest.mark.asyncio
@@ -147,6 +201,20 @@ def test_cookie_cache_survives_other_request_reads() -> None:
     assert request.cookies is first
 
 
+def test_split_cookie_headers_enforce_the_aggregate_limit() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"cookie", b"a=1"), (b"cookie", b"b=22")],
+        },
+        _no_receive,
+        limits=RequestLimits(max_cookie_bytes=8),
+    )
+
+    with pytest.raises(RequestHeaderFieldsTooLarge, match="limit is 8"):
+        _ = request.cookies
+
+
 # --- buffered-body and multipart limits ---------------------------------------
 
 
@@ -204,6 +272,14 @@ async def test_request_stream_yields_transport_chunks_without_materialising() ->
 
 
 @pytest.mark.asyncio
+async def test_stream_refuses_a_chunk_over_the_body_limit() -> None:
+    request = _limited_request([b"a" * 65], RequestLimits(max_body_bytes=64))
+
+    with pytest.raises(PayloadTooLarge, match="exceeds 64 bytes"):
+        _ = [chunk async for chunk in request.stream()]
+
+
+@pytest.mark.asyncio
 async def test_stream_replays_a_body_that_was_already_buffered() -> None:
     request = _limited_request([b"one", b"two"], RequestLimits(max_body_bytes=64))
 
@@ -214,7 +290,7 @@ async def test_stream_replays_a_body_that_was_already_buffered() -> None:
 @pytest.mark.asyncio
 async def test_a_second_stream_is_refused_while_the_first_is_active() -> None:
     request = _limited_request([b"one", b"two"], RequestLimits(max_body_bytes=64))
-    first = request.stream()
+    first = cast(Any, request.stream())
 
     assert await anext(first) == b"one"
     with pytest.raises(StreamConsumed):
@@ -317,6 +393,31 @@ async def test_a_multipart_part_header_block_over_the_limit_is_refused() -> None
     with pytest.raises(PayloadTooLarge, match="headers exceed 64 bytes") as caught:
         await request.form()
     assert caught.value.status == 413
+
+
+@pytest.mark.asyncio
+async def test_an_unterminated_multipart_header_over_the_limit_is_refused() -> None:
+    body = b"--B\r\nX-Padding: " + b"p" * 65
+    request = _limited_request(
+        [body],
+        RequestLimits(max_part_header_bytes=64),
+        [(b"content-type", b"multipart/form-data; boundary=B")],
+    )
+
+    with pytest.raises(PayloadTooLarge, match="headers exceed 64 bytes"):
+        await request.form()
+
+
+@pytest.mark.asyncio
+async def test_multipart_content_type_requires_a_boundary() -> None:
+    request = _limited_request(
+        [b""],
+        RequestLimits(),
+        [(b"content-type", b"multipart/form-data")],
+    )
+
+    with pytest.raises(ValueError, match="without a boundary"):
+        await request.form()
 
 
 @pytest.mark.asyncio

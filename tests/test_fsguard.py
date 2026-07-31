@@ -70,16 +70,29 @@ def test_refuses_parent_traversal(tmp_path) -> None:
 # refusals below had never fired in any test, and one of them guards a defect
 # that actually shipped -- which is the shape a regression test is for.
 #
-# **Two survivors remain, and they are equivalents rather than gaps.** Removing
-# the `lstat` check in `_open_at` -- either the branch or the `raise` -- leaves
-# every test green, because `O_NOFOLLOW` on the open below it refuses the same
-# symlink. That is a defence behind a defence, which the mutant guide names as a
-# survivor to accept; the reason it is *safe* to accept is
-# `test_o_nofollow_catches_a_symlink_the_lstat_check_missed`, which proves the
-# one underneath actually works. Before that test, "the check is redundant" was
-# an assumption. Do not delete the `lstat`: the module keeps it because the
-# errno for `O_NOFOLLOW` + `O_DIRECTORY` is not the same on every platform, and
-# only the `lstat` is deterministic everywhere.
+# The real-filesystem result is equivalent when the `lstat` check is removed:
+# `O_NOFOLLOW` on the open below it refuses the same symlink. The two direct
+# tests pin both defences independently. The module keeps the pre-open check
+# because the errno for `O_NOFOLLOW` + `O_DIRECTORY` is not the same on every
+# platform, while `lstat` gives callers one deterministic refusal everywhere.
+
+
+def test_a_known_symlink_is_refused_before_open(tmp_path, monkeypatch) -> None:
+    """The deterministic first defence does not hand a known symlink to open."""
+    import wreath._fsguard as guard
+
+    os.symlink(tmp_path / "target.txt", tmp_path / "link.txt")
+    root = open_root(tmp_path)
+
+    def unexpected_open(*_args, **_kwargs):
+        pytest.fail("a known symlink reached os.open")
+
+    monkeypatch.setattr(guard.os, "open", unexpected_open)
+    try:
+        with pytest.raises(ContainmentError, match="refusing to follow symlink"):
+            guard._open_at(root, "link.txt", 0)
+    finally:
+        os.close(root)
 
 
 def test_refuses_an_embedded_nul_byte(tmp_path) -> None:

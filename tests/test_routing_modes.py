@@ -7,7 +7,12 @@ from typing import Any
 import pytest
 
 from wreath import JSONResponse, Wreath
+from wreath._routing import Router as CompiledRouter
 from wreath._routing import RoutingMode
+
+
+async def handler(*_args: Any, **_kwargs: Any) -> None:
+    pass
 
 
 async def invoke(
@@ -100,3 +105,45 @@ def test_default_routing_mode_is_bitset() -> None:
 def test_unknown_mode_rejected() -> None:
     with pytest.raises(ValueError, match="unknown routing mode"):
         Wreath(routing="quantum")  # type: ignore
+
+
+@pytest.mark.parametrize(
+    ("path", "message"),
+    [
+        ("/users/{id", "path parameters must occupy an entire segment"),
+        ("/users/id}", "path parameters must occupy an entire segment"),
+        ("/users/{}", "empty path placeholder"),
+        ("/users/{:path}", "empty path placeholder"),
+        ("/users/{id:int}", "unknown path converter 'int'"),
+        ("/users/{rest:path}/meta", "must be the final path segment"),
+    ],
+)
+def test_malformed_path_placeholders_are_rejected(path: str, message: str) -> None:
+    router = CompiledRouter()
+
+    with pytest.raises(ValueError, match=message):
+        router.add(path, "GET", handler)
+
+
+def test_a_final_greedy_path_placeholder_is_accepted() -> None:
+    router = CompiledRouter()
+
+    router.add("/assets/{rest:path}", "GET", handler)
+
+
+@pytest.mark.parametrize("mode", ["decision", "bitset"])
+def test_classifying_backends_issue_and_resolve_protected_tickets(
+    mode: RoutingMode,
+) -> None:
+    authenticated = 1
+    router = CompiledRouter(mode)
+    router.add("/private/{item}", "GET", handler, (authenticated,))
+
+    classification, ticket = router.classify("GET", "/private/42")
+
+    assert classification == 2
+    assert router.resolve(ticket, 0) is None
+    assert router.resolve(ticket, authenticated) == (
+        handler,
+        {"item": "42"},
+    )
