@@ -60,7 +60,7 @@
     },
     {
       "name": "routing",
-      "capability": "Startup-compiled matching for static and parameterized routes, with bitset and decision-tree modes implemented by byte-identical pure and native backends",
+      "capability": "Startup-compiled static, parameter, trailing-path and host routing; named reverse lookup; declarative routers; and generic ASGI application mounts",
       "guides": [
         "docs/guides/routing.md"
       ],
@@ -81,7 +81,8 @@
       "decisions": [
         "docs/decisions/0011-bitset-routing-is-the-default.md",
         "docs/decisions/0004-the-public-api-is-literal.md"
-      ]
+      ],
+      "policy": "Ordinary static and single-segment parameter routes stay on the selected byte-identical pure/native table. Host patterns and a final {name:path} use an ordered startup-compiled Python matcher because the segment-count tables cannot represent either without weakening their hot path: matching host routes run before the ordinary table, while an unscoped trailing-path route is a fallback after that table so it cannot shadow a literal route. Router inclusion remains declarative flattening; Wreath.mount is the explicit request-time ASGI composition surface."
     },
     {
       "name": "http",
@@ -132,7 +133,8 @@
         "docs/decisions/0007-native-code-owns-no-process-global-state.md",
         "docs/decisions/0009-rfc-9457-problem-json.md",
         "docs/decisions/0010-one-shot-response-extension.md"
-      ]
+      ],
+      "policy": "Request.stream is one-shot and enforces max_body_bytes as chunks arrive; body() buffers through that same stream and may be replayed, while consuming stream() first makes later body/json/form reads raise StreamConsumed. Multipart form parsing is incremental and spools a file at the threshold without retaining a whole-request body."
     },
     {
       "name": "http-client",
@@ -177,7 +179,7 @@
     },
     {
       "name": "binding",
-      "capability": "Typed parameters and request bodies, validation compiled at startup, and dependency injection with Depends",
+      "capability": "Typed request and response contracts, rich stdlib scalars, reusable Field constraints and aliases, startup-compiled validation, and dependency injection with Depends",
       "replaces": [
         "pydantic",
         "marshmallow",
@@ -205,11 +207,11 @@
         "tests/test_validation_errors.py",
         "tests/test_dependency_scopes.py"
       ],
-      "policy": "Native body validation executes a plan compiled once in Python; the pure binding.validate stays the reference and native must match it byte-for-byte (errors included); recursive dataclasses fall back to pure"
+      "policy": "Native body validation executes a plan compiled once in Python; binding.validate remains the reference and native must match it byte-for-byte (errors included). Recursive dataclasses and annotations carrying advanced Field/rich-type operations fall back to the pure validator until the native plan can represent the whole contract; a partial native interpretation is forbidden. Supported return annotations filter, validate and serialize plain handler values; explicit Response objects retain wire ownership."
     },
     {
       "name": "openapi",
-      "capability": "An OpenAPI 3.1 schema derived from your routes, a self-contained docs UI, and generated typed clients",
+      "capability": "A strict OpenAPI 3.1 contract derived from runtime validation, explicit responses and security, compatibility comparison, a self-contained docs UI, and generated typed clients",
       "replaces": [
         "drf-spectacular",
         "apispec",
@@ -236,7 +238,7 @@
         "tests/test_typegen_cli.py",
         "tests/typegen/"
       ],
-      "policy": "Python owns annotation analysis; renderers consume prevalidated tuples and are byte-identical pure/native; generation adds no request-time work; the native renderer is benchmark-gated and currently not justified. Docs endpoints are opt-in via enable_docs()."
+      "policy": "Python owns annotation analysis; renderers consume prevalidated tuples and are byte-identical pure/native; generation adds no request-time work; the native renderer is benchmark-gated and currently not justified. OpenAPI refuses unsupported annotations instead of publishing an empty schema. Field metadata, query bounds, primary/additional responses, deprecation, visibility and explicitly registered security schemes render from the same route image. compare_openapi reports stable breaking request/response changes. Docs endpoints are opt-in via enable_docs()."
     },
     {
       "name": "configuration",
@@ -263,7 +265,8 @@
       ],
       "decisions": [
         "docs/decisions/0009-rfc-9457-problem-json.md"
-      ]
+      ],
+      "policy": "Environment is an immutable string snapshot. Environment.bind constructs an ordinary dataclass once at startup, converts supported stdlib/enums/literals/unions/containers, recurses into nested groups using double-underscore keys, and raises one SettingsError containing every missing or invalid key. Env supplies an absolute alias, Secret redacts implicit formatting, and source() reports the winning process or dotenv source."
     },
     {
       "name": "middleware",
