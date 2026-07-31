@@ -68,6 +68,12 @@ def csrf_validate(secret: bytes, token: str, now: int, max_age: int) -> tuple[bo
 
 
 def host_allowed(host: str, patterns: tuple[str, ...]) -> bool:
+    # The native twin parses this argument as `str` and raises TypeError for
+    # anything else. Keep that boundary identical: callers rely on an outer
+    # malformed-host guard, and silently treating its accidental removal as a
+    # normal non-match would make the pure and native configurations disagree.
+    if not isinstance(host, str):
+        raise TypeError("host must be str")
     for pattern in patterns:
         if pattern == "*" or host == pattern:
             return True
