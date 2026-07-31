@@ -236,7 +236,8 @@
         "tests/test_api_docs.py",
         "tests/test_typegen.py",
         "tests/test_typegen_cli.py",
-        "tests/typegen/"
+        "tests/typegen/",
+        "tests/test_typegen_python_target.py"
       ],
       "policy": "Python owns annotation analysis; renderers consume prevalidated tuples and are byte-identical pure/native; generation adds no request-time work; the native renderer is benchmark-gated and currently not justified. OpenAPI refuses unsupported annotations instead of publishing an empty schema. Field metadata, query bounds, primary/additional responses, deprecation, visibility and explicitly registered security schemes render from the same route image. compare_openapi reports stable breaking request/response changes. Docs endpoints are opt-in via enable_docs()."
     },
@@ -319,7 +320,8 @@
         "tests/test_webpolicy_parity.py",
         "tests/test_session_store.py",
         "tests/test_store.py",
-        "tests/test_auth_wiring_red_team.py"
+        "tests/test_auth_wiring_red_team.py",
+        "tests/test_middleware_contract.py"
       ],
       "decisions": [
         "docs/decisions/0002-no-mandatory-runtime-dependencies.md",
@@ -365,6 +367,7 @@
         "tests/test_cedar.py",
         "tests/test_cedar_engine.py",
         "tests/test_cedar_set_dedupe.py",
+        "tests/test_cedar_flags.py",
         "tests/test_permissions.py",
         "tests/test_jwt.py",
         "tests/test_livedoc.py",
@@ -1028,9 +1031,10 @@
         "src/wreath/_nplusone.py"
       ],
       "tests": [
-        "tests/test_doctor.py"
+        "tests/test_doctor.py",
+        "tests/test_nplusone_scopes.py"
       ],
-      "policy": "Defects a green test suite cannot see, over layers only Wreath holds together. N+1: the ORM stamps each read's model onto the recorder's ORM_HYDRATE phase (dependency_id = the metadata image's model entry id, stamped onto `Registry._flight_model_ids` at startup like a Database's `_flight_dep_id`), and the completion carries the route, so a trace can name the shape rather than only the endpoint. Two surfaces, one vocabulary: `NPlusOneGuard` trips inside the query that crossed the limit so the traceback names the loop, and `diagnose_n_plus_one` / `wreath doctor n-plus-one` reads the same finding out of a running server's Inspector without reproducing anything. Both produce a `Finding`. Cost discipline: the ORM seam reads no ContextVar until a guard exists (`_nplusone.WATCHING`, a module attribute, not a crossing) and reads no phase marker until a metadata image exists (`_flight_model_ids` non-empty), so `wreath-request-trace` records zero added crossings for an app that uses neither. The guard is for development and staging; a guard that fails production requests is a worse outage than the N+1."
+      "policy": "Defects a green test suite cannot see, over layers only Wreath holds together. Scopes: a request is not the only one, and is not the worst. `_nplusone.watching(origin, limit)` binds a ledger for any execution scope; `_nplusone.scope_for(origin, budget=...)` holds the three-state rule in one place -- a declared `query_budget` fails at the ceiling, no budget but a guard already in the process observes and reports, neither binds nothing at all. `wreath.jobs` binds one per job *attempt* (a retry starts from zero, or a task that legitimately queries ninety times dead-letters itself on the second try), `wreath.workflows` one per step plus a separate one per compensation, `wreath.passes` one per shift rather than per chunk -- an N+1 inside a hundred-row chunk is under any per-chunk ceiling a person would write, and it is the product of queries-per-chunk and chunks-per-shift that turns a backfill into an outage. Failing is opt-in everywhere outside a request: a guard that raises inside a durable job turns a slow job into a failed one and then into a retry storm. `NPlusOneGuard` deliberately does *not* use `watching` -- the middleware protocol splits bind and reset across two calls, and a suspended `@contextmanager` held on `request.state` is finalized when the request object becomes unreachable, which unbinds the ledger mid-request rather than at the end of it. N+1: the ORM stamps each read's model onto the recorder's ORM_HYDRATE phase (dependency_id = the metadata image's model entry id, stamped onto `Registry._flight_model_ids` at startup like a Database's `_flight_dep_id`), and the completion carries the route, so a trace can name the shape rather than only the endpoint. Two surfaces, one vocabulary: `NPlusOneGuard` trips inside the query that crossed the limit so the traceback names the loop, and `diagnose_n_plus_one` / `wreath doctor n-plus-one` reads the same finding out of a running server's Inspector without reproducing anything. Both produce a `Finding`. Cost discipline: the ORM seam reads no ContextVar until a guard exists (`_nplusone.WATCHING`, a module attribute, not a crossing) and reads no phase marker until a metadata image exists (`_flight_model_ids` non-empty), so `wreath-request-trace` records zero added crossings for an app that uses neither. The guard is for development and staging; a guard that fails production requests is a worse outage than the N+1."
     },
     {
       "name": "temporal",
