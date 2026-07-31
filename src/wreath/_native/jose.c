@@ -188,8 +188,14 @@ wreath_jose_parse(PyObject *Py_UNUSED(self), PyObject *args)
     if (tok == NULL) {
         return NULL;
     }
-    if (tok_len == 0 || tok_len > JOSE_ABS_MAX_TOKEN) {
-        PyErr_SetString(PyExc_ValueError, "token length out of range");
+    /* Wording is shared with the pure twin in `_auth/jwt.py`, deliberately: the
+       two are one contract, and an error message that names which build parsed
+       the token is a difference callers can trip over. An *empty* token is not
+       handled here -- it falls through to the separator count below and is
+       answered "must have exactly two dots", which is both the more accurate
+       diagnosis and what the pure branch already said. */
+    if (tok_len > JOSE_ABS_MAX_TOKEN) {
+        PyErr_SetString(PyExc_ValueError, "compact JWT exceeds maximum size");
         return NULL;
     }
     /* Find exactly two '.' separators. */
@@ -242,7 +248,10 @@ wreath_jose_parse(PyObject *Py_UNUSED(self), PyObject *args)
     Py_ssize_t pn = b64url_decode_into(p_b64, p_len, (unsigned char *)PyBytes_AS_STRING(payload));
     Py_ssize_t sn = b64url_decode_into(s_b64, s_len, (unsigned char *)PyBytes_AS_STRING(signature));
     if (hn < 0 || pn < 0 || sn < 0) {
-        PyErr_SetString(PyExc_ValueError, "invalid base64url in JWT segment");
+        /* Covers both causes -- a character outside the alphabet, and a length
+           that is not a valid unpadded base64 length -- because both are the
+           same instruction to the caller. Shared verbatim with the pure twin. */
+        PyErr_SetString(PyExc_ValueError, "a compact JWT segment must be unpadded base64url");
         goto error;
     }
     if (_PyBytes_Resize(&header, hn) < 0 ||
