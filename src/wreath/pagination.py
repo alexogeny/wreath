@@ -126,8 +126,6 @@ class PageParams:
 
 def parse_sort(raw: str) -> tuple[str, ...]:
     """`"name,-created_at"` -> `("name", "-created_at")`; blank -> `()`."""
-    if not raw:
-        return ()
     return tuple(token.strip() for token in raw.split(",") if token.strip())
 
 
@@ -140,7 +138,7 @@ def _bounded(raw: str | None, default: int, ceiling: int) -> int:
     exists because `LIMIT/OFFSET` makes the database discard every row before
     the offset, which an anonymous caller could otherwise ask for repeatedly.
     """
-    if raw is None or not raw.strip():
+    if raw is None:
         return default
     try:
         value = int(raw)
