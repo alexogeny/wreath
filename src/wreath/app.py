@@ -18,8 +18,10 @@ import threading
 from asyncio import timeout as _asyncio_timeout
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from inspect import isawaitable
+from inspect import iscoroutinefunction as _iscoroutinefunction
 from time import monotonic_ns as _monotonic_ns
 from time import time as _wall_clock
+from types import CoroutineType as _COROUTINE
 from typing import Any, Literal, cast
 from urllib.parse import quote
 
@@ -497,6 +499,7 @@ class Wreath:
         "_databases",
         "_manage_schema",
         "_exception_handlers",
+        "_dispatch_http",
         "_flight_route_ids",
         "_flight_route_keys",
         "_flight_capture_plan",
@@ -607,6 +610,9 @@ class Wreath:
         self._global_before_hooks: tuple[tuple[Any, bool, int, int], ...] = ()
         self._global_after_hooks: tuple[tuple[Any, int], ...] = ()
         self._has_global_http_hooks = False
+        # Which dispatcher a request takes, chosen once per compile by
+        # `_select_dispatch`. Generic until the first compile decides.
+        self._dispatch_http: Any = self._handle_http
         # (before_hook, is_sync) for middleware explicitly safe on handshakes.
         self._websocket_hooks: tuple[tuple[Any, bool], ...] = ()
         self._handler_requirements: dict[Any, AuthRequirement] = {}
@@ -1759,7 +1765,7 @@ class Wreath:
                 await self._lifespan(receive, send)
                 return
             raise ValueError(f"unsupported ASGI scope: {scope_type!r}")
-        await self._handle_http(
+        await self._dispatch_http(
             scope, receive, send, scope["method"], scope["path"], False
         )
 
@@ -1767,8 +1773,95 @@ class Wreath:
         """Wreath-server entry point using a lazily materialized ASGI scope."""
         if self._dirty:
             self._compile_routes()
-        await self._handle_http(
+        await self._dispatch_http(
             context, receive, send, context.method, context.path, True
+        )
+
+    def _select_dispatch(self) -> None:
+        """Choose this application's dispatcher once, at compile time.
+
+        `_handle_http` is general because applications are: it carries global
+        hooks, four middleware stages, two routing protocols, a dynamic
+        host/`:path` matcher, and the recorder. An application that registered
+        none of those still evaluates every one of those branches per request to
+        discover it has none of them, and the answers cannot change between
+        requests -- they are fixed the moment routes compile.
+
+        So the shape is decided here instead. `_handle_http_plain` exists only
+        for the shape whose branches are all statically false, and it is
+        selected only when they are. Anything else keeps the general path; there
+        is no partially-specialized third dispatcher, because two
+        implementations of dispatch is already the most this is worth.
+        """
+        self._dispatch_http = (
+            self._handle_http_plain
+            if not self._has_global_http_hooks and self._dynamic_matcher is None
+            else self._handle_http
+        )
+
+    async def _handle_http_plain(
+        self,
+        scope: Any,
+        receive: Any,
+        send: Send,
+        method: str,
+        path: str,
+        native_response: bool,
+    ) -> None:
+        """Dispatch for an application with no global middleware and no dynamic routes.
+
+        Every delegation back to `_handle_http` is decided **before** this method
+        has any effect a second dispatch would repeat -- before the `Request`
+        exists, before a hook could have run, before the recorder is told
+        anything. That is what makes handing the request back safe rather than a
+        double-execution bug, and it is the invariant to preserve if a condition
+        is ever added here: a new `await self._handle_http(...)` below the
+        `Request` construction is wrong however plausible it looks.
+
+        Re-routing on delegation costs one extra table lookup. It is paid only
+        by requests that miss, carry authentication, or are being recorded --
+        none of which are the path this exists for, and all of which already
+        cost more than a lookup elsewhere.
+        """
+        if not native_response and _ambiguous_request_path(scope, path):
+            await self._handle_http(scope, receive, send, method, path, native_response)
+            return
+        classify = self._classify
+        if classify is None:
+            matched = self._match(method, path)
+        else:
+            # A classifying table answers 1 for a route this caller may have
+            # without presenting an identity. 2 is a ticket wanting
+            # authentication and 0 is a miss; both belong to the general path.
+            classification, payload = classify(method, path)
+            matched = payload if classification == 1 else None
+        if matched is None or matched[0] in self._auth_handlers:
+            await self._handle_http(scope, receive, send, method, path, native_response)
+            return
+        if scope.flight if native_response else ("_wreath_flight" in scope):
+            await self._handle_http(scope, receive, send, method, path, native_response)
+            return
+        handler, path_params = matched
+        request = Request(scope, receive, path_params, self._limits, app=self)
+        if _telemetry.PROPAGATING:
+            _telemetry.bind_propagation(request)
+        try:
+            # Called, then awaited only if calling produced something to await.
+            # An `async def` route pays one `is` test for that; a `def` route
+            # skips the coroutine object, its send, and its StopIteration
+            # unwind. See `_ensure_response` for where the convention survives
+            # the wrappers.
+            value = handler(request)
+            response = _coerce_response(
+                await value if value.__class__ is _COROUTINE else value
+            )
+        except Exception as error:  # noqa: BLE001 -- see _handle_exception
+            response = await self._handle_exception(request, error)
+        # `active_global` is 0 rather than omitted: this application has no
+        # global after hooks to unwind, so `_finish_http` skips its loop and
+        # both dispatchers keep one response-emission path between them.
+        await self._finish_http(
+            request, response, send, method, scope, native_response, 0
         )
 
     async def _handle_http(
@@ -2181,11 +2274,15 @@ class Wreath:
             return
         try:
             if flight_phase is None:
-                value = await handler(request)
+                value = handler(request)
+                if value.__class__ is _COROUTINE:
+                    value = await value
                 response = _coerce_response(value)
             else:
                 handler_start = _monotonic_ns()
-                value = await handler(request)
+                value = handler(request)
+                if value.__class__ is _COROUTINE:
+                    value = await value
                 flight_phase(
                     _PH_HANDLER, 0, _COV_PYTHON, _monotonic_ns() - handler_start
                 )
@@ -2751,6 +2848,9 @@ class Wreath:
         self._classify = getattr(router._table, "classify", None)
         self._resolve = getattr(router._table, "resolve", None)
         self._probe = getattr(router._table, "probe", None)
+        # Last, so it sees the hooks, the matcher and the routing protocol this
+        # compile just settled.
+        self._select_dispatch()
         self._dirty = False
 
     def _build_flight_route_ids(self) -> dict[Any, tuple[int, int]]:
@@ -3440,10 +3540,21 @@ _NOT_FOUND = ProblemResponse(status=404, detail="Not Found")
 
 
 def _ensure_response(endpoint: Handler, status: int = 200) -> Handler:
-    async def coerced(
-        request: Request,
-    ) -> Response | StreamingResponse | FileResponse | PreparedResponse:
-        return _coerce_response(await endpoint(request), status=status)
+    coerced: Handler
+    if _iscoroutinefunction(endpoint):
+
+        async def coerced(  # type: ignore[no-redef]
+            request: Request,
+        ) -> Response | StreamingResponse | FileResponse | PreparedResponse:
+            return _coerce_response(await endpoint(request), status=status)
+
+    else:
+        # A synchronous endpoint keeps its call convention, exactly as it does
+        # through `compile_response_validator`.
+        def coerced(  # type: ignore[no-redef]
+            request: Request,
+        ) -> Response | StreamingResponse | FileResponse | PreparedResponse:
+            return _coerce_response(endpoint(request), status=status)
 
     coerced.__name__ = getattr(endpoint, "__name__", "coerced")
     coerced.__qualname__ = getattr(endpoint, "__qualname__", "coerced")
