@@ -481,16 +481,29 @@ outbound_context: ContextVar[tuple[str, str] | None] = ContextVar(
     "wreath_outbound_context", default=None
 )
 
-#: Whether anything in this process could *make* an outbound call. Latched by
-#: `HTTPClient.__init__`, and read before the request path binds anything --
-#: the same shape as `_nplusone.WATCHING`, and for the same reason: an
-#: application with no outbound client must not pay a `ContextVar.set` per
-#: request to discover that it has nothing to propagate to.
+#: Whether anything in this process could *carry this request's context past
+#: its own boundary*. Latched by `HTTPClient.__init__` and by `JobRunner`, and
+#: read before the request path binds anything -- the same shape as
+#: `_nplusone.WATCHING`, and for the same reason: an application with no
+#: outbound seam must not pay a `ContextVar.set` per request to discover that it
+#: has nothing to propagate to.
+#:
+#: It started as "could make an outbound HTTP call" and widened when the queue
+#: became the second seam. The distinction that matters is *causal*, not
+#: transport: enqueuing a durable job hands work to a later process exactly as a
+#: client call hands it to another service, and a trace that stops at the queue
+#: loses the same link for the same reason.
 PROPAGATING = False
 
 
 def propagates() -> None:
-    """Arm outbound propagation. Called when an HTTP client is constructed."""
+    """Arm context propagation. Called when a seam that can carry it is built.
+
+    Idempotent and never cleared: a process that has ever constructed such a
+    seam keeps the latch, because the cost it guards is one `ContextVar.set` and
+    the alternative -- reference-counting live seams -- would be a far larger
+    mechanism than the thing it saves.
+    """
     global PROPAGATING
     PROPAGATING = True
 
