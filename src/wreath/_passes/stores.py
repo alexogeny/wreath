@@ -40,7 +40,6 @@ def keyed_purge_pass(
     """
     from ..passes import (
         ChunkedPass,
-        DutyCycle,
         Key,
         PassDeclarationError,
         Purge,
@@ -68,7 +67,7 @@ def keyed_purge_pass(
         units=Rows(key=keys, limit=chunk, within=within),
         frontier=Sealed(after=after),
         work=Purge(),
-        pace=pace if pace is not None else DutyCycle(),
+        pace=pace,
         # An expiry purge has no terminal step, so there is no irreversible
         # thing a skip could buy: one undeletable row must not stop the table
         # from being kept small forever. The hole is still recorded, and

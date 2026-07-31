@@ -79,6 +79,13 @@ def test_the_purge_is_paced_by_default():
     assert _purge().pace.fraction == 0.25
 
 
+def test_the_purge_keeps_an_explicit_pacing_policy():
+    from wreath.passes import DutyCycle
+
+    policy = DutyCycle(0.5)
+    assert _purge(pace=policy).pace is policy
+
+
 def test_an_idle_store_purge_holds_the_frontier_back():
     # A rate-limit bucket is aged by last touch rather than by a deadline, so
     # the frontier sits an hour behind the clock.

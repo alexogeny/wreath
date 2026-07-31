@@ -109,6 +109,17 @@ def test_a_duration_may_be_written_in_any_of_the_usual_units():
     assert declare(shift=12).shift == 12.0
 
 
+def test_duration_parser_distinguishes_bool_unitless_text_and_permitted_zero():
+    from wreath._passes.duration import seconds
+
+    assert seconds("2", what="shift") == 2.0
+    with pytest.raises(PassDeclarationError, match="must be a duration"):
+        seconds(True, what="shift")
+    with pytest.raises(PassDeclarationError, match="must be positive"):
+        seconds(0, what="shift")
+    assert seconds(0, what="frontier", allow_zero=True) == 0.0
+
+
 # --- the work and the key -----------------------------------------------------
 
 
