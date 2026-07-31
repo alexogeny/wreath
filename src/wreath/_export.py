@@ -16,10 +16,14 @@ touches a request stack and its failures never stall anything:
   counter and the pipeline keeps draining. Backpressure shows up as visible
   queue drops, never as growth or a stalled projector.
 
-The default `OtlpHttpExporter` speaks OTLP/HTTP+JSON over the standard
-library (`urllib`), so enabling export pulls in **no** third-party dependency;
-any object with `export_traces`/`export_metrics` methods can stand in, and one
-that also has `export_logs` gets the logs signal too.
+The default `OtlpHttpExporter` speaks OTLP/HTTP over the standard library
+(`urllib`) with wreath's own protobuf codec, so enabling export pulls in **no**
+third-party dependency -- no `protobuf`, no `opentelemetry-*`. It sends
+`application/x-protobuf` by default because that is what SDK and collector
+exporters send and therefore the path a receiver actually exercises;
+`encoding="json"` selects OTLP/HTTP+JSON, which stays fully supported. Any
+object with `export_traces`/`export_metrics` methods can stand in, and one that
+also has `export_logs` gets the logs signal too.
 """
 
 from __future__ import annotations
@@ -64,16 +68,60 @@ class TraceMetricTransport(_Protocol):
     def export_metrics(self, request: dict[str, Any]) -> None: ...
 
 
+def _json_body(request: dict[str, Any], _signal: str) -> bytes:
+    return json.dumps(request).encode("utf-8")
+
+
+def _protobuf_body(request: dict[str, Any], signal: str) -> bytes:
+    # Imported here rather than at module scope: the declarations compile a
+    # wire plan per message at import, and an application exporting nothing
+    # should not pay for them.
+    from . import _otlp_proto
+
+    return getattr(_otlp_proto, f"encode_{signal}")(request)
+
+
+#: media type and body encoder per supported OTLP/HTTP encoding.
+_ENCODINGS: dict[str, tuple[str, Any]] = {
+    "protobuf": ("application/x-protobuf", _protobuf_body),
+    "json": ("application/json", _json_body),
+}
+
+
 class OtlpHttpExporter:
-    """A minimal OTLP/HTTP+JSON exporter over `urllib` (no third-party dep).
+    """A minimal OTLP/HTTP exporter over `urllib` (no third-party dep).
 
     Posts to `{endpoint}/v1/traces`, `/v1/logs` and `/v1/metrics` with a bounded
     timeout. Any transport-level failure raises, which the pipeline isolates and
     counts -- this class deliberately holds no retry/backoff policy of its own so
     that the single "drop and count" backpressure story stays in one place.
+
+    **`protobuf` is the default encoding.** OTLP specifies both, and every
+    receiver accepts JSON -- but protobuf is what SDK and collector exporters
+    actually send, so it is the encoding a receiver's protobuf path is exercised
+    by. JSON stays fully supported and selectable with `encoding="json"`, which
+    is worth having: it is readable in a proxy log, and it is the fallback if a
+    receiver's protobuf handling turns out to be the broken one.
+
+    The request is built as an OTLP/JSON dict either way -- `_otlp.py` has one
+    set of builders and `_otlp_proto.py` converts -- so the two encodings cannot
+    describe different telemetry.
+
+    Args:
+        encoding: `"protobuf"` (default) or `"json"`.
+
+    Raises:
+        ValueError: `encoding` is neither.
     """
 
-    __slots__ = ("_headers", "_logs_url", "_metrics_url", "_timeout", "_traces_url")
+    __slots__ = (
+        "_encode",
+        "_headers",
+        "_logs_url",
+        "_metrics_url",
+        "_timeout",
+        "_traces_url",
+    )
 
     def __init__(
         self,
@@ -81,16 +129,25 @@ class OtlpHttpExporter:
         *,
         timeout: float = 10.0,
         headers: dict[str, str] | None = None,
+        encoding: str = "protobuf",
     ) -> None:
+        try:
+            media_type, encode = _ENCODINGS[encoding]
+        except KeyError:
+            known = ", ".join(sorted(_ENCODINGS))
+            raise ValueError(
+                f"unknown OTLP encoding {encoding!r}; expected one of {known}"
+            ) from None
         base = endpoint.rstrip("/")
         self._traces_url = f"{base}/v1/traces"
         self._metrics_url = f"{base}/v1/metrics"
         self._logs_url = f"{base}/v1/logs"
         self._timeout = timeout
-        self._headers = {"content-type": "application/json", **(headers or {})}
+        self._encode = encode
+        self._headers = {"content-type": media_type, **(headers or {})}
 
-    def _post(self, url: str, request: dict[str, Any]) -> None:
-        body = json.dumps(request).encode("utf-8")
+    def _post(self, url: str, request: dict[str, Any], signal: str) -> None:
+        body = self._encode(request, signal)
         req = urllib.request.Request(url, data=body, headers=self._headers, method="POST")  # noqa: S310 (configured OTLP endpoint)
         with urllib.request.urlopen(req, timeout=self._timeout) as response:  # noqa: S310
             # Drain and discard: the OTLP response body is not needed, but leaving
@@ -99,15 +156,15 @@ class OtlpHttpExporter:
 
     def export_traces(self, request: dict[str, Any]) -> None:
         if request.get("resourceSpans"):
-            self._post(self._traces_url, request)
+            self._post(self._traces_url, request, "traces")
 
     def export_logs(self, request: dict[str, Any]) -> None:
         if request.get("resourceLogs"):
-            self._post(self._logs_url, request)
+            self._post(self._logs_url, request, "logs")
 
     def export_metrics(self, request: dict[str, Any]) -> None:
         if request.get("resourceMetrics"):
-            self._post(self._metrics_url, request)
+            self._post(self._metrics_url, request, "metrics")
 
 
 class ExportPipeline:
