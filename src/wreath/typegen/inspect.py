@@ -17,6 +17,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from ..binding import _return_annotation
 from ..temporal import Instant
 from .model import (
     BOOLEAN,
@@ -574,14 +575,6 @@ def _series_shape(variable: str, declaration: Any) -> SeriesShape:
         ),
         events=bool(series and declaration._events is not None),
     )
-
-
-def _return_annotation(handler: Any) -> Any:
-    try:
-        hints = typing.get_type_hints(handler, include_extras=False)
-    except (TypeError, ValueError, NameError):
-        return inspect.Parameter.empty
-    return hints.get("return", inspect.Parameter.empty)
 
 
 def _operation_shape(
