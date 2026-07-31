@@ -74,6 +74,12 @@ component_to_str(const uint8_t *src, Py_ssize_t len)
     if (len == 0) {
         return PyUnicode_New(0, 127);
     }
+    /* Nothing to decode is the common case for a query value. Two vectorised
+     * `memchr`s establish that and hand the source straight to the decoder,
+     * skipping the scratch allocation and the byte loop entirely. */
+    if (memchr(src, '%', (size_t)len) == NULL && memchr(src, '+', (size_t)len) == NULL) {
+        return PyUnicode_DecodeUTF8((const char *)src, len, "replace");
+    }
     uint8_t *scratch = PyMem_Malloc((size_t)len);
     if (scratch == NULL) {
         return PyErr_NoMemory();

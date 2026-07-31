@@ -10,11 +10,9 @@
  */
 #include "wreathcore.h"
 
-#include <math.h>
+#include "simd.h"
 
-#if defined(__AVX2__)
-#include <immintrin.h>
-#endif
+#include <math.h>
 
 #define WREATH_JSON_MAX_DEPTH 1000
 #define json_token_tape 256  /* signal/cancellation boundary in decoded tokens */
@@ -76,55 +74,11 @@ write_char(Writer *w, char c)
 
 static const char HEX[] = "0123456789abcdef";
 
-/* SWAR helpers: detect any byte needing a JSON string escape (< 0x20, '"',
- * '\\') across an 8-byte word without branching per byte. */
-#define SWAR_ONES 0x0101010101010101ULL
-#define SWAR_HIGH 0x8080808080808080ULL
-
-static inline uint64_t
-swar_has_zero(uint64_t x)
-{
-    return (x - SWAR_ONES) & ~x & SWAR_HIGH;
-}
-
-static inline uint64_t
-swar_needs_escape(uint64_t word)
-{
-    uint64_t lt_20 = (word - SWAR_ONES * 0x20) & ~word & SWAR_HIGH;
-    return lt_20 | swar_has_zero(word ^ (SWAR_ONES * '"')) |
-           swar_has_zero(word ^ (SWAR_ONES * '\\'));
-}
-
-#if defined(__AVX2__)
-/* Advance *i past bytes that need no JSON string escape, 32 at a time.
- * Returns 1 when a byte needing attention ('"', '\\', or a control) was
- * found and *i points at it; 0 when fewer than 32 bytes remain.  The bytes
- * that were skipped are ORed into *seen so callers can detect pure ASCII. */
-static inline int
-avx2_skip_plain(const char *data, Py_ssize_t len, Py_ssize_t *i, unsigned *seen_high)
-{
-    const __m256i quote = _mm256_set1_epi8('"');
-    const __m256i backslash = _mm256_set1_epi8('\\');
-    const __m256i ctrl_max = _mm256_set1_epi8(0x1F);
-    while (len - *i >= 32) {
-        __m256i v = _mm256_loadu_si256((const __m256i *)(data + *i));
-        __m256i special = _mm256_or_si256(
-            _mm256_or_si256(_mm256_cmpeq_epi8(v, quote), _mm256_cmpeq_epi8(v, backslash)),
-            _mm256_cmpeq_epi8(_mm256_min_epu8(v, ctrl_max), v));
-        unsigned mask = (unsigned)_mm256_movemask_epi8(special);
-        if (mask != 0) {
-            unsigned prefix_high =
-                (unsigned)_mm256_movemask_epi8(v) & (mask ^ (mask - 1)) >> 1;
-            *seen_high |= prefix_high;
-            *i += (Py_ssize_t)__builtin_ctz(mask);
-            return 1;
-        }
-        *seen_high |= (unsigned)_mm256_movemask_epi8(v);
-        *i += 32;
-    }
-    return 0;
-}
-#endif
+/* The scan for bytes a JSON string cannot carry unescaped ('"', '\\', and the
+ * controls) lives in `simd.h`, which picks a width per call. It used to be an
+ * `#if defined(__AVX2__)` arm here, which no build ever defined: nothing in
+ * `setup.py` passes `-mavx2`, so the wheel and every local build ran the SWAR
+ * fallback and the vector code was never compiled at all. */
 
 static int
 write_json_string(Writer *w, PyObject *str)
@@ -140,25 +94,8 @@ write_json_string(Writer *w, PyObject *str)
     Py_ssize_t i = 0;
     while (i < len) {
         Py_ssize_t run_start = i;
-#if defined(__AVX2__)
         unsigned unused_high = 0;
-        (void)avx2_skip_plain(utf8, len, &i, &unused_high);
-#endif
-        while (len - i >= 8) {
-            uint64_t word;
-            memcpy(&word, utf8 + i, 8);
-            if (swar_needs_escape(word)) {
-                break;
-            }
-            i += 8;
-        }
-        while (i < len) {
-            uint8_t c = (uint8_t)utf8[i];
-            if (c < 0x20 || c == '"' || c == '\\') {
-                break;
-            }
-            i++;
-        }
+        i += (Py_ssize_t)wreath_json_run(utf8 + i, (ptrdiff_t)(len - i), &unused_high);
         if (i > run_start && write_bytes(w, utf8 + run_start, i - run_start) < 0) {
             return -1;
         }
@@ -527,33 +464,22 @@ parse_string_ex(Parser *p, int as_key)
     const char *end = p->end;
     uint64_t high = 0;  /* accumulates every scanned byte: ASCII iff no 0x80 bit */
 
-#if defined(__AVX2__)
     {
+        /* One dispatched scan to the first byte this fast path cannot carry:
+         * '"', '\\', or a control. `seen_high` reports whether anything it
+         * passed over was non-ASCII, which decides between a one-byte str and
+         * a UTF-8 decode below. */
         unsigned seen_high = 0;
-        Py_ssize_t offset = 0;
-        (void)avx2_skip_plain(cur, end - cur, &offset, &seen_high);
-        cur += offset;
+        cur += wreath_json_run(cur, (ptrdiff_t)(end - cur), &seen_high);
         if (seen_high) {
-            high = SWAR_HIGH;
+            high = WREATH_SWAR_HIGH;
         }
-    }
-#endif
-    /* Scan a word at a time; swar_needs_escape flags exactly the bytes that
-     * terminate this fast scan: '"', '\\', and controls. */
-    while (end - cur >= 8) {
-        uint64_t word;
-        memcpy(&word, cur, 8);
-        if (swar_needs_escape(word)) {
-            break;
-        }
-        high |= word;
-        cur += 8;
     }
     while (cur < end) {
         uint8_t c = (uint8_t)*cur;
         if (c == '"') {
             Py_ssize_t n = cur - start;
-            int ascii = (high & SWAR_HIGH) == 0;
+            int ascii = (high & WREATH_SWAR_HIGH) == 0;
             PyObject *s;
             if (as_key && n > 0 && n <= WREATH_KEY_CACHE_MAX_LEN) {
                 uint64_t h = 1469598103934665603ULL;
@@ -633,13 +559,8 @@ parse_string_ex(Parser *p, int as_key)
         }
         if (c != '\\') {
             const char *run = cur;
-            while (cur < end) {
-                c = (uint8_t)*cur;
-                if (c == '"' || c == '\\' || c < 0x20) {
-                    break;
-                }
-                cur++;
-            }
+            unsigned unused_high = 0;
+            cur += wreath_json_run(cur, (ptrdiff_t)(end - cur), &unused_high);
             if (PyUnicodeWriter_WriteUTF8(w, run, cur - run) < 0) {
                 goto fail;
             }

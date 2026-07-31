@@ -66,6 +66,8 @@ PyObject *wreath_parse_cookies(PyObject *self, PyObject *args);
 
 /* ws.c */
 PyObject *wreath_ws_mask(PyObject *self, PyObject *args);
+PyObject *wreath_simd_arms(PyObject *self, PyObject *ignored);
+PyObject *wreath_simd_probe(PyObject *self, PyObject *args);
 PyObject *wreath_ws_parse_frame(PyObject *self, PyObject *args);
 PyObject *wreath_ws_build_frame(PyObject *self, PyObject *args, PyObject *kwargs);
 

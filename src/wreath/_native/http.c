@@ -2,6 +2,8 @@
  * terminator first, then scan the head with flat byte loops. */
 #include "wreathcore.h"
 
+#include "simd.h"
+
 static const uint8_t TOKEN_CHARS[256] = {
     /* RFC 9110 token characters: ALPHA / DIGIT / !#$%&'*+-.^_`|~ */
     ['!'] = 1, ['#'] = 1, ['$'] = 1, ['%'] = 1, ['&'] = 1, ['\''] = 1,
@@ -183,13 +185,15 @@ wreath_http_parse_request_parts(
         p++;
         while (p < end && (*p == ' ' || *p == '\t')) p++;
         value_start = p;
-        while (p < end && *p != '\r') {
-            uint8_t c = *p;
-            if (c != '\t' && (c < 0x20 || c == 0x7f)) {
-                malformed("invalid header value byte");
-                goto error;
-            }
-            p++;
+        /* One dispatched scan stops on whatever ends the value: the CR that
+         * closes the line, or a byte no value may carry. Which one it was is
+         * decided below, exactly as the per-byte loop this replaces did.
+         * Values are the long part of a head -- a user-agent or a cookie runs
+         * far past a register -- so this is where the width pays. */
+        p += wreath_value_run((const char *)p, (ptrdiff_t)(end - p));
+        if (p < end && *p != '\r') {
+            malformed("invalid header value byte");
+            goto error;
         }
         if (end - p < 2 || p[1] != '\n') {
             malformed("malformed header line ending");
@@ -391,13 +395,15 @@ wreath_http_parse_response(PyObject *Py_UNUSED(self), PyObject *arg)
         p++;
         while (p < end && (*p == ' ' || *p == '\t')) p++;
         value_start = p;
-        while (p < end && *p != '\r') {
-            uint8_t c = *p;
-            if (c != '\t' && (c < 0x20 || c == 0x7f)) {
-                malformed("invalid header value byte");
-                goto error;
-            }
-            p++;
+        /* One dispatched scan stops on whatever ends the value: the CR that
+         * closes the line, or a byte no value may carry. Which one it was is
+         * decided below, exactly as the per-byte loop this replaces did.
+         * Values are the long part of a head -- a user-agent or a cookie runs
+         * far past a register -- so this is where the width pays. */
+        p += wreath_value_run((const char *)p, (ptrdiff_t)(end - p));
+        if (p < end && *p != '\r') {
+            malformed("invalid header value byte");
+            goto error;
         }
         if (end - p < 2 || p[1] != '\n') {
             malformed("malformed header line ending");
