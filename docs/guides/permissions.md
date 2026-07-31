@@ -131,10 +131,12 @@ If-None-Match: W/"3f2c…"
 ```
 
 The `ETag` covers everything that can change the answer — who is asking, the
-roles they hold, and the policy set itself. So a **promotion** invalidates that
-user's manifest, a **deploy that widens a rule** invalidates everyone's, and
-nothing else does. Until one of those happens the client holds the document and
-sends nothing but a conditional request.
+roles they hold, the policy set itself, and the caller's enabled
+[feature flags](auth.md#feature-flags-in-a-policy) when a policy reads them. So
+a **promotion** invalidates that user's manifest, a **deploy that widens a
+rule** invalidates everyone's, a **flag flip** invalidates the manifests it
+changes, and nothing else does. Until one of those happens the client holds the
+document and sends nothing but a conditional request.
 
 The policy half of that tag is derived from the policies themselves, so every
 worker parsing the same policy text produces the same tag — a conditional
@@ -218,6 +220,23 @@ nothing changed is a `304`.
     the policy again on the actual request. Treat the stream as a permission
     cache with a push, and drop the route check because "the UI knows", and you
     have built the one thing this design cannot make safe.
+
+!!! note "Feature flags move the answer, and the stream will not tell you"
+
+    Once a policy reads `context.flags`, a **flag flip** changes what a caller
+    may do. The manifest's `ETag` covers that, so the next conditional request
+    returns a fresh document — but a flip is not a policy change, so no stream
+    event announces it, and an open stream keeps quiet until something else
+    moves.
+
+    This is the same optimistic-chrome property as a route behind
+    `@second_factor`, which the manifest can also read as permitted and then
+    answer 403 on: the manifest models *what the policies say about you*, not
+    every condition evaluated at the moment you act. It stays safe for the same
+    reason — enforcement is on the route, and chrome drawn a little too
+    generously costs an unexpected 403, never an unauthorized success. If a
+    flag gates something whose button must vanish promptly, flip it alongside a
+    policy change, or poll the manifest rather than waiting to be told.
 
 Two more properties worth knowing, because they are the ones a hand-rolled
 version usually misses. Subscriptions are **bounded** — per principal and

@@ -129,6 +129,77 @@ $ wreath doctor n-plus-one "$SOCKET" --threshold 20 --strict
 the build on a regression. `--json` prints the same findings as a versioned
 document for anything that wants to consume them.
 
+## Outside the request
+
+A request has an implicit query budget, because somebody is waiting for it.
+Background work has none — and background work is where the heaviest ORM
+traffic actually happens. A durable job that touches a relation per row, a
+workflow compensation that queries in a loop, a backfill with an N+1 *per
+chunk*: the last of those is the classic production disaster, because it passes
+every test on a table small enough to fit in one chunk and then runs for six
+hours against the real one.
+
+So the ledger binds to three more scopes: one per **job attempt**, one per
+**workflow step** (its compensation counted separately), and one per **pass
+shift**.
+
+### Observation is the default; failing is opt-in
+
+```python
+@runner.task("ingest_card", query_budget=200)
+async def ingest_card(ctx, card_id: int) -> None:
+    ...
+```
+
+`query_budget` is a declaration that this task should not hydrate one model
+more than 200 times in a single attempt. Cross it and the attempt fails at the
+query that did, with a traceback naming the loop — the same behaviour the
+request guard has, in the place it is hardest to reproduce.
+
+**Leave it off and nothing fails.** An attempt with no budget is counted and
+reported, never raised. That default is deliberate and it is not timidity: a
+guard that raises inside a durable job turns a slow job into a failed one, and
+a failed job into a retry storm. Wreath does not know whether five hundred
+queries was the defect or the point of the task. You do, so you declare it.
+
+The same keyword works on a workflow step — where it covers the step's
+compensation too, which is the half nobody exercises — and on a pass:
+
+```python
+@checkout.step(compensate=release_hold, query_budget=50)
+async def reserve_stock(context): ...
+
+ChunkedPass("recode_species", ..., query_budget=500)
+```
+
+A pass budget is per *shift*, not per chunk. An N+1 inside a hundred-row chunk
+is invisible against any per-chunk ceiling a person would set; it is the
+product — queries per chunk times chunks per shift — that does the damage.
+
+### An attempt, not a job
+
+Each retry starts from zero. Counting across attempts would dead-letter a task
+that legitimately queries ninety times on its second try, which is a bug in the
+tool rather than a finding about the code.
+
+### Where the findings go
+
+An attempt that had no budget but did cross the observation threshold counts on
+the runner as `nplusone_findings`; one that crossed a declared budget counts as
+`query_budget_exceeded`, kept apart from `run_errors` because its cause is a
+defect in the handler rather than in whatever it was calling.
+
+`wreath doctor n-plus-one` groups its report by scope, so a job attempt is not
+filed under requests and a scope it does not recognise is still printed rather
+than dropped.
+
+### What it costs when you have not asked
+
+Nothing. The ORM seam is gated on a latched module flag, and a background scope
+binds a ledger only when a budget is declared *or* a guard already exists in the
+process. An application that never asked for any of this does not pay a
+`ContextVar` read per query to discover that.
+
 ## Why other frameworks ship this as a plugin
 
 Because they have to. An N+1 detector bolted on beside the framework can see
