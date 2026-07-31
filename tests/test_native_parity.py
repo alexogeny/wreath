@@ -552,3 +552,95 @@ def test_multipart_limits_default_to_unlimited() -> None:
     assert pure_multipart.multipart_parse(body, b"X") == pure_multipart.multipart_parse(
         body, b"X", -1, -1, -1
     )
+
+
+# --- PostgreSQL wire codecs: native vs pure ------------------------------------
+#
+# The two codec twins encode every parameter the driver sends and decode every value
+# it reads, so a disagreement between them is a value that changes depending on which
+# build is installed. Nothing compared them directly; a generated differential sweep
+# over the declared OIDs found three, all in the pure twin and all fixed:
+#
+#   * `_encode_text` rounded an int through `float()` before sending it to a float
+#     column, so 2**53+1 went on the wire as 9007199254740992 -- a different number,
+#     decided client-side -- and anything past the float range raised OverflowError
+#     where the native build sent the digits and let the server rule on them.
+#   * `_encode_binary` let `struct.error` out for an over-range int. It does not
+#     inherit from OverflowError, so a caller handling the native codec's failure did
+#     not catch this one.
+#   * The text fall-through encoded UTF-8, so a non-ASCII string was accepted as a
+#     literal for a `time` column that cannot hold one.
+
+_PG_OIDS = {
+    "bool": 16, "bytea": 17, "int8": 20, "int2": 21, "int4": 23, "text": 25,
+    "json": 114, "float4": 700, "float8": 701, "varchar": 1043, "date": 1082,
+    "time": 1083, "timestamp": 1114, "timestamptz": 1184, "numeric": 1700,
+    "uuid": 2950, "jsonb": 3802, "bit": 1560,
+}
+
+
+def _pg_twins():
+    pytest.importorskip("wreath._native._postgres")
+    from wreath._native import _postgres as native
+    from wreath._pure import postgres as pure
+
+    return native, pure
+
+
+def _pg_outcome(fn, *args):
+    try:
+        return ("ok", fn(*args))
+    except Exception as error:  # noqa: BLE001 - the class is the assertion
+        return ("err", type(error).__name__, str(error))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [2**53 + 1, 2**63 - 1, 10**400, -(10**400), 0, 1, -1, 1.5, -0.0,
+     float("inf"), float("nan")],
+    ids=repr,
+)
+@pytest.mark.parametrize("oid", [700, 701], ids=["float4", "float8"])
+def test_float_codecs_agree_between_the_twins(oid: int, value: object) -> None:
+    """Both formats, including the values that only differ once they are large.
+
+    2**53+1 is the one that mattered: it is the first integer a double cannot hold,
+    so it is where a client-side `float()` starts silently changing the number.
+    """
+    native, pure = _pg_twins()
+    assert _pg_outcome(native._encode_text, value, oid) == _pg_outcome(
+        pure._encode_text, value, oid
+    )
+    assert _pg_outcome(native._encode_binary, value, oid) == _pg_outcome(
+        pure._encode_binary, value, oid
+    )
+
+
+def test_an_over_range_int_raises_overflowerror_from_both_float_codecs() -> None:
+    """The type, not just that it failed. `struct.error` is not an `OverflowError`."""
+    native, pure = _pg_twins()
+    for oid in (700, 701):
+        for codec in ("_encode_binary", "_encode_text"):
+            for module in (native, pure):
+                fn = getattr(module, codec)
+                if codec == "_encode_text":
+                    assert fn(10**400, oid) == str(10**400).encode("ascii")
+                else:
+                    with pytest.raises(OverflowError):
+                        fn(10**400, oid)
+
+
+@pytest.mark.parametrize("oid", sorted(set(_PG_OIDS.values())))
+@pytest.mark.parametrize("value", ["12:00:00", "é", "", "plain"], ids=repr)
+def test_text_encoding_of_a_string_agrees_for_every_declared_oid(
+    oid: int, value: str
+) -> None:
+    """`text`/`varchar` are UTF-8; everything else is ASCII in both twins.
+
+    Parametrised over every OID wreath declares so a type added later cannot pick up
+    the wrong encoding silently.
+    """
+    native, pure = _pg_twins()
+    assert _pg_outcome(native._encode_text, value, oid) == _pg_outcome(
+        pure._encode_text, value, oid
+    )

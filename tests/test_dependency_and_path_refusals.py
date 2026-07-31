@@ -26,37 +26,80 @@ from wreath.request import Request
 from wreath.router import Router
 from wreath.testing import TestClient
 
-# --- {name:path}: accepted, then 404 on many segments and 422 on one ----------
+# --- path converters ----------------------------------------------------------
 
 
-def test_a_converter_suffix_is_refused_at_registration() -> None:
-    """Wreath placeholders name a parameter and match exactly one segment.
-
-    `{key:path}` is the Starlette and Flask spelling for a greedy trailing
-    match. Every wreath backend reads the whole brace body as the parameter
-    *name*, so the route bound a parameter literally called `key:path`: a
-    multi-segment request 404'd on the separators it could not match, and a
-    single-segment one 422'd on the parameter that was never bound.
-    """
+@pytest.mark.asyncio
+async def test_the_path_converter_greedily_binds_trailing_segments() -> None:
     app = wreath.Wreath()
-    with pytest.raises(ValueError) as caught:
 
-        @app.get("/media/{key:path}")
+    @app.get("/media/{key:path}")
+    async def handler(request: Request, key: str) -> dict:
+        return {"key": key}
+
+    async with TestClient(app) as client:
+        response = await client.get("/media/images/llama.jpg")
+
+    assert response.json() == {"key": "images/llama.jpg"}
+
+
+@pytest.mark.asyncio
+async def test_a_router_can_declare_a_trailing_path_converter() -> None:
+    router = Router(prefix="/api")
+
+    @router.get("/media/{key:path}")
+    async def handler(request: Request, key: str) -> dict:
+        return {"key": key}
+
+    app = wreath.Wreath()
+    app.include_router(router)
+    async with TestClient(app) as client:
+        response = await client.get("/api/media/a/b")
+
+    assert response.json() == {"key": "a/b"}
+
+
+def test_an_unknown_converter_is_refused_at_registration() -> None:
+    app = wreath.Wreath()
+    with pytest.raises(ValueError, match="unknown path converter"):
+
+        @app.get("/media/{key:rest}")
         async def handler(request: Request) -> dict:  # pragma: no cover
             return {}
 
-    message = str(caught.value)
-    assert "converter suffix" in message
-    assert "{key}" in message, "the refusal must show the corrected placeholder"
-    assert "query string" in message, "and say where a multi-segment value belongs"
+
+def test_an_empty_converted_placeholder_is_refused() -> None:
+    app = wreath.Wreath()
+    with pytest.raises(ValueError, match="empty path placeholder"):
+
+        @app.get("/media/{:path}")
+        async def handler(request: Request) -> dict:  # pragma: no cover
+            return {}
 
 
-def test_a_router_registration_is_refused_too() -> None:
-    """The check sits at the matcher, so every registration path reaches it."""
-    router = Router(prefix="/api")
-    with pytest.raises(ValueError, match="converter suffix"):
+def test_a_path_converter_must_be_the_final_segment() -> None:
+    app = wreath.Wreath()
+    with pytest.raises(ValueError, match="final path segment"):
 
-        @router.get("/media/{key:path}")
+        @app.get("/media/{key:path}/metadata")
+        async def handler(request: Request) -> dict:  # pragma: no cover
+            return {}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/literal/{open",
+        "/literal/close}",
+        "/literal/{open:path",
+        "/literal/close:path}",
+    ],
+)
+def test_unpaired_braces_are_refused_consistently(path: str) -> None:
+    app = wreath.Wreath()
+    with pytest.raises(ValueError, match="entire segment"):
+
+        @app.get(path)
         async def handler(request: Request) -> dict:  # pragma: no cover
             return {}
 

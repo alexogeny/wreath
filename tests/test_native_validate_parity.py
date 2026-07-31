@@ -13,7 +13,13 @@ from typing import Any, Literal
 import pytest
 
 from wreath._native import _core
-from wreath.binding import ValidationError, _compile_plan, _PlanUnsupported, validate
+from wreath.binding import (
+    ValidationError,
+    _body_validator,
+    _compile_plan,
+    _PlanUnsupported,
+    validate,
+)
 
 native_only = pytest.mark.skipif(_core is None, reason="native core not built")
 
@@ -52,7 +58,14 @@ def _pure(annotation: Any, value: Any, loc: tuple[Any, ...] = ("body",)) -> tupl
 
 
 def _native(annotation: Any, value: Any, loc: tuple[Any, ...] = ("body",)) -> tuple[str, Any]:
-    plan = _compile_plan(annotation, frozenset())
+    try:
+        plan = _compile_plan(annotation, frozenset())
+    except _PlanUnsupported:
+        validator = _body_validator(annotation)
+        try:
+            return ("ok", repr(validator(value, loc)))
+        except ValidationError as error:
+            return ("err", error.errors)
     result, errors = _core.run_validation(plan, value, loc)
     if errors:
         return ("err", errors)

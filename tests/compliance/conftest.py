@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import os
 from typing import Any
 
 import pytest
@@ -56,7 +57,26 @@ async def _ok_app(scope: dict, receive: Any, send: Any) -> None:
 
 
 def drive_request(request: bytes, *, app: Any = None, config: ServerConfig | None = None) -> bytes:
-    """Feed `request` to the native HTTP/1 protocol; return the raw response bytes."""
+    """Feed `request` to the native HTTP/1 protocol; return the raw response bytes.
+
+    Skips under `WREATH_PURE=1`. The native server has no pure twin by design --
+    `_native._server` refuses to load without the `_core` C API -- so there is
+    nothing for these tests to exercise in that mode, and the seven `ImportError`s
+    they raised there were noise rather than signal. The same guard and the same
+    reason are on `tests/http3/test_availability.py`.
+
+    Guarding here rather than decorating each caller is deliberate: this helper is
+    the only thing in the compliance suite that touches the native server, so a test
+    added later cannot forget it. It is the environment-capability exception AGENTS.md
+    allows, and the reason names the variable that turns it back on.
+
+    This matters now because a mutation sweep of any module with a native/pure fork
+    has to be run in both modes, and `WREATH_PURE=1` over a directory that includes
+    this suite used to come back red for reasons that had nothing to do with the
+    mutant under test.
+    """
+    if os.environ.get("WREATH_PURE"):
+        pytest.skip("WREATH_PURE=1 does not load the _core C API the native server needs")
     server = importlib.import_module("wreath._native._server")
 
     async def run() -> bytes:
