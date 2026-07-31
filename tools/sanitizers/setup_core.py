@@ -29,6 +29,7 @@ SOURCES = (
     "ws.c",
     "multipart.c",
     "json.c",
+    "simd.c",
     "msgpack.c",
     "geospatial.c",
     "protobuf.c",

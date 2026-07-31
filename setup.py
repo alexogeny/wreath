@@ -106,6 +106,7 @@ ext_modules = [
                 "src/wreath/_native/ws.c",
                 "src/wreath/_native/multipart.c",
                 "src/wreath/_native/json.c",
+                "src/wreath/_native/simd.c",
                 "src/wreath/_native/msgpack.c",
                 "src/wreath/_native/geospatial.c",
                 "src/wreath/_native/protobuf.c",
@@ -123,7 +124,10 @@ ext_modules = [
                 "src/wreath/_native/ratelimit.c",
                 "src/wreath/_native/scheduler.c",
             ],
-            depends=["src/wreath/_native/wreathcore.h"],
+            depends=[
+                "src/wreath/_native/wreathcore.h",
+                "src/wreath/_native/simd.h",
+            ],
             extra_compile_args=extra_compile_args,
         ),
         Extension(
@@ -169,6 +173,7 @@ ext_modules = [
                 "src/wreath/_native/server.h",
                 "src/wreath/_native/wreath_stream.h",
                 "src/wreath/_native/wreathcore.h",
+                "src/wreath/_native/simd.h",
                 "src/wreath/_native/server_request.c",
             ],
             extra_compile_args=hot_compile_args,
