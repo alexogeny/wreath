@@ -515,7 +515,15 @@ def bind_propagation(request: object) -> object | None:
     # neither could be made to matter.)
     parent = server_span(request).traceparent()
     if parent is None:
-        return None
+        # Bind *None* rather than returning early. A context can outlive one
+        # request -- keep-alive hands the next request the same one -- and a
+        # request that carries no trace of its own must not inherit the last
+        # one's. Returning without setting leaks request A's parent onto
+        # request B's outbound calls, which is a misattribution, and a trace
+        # that points at the wrong cause is worse than no trace at all.
+        # Overwriting unconditionally costs one `set` on an untraced request
+        # and makes the staleness unrepresentable rather than merely unlikely.
+        return outbound_context.set(None)
     state = ""
     getter = getattr(request, "header", None)
     if callable(getter):
