@@ -10,16 +10,18 @@ marks the application dirty, so the next request recompiles.
 
 from __future__ import annotations
 
+import re
 import threading
 
 # Imported by name, like `monotonic_ns` below: one global lookup, and it is only
 # reached by a response that carries background tasks.
 from asyncio import timeout as _asyncio_timeout
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from inspect import isawaitable
 from time import monotonic_ns as _monotonic_ns
 from time import time as _wall_clock
 from typing import Any, Literal, cast
+from urllib.parse import quote
 
 from ._auth.backends import AuthenticationBackend, AuthorizationProvider
 from ._auth.models import Identity
@@ -40,7 +42,7 @@ from ._flight_schema import PhaseKind as _PhaseKind
 from ._json import dumps as _json_dumps
 from ._native import _core
 from ._pure.authz import build_capability_mask as _pure_build_capability_mask
-from ._routing import _CLASSIFYING, Handler, RoutingMode
+from ._routing import _CLASSIFYING, Handler, RoutingMode, check_placeholders
 from ._routing import Router as CompiledRouter
 from .binding import (
     AppScope,
@@ -48,6 +50,7 @@ from .binding import (
     Depends,
     ValidationError,
     compile_binder,
+    compile_response_validator,
     inspect_handler,
 )
 from .cache_control import CacheControl
@@ -80,6 +83,7 @@ from .response import (
 )
 from .router import RouteDefinition, Router
 from .state import State
+from .typegen.inspect import _return_annotation
 from .websocket import WebSocket, WebSocketDisconnect
 
 _build_capability_mask = (
@@ -254,7 +258,7 @@ class _ApplicationImage:
         routes = self.routes()
         if not self._analyzed:
             self._binding_specs = tuple(
-                inspect_handler(definition.endpoint, definition.path)
+                inspect_handler(definition.endpoint, definition.path, definition.host)
                 for definition in routes
             )
             self._analyzed = True
@@ -297,9 +301,138 @@ class _StaticMatcher:
 
     def match(self, path: str) -> tuple[Handler, dict[str, str]] | None:
         for prefix, handler in self._mounts:
+            if path == prefix.rstrip("/"):
+                return handler, {"path": ""}
             if path.startswith(prefix):
                 return handler, {"path": path[len(prefix):]}
         return None
+
+
+def _dynamic_path_pattern(path: str) -> re.Pattern[str]:
+    pieces: list[str] = []
+    for segment in path.split("/"):
+        if segment.startswith("{") and segment.endswith("}"):
+            declaration = segment[1:-1]
+            name, separator, converter = declaration.partition(":")
+            expression = ".*" if separator and converter == "path" else "[^/]+"
+            pieces.append(f"(?P<{name}>{expression})")
+        else:
+            pieces.append(re.escape(segment))
+    return re.compile("^" + "/".join(pieces) + "$")
+
+
+def _dynamic_host_pattern(host: str | None) -> re.Pattern[str] | None:
+    if host is None:
+        return None
+    pieces: list[str] = []
+    for segment in host.lower().split("."):
+        if segment == "*":
+            pieces.append("[^.]+")
+        elif segment.startswith("{") and segment.endswith("}"):
+            pieces.append(f"(?P<{segment[1:-1]}>[^.]+)")
+        else:
+            pieces.append(re.escape(segment))
+    return re.compile("^" + r"\.".join(pieces) + "$")
+
+
+def _host_name(value: str) -> str:
+    value = value.strip().lower()
+    if value.startswith("["):
+        end = value.find("]")
+        return value[1:end] if end >= 0 else value
+    name, separator, port = value.rpartition(":")
+    return name if separator and port.isdigit() else value
+
+
+_ROUTE_PARAMETER = re.compile(r"\{([^}:]+)(?::(path))?\}")
+
+
+def _render_route_template(template: str, values: Mapping[str, Any]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        name, converter = match.groups()
+        if name not in values:
+            raise KeyError(f"missing route parameter {name!r}")
+        return quote(str(values[name]), safe="/" if converter == "path" else "")
+
+    return _ROUTE_PARAMETER.sub(replace, template)
+
+
+class _DynamicMatcher:
+    """Ordered fallback for host routes and trailing `{name:path}` routes."""
+
+    __slots__ = ("_routes",)
+
+    def __init__(self) -> None:
+        self._routes: list[
+            tuple[str, re.Pattern[str], re.Pattern[str] | None, Handler]
+        ] = []
+
+    def add(self, path: str, method: str, host: str | None, handler: Handler) -> None:
+        self._routes.append(
+            (method, _dynamic_path_pattern(path), _dynamic_host_pattern(host), handler)
+        )
+
+    def match(
+        self,
+        method: str,
+        path: str,
+        host: str,
+        *,
+        host_routes: bool | None = None,
+    ) -> tuple[Handler, dict[str, str]] | None:
+        for route_method, path_pattern, host_pattern, handler in self._routes:
+            if route_method != method and not (method == "HEAD" and route_method == "GET"):
+                continue
+            if host_routes is not None and (host_pattern is not None) != host_routes:
+                continue
+            host_match = host_pattern.fullmatch(host) if host_pattern is not None else None
+            if host_pattern is not None and host_match is None:
+                continue
+            path_match = path_pattern.fullmatch(path)
+            if path_match is None:
+                continue
+            params = path_match.groupdict()
+            if host_match is not None:
+                params.update(host_match.groupdict())
+            return handler, params
+        return None
+
+
+class _MountedResponse(Response):
+    """Defer one child ASGI HTTP application until response emission."""
+
+    __slots__ = ("_application", "_receive", "_scope")
+
+    def __init__(self, application: Any, scope: dict[str, Any], receive: Any) -> None:
+        super().__init__(b"", headers=(), media_type=b"")
+        # A mount has no response metadata until the child sends its start
+        # event. Parent egress middleware may append or replace headers on this
+        # proxy; keeping the generated empty-body content-length would overwrite
+        # the child's real length when those edits are merged below.
+        self.headers = []
+        self._application = application
+        self._scope = scope
+        self._receive = receive
+
+    async def __call__(self, send: Send) -> None:
+        async def parent_send(message: dict[str, Any]) -> None:
+            if message.get("type") != "http.response.start":
+                await send(message)
+                return
+            parent_names = {name.lower() for name, _value in self.headers}
+            child_headers = [
+                pair
+                for pair in message.get("headers", ())
+                if pair[0].lower() not in parent_names
+            ]
+            child_headers.extend(self.headers)
+            forwarded = dict(message)
+            forwarded["headers"] = child_headers
+            if self.status != 200:
+                forwarded["status"] = self.status
+            await send(forwarded)
+
+        await self._application(self._scope, self._receive, parent_send)
 
 
 class Wreath:
@@ -359,6 +492,7 @@ class Wreath:
         "exception_handler_errors",
         "lifespan_teardown_errors",
         "_dirty",
+        "_dynamic_matcher",
         "_databases",
         "_manage_schema",
         "_exception_handlers",
@@ -379,8 +513,10 @@ class Wreath:
         "_match",
         "_message_buses",
         "_object_stores",
+        "_openapi_security_schemes",
         "_middleware",
         "_middleware_order",
+        "_mount_names",
         "_oidc_providers",
         "_orm_registries",
         "_supervisor",
@@ -453,9 +589,12 @@ class Wreath:
         #: join matched handlers to their route IDs.
         self._ws_routes: list[tuple[str, WebSocketHandler]] = []
         self._static_matcher = _StaticMatcher()
+        self._dynamic_matcher: _DynamicMatcher | None = None
+        self._mount_names: dict[str, str] = {}
         self._startup_handlers: list[LifespanHandler] = []
         self._shutdown_handlers: list[LifespanHandler] = []
         self._routes: list[RouteDefinition] = []
+        self._openapi_security_schemes: dict[str, dict[str, Any]] = {}
         #: Every distinct HTTP method any route declares, recomputed on compile.
         #: Read only when a request misses, to tell a 404 from a 405.
         self._route_methods: tuple[str, ...] = ()
@@ -1039,6 +1178,15 @@ class Wreath:
         permissions: Iterable[str] = (),
         operation_id: str | None = None,
         response_only: bool = False,
+        status_code: int = 200,
+        response_description: str = "Successful response",
+        response_media_type: str = "application/json",
+        responses: Mapping[int, Any] | None = None,
+        deprecated: bool = False,
+        include_in_schema: bool = True,
+        security: Mapping[str, Iterable[str]] | None = None,
+        name: str | None = None,
+        host: str | None = None,
     ) -> Callable[[Handler], Handler]:
         """Register the decorated handler for `path` under each of `methods`.
 
@@ -1094,10 +1242,29 @@ class Wreath:
             if permission_values
             else AuthRequirement()
         )
+        if not 100 <= status_code <= 599:
+            raise ValueError("status_code must be between 100 and 599")
+        response_specs = tuple((int(code), spec) for code, spec in (responses or {}).items())
+        route_security = tuple(
+            (name, tuple(scopes)) for name, scopes in (security or {}).items()
+        )
 
         def register(handler: Handler) -> Handler:
+            check_placeholders(path)
+            if name is not None and any(route.name == name for route in self._routes):
+                raise ValueError(f"route name {name!r} is already registered")
+            dynamic = host is not None or ":path}" in path
             for method in route_methods:
-                self.router.add(path, method, handler)
+                if dynamic:
+                    if any(
+                        method in route.methods and route.path == path and route.host == host
+                        for route in self._routes
+                    ):
+                        raise ValueError(
+                            f"route {method} {path!r} for host {host!r} is already registered"
+                        )
+                else:
+                    self.router.add(path, method, handler)
             self._routes.append(
                 RouteDefinition(
                     path,
@@ -1110,6 +1277,15 @@ class Wreath:
                     requirement,
                     operation_id,
                     response_only,
+                    status_code,
+                    response_description,
+                    response_media_type,
+                    response_specs,
+                    deprecated,
+                    include_in_schema,
+                    route_security,
+                    name,
+                    host,
                 )
             )
             self._dirty = True
@@ -1141,6 +1317,28 @@ class Wreath:
     def delete(self, path: str, **metadata: Any) -> Callable[[Handler], Handler]:
         """Register a DELETE route. `metadata` is `route()`'s keyword arguments."""
         return self.route(path, methods=("DELETE",), **metadata)
+
+    def _named_route(self, name: str) -> RouteDefinition:
+        for definition in self._routes:
+            if definition.name == name:
+                return definition
+        raise KeyError(f"no route named {name!r}")
+
+    def url_path_for(self, name: str, **parameters: Any) -> str:
+        """Build a percent-encoded path for a named route or mount."""
+        mount = self._mount_names.get(name)
+        if mount is not None:
+            suffix = parameters.get("path", "")
+            if suffix:
+                return mount.rstrip("/") + "/" + quote(str(suffix).lstrip("/"), safe="/")
+            return mount
+        return _render_route_template(self._named_route(name).path, parameters)
+
+    def _host_for(self, name: str, parameters: Mapping[str, Any]) -> str | None:
+        if name in self._mount_names:
+            return None
+        host = self._named_route(name).host
+        return _render_route_template(host, parameters) if host is not None else None
 
     def include_router(
         self,
@@ -1188,8 +1386,14 @@ class Wreath:
         )
         for definition in router.routes:
             path = prefix + definition.path if prefix else definition.path
+            if definition.name is not None and any(
+                route.name == definition.name for route in self._routes
+            ):
+                raise ValueError(f"route name {definition.name!r} is already registered")
+            dynamic = definition.host is not None or ":path}" in path
             for method in definition.methods:
-                self.router.add(path, method, definition.endpoint)
+                if not dynamic:
+                    self.router.add(path, method, definition.endpoint)
             self._routes.append(
                 RouteDefinition(
                     path,
@@ -1202,6 +1406,15 @@ class Wreath:
                     merge_requirements(include_requirement, definition.requirement),
                     definition.operation_id,
                     definition.response_only,
+                    definition.status_code,
+                    definition.response_description,
+                    definition.response_media_type,
+                    definition.responses,
+                    definition.deprecated,
+                    definition.include_in_schema,
+                    definition.security,
+                    definition.name,
+                    definition.host,
                 )
             )
         self._dirty = True
@@ -1333,6 +1546,35 @@ class Wreath:
             return value
 
         return register if middleware is None else register(middleware)
+
+    def mount(self, prefix: str, application: Any, *, name: str | None = None) -> None:
+        """Mount an arbitrary ASGI application below `prefix`.
+
+        The child receives a path with the mount prefix removed and a
+        `root_path` extended by that prefix. Parent global middleware still
+        runs and its response-header edits are merged into the child's response;
+        the child's own status, streaming, routing and middleware remain
+        independent.
+        """
+        if not prefix.startswith("/"):
+            raise ValueError("mount prefixes must begin with '/'")
+        mount_root = "/" + prefix.strip("/")
+        normalized = mount_root + "/"
+        if name is not None:
+            if name in self._mount_names or any(route.name == name for route in self._routes):
+                raise ValueError(f"route name {name!r} is already registered")
+            self._mount_names[name] = mount_root
+
+        async def mounted(request: Request) -> _MountedResponse:
+            child_scope = dict(request.scope)
+            remainder = request.path_params.get("path", "")
+            child_scope["path"] = "/" + remainder.lstrip("/")
+            child_scope["raw_path"] = child_scope["path"].encode("utf-8")
+            parent_root = str(child_scope.get("root_path", "")).rstrip("/")
+            child_scope["root_path"] = parent_root + mount_root
+            return _MountedResponse(application, child_scope, request._receive)
+
+        self._static_matcher.add(normalized, cast("Handler", mounted))
 
     def static(
         self,
@@ -1473,6 +1715,19 @@ class Wreath:
         """
         self._validation_formatter = formatter
 
+    def add_security_scheme(self, name: str, schema: Mapping[str, Any]) -> None:
+        """Declare one OpenAPI security scheme used by route metadata.
+
+        The schema is copied at registration. Routes opt into it with
+        `security={name: scopes}`; naming an undeclared scheme is refused by
+        OpenAPI generation rather than emitting a dangling reference.
+        """
+        if not name:
+            raise ValueError("security scheme name must not be empty")
+        if "type" not in schema:
+            raise ValueError("security scheme requires a type")
+        self._openapi_security_schemes[name] = dict(schema)
+
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Send) -> None:
         """Serve one ASGI connection. The application's entry point on any server.
 
@@ -1524,7 +1779,7 @@ class Wreath:
         global_hooks = self._has_global_http_hooks
         active_global = len(after_hooks)
         if global_hooks:
-            request = Request(scope, receive, limits=self._limits)
+            request = Request(scope, receive, limits=self._limits, app=self)
             request._route_outcome = "ingress"
             for before, is_sync, error_afters, success_afters in before_hooks:
                 try:
@@ -1560,7 +1815,7 @@ class Wreath:
 
         if not native_response and _ambiguous_request_path(scope, path):
             if request is None:
-                request = Request(scope, receive, limits=self._limits)
+                request = Request(scope, receive, limits=self._limits, app=self)
             response = await self._handle_exception(
                 request,
                 BadRequest("ambiguous encoded path separator or dot segment"),
@@ -1570,16 +1825,28 @@ class Wreath:
             )
             return
 
-        if self._routing in _CLASSIFYING:
+        matched = None
+        dynamic_matcher = self._dynamic_matcher
+        if dynamic_matcher is not None:
+            if request is None:
+                request = Request(scope, receive, limits=self._limits, app=self)
+            matched = dynamic_matcher.match(
+                method,
+                path,
+                _host_name(request.header("host", "") or ""),
+                host_routes=True,
+            )
+        if matched is None and self._routing in _CLASSIFYING:
             classify = self._classify
             resolve = self._resolve
-            assert classify is not None and resolve is not None
+            if classify is None or resolve is None:
+                raise RuntimeError("classifying router did not expose classify/resolve")
             classification, payload = classify(method, path)
             matched = payload if classification == 1 else None
             if classification == 2:
                 ticket = payload
                 if request is None:
-                    request = Request(scope, receive, limits=self._limits)
+                    request = Request(scope, receive, limits=self._limits, app=self)
                 backend = self._auth_backend
                 if backend is None:
                     if global_hooks:
@@ -1691,13 +1958,22 @@ class Wreath:
                         request, response, send, method, scope, native_response, active_global
                     )
                     return
-        else:
+        elif matched is None:
             # Trie routes are selected without capability filtering; the common
             # authorization stage below checks the compiled route requirement.
             matched = self._route_match(method, path, 0)
+        if matched is None and dynamic_matcher is not None:
+            if request is None:
+                request = Request(scope, receive, limits=self._limits, app=self)
+            matched = dynamic_matcher.match(
+                method,
+                path,
+                _host_name(request.header("host", "") or ""),
+                host_routes=False,
+            )
         if matched is None:
             if request is None:
-                request = Request(scope, receive, limits=self._limits)
+                request = Request(scope, receive, limits=self._limits, app=self)
             if global_hooks:
                 request._set_route_outcome("miss")
             stage_response = (
@@ -1741,7 +2017,9 @@ class Wreath:
                 # probe re-runs classification once per registered method, which
                 # is a handful of lookups on a path that is already an error --
                 # nothing on the hot path pays for it.
-                allow = self._allowed_methods(method, path)
+                allow = self._allowed_methods(
+                    method, path, _host_name(request.header("host", "") or "")
+                )
                 # Through the exception path rather than straight to a
                 # ProblemResponse, so a registered 404 status handler (or a
                 # NotFound exception handler) covers a routing miss -- which is
@@ -1814,7 +2092,7 @@ class Wreath:
             if attribution is not None:
                 scope["_wreath_flight"] = attribution
         if request is None:
-            request = Request(scope, receive, path_params, self._limits)
+            request = Request(scope, receive, path_params, self._limits, app=self)
         else:
             request.path_params = path_params or {}
         # Forensic capture (native armed path only): flight_phase is non-None
@@ -2037,7 +2315,13 @@ class Wreath:
         if websocket_hooks or needs_auth:
             # The handshake is a GET. Keep one Request for ingress and auth so
             # session state published by middleware reaches the backend.
-            request = Request({**scope, "method": "GET"}, receive, path_params, self._limits)
+            request = Request(
+                {**scope, "method": "GET"},
+                receive,
+                path_params,
+                self._limits,
+                app=self,
+            )
         if request is not None:
             for before, is_sync in websocket_hooks:
                 try:
@@ -2135,7 +2419,9 @@ class Wreath:
                 )
             return ProblemResponse(status=500, detail="Internal Server Error")
 
-    def _allowed_methods(self, method: str, path: str) -> tuple[str, ...]:
+    def _allowed_methods(
+        self, method: str, path: str, host: str = ""
+    ) -> tuple[str, ...]:
         """Methods other than `method` that this `path` does answer, for `Allow`.
 
         Called only after the route table, the static mounts and the CORS
@@ -2151,11 +2437,18 @@ class Wreath:
         no body), so `HEAD` is listed with it even though nothing registered it.
         """
         classify = self.router.classify
-        allowed = [
-            candidate
-            for candidate in self._route_methods
-            if candidate != method and classify(candidate, path)[0] != 0
-        ]
+        allowed = []
+        for candidate in self._route_methods:
+            if candidate == method:
+                continue
+            dynamic_matcher = self._dynamic_matcher
+            if (
+                dynamic_matcher is not None
+                and dynamic_matcher.match(candidate, path, host) is not None
+            ):
+                allowed.append(candidate)
+            elif classify(candidate, path)[0] != 0:
+                allowed.append(candidate)
         if "GET" in allowed and "HEAD" not in allowed and method != "HEAD":
             allowed.append("HEAD")
         return tuple(allowed)
@@ -2278,6 +2571,7 @@ class Wreath:
     def _compile_routes_locked(self) -> None:
         binding_specs = self._application_image.binding_specs()
         router = CompiledRouter(self._routing)
+        dynamic_matcher = _DynamicMatcher()
         app_middleware = tuple(
             item[2] for item in sorted(self._middleware, key=lambda item: (item[0], item[1]))
         )
@@ -2375,8 +2669,16 @@ class Wreath:
                 binding_spec=binding_spec,
                 app_scope=self._app_scope,
             )
+            returns = (
+                binding_spec.returns
+                if binding_spec is not None
+                else _return_annotation(definition.endpoint)
+            )
+            endpoint = compile_response_validator(endpoint, returns)
             chain = app_middleware + definition.middleware
-            if chain and not definition.response_only:
+            if definition.status_code != 200 and not definition.response_only:
+                endpoint = _ensure_response(endpoint, definition.status_code)
+            elif chain and not definition.response_only:
                 # Middleware (hooks and call_next alike) always sees Response
                 # objects, never raw handler return values; without a chain
                 # the coercion in __call__ suffices.
@@ -2397,7 +2699,12 @@ class Wreath:
                         ),
                     )
                 )
-                router.add(definition.path, method, compiled, access_clauses)
+                if definition.host is not None or ":path}" in definition.path:
+                    dynamic_matcher.add(
+                        definition.path, method, definition.host, compiled
+                    )
+                else:
+                    router.add(definition.path, method, compiled, access_clauses)
                 handler_requirements[compiled] = requirement
                 flight_route_keys[compiled] = (method, definition.path)
         # WebSocket routes are attributable too: the matched handler joins to a
@@ -2421,6 +2728,7 @@ class Wreath:
         self._flight_route_keys = flight_route_keys
         self._flight_route_ids = None  # rebuilt lazily against the new routes
         self.router = router
+        self._dynamic_matcher = dynamic_matcher if dynamic_matcher._routes else None
         self._match = router._table.match
         self._classify = getattr(router._table, "classify", None)
         self._resolve = getattr(router._table, "resolve", None)
@@ -3113,18 +3421,20 @@ def _check_set(actual: frozenset[str], requirement: SetRequirement) -> bool:
 _NOT_FOUND = ProblemResponse(status=404, detail="Not Found")
 
 
-def _ensure_response(endpoint: Handler) -> Handler:
+def _ensure_response(endpoint: Handler, status: int = 200) -> Handler:
     async def coerced(
         request: Request,
     ) -> Response | StreamingResponse | FileResponse | PreparedResponse:
-        return _coerce_response(await endpoint(request))
+        return _coerce_response(await endpoint(request), status=status)
 
     coerced.__name__ = getattr(endpoint, "__name__", "coerced")
     coerced.__qualname__ = getattr(endpoint, "__qualname__", "coerced")
     return coerced
 
 
-def _coerce_response(value: Any) -> Response | StreamingResponse | FileResponse | PreparedResponse:
+def _coerce_response(
+    value: Any, *, status: int = 200
+) -> Response | StreamingResponse | FileResponse | PreparedResponse:
     """Turn a handler's return value into a response object.
 
     Two deliberate tiers, not redundant checks: the exact-type `kind is` arms
@@ -3135,19 +3445,19 @@ def _coerce_response(value: Any) -> Response | StreamingResponse | FileResponse 
     """
     kind = type(value)
     if kind is str:
-        return coerce_text(value)
+        return coerce_text(value) if status == 200 else TextResponse(value, status=status)
     if kind is dict:
-        return coerce_json(value)
+        return coerce_json(value) if status == 200 else JSONResponse(value, status=status)
     if kind is bytes:
-        return coerce_bytes(value)
+        return coerce_bytes(value) if status == 200 else Response(value, status=status)
     if isinstance(value, (Response, StreamingResponse, FileResponse, PreparedResponse)):
         return value
     if isinstance(value, bytes):
-        return Response(value)
+        return Response(value, status=status)
     if isinstance(value, str):
-        return TextResponse(value)
+        return TextResponse(value, status=status)
     if isinstance(value, (dict, list, tuple, int, float, bool)) or value is None:
-        return JSONResponse(value)
+        return JSONResponse(value, status=status)
     raise TypeError(f"handlers must return a response-compatible value, got {type(value).__name__}")
 
 

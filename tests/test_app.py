@@ -324,3 +324,119 @@ def test_rejects_duplicate_static_routes() -> None:
         @app.get("/")
         async def second(request):
             return "second"
+
+
+@pytest.mark.asyncio
+async def test_greedy_path_converter_binds_slashes_and_reverses() -> None:
+    from wreath.openapi import generate_openapi
+    from wreath.testing import TestClient
+
+    app = Wreath()
+
+    @app.get("/assets/{asset_path:path}", name="asset")
+    async def asset(request: Any, asset_path: str) -> dict[str, str]:
+        return {
+            "asset": asset_path,
+            "path": request.url_path_for("asset", asset_path="css/site.css"),
+            "url": request.url_for("asset", asset_path="css/site.css"),
+        }
+
+    async with TestClient(app) as client:
+        response = await client.get(
+            "/assets/images/logo.svg", headers={"host": "example.test"}
+        )
+
+    assert response.status == 200
+    assert response.json() == {
+        "asset": "images/logo.svg",
+        "path": "/assets/css/site.css",
+        "url": "http://example.test/assets/css/site.css",
+    }
+    assert app.url_path_for("asset", asset_path="docs/index.html") == (
+        "/assets/docs/index.html"
+    )
+    assert "/assets/{asset_path}" in generate_openapi(app)["paths"]
+
+
+@pytest.mark.asyncio
+async def test_static_route_precedes_an_unscoped_greedy_fallback() -> None:
+    from wreath.testing import TestClient
+
+    app = Wreath()
+
+    @app.get("/assets/{asset_path:path}")
+    async def fallback(request: Any, asset_path: str) -> str:
+        return f"fallback:{asset_path}"
+
+    @app.get("/assets/manifest.json")
+    async def manifest(request: Any) -> str:
+        return "manifest"
+
+    async with TestClient(app) as client:
+        response = await client.get("/assets/manifest.json")
+        head = await client.head("/assets/css/site.css")
+
+    assert response.text == "manifest"
+    assert head.status == 200
+    assert dict(head.headers)[b"content-length"] == str(
+        len("fallback:css/site.css")
+    ).encode()
+    assert head.body == b""
+
+
+@pytest.mark.asyncio
+async def test_host_route_precedes_the_host_agnostic_route() -> None:
+    from wreath.testing import TestClient
+
+    app = Wreath()
+
+    @app.get("/", name="default")
+    async def default(request: Any) -> str:
+        return "default"
+
+    @app.get("/", host="{tenant}.example.test", name="tenant-home")
+    async def tenant(request: Any, tenant: str) -> str:
+        return tenant
+
+    async with TestClient(app) as client:
+        tenant_response = await client.get("/", headers={"host": "acme.example.test"})
+        default_response = await client.get("/", headers={"host": "elsewhere.test"})
+
+    assert tenant_response.text == "acme"
+    assert default_response.text == "default"
+
+
+@pytest.mark.asyncio
+async def test_mount_dispatches_a_child_asgi_application_with_root_path() -> None:
+    from wreath.testing import TestClient
+
+    observed: list[tuple[str, str]] = []
+
+    async def child(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        observed.append((scope["path"], scope["root_path"]))
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 201,
+                "headers": [(b"content-type", b"text/plain")],
+            }
+        )
+        await send({"type": "http.response.body", "body": scope["path"].encode()})
+
+    app = Wreath()
+
+    class ParentHeaders:
+        def after_inplace(self, request: Any, response: Any) -> None:
+            response.headers.append((b"x-parent", b"wreath"))
+
+    app.add_global_middleware(ParentHeaders())
+    app.mount("/service", child, name="service")
+
+    async with TestClient(app) as client:
+        response = await client.get("/service/health")
+
+    assert response.status == 201
+    assert response.text == "/health"
+    assert dict(response.headers)[b"x-parent"] == b"wreath"
+    assert observed == [("/health", "/service")]
+    assert app.url_path_for("service", path="health/live") == "/service/health/live"
