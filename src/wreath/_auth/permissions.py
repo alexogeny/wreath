@@ -44,7 +44,7 @@ import asyncio
 import hashlib
 from collections.abc import Callable, Iterable, Sequence
 from secrets import token_bytes
-from typing import Any
+from typing import Any, cast
 from weakref import WeakKeyDictionary
 
 from .._livedoc import DEFAULT_KEEPALIVE, LiveDocument, change_stream
@@ -441,7 +441,9 @@ def permissions_router(
         # change the answer -- who is asking, what roles they hold, and the
         # policy set itself -- so a promotion or a deploy invalidates it and
         # nothing else does.
-        tag = _manifest_etag(identity, authorizer, vocabulary)
+        tag = _manifest_etag(
+            identity, authorizer, vocabulary, _request_flags(authorizer, request)
+        )
         if _etag_matches(request.header("if-none-match"), tag):
             response = Response(b"", status=304)
             response.headers.append((b"etag", tag.encode("ascii")))
@@ -519,7 +521,15 @@ def permissions_router(
             """
             if reason != "policies":
                 return None
-            return _manifest_etag(identity, authorizer, vocabulary_now())
+            # The flags are this stream's, resolved when it opened, and a flip
+            # is not a "policies" reason so it never reaches here on its own.
+            # On a genuine policy change they are as stale as `identity` is,
+            # and the paragraph above is the standing answer for that class:
+            # what cannot be stated truthfully is settled by a conditional
+            # request rather than guessed at.
+            return _manifest_etag(
+                identity, authorizer, vocabulary_now(), _request_flags(authorizer, request)
+            )
 
         return _private_stream(change_stream(subscription, tag_for=tag_for))
 
@@ -624,14 +634,23 @@ def _bad(detail: str) -> Response:
 
 
 def _manifest_etag(
-    identity: Any, authorizer: Any, vocabulary: dict[str, tuple[str, ...]]
+    identity: Any,
+    authorizer: Any,
+    vocabulary: dict[str, tuple[str, ...]],
+    flags: frozenset[str] = frozenset(),
 ) -> str:
     """A tag over every input that can change the answer.
 
     The policy set is fingerprinted through the authorizer so a deploy that
     widens a rule invalidates every cached manifest; the roles are included so a
-    promotion invalidates one. Nothing else can move the answer, which is why
-    a client can hold the manifest until this changes.
+    promotion invalidates one; and the caller's enabled feature flags are
+    included because a policy may read `context.flags`, so a flip changes the
+    answer exactly as a promotion does. Without them a client would hold a
+    manifest drawn for the old flag state and keep revalidating it successfully
+    -- chrome for something now denied, with no event that could correct it.
+
+    Nothing else can move the answer, which is why a client can hold the
+    manifest until this changes.
     """
     digest = hashlib.blake2s(digest_size=16)
     digest.update(f"{identity.type}::{identity.id}\x00".encode())
@@ -642,7 +661,23 @@ def _manifest_etag(
         digest.update(f"{resource_type}\x00{'\x00'.join(actions)}\x00".encode())
     digest.update(b"\x02")
     digest.update(_policy_fingerprint(authorizer))
+    digest.update(b"\x03")
+    for flag in sorted(flags):
+        digest.update(f"{flag}\x00".encode())
     return f'W/"{digest.hexdigest()}"'
+
+
+def _request_flags(authorizer: Any, request: Any) -> frozenset[str]:
+    """The caller's enabled flags, when the authorizer can say.
+
+    Optional capability, probed like `fingerprint`/`source`/`policies`: an
+    authorizer that does not model flags contributes nothing to the tag, which
+    is the same tag it produced before flags existed.
+    """
+    resolve = getattr(authorizer, "flags_for", None)
+    if not callable(resolve):
+        return frozenset()
+    return cast("frozenset[str]", resolve(request))
 
 
 def _shared_fingerprint(app: Any) -> str:

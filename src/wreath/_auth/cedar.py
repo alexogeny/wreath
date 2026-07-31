@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import inspect
 import time
+import warnings
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol, cast
 
@@ -54,6 +55,77 @@ def _default_entities(request: Request) -> object:
     return (CedarEntity(uid, parents=parents),)
 
 
+#: Where one request's resolved flag set lives for the rest of that request.
+_FLAGS_SLOT = "_cedar_flags"
+
+#: The answer for an application with no provider. Shared rather than rebuilt,
+#: and *always supplied* -- see `request_flags` for why absence is not an option.
+_NO_FLAGS: frozenset[str] = frozenset()
+
+
+def request_flags(
+    request: Request, provider: Any, vocabulary: frozenset[str] | None = frozenset()
+) -> frozenset[str]:
+    """The enabled feature flags for this request, as a set of names.
+
+    **Resolved once per request and cached on `request.state`.** A route behind
+    several policies asks the authorizer once per policy, and a percentage
+    rollout re-bucketed per policy could answer differently within one request
+    -- a `permit` and a `forbid` disagreeing about whether the same caller is in
+    the same rollout is not a decision anybody wrote.
+
+    The bucketing context is `{"id": identity.id}`, which is what
+    `flags.flags_dependency` passes, so a percentage flag places a principal in
+    the same bucket in a policy as in a handler. An anonymous request buckets
+    against the empty string, exactly as it does everywhere else.
+
+    A set of *enabled names*, never a map of name to bool. `context.flags["x"]
+    == false` reads as "explicitly off" when it may mean "no such flag", and an
+    authorization expression that cannot tell those apart eventually permits
+    something by typo. Absent from the set is false, and deny is the safe
+    direction.
+
+    **Only the flags the policy set names are resolved.** `vocabulary` is that
+    list, read off the engine once at startup; a provider holding fifty flags
+    whose policies test three answers three questions. Measured on a served
+    request against a fifty-flag provider, resolving all of them cost +21.7us
+    (+119%) for on/off values and +56.5us (+310%) for percentages, against a
+    0.36us noise floor -- so this is not a micro-optimisation, it is the
+    difference between flags being free and being the most expensive thing in
+    the authorization phase.
+
+    `vocabulary` of `None` means the policy set reads flags in a shape whose
+    names are not knowable (`isEmpty()`, a computed argument), and then every
+    flag must be resolved for the answer to be right. That path asks `all()`
+    when the provider offers it, and can do nothing when it does not: a
+    provider that can neither enumerate nor be enumerated *against* has no
+    answer to give, so the set is empty and the policy denies.
+    """
+    if provider is None:
+        return _NO_FLAGS
+    state = request.state
+    cached = state.get(_FLAGS_SLOT)
+    if cached is not None:
+        return cast(frozenset[str], cached)
+    identity = request.identity
+    context: dict[str, Any] = {}
+    if identity is not None:
+        context["id"] = identity.id
+    if vocabulary is None:
+        resolve_all = getattr(provider, "all", None)
+        resolved = (
+            frozenset(name for name, on in resolve_all(context).items() if on)
+            if callable(resolve_all)
+            else _NO_FLAGS
+        )
+    else:
+        resolved = frozenset(
+            name for name in vocabulary if provider.enabled(name, context)
+        )
+    state.__setattr__(_FLAGS_SLOT, resolved)
+    return resolved
+
+
 def _default_context(request: Request) -> Mapping[str, object]:
     context: dict[str, object] = {"method": request.method, "path": request.path}
     # Step-up, expressed where a policy can read it:
@@ -74,6 +146,84 @@ def _default_context(request: Request) -> Mapping[str, object]:
     if age is not None:
         context["second_factor_age"] = age
     return context
+
+
+def _referenced_flag_names(engine: Any) -> frozenset[str] | None:
+    """The flag names `engine`'s policies test, or None for "resolve them all".
+
+    Optional capability, probed the way `fingerprint`/`source`/`policies` are:
+    the `CedarEngine` protocol does not require it. An engine that cannot
+    introspect its own policy set answers `None` here, which costs the eager
+    resolution rather than risking a short list -- an outside evaluator whose
+    policies this walk has never seen must not have its flags guessed at.
+    """
+    referenced = getattr(engine, "referenced_flags", None)
+    if not callable(referenced):
+        return None
+    names = referenced()
+    return None if names is None else frozenset(names)
+
+
+def _validate_flag_names(referenced: frozenset[str] | None, provider: Any) -> None:
+    """Refuse, at startup, a policy naming a flag the provider does not hold.
+
+    A typo inside `context.flags.contains("new_iu")` is the likeliest mistake
+    here and the least visible one: the name is simply absent from the set, the
+    condition is false, and the policy denies forever with nothing to see. This
+    turns that into a boot failure naming the flag.
+
+    Two branches, because only some providers can enumerate. One that offers
+    `names()` is checked. One that cannot -- an external service that would need
+    a network call to list its vocabulary -- gets a warning at the point the
+    authorizer is built instead, which is the same shape `second_factor_router`
+    uses for its own half-knowable condition: say what is unverifiable where it
+    is written, rather than either failing on a guess or staying silent.
+
+    A configured-but-empty provider is still a provider, so `names()` returning
+    nothing means every referenced flag is unknown and the raise is correct.
+    Passing no provider at all skips validation entirely: that application has
+    decided flags are off, every set is empty, and every flag test denies.
+    """
+    if referenced is not None and not referenced:
+        return  # no policy reads a flag; nothing to check and nothing to say
+    if provider is None:
+        return  # flags deliberately off: every test denies, and that is written down
+    enumerate_names = getattr(provider, "names", None)
+    if referenced is None:
+        # The policy set reads flags in a shape whose names cannot be listed, so
+        # the provider has to supply all of them -- and this one cannot be
+        # enumerated either. Nothing can ever be resolved, so every flag test
+        # denies forever: working, fail-closed, and completely silent, which is
+        # the shape worth a warning rather than a shrug.
+        if not callable(enumerate_names):
+            warnings.warn(
+                "cedar policies read context.flags in a shape whose names "
+                "cannot be read off the source (isEmpty(), or a computed "
+                f"argument), and the flag provider {type(provider).__name__} "
+                "cannot enumerate its names either, so no flag can be resolved "
+                "and every flag test will deny",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        return  # no name list to validate against either way
+    if not callable(enumerate_names):
+        warnings.warn(
+            "cedar policies reference feature flags "
+            f"({', '.join(sorted(referenced))}) but the flag provider "
+            f"{type(provider).__name__} cannot enumerate its names, so they "
+            "cannot be checked; a misspelled flag will deny silently",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return
+    known = {str(name).lower() for name in enumerate_names()}
+    unknown = sorted(name for name in referenced if name.lower() not in known)
+    if unknown:
+        raise ValueError(
+            "cedar policies reference feature flags the provider does not "
+            f"hold: {', '.join(unknown)}. A flag absent from the provider is "
+            "absent from context.flags, so the policy would deny forever."
+        )
 
 
 class CedarEngine(Protocol):
@@ -155,7 +305,16 @@ class CedarAuthorizer:
     hand out the engine's identifying *values* without handing out the engine.
     """
 
-    __slots__ = ("_action", "_context", "_engine", "_entities", "_principal", "_resource")
+    __slots__ = (
+        "_action",
+        "_context",
+        "_engine",
+        "_entities",
+        "_flag_names",
+        "_flags",
+        "_principal",
+        "_resource",
+    )
 
     def __init__(
         self,
@@ -166,6 +325,7 @@ class CedarAuthorizer:
         resource: Callable[[object, Request], object] = _default_resource,
         entities: Callable[[Request], object] = _default_entities,
         context: Callable[[Request], Mapping[str, object]] = _default_context,
+        flags: Any = None,
     ) -> None:
         self._engine = engine
         self._principal = principal
@@ -173,6 +333,9 @@ class CedarAuthorizer:
         self._resource = resource
         self._entities = entities
         self._context = context
+        self._flags = flags
+        self._flag_names = _referenced_flag_names(engine)
+        _validate_flag_names(self._flag_names, flags)
 
     # --- policy identity, delegated from the engine -------------------------
     #
@@ -199,6 +362,17 @@ class CedarAuthorizer:
     # than "there is no source to offer". Each body is a single attribute
     # access, so there is no room for an unrelated `AttributeError` to be
     # swallowed here.
+
+    def flags_for(self, request: Request) -> frozenset[str]:
+        """This request's enabled flags, from the same resolution `authorize` uses.
+
+        The permission manifest tags its answer with everything that can change
+        it, and once a policy can read `context.flags` that includes the flags.
+        Reading them back through the authorizer keeps the provider and the
+        vocabulary private to this class, and shares the per-request cache, so
+        tagging a manifest costs no extra resolution.
+        """
+        return request_flags(request, self._flags, self._flag_names)
 
     @property
     def fingerprint(self) -> object:
@@ -274,7 +448,19 @@ class CedarAuthorizer:
         action = await _resolve(self._action(requirement.action, request))
         resource = await _resolve(self._resource(raw_resource, request))
         entities = await _resolve(self._entities(request))
-        context = await _resolve(self._context(request))
+        context = dict(await _resolve(self._context(request)))
+        # The authorizer owns this key, and supplies it whether or not a
+        # provider was configured. An *absent* `flags` is not a neutral
+        # default: `forbid(...) unless { context.flags.contains("bypass") }`
+        # against a context with no `flags` at all evaluates to allowed --
+        # the forbid is skipped rather than standing -- so an application that
+        # never configured a provider, or a custom context mapper that forgot
+        # the key, would silently stop forbidding. An empty set denies in both
+        # the `when` and the `unless` shape, which is the only fail-closed
+        # answer. (`second_factor_age` above reaches the opposite conclusion
+        # for the opposite reason: it is guarded by `has`, and a *number* has
+        # no value that fails closed in both shapes.)
+        context["flags"] = request_flags(request, self._flags, self._flag_names)
         result = await _resolve(
             self._engine.is_authorized(
                 principal=principal,

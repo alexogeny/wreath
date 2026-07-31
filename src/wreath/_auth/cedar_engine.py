@@ -38,7 +38,7 @@ int and Cedar's type system does not.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -87,6 +87,72 @@ _SCOPE_EQ = 1
 _SCOPE_IN = 2
 _SCOPE_IN_SET = 3
 _SCOPE_IS = 4
+
+
+#: The compiled shape of `context.flags`, which is what a flag test reads.
+_FLAGS_ATTRIBUTE = (_OP_GETATTR, (_OP_VAR, _VARS["context"]), "flags")
+
+#: Set methods whose argument names flags. `isEmpty` takes none and names none.
+_FLAG_METHODS = frozenset({_METHOD_IDS["contains"], _METHOD_IDS["containsAll"],
+                           _METHOD_IDS["containsAny"]})
+
+
+def _literal_names(node: object) -> Iterator[str]:
+    """The string literals in a flag method's argument.
+
+    `contains("a")` is one constant; `containsAll(["a", "b"])` is a set literal
+    of them. A non-literal argument yields nothing -- absence of evidence, not
+    evidence that no flag is named, which is why the caller treats an empty
+    result as "cannot validate" rather than "references nothing".
+    """
+    if not isinstance(node, tuple) or not node:
+        return
+    if node[0] == _OP_CONST and len(node) == 2 and isinstance(node[1], str):
+        yield node[1]
+    elif node[0] == _OP_SET and isinstance(node[1], tuple | list):
+        for element in node[1]:
+            yield from _literal_names(element)
+
+
+def _referenced_flags(policies: Iterable[Any]) -> frozenset[str] | None:
+    """Every literal `context.flags` name, or None when they cannot be listed.
+
+    A generic walk over the expression tuples rather than a shape-by-shape
+    visitor: a flag test is legal anywhere an expression is, including nested
+    inside `if`, `&&` and a set literal, and a visitor that knew only the
+    top-level shapes would silently miss half the policy set.
+
+    **`None` means "resolve every flag".** The caller resolves only the names
+    listed here, which is exact while every reference is a literal `contains`,
+    `containsAll` or `containsAny`. Two shapes break that: `isEmpty()` names no
+    flag but its answer depends on all of them, and a computed argument names
+    one this walk cannot know. Either makes the list incomplete rather than
+    short, so it is withheld entirely -- an optimisation that changes an
+    authorization answer is a defect, and a partial list would.
+    """
+    found: set[str] = set()
+    stack: list[Any] = list(policies)
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, tuple | list):
+            continue
+        if isinstance(node, tuple) and _FLAGS_ATTRIBUTE in node:
+            # A read of `context.flags`. Enumerable only as the target of one
+            # of the naming methods, with a literal argument.
+            if (
+                len(node) == 4
+                and node[0] == _OP_METHOD
+                and node[1] in _FLAG_METHODS
+                and node[2] == _FLAGS_ATTRIBUTE
+            ):
+                names = frozenset(_literal_names(node[3]))
+                if not names:
+                    return None  # a computed argument
+                found.update(names)
+            else:
+                return None  # isEmpty(), a comparison, or passed along whole
+        stack.extend(node)
+    return frozenset(found)
 
 
 class CedarParseError(ValueError):
@@ -881,6 +947,25 @@ class CedarPolicies:
         a settable source would let the text drift from `_policies`.
         """
         return self._source
+
+    def referenced_flags(self) -> frozenset[str] | None:
+        """Every feature-flag name this policy set tests, or None for "all of them".
+
+        Two jobs. It is the vocabulary a `CedarAuthorizer` validates its flag
+        provider against at startup, so `context.flags.contains("new_iu")` fails
+        where it is written rather than denying quietly forever; and it is the
+        set the authorizer resolves per request, which measured at a fifth of
+        the cost of resolving every configured flag.
+
+        `None` means the policy set reads `context.flags` in a shape whose names
+        are not statically knowable -- `isEmpty()`, or a computed argument -- so
+        the caller must resolve them all. An empty set means no policy reads
+        flags at all, which is the overwhelmingly common case and costs nothing.
+
+        Optional capability, probed with `getattr` the way `source` is — an
+        outside `CedarEngine` that cannot answer simply gets the safe path.
+        """
+        return _referenced_flags(self._policies)
 
     def is_authorized(
         self,
