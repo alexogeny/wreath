@@ -274,10 +274,11 @@ def _app(
     app.include_router(
         user_router(users, secret="u" * 32, second_factors=factors, clock=clock)
     )
-    with pytest.warns(UserWarning, match="enrolments="):
-        router = second_factor_router(
-            users, factors, issuer="Wreath", clock=clock, **options
-        )
+    # No `pytest.warns` wrapper: building without `enrolments=` no longer warns,
+    # because it no longer degrades. See `test_users_webauthn.py`.
+    router = second_factor_router(
+        users, factors, issuer="Wreath", clock=clock, **options
+    )
     app.include_router(router)
 
     @app.get("/session")
@@ -434,8 +435,7 @@ async def test_step_up_with_nothing_enrolled_says_so(
 
 async def test_the_router_mounts_the_removal_route() -> None:
     users, factors = InMemoryUserStore(), InMemorySecondFactorStore()
-    with pytest.warns(UserWarning, match="enrolments="):
-        router = second_factor_router(users, factors)
+    router = second_factor_router(users, factors)
     routes = {(route.path, method) for route in router.routes for method in route.methods}
     assert ("/auth/2fa/{factor_id}", "DELETE") in routes
 
