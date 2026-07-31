@@ -91,13 +91,8 @@ def read_beneath(root_fd: int, relative: str, *, max_bytes: int) -> bytes:
                 "becomes one JSON-RPC result held in memory, so the ceiling is "
                 "on what one answer may cost."
             )
-        chunks: list[bytes] = []
-        while True:
-            chunk = os.read(handle, 65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        return b"".join(chunks)
+        with os.fdopen(handle, "rb", closefd=False) as stream:
+            return stream.read()
     finally:
         os.close(handle)
 

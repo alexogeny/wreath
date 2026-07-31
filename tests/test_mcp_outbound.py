@@ -18,10 +18,13 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
 from wreath import Wreath
+from wreath._fsguard import ContainmentError
+from wreath._mcp import roots as mcp_roots
 from wreath.mcp import MCP, PROTOCOL_VERSION, ClientRequestError, MCPLimits, ToolError
 from wreath.testing import TestClient, TestResponse
 
@@ -1039,6 +1042,53 @@ async def test_the_pending_table_is_bounded() -> None:
 
 
 # -- roots ------------------------------------------------------------------
+
+
+def test_root_results_keep_only_absolute_file_uris() -> None:
+    assert mcp_roots.root_paths(None) == ()
+    assert mcp_roots.root_paths({"roots": "not-a-list"}) == ()
+    assert mcp_roots.root_paths(
+        {"roots": iter(({"uri": "file:///not-admitted"},))}
+    ) == ()
+    assert mcp_roots.root_paths(
+        {
+            "roots": [
+                None,
+                {"uri": 3},
+                {"uri": "https://example.test/workspace"},
+                {"uri": "file://"},
+                {"uri": "file:///srv/a%20trail/../workspace"},
+            ]
+        }
+    ) == ("/srv/workspace",)
+
+
+def test_read_beneath_refuses_non_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        mcp_roots,
+        "open_beneath",
+        lambda _root, _relative: (
+            101,
+            SimpleNamespace(st_mode=0, st_size=0),
+        ),
+    )
+    monkeypatch.setattr(mcp_roots.os, "close", lambda _handle: None)
+
+    with pytest.raises(ContainmentError, match="not a regular file"):
+        mcp_roots.read_beneath(100, "directory", max_bytes=20)
+
+
+def test_read_beneath_stops_at_eof(tmp_path) -> None:
+    (tmp_path / "empty.txt").write_bytes(b"")
+    root_fd = mcp_roots.open_root(tmp_path)
+    try:
+        assert mcp_roots.read_beneath(
+            root_fd,
+            "empty.txt",
+            max_bytes=20,
+        ) == b""
+    finally:
+        mcp_roots.os.close(root_fd)
 
 
 async def test_a_client_root_confines_a_file_read(tmp_path) -> None:

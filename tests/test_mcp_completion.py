@@ -13,6 +13,7 @@ import enum
 from typing import Literal
 
 from wreath import Wreath
+from wreath._mcp.completion import MAX_VALUES, _answer
 from wreath.mcp import MCP, PROTOCOL_VERSION
 from wreath.testing import TestClient, TestResponse
 
@@ -66,6 +67,15 @@ async def call(client: TestClient, session: str, payload: dict) -> dict:
 
 def completion(session_payload: dict) -> dict:
     return session_payload["result"]["completion"]
+
+
+def test_completion_answers_stop_at_the_protocol_ceiling() -> None:
+    values = tuple(f"value-{index}" for index in range(MAX_VALUES + 1))
+    assert _answer(values)["completion"] == {
+        "values": list(values[:MAX_VALUES]),
+        "total": MAX_VALUES + 1,
+        "hasMore": True,
+    }
 
 
 async def test_the_values_are_the_ones_the_annotation_declared() -> None:

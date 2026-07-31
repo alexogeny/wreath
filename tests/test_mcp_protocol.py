@@ -13,6 +13,7 @@ from typing import Annotated
 import pytest
 
 from wreath import Wreath
+from wreath._mcp.protocol import INVALID_REQUEST, JsonRpcError, parse_message
 from wreath.binding import Body
 from wreath.mcp import MCP, PROTOCOL_VERSION, ToolError
 from wreath.request import RequestLimits
@@ -78,6 +79,37 @@ async def call(client: TestClient, session_id: str, payload: dict) -> dict:
     response = await client.post("/mcp", json=payload, headers={"mcp-session-id": session_id})
     assert response.status == 200
     return response.json()
+
+
+def test_parse_message_classifies_a_valid_request_directly() -> None:
+    message = parse_message(
+        {"jsonrpc": "2.0", "id": 7, "method": "ping", "params": {}}
+    )
+    assert message.method == "ping"
+    assert message.id == 7
+    assert message.is_request is True
+
+
+@pytest.mark.parametrize("payload", [None, 1, "ping"])
+def test_parse_message_requires_an_object(payload: object) -> None:
+    with pytest.raises(JsonRpcError) as caught:
+        parse_message(payload)
+    assert caught.value.code == INVALID_REQUEST
+    assert "JSON object" in caught.value.message
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"id": 1, "method": "ping"},
+        {"jsonrpc": "1.0", "id": 1, "method": "ping"},
+    ],
+)
+def test_parse_message_requires_json_rpc_2(payload: dict) -> None:
+    with pytest.raises(JsonRpcError) as caught:
+        parse_message(payload)
+    assert caught.value.code == INVALID_REQUEST
+    assert '"jsonrpc": "2.0"' in caught.value.message
 
 
 async def test_initialize_negotiates_and_mints_a_session() -> None:
