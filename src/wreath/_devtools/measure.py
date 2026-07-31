@@ -6,6 +6,18 @@ ways. Those lessons live here rather than in each tool:
 
 * **Interleave the arms.** Run them round-robin so thermal and governor drift
   hits every arm, not whichever one ran while the CPU was asleep.
+* **Alternate the direction of each round.** Round-robin in a fixed order does
+  not remove drift *within* a round, it converts it into a per-arm constant: on
+  a powersave governor the CPU ramps across the round, so arm 0 is measured
+  cold and arm 7 hot on every single round, and averaging rounds preserves the
+  bias exactly. Running odd rounds backwards puts every arm in both positions.
+  This is not a refinement -- on an 8-arm round it moved the measured A/A floor
+  from 5.61us to 0.18us, and the flattered version had ranked arms in an order
+  that was purely their position.
+* **Only compare arms measured in the same interleaved run.** Two runs of the
+  same arm minutes apart are not comparable: an identical no-op application
+  measured 61.67us in a cold first block and 29.71us once the machine had
+  ramped. Anything worth comparing goes in as another arm.
 * **Measure the noise floor, do not assume it.** An A/A control -- the same
   configuration entered as two separate arms -- placed at the *far end* of the
   round from its twin, so the floor includes within-round drift. Adjacent
@@ -49,15 +61,36 @@ class Arm:
     app: Any = None
     payload: Any = None
     samples: list[float] = field(default_factory=list)
+    #: CPU microseconds per request, filled alongside `samples` by
+    #: `measure_apps`. Empty for arms measured through a caller's own loop.
+    cpu_samples: list[float] = field(default_factory=list)
 
     @property
     def median(self) -> float:
         return statistics.median(self.samples)
 
     @property
+    def cpu_median(self) -> float:
+        return statistics.median(self.cpu_samples)
+
+    @property
     def p95(self) -> float:
         ordered = sorted(self.samples)
         return ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
+
+
+def _ordered[T](arms: list[T], round_index: int) -> list[T]:
+    """The arms for round `round_index`, reversed on odd rounds.
+
+    Generic because `tape_decomp` carries its own `Arm`, and all this needs of
+    one is that a list of them can be reversed.
+
+    A fixed order measures arm 0 at the round's starting clock every time. Over
+    an 8-arm round on a powersave governor that positional bias reached 16% of
+    the baseline -- larger than most of what these tools measure, and stable
+    enough across rounds to look like a result rather than like noise.
+    """
+    return arms if round_index % 2 == 0 else arms[::-1]
 
 
 def scope(
@@ -106,6 +139,26 @@ async def time_app(app: Any, template: dict[str, Any], iterations: int) -> float
     return (time.perf_counter() - start) / iterations * 1e6
 
 
+async def time_app_cpu(
+    app: Any, template: dict[str, Any], iterations: int
+) -> tuple[float, float]:
+    """Wall and CPU microseconds per request, from one pass.
+
+    `time.process_time()` counts user plus system CPU for the whole process and
+    excludes anything spent blocked, which is what a burstable instance meters:
+    t4g/t3/e2/B-series earn credits at a baseline rate and throttle to it once
+    the bucket is empty, so the number that predicts a cliff is CPU per request,
+    not latency per request. Wall time on an idle laptop is a decent proxy for
+    it and on a loaded server is not one at all.
+    """
+    cpu_start = time.process_time()
+    wall_start = time.perf_counter()
+    await run(app, template, iterations)
+    wall = (time.perf_counter() - wall_start) / iterations * 1e6
+    cpu = (time.process_time() - cpu_start) / iterations * 1e6
+    return wall, cpu
+
+
 async def status_of(app: Any, template: dict[str, Any]) -> int:
     sent: list[dict[str, Any]] = []
 
@@ -147,9 +200,12 @@ async def measure_apps(
     for arm in arms:
         await run(arm.app, template, warmup)
     await verify_serving(arms, template, "before")
-    for _ in range(rounds):
-        for arm in arms:  # interleaved, so drift hits every arm alike
-            arm.samples.append(await time_app(arm.app, template, iterations))
+    for index in range(rounds):
+        # Alternating, so within-round drift does not become a per-arm constant.
+        for arm in _ordered(arms, index):
+            wall, cpu = await time_app_cpu(arm.app, template, iterations)
+            arm.samples.append(wall)
+            arm.cpu_samples.append(cpu)
     await verify_serving(arms, template, "after")
 
 
@@ -162,8 +218,8 @@ def measure_callables(
     """For arms whose payload is a plain `fn(n)`, not an ASGI app."""
     for arm in arms:
         arm.payload(warmup)
-    for _ in range(rounds):
-        for arm in arms:
+    for index in range(rounds):
+        for arm in _ordered(arms, index):
             start = time.perf_counter()
             arm.payload(iterations)
             arm.samples.append((time.perf_counter() - start) / iterations * 1e6)
@@ -233,6 +289,63 @@ def report(
             "anything to them."
         )
     return {"baseline": round(base, 3), "floor": round(floor, 3), "rows": rows}
+
+
+def report_cpu(
+    arms: list[Arm], baseline: str, control: str, *, requests: int = 1000
+) -> dict[str, Any]:
+    """Print CPU cost per `requests`, the unit a burstable instance meters.
+
+    Separate from `report` rather than a column on it, so the existing tools'
+    output keeps its shape. Read the two together: wall time says what a caller
+    waits for, this says what the instance is billed for, and they diverge as
+    soon as a request spends time blocked on a socket or a database.
+
+    The `cpu/wall` ratio is the useful third number. Near 1.0 means the arm is
+    CPU-bound and every microsecond saved is a microsecond of credit saved;
+    well under 1.0 means the request is mostly waiting, and shaving framework
+    CPU will not move the throughput ceiling much.
+    """
+    medians = {arm.label: arm.cpu_median for arm in arms}
+    base = medians[baseline]
+    floor = abs(medians[control] - base)
+    scale = requests / 1000.0
+
+    print(f"baseline ({baseline}) = {base * scale:.2f} CPU-ms / {requests} requests")
+    print(
+        f"A/A floor = {floor * scale:.2f} ms ({floor / base * 100:.1f}%); "
+        f"a delta must exceed {floor * RESOLUTION_FACTOR * scale:.2f} ms\n"
+    )
+    header = f"{'arm':32s} {'CPU-ms/1k':>11s} {'vs base':>10s} {'cpu/wall':>9s}   resolved?"
+    print(header)
+    print("-" * len(header))
+
+    rows: list[dict[str, Any]] = []
+    for arm in arms:
+        if arm.label in (baseline, control):
+            continue
+        delta = medians[arm.label] - base
+        resolved = abs(delta) > floor * RESOLUTION_FACTOR
+        ratio = arm.cpu_median / arm.median if arm.median else 0.0
+        print(
+            f"{arm.label:32s} {medians[arm.label] * scale:10.2f}m "
+            f"{delta * scale:+9.2f}m {ratio:9.2f}   "
+            f"{'yes' if resolved else 'BELOW NOISE'}"
+        )
+        rows.append(
+            {
+                "arm": arm.label,
+                "cpu_ms_per_1k": round(medians[arm.label] * scale, 3),
+                "delta_ms": round(delta * scale, 3),
+                "cpu_wall_ratio": round(ratio, 3),
+                "resolved": resolved,
+            }
+        )
+    return {
+        "baseline_ms": round(base * scale, 3),
+        "floor_ms": round(floor * scale, 3),
+        "rows": rows,
+    }
 
 
 def run_apps(

@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any
 
 from .decomp import _frame_chain
+from .measure import _ordered
 from .measure import run as _run
 from .measure import scope as _scope
 from .measure import status_of as _status
@@ -140,8 +141,11 @@ async def _calibrate(
         await _run(app, template, warmup)
 
     samples: dict[int, list[float]] = {depth: [] for depth, _ in arms}
-    for _ in range(rounds):
-        for depth, app in arms:
+    for index in range(rounds):
+        # Alternating for the same reason as `_measure`, and it matters more
+        # here: the arms are ordered by increasing depth, so a clock that ramps
+        # across the round adds a slope of its own to the one being fitted.
+        for depth, app in arms if index % 2 == 0 else arms[::-1]:
             samples[depth].append(await _time(app, template, iterations))
 
     medians = {depth: statistics.median(values) for depth, values in samples.items()}
@@ -236,8 +240,11 @@ async def _measure(
     for arm in arms:
         await _run(arm.app, template, warmup)
     await _verify(arms, template, "before")
-    for _ in range(rounds):
-        for arm in arms:  # interleaved, so drift hits every arm alike
+    for index in range(rounds):
+        # Alternating direction, per `measure._ordered`: this tool builds the
+        # longest rounds in the repository -- one arm per middleware, twice in
+        # `--mode both` -- so it had the most positional bias to lose.
+        for arm in _ordered(arms, index):
             arm.samples.append(await _time(arm.app, template, iterations))
     await _verify(arms, template, "after")
 
