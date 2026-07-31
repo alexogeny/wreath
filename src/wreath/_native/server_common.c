@@ -1,5 +1,7 @@
 #include "server.h"
 
+#include "simd.h"
+
 /* --- field validation ---------------------------------------------------- */
 
 const uint8_t wreath_field_token[256] = {
@@ -39,13 +41,10 @@ wreath_field_name_valid(const char *data, Py_ssize_t size)
 int
 wreath_field_value_valid(const char *data, Py_ssize_t size)
 {
-    for (Py_ssize_t i = 0; i < size; i++) {
-        unsigned char c = (unsigned char)data[i];
-        if ((c < 0x20 && c != '\t') || c == 0x7f) {
-            return 0;
-        }
-    }
-    return 1;
+    /* The same predicate the head parser scans with, so it gets the same
+     * dispatched width: valid exactly when the run reaches the end without
+     * stopping. */
+    return wreath_value_run(data, (ptrdiff_t)size) == (ptrdiff_t)size;
 }
 
 
@@ -56,10 +55,23 @@ wreath_decode_request_path(const char *data, Py_ssize_t size, int *bad)
 {
     /* Percent-decode (without plus-as-space), then strict UTF-8, matching the
      * pure reference. */
-    char *decoded = PyMem_Malloc(size ? (size_t)size : 1);
+    char *decoded;
     Py_ssize_t out = 0;
     PyObject *path;
     *bad = 0;
+    /* Almost no request path contains a percent. Finding that out costs one
+     * vectorised `memchr` and skips both the scratch allocation and the
+     * byte-at-a-time copy: the decoder below is only reachable when there is
+     * something to decode. */
+    if (memchr(data, '%', (size_t)size) == NULL) {
+        path = PyUnicode_DecodeUTF8(data, size, "strict");
+        if (path == NULL && PyErr_ExceptionMatches(PyExc_UnicodeDecodeError)) {
+            PyErr_Clear();
+            *bad = 1;
+        }
+        return path;
+    }
+    decoded = PyMem_Malloc(size ? (size_t)size : 1);
     if (decoded == NULL) {
         PyErr_NoMemory();
         return NULL;
@@ -389,13 +401,23 @@ find_sub_from(
     if (start > hay_len) {
         start = hay_len;
     }
-    for (Py_ssize_t i = start; i + needle_len <= hay_len; i++) {
-        if (hay[i] == needle[0] && memcmp(hay + i, needle, (size_t)needle_len) == 0) {
+    /* `memchr` for the first byte rather than a per-byte compare: the C
+     * library's is vectorised on every platform this runs on, and the head of
+     * a request is the one buffer every connection walks. The candidates it
+     * returns are still confirmed with `memcmp`, so the answer is unchanged. */
+    for (Py_ssize_t i = start; i + needle_len <= hay_len;) {
+        const char *hit = memchr(hay + i, needle[0], (size_t)(hay_len - needle_len - i + 1));
+        if (hit == NULL) {
+            break;
+        }
+        i = hit - hay;
+        if (memcmp(hit, needle, (size_t)needle_len) == 0) {
             /* Leave the cursor at the match: the caller may be called again
              * before consuming, and the match must not be skipped. */
             *scan_from = i;
             return i;
         }
+        i++;
     }
     Py_ssize_t resume = hay_len - (needle_len - 1);
     *scan_from = resume > 0 ? resume : 0;
