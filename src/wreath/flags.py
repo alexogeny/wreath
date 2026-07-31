@@ -151,6 +151,22 @@ class FeatureFlags:
         """
         return {name: evaluate_rule(raw, name, context) for name, raw in self._values.items()}
 
+    def names(self) -> frozenset[str]:
+        """Every flag name this provider holds, lower-cased.
+
+        The enumeration half of the provider surface, and deliberately *not* on
+        the `FlagProvider` protocol: an external provider (Unleash,
+        LaunchDarkly) may not be able to list its vocabulary without a network
+        call, and a protocol method that some implementations cannot answer is
+        worse than an optional one they can be asked for.
+
+        A caller that needs the vocabulary probes for this with `getattr` and
+        degrades when it is absent -- `CedarAuthorizer` validates the flag names
+        its policies reference against it at startup when it is there, and warns
+        where the policies were written when it is not.
+        """
+        return frozenset(self._values)
+
     def view(self, context: Mapping[str, Any] | None = None) -> FlagView:
         """Bind `context` to this provider, giving a one-argument `enabled`."""
         return FlagView(self, context)
