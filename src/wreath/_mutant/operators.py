@@ -336,6 +336,26 @@ _DECLARING_CALLS: dict[str, frozenset[str]] = {
     "prompt": frozenset({"action", "rate_limit", "second_factor"}),
 }
 
+#: `wreath.grpc`'s four method shapes. `service.unary(...)` is not route-shaped to
+#: `_looks_like_a_route` (no verb, no literal `/`-path) and its receiver is a
+#: local, so both branches declined and a gRPC method's guards were mutated not
+#: at all.
+#:
+#: The keywords are listed rather than taken from `_route_metadata()`, which is
+#: the wrong source here: that reads `RouteDefinition`'s *dataclass fields*, and
+#: these reach the route **decorator**, whose vocabulary is wider. `GrpcService.
+#: router`'s own docstring names the contract -- "metadata passed to a method
+#: decorator reaches `RouteDefinition` unchanged, so `roles=`, `dependencies=`
+#: and `rate_limit=` are enforced by the same tape as any REST route".
+_GRPC_METHOD_CONTROLS: frozenset[str] = frozenset({
+    "action", "authorize", "dependencies", "middleware", "permissions",
+    "rate_limit", "requirement", "roles", "second_factor",
+})
+
+for _grpc_call in ("unary", "server_stream", "client_stream", "bidi"):
+    _DECLARING_CALLS[_grpc_call] = _GRPC_METHOD_CONTROLS
+del _grpc_call
+
 
 def _declared_controls(node: ast.Call) -> frozenset[str] | None:
     """The control keywords for a declaring call whose callee did not resolve."""

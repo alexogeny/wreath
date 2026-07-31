@@ -366,6 +366,63 @@ def test_an_mcp_tools_gates_are_mutable(tmp_path: Path) -> None:
         assert any(f"`{gate}=`" in control for control in dropped), (gate, dropped)
 
 
+def test_a_grpc_methods_controls_are_mutable(tmp_path: Path) -> None:
+    """`service.unary(..., roles=...)` in a factory.
+
+    `wreath.grpc` declares a method with `**metadata` forwarded to
+    `RouteDefinition`, so its controls *are* a route's -- but the call is not
+    route-shaped (no verb, no literal `/`-path) and `service` is a local, so both
+    branches of the declaration operator declined and a gRPC method's guards were
+    mutated not at all. An authorization control the mutation tester cannot see
+    is the hole this whole section exists to close.
+
+    The source is written the way a real service is rather than imported from
+    `wreath.grpc`: the operators read the tree, and the table is keyed on the
+    call name, so this holds whether or not the module is present.
+    """
+    found = _scan_resolved(tmp_path, """
+        from typing import Any
+
+
+        def build(service: Any) -> None:
+            @service.unary(request=dict, response=dict,
+                           permissions=("track:read",))
+            async def GetPosition(request, message): ...
+
+            @service.server_stream(request=dict, response=dict,
+                                   roles=("ranger",), rate_limit=(2, 60.0))
+            async def WatchPositions(request, message): ...
+    """, "grpc_service")
+    dropped = {c.control for c in _by(found, "declaration.drop-keyword")}
+    for control in ("permissions", "roles", "rate_limit"):
+        assert any(f"`{control}=`" in name for name in dropped), (control, dropped)
+
+
+def test_a_grpc_methods_wire_types_are_not_treated_as_controls(
+    tmp_path: Path,
+) -> None:
+    """The negative space, and the reason the table names calls not keywords.
+
+    `request=`/`response=` are the message types, not guards -- and they are
+    *required* keyword parameters, so dropping one does not fall back to a
+    default, it raises. A broken mutant that a test kills inflates the score,
+    which is the failure `_defaulted_keywords` already declines a `**kwargs`
+    callee to avoid. They stay out because the entry lists controls explicitly.
+    """
+    found = _scan_resolved(tmp_path, """
+        from typing import Any
+
+
+        def build(service: Any) -> None:
+            @service.bidi(request=dict, response=dict, roles=("ranger",))
+            async def Chat(request, message): ...
+    """, "grpc_wire_types")
+    dropped = {c.control for c in _by(found, "declaration.drop-keyword")}
+    assert any("`roles=`" in name for name in dropped), dropped
+    for wire in ("request", "response"):
+        assert not any(f"`{wire}=`" in name for name in dropped), (wire, dropped)
+
+
 def test_an_mcp_servers_bounds_are_already_widenable(tmp_path: Path) -> None:
     """`MCPLimits(...)` needs no operator of its own.
 
