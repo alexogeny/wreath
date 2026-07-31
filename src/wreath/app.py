@@ -16,7 +16,7 @@ import threading
 # Imported by name, like `monotonic_ns` below: one global lookup, and it is only
 # reached by a response that carries background tasks.
 from asyncio import timeout as _asyncio_timeout
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from inspect import isawaitable
 from inspect import iscoroutinefunction as _iscoroutinefunction
 from time import monotonic_ns as _monotonic_ns
@@ -43,6 +43,8 @@ from ._flight_schema import CaptureFieldClass as _CaptureFieldClass
 from ._flight_schema import PhaseCoverage as _PhaseCoverage
 from ._flight_schema import PhaseKind as _PhaseKind
 from ._json import dumps as _json_dumps
+from ._middleware_tape import compile_tape as _compile_tape
+from ._middleware_tape import preflight_answer as _preflight_answer
 from ._native import _core
 from ._pure.authz import build_capability_mask as _pure_build_capability_mask
 from ._routing import _CLASSIFYING, Handler, RoutingMode, check_placeholders
@@ -52,6 +54,7 @@ from .binding import (
     BindingSpec,
     Depends,
     ValidationError,
+    _return_annotation,
     compile_binder,
     compile_response_validator,
     inspect_handler,
@@ -86,7 +89,6 @@ from .response import (
 )
 from .router import RouteDefinition, Router
 from .state import State
-from .typegen.inspect import _return_annotation
 from .websocket import WebSocket, WebSocketDisconnect
 
 _build_capability_mask = (
@@ -347,6 +349,46 @@ def _host_name(value: str) -> str:
     return name if separator and port.isdigit() else value
 
 
+def _hook_program(
+    middleware: Sequence[Any],
+) -> tuple[tuple[tuple[Any, bool, int, int], ...], tuple[tuple[Any, int], ...]]:
+    """Compile an ordered middleware sequence into dense before/after programs.
+
+    Dense directional programs: request dispatch never scans a missing
+    before/after slot. Each before records the exact after-prefix active before
+    and after it completes, preserving partial unwind semantics.
+
+    Those recorded prefixes are indices into *this* program's after-list, so a
+    program is only meaningful alongside the after-tuple compiled with it. That
+    is why per-route compartments compile a whole program per distinct
+    middleware subset rather than masking the global one: a subset with
+    different membership has different indices throughout.
+    """
+    before_hooks: list[tuple[Any, bool, int, int]] = []
+    after_hooks: list[tuple[Any, int]] = []
+    for item in middleware:
+        before_sync = getattr(item, "before_sync", None)
+        before = (
+            before_sync if before_sync is not None else getattr(item, "before", None)
+        )
+        after_sync = getattr(item, "after_sync", None)
+        after_inplace = getattr(item, "after_inplace", None)
+        after = (
+            after_inplace
+            if after_inplace is not None
+            else (after_sync if after_sync is not None else getattr(item, "after", None))
+        )
+        error_afters = len(after_hooks)
+        if after is not None:
+            mode = 2 if after_inplace is not None else (1 if after_sync is not None else 0)
+            after_hooks.append((after, mode))
+        if before is not None:
+            before_hooks.append(
+                (before, before_sync is not None, error_afters, len(after_hooks))
+            )
+    return tuple(before_hooks), tuple(after_hooks)
+
+
 _ROUTE_PARAMETER = re.compile(r"\{([^}:]+)(?::(path))?\}")
 
 
@@ -510,6 +552,9 @@ class Wreath:
         "_global_before_hooks",
         "_has_global_http_hooks",
         "_global_middleware",
+        "_route_programs",
+        "_middleware_mode",
+        "_native_preflight",
         "_auth_handlers",
         "_handler_requirements",
         "_http_clients",
@@ -552,8 +597,15 @@ class Wreath:
         routing: RoutingMode = "bitset",
         limits: RequestLimits = DEFAULT_LIMITS,
         background_timeout: float | None = 30.0,
+        middleware: str = "python",
     ) -> None:
         self._routing = routing
+        #: Where the global middleware tape runs. See `_middleware_tape`.
+        #: `native` is opt-in because it changes what the Python tape sees:
+        #: a CORS preflight answered by the server never reaches middleware
+        #: registered before CORS, so a rate limiter stops counting them.
+        self._middleware_mode = middleware
+        self._native_preflight: Any = None
         self._limits = limits
         if background_timeout is not None and background_timeout <= 0:
             raise ValueError("background_timeout must be positive, or None for no limit")
@@ -610,6 +662,9 @@ class Wreath:
         self._global_before_hooks: tuple[tuple[Any, bool, int, int], ...] = ()
         self._global_after_hooks: tuple[tuple[Any, int], ...] = ()
         self._has_global_http_hooks = False
+        # None until a compile finds a middleware that declines a route, so an
+        # application not using compartments never grows the dict or the branch.
+        self._route_programs: dict[Any, tuple[Any, Any]] | None = None
         # Which dispatcher a request takes, chosen once per compile by
         # `_select_dispatch`. Generic until the first compile decides.
         self._dispatch_http: Any = self._handle_http
@@ -1773,9 +1828,21 @@ class Wreath:
         """Wreath-server entry point using a lazily materialized ASGI scope."""
         if self._dirty:
             self._compile_routes()
-        await self._dispatch_http(
-            context, receive, send, context.method, context.path, True
-        )
+        method = context.method
+        # Before the tape, before routing, before a `Request` exists. A CORS
+        # preflight is answerable from configuration alone, and every answer was
+        # recorded at boot -- so this is a dict lookup and a write. `method` is
+        # tested first because it is one attribute read and it is false for
+        # every request that is not an OPTIONS.
+        if method == "OPTIONS" and self._native_preflight is not None:
+            answer = _preflight_answer(self._native_preflight, context.headers)
+            if answer is not None:
+                # Same handoff `_finish_http` uses for a plain response on
+                # the native path: the protocol writes status, headers and
+                # body without a Response object existing at all.
+                await cast(Any, send).__self__._wreath_response(*answer)
+                return
+        await self._dispatch_http(context, receive, send, method, context.path, True)
 
     def _select_dispatch(self) -> None:
         """Choose this application's dispatcher once, at compile time.
@@ -1793,11 +1860,21 @@ class Wreath:
         is no partially-specialized third dispatcher, because two
         implementations of dispatch is already the most this is worth.
         """
-        self._dispatch_http = (
-            self._handle_http_plain
-            if not self._has_global_http_hooks and self._dynamic_matcher is None
-            else self._handle_http
-        )
+        if not self._has_global_http_hooks and self._dynamic_matcher is None:
+            self._dispatch_http = self._handle_http_plain
+        elif (
+            self._route_programs is not None
+            and self._dynamic_matcher is None
+            and self._classify is not None
+            and not self._stage_hooks
+        ):
+            # Some route runs fewer global middleware than the stack declares,
+            # and this application's shape lets the route be known before the
+            # hooks run. See `_handle_http_compartment` for why each of those
+            # conditions is load-bearing.
+            self._dispatch_http = self._handle_http_compartment
+        else:
+            self._dispatch_http = self._handle_http
 
     async def _handle_http_plain(
         self,
@@ -1862,6 +1939,126 @@ class Wreath:
         # both dispatchers keep one response-emission path between them.
         await self._finish_http(
             request, response, send, method, scope, native_response, 0
+        )
+
+    async def _handle_http_compartment(
+        self,
+        scope: Any,
+        receive: Any,
+        send: Send,
+        method: str,
+        path: str,
+        native_response: bool,
+    ) -> None:
+        """Dispatch running only the global middleware the matched route needs.
+
+        `_handle_http` runs the global tape *before* it routes, because hooks
+        that rewrite the request (`ProxyHeadersMiddleware` on a forwarded Host)
+        or refuse it (a rate limiter counting a flood of 404s) have to see
+        requests that never match. Compartments need the opposite order, and the
+        reconciliation is that the route is knowable without a `Request`:
+        `classify` takes a method and a path string, which is exactly what
+        `_handle_http_plain` already relies on.
+
+        So this routes first, then runs that route's program. It is selected
+        only for the shape where doing so changes nothing:
+
+        * **no dynamic matcher** -- host routing consults a Host that
+          `ProxyHeadersMiddleware` may rewrite, so the match would be taken from
+          a header the tape had not corrected yet.
+        * **a classifying table**, since that is what answers without a Request.
+        * **no stage hooks** -- `miss`, `pre_auth`, `identity` and `action` fire
+          at points this dispatcher does not have.
+
+        and per request, only when `classify` answers 1: a definite match on a
+        route needing no identity. A miss, an authentication ticket, an armed
+        recorder or an ambiguous path all hand back to `_handle_http`, which
+        runs the full tape exactly as before -- so a 404 is still counted by the
+        rate limiter, and route existence is not leaked by which middleware ran.
+
+        Every delegation is decided **before** this method has had an effect a
+        second dispatch would repeat: before the `Request` exists and before any
+        hook has run. That is the same invariant `_handle_http_plain` documents,
+        and the same one to preserve if a condition is ever added here.
+        """
+        if not native_response and _ambiguous_request_path(scope, path):
+            await self._handle_http(scope, receive, send, method, path, native_response)
+            return
+        # Both are guaranteed non-None by `_select_dispatch`, which is what
+        # selected this method; bound locally so the guarantee is stated once
+        # and the attribute is read once.
+        classify = cast(Any, self._classify)
+        programs = cast(dict[Any, tuple[Any, Any]], self._route_programs)
+        classification, payload = classify(method, path)
+        if classification != 1:
+            await self._handle_http(scope, receive, send, method, path, native_response)
+            return
+        matched = payload
+        if matched[0] in self._auth_handlers:
+            await self._handle_http(scope, receive, send, method, path, native_response)
+            return
+        if scope.flight if native_response else ("_wreath_flight" in scope):
+            await self._handle_http(scope, receive, send, method, path, native_response)
+            return
+        handler, path_params = matched
+        before_hooks, after_hooks = programs.get(
+            (method, handler), (self._global_before_hooks, self._global_after_hooks)
+        )
+        request = Request(scope, receive, limits=self._limits, app=self)
+        request._route_outcome = "ingress"
+        if _telemetry.PROPAGATING:
+            _telemetry.bind_propagation(request)
+        active_global = len(after_hooks)
+        for before, is_sync, error_afters, success_afters in before_hooks:
+            try:
+                candidate = before(request) if is_sync else await before(request)
+            except Exception as error:  # noqa: BLE001 -- see _handle_exception
+                await self._finish_http(
+                    request,
+                    _coerce_response(await self._handle_exception(request, error)),
+                    send,
+                    method,
+                    scope,
+                    native_response,
+                    error_afters,
+                    after_hooks,
+                )
+                return
+            if candidate is not None:
+                await self._finish_http(
+                    request,
+                    _coerce_response(candidate),
+                    send,
+                    method,
+                    scope,
+                    native_response,
+                    success_afters,
+                    after_hooks,
+                )
+                return
+        # After the hooks, as in `_handle_http`: the tape runs before routing
+        # there, so a hook has never been able to read path parameters, and
+        # publishing them earlier here would be a behaviour change smuggled in
+        # as an optimization.
+        request.path_params = path_params or {}
+        if request._get_route_outcome() in (None, "ingress"):
+            request._set_route_outcome("route")
+        try:
+            value = handler(request)
+            response = _coerce_response(
+                await value if value.__class__ is _COROUTINE else value
+            )
+        except Exception as error:  # noqa: BLE001 -- see _handle_exception
+            response = await self._handle_exception(request, error)
+        await self._finish_http(
+            request,
+            response,
+            send,
+            method,
+            scope,
+            native_response,
+            active_global,
+            after_hooks,
         )
 
     async def _handle_http(
@@ -2313,8 +2510,12 @@ class Wreath:
         scope: Any,
         native_response: bool,
         active_global: int,
+        after_hooks: tuple[tuple[Any, int], ...] | None = None,
     ) -> None:
-        hooks = self._global_after_hooks
+        # `active_global` indexes `after_hooks`, and the two must come from the
+        # same compiled program -- see `_hook_program`. Only the compartment
+        # dispatcher passes one; every other caller unwinds the global program.
+        hooks = self._global_after_hooks if after_hooks is None else after_hooks
         # Counted down by index rather than `reversed(hooks[:active_global])`,
         # which allocated a fresh list slice on every response.
         index = active_global
@@ -2698,45 +2899,9 @@ class Wreath:
         # Dense directional programs: request dispatch never scans a missing
         # before/after slot. Each before records the exact after-prefix active
         # before and after it completes, preserving partial unwind semantics.
-        compiled_before_hooks: list[tuple[Any, bool, int, int]] = []
-        compiled_after_hooks: list[tuple[Any, int]] = []
-        for item in global_middleware:
-            before_sync = getattr(item, "before_sync", None)
-            before = (
-                before_sync
-                if before_sync is not None
-                else getattr(item, "before", None)
-            )
-            after_sync = getattr(item, "after_sync", None)
-            after_inplace = getattr(item, "after_inplace", None)
-            after = (
-                after_inplace
-                if after_inplace is not None
-                else (
-                    after_sync
-                    if after_sync is not None
-                    else getattr(item, "after", None)
-                )
-            )
-            error_afters = len(compiled_after_hooks)
-            if after is not None:
-                mode = (
-                    2
-                    if after_inplace is not None
-                    else (1 if after_sync is not None else 0)
-                )
-                compiled_after_hooks.append((after, mode))
-            if before is not None:
-                compiled_before_hooks.append(
-                    (
-                        before,
-                        before_sync is not None,
-                        error_afters,
-                        len(compiled_after_hooks),
-                    )
-                )
-        self._global_before_hooks = tuple(compiled_before_hooks)
-        self._global_after_hooks = tuple(compiled_after_hooks)
+        compiled_before_hooks, compiled_after_hooks = _hook_program(global_middleware)
+        self._global_before_hooks = compiled_before_hooks
+        self._global_after_hooks = compiled_after_hooks
         websocket_hooks: list[tuple[Any, bool]] = []
         for item in global_middleware:
             websocket_hook = getattr(item, "before_websocket", None)
@@ -2766,6 +2931,16 @@ class Wreath:
             for route in self._routes
         ]
         self._compile_capabilities(requirements)
+        # Middleware that scopes itself to some routes. Empty for almost every
+        # application, and the emptiness is what keeps the per-route work off
+        # everyone else's compile.
+        scoped_middleware = [
+            (index, applies)
+            for index, item in enumerate(global_middleware)
+            if (applies := getattr(item, "applies_to", None)) is not None
+        ]
+        route_programs: dict[Any, tuple[Any, Any]] = {}
+        program_cache: dict[frozenset[int], tuple[Any, Any]] = {}
         handler_requirements: dict[Any, AuthRequirement] = {}
         # Compiled handler -> (method, path) so a later telemetry join can map
         # each route to its metadata-image IDs without re-walking the router.
@@ -2800,6 +2975,25 @@ class Wreath:
                 endpoint = _ensure_response(endpoint)
             access_clauses = self._requirement_clauses(requirement)
             for method in definition.methods:
+                # Which global middleware this route actually runs, decided
+                # here rather than per request. A middleware that declines is
+                # not gated at dispatch -- it is absent from the program the
+                # route dispatches, so declining costs nothing to check.
+                #
+                # `applies_to` is application code, and a raise propagates: this
+                # is boot, where loud is correct. Swallowing it would have to
+                # choose a direction, and the safe direction (run the
+                # middleware) silently discards a configuration the author
+                # believed was in effect.
+                excluded = (
+                    frozenset(
+                        index
+                        for index, applies in scoped_middleware
+                        if not applies(method, definition.path)
+                    )
+                    if scoped_middleware
+                    else frozenset()
+                )
                 compiled = (
                     endpoint
                     if not chain
@@ -2822,6 +3016,24 @@ class Wreath:
                     router.add(definition.path, method, compiled, access_clauses)
                 handler_requirements[compiled] = requirement
                 flight_route_keys[compiled] = (method, definition.path)
+                if excluded:
+                    program = program_cache.get(excluded)
+                    if program is None:
+                        program = _hook_program(
+                            [
+                                item
+                                for index, item in enumerate(global_middleware)
+                                if index not in excluded
+                            ]
+                        )
+                        program_cache[excluded] = program
+                    # Keyed by method as well as handler: a route declaring
+                    # several methods and carrying no route middleware compiles
+                    # to one shared endpoint object, so keying on the handler
+                    # alone gave GET and POST the same program -- and method is
+                    # exactly the axis compartments are most wanted on, since
+                    # CSRF applies only to the unsafe ones.
+                    route_programs[method, compiled] = program
         # WebSocket routes are attributable too: the matched handler joins to a
         # WEBSOCKET route in the metadata image. They carry no HTTP plan.
         for ws_path, ws_handler in self._ws_routes:
@@ -2830,6 +3042,10 @@ class Wreath:
         if self._ws_router is not None:
             self._ws_router.compile()
         self._handler_requirements = handler_requirements
+        self._route_programs = route_programs or None
+        # Recompiled every time routes are, so adding a CORS middleware after
+        # the first compile is picked up and removing one stops being answered.
+        self._native_preflight = _compile_tape(self._middleware_mode, global_middleware)
         self._auth_handlers = frozenset(
             compiled
             for compiled, requirement in handler_requirements.items()
