@@ -20,6 +20,7 @@ There are two circles of readers here, and each gets its own set.
 - [Rate-limit an endpoint](recipes/rate-limiting.md)
 - [Serve JSON or MessagePack from one handler](recipes/negotiate-format.md)
 - [Accept a Protocol Buffers request body](recipes/accept-a-protobuf-body.md)
+- [Serve a gRPC method](recipes/serve-a-grpc-method.md)
 
 ### Users, auth, and security
 
