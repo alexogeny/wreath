@@ -2041,6 +2041,28 @@ def _resolve_hints(obj: Any, label: str, *, extras: bool = True) -> dict[str, An
         ) from error
 
 
+def _return_annotation(handler: Any) -> Any:
+    """The handler's resolved return annotation, or `Parameter.empty`.
+
+    Lives here rather than beside the OpenAPI and typegen code that also calls
+    it, because `app.py` needs it to compile a route and importing it from
+    `typegen.inspect` pulled the whole code-generation package -- the type
+    model, the renderers and the TypeScript target -- into the import path of
+    every application that only ever serves requests. 13ms of a 207ms
+    `import wreath`, for six lines needing nothing but `typing` and `inspect`.
+
+    Unlike `_resolve_hints` this swallows the failure: a handler whose return
+    annotation will not resolve still binds and still serves, it just does not
+    get response validation or a documented response schema. Refusing here
+    would turn a documentation problem into a boot failure.
+    """
+    try:
+        hints = typing.get_type_hints(handler, include_extras=False)
+    except (TypeError, ValueError, NameError):
+        return inspect.Parameter.empty
+    return hints.get("return", inspect.Parameter.empty)
+
+
 def inspect_handler(
     handler: Handler, path: str, host: str | None = None
 ) -> BindingSpec | None:
