@@ -61,6 +61,45 @@ Each connection's automatic prepared-plan LRU is bounded twice: by
 `PoolConfig.statement_cache_bytes`. Keep both finite when SQL text or result
 metadata can vary by tenant.
 
+## Sizing the pools for the machine you deploy on
+
+The defaults are `read` and `write` pools of `max_size=10` each, so **one worker
+can open 20 connections** and a four-worker host can open 80. On a managed
+PostgreSQL with `max_connections=100` that is most of the server, and the cost
+lands on the *database* instance: each backend is a process holding several
+megabytes, whether or not it is running a query.
+
+Size it from the app instance, not from the database:
+
+```python
+Database("main", dsn, pools={
+    "read": PoolConfig(min_size=1, max_size=4),
+    "write": PoolConfig(min_size=0, max_size=2),
+})
+```
+
+The reasoning is that a pooled connection is only useful while a worker has a
+core to process its results on. A 2-vCPU instance cannot have twenty queries
+genuinely in flight; it has twenty connections idling, each costing memory at
+both ends and each counting against `max_connections`. Two to four per worker per
+pool is the range worth starting from, and `min_size=0` on `write` means a
+read-heavy service opens nothing until it first writes.
+
+Two things to check before raising a limit:
+
+- **`workers × max_size × pools` against the server's `max_connections`**, with
+  headroom for migrations, `psql`, and your monitoring. Exhaustion surfaces as
+  `acquire_timeout` errors under load, which read like a slow database and are
+  not.
+- **Session-scoped advisory locks hold a connection for their duration**, so a
+  fleet using them needs its own budget on top — see
+  [distributed locks](distributed-locks.md), which raises a `ResourceWarning`
+  when an acquisition would leave the pool no headroom.
+
+Raising `max_size` is the right fix only when the pool is genuinely saturated by
+concurrent in-flight queries. When it is saturated by *slow* queries, more
+connections move the queue rather than shorten it.
+
 Because the exact signatures for pooling, transactions, workloads, and result
 types come straight from the driver, the reference is the authoritative place for
 them.
