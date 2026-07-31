@@ -54,9 +54,10 @@
         "tests/test_app_factories.py",
         "tests/test_state.py",
         "tests/test_request_pipeline.py",
+        "tests/test_sync_handlers.py",
         "tests/test_problem_details.py"
       ],
-      "policy": "Configuration is how Wreath starts; state is what it holds while running. They do not share an API. Route tables compile at startup, never per request. `_reject_session_after_authentication` scans **every** route-scoped registration -- `add_middleware`, `Router(middleware=[...])`, an included router's, and one route's `middleware=[...]` -- not just the application's. It used to read `self._middleware` alone, so a session middleware on a router walked past a refusal that had nothing to look at and shipped the 401 it exists to prevent (docs/decisions/0024). Nesting needs no special case: `Router.routes` folds an included router's middleware into each route before the application sees it."
+      "policy": "Configuration is how Wreath starts; state is what it holds while running. They do not share an API. Route tables compile at startup, never per request. Dispatch is chosen at compile time too: `_select_dispatch` picks `_handle_http_plain` for an application with no global hooks and no dynamic matcher, and every delegation from it back to `_handle_http` must be decided *before* the specialized path has any effect a second dispatch would repeat -- before the Request exists, before a hook could run, before the recorder is told anything. A route handler may be `def` as well as `async def`; dispatch calls it and awaits only what came back awaitable, and every wrapper (binder, response validator, status coercion) preserves whichever convention it was handed. `_reject_session_after_authentication` scans **every** route-scoped registration -- `add_middleware`, `Router(middleware=[...])`, an included router's, and one route's `middleware=[...]` -- not just the application's. It used to read `self._middleware` alone, so a session middleware on a router walked past a refusal that had nothing to look at and shipped the 401 it exists to prevent (docs/decisions/0024). Nesting needs no special case: `Router.routes` folds an included router's middleware into each route before the application sees it."
     },
     {
       "name": "routing",
@@ -215,6 +216,7 @@
         "tests/test_binding.py",
         "tests/test_binding_sources.py",
         "tests/test_binding_complexity.py",
+        "tests/test_binding_response_compilation.py",
         "tests/test_native_validate_parity.py",
         "tests/test_form_model_binding.py",
         "tests/test_validation_errors.py",
