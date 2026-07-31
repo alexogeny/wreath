@@ -981,3 +981,119 @@ the `enrolments=`-store path (`_load_record`'s handle validation, ~8), an inacti
 completing a second factor (`user is None or not user.is_active`), and several
 `declaration.drop-keyword` mutants where a keyword argument falls back to the same
 default the caller passed.
+
+## Session seven — fixing what the mutants pointed at, rather than covering it
+
+The brief changed here: not "kill mutants" but "fix the code the mutants are pointing
+at, and fix the tests that were not testing". Three real defects, two AGENTS.md rules,
+and one long-standing trap in the pure-mode sweep. Nothing committed; tree stays dirty.
+
+### The scoring rule was wrong, and it is now written down
+
+**A mutant killed in one execution mode and surviving in another has *survived*.** An
+earlier number in this session combined the native and pure sweeps optimistically
+("killed in either"), which overstated `_auth/jwt.py` by four. `unreached` is absence
+of evidence -- that mode does not execute the line. `survived` is evidence: the line
+ran and nothing objected, so a regression there ships undetected to everyone on that
+mode. AGENTS.md now carries the full table under "Engineering rules".
+
+Four `_auth/jwt.py` mutants are decided differently by the two modes: three are caught
+only by the pure suite (the native path answers in C, so the Python guard never runs)
+and one only by the native suite. That is the rule earning its place, not a hypothesis.
+
+### Three genuine defects in the `_parse_compact` twins
+
+The pure branch's comment claimed it enforced "the same hard size caps as native
+jose_parse". Exercising both paths over the same 21 malformed tokens found **ten
+divergences**, of which three were real:
+
+1. **The same token had two verdicts.** Native refused a segment when
+   `b64len // 4 * 3 > max_seg`; the pure branch computed
+   `(_MAX_SEGMENT_BYTES * 4) // 3 + 4` = 21849 and refused only what was strictly
+   greater, so segments of exactly 21848 and 21849 bytes were refused by one build and
+   accepted by the other. Fixed by writing native's expression out in Python --
+   integer division included -- rather than approximating it, so the two cannot drift
+   apart again. Session four had found this and left it for a human; this is that.
+2. **`binascii.Error` escaped the pure branch.** The charset check passes a segment
+   whose *length* is not a valid unpadded base64 length (one more than a multiple of
+   four), so `base64.urlsafe_b64decode` raised with CPython's wording where native
+   raised wreath's. It is a `ValueError` subclass, so every caller caught it and
+   nothing failed loudly -- what leaked was an implementation detail, in the fallback
+   build only.
+3. **An empty token was diagnosed two ways**, and the pure branch answered "three
+   non-empty segments" where native separated "exactly two dots" (wrong count) from
+   "has an empty segment" (right count, empty part).
+
+Both twins were then aligned on the **clearer** wording of the two rather than on
+whichever happened to be there -- `jose.c` gained the pure branch's "a compact JWT
+segment must be unpadded base64url" and "compact JWT exceeds maximum size", and the
+pure branch gained native's dots/empty-segment split. Blast radius was two files: the
+messages were pinned nowhere else. `wreath-native-lint` is clean and the extension
+rebuilds. `tests/test_jwt_pure_parse_caps.py`'s table collapsed from two message
+columns to one, which makes every row a twin-parity assertion, and the boundary test
+that deliberately stopped eight characters short now pins both sides of the cap
+exactly.
+
+### RSA-PSS verification had no negative test at all
+
+The sweep reported `_verify_ps` as replaceable, whole, by `return True`.
+`test_rsa_valid_token_verifies` parametrises PS256/384/512 but only over tokens that
+*should* verify, and the one tampered-signature test covered RS256 alone. **A verifier
+that accepted any signature would have passed CI**, and forging a token needs no key
+at that point. The module docstring claims every family is differentially tested
+against the `cryptography` oracle; for PS that was true only on the accepting side.
+
+**The code was correct** -- every forgery tried was already refused, including
+offering a PKCS#1 v1.5 signature where PSS is expected and vice versa. What was
+missing was the proof. Added: flipped-bit, signature-over-different-content,
+wrong-length (both directions), signature at the modulus, cross-padding confusion, and
+four structurally invalid signatures, across all six RSA algorithms.
+
+Then the interior, which ordered guards had masked -- a crafted signature only ever
+reaches the first check it fails. Reaching the rest needs a signature valid *up to*
+the guard under test, which the private key makes constructible: recover the genuine
+encoded message with the public exponent (`em = s**e mod n`), change one field, and
+re-sign with the private exponent so the verifier's own `pow(s, e, n)` reproduces it.
+One forgery per guard now covers the 0xbc trailer, the top-bits mask, the DB padding,
+the 0x01 separator and the salt. **A control case re-signs an unperturbed `em` and
+must still verify** -- without it every rejection could be the harness failing rather
+than the guard firing.
+
+`_auth/jwt.py`: **0.5745 -> 0.7320** under the correct (survived-wins) rule, non-killed
+103 -> 47, `unreached` 63 -> 6.
+
+### The pure-mode sweep was red for reasons unrelated to any mutant
+
+`WREATH_PURE=1` over a directory including `tests/compliance/` produced seven
+`ImportError`s: `_native._server` refuses to load without the `_core` C API, by
+design, and the native server has no pure twin to test. Anyone following "run the
+sweep twice" hit this and had to decide whether they had broken something.
+
+`drive_request` in `tests/compliance/conftest.py` is the only thing in that suite
+touching the native server, so the skip lives there and a test added later cannot
+forget it -- the environment-capability exception AGENTS.md allows, with the reason
+naming the variable that turns it back on, matching the existing guard in
+`tests/http3/test_availability.py`. `WREATH_PURE=1` over the compliance and auth
+suites is now green with seven visible skips.
+
+### Second AGENTS.md rule: no `noqa` on your own new code
+
+Recorded in session six and repeated here because it came from the same kind of
+mistake: a suppression added to reach code that a lint forbids expressing is a third
+state that passes the gate silently. The full rationale, including the `--fix` that
+inverted a test's meaning, is in AGENTS.md under "Engineering rules".
+
+### What is left
+
+`_auth/jwt.py`'s remaining 47: `_reason_valid` 13 (claim validation -- `nbf`/`iat`
+leeway arms and the audience list shapes), `_verify_ps` 7, `default_identity` 6,
+`_coerce_key` 4, `peek_header` 4, `_verify_rs` 3, `verify_jwt` 3. Two of the
+`_verify_ps` survivors look genuinely unreachable through the public API and should be
+proven rather than chased: `em_len < h_len + s_len + 2` cannot fire while
+`MIN_RSA_MODULUS_BITS` is 2048 (it needs roughly a 1040-bit modulus), and
+`db[-s_len:] if s_len else b""` has no `s_len == 0` caller because JWA fixes the salt
+length to the digest length.
+
+Unchanged: the `app` sweep has still never produced a file, the psql re-check has
+still not run, and the manifest-attribution decision is still open. A `WREATH_PURE=1`
+sweep has now been run for exactly one module.
