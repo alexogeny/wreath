@@ -31,6 +31,7 @@ from typing import Any
 
 from ._json import dumps as _json_dumps
 from ._native import _core
+from .protobuf import encode as _protobuf_encode
 from .request import Request
 from .response import ProblemResponse, Response
 
@@ -42,7 +43,15 @@ if _core is not None and hasattr(_core, "msgpack_dumps"):
 else:
     from ._pure.msgpack import packb as _msgpack
 
-__all__ = ["JSON", "MSGPACK", "Serializer", "negotiate", "parse_accept", "serialize"]
+__all__ = [
+    "JSON",
+    "MSGPACK",
+    "PROTOBUF",
+    "Serializer",
+    "negotiate",
+    "parse_accept",
+    "serialize",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,10 +76,38 @@ def _to_bytes(data: Any) -> bytes:
     return encoded if isinstance(encoded, bytes) else encoded.encode("utf-8")
 
 
+def _to_protobuf(data: Any) -> bytes:
+    """Encode a declared message, refusing anything else by name.
+
+    JSON and MessagePack are self-describing and encode any plain structure.
+    Protobuf is schema-driven: it can only encode a class built by
+    `@wreath.protobuf.message`, because the field numbers *are* the wire
+    contract and there is nothing to infer them from. Reaching the codec with a
+    plain dict raises `AttributeError` on a private attribute, which tells the
+    caller nothing, so the precondition is guarded here instead.
+    """
+    if not hasattr(type(data), "__wreath_protobuf_plan__"):
+        raise TypeError(
+            "application/x-protobuf can only encode a class declared with "
+            f"@message from wreath.protobuf; got {type(data).__name__}. "
+            "Protobuf carries field numbers rather than names, so there is "
+            "nothing to derive them from for an undeclared value."
+        )
+    return _protobuf_encode(data)
+
+
 JSON = Serializer("application/json", _to_bytes)
 MSGPACK = Serializer("application/msgpack", _msgpack)
+PROTOBUF = Serializer("application/x-protobuf", _to_protobuf)
 
 #: JSON first, so it wins ties and is the default when Accept is absent/`*/*`.
+#:
+#: `PROTOBUF` is deliberately absent. JSON and MessagePack encode whatever a
+#: handler returns, so offering them everywhere costs nothing; protobuf can only
+#: encode a declared message, and a handler returning a dict is the common case.
+#: Adding it here would turn every existing `serialize()` call site into a
+#: runtime error for any client that sent `Accept: application/x-protobuf`. Pass
+#: `serializers=(PROTOBUF, JSON)` at the call sites that return a message.
 DEFAULT_SERIALIZERS: tuple[Serializer, ...] = (JSON, MSGPACK)
 
 
