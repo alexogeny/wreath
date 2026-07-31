@@ -108,6 +108,14 @@ PyObject *wreath_json_configure(PyObject *self, PyObject *args);
 /* msgpack.c */
 PyObject *wreath_msgpack_dumps(PyObject *self, PyObject *arg);
 
+/* geospatial.c */
+PyObject *wreath_geo_haversine(PyObject *self, PyObject *const *args, Py_ssize_t nargs);
+
+/* protobuf.c */
+PyObject *wreath_protobuf_configure(PyObject *self, PyObject *arg);
+PyObject *wreath_protobuf_encode(PyObject *self, PyObject *args);
+PyObject *wreath_protobuf_decode(PyObject *self, PyObject *args);
+
 /* sse.c */
 PyObject *wreath_sse_frame(PyObject *self, PyObject *args);
 
