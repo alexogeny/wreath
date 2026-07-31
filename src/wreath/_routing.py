@@ -68,33 +68,36 @@ _CLASSIFYING = frozenset({"decision", "bitset"})
 def check_placeholders(path: str) -> None:
     """Refuse a placeholder syntax the matcher does not implement.
 
-    Every backend reads a placeholder as the whole segment between braces and
-    matches exactly one segment, so a converter suffix -- `{key:path}`, the
-    Starlette and Flask spelling for a greedy trailing match -- was accepted at
-    registration and then behaved as a parameter literally named `key:path`. A
-    multi-segment request 404'd because the extra separators matched nothing,
-    and a single-segment one bound nothing and 422'd on the missing parameter.
-    Both blame the caller for a declaration the framework never supported.
+    Every backend reads an ordinary placeholder as the whole segment between
+    braces. A final `{key:path}` placeholder is the one supported converter and
+    greedily captures the remaining path. Reject partial braces, empty names,
+    unknown converters, and non-final greedy placeholders at registration so
+    native and pure routing cannot interpret a malformed declaration differently.
 
     Raises:
-        ValueError: A placeholder carries a converter suffix, or is empty.
+        ValueError: A placeholder is malformed or uses an unsupported converter.
     """
     for segment in path.split("/"):
-        if not (segment.startswith("{") and segment.endswith("}")):
+        starts = segment.startswith("{")
+        ends = segment.endswith("}")
+        if starts != ends:
+            raise ValueError("path parameters must occupy an entire segment")
+        if not starts:
             continue
         name = segment[1:-1]
         if not name:
             raise ValueError(f"empty path placeholder in {path!r}")
         if ":" in name:
-            converter = name.split(":", 1)[1]
-            raise ValueError(
-                f"path placeholder {segment!r} in {path!r} carries a converter "
-                f"suffix ({converter!r}); wreath placeholders name a parameter "
-                f"and match exactly one segment. Write '{{{name.split(':', 1)[0]}}}' "
-                "and declare the type on the handler parameter "
-                "(Annotated[int, Path()]). A value spanning '/' cannot be a path "
-                "parameter -- carry it in the query string instead."
-            )
+            parameter, converter = name.split(":", 1)
+            if not parameter:
+                raise ValueError(f"empty path placeholder in {path!r}")
+            if converter != "path":
+                raise ValueError(
+                    f"unknown path converter {converter!r} in {path!r}; "
+                    "the only converter is 'path'"
+                )
+            if segment != path.rstrip("/").split("/")[-1]:
+                raise ValueError("a {name:path} placeholder must be the final path segment")
 
 
 class Router:

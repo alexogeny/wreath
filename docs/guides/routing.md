@@ -30,6 +30,23 @@ if the conversion fails, the caller gets a `422` and your handler is never
 entered. The [Binding, validation, and dependencies](binding.md) guide picks up
 that thread.
 
+Name a route to reverse it, and use the trailing `path` converter when one value
+must contain slashes:
+
+```python
+@app.get("/assets/{asset_path:path}", name="asset")
+async def asset(request, asset_path: str):
+    return {"canonical": request.url_for("asset", asset_path=asset_path)}
+
+app.url_path_for("asset", asset_path="css/site.css")
+# /assets/css/site.css
+```
+
+`host="{tenant}.example.com"` adds host matching and binds the placeholder by
+name. Host-specific routes are checked ahead of a host-agnostic route at the
+same path. Ordinary static and single-segment routes stay on the native compiled
+table; host and trailing-path routes use an ordered startup-compiled fallback.
+
 ## User story: a resource with a typed id
 
 > *As an API author, I'm exposing an `orders` resource: fetch one by id, and
@@ -79,8 +96,17 @@ requirements — and routers include other routers, so a versioned API composes
 naturally: `app.include_router(v1, prefix="/v1")`. Including a router takes a
 snapshot of its routes and folds all of that context into each one, so the
 arrangement you see in the file is exactly the arrangement that runs — no
-hidden precedence to reason about, and no request-time sub-application
-dispatch.
+hidden precedence to reason about. A `Router` is still declarative and flattened;
+when you actually need request-time ASGI composition, mount the application:
+
+```python
+app.mount("/service", child_asgi_app, name="service")
+```
+
+The child receives the prefix removed from `path` and appended to `root_path`.
+Parent global middleware still runs, and response-header edits from its egress
+hooks are merged into the child's response. The child retains its own status,
+body streaming, routing, and middleware.
 
 **Reference:** [`wreath.router`](../reference/router.md),
 [`wreath.app`](../reference/app.md).
