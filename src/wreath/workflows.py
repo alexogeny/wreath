@@ -62,6 +62,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import _nplusone
+
 #: The system schema durable workflow state lives in, matching `wreath.jobs`.
 DEFAULT_SCHEMA = "wreath_system"
 DEFAULT_TABLE = "workflow_steps"
@@ -91,6 +93,9 @@ class Step:
     name: str
     run: Callable[..., Any]
     compensate: Callable[..., Any] | None = None
+    #: Queries to one model allowed inside this step (and its compensation)
+    #: before that is a defect, or `None` to observe without a ceiling.
+    query_budget: int | None = None
 
 
 @dataclass(slots=True)
@@ -404,13 +409,23 @@ class Workflow:
         handler: Callable[..., Any] | None = None,
         *,
         compensate: Callable[..., Any] | None = None,
+        query_budget: int | None = None,
     ) -> Any:
         """Register a step. Usable bare or with `compensate=`.
 
         The step's name is the function's name, which is what a stored record
         keys on -- see `WorkflowDefinitionChanged` for what happens when it
         changes underneath a live instance.
+
+        `query_budget` is how many times one model may be hydrated inside this
+        step before that is a defect; crossing it raises from the query that
+        did. It covers the step's compensation too, which is the half nobody
+        exercises -- an undo runs only when something has already gone wrong,
+        so an N+1 in one is discovered during an incident or not at all.
+        Omitted, the step is observed rather than bounded; see
+        `wreath.jobs.JobRunner.task` for why that is the default.
         """
+        _nplusone.check_budget(query_budget, f"a step of workflow {self.name!r}")
 
         def register(function: Callable[..., Any]) -> Callable[..., Any]:
             # `getattr` rather than `function.__name__`: a `functools.partial`, a
@@ -431,7 +446,7 @@ class Workflow:
                     f"workflow {self.name!r} already has a step named {name!r}; "
                     "step names key durable records, so two of them would share one row"
                 )
-            self._steps.append(Step(name, function, compensate))
+            self._steps.append(Step(name, function, compensate, query_budget))
             return function
 
         if handler is not None:
@@ -556,7 +571,11 @@ class Workflow:
             if step.name in results:
                 continue
             try:
-                results[step.name] = await _call(step.run, context)
+                with _nplusone.scope_for(
+                    _nplusone.Origin(kind="step", label=step.name, identifier=key),
+                    budget=step.query_budget,
+                ):
+                    results[step.name] = await _call(step.run, context)
             except BaseException as error:
                 if compensate:
                     _undone, failures = await self._compensate(store, key, completed, context)
@@ -593,7 +612,13 @@ class Workflow:
                 await store.uncomplete_step(key, step.name)
                 continue
             try:
-                await _call(step.compensate, context)
+                with _nplusone.scope_for(
+                    _nplusone.Origin(
+                        kind="step", label=f"{step.name}:compensate", identifier=key
+                    ),
+                    budget=step.query_budget,
+                ):
+                    await _call(step.compensate, context)
             except Exception:  # noqa: BLE001
                 # Broad by necessity and counted, per AGENTS.md's third tier: a
                 # compensation is arbitrary user code, and the undo chain behind a
