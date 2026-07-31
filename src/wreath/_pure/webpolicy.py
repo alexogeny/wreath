@@ -132,7 +132,14 @@ def _normalized_origin(value: bytes) -> bytes | None:
 
 def origin_matches(origin: bytes, allowed: tuple[bytes, ...]) -> bool:
     normalized = _normalized_origin(origin)
-    return normalized is not None and normalized in allowed
+    if normalized is None:
+        return False
+    for candidate in allowed:
+        if not isinstance(candidate, bytes):
+            raise TypeError("allowed origins must be bytes")
+        if _normalized_origin(candidate) == normalized:
+            return True
+    return False
 
 
 def _validated_headers(headers: list[tuple[bytes, bytes]]) -> None:

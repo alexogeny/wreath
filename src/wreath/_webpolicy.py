@@ -39,7 +39,6 @@ def normalize_origin(value: str, *, label: str) -> bytes:
         parsed.scheme.lower() not in {"http", "https"}
         or not parsed.hostname
         or parsed.username is not None
-        or parsed.password is not None
         or parsed.query
         or parsed.fragment
         or parsed.path not in {"", "/"}

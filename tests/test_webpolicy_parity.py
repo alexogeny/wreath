@@ -69,6 +69,14 @@ def test_policy_helpers_native_pure_parity() -> None:
             assert _core.origin_matches(origin, allowed) is expected
 
 
+def test_allowed_origins_are_normalized_by_both_implementations() -> None:
+    allowed = (b"https://EXAMPLE.test:443/",)
+    origin = b"https://example.test"
+    assert pure.origin_matches(origin, allowed)
+    if _core is not None and hasattr(_core, "origin_matches"):
+        assert _core.origin_matches(origin, allowed)
+
+
 def test_header_mutations() -> None:
     headers = [(b"content-length", b"99"), (b"vary", b"Origin"), (b"vary", b"Cookie")]
     pure.replace_content_length(headers, 12)
