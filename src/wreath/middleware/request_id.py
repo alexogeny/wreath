@@ -107,6 +107,34 @@ class RequestIDMiddleware:
         self._echo = echo
         self._max_length = max_length
 
+    def describe(self) -> Any:
+        """The correlation header, in whichever direction this one is configured for.
+
+        A middleware built with `echo=False` emits nothing, and saying so is
+        the point: the document describes this instance, not the class.
+        """
+        from .base import HeaderSpec, MiddlewareContract
+
+        request_headers = (
+            (
+                HeaderSpec(
+                    self._header,
+                    description="Correlation id; echoed back on the response.",
+                ),
+            )
+            if self._trust_inbound
+            else ()
+        )
+        response_headers = (
+            ((None, HeaderSpec(self._header, description="Correlation id for this request.")),)
+            if self._echo
+            else ()
+        )
+        return MiddlewareContract(
+            request_headers=request_headers,
+            response_headers=response_headers,
+        )
+
     def _inbound(self, request: Request) -> str | None:
         value = find_header(request.headers, self._header_bytes)
         if value is None or not _request_id_valid(value, self._max_length):

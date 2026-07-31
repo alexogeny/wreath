@@ -86,21 +86,24 @@
     },
     {
       "name": "http",
-      "capability": "Requests and responses, streaming and server-sent events, multipart file uploads, background tasks, and content negotiation",
+      "capability": "Requests and responses, streaming and server-sent events, multipart file uploads, background tasks, and content negotiation over JSON, MessagePack and Protocol Buffers",
       "replaces": [
         "sse-starlette",
         "python-multipart",
-        "msgpack"
+        "msgpack",
+        "protobuf"
       ],
       "guides": [
         "docs/guides/requests-responses.md",
         "docs/guides/sse.md",
-        "docs/guides/content-negotiation.md"
+        "docs/guides/content-negotiation.md",
+        "docs/guides/protobuf.md"
       ],
       "reference": [
         "docs/reference/request.md",
         "docs/reference/response.md",
-        "docs/reference/background.md"
+        "docs/reference/background.md",
+        "docs/reference/protobuf.md"
       ],
       "sources": [
         "src/wreath/request.py",
@@ -114,7 +117,10 @@
         "src/wreath/_multipart.py",
         "src/wreath/_pure/msgpack.py",
         "src/wreath/_native/msgpack.c",
-        "src/wreath/_native/sse.c"
+        "src/wreath/_native/sse.c",
+        "src/wreath/protobuf.py",
+        "src/wreath/_pure/protobuf.py",
+        "src/wreath/_native/protobuf.c"
       ],
       "tests": [
         "tests/test_request.py",
@@ -127,7 +133,11 @@
         "tests/test_sse_frame_parity.py",
         "tests/test_json_temporal.py",
         "tests/test_native_parity.py",
-        "tests/test_native_response_regressions.py"
+        "tests/test_native_response_regressions.py",
+        "tests/test_protobuf.py",
+        "tests/test_protobuf_structures.py",
+        "tests/test_protobuf_plan.py",
+        "tests/test_protobuf_parity.py"
       ],
       "decisions": [
         "docs/decisions/0007-native-code-owns-no-process-global-state.md",
@@ -236,7 +246,8 @@
         "tests/test_api_docs.py",
         "tests/test_typegen.py",
         "tests/test_typegen_cli.py",
-        "tests/typegen/"
+        "tests/typegen/",
+        "tests/test_typegen_python_target.py"
       ],
       "policy": "Python owns annotation analysis; renderers consume prevalidated tuples and are byte-identical pure/native; generation adds no request-time work; the native renderer is benchmark-gated and currently not justified. OpenAPI refuses unsupported annotations instead of publishing an empty schema. Field metadata, query bounds, primary/additional responses, deprecation, visibility and explicitly registered security schemes render from the same route image. compare_openapi reports stable breaking request/response changes. Docs endpoints are opt-in via enable_docs()."
     },
@@ -319,7 +330,8 @@
         "tests/test_webpolicy_parity.py",
         "tests/test_session_store.py",
         "tests/test_store.py",
-        "tests/test_auth_wiring_red_team.py"
+        "tests/test_auth_wiring_red_team.py",
+        "tests/test_middleware_contract.py"
       ],
       "decisions": [
         "docs/decisions/0002-no-mandatory-runtime-dependencies.md",
@@ -365,6 +377,7 @@
         "tests/test_cedar.py",
         "tests/test_cedar_engine.py",
         "tests/test_cedar_set_dedupe.py",
+        "tests/test_cedar_flags.py",
         "tests/test_permissions.py",
         "tests/test_jwt.py",
         "tests/test_livedoc.py",
@@ -409,11 +422,12 @@
         "tests/test_users_totp.py",
         "tests/test_users_stepup.py",
         "tests/test_users_webauthn.py",
+        "tests/test_second_factor_challenges.py",
         "tests/test_users_second_factor_redaction.py",
         "tests/test_red_team_auth.py",
         "tests/test_auth_wiring_red_team.py"
       ],
-      "policy": "Second factors, stages one and two of docs/plans/second-factors-totp-webauthn.md: a TOTP code that verified once never verifies again (verify_totp requires a counter strictly greater than the credential's stored one, and SecondFactorStore.touch is an atomic conditional advance that reports whether it won -- one statement with WHERE counter < $1 in OrmSecondFactorStore, a compare-and-set in a synchronous function in InMemorySecondFactorStore -- so a lost advance is refused as a replay and two concurrent requests carrying one code cannot both complete); skew is one step by default and never more than _secondfactor.MAX_SKEW; enrolment is two-phase, so begin_totp_enrolment writes nothing and only a verified code creates a credential, and the unconfirmed secret lives in the `enrolments` SessionStore under an opaque id when one is passed, bound to the user who began it; recovery codes are a single SHA-256 (hash_recovery_code) rather than the password hasher -- ~78 bits needs no slow KDF, passwords still get scrypt -- shown once, compared with hmac.compare_digest, and deleted when redeemed -- the deletion claimed through the same conditional advance the TOTP branch uses, since a remove() that returns nothing cannot say which of two simultaneous redemptions spent the code, with stage one's scrypt$ rows still verifying; a login awaiting a second factor writes a pending marker and never a principal, so SessionIdentityBackend yields no identity for it; verification (promotion or step-up) rotates the session and stamps second_factor_at, which AuthRequirement.second_factor / wreath.auth.second_factor and the Cedar context's second_factor_age read, absent always meaning refused rather than fresh; DELETE /auth/2fa/{id} needs a factor within step_up_ttl, is owner-scoped, refuses a recovery id, and takes the recovery codes with the last real factor; the credential material column is named secret_material because crud.SENSITIVE_FIELD matches that and not `material`. Stage three adds WebAuthn as a second factor, all Python and no new C: _webauthn.py parses CBOR/COSE/authenticator data/DER and delegates every signature to _auth/_ecverify (ES256 and Ed25519 only -- RS256 is refused by name rather than implemented), the parsers refuse indefinite-length CBOR, tags, floats, duplicate keys, trailing bytes, non-minimal DER integers and off-curve points, and only `none` attestation is accepted because verifying an attestation statement needs a metadata service; a ceremony's type, challenge, origin and RP ID hash are four separate refusals; the challenge lives in the same `enrolments` SessionStore, is bound to the user who began it, and is spent unconditionally on every exit from confirm/verify, which is what makes it single-use; a signature counter that fails to increase above a stored non-zero one is refused as a clone signal while an authenticator that always reports 0 keeps working; user verification is requested (not required) and its outcome is recorded on the session as second_factor_uv; the webauthn routes mount only when second_factor_router is given rp_id. The accepted origins default to https://{rp_id} and widen for exactly one case: _webauthn.default_origins admits http:// as well when rp_id is a loopback host (localhost, ::1, 127.0.0.0/8), and _webauthn.origin_accepted lets a loopback origin carry any port, since http://localhost:8000 is a secure context and no default set can enumerate a development port -- no other host is ever admitted over http, no port is tolerated off loopback, and there is no wildcard. Building second_factor_router without enrolments= warns (UserWarning) rather than raising, because an in-memory development app is legitimate and stage two already rejected making the store mandatory; the warning names half its condition on purpose, since a router built before any application exists cannot observe whether SessionMiddleware was given a store=. The webauthn suite's authenticator is synthetic (a real key and a real signature from cryptography, a dev/test dependency), which proves agreement about the wire formats and not interoperability; interoperability is pinned by one recorded registration and one recorded assertion transcribed from the W3C WebAuthn Level 3 specification's own section 16.2 test vectors (CR Snapshot, 26 May 2026), cited in place -- do not replace those with generated bytes. The two routers are separate but not independent: second_factor_router records itself against the UserStore it was built with, so a user_router over that same store with no second_factors= of its own refuses (500 second_factor_not_wired, no session written) the login of a user who has a non-recovery factor, rather than issuing a password-only sign-in -- and the same refusal covers the other half-wiring, a user_router given a SecondFactorStore that is not the object second_factor_router writes to, which otherwise read an empty store and signed the caller in; and user_router's login and logout both clear pending_totp_enrolment and pending_webauthn from the session and delete the rows behind them, so a ceremony does not outlive the sitting it began in. Every one of those checks is a raise, never an assert. `user_router` hands its own `session_key` to `sessions.delete_for` when it is not the default, so a password reset enumerates by the key login actually wrote the principal under; the default call shape is unchanged so a store written against the one-argument signature keeps working."
+      "policy": "Second factors, stages one and two of docs/plans/second-factors-totp-webauthn.md: a TOTP code that verified once never verifies again (verify_totp requires a counter strictly greater than the credential's stored one, and SecondFactorStore.touch is an atomic conditional advance that reports whether it won -- one statement with WHERE counter < $1 in OrmSecondFactorStore, a compare-and-set in a synchronous function in InMemorySecondFactorStore -- so a lost advance is refused as a replay and two concurrent requests carrying one code cannot both complete); skew is one step by default and never more than _secondfactor.MAX_SKEW; enrolment is two-phase, so begin_totp_enrolment writes nothing and only a verified code creates a credential, and the unconfirmed secret lives in the `enrolments` SessionStore under an opaque id when one is passed, bound to the user who began it; recovery codes are a single SHA-256 (hash_recovery_code) rather than the password hasher -- ~78 bits needs no slow KDF, passwords still get scrypt -- shown once, compared with hmac.compare_digest, and deleted when redeemed -- the deletion claimed through the same conditional advance the TOTP branch uses, since a remove() that returns nothing cannot say which of two simultaneous redemptions spent the code, with stage one's scrypt$ rows still verifying; a login awaiting a second factor writes a pending marker and never a principal, so SessionIdentityBackend yields no identity for it; verification (promotion or step-up) rotates the session and stamps second_factor_at, which AuthRequirement.second_factor / wreath.auth.second_factor and the Cedar context's second_factor_age read, absent always meaning refused rather than fresh; DELETE /auth/2fa/{id} needs a factor within step_up_ttl, is owner-scoped, refuses a recovery id, and takes the recovery codes with the last real factor; the credential material column is named secret_material because crud.SENSITIVE_FIELD matches that and not `material`. Stage three adds WebAuthn as a second factor, all Python and no new C: _webauthn.py parses CBOR/COSE/authenticator data/DER and delegates every signature to _auth/_ecverify (ES256 and Ed25519 only -- RS256 is refused by name rather than implemented), the parsers refuse indefinite-length CBOR, tags, floats, duplicate keys, trailing bytes, non-minimal DER integers and off-curve points, and only `none` attestation is accepted because verifying an attestation statement needs a metadata service; a ceremony's type, challenge, origin and RP ID hash are four separate refusals; the challenge lives in a ChallengeStore (wreath.store's Keyed primitive, MemoryChallengeStore by default and PostgresChallengeStore for a fleet) rather than in the session, and is spent by one DELETE ... WHERE handle AND user_id AND kind AND expires > clock_timestamp() RETURNING payload -- so the returned row *is* the consumption (two concurrent completions cannot both proceed) and the user binding is a WHERE clause rather than a check after the row is already gone (a mismatched attempt matches no row, deletes nothing, and costs the rightful user nothing). The candidate subject is derived from the session -- a pending login first, then the signed-in principal -- and passed to that statement as a precondition, never read back out of the record, because a record that names its own owner lets whoever holds a handle define who they are; ChallengeStore.peek is a non-consuming read used by the TOTP enrolment path (whose property is confirmed-exactly-once, not read-exactly-once: a mistyped code must not cost a fresh QR scan) and, after a consume has already refused, to choose between ceremony_expired and the binding refusal -- it applies no binding and no security decision rests on it; a signature counter that fails to increase above a stored non-zero one is refused as a clone signal while an authenticator that always reports 0 keeps working; user verification is requested (not required) and its outcome is recorded on the session as second_factor_uv; the webauthn routes mount only when second_factor_router is given rp_id. The accepted origins default to https://{rp_id} and widen for exactly one case: _webauthn.default_origins admits http:// as well when rp_id is a loopback host (localhost, ::1, 127.0.0.0/8), and _webauthn.origin_accepted lets a loopback origin carry any port, since http://localhost:8000 is a secure context and no default set can enumerate a development port -- no other host is ever admitted over http, no port is tolerated off loopback, and there is no wildcard. Building second_factor_router without enrolments= no longer warns, because it no longer degrades: ceremony state goes to a ChallengeStore whose default is real, so the single-use property holds unconditionally instead of being announced as absent. The removed UserWarning could only ever name half its condition -- a router built before any application exists cannot observe whether SessionMiddleware was given a store= -- and a warning nobody can act on with certainty is one people learn to ignore. One behaviour change comes with it, for multi-worker deployments on cookie sessions with no store named: a ceremony is now confined to the worker that began it, which fails closed (refused, begin again) and is what challenges=PostgresChallengeStore answers. The webauthn suite's authenticator is synthetic (a real key and a real signature from cryptography, a dev/test dependency), which proves agreement about the wire formats and not interoperability; interoperability is pinned by one recorded registration and one recorded assertion transcribed from the W3C WebAuthn Level 3 specification's own section 16.2 test vectors (CR Snapshot, 26 May 2026), cited in place -- do not replace those with generated bytes. The two routers are separate but not independent: second_factor_router records itself against the UserStore it was built with, so a user_router over that same store with no second_factors= of its own refuses (500 second_factor_not_wired, no session written) the login of a user who has a non-recovery factor, rather than issuing a password-only sign-in -- and the same refusal covers the other half-wiring, a user_router given a SecondFactorStore that is not the object second_factor_router writes to, which otherwise read an empty store and signed the caller in; and user_router's login and logout both clear pending_totp_enrolment and pending_webauthn from the session and delete the rows behind them, so a ceremony does not outlive the sitting it began in. Every one of those checks is a raise, never an assert. `user_router` hands its own `session_key` to `sessions.delete_for` when it is not the default, so a password reset enumerates by the key login actually wrote the principal under; the default call shape is unchanged so a store written against the one-argument signature keeps working."
     },
     {
       "name": "postgres",
@@ -1028,9 +1042,10 @@
         "src/wreath/_nplusone.py"
       ],
       "tests": [
-        "tests/test_doctor.py"
+        "tests/test_doctor.py",
+        "tests/test_nplusone_scopes.py"
       ],
-      "policy": "Defects a green test suite cannot see, over layers only Wreath holds together. N+1: the ORM stamps each read's model onto the recorder's ORM_HYDRATE phase (dependency_id = the metadata image's model entry id, stamped onto `Registry._flight_model_ids` at startup like a Database's `_flight_dep_id`), and the completion carries the route, so a trace can name the shape rather than only the endpoint. Two surfaces, one vocabulary: `NPlusOneGuard` trips inside the query that crossed the limit so the traceback names the loop, and `diagnose_n_plus_one` / `wreath doctor n-plus-one` reads the same finding out of a running server's Inspector without reproducing anything. Both produce a `Finding`. Cost discipline: the ORM seam reads no ContextVar until a guard exists (`_nplusone.WATCHING`, a module attribute, not a crossing) and reads no phase marker until a metadata image exists (`_flight_model_ids` non-empty), so `wreath-request-trace` records zero added crossings for an app that uses neither. The guard is for development and staging; a guard that fails production requests is a worse outage than the N+1."
+      "policy": "Defects a green test suite cannot see, over layers only Wreath holds together. Scopes: a request is not the only one, and is not the worst. `_nplusone.watching(origin, limit)` binds a ledger for any execution scope; `_nplusone.scope_for(origin, budget=...)` holds the three-state rule in one place -- a declared `query_budget` fails at the ceiling, no budget but a guard already in the process observes and reports, neither binds nothing at all. `wreath.jobs` binds one per job *attempt* (a retry starts from zero, or a task that legitimately queries ninety times dead-letters itself on the second try), `wreath.workflows` one per step plus a separate one per compensation, `wreath.passes` one per shift rather than per chunk -- an N+1 inside a hundred-row chunk is under any per-chunk ceiling a person would write, and it is the product of queries-per-chunk and chunks-per-shift that turns a backfill into an outage. Failing is opt-in everywhere outside a request: a guard that raises inside a durable job turns a slow job into a failed one and then into a retry storm. `NPlusOneGuard` deliberately does *not* use `watching` -- the middleware protocol splits bind and reset across two calls, and a suspended `@contextmanager` held on `request.state` is finalized when the request object becomes unreachable, which unbinds the ledger mid-request rather than at the end of it. N+1: the ORM stamps each read's model onto the recorder's ORM_HYDRATE phase (dependency_id = the metadata image's model entry id, stamped onto `Registry._flight_model_ids` at startup like a Database's `_flight_dep_id`), and the completion carries the route, so a trace can name the shape rather than only the endpoint. Two surfaces, one vocabulary: `NPlusOneGuard` trips inside the query that crossed the limit so the traceback names the loop, and `diagnose_n_plus_one` / `wreath doctor n-plus-one` reads the same finding out of a running server's Inspector without reproducing anything. Both produce a `Finding`. Cost discipline: the ORM seam reads no ContextVar until a guard exists (`_nplusone.WATCHING`, a module attribute, not a crossing) and reads no phase marker until a metadata image exists (`_flight_model_ids` non-empty), so `wreath-request-trace` records zero added crossings for an app that uses neither. The guard is for development and staging; a guard that fails production requests is a worse outage than the N+1."
     },
     {
       "name": "temporal",
@@ -1055,6 +1070,34 @@
         "tests/test_temporal_surfaces.py"
       ],
       "policy": "An `Instant` is always aware; a naive value is refused, never assumed UTC -- that assumption is the bug the module exists to prevent. Dependency-free over stdlib datetime/zoneinfo, because the core cannot take arrow and those are the applications being ported. One declaration settles every surface: ORM column, binding coercion, REST JSON, OpenAPI format, typegen alias, GraphQL scalar -- they used to be five places that drifted. Temporal JSON encoding is a *retry* in the `_json` facade (encode as-is; only a TypeError triggers rewrite-and-retry), never a pre-pass, so a payload with no timestamps pays one un-raised try and the ordinary response path is untouched. Body validation is deliberately NOT wired: it has a byte-for-byte C twin in `_native/validate.c`, and a silent divergence there is worse than the gap. The relative formatter is the single locale-keyed seam, so i18n is a table entry rather than a migration. ISO durations reject years/months: neither is a fixed number of seconds and a timedelta cannot hold one honestly."
+    },
+    {
+      "name": "geospatial",
+      "capability": "Coordinates, great-circle distances, and index-answerable proximity bounds, with no PostgreSQL extension",
+      "replaces": [
+        "geopy",
+        "haversine"
+      ],
+      "guides": [
+        "docs/guides/geospatial.md"
+      ],
+      "reference": [
+        "docs/reference/geospatial.md"
+      ],
+      "sources": [
+        "src/wreath/geospatial.py",
+        "src/wreath/_pure/geospatial.py",
+        "src/wreath/_native/geospatial.c"
+      ],
+      "tests": [
+        "tests/test_geospatial.py",
+        "tests/test_geospatial_bounds.py",
+        "tests/test_geospatial_parity.py"
+      ],
+      "policy": "A `Coordinate` is keyword-only and a bare pair is refused, for the reason `wreath.temporal` refuses a naive datetime: GeoJSON orders [lon, lat], humans say 'lat, lon', and a positional pair silently picks one -- the symptom is not an exception, it is a wrong place. Bounds are inclusive, since the poles and the antimeridian are real coordinates. Distance is haversine on the IUGG mean-radius sphere (6_371_008.8 m), not an ellipsoid: the guide states the ~0.5% modelling error rather than implying exactness, because a fleet billing by distance will care. The law of cosines is deliberately not used -- `acos` of a value within an ulp of 1 loses every significant figure, and consecutive GPS fixes are the common case. A proximity search is a bounding box an index can answer ANDed with the exact filter, never a bare distance comparison, in the same discipline vector search already enforces. `bounding_boxes` returns TWO boxes across the antimeridian (no comparison operator understands a wrapped edge) and widens to every longitude at a pole; both are answered rather than refused, because a fleet on the date line and a station near a pole are ordinary. The native/pure twins are held to a stated tolerance rather than byte-for-byte, unlike the codec twins: libm transcendentals are not required to be correctly rounded, so bit equality would fail on another platform's libm for no defect. Tier 1 needs no extension; PostGIS is the opt-in tier in the pgvector shape and is not yet built.",
+      "decisions": [
+        "docs/decisions/0002-no-mandatory-runtime-dependencies.md"
+      ]
     },
     {
       "name": "staticfiles",

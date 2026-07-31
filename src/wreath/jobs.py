@@ -29,6 +29,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from . import _nplusone
+
 # Re-exported under this module's historic names: the supervision moved to
 # `_doorbell`, the names callers and tests already reach for did not.
 from ._doorbell import BACKOFF_BASE as DOORBELL_BACKOFF_BASE  # noqa: F401
@@ -37,6 +39,7 @@ from ._doorbell import Doorbell
 from ._doorbell import delay as _doorbell_delay  # noqa: F401
 from ._doorbell import sleep_or_stop as _sleep_or_stop
 from ._jobcore import CronSchedule, compute_backoff, dedup_key, validate_identifier
+from ._nplusone import NPlusOneDetected as _NPlusOneDetected
 from .postgres import PostgresError
 
 JobHandler = Callable[..., Awaitable[None]]
@@ -144,6 +147,10 @@ class _Task:
     #: Seconds this handler may run before it is cancelled, or `None` to take
     #: the runner's default (a fraction of the lease). See `JobRunner.task`.
     timeout: float | None = None
+    #: How many times one model may be hydrated in a single attempt before that
+    #: is treated as a defect, or `None` to observe without a ceiling. See
+    #: `JobRunner.task`.
+    query_budget: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +260,14 @@ class JobRunner:
         #: does nothing at all, and the ledger cannot tell that apart from a
         #: pass with no work to do.
         self.pass_drive_errors = 0
+        #: Attempts failed for crossing a declared `query_budget`. Counted
+        #: separately from `run_errors` because it is the one failure whose
+        #: cause is a defect in the handler rather than in what it was calling.
+        self.query_budget_exceeded = 0
+        #: N+1 findings observed in attempts that declared no budget. These did
+        #: not fail anything; the number is how often something was worth
+        #: looking at. A finding nobody counts is the blind spot in a new place.
+        self.nplusone_findings = 0
 
     @property
     def name(self) -> str:
@@ -306,12 +321,23 @@ class JobRunner:
         backoff_cap: float = 3600.0,
         backoff_jitter: float = 0.2,
         timeout: float | None = None,
+        query_budget: int | None = None,
     ) -> Callable[[JobHandler], JobHandler]:
         """Decorator registering an async `handler(ctx, *args)` under `name`.
 
         `timeout` is how long the handler may run before it is cancelled and the
         attempt fails; `None` takes the runner's default, `DEADLINE_FRACTION` of
         the lease. **It must end inside the lease**, and that is checked here.
+
+        `query_budget` is how many times one model may be hydrated within a
+        single attempt before that is a defect. Declaring it makes the attempt
+        *fail* at the query that crossed the line, with a traceback naming the
+        loop -- which is the only way to find an N+1 in work nobody is watching.
+        Leave it unset and the attempt is merely observed: counted, and reported
+        if a guard exists in this process, but never failed. That default is
+        deliberate. A guard that raises inside a durable job converts a slow job
+        into a failed one and then into a retry storm, and wreath does not know
+        whether five hundred queries was the defect or the point of the task.
 
         There is no heartbeat, so a handler still running when its lease expires
         is reclaimed by the sweeper and started again by another worker — two
@@ -337,6 +363,7 @@ class JobRunner:
                     "again by another worker, so a handler has to finish -- or be "
                     "cancelled -- before then."
                 )
+        _nplusone.check_budget(query_budget, f"task {name!r}")
 
         def register(func: JobHandler) -> JobHandler:
             self._tasks[name] = _Task(
@@ -350,6 +377,7 @@ class JobRunner:
                 backoff_cap=backoff_cap,
                 backoff_jitter=backoff_jitter,
                 timeout=timeout,
+                query_budget=query_budget,
             )
             return func
 
@@ -884,32 +912,73 @@ class JobRunner:
             )
             return
         deadline = self.deadline_for(job.task)
-        future = asyncio.ensure_future(handler.func(ctx, *job.args))
-        self._inflight.add(future)
-        try:
-            async with asyncio.timeout(deadline):
-                await future
-        except asyncio.CancelledError:
-            # Not ours: the supervisor is stopping. `asyncio.timeout` re-raises
-            # a cancellation it did not cause, so this stays the shutdown path.
-            raise
-        except TimeoutError:
-            # Ours. The handler has already been cancelled by the timeout; the
-            # attempt is charged and retried like any other failure, because a
-            # deadline miss is usually a slow dependency rather than a bug.
-            self.run_timeouts += 1
-            await self._fail(
-                job,
-                f"{job.task!r} timed out after {deadline:g}s and was cancelled",
-                handler,
-            )
-            return
-        except Exception as error:  # noqa: BLE001 - handler failures drive retry/dead-letter
-            await self._fail(job, repr(error), handler)
-            return
-        finally:
-            self._inflight.discard(future)
+        # The ledger is bound *before* the task is created, because
+        # `ensure_future` copies the current context into the task: bind it
+        # after and the handler runs with an empty one.
+        with self._query_scope(handler, job) as ledger:
+            future = asyncio.ensure_future(handler.func(ctx, *job.args))
+            self._inflight.add(future)
+            try:
+                async with asyncio.timeout(deadline):
+                    await future
+            except asyncio.CancelledError:
+                # Not ours: the supervisor is stopping. `asyncio.timeout`
+                # re-raises a cancellation it did not cause, so this stays the
+                # shutdown path.
+                raise
+            except TimeoutError:
+                # Ours. The handler has already been cancelled by the timeout;
+                # the attempt is charged and retried like any other failure,
+                # because a deadline miss is usually a slow dependency rather
+                # than a bug.
+                self.run_timeouts += 1
+                await self._fail(
+                    job,
+                    f"{job.task!r} timed out after {deadline:g}s and was cancelled",
+                    handler,
+                )
+                return
+            except _NPlusOneDetected as error:
+                # A declared budget was crossed. Counted apart from
+                # `run_errors` because the cause is a defect in the handler
+                # rather than in whatever it was calling, and retrying will
+                # reproduce it exactly.
+                self.query_budget_exceeded += 1
+                await self._fail(job, repr(error), handler)
+                return
+            except Exception as error:  # noqa: BLE001 - handler failures drive retry/dead-letter
+                await self._fail(job, repr(error), handler)
+                return
+            finally:
+                self._inflight.discard(future)
+                self._report_repetition(ledger)
         await self._complete(job)
+
+    def _query_scope(self, handler: _Task, job: _Claimed) -> Any:
+        """The N+1 ledger for one attempt, or nothing when nobody asked.
+
+        An *attempt*, not a job: a retry is a separate execution and starts
+        from zero, or a task that legitimately queries ninety times would
+        dead-letter itself on the second try.
+        """
+        return _nplusone.scope_for(
+            _nplusone.Origin(kind="job", label=job.task, identifier=str(job.id)),
+            budget=handler.query_budget,
+        )
+
+    def _report_repetition(self, ledger: Any) -> None:
+        """Count what an observing attempt saw, so a finding has an actor.
+
+        Only for the no-budget case: a scope with a budget already failed the
+        attempt at the ceiling, and counting it twice would say a defect
+        happened once as a failure and once as an observation.
+        """
+        if ledger is None or ledger.on_exceeded is not None:
+            return
+        finding = ledger.finding()
+        if finding is None:
+            return
+        self.nplusone_findings += 1
 
     #: What fraction of the lease a handler may spend before it is cancelled.
     #: The remaining fifth is for the cancellation to land and the failure to be

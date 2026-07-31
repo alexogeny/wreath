@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Any
 
+from .. import _nplusone
 from . import keyset
 from .ledger import APPLYING, BLOCKED, DONE, STOPPED, UNVERIFIED, VERIFIED, VERIFYING, WALKING
 
@@ -291,10 +292,14 @@ async def run_shift(
     except TimeoutError:
         return ShiftResult(stopped="pool", error="timed out acquiring a connection")
     try:
-        return await _shift(
-            walk, connection, stopping=stopping, deadline=deadline,
-            sleeper=sleeper, clock=clock,
-        )
+        with _nplusone.scope_for(
+            _nplusone.Origin(kind="shift", label=walk.name),
+            budget=getattr(walk, "query_budget", None),
+        ):
+            return await _shift(
+                walk, connection, stopping=stopping, deadline=deadline,
+                sleeper=sleeper, clock=clock,
+            )
     finally:
         await database.release(walk.workload, connection)
 

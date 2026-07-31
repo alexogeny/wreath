@@ -18,6 +18,7 @@ See `docs/plans/native-flight-recorder-stage-1.md` (modes, sizing) and
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -56,6 +57,9 @@ __all__ = [
     "SpanContextView",
     "server_span",
     "current_span",
+    "bind_propagation",
+    "outbound_context",
+    "propagates",
     "activate_otel",
     "activate_prometheus",
     "activate_openmetrics",
@@ -435,10 +439,15 @@ class SpanContextView:
     """An immutable, dependency-free view of a request's W3C trace context.
 
     This is what the bridge returns when the OpenTelemetry API is absent, and the
-    correlation source when it is present. It reflects the *incoming* (remote)
-    context parsed from `traceparent`; exposing the server's own generated span
-    id to Python needs a native read seam and is deferred, so instrumentation
-    treats this as the remote parent to child-span under.
+    correlation source when it is present.
+
+    What it *means* depends on which constructor handed it over. From
+    `current_span` it is the **incoming (remote) parent** parsed from
+    `traceparent`. From `server_span` it is this request's **own server span**,
+    read from the recorder's flight context on the native path and falling back
+    to the incoming parent where that id is not exposed. Anything parenting work
+    under "the span that caused this" wants `server_span`, and that is what
+    outbound propagation and the durable queue both carry.
     """
 
     trace_id: int = 0  # 128-bit; 0 when the request is unpropagated
@@ -462,6 +471,64 @@ class SpanContextView:
         if not self.is_valid:
             return None
         return f"00-{self.trace_id_hex}-{self.span_id_hex}-{'01' if self.sampled else '00'}"
+
+
+#: The serialized `(traceparent, tracestate)` an outbound call should carry, or
+#: `None` outside a propagating request. Serialized rather than structured
+#: because it is written once per request and read once per outbound call, and
+#: the wire format is what both ends want.
+outbound_context: ContextVar[tuple[str, str] | None] = ContextVar(
+    "wreath_outbound_context", default=None
+)
+
+#: Whether anything in this process could *make* an outbound call. Latched by
+#: `HTTPClient.__init__`, and read before the request path binds anything --
+#: the same shape as `_nplusone.WATCHING`, and for the same reason: an
+#: application with no outbound client must not pay a `ContextVar.set` per
+#: request to discover that it has nothing to propagate to.
+PROPAGATING = False
+
+
+def propagates() -> None:
+    """Arm outbound propagation. Called when an HTTP client is constructed."""
+    global PROPAGATING
+    PROPAGATING = True
+
+
+def bind_propagation(request: object) -> object | None:
+    """Bind this request's outgoing trace context, if anything could send it.
+
+    Returns the `ContextVar` token to reset, or `None` when nothing was bound.
+
+    The context is the request's **owned server span** (`server_span`), not the
+    incoming remote parent: work this request causes is a child of *this*
+    server's span, and on the native path that id is real rather than inferred.
+    Where the recorder cannot supply one -- the pure and bare-ASGI paths --
+    `server_span` already falls back to the incoming parent, which keeps the
+    trace joined even though the parentage is one level coarser.
+    """
+    if not PROPAGATING:
+        return None
+    # One guard, not two: `traceparent()` returns None exactly when the view is
+    # invalid, so an `is_valid` check before it is a second spelling of the same
+    # question. (A bounded mutant sweep found the pair mutually redundant --
+    # neither could be made to matter.)
+    parent = server_span(request).traceparent()
+    if parent is None:
+        # Bind *None* rather than returning early. A context can outlive one
+        # request -- keep-alive hands the next request the same one -- and a
+        # request that carries no trace of its own must not inherit the last
+        # one's. Returning without setting leaks request A's parent onto
+        # request B's outbound calls, which is a misattribution, and a trace
+        # that points at the wrong cause is worse than no trace at all.
+        # Overwriting unconditionally costs one `set` on an untraced request
+        # and makes the staleness unrepresentable rather than merely unlikely.
+        return outbound_context.set(None)
+    state = ""
+    getter = getattr(request, "header", None)
+    if callable(getter):
+        state = getter("tracestate") or ""
+    return outbound_context.set((parent, state))
 
 
 def current_span(request: object) -> SpanContextView:

@@ -76,6 +76,14 @@ def module(tmp_path: Path) -> Path:
     return path
 
 
+#: Deadline for a nested `wreath mutant` invocation. Each one runs a pytest
+#: baseline and then forks per mutant, so several of them inside an xdist run
+#: are the most load-sensitive thing in this file. Generous on purpose: these
+#: are bounded fixture projects, so a run that genuinely hangs is still caught,
+#: while a run merely competing for the machine is not reported as a failure.
+_NESTED_TIMEOUT = 600
+
+
 def _scan(path: Path) -> list[operators.Candidate]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return operators.scan(tree, None)
@@ -94,14 +102,15 @@ def test_every_named_operator_is_reachable_from_the_public_surface() -> None:
     Without this, an operator that stops being emitted shrinks coverage
     silently and the run still exits 0.
     """
-    assert len(OPERATORS) == 16
+    assert len(OPERATORS) == 19
     assert set(OPERATORS) == {
         "predicate.drop-operand", "predicate.always-true", "expression.take-branch",
         "comprehension.drop-clause", "guard.remove-raise", "guard.never-fires",
         "guard.always-fires", "guard.drop-statement", "declaration.drop-keyword",
-        "declaration.widen-bound", "cedar.flip-effect", "cedar.drop-condition",
-        "cedar.delete-policy", "value.widen-bound", "value.disable-pattern",
-        "value.empty-denylist",
+        "declaration.widen-bound", "crud.drop-operation-authorize",
+        "crud.widen-access", "crud.unprotect-column", "cedar.flip-effect",
+        "cedar.drop-condition", "cedar.delete-policy", "value.widen-bound",
+        "value.disable-pattern", "value.empty-denylist",
     }
 
 
@@ -159,6 +168,250 @@ def test_the_control_vocabulary_is_what_scopes_the_predicate_operators() -> None
     assert "second_factor" in operators.CONTROL_KEYWORDS
     quiet = ast.parse("def encode(value):\n    if value:\n        raise ValueError('x')\n")
     assert operators.scan(quiet, None) == []
+
+
+def _scan_resolved(tmp_path: Path, source: str, name: str) -> list[operators.Candidate]:
+    """Scan a module that has been *imported*, so callee resolution can work.
+
+    `_scan` passes `None` for the module name, which makes `_resolve_callee`
+    return `None` for everything and confines the declaration operators to the
+    route branch. The declaration surfaces this section covers -- crud, mcp,
+    graphql -- are answered through resolution or through the declaring-call
+    table, so they need the live module the way a real run has one.
+    """
+    import importlib.util
+
+    path = tmp_path / f"{name}.py"
+    path.write_text(textwrap.dedent(source), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise RuntimeError(f"could not load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        return operators.scan(tree, name)
+    finally:
+        sys.modules.pop(name, None)
+
+
+#: A crud declaration written the way a factory writes one: the callee resolves,
+#: and every control is a keyword.
+_CRUD_FACTORY = """
+    from wreath.crud import Access, crud_router
+
+
+    def _open(request): ...
+
+
+    class Account:
+        __wreath_column_map__ = {}
+
+
+    def build():
+        return crud_router(
+            Account, _open,
+            expose=("api_token",),
+            readonly=("id",),
+            page_size=20,
+            authorize={
+                "list": Access.roles("admin"),
+                "create": Access.deny(),
+                "delete": Access.permissions("account:delete"),
+            },
+        )
+"""
+
+
+def test_the_crud_authorize_mapping_is_offered_at_all(tmp_path: Path) -> None:
+    """`authorize=` is the control `crud_router` exists to carry.
+
+    Reproduction, 2026-07-31: with everything resolvable the tool offered
+    `expose=`, `readonly=` and `page_size=` and *not* `authorize=`, because
+    `authorize` was absent from `CONTROL_KEYWORDS`. The most important control
+    on the call was invisible for a one-word reason, and the report read clean.
+    """
+    found = _scan_resolved(tmp_path, _CRUD_FACTORY, "crud_factory")
+    dropped = {c.control for c in found if c.operator == "declaration.drop-keyword"}
+    assert any("`authorize=`" in control for control in dropped), dropped
+
+
+def test_each_crud_operation_is_verified_independently(tmp_path: Path) -> None:
+    """One mutant per operation, not one for the whole mapping.
+
+    Dropping `authorize=` wholesale removes every operation's control at once,
+    so a suite that tests only `delete` still kills it while `list` and
+    `create` go unverified. A coarse mutant that dies easily reports coverage
+    that does not exist -- the same optimistic-union error AGENTS.md records
+    for native/pure runs, in a different dimension.
+    """
+    found = _scan_resolved(tmp_path, _CRUD_FACTORY, "crud_ops")
+    per_entry = _by(found, "crud.drop-operation-authorize")
+    keys = {c.control.split("`")[1] for c in per_entry}
+    assert keys == {"list", "create", "delete"}, [c.control for c in per_entry]
+
+
+def test_a_crud_denial_can_be_turned_into_a_permit(tmp_path: Path) -> None:
+    """`Access.deny()` is a refusal somebody wrote on purpose."""
+    found = _scan_resolved(tmp_path, _CRUD_FACTORY, "crud_deny")
+    widened = _by(found, "crud.widen-access")
+    assert any("create" in c.control for c in widened), [c.control for c in widened]
+
+
+def test_each_protected_column_is_verified_independently(tmp_path: Path) -> None:
+    """`readonly=("id", ...)` is one control per column.
+
+    Dropping the keyword makes every listed column writable in a single mutant,
+    so a test that checks any one of them reports the rest as covered. One
+    mutant per column names the column nobody checks.
+
+    This is the per-entry operator for a *column* control. The sibling that
+    plan 05 asked for -- widening `expose=` to reveal one more sensitive column
+    -- is deliberately absent, and `test_widening_expose_is_out_of_static_reach`
+    below records why.
+    """
+    found = _scan_resolved(tmp_path, _CRUD_FACTORY, "crud_readonly")
+    per_column = _by(found, "crud.unprotect-column")
+    assert [c.control.split("`")[1] for c in per_column] == ["id"], [
+        c.control for c in per_column
+    ]
+
+
+def test_widening_expose_is_out_of_static_reach(tmp_path: Path) -> None:
+    """`expose=` cannot be widened from the source alone, and pretending
+    otherwise would ship a broken mutant.
+
+    `expose` is the escape hatch for columns crud withholds *by default* --
+    sensitive-looking names and retrieval columns, derived from the model's
+    column map. So the name a widening mutation would have to add is precisely
+    the one name that is **not** written at the call site. Fabricating one
+    yields a mutant that names a column the model does not have: it either
+    raises, which kills the mutant for a reason unrelated to any control, or is
+    ignored, which reports a survivor nobody can act on. Either way the score
+    moves for a reason that is not about the suite.
+
+    Reaching it needs the *model* resolved and its withheld set read, which is
+    a different kind of coupling from anything else in this library. Left
+    undone on purpose; `crud.unprotect-column` covers the column control that
+    the source does state.
+    """
+    found = _scan_resolved(tmp_path, _CRUD_FACTORY, "crud_expose")
+    assert not [c for c in found if c.operator.startswith("crud.expose")]
+    # ... and the wholesale drop is still offered, so `expose=` is not unwatched.
+    assert any(
+        "`expose=`" in c.control for c in _by(found, "declaration.drop-keyword")
+    )
+
+
+def test_a_crud_call_through_an_unresolvable_receiver_is_still_answerable(
+    tmp_path: Path,
+) -> None:
+    """`application.crud(...)` inside a mount function.
+
+    This is the shape the camera-trap example uses, and the receiver is a
+    parameter -- so `_resolve_callee` cannot answer and the declaration
+    operators declined for *every* keyword. The declaring-call table answers it
+    the way `_route_metadata` already answers a route decorator.
+    """
+    found = _scan_resolved(tmp_path, """
+        from typing import Any
+
+        from wreath.crud import Access
+
+
+        class Species: ...
+
+
+        def mount(application: Any, open_session: Any) -> None:
+            application.crud(
+                Species, open_session,
+                prefix="/admin/species",
+                readonly=("id",),
+                authorize={"list": Access.roles("admin"), "create": Access.deny()},
+            )
+    """, "crud_mount")
+    assert _by(found, "crud.drop-operation-authorize"), [c.operator for c in found]
+
+
+def test_an_mcp_tools_gates_are_mutable(tmp_path: Path) -> None:
+    """`@mcp.tool(action=..., sampling=..., elicitation=...)` in a factory.
+
+    `mcp` is a local, so the callee never resolved and none of the three gates
+    was offered. The sampling and elicitation gates are the ones the roadmap
+    argues hardest for: an elicitation is a phishing surface wearing a trusted
+    client's chrome, and being able to decline is the control.
+    """
+    found = _scan_resolved(tmp_path, """
+        from wreath.mcp import MCP, ToolRateLimit
+
+
+        def build():
+            mcp = MCP(name="camera-trap", version="1")
+
+            @mcp.tool(description="Find sightings.", action="Sighting::find",
+                      resource="all")
+            async def find_sightings(context): ...
+
+            @mcp.tool(description="Delete a camera.", action="Camera::delete",
+                      rate_limit=ToolRateLimit(2, 60.0),
+                      sampling="Sighting::summarise",
+                      elicitation="Camera::confirm")
+            async def delete_camera(context): ...
+
+            return mcp
+    """, "mcp_factory")
+    dropped = {c.control for c in _by(found, "declaration.drop-keyword")}
+    for gate in ("action", "sampling", "elicitation", "rate_limit"):
+        assert any(f"`{gate}=`" in control for control in dropped), (gate, dropped)
+
+
+def test_an_mcp_servers_bounds_are_already_widenable(tmp_path: Path) -> None:
+    """`MCPLimits(...)` needs no operator of its own.
+
+    Its bounds are numeric keywords on a resolvable dataclass, so
+    `declaration.widen-bound` already reaches them -- verified rather than
+    assumed, because "covered by an existing operator" is exactly the claim
+    that rots. `ToolRateLimit(2, 60.0)` is *positional*, so nothing is offered
+    for it: a keyword operator has no keyword to widen, and that is a real
+    limit rather than an oversight.
+    """
+    found = _scan_resolved(tmp_path, """
+        from wreath.mcp import MCP, MCPLimits, ToolRateLimit
+
+
+        def build():
+            mcp = MCP(name="t", version="1",
+                      limits=MCPLimits(max_tools=256, max_sessions=1024,
+                                       session_idle_seconds=900.0))
+
+            @mcp.tool(description="d", rate_limit=ToolRateLimit(2, 60.0))
+            async def probe(context): ...
+
+            return mcp
+    """, "mcp_limits")
+    widened = {c.control.split("`")[1] for c in _by(found, "declaration.widen-bound")}
+    assert widened == {"max_tools=256", "max_sessions=1024",
+                       "session_idle_seconds=900.0"}, widened
+
+
+def test_a_graphql_authorizer_is_a_control(tmp_path: Path) -> None:
+    """`authorizer=` is what makes every field ask Cedar at all.
+
+    `action=` and `expose=` were already offered; `authorizer=` was not, for
+    the same missing-keyword reason as crud's `authorize=`.
+    """
+    found = _scan_resolved(tmp_path, """
+        from wreath.graphql import GraphQL
+
+
+        def build(registry, authorizer):
+            return GraphQL(registry, authorizer=authorizer, action="read",
+                           expose=("email",), introspection=False,
+                           max_page_size=100)
+    """, "graphql_factory")
+    dropped = {c.control for c in _by(found, "declaration.drop-keyword")}
+    assert any("`authorizer=`" in control for control in dropped), dropped
 
 
 def test_a_routes_own_controls_are_mutable_where_the_route_is_built(tmp_path: Path) -> None:
@@ -422,6 +675,347 @@ PROJECT = {
 }
 
 
+#: A crud-shaped declaration where one operation is tested and one is not, and
+#: one protected column is tested and one is not. The point of the per-entry
+#: operators is exactly this asymmetry: the wholesale `declaration.drop-keyword`
+#: mutant dies to the `delete` test alone and reports `list` as covered.
+CRUD_PROJECT = {
+    "shop/__init__.py": "",
+    "shop/access.py": textwrap.dedent(
+        '''
+        """A stand-in for `wreath.crud.Access`, so the fixture needs no database."""
+
+
+        class Access:
+            def __init__(self, verdict):
+                self._verdict = verdict
+
+            def __call__(self, identity):
+                return self._verdict(identity)
+
+            @classmethod
+            def roles(cls, *names):
+                wanted = set(names)
+                return cls(lambda identity: wanted.issubset(identity["roles"]))
+
+            @classmethod
+            def deny(cls):
+                return cls(lambda identity: False)
+
+            @classmethod
+            def public(cls):
+                return cls(lambda identity: True)
+        '''
+    ),
+    "shop/api.py": textwrap.dedent(
+        '''
+        """A generated router, declared the way an application declares one."""
+
+        from .access import Access
+
+
+        class Account:
+            pass
+
+
+        def _open(request):
+            return None
+
+
+        def crud_router(model, open_session, *, authorize=None, readonly=()):
+            return {"authorize": dict(authorize or {}), "readonly": tuple(readonly)}
+
+
+        def build():
+            return crud_router(
+                Account, _open,
+                readonly=("id", "created_at"),
+                authorize={
+                    "list": Access.roles("reader"),
+                    "delete": Access.deny(),
+                },
+            )
+
+
+        def may(router, operation, identity):
+            """Whether `identity` may perform `operation`.
+
+            An operation with no rule falls back to permitted, which is what
+            makes dropping one entry a real control removal rather than a
+            crash.
+            """
+            rule = router["authorize"].get(operation)
+            return True if rule is None else rule(identity)
+
+
+        def writable(router, column):
+            return column not in router["readonly"]
+        '''
+    ),
+    "tests/test_api.py": textwrap.dedent(
+        '''
+        from shop.api import build, may, writable
+
+        ANYONE = {"roles": set()}
+
+
+        def test_delete_is_refused_outright():
+            # Watches the `delete` entry: dropping it, or widening it to
+            # `public`, makes this pass where it should not.
+            assert may(build(), "delete", ANYONE) is False
+
+
+        def test_listing_runs():
+            # Exercises `list` without ever asserting that anyone is refused --
+            # so the `list` entry is unwatched, and its mutants must survive.
+            assert may(build(), "list", {"roles": {"reader"}}) is True
+
+
+        def test_the_id_column_is_not_writable():
+            assert writable(build(), "id") is False
+
+
+        def test_a_row_can_be_written():
+            # Never asserts that `created_at` is protected: the second column's
+            # mutant must survive while the first one's dies.
+            assert writable(build(), "name") is True
+        '''
+    ),
+    "pyproject.toml": textwrap.dedent(
+        """
+        [tool.pytest.ini_options]
+        testpaths = ["tests"]
+        """
+    ),
+}
+
+
+def _run_mutant(root: Path, *args: str) -> dict:
+    completed = subprocess.run(
+        [sys.executable, "-m", "wreath._mutant.cli", "--path", "shop",
+         "--format", "json", "--quiet", *args],
+        cwd=root, capture_output=True, text=True, timeout=_NESTED_TIMEOUT, check=False,
+        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(root), "HOME": str(root)},
+    )
+    if completed.returncode != 0:
+        pytest.fail(
+            f"wreath mutant exited {completed.returncode}\n{completed.stderr[-4000:]}"
+        )
+    return json.loads(completed.stdout)
+
+
+@pytest.fixture(scope="module")
+def crud_run(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    root = tmp_path_factory.mktemp("mutant-crud")
+    for relative, body in CRUD_PROJECT.items():
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    return _run_mutant(root)
+
+
+def _crud_outcomes(run: dict, operator: str) -> dict[str, str]:
+    """`{the entry named in the control: outcome}` for one operator."""
+    return {
+        mutant["control"].split("`")[1]: mutant["outcome"]
+        for mutant in run["mutants"]
+        if mutant["operator"] == operator
+    }
+
+
+def test_dropping_one_operations_rule_kills_and_survives_independently(
+    crud_run: dict,
+) -> None:
+    """The pair that justifies the operator.
+
+    `delete` is watched and `list` is not. A wholesale `authorize=` mutant dies
+    to the `delete` test and reports the whole mapping as covered; per entry,
+    the unwatched operation is visible as a survivor.
+    """
+    outcomes = _crud_outcomes(crud_run, "crud.drop-operation-authorize")
+    assert outcomes["delete"] == "killed", crud_run["mutants"]
+    assert outcomes["list"] in ("survived", "unreached"), crud_run["mutants"]
+
+
+def test_widening_one_rule_to_public_kills_and_survives_independently(
+    crud_run: dict,
+) -> None:
+    outcomes = _crud_outcomes(crud_run, "crud.widen-access")
+    assert outcomes["delete"] == "killed", crud_run["mutants"]
+    assert outcomes["list"] in ("survived", "unreached"), crud_run["mutants"]
+
+
+def test_unprotecting_one_column_kills_and_survives_independently(
+    crud_run: dict,
+) -> None:
+    """`readonly=("id", "created_at")` with a test for only the first."""
+    outcomes = _crud_outcomes(crud_run, "crud.unprotect-column")
+    assert outcomes["id"] == "killed", crud_run["mutants"]
+    assert outcomes["created_at"] in ("survived", "unreached"), crud_run["mutants"]
+
+
+def test_the_wholesale_keyword_mutant_is_the_one_that_overstates(
+    crud_run: dict,
+) -> None:
+    """Why the per-entry operators had to exist.
+
+    The coarse mutant dies -- `delete` has a test -- and on its own it would
+    report `authorize=` as a watched control. The per-entry survivors above are
+    the same declaration telling the truth.
+    """
+    wholesale = [
+        m for m in crud_run["mutants"]
+        if m["operator"] == "declaration.drop-keyword" and "authorize" in m["control"]
+    ]
+    assert wholesale, crud_run["mutants"]
+    assert all(m["outcome"] == "killed" for m in wholesale), wholesale
+
+
+# -- bounding a pass onto code you just wrote -------------------------------
+
+
+def _write_project(root: Path, project: dict[str, str]) -> None:
+    for relative, body in project.items():
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+
+
+def _cli(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "wreath._mutant.cli", "--path", "shop", "--quiet", *args],
+        cwd=root, capture_output=True, text=True, timeout=_NESTED_TIMEOUT, check=False,
+        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(root), "HOME": str(root)},
+    )
+
+
+def test_a_selector_that_matches_nothing_is_refused(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A bound that selects nothing must not read as a clean run.
+
+    `--only` matches a substring of `operator@path:line`, and the line in that
+    id is the line the *operator* anchors to -- an operand's line inside a
+    compound condition, a keyword's *value* line in a declaration -- not
+    necessarily the line a human reads as the decision. Aiming at the latter
+    selects zero, and the run then reports `0 killed, 0 survived` and exits 0,
+    which is the ADR 0024 shape one level up: a check that passes because it
+    has nothing to check. It cost a sibling agent a whole pass that described
+    unrelated code.
+    """
+    root = tmp_path_factory.mktemp("mutant-empty-selector")
+    _write_project(root, CRUD_PROJECT)
+    completed = _cli(root, "--only", "@shop/api.py:9999")
+    assert completed.returncode == 2, completed.stdout[-2000:]
+    assert "9999" in completed.stderr
+    assert "matched no" in completed.stderr.lower(), completed.stderr
+
+
+def test_a_selector_that_matches_is_still_accepted(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """The refusal above must not fire on a working selector."""
+    root = tmp_path_factory.mktemp("mutant-good-selector")
+    _write_project(root, CRUD_PROJECT)
+    completed = _cli(root, "--only", "crud.widen-access")
+    assert completed.returncode == 0, completed.stderr[-2000:]
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", *args], cwd=root, check=True, capture_output=True, text=True,
+        env={
+            "PATH": "/usr/bin:/bin", "HOME": str(root),
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e",
+        },
+    )
+
+
+def test_changed_bounds_a_pass_onto_the_lines_you_just_wrote(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """`--limit N` takes the *first* N candidates, which is the wrong end.
+
+    Mutations are ordered by line, so a bound of 40 over a 1500-line module
+    spends the whole budget on whatever sits at the top of the file and reports
+    coverage of code the run was not about. New work is appended, so it is
+    exactly the code a limit cannot reach.
+
+    `--changed` restricts candidates to lines that differ from a git ref, which
+    is the shape the workflow actually has, and it composes with `--limit`.
+    """
+    root = tmp_path_factory.mktemp("mutant-changed")
+    _write_project(root, CRUD_PROJECT)
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "base")
+
+    # Append a second, independently-controlled router at the tail of the file.
+    api = root / "shop" / "api.py"
+    api.write_text(api.read_text(encoding="utf-8") + textwrap.dedent(
+        '''
+
+        def build_reports():
+            return crud_router(
+                Account, _open,
+                readonly=("secret",),
+                authorize={"export": Access.deny()},
+            )
+        '''
+    ), encoding="utf-8")
+
+    completed = _cli(root, "--changed", "HEAD", "--format", "json")
+    assert completed.returncode == 0, completed.stderr[-3000:]
+    report = json.loads(completed.stdout)
+    controls = [m["control"] for m in report["mutants"]]
+    assert controls, report
+
+    # Everything selected is from the appended block ...
+    assert any("export" in c for c in controls), controls
+    assert any("secret" in c for c in controls), controls
+    # ... and nothing from the original declaration, which did not change.
+    assert not any("delete" in c for c in controls), controls
+    assert not any("created_at" in c for c in controls), controls
+
+
+def test_changed_and_limit_compose(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """The bound still bounds: `--changed` narrows, `--limit` truncates."""
+    root = tmp_path_factory.mktemp("mutant-changed-limit")
+    _write_project(root, CRUD_PROJECT)
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "base")
+    api = root / "shop" / "api.py"
+    api.write_text(api.read_text(encoding="utf-8") + textwrap.dedent(
+        '''
+
+        def build_reports():
+            return crud_router(
+                Account, _open,
+                readonly=("secret", "other"),
+                authorize={"export": Access.deny(), "purge": Access.deny()},
+            )
+        '''
+    ), encoding="utf-8")
+    completed = _cli(root, "--changed", "HEAD", "--limit", "2", "--format", "json")
+    assert completed.returncode == 0, completed.stderr[-3000:]
+    assert len(json.loads(completed.stdout)["mutants"]) == 2
+
+
+def test_changed_outside_a_repository_says_so(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A bound that cannot be computed is refused, not silently ignored."""
+    root = tmp_path_factory.mktemp("mutant-nogit")
+    _write_project(root, CRUD_PROJECT)
+    completed = _cli(root, "--changed", "HEAD")
+    assert completed.returncode == 2, completed.stdout[-2000:]
+    assert "git" in completed.stderr.lower(), completed.stderr
+
+
 @pytest.fixture(scope="module")
 def sample_run(tmp_path_factory: pytest.TempPathFactory) -> dict:
     root = tmp_path_factory.mktemp("mutant-e2e")
@@ -432,7 +1026,7 @@ def sample_run(tmp_path_factory: pytest.TempPathFactory) -> dict:
     completed = subprocess.run(
         [sys.executable, "-m", "wreath._mutant.cli", "--path", "shop",
          "--format", "json", "--quiet"],
-        cwd=root, capture_output=True, text=True, timeout=300, check=False,
+        cwd=root, capture_output=True, text=True, timeout=_NESTED_TIMEOUT, check=False,
         env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(root), "HOME": str(root)},
     )
     if completed.returncode != 0:
@@ -443,6 +1037,68 @@ def sample_run(tmp_path_factory: pytest.TempPathFactory) -> dict:
 def test_a_withheld_field_set_that_stops_withholding_is_a_mutation(module: Path) -> None:
     found = _by(_scan(module), "comprehension.drop-clause")
     assert found == [] or all("filter" in c.control for c in found)
+
+
+def test_a_run_leaves_every_source_file_byte_identical(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """No file is ever rewritten.
+
+    The mutated code object is assigned over the live function's `__code__`, so
+    an interrupted run cannot leave a mutant on disk and `from x import y`
+    aliases see the mutation anyway. An operator that could only be expressed by
+    editing the file does not belong in this tool, and this is the assertion
+    that says so about the ones just added.
+    """
+    root = tmp_path_factory.mktemp("mutant-untouched")
+    for relative, body in CRUD_PROJECT.items():
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    sources = sorted(root.rglob("*.py"))
+    before = {path: path.read_bytes() for path in sources}
+    run = _run_mutant(root)
+    assert run["counts"]["killed"] >= 1  # it really did mutate something
+    assert {path: path.read_bytes() for path in sources} == before
+
+
+def test_a_run_with_survivors_still_exits_zero(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A report, not a gate -- and `--fail-on-survivor` is the opt-in.
+
+    The crud fixture has survivors by construction, so this is the case that
+    would regress if the new operators were ever wired into a failing exit.
+    """
+    root = tmp_path_factory.mktemp("mutant-exit")
+    for relative, body in CRUD_PROJECT.items():
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    environment = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(root), "HOME": str(root)}
+    base = [sys.executable, "-m", "wreath._mutant.cli", "--path", "shop", "--quiet"]
+    default = subprocess.run(
+        base, cwd=root, capture_output=True, text=True, timeout=_NESTED_TIMEOUT, check=False,
+        env=environment,
+    )
+    assert default.returncode == 0, default.stderr[-2000:]
+    opted_in = subprocess.run(
+        [*base, "--fail-on-survivor"], cwd=root, capture_output=True, text=True,
+        timeout=_NESTED_TIMEOUT, check=False, env=environment,
+    )
+    assert opted_in.returncode == 1, opted_in.stdout[-2000:]
+
+
+def test_mutant_is_not_one_of_the_gates() -> None:
+    """`wreath check` must not run it.
+
+    A survivor is a question rather than a verdict, and a question that fails
+    the build gets answered with `|| true`. Pinned because adding operators is
+    exactly the change that would tempt someone to promote it.
+    """
+    from wreath._devtools.tasks import _CHECKS
+
+    assert not any("mutant" in name for name, _ in _CHECKS), _CHECKS
 
 
 def test_a_run_reports_both_a_killed_and_a_surviving_control(sample_run: dict) -> None:

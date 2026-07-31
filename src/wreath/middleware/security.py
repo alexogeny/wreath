@@ -131,6 +131,23 @@ class TrustedHostMiddleware:
                 raise ValueError(f"invalid trusted-host pattern: {pattern!r}")
         self.allowed_hosts = tuple(patterns)
 
+    def describe(self):
+        """The 400 an untrusted or duplicated `Host` gets."""
+        from ..openapi import ResponseSpec
+        from .base import MiddlewareContract
+
+        return MiddlewareContract(
+            responses=(
+                (
+                    400,
+                    ResponseSpec(
+                        description="The Host header is missing, duplicated, or untrusted.",
+                        media_type="application/problem+json",
+                    ),
+                ),
+            ),
+        )
+
     def before_sync(self, request: Request):
         """Return None for an allowed unique Host, or a 400 otherwise."""
         # Host is not list-valued. Reject duplicates so an upstream proxy and
@@ -289,6 +306,32 @@ class SecurityHeadersMiddleware:
         self.headers = tuple(headers)
         self.https_headers = (
             (*self.headers, self.hsts_header) if self.hsts_header is not None else self.headers
+        )
+
+    def describe(self):
+        """Every configured header, with its value, read off the precompiled set.
+
+        Derived from `self.https_headers` -- the widest set this instance can
+        emit -- so a deployment that turned CSP off documents no CSP. HSTS is
+        included because a caller over https receives it; over http it is
+        simply absent, which the description says.
+        """
+        from .base import HeaderSpec, MiddlewareContract
+
+        return MiddlewareContract(
+            response_headers=tuple(
+                (
+                    None,
+                    HeaderSpec(
+                        name.decode("latin-1")
+                        .replace("-", " ")
+                        .title()
+                        .replace(" ", "-"),
+                        const=value.decode("latin-1"),
+                    ),
+                )
+                for name, value in self.https_headers
+            ),
         )
 
     def after_inplace(self, request: Request, response) -> None:

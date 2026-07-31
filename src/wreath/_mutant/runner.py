@@ -104,16 +104,70 @@ def discover(roots: Sequence[Path]) -> list[Path]:
     return files
 
 
+class ChangedUnavailable(RuntimeError):
+    """`--changed` was asked for where the answer cannot be computed."""
+
+
+def changed_lines(repo: Path, ref: str) -> dict[str, set[int]]:
+    """The lines that differ from `ref`, per repository-relative path.
+
+    `--limit` takes the *first* N mutations, and mutations are ordered by line,
+    so a bound spends its whole budget on the top of the file. New work is
+    appended, which makes the one bound the tool had unable to reach the one
+    code a run is usually about. This answers "the lines I just wrote" directly.
+
+    An untracked file is entirely new, so every line of it counts; `git diff`
+    says nothing about a file it has never seen.
+    """
+    import subprocess
+
+    def git(*args: str) -> str:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(repo), *args],
+                capture_output=True, text=True, check=False, timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ChangedUnavailable(f"could not run git: {error}") from error
+        if completed.returncode != 0:
+            raise ChangedUnavailable(
+                f"git {' '.join(args)} failed: {completed.stderr.strip() or 'no output'}"
+            )
+        return completed.stdout
+
+    lines: dict[str, set[int]] = {}
+    current: str | None = None
+    for line in git("diff", "--unified=0", ref).splitlines():
+        if line.startswith("+++ "):
+            target = line[4:].strip()
+            current = None if target == "/dev/null" else target.removeprefix("b/")
+        elif line.startswith("@@ ") and current is not None:
+            # `@@ -a,b +c,d @@`; `d` defaults to 1 and may be 0 for a deletion.
+            span = line.split("+", 1)[1].split(" ", 1)[0]
+            start, _, count = span.partition(",")
+            length = int(count) if count else 1
+            if length:
+                lines.setdefault(current, set()).update(
+                    range(int(start), int(start) + length)
+                )
+    for path in git("ls-files", "--others", "--exclude-standard").splitlines():
+        if path.endswith(".py"):
+            lines[path] = set(range(1, 1_000_000))
+    return lines
+
+
 def build_plan(
     roots: Sequence[Path],
     repo: Path,
     *,
     operators: Sequence[str] = (),
     only: Sequence[str] = (),
+    changed: str | None = None,
 ) -> Plan:
     """Compile every mutation this run will attempt."""
     plan = Plan()
     seen: dict[str, int] = {}
+    touched = changed_lines(repo, changed) if changed is not None else None
     for path in discover(roots):
         name = module_name_for(path)
         if name is None or name.startswith("wreath._mutant"):
@@ -132,11 +186,18 @@ def build_plan(
             plan.errors.append((name, f"not importable: {type(error).__name__}: {error}"))
             continue
         relative = str(path.relative_to(repo)) if path.is_relative_to(repo) else str(path)
+        if touched is not None and relative not in touched:
+            continue
         plan.sources.append(relative)
         scopes = tag(tree)
         baseline_code = compile_module(tree, str(path))
         for candidate in scan(tree, name):
             if operators and not any(candidate.operator.startswith(p) for p in operators):
+                continue
+            if touched is not None and candidate.line not in touched[relative]:
+                # A value patch has no line of its own worth trusting here: it
+                # rebinds a module-level name, and the name's assignment *is*
+                # the line, so the same test applies.
                 continue
             identifier = f"{candidate.operator}@{relative}:{candidate.line}"
             # The suffix is part of the id, so it has to exist before `--only`
@@ -398,10 +459,11 @@ def execute(
     timeout: float = DEFAULT_TIMEOUT,
     max_candidates: int = DEFAULT_MAX_CANDIDATES,
     limit: int = 0,
+    changed: str | None = None,
     progress: bool = True,
 ) -> Report:
     started = time.perf_counter()
-    plan = build_plan(roots, repo, operators=operators, only=only)
+    plan = build_plan(roots, repo, operators=operators, only=only, changed=changed)
     if limit:
         plan.mutations = plan.mutations[:limit]
     report = Report(sources=tuple(plan.sources))

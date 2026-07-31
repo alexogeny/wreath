@@ -82,6 +82,11 @@ class Operation:
     tags: tuple[str, ...] = ()
     summary: str | None = None
     description: str | None = None
+    #: Behaviours the tape declared for this operation, from the closed
+    #: `wreath.middleware.base.BEHAVIOURS` vocabulary. A target may emit a
+    #: runtime for each; a target that ignores them is still correct, just
+    #: less capable.
+    behaviours: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

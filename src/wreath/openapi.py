@@ -34,6 +34,92 @@ _TYPE_KEYS: dict[str, dict[str, Any]] = {
 
 _PATH_CONVERTER = re.compile(r"\{([^}:]+):path\}")
 
+#: The vendor extension carrying the behaviours a generated client may act on.
+#: A foreign generator ignores an unknown `x-` key, which is the right failure
+#: mode: it sees a document it fully understands, minus an optimisation.
+BEHAVIOUR_EXTENSION = "x-wreath-behaviours"
+
+
+def _contract_candidates(app: Any, definition: Any, method: str) -> list[Any]:
+    """Every middleware whose tape covers this operation, outermost first.
+
+    This mirrors `Wreath._compile_routes_locked` exactly, because a document
+    that disagrees with the tape about *which* routes a middleware covers is
+    worse than a silent one -- a generated client would retry a permanent
+    failure. Global middleware wraps every request, so it always applies;
+    route middleware is filtered by the same `applies_to` predicate
+    `compile_middleware` evaluates, against the same `MiddlewareRoute`.
+    """
+    from ._auth.requirements import merge_requirements, requirement_for
+    from .middleware.base import MiddlewareRoute
+
+    globals_ = [
+        item[2]
+        for item in sorted(app._global_middleware, key=lambda item: (item[0], item[1]))
+    ]
+    route_scoped = [
+        item[2] for item in sorted(app._middleware, key=lambda item: (item[0], item[1]))
+    ]
+    requirement = merge_requirements(
+        definition.requirement, requirement_for(definition.endpoint)
+    )
+    route = MiddlewareRoute(
+        definition.path,
+        method,
+        definition.endpoint,
+        authenticated=bool(getattr(requirement, "authenticated", False)),
+    )
+    applicable = list(globals_)
+    for item in (*route_scoped, *definition.middleware):
+        predicate = getattr(item, "applies_to", None)
+        if predicate is None or predicate(route):
+            applicable.append(item)
+    return applicable
+
+
+def _collect_contracts(app: Any, definition: Any, method: str) -> list[Any]:
+    """Ask each covering middleware for its contract; skip those with none."""
+    from .middleware.base import BEHAVIOURS
+
+    contracts = []
+    for item in _contract_candidates(app, definition, method):
+        # `callable(None)` is False, so the absent case needs no clause of its
+        # own -- a middleware with no `describe`, and one carrying a `describe`
+        # that is not a method, are both simply not asked.
+        describe = getattr(item, "describe", None)
+        if not callable(describe):
+            continue
+        contract = describe()
+        if contract is None:
+            continue
+        if getattr(item, "global_scope", False) and getattr(item, "applies_to", None):
+            raise ValueError(
+                f"{type(item).__name__} is global middleware and declares both "
+                "describe() and applies_to. Global hooks are compiled into a flat "
+                "program with no predicate evaluation, so applies_to is never "
+                "consulted at runtime and the contract would document a narrower "
+                "scope than the tape enforces. Register it with add_middleware() "
+                "for route scope, or drop applies_to."
+            )
+        if contract.methods is not None and method.upper() not in contract.methods:
+            continue
+        unknown = set(contract.behaviours) - BEHAVIOURS
+        if unknown:
+            raise ValueError(
+                f"{type(item).__name__}.describe() declares unknown behaviour(s) "
+                f"{', '.join(sorted(unknown))}; the vocabulary is closed and is "
+                f"{', '.join(sorted(BEHAVIOURS))}"
+            )
+        contracts.append(contract)
+    return contracts
+
+
+def _header_schema(spec: Any) -> dict[str, Any]:
+    schema: dict[str, Any] = {"type": "string"}
+    if spec.const is not None:
+        schema["const"] = spec.const
+    return schema
+
 
 @dataclass(frozen=True, slots=True)
 class ResponseSpec:
@@ -276,6 +362,21 @@ def generate_openapi(
                                 "schema": {"type": "string"},
                             }
                         )
+            # The tape describes itself. Collected by asking every middleware
+            # that actually covers this operation, so a router-scoped limiter
+            # never decorates a route outside that router.
+            contracts = _collect_contracts(app, definition, method)
+            for contract in contracts:
+                for header in contract.request_headers:
+                    parameters.append(
+                        {
+                            "name": header.name,
+                            "in": "header",
+                            "required": header.required,
+                            "schema": _header_schema(header),
+                        }
+                        | ({"description": header.description} if header.description else {})
+                    )
             if parameters:
                 operation["parameters"] = parameters
             response: dict[str, Any] = {"description": definition.response_description}
@@ -296,6 +397,41 @@ def generate_openapi(
                         response_spec.media_type: {"schema": additional_schema}
                     }
                 operation_responses[str(status)] = additional
+            # A middleware's response is additive: the route's own declaration
+            # for a status is the more specific source and wins outright.
+            for contract in contracts:
+                for status, declared in contract.responses:
+                    key = str(status)
+                    if key in operation_responses:
+                        continue
+                    response_spec = (
+                        declared
+                        if isinstance(declared, ResponseSpec)
+                        else ResponseSpec(declared)
+                    )
+                    from_tape: dict[str, Any] = {"description": response_spec.description}
+                    tape_schema = schema(response_spec.model)
+                    if tape_schema:
+                        from_tape["content"] = {
+                            response_spec.media_type: {"schema": tape_schema}
+                        }
+                    operation_responses[key] = from_tape
+            for contract in contracts:
+                for status, header in contract.response_headers:
+                    key = str(definition.status_code if status is None else status)
+                    target = operation_responses.get(key)
+                    if target is None:
+                        continue
+                    headers = target.setdefault("headers", {})
+                    entry: dict[str, Any] = {"schema": _header_schema(header)}
+                    if header.description:
+                        entry["description"] = header.description
+                    headers.setdefault(header.name, entry)
+            behaviours = sorted(
+                {name for contract in contracts for name in contract.behaviours}
+            )
+            if behaviours:
+                operation[BEHAVIOUR_EXTENSION] = behaviours
             operation["responses"] = operation_responses
             operations[method.lower()] = operation
 
@@ -379,6 +515,20 @@ def compare_openapi(
                         "response-removed",
                         f"{method_name} {path} {status}",
                         "a documented response status was removed",
+                    )
+                )
+            # A behaviour that stops being declared is a silent correctness
+            # regression at the consumer: a generated client that stops
+            # sending an idempotency key still compiles, still passes its
+            # tests, and duplicates a write the first time it retries.
+            old_behaviours = set(old_operation.get(BEHAVIOUR_EXTENSION, ()))
+            new_behaviours = set(new_operation.get(BEHAVIOUR_EXTENSION, ()))
+            for behaviour in sorted(old_behaviours - new_behaviours):
+                changes.append(
+                    CompatibilityChange(
+                        "behaviour-removed",
+                        f"{method_name} {path} {behaviour}",
+                        "a declared client behaviour was removed",
                     )
                 )
     return tuple(changes)

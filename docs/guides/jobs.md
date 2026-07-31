@@ -119,6 +119,34 @@ it visible is the point.
 
 One failure skips the retries: a job whose stored arguments no longer **bind** to its handler's signature is dead-lettered on the first attempt. That is version skew — the row was written by a release where the task took different arguments — and the fourth attempt binds no better than the first. The `last_error` names the task, how many arguments the row carried, and which parameter is missing, so it reads as a deploy-ordering problem rather than as a handler bug. Arguments are bound *before* the handler is called, so this never reaches your code.
 
+### A query budget for an attempt
+
+A durable job is where an N+1 hides best: nobody is waiting for it, so nothing
+looks slow, and the only symptom is a queue that never drains.
+
+```python
+@runner.task("ingest_card", query_budget=200)
+async def ingest_card(ctx, card_id: int) -> None:
+    ...
+```
+
+`query_budget` is how many times one model may be hydrated inside a *single
+attempt*. Crossing it fails the attempt from inside the query that did it, so
+the traceback names the loop. A retry starts from zero — an attempt is one
+execution, and counting across them would dead-letter a task that legitimately
+queries ninety times on its second try.
+
+Omit it and the attempt is observed rather than bounded: counted, reported if a
+guard exists in the process, never failed. Raising inside a durable job turns a
+slow job into a failed one and then into a retry storm, so the ceiling is
+something you declare rather than something wreath assumes. Crossed budgets
+count as `query_budget_exceeded`, kept apart from `run_errors` because the cause
+is a defect in the handler rather than in what it was calling; observed findings
+count as `nplusone_findings`.
+
+See [Finding the N+1 query](n-plus-one.md) for the whole picture, including the
+workflow-step and pass-shift scopes.
+
 ## Transactional enqueue
 
 Enqueue from a handler on the *same transaction* as the business row, so the job commits atomically with the work that spawned it. Pass a `key` for idempotency:

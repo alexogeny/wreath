@@ -106,6 +106,18 @@ static PyMethodDef core_methods[] = {
      "json_dumps(obj) -> bytes\nSerialize to compact UTF-8 JSON."},
     {"msgpack_dumps", wreath_msgpack_dumps, METH_O,
      "msgpack_dumps(obj) -> bytes\nSerialize to MessagePack."},
+    {"geo_haversine", (PyCFunction)(void (*)(void))wreath_geo_haversine,
+     METH_FASTCALL,
+     "geo_haversine(lat1, lon1, lat2, lon2) -> float\n"
+     "Great-circle metres on the IUGG mean-radius sphere."},
+    {"protobuf_configure", wreath_protobuf_configure, METH_O,
+     "protobuf_configure(decode_error_type) -> None"},
+    {"protobuf_encode", wreath_protobuf_encode, METH_VARARGS,
+     "protobuf_encode(plan, values, unknown=b'') -> bytes\n"
+     "Encode values in plan order to protobuf wire bytes."},
+    {"protobuf_decode", wreath_protobuf_decode, METH_VARARGS,
+     "protobuf_decode(plan, data) -> (values, unknown)\n"
+     "Decode protobuf wire bytes against a compiled plan."},
     {"sse_frame", wreath_sse_frame, METH_VARARGS,
      "sse_frame(comment, name, ident, retry, data) -> bytes\nFrame one SSE event."},
     {"json_configure", wreath_json_configure, METH_VARARGS,

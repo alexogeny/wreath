@@ -24,7 +24,6 @@ implicit TLS on port 465) is the shipped production transport.
 
 from __future__ import annotations
 
-import warnings
 import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -33,11 +32,15 @@ from typing import Annotated, Any
 
 from . import _secondfactor, _userkit
 from ._secondfactor import (  # re-export the stdlib-only second-factor surface
+    CHALLENGE_ENROLMENT,
+    CHALLENGE_WEBAUTHN_ASSERT,
+    CHALLENGE_WEBAUTHN_REGISTER,
     DEFAULT_DIGITS,
     DEFAULT_PERIOD,
     DEFAULT_RECOVERY_CODES,
     DEFAULT_SKEW,
     InMemorySecondFactorStore,
+    MemoryChallengeStore,
     SecondFactor,
     SecondFactorStore,
     TotpEnrolment,
@@ -141,6 +144,7 @@ class _SecondFactorWiring:
     users: UserStore
     factors: SecondFactorStore
     enrolments: Any
+    challenges: Any
     enrolment_key: str
     webauthn_key: str
 
@@ -186,10 +190,28 @@ def _ceremony_slots(users: UserStore, sessions: Any) -> list[tuple[str, str, Any
     for wiring in _mounted_second_factors(users):
         store = wiring.enrolments if wiring.enrolments is not None else sessions
         slots[(wiring.enrolment_key, _ENROLMENT_PREFIX)] = store
-        slots[(wiring.webauthn_key, _WEBAUTHN_PREFIX)] = store
     slots.setdefault((_ENROLMENT_KEY, _ENROLMENT_PREFIX), sessions)
-    slots.setdefault((_WEBAUTHN_KEY, _WEBAUTHN_PREFIX), sessions)
     return [(key, prefix, store) for (key, prefix), store in slots.items()]
+
+
+def _challenge_slots(users: UserStore) -> list[tuple[str, Any]]:
+    """Where a begun WebAuthn ceremony can be, as (session key, store).
+
+    Separate from `_ceremony_slots` because a `ChallengeStore` is a different
+    shape: it is keyed by a bare handle and spent with `discard`, where a
+    `SessionStore` takes a prefixed id and `delete`. Forcing one call shape onto
+    both would mean one of them lying about what it does.
+
+    Only mounted routers contribute. A `user_router` with no
+    `second_factor_router` beside it can still drop the session key -- and does,
+    in `_forget_ceremonies` -- but there is no store for it to reach, because
+    the challenge belongs to a router this process has not built.
+    """
+    slots: dict[str, Any] = {}
+    for wiring in _mounted_second_factors(users):
+        if wiring.challenges is not None:
+            slots[wiring.webauthn_key] = wiring.challenges
+    return list(slots.items())
 
 
 async def _forget_ceremonies(
@@ -216,6 +238,20 @@ async def _forget_ceremonies(
         handle = marker.get("id")
         if isinstance(handle, str) and handle:
             await store.delete(prefix + handle)
+    # The WebAuthn half, whose challenge lives in a `ChallengeStore`. The
+    # default key is popped even when no router is mounted to name it, so a
+    # session never keeps a marker for a ceremony nothing can finish.
+    handled = set()
+    for key, store in _challenge_slots(users):
+        handled.add(key)
+        marker = session.pop(key, None)
+        if not isinstance(marker, dict):
+            continue
+        handle = marker.get("id")
+        if isinstance(handle, str) and handle:
+            await store.discard(handle)
+    if _WEBAUTHN_KEY not in handled:
+        session.pop(_WEBAUTHN_KEY, None)
 
 
 async def _factor_this_login_cannot_check(
@@ -877,6 +913,7 @@ def second_factor_router(
     max_verify_attempts: int = 5,
     verify_window: float = 300.0,
     enrolments: Any = None,
+    challenges: Any = None,
     rp_id: str = "",
     rp_name: str = "",
     origins: Sequence[str] = (),
@@ -1054,35 +1091,36 @@ def second_factor_router(
         _secondfactor.begin_webauthn_assertion(
             (), rp_id=rp_id, user_verification=user_verification
         )
-    if enrolments is None:
-        # Said out loud at startup rather than left in the guide. Both the
-        # pending TOTP secret and the WebAuthn challenge are only as single-use,
-        # and only as private, as wherever the session happens to live -- and a
-        # deployment that has not thought about that finds out by being wrong.
-        # A warning and not a refusal: an in-memory development app is a
-        # legitimate configuration, and making the store mandatory would break
-        # every one of them.
-        #
-        # Last, after the refusals above, so a router that fails to build does
-        # not also warn about how it would have behaved.
-        #
-        # **Only half the condition is checkable here.** The degradation is real
-        # when the session middleware is cookie-backed and absent when it has a
-        # `store=`, but this router is built before any application exists and
-        # cannot see the middleware, so the message names the other half rather
-        # than guessing at it.
-        warnings.warn(
-            "second_factor_router was given no enrolments= store, so a pending "
-            "TOTP secret and a WebAuthn challenge are held in the session "
-            "itself. If your SessionMiddleware has no store= either, that means "
-            "a cookie: the challenge is then only as single-use as the cookie -- "
-            "a caller who kept an older copy kept the challenge with it -- and "
-            "the unconfirmed secret goes wherever the cookie goes. Pass "
-            "enrolments=<the same SessionStore you gave SessionMiddleware>.",
-            UserWarning,
-            stacklevel=2,
-        )
+    # A ceremony's state is never held in the session, whatever the deployment
+    # passed. It goes to a `ChallengeStore`, and the default is a real one.
+    #
+    # This replaces a `UserWarning` that could only name *half* its condition:
+    # it fired on `enrolments=None` and then had to say "if your
+    # SessionMiddleware also has no store=, that means a cookie", because a
+    # router built before any application exists cannot see the middleware. A
+    # warning nobody can act on with certainty is a warning people learn to
+    # ignore. The property now simply holds: single-use is enforced by an
+    # atomic consume against a store, not by wherever the cookie went.
+    #
+    # `MemoryChallengeStore` bounds a single worker. Behind more than one, a
+    # ceremony begun on one worker is not spendable on another -- which fails
+    # *closed* (refused, begin again) rather than open, and is what
+    # `challenges=PostgresChallengeStore(db)` is for.
+    # The default store shares this router's clock, so a ceremony's TTL is
+    # measured on the same time source as everything else the router bounds.
+    # A `PostgresChallengeStore` measures it in the database instead --
+    # `clock_timestamp()`, so workers whose wall clocks disagree cannot disagree
+    # about whether a challenge is still live.
+    challenges = (
+        challenges if challenges is not None else MemoryChallengeStore(clock=clock)
+    )
     router = Router(prefix=prefix, tags=("users",))
+    # `WebAuthnCeremony.ceremony` is the vocabulary the ceremony builders
+    # already speak; this is the one place it becomes a store kind.
+    _CEREMONY_KINDS = {
+        "register": CHALLENGE_WEBAUTHN_REGISTER,
+        "authenticate": CHALLENGE_WEBAUTHN_ASSERT,
+    }
     limiter = LoginLimiter(max_attempts=max_verify_attempts, window=verify_window)
 
     def _session(request: Any) -> dict[str, Any] | None:
@@ -1129,31 +1167,50 @@ def second_factor_router(
     async def _save_record(
         session: dict[str, Any], key: str, prefix: str, record: dict[str, Any], ttl: float
     ) -> None:
-        """Park a begun ceremony's state wherever `enrolments` says to.
+        """Park a begun enrolment server-side, under an opaque handle.
 
-        With a store it lives server-side under an opaque handle and the cookie
-        carries only that handle; without one it rides in the session itself,
-        which is the stage-one behaviour and is only as server-side as the
-        session middleware is.
+        **Never in the session.** An unconfirmed TOTP secret riding in a cookie
+        was the other half of the warning this router used to emit, and it is
+        the half that outlives the tab on a shared machine. With `enrolments=`
+        it goes there, because a deployment that named a store meant it; without
+        one it goes to the `ChallengeStore`, which is a real store rather than
+        the session by another name. The cookie carries the handle and nothing
+        else in both cases.
         """
-        if enrolments is None:
-            session[key] = record
-            return
         handle = _secondfactor.new_credential_id()
-        await enrolments.save(prefix + handle, record, int(ttl))
+        if enrolments is not None:
+            await enrolments.save(prefix + handle, record, int(ttl))
+        else:
+            await challenges.put(
+                handle,
+                user_id=str(record.get("user", "")),
+                kind=CHALLENGE_ENROLMENT,
+                payload=record,
+                ttl=ttl,
+            )
         session[key] = {"id": handle, "at": record["at"]}
 
     async def _load_record(
         marker: dict[str, Any], prefix: str
     ) -> dict[str, Any] | None:
-        """The begun ceremony behind a session marker, wherever it is kept."""
-        if enrolments is None:
-            return marker
+        """The begun enrolment behind a session marker, wherever it is kept.
+
+        A *read*, deliberately, and not a consume. An enrolment's property is
+        "confirmed exactly once", not "read exactly once": the digits are typed
+        by a human off an authenticator, and spending the secret on a mistyped
+        one would send them back to scanning a fresh QR code. `peek` is the
+        non-consuming read that says so in its own name.
+        """
         handle = marker.get("id")
         if not isinstance(handle, str) or not handle:
             return None
-        loaded = await enrolments.load(prefix + handle)
-        return loaded if isinstance(loaded, dict) else None
+        if enrolments is not None:
+            loaded = await enrolments.load(prefix + handle)
+            return loaded if isinstance(loaded, dict) else None
+        row = await challenges.peek(handle)
+        if row is None or row.kind != CHALLENGE_ENROLMENT:
+            return None
+        return row.payload
 
     async def _forget_record(
         session: dict[str, Any], key: str, prefix: str, marker: dict[str, Any]
@@ -1167,11 +1224,13 @@ def second_factor_router(
         challenge, and there it is the single-use property itself.
         """
         session.pop(key, None)
-        if enrolments is None:
-            return
         handle = marker.get("id")
-        if isinstance(handle, str) and handle:
+        if not isinstance(handle, str) or not handle:
+            return
+        if enrolments is not None:
             await enrolments.delete(prefix + handle)
+        else:
+            await challenges.discard(handle)
 
     async def _load_enrolment(marker: dict[str, Any]) -> dict[str, Any] | None:
         return await _load_record(marker, _ENROLMENT_PREFIX)
@@ -1453,52 +1512,84 @@ def second_factor_router(
         # rather than routes that answer 500 to the first person who finds them.
 
         async def _take_ceremony(
-            session: dict[str, Any], marker: dict[str, Any]
-        ) -> dict[str, Any] | None:
-            """Load a begun ceremony and **spend it**, whatever happens next.
+            session: dict[str, Any], marker: dict[str, Any], *, subject: str, kind: str
+        ) -> tuple[dict[str, Any] | None, bool]:
+            """Spend a begun ceremony, or refuse it without spending anything.
 
-            The deletion is unconditional and happens before anything is
-            verified, which is what makes a challenge single-use: one that
-            survived a failed attempt would let a recorded assertion be posted
-            again until it expired. A caller whose ceremony failed begins
-            another one; that costs a round trip and buys the property the whole
-            thing rests on.
+            `subject` is a **precondition** of the consume, never something read
+            back out of the record. Consuming in order to learn who you are
+            makes the record its own authority: whoever holds a handle would
+            define who they are. So the caller derives the candidate from the
+            session first and the statement matches on it, which means a
+            mismatched attempt matches no row and costs the rightful user
+            nothing.
+
+            The returned payload *is* the consumption -- one DELETE ...
+            RETURNING, so two concurrent completions cannot both proceed. A
+            challenge that survived a failed attempt would let a recorded
+            assertion be posted again until it expired, so this spends on sight;
+            a caller whose ceremony failed begins another one.
+
+            Returns `(record, mismatched)`. `mismatched` says the row was there
+            and belonged to somebody else, which is the only reason the two
+            refusals answer differently: an expired ceremony is a 400, and
+            somebody else's is the binding refusing.
             """
-            started = marker.get("at")
-            record: dict[str, Any] | None = None
-            if isinstance(started, (int, float)) and clock() - started <= webauthn_ttl:
-                record = await _load_record(marker, _WEBAUTHN_PREFIX)
-            await _forget_record(session, webauthn_key, _WEBAUTHN_PREFIX, marker)
-            return record
+            handle = marker.get("id")
+            session.pop(webauthn_key, None)
+            if not isinstance(handle, str) or not handle:
+                return None, False
+            record = await challenges.consume(handle, user_id=subject, kind=kind)
+            if record is not None:
+                return record, False
+            # Diagnostic only, and only after the refusal has already happened:
+            # it chooses which *error code* answers, never whether the caller
+            # may proceed. `discard` afterwards because the handle lived in the
+            # session marker we just dropped, so the row is now unreachable by
+            # anyone and would otherwise sit out its TTL as litter.
+            row = await challenges.peek(handle)
+            await challenges.discard(handle)
+            # The consume has already refused, so a live row under this handle
+            # means either the wrong ceremony or the wrong person. Only the
+            # second is the *binding* refusing; a registration challenge posted
+            # to `verify` is simply not the ceremony that was begun, and
+            # `ceremony_expired` says so. Testing the kind as well would be a
+            # clause no reachable state can distinguish.
+            return None, row is not None and row.user_id != subject
+
+        async def _forget_ceremony(session: dict[str, Any]) -> None:
+            """Drop whatever ceremony this session had, row included."""
+            previous = session.pop(webauthn_key, None)
+            if isinstance(previous, dict):
+                handle = previous.get("id")
+                if isinstance(handle, str) and handle:
+                    await challenges.discard(handle)
 
         async def _begin_ceremony(
             session: dict[str, Any], ceremony: WebAuthnCeremony, subject: str
         ) -> JSONResponse:
-            previous = session.get(webauthn_key)
-            if isinstance(previous, dict):
-                # One live challenge per session. Beginning a second ceremony
-                # abandons the first rather than leaving its row to sit out its
-                # TTL, so a caller who reloads the page ten times leaves one
-                # challenge behind instead of ten.
-                await _forget_record(
-                    session, webauthn_key, _WEBAUTHN_PREFIX, previous
-                )
-            await _save_record(
-                session,
-                webauthn_key,
-                _WEBAUTHN_PREFIX,
-                {
-                    "challenge": b64url_encode(ceremony.challenge),
-                    # Bound to whoever began it. A session that changes hands --
-                    # signed out and signed in as somebody else -- carries its
-                    # contents across rotation, so without this the new holder
-                    # could finish the previous one's ceremony.
-                    "user": subject,
-                    "ceremony": ceremony.ceremony,
-                    "at": clock(),
-                },
-                webauthn_ttl,
+            # One live challenge per session. Beginning a second ceremony
+            # abandons the first rather than leaving its row to sit out its TTL,
+            # so a caller who reloads the page ten times leaves one challenge
+            # behind instead of ten.
+            await _forget_ceremony(session)
+            handle = _secondfactor.new_credential_id()
+            # Bound to whoever began it, in the row rather than beside it. A
+            # session that changes hands -- signed out and signed in as somebody
+            # else -- carries its contents across rotation, so without this the
+            # new holder could finish the previous one's ceremony. Because the
+            # binding is a condition of the consuming statement, that attempt
+            # now matches no row at all instead of being caught afterwards.
+            await challenges.put(
+                handle,
+                user_id=subject,
+                kind=_CEREMONY_KINDS[ceremony.ceremony],
+                payload={"challenge": b64url_encode(ceremony.challenge)},
+                ttl=webauthn_ttl,
             )
+            # The cookie carries an opaque handle and nothing else: no challenge,
+            # no subject. There is nothing in it worth replaying.
+            session[webauthn_key] = {"id": handle, "at": clock()}
             return JSONResponse(ceremony.options, status=200)
 
         @router.post("/webauthn/begin")
@@ -1532,12 +1623,17 @@ def second_factor_router(
             marker = session.get(webauthn_key)
             if not isinstance(marker, dict):
                 return JSONResponse({"error": "no_ceremony_in_progress"}, status=400)
-            record = await _take_ceremony(session, marker)
-            if record is None or record.get("ceremony") != "register":
-                return JSONResponse({"error": "ceremony_expired"}, status=400)
-            if record.get("user") != user.id:
+            # The signed-in user is the precondition. A ceremony begun for
+            # somebody else matches no row, so it is refused by the statement
+            # rather than after the record has already been read back.
+            record, mismatched = await _take_ceremony(
+                session, marker, subject=user.id, kind=CHALLENGE_WEBAUTHN_REGISTER
+            )
+            if mismatched:
                 # Begun for somebody else; this session has changed hands since.
                 return JSONResponse({"error": "no_ceremony_in_progress"}, status=400)
+            if record is None:
+                return JSONResponse({"error": "ceremony_expired"}, status=400)
             # Read before the registration writes, for the same reason
             # `totp/confirm` reads before its own: only the *first* factor a
             # user has may stamp the session.
@@ -1617,21 +1713,32 @@ def second_factor_router(
             marker = session.get(webauthn_key)
             if not isinstance(marker, dict):
                 return JSONResponse({"error": "no_ceremony_in_progress"}, status=400)
-            record = await _take_ceremony(session, marker)
-            if record is None or record.get("ceremony") != "authenticate":
-                return JSONResponse({"error": "ceremony_expired"}, status=400)
-            subject = record.get("user")
-            if not isinstance(subject, str) or not subject:
-                return JSONResponse({"error": "no_ceremony_in_progress"}, status=400)
-            promoting = _pending_subject(session) == subject
+            # Who this session may be, derived exactly as `verify/begin` derived
+            # it when the challenge was bound -- a half-finished login first,
+            # then whoever is signed in. This is the *precondition*; the record
+            # never gets to say who the caller is.
+            pending = _pending_subject(session)
             principal = _principal(session)
-            if not promoting and (
-                principal is None or str(principal["sub"]) != subject
-            ):
-                # The challenge belongs to somebody this session is not.
+            subject = pending if pending is not None else (
+                None if principal is None else str(principal["sub"])
+            )
+            if subject is None:
+                await _forget_ceremony(session)
                 return JSONResponse({"error": "no_pending_second_factor"}, status=401)
+            promoting = pending is not None
+            # Before the consume, because the limiter keys on a subject already
+            # known from the session: a throttled caller must not be able to
+            # spend a challenge on their way to being refused.
             if not limiter.allow(subject):
                 return _throttled()
+            record, mismatched = await _take_ceremony(
+                session, marker, subject=subject, kind=CHALLENGE_WEBAUTHN_ASSERT
+            )
+            if mismatched:
+                # The challenge belongs to somebody this session is not.
+                return JSONResponse({"error": "no_pending_second_factor"}, status=401)
+            if record is None:
+                return JSONResponse({"error": "ceremony_expired"}, status=400)
             try:
                 result = await _secondfactor.verify_webauthn_assertion(
                     factors,
@@ -1709,6 +1816,7 @@ def second_factor_router(
             users=users,
             factors=factors,
             enrolments=enrolments,
+            challenges=challenges,
             enrolment_key=enrolment_key,
             webauthn_key=webauthn_key,
         )

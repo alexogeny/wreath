@@ -126,6 +126,35 @@ class CORSMiddleware:
         self._simple_headers = tuple(simple)
         self._allow_methods = frozenset(method.upper() for method in allow_methods)
 
+    def describe(self):
+        """The cross-origin headers this middleware negotiates.
+
+        Values depend on the request's `Origin`, so none is a `const`.
+        """
+        from .base import HeaderSpec, MiddlewareContract
+
+        return MiddlewareContract(
+            request_headers=(
+                HeaderSpec("Origin", description="The requesting origin, when cross-site."),
+            ),
+            response_headers=(
+                (
+                    None,
+                    HeaderSpec(
+                        "Access-Control-Allow-Origin",
+                        description="Echoed origin, or `*`, when the origin is allowed.",
+                    ),
+                ),
+                (
+                    None,
+                    HeaderSpec(
+                        "Vary",
+                        description="Includes `Origin` whenever the answer depends on it.",
+                    ),
+                ),
+            ),
+        )
+
     def _origin_header(self, origin: str) -> tuple[bytes, bytes] | None:
         if self._allow_all_origins:
             return (b"access-control-allow-origin", b"*")

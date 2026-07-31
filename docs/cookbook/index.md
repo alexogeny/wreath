@@ -19,6 +19,7 @@ There are two circles of readers here, and each gets its own set.
 - [Handle file uploads](recipes/file-uploads.md)
 - [Rate-limit an endpoint](recipes/rate-limiting.md)
 - [Serve JSON or MessagePack from one handler](recipes/negotiate-format.md)
+- [Accept a Protocol Buffers request body](recipes/accept-a-protobuf-body.md)
 
 ### Users, auth, and security
 

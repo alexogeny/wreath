@@ -43,3 +43,33 @@ telemetry.activate_cloudwatch_emf(projector, namespace="Trailhead")  # EMF JSON 
 `telemetry.activate_otel(...)` bridges wreath's spans to OpenTelemetry (OTLP), which in turn reaches Jaeger, Tempo, Honeycomb, and most vendors.
 
 Because every bridge reads the recorder's own metric definitions rather than a parallel set, switching or doubling up exporters never changes what the numbers *mean* — only where they land.
+
+## Trace context on outbound calls
+
+A trace that stops at the request boundary is a trace of one hop. When a request calls
+another service through `wreath.http_client` or `ServiceClient`, wreath puts the calling
+request's context on the wire as W3C `traceparent`, so the two services' spans join
+without an instrumentation package at either end.
+
+The parent is the request's **own server span**, not the remote parent it inherited: work
+a request causes is a child of *that request*. On the native path that span id is the
+recorder's real one; on the pure and bare-ASGI paths `server_span()` falls back to the
+incoming parent, which keeps the trace joined one level coarser.
+
+Three properties worth knowing:
+
+- **A header you wrote wins.** An explicit `traceparent` in `headers=` is a decision, and
+  the framework does not overrule it.
+- **Opt out per client, not globally.** An origin outside your trust boundary should not
+  receive your trace ids: `HTTPClient(..., trace=TracePolicy(propagate=False))`. This is
+  the same shape as `DestinationPolicy`, and for the same reason.
+- **`tracestate` rides only when asked** — `TracePolicy(tracestate=True)`. It crosses
+  trust boundaries carrying whatever an upstream put in it, so it is off by default.
+
+Nothing is bound until something exists that could send it: constructing an `HTTPClient`
+arms propagation, and an application with no outbound client pays one module-attribute
+read per request and never touches a `ContextVar`. An application that *does* have one
+pays a single `ContextVar` set per request — including for untraced requests, which bind
+`None` rather than skipping the bind, so a context reused across keep-alive requests can
+never carry the previous request's parent. A trace pointing at the wrong cause is worse
+than no trace.

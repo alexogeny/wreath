@@ -450,6 +450,61 @@ class IdempotencyMiddleware:
         #: leaves it claimed for the whole TTL. `release()` is the lever.
         self.conflicts = 0
 
+    def describe(self) -> Any:
+        """The key this middleware reads, and the 409 a concurrent repeat gets.
+
+        Scoped to the four methods `action` actually considers, so a generated
+        client does not send a key on a `GET` that would ignore it.
+        """
+        from ..openapi import ResponseSpec
+        from .base import HeaderSpec, MiddlewareContract
+
+        return MiddlewareContract(
+            request_headers=(
+                HeaderSpec(
+                    "Idempotency-Key",
+                    description=(
+                        "Client-chosen key making this request replay-safe. The "
+                        "first request holding it claims it; a repeat is answered "
+                        "from the store."
+                    ),
+                ),
+            ),
+            response_headers=(
+                (
+                    None,
+                    HeaderSpec(
+                        "Idempotency-Replayed",
+                        description="`true` when this response came from the store.",
+                    ),
+                ),
+                (
+                    None,
+                    HeaderSpec(
+                        "Idempotency-Ignored",
+                        description=(
+                            "Present when a key was sent but not acted on -- "
+                            "`unauthenticated` for an anonymous caller."
+                        ),
+                    ),
+                ),
+                (409, HeaderSpec("Retry-After", description="Whole seconds; always 1.")),
+            ),
+            responses=(
+                (
+                    409,
+                    ResponseSpec(
+                        description=(
+                            "A request with this Idempotency-Key is still running."
+                        ),
+                        media_type="application/problem+json",
+                    ),
+                ),
+            ),
+            methods=frozenset({"POST", "PUT", "PATCH", "DELETE"}),
+            behaviours=frozenset({"idempotency-key"}),
+        )
+
     def _key(self, request: Request) -> str | None:
         """The store key for this request, or None to leave it unguarded.
 

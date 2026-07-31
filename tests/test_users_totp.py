@@ -20,7 +20,9 @@ import pytest
 
 from wreath import Wreath
 from wreath._secondfactor import (
+    CHALLENGE_ENROLMENT,
     MAX_SKEW,
+    MemoryChallengeStore,
     SecondFactor,
     base32_to_secret,
     begin_totp_enrolment,
@@ -546,15 +548,11 @@ def _app(
     app.include_router(
         user_router(users, secret="u" * 32, second_factors=factors, clock=clock)
     )
-    if "enrolments" in options:
-        router = second_factor_router(
-            users, factors, issuer="Wreath", clock=clock, **options
-        )
-    else:
-        with pytest.warns(UserWarning, match="enrolments="):
-            router = second_factor_router(
-                users, factors, issuer="Wreath", clock=clock, **options
-            )
+    # No `pytest.warns` wrapper: building without `enrolments=` no longer warns,
+    # because it no longer degrades. See `test_users_webauthn.py`.
+    router = second_factor_router(
+        users, factors, issuer="Wreath", clock=clock, **options
+    )
     app.include_router(router)
 
     @app.get("/session")
@@ -834,8 +832,7 @@ async def test_listing_factors_renders_no_material() -> None:
 
 async def test_the_router_mounts_the_stage_one_routes() -> None:
     users, factors = InMemoryUserStore(), InMemorySecondFactorStore()
-    with pytest.warns(UserWarning, match="enrolments="):
-        router = second_factor_router(users, factors)
+    router = second_factor_router(users, factors)
     routes = {(route.path, method) for route in router.routes for method in route.methods}
     assert ("/auth/2fa/totp/begin", "POST") in routes
     assert ("/auth/2fa/totp/confirm", "POST") in routes
@@ -1271,12 +1268,15 @@ async def test_a_begun_enrolment_does_not_survive_a_login() -> None:
         assert "pending_totp_enrolment" not in session
 
 
-async def test_an_enrolment_in_the_session_itself_is_cleared_too() -> None:
-    """Without an `enrolments=` store the secret rides in the session.
+async def test_an_unconfirmed_secret_never_rides_in_the_session() -> None:
+    """The half of the old warning that was about privacy, now simply untrue.
 
-    There is no row to delete then, and the key is the whole of the state --
-    which is exactly the deployment that would be missed by a fix that only
-    knew how to delete rows.
+    This test used to assert the opposite -- that without an `enrolments=` store
+    the secret rides in the session, so a fix that only knew how to delete rows
+    would miss it. There is no such deployment any more: with no store named,
+    the enrolment goes to the `ChallengeStore` instead of the session, so the
+    cookie carries an opaque handle and never the secret. What the session holds
+    is a marker; what logout clears is the marker *and* the row behind it.
     """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     async with TestClient(_app(users, factors, clock)) as client:
@@ -1284,14 +1284,17 @@ async def test_an_enrolment_in_the_session_itself_is_cleared_too() -> None:
         cookie = _cookie(await _login(client))
         begun = await client.post("/auth/2fa/totp/begin", headers={"cookie": cookie})
         cookie = _cookie(begun) or cookie
+        secret = begun.json()["secret"]
         session = (await client.get("/session", headers={"cookie": cookie})).json()
-        assert session["pending_totp_enrolment"]["secret"] == begun.json()["secret"]
+        # A handle, not the secret -- and the secret is nowhere in the session.
+        assert isinstance(session["pending_totp_enrolment"]["id"], str)
+        assert secret not in str(session)
 
         gone = await client.post("/users/logout", headers={"cookie": cookie})
         cookie = _cookie(gone) or cookie
         session = (await client.get("/session", headers={"cookie": cookie})).json()
         assert "pending_totp_enrolment" not in session
-        assert begun.json()["secret"] not in str(session)
+        assert secret not in str(session)
 
 
 # --- a login that cannot check the factor the account has -------------------
@@ -1309,8 +1312,7 @@ def _unwired_app(
     app = Wreath()
     app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
     app.include_router(user_router(users, secret="u" * 32, clock=clock))
-    with pytest.warns(UserWarning, match="enrolments="):
-        router = second_factor_router(users, factors, issuer="Wreath", clock=clock)
+    router = second_factor_router(users, factors, issuer="Wreath", clock=clock)
     app.include_router(router)
 
     @app.get("/session")
@@ -1676,8 +1678,7 @@ async def test_a_malformed_principal_is_not_signed_in(
 
     app = Wreath()
     app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
-    with pytest.warns(UserWarning, match="enrolments="):
-        router = second_factor_router(users, factors, issuer="Wreath", clock=clock)
+    router = second_factor_router(users, factors, issuer="Wreath", clock=clock)
     app.include_router(router)
 
     @app.post("/plant")
@@ -1773,17 +1774,32 @@ def _app_with_planting(
     clock: _Clock,
     **options: Any,
 ) -> Wreath:
-    """`_app`, plus a route that writes an enrolment marker straight onto the session.
+    """`_app`, plus a route that plants a malformed enrolment.
 
-    Planting is the only way in: the router writes well-formed markers, so a
-    malformed one cannot come from its own `begin`. Without an `enrolments=` store
-    the marker *is* the record, which is what lets a bad `secret` be planted here.
+    Planting is the only way in: the router writes well-formed markers and
+    well-formed records, so neither can come from its own `begin`.
+
+    The record no longer rides in the session -- it lives in the `ChallengeStore`
+    -- so planting writes to both halves: the session gets a marker carrying the
+    handle and the `at` under test, and the store gets the record under that
+    handle. That split is the point of the change these tests now cover.
     """
-    app = _app(users, factors, clock, **options)
+    challenges = options.pop("challenges", None) or MemoryChallengeStore(clock=clock)
+    app = _app(users, factors, clock, challenges=challenges, **options)
 
     @app.post("/plant-enrolment")
-    async def plant(request: Any, marker: Annotated[dict[str, Any], Body()]):
-        request.state.session["pending_totp_enrolment"] = marker
+    async def plant(request: Any, planted: Annotated[dict[str, Any], Body()]):
+        handle = "planted-handle"
+        await challenges.put(
+            handle,
+            user_id="1",
+            kind=CHALLENGE_ENROLMENT,
+            payload=planted["record"],
+            ttl=600.0,
+        )
+        request.state.session["pending_totp_enrolment"] = {
+            "id": handle, "at": planted["at"],
+        }
         return {"status": "planted"}
 
     return app
@@ -1792,10 +1808,16 @@ def _app_with_planting(
 @pytest.mark.parametrize(
     ("marker", "expected"),
     [
-        ({"secret": "JBSWY3DPEHPK3PXP", "user": "1", "at": "recently"}, "enrolment_expired"),
-        ({"secret": 1234, "user": "1", "at": 1_700_000_000.0}, "no_enrolment_in_progress"),
         (
-            {"secret": "not-base32-!!", "user": "1", "at": 1_700_000_000.0},
+            {"at": "recently", "record": {"secret": "JBSWY3DPEHPK3PXP", "user": "1"}},
+            "enrolment_expired",
+        ),
+        (
+            {"at": 1_700_000_000.0, "record": {"secret": 1234, "user": "1"}},
+            "no_enrolment_in_progress",
+        ),
+        (
+            {"at": 1_700_000_000.0, "record": {"secret": "not-base32-!!", "user": "1"}},
             "no_enrolment_in_progress",
         ),
     ],

@@ -30,6 +30,8 @@ SOURCES = (
     "multipart.c",
     "json.c",
     "msgpack.c",
+    "geospatial.c",
+    "protobuf.c",
     "sse.c",
     "templates.c",
     "http.c",

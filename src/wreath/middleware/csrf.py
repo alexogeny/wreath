@@ -356,6 +356,39 @@ class CSRFMiddleware:
         # effect of an unrelated flag it never connected to CSRF.
         return self._allow_missing_origin
 
+    def describe(self) -> Any:
+        """The token header this middleware requires, and the 403 without it.
+
+        Named from `self._header_name`, so a deployment that configured a
+        different header documents the one it actually reads.
+        """
+        from ..openapi import ResponseSpec
+        from .base import HeaderSpec, MiddlewareContract
+
+        return MiddlewareContract(
+            request_headers=(
+                HeaderSpec(
+                    self._header_name,
+                    description=(
+                        "The CSRF token, resubmitted from the cookie. Read from "
+                        "this header only, never from the form body."
+                    ),
+                    required=True,
+                ),
+            ),
+            responses=(
+                (
+                    403,
+                    ResponseSpec(
+                        description="Missing, malformed, or cross-site CSRF token.",
+                        media_type="application/problem+json",
+                    ),
+                ),
+            ),
+            methods=frozenset({"POST", "PUT", "PATCH", "DELETE"}),
+            behaviours=frozenset({"csrf-token"}),
+        )
+
     def _mint_for(self, request: Request) -> str:
         """Mint a token for a request Fetch Metadata already answered.
 

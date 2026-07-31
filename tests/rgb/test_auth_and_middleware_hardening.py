@@ -149,11 +149,28 @@ class TestJwksRefreshDiscipline:
     async def test_a_providers_max_age_is_clamped(self):
         import json
 
+        from wreath._auth.jwks import _MAX_TTL, _ttl_from_headers
+
+        # The clamp itself, asserted where it happens. Reconstructing it as
+        # `_expires_at - _last_refresh` compares a *difference of two large
+        # monotonic floats* against an exact bound, and whether that lands above
+        # or below 86400.0 depends on the float spacing at the current uptime:
+        # around three days the spacing at that magnitude is ~3e-11, so the
+        # subtraction returns 86400.00000000003 for about half of all clock
+        # values and 86399.99999999997 for the rest. That failed on a box that
+        # had been up a while and passed on a fresh one, which reads as a
+        # regression in whatever was being edited at the time.
+        response = self._Response(200, b"{}", cache_control=b"max-age=31536000")
+        assert _ttl_from_headers(response, 600.0) == _MAX_TTL
+
+        # And that the cache actually uses the clamped value. A tolerance here
+        # because this one *is* a difference of two instants, and the property
+        # is "clamped to a day", not "clamped to the last bit of a day".
         body = json.dumps({"keys": [{"kty": "oct", "k": "AAAA", "kid": "k1"}]}).encode()
         client = self._Client([self._Response(200, body, cache_control=b"max-age=31536000")])
         cache = self._cache(client, ttl=600.0)
         await cache.prefetch()
-        assert cache._expires_at - cache._last_refresh <= 86400.0
+        assert cache._expires_at - cache._last_refresh == pytest.approx(_MAX_TTL)
 
 
 class TestFusedMiddlewareDetection:

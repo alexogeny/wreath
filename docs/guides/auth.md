@@ -144,6 +144,65 @@ never silently satisfied. The engine covers the Cedar core; extension types
 and fail loudly at parse time. A different evaluator can be swapped in through
 the same `CedarEngine` protocol the built-in engine satisfies.
 
+### Feature flags in a policy
+
+A flag and a policy answer one question between them — *may this caller do this
+now?* — and kept apart they drift, silently, in whichever direction nobody
+checks. Hand the authorizer a [flag provider](health-flags-versioning.md) and
+the flags arrive as context, so the rollout and the rule are one decision:
+
+```python
+engine = CedarPolicies("""
+    permit(principal in Role::"editor", action == Action::"Invoice::void", resource)
+    when { context.flags.contains("new_billing") };
+""")
+app.configure_auth(
+    BearerTokenBackend(verify),
+    CedarAuthorizer(engine=engine, flags=app.flags(new_billing="25%")),
+)
+```
+
+`context.flags` is a **set of the enabled flag names**, never a map of name to
+boolean. `context.flags["x"] == false` reads as "explicitly off" when it may
+equally mean "no such flag", and an authorization expression that cannot tell
+those apart eventually permits something because of a typo. Absent from the set
+is false, and deny is the safe direction. Use `.contains()`, `.containsAny([…])`
+and `.containsAll([…])`.
+
+Three properties are worth knowing before you write the first one:
+
+- **A flag can never permit on its own.** It is an input to the decision; Cedar
+  still makes it. There is no shape of flag configuration that grants access no
+  policy grants.
+- **The set is resolved once per request**, so a route behind several policies
+  cannot see two answers. That matters most for a percentage rollout: without
+  it, a `permit` and a `forbid` could disagree about whether the same caller is
+  inside the same 25%. The bucket is the one
+  [`flags_dependency`](health-flags-versioning.md) uses, so a rollout places a
+  principal identically in a policy and in a handler.
+- **A misspelled flag fails at startup**, naming it, when the provider can
+  enumerate its own names — which `FeatureFlags` can. Without that check the
+  name is simply absent from the set and the policy denies forever with nothing
+  to see. A provider that cannot list its vocabulary (an external service that
+  would need a network call) is warned about where the authorizer is built
+  instead, because refusing on a guess would break a working deployment.
+
+An application with no provider gets an empty set, so a flag-reading policy
+denies. That is deliberate rather than incidental: with no `flags` key in the
+context at all, `forbid(...) unless { context.flags.contains("bypass") }`
+evaluates to *allowed* — the forbid is skipped rather than left standing — which
+would silently disable every kill-switch written in that shape. The empty set
+denies in both the `when` and the `unless` form, so the authorizer always
+supplies it.
+
+Only the flags your policies actually name are resolved. Against a provider
+holding fifty flags, resolving all of them measured +21.7us per request for
+on/off values and +56.5us for percentages; resolving the three a policy names
+costs +1.5us and +3.9us. A policy set that reads flags in a shape whose names
+cannot be read off the source — `context.flags.isEmpty()`, or an argument
+computed at evaluation time — falls back to resolving everything, because a
+short list would change the answer rather than merely cost less.
+
 When a request is denied, Wreath still runs your global finalizers — so the
 `401` or `403` carries the same security headers and CORS treatment as a success
 — but it skips the route middleware and your handler entirely. The person who

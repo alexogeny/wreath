@@ -23,6 +23,7 @@ from time import time as _wall_clock
 from typing import Any, Literal, cast
 from urllib.parse import quote
 
+from . import telemetry as _telemetry
 from ._auth.backends import AuthenticationBackend, AuthorizationProvider
 from ._auth.models import Identity
 from ._auth.requirements import (
@@ -686,8 +687,12 @@ class Wreath:
             *self._job_runners.values(),
             *self._message_buses.values(),
             *self._webhook_hubs.values(),
-            *self._global_middleware,
-            *self._middleware,
+            # The middleware registries hold `(priority, order, middleware)`.
+            # Walking the tuples asked a tuple for `component()`, so every
+            # middleware-owned table -- the session, rate-limit and idempotency
+            # stores this docstring names -- was silently never collected.
+            *(item[2] for item in self._global_middleware),
+            *(item[2] for item in self._middleware),
         ]
         seen: dict[str, Any] = {}
         for holder in holders:
@@ -779,8 +784,10 @@ class Wreath:
             *self._job_runners.values(),
             *self._message_buses.values(),
             *self._webhook_hubs.values(),
-            *self._global_middleware,
-            *self._middleware,
+            # See `schema_components`: these registries hold tuples, and the
+            # middleware is the third element.
+            *(item[2] for item in self._global_middleware),
+            *(item[2] for item in self._middleware),
         ]
         for holder in holders:
             for candidate in (holder, *getattr(holder, "schema_owners", ())):
@@ -1781,6 +1788,11 @@ class Wreath:
         if global_hooks:
             request = Request(scope, receive, limits=self._limits, app=self)
             request._route_outcome = "ingress"
+            # Bind before the first `before` hook: a global middleware may itself
+            # call out (an auth introspection, a feature-flag fetch), and that
+            # call is caused by this request exactly as a handler's is.
+            if _telemetry.PROPAGATING:
+                _telemetry.bind_propagation(request)
             for before, is_sync, error_afters, success_afters in before_hooks:
                 try:
                     candidate = before(request) if is_sync else await before(request)
@@ -2093,6 +2105,12 @@ class Wreath:
                 scope["_wreath_flight"] = attribution
         if request is None:
             request = Request(scope, receive, path_params, self._limits, app=self)
+            # The no-global-middleware path: the branch above never ran, so this
+            # is where the request first exists and where it gets bound. When
+            # global hooks *did* run, `request` is not None and is already bound
+            # -- binding twice would be harmless but is one `set` nobody needs.
+            if _telemetry.PROPAGATING:
+                _telemetry.bind_propagation(request)
         else:
             request.path_params = path_params or {}
         # Forensic capture (native armed path only): flight_phase is non-None

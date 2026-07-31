@@ -360,6 +360,24 @@ is still serving correctly — failing readiness for it turns that into an outag
 built non-critical as well, so putting it in the wrong list still cannot drop
 traffic.
 
+## A query budget for a shift
+
+A pass is where an N+1 costs the most. Per chunk it is invisible; multiplied by
+the chunk count it is a six-hour outage — and it passes every test, because a
+test table fits in one chunk.
+
+```python
+ChunkedPass("recode_species", ..., query_budget=500)
+```
+
+The budget is per **shift**, not per chunk. An N+1 inside a hundred-row chunk is
+under any per-chunk ceiling a person would write; what does the damage is the
+product of queries per chunk and chunks per shift, and the shift is the scope
+where that product is visible.
+
+Omitted, a shift is observed rather than bounded. See
+[Finding the N+1 query](n-plus-one.md).
+
 ## When a chunk keeps failing
 
 Retries inside the shift come first: a lock wait that clears in fifty

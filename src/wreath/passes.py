@@ -67,6 +67,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import _nplusone
 from ._passes import driver as _driver
 from ._passes import duration as _duration
 from ._passes import gate as _gate
@@ -769,8 +770,9 @@ class ChunkedPass:
 
     __slots__ = (
         "_alias", "_chunk_retries", "_frontier", "_gate", "_ledger", "_model",
-        "_name", "_on_chunk_failure", "_pace", "_progress", "_rewrites",
-        "_schema", "_shift", "_table", "_tenant", "_units", "_work", "_workload",
+        "_name", "_on_chunk_failure", "_pace", "_progress", "_query_budget",
+        "_rewrites", "_schema", "_shift", "_table", "_tenant", "_units", "_work",
+        "_workload",
     )
 
     def __init__(
@@ -791,9 +793,13 @@ class ChunkedPass:
         schema: str = "wreath",
         workload: str = "write",
         rewrites: str | None = None,
+        query_budget: int | None = None,
     ) -> None:
         if not name or len(name) > 200:
             raise PassDeclarationError("a pass name must be 1..200 characters")
+        # A pass is where an N+1 costs the most: it multiplies by chunk count,
+        # and it passes every test on a table small enough to fit in one chunk.
+        _nplusone.check_budget(query_budget, f"pass {name!r}")
         if not isinstance(units, (Rows, Buckets)):
             raise PassDeclarationError(
                 f"units= must be a range source -- Rows(...) or Buckets(...); "
@@ -841,6 +847,7 @@ class ChunkedPass:
         self._on_chunk_failure = on_chunk_failure
         self._chunk_retries = chunk_retries
         self._workload = workload
+        self._query_budget = query_budget
         self._shift = _seconds(shift, what="shift")
         self._model, self._table, self._alias = _resolve_source(over)
 
@@ -1004,6 +1011,17 @@ class ChunkedPass:
     def chunk_retries(self) -> int:
         """Attempts a chunk gets before it becomes a hole. At least 1."""
         return self._chunk_retries
+
+    @property
+    def query_budget(self) -> int | None:
+        """Queries to one model allowed in a shift, or `None` to observe only.
+
+        Scoped to the shift rather than the chunk deliberately: an N+1 inside
+        one chunk of a hundred rows is invisible against a per-chunk ceiling
+        anyone would set, and it is the *product* -- queries per chunk times
+        chunks per shift -- that turns a backfill into a six-hour outage.
+        """
+        return self._query_budget
 
     @property
     def shift(self) -> float:

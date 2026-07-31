@@ -74,6 +74,83 @@ class MiddlewareRoute:
     authenticated: bool = False
 
 
+#: The closed vocabulary a contract may declare, and the only strings a
+#: generated client is allowed to act on. Closed on purpose: an unknown
+#: behaviour reaching a client is a typo that silently stops it sending an
+#: idempotency key, and that failure is invisible until a retry duplicates a
+#: write. `generate_openapi` refuses anything not named here.
+#:
+#: * `idempotency-key` -- send a key on the unsafe methods; reuse it on retry.
+#: * `retry-after` -- wait the header on a 429/503 rather than backing off blind.
+#: * `etag` -- retain the `ETag`, send `If-None-Match`, treat 304 as a hit.
+#: * `csrf-token` -- read the token where the middleware says and send it on
+#:   the unsafe methods.
+BEHAVIOURS: frozenset[str] = frozenset(
+    {"idempotency-key", "retry-after", "etag", "csrf-token"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class HeaderSpec:
+    """One header a middleware reads or emits.
+
+    Args:
+        name: The header name in its canonical casing, for the document.
+        description: What it is for, rendered into the operation.
+        required: True when the middleware refuses a request without it.
+        const: The exact value, when configuration fixes it. `RateLimit-Policy`
+            is `60;w=60` for a middleware built with `limit=60, window=60.0`,
+            and putting that in the document is what lets a test assert the
+            document and the runtime agree rather than merely resemble.
+    """
+
+    name: str
+    description: str = ""
+    required: bool = False
+    const: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MiddlewareContract:
+    """What a middleware adds to every operation it covers.
+
+    Returned by an optional `describe()`. The OpenAPI generator collects these
+    by *asking* every middleware on a route's tape, the same way
+    `Wreath.schema_components` asks for `component()` -- a hand-kept list would
+    be one more place to forget a new middleware, and forgetting is the defect
+    the mechanism exists to remove.
+
+    A contract describes what the middleware was *configured* to do, not what
+    its class can do in general, so the document and the runtime cannot
+    disagree about a limit or a policy string.
+
+    Args:
+        request_headers: Headers the middleware reads, as header parameters.
+        response_headers: `(status, header)` pairs. A status of `None` means
+            the operation's own success status, so `ETag` can be declared
+            without knowing whether the route answers 200 or 201.
+        responses: `(status, ResponseSpec | model)` pairs for the statuses this
+            middleware can answer on its own, in `RouteDefinition.responses`
+            shape so `ResponseSpec` is reused rather than duplicated.
+        methods: Restrict the contract to these uppercased methods; `None`
+            covers every method the route serves. An `Idempotency-Key` belongs
+            on the unsafe methods and nowhere else.
+        behaviours: Names from `BEHAVIOURS` that a generated client may act on.
+    """
+
+    request_headers: tuple[HeaderSpec, ...] = ()
+    response_headers: tuple[tuple[int | None, HeaderSpec], ...] = ()
+    responses: tuple[tuple[int, Any], ...] = ()
+    methods: frozenset[str] | None = None
+    behaviours: frozenset[str] = frozenset()
+
+
+class DescribesItself(Protocol):
+    """A middleware that declares what it adds to the operations it covers."""
+
+    def describe(self) -> MiddlewareContract: ...
+
+
 class LegacyMiddleware(Protocol):
     """The nested `(request, call_next)` middleware form.
 
@@ -128,6 +205,9 @@ class MiddlewareHooks:
         before_sync: The synchronous, fusible form of `before`.
         after_sync: The synchronous, non-awaiting form of `after`.
         after_inplace: Synchronous response mutation with no replacement value.
+        contract: What this middleware adds to the OpenAPI operations it covers.
+            `None` declares nothing, which is what an unannotated middleware
+            has always done.
     """
 
     before: BeforeHook | None = None
@@ -136,6 +216,11 @@ class MiddlewareHooks:
     before_sync: SyncBeforeHook | None = None
     after_sync: SyncAfterHook | None = None
     after_inplace: InPlaceAfterHook | None = None
+    contract: MiddlewareContract | None = None
+
+    def describe(self) -> MiddlewareContract | None:
+        """The declared contract, or None when this middleware declares nothing."""
+        return self.contract
 
 
 @dataclass(frozen=True, slots=True)

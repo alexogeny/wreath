@@ -103,6 +103,24 @@ except WorkflowDefinitionChanged:
 This is the one failure in the module that would otherwise be completely
 invisible, which is why it is loud.
 
+## A query budget for a step
+
+```python
+@checkout.step(compensate=release_hold, query_budget=50)
+async def reserve_stock(context): ...
+```
+
+How many times this step may hydrate one model before that is a defect.
+Crossing it raises from the query that did, so the traceback names the loop.
+
+It covers the step's **compensation** too, counted as its own scope. That is
+the half worth watching: an undo runs only when something has already gone
+wrong, so an N+1 in one is discovered during an incident or not at all.
+
+Omitted, the step is observed rather than bounded — see
+[Finding the N+1 query](n-plus-one.md) for why failing is opt-in everywhere
+outside a request.
+
 ## Choosing a store
 
 `InMemoryWorkflowStore` is for tests and single-process work. Be clear-eyed about

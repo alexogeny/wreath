@@ -40,6 +40,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 from wreath import Wreath
 from wreath._secondfactor import (
     InMemorySecondFactorStore,
+    MemoryChallengeStore,
     begin_webauthn_assertion,
     begin_webauthn_registration,
     confirm_webauthn_registration,
@@ -929,6 +930,34 @@ class _Clock:
         return self.now
 
 
+class _CountingChallengeStore(MemoryChallengeStore):
+    """A `MemoryChallengeStore` a test can count.
+
+    The router keeps ceremony state here rather than in the session store, so
+    "is the challenge parked / spent / gone" is a question about *this* object.
+    Counting is all these tests need, and doing it by wrapping `put`/`discard`
+    keeps the consuming statement -- the thing actually under test -- untouched.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.live: set[str] = set()
+
+    async def put(self, handle: str, **kwargs: Any) -> None:
+        await super().put(handle, **kwargs)
+        self.live.add(handle)
+
+    async def consume(self, handle: str, **kwargs: Any) -> dict[str, Any] | None:
+        payload = await super().consume(handle, **kwargs)
+        if payload is not None:
+            self.live.discard(handle)
+        return payload
+
+    async def discard(self, handle: str) -> None:
+        await super().discard(handle)
+        self.live.discard(handle)
+
+
 class _MemorySessionStore:
     """A `wreath.session_store.SessionStore` twin: load / save / delete."""
 
@@ -964,12 +993,10 @@ def _app(
     )
     options.setdefault("rp_id", RP_ID)
     options.setdefault("origins", (ORIGIN,))
-    if "enrolments" in options:
-        router = second_factor_router(users, factors, clock=clock, **options)
-    else:
-        with pytest.warns(UserWarning, match="enrolments="):
-            router = second_factor_router(users, factors, clock=clock, **options)
-    app.include_router(router)
+    # No `pytest.warns` wrapper any more: a router built without `enrolments=`
+    # no longer warns, because it no longer degrades. Ceremony state goes to a
+    # `ChallengeStore` whose default is a real one.
+    app.include_router(second_factor_router(users, factors, clock=clock, **options))
 
     @app.get("/session")
     async def show(request: Any) -> dict[str, Any]:
@@ -991,6 +1018,18 @@ def _app(
             "sub": user_id, "type": "User", "roles": []
         }
         return {"status": "adopted"}
+
+    @app.post("/forget")
+    async def forget(request: Any) -> dict[str, Any]:
+        """Drop the identity and nothing else.
+
+        Logout would clear the ceremony marker too, which is the whole state
+        under test here: an application that writes the session itself can leave
+        a marker behind with nobody to own it.
+        """
+        request.state.session.pop("principal", None)
+        request.state.session.pop("pending_second_factor", None)
+        return {"status": "forgotten"}
 
     return app
 
@@ -1104,8 +1143,10 @@ async def test_a_challenge_is_single_use() -> None:
     """Replaying the assertion that just worked must not work again."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
-    store = _MemorySessionStore()
-    async with TestClient(_app(users, factors, clock, enrolments=store)) as client:
+    challenges = _CountingChallengeStore()
+    async with TestClient(
+        _app(users, factors, clock, challenges=challenges)
+    ) as client:
         await _seed(users)
         cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
         begun, minted = await _http_assert(client, device, cookie, sign_count=1)
@@ -1115,7 +1156,7 @@ async def test_a_challenge_is_single_use() -> None:
             "/auth/2fa/webauthn/verify", json=body, headers={"cookie": cookie}
         )
         assert first.status == 200
-        assert store.rows == {}
+        assert challenges.live == set()
         replayed = await client.post(
             "/auth/2fa/webauthn/verify", json=body, headers={"cookie": cookie}
         )
@@ -1127,8 +1168,10 @@ async def test_a_failed_ceremony_spends_its_challenge_too() -> None:
     """Otherwise a recorded assertion has until the TTL to be posted again."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
-    store = _MemorySessionStore()
-    async with TestClient(_app(users, factors, clock, enrolments=store)) as client:
+    challenges = _CountingChallengeStore()
+    async with TestClient(
+        _app(users, factors, clock, challenges=challenges)
+    ) as client:
         await _seed(users)
         cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
         begun, minted = await _http_assert(
@@ -1141,22 +1184,24 @@ async def test_a_failed_ceremony_spends_its_challenge_too() -> None:
         )
         assert refused.status == 401
         assert refused.json() == {"error": "invalid_assertion"}
-        assert store.rows == {}
+        assert challenges.live == set()
 
 
 async def test_beginning_again_abandons_the_previous_challenge() -> None:
     """One live challenge per session, not one per reload of the page."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
-    store = _MemorySessionStore()
-    async with TestClient(_app(users, factors, clock, enrolments=store)) as client:
+    challenges = _CountingChallengeStore()
+    async with TestClient(
+        _app(users, factors, clock, challenges=challenges)
+    ) as client:
         await _seed(users)
         cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
         begun, minted = await _http_assert(client, device, cookie, sign_count=1)
         cookie = _cookie(begun) or cookie
         again, _ = await _http_assert(client, device, cookie, sign_count=1)
         cookie = _cookie(again) or cookie
-        assert len(store.rows) == 1
+        assert len(challenges.live) == 1
         stale = await client.post(
             "/auth/2fa/webauthn/verify",
             json={"id": b64url_encode(device.credential_id), **_wire(minted)},
@@ -1164,6 +1209,130 @@ async def test_beginning_again_abandons_the_previous_challenge() -> None:
         )
         assert stale.status == 401
         assert stale.json() == {"error": "invalid_assertion"}
+
+
+async def test_a_challenge_is_single_use_with_no_stores_configured_at_all() -> None:
+    """The property the deleted warning used to disclaim.
+
+    No `enrolments=`, no `challenges=`, and a cookie-backed `SessionMiddleware`
+    -- the exact deployment the old warning said was only as single-use as the
+    cookie. It is single-use now, because the challenge is not in the cookie:
+    the default `ChallengeStore` holds it and the consume spends it.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    device = _Authenticator()
+    async with TestClient(_app(users, factors, clock)) as client:
+        await _seed(users)
+        cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
+        begun, minted = await _http_assert(client, device, cookie, sign_count=1)
+        cookie = _cookie(begun) or cookie
+        body = {"id": b64url_encode(device.credential_id), **_wire(minted)}
+        first = await client.post(
+            "/auth/2fa/webauthn/verify", json=body, headers={"cookie": cookie}
+        )
+        assert first.status == 200
+        # The same cookie, replayed. It still carries the marker; what it cannot
+        # carry is the challenge, which was spent by the statement above.
+        replayed = await client.post(
+            "/auth/2fa/webauthn/verify", json=body, headers={"cookie": cookie}
+        )
+        assert replayed.status == 400
+        assert replayed.json() == {"error": "ceremony_expired"}
+
+
+async def test_a_registration_challenge_cannot_answer_an_assertion() -> None:
+    """Cross-ceremony confusion, refused by the consuming statement itself.
+
+    The two ceremonies are different *kinds* in the store, so a registration
+    challenge posted to `/verify` matches no row -- rather than being read back
+    and rejected by a check afterwards, which is the shape that spends the row
+    on the way to refusing it.
+
+    It answers `ceremony_expired` and not the binding refusal: the row belongs
+    to the right *user*, it is simply the wrong ceremony, and telling those two
+    apart is what `peek` is for.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    device = _Authenticator()
+    async with TestClient(_app(users, factors, clock)) as client:
+        await _seed(users)
+        cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
+        # Begin a *registration*, then try to finish it as an *assertion*.
+        begun, _, _ = await _http_register(client, device, cookie)
+        cookie = _cookie(begun) or cookie
+        challenge = b64url_decode(begun.json()["challenge"])
+        minted = device.assertion(challenge, sign_count=1)
+        confused = await client.post(
+            "/auth/2fa/webauthn/verify",
+            json={"id": b64url_encode(device.credential_id), **_wire(minted)},
+            headers={"cookie": cookie},
+        )
+        assert confused.status == 400
+        assert confused.json() == {"error": "ceremony_expired"}
+
+
+async def test_a_verify_with_no_identity_on_the_session_is_refused() -> None:
+    """The subject is a precondition, so there has to be one.
+
+    A session carrying a ceremony marker but neither a pending login nor a
+    principal has nobody whose challenge this could be. It is refused before the
+    store is touched -- there is no candidate to match a row against.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    device = _Authenticator()
+    async with TestClient(_app(users, factors, clock)) as client:
+        await _seed(users)
+        cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
+        begun, minted = await _http_assert(client, device, cookie, sign_count=1)
+        cookie = _cookie(begun) or cookie
+        # Strip the identity without going through logout, which would also
+        # clear the marker: an application that writes the session itself can
+        # leave exactly this shape behind.
+        stripped = await client.post("/forget", headers={"cookie": cookie})
+        cookie = _cookie(stripped) or cookie
+        refused = await client.post(
+            "/auth/2fa/webauthn/verify",
+            json={"id": b64url_encode(device.credential_id), **_wire(minted)},
+            headers={"cookie": cookie},
+        )
+        assert refused.status == 401
+        assert refused.json() == {"error": "no_pending_second_factor"}
+
+
+async def test_a_throttled_caller_cannot_spend_a_challenge() -> None:
+    """The ordering hazard: the limiter keys on a subject known from the session
+    without reading the record, so it must run *before* the consume. Consuming
+    first would let a rate-limited attacker burn the ceremony of the account
+    they are hammering on their way to being refused."""
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    device = _Authenticator()
+    challenges = _CountingChallengeStore()
+    async with TestClient(
+        _app(users, factors, clock, challenges=challenges, max_verify_attempts=1)
+    ) as client:
+        await _seed(users)
+        cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
+        begun, minted = await _http_assert(client, device, cookie, sign_count=1)
+        cookie = _cookie(begun) or cookie
+        bad = {"id": b64url_encode(device.credential_id), **_wire(minted)}
+        bad["signature"] = b64url_encode(b"\x00" * 64)
+
+        first = await client.post(
+            "/auth/2fa/webauthn/verify", json=bad, headers={"cookie": cookie}
+        )
+        assert first.status == 401
+        # Now throttled. Begin a fresh ceremony and confirm the refusal does not
+        # cost it: the challenge is still live afterwards.
+        begun, minted = await _http_assert(client, device, cookie, sign_count=2)
+        cookie = _cookie(begun) or cookie
+        assert len(challenges.live) == 1
+        throttled = await client.post(
+            "/auth/2fa/webauthn/verify",
+            json={"id": b64url_encode(device.credential_id), **_wire(minted)},
+            headers={"cookie": cookie},
+        )
+        assert throttled.status == 429
+        assert len(challenges.live) == 1, "a throttled attempt spent the challenge"
 
 
 async def test_a_challenge_expires() -> None:
@@ -1188,8 +1357,10 @@ async def test_a_challenge_is_bound_to_the_session_that_began_it() -> None:
     """Another browser holding the same assertion has no challenge to spend."""
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
-    store = _MemorySessionStore()
-    async with TestClient(_app(users, factors, clock, enrolments=store)) as client:
+    challenges = _CountingChallengeStore()
+    async with TestClient(
+        _app(users, factors, clock, challenges=challenges)
+    ) as client:
         await _seed(users)
         cookie = await _enrolled(client, device, _cookie(await _http_login(client)))
         begun, minted = await _http_assert(client, device, cookie, sign_count=1)
@@ -1216,18 +1387,20 @@ async def test_a_begun_registration_does_not_survive_a_logout() -> None:
     """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
-    store = _MemorySessionStore()
-    async with TestClient(_app(users, factors, clock, enrolments=store)) as client:
+    challenges = _CountingChallengeStore()
+    async with TestClient(
+        _app(users, factors, clock, challenges=challenges)
+    ) as client:
         await _seed(users)
         bob = await _seed(users, "bob@example.test")
         cookie = _cookie(await _http_login(client))
         begun, _, minted = await _http_register(client, device, cookie)
         cookie = _cookie(begun) or cookie
-        assert len(store.rows) == 1
+        assert len(challenges.live) == 1
 
         gone = await client.post("/users/logout", headers={"cookie": cookie})
         cookie = _cookie(gone) or cookie
-        assert store.rows == {}
+        assert challenges.live == set()
         session = (await client.get("/session", headers={"cookie": cookie})).json()
         assert "pending_webauthn" not in session
 
@@ -1251,8 +1424,10 @@ async def test_a_registration_is_bound_to_the_user_who_began_it() -> None:
     """
     users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
     device = _Authenticator()
-    store = _MemorySessionStore()
-    async with TestClient(_app(users, factors, clock, enrolments=store)) as client:
+    challenges = _CountingChallengeStore()
+    async with TestClient(
+        _app(users, factors, clock, challenges=challenges)
+    ) as client:
         await _seed(users)
         bob = await _seed(users, "bob@example.test")
         cookie = _cookie(await _http_login(client))
@@ -1263,14 +1438,14 @@ async def test_a_registration_is_bound_to_the_user_who_began_it() -> None:
         cookie = _cookie(adopted) or cookie
         # The challenge is still there and still reachable from this session:
         # what refuses the confirmation is who it was begun for, nothing else.
-        assert len(store.rows) == 1
+        assert len(challenges.live) == 1
         stolen = await client.post(
             "/auth/2fa/webauthn/confirm", json=_wire(minted), headers={"cookie": cookie}
         )
         assert stolen.status == 400
         assert stolen.json() == {"error": "no_ceremony_in_progress"}
         assert await factors.credentials(bob.id) == []
-        assert store.rows == {}
+        assert challenges.live == set()
 
 
 async def test_a_pending_login_cannot_finish_somebody_elses_ceremony() -> None:
@@ -1494,9 +1669,7 @@ async def test_without_an_rp_id_there_are_no_passkey_routes() -> None:
     app = Wreath()
     app.add_global_middleware(SessionMiddleware(secret="s" * 32, secure=False))
     app.include_router(user_router(users, secret="u" * 32, clock=clock))
-    with pytest.warns(UserWarning, match="enrolments="):
-        router = second_factor_router(users, factors, clock=clock)
-    app.include_router(router)
+    app.include_router(second_factor_router(users, factors, clock=clock))
     async with TestClient(app) as client:
         assert (await client.post("/auth/2fa/webauthn/begin")).status == 404
 
@@ -1624,9 +1797,18 @@ async def test_a_localhost_router_accepts_a_ported_ceremony_with_no_origins_name
 # --- where the second-factor state lives, said out loud at startup ----------
 
 
-def test_a_router_with_nowhere_safe_to_park_its_state_says_so() -> None:
-    """Silence at startup means a deployment discovers this by being wrong."""
-    with pytest.warns(UserWarning, match="enrolments="):
+def test_a_router_built_without_a_store_warns_about_nothing() -> None:
+    """The warning this replaced could only name *half* its condition.
+
+    It fired on `enrolments=None` and then had to say "if your SessionMiddleware
+    also has no store=, that means a cookie", because a router built before any
+    application exists cannot see the middleware. A warning nobody can act on
+    with certainty is one people learn to ignore. There is nothing to warn about
+    now: ceremony state goes to a `ChallengeStore` whose default is a real one,
+    so the property holds rather than being announced as absent.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         second_factor_router(InMemoryUserStore(), InMemorySecondFactorStore())
 
 

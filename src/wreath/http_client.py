@@ -46,6 +46,7 @@ from typing import Any, cast
 from urllib.parse import SplitResult, urljoin, urlsplit
 
 from . import _client_codec
+from . import telemetry as _telemetry
 from ._native import _client as _native_client
 from time import monotonic as _monotonic
 from time import monotonic_ns as _monotonic_ns
@@ -471,6 +472,33 @@ class RedirectPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class TracePolicy:
+    """Whether this client carries the calling request's trace context out.
+
+    Propagation is on by default: a `traceparent` is how a downstream service's
+    spans join this one's trace, and the W3C format exists to be sent. It is a
+    *policy* rather than a constant for the same reason `DestinationPolicy` is
+    -- an origin is not automatically inside your trust boundary, and a trace id
+    is a correlation handle you may not want to hand a third party. Turn it off
+    per client:
+
+    ```python
+    app.http_client("partner", base_url="https://partner.example",
+                    trace=TracePolicy(propagate=False))
+    ```
+
+    `tracestate` is off by default and separate, because it is vendor key-value
+    data rather than an identifier: it is larger, it is not always yours to
+    forward, and forwarding it is a deliberate choice. It mirrors
+    `wreath.telemetry.PropagationConfig.propagate_tracestate` at the client,
+    which is where the destination is known.
+    """
+
+    propagate: bool = True
+    tracestate: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class DestinationPolicy:
     """Where this client is permitted to connect. The SSRF guard.
 
@@ -689,6 +717,7 @@ _DEFAULT_TIMEOUT = ClientTimeout()
 _DEFAULT_RETRY = RetryPolicy()
 _DEFAULT_REDIRECT = RedirectPolicy()
 _DEFAULT_DESTINATION = DestinationPolicy()
+_DEFAULT_TRACE = TracePolicy()
 
 
 def _host_matches(host: str, pattern: str) -> bool:
@@ -757,6 +786,7 @@ class HTTPClient:
         "_ssl_context",
         "_started",
         "_timeout",
+        "_trace",
         "_waiters",
     )
 
@@ -771,6 +801,7 @@ class HTTPClient:
         redirect: RedirectPolicy = _DEFAULT_REDIRECT,
         destination: DestinationPolicy = _DEFAULT_DESTINATION,
         rate: RatePolicy = _DEFAULT_RATE,
+        trace: TracePolicy = _DEFAULT_TRACE,
     ) -> None:
         if not name:
             raise ValueError("HTTP client name cannot be empty")
@@ -790,6 +821,11 @@ class HTTPClient:
         self._redirect = redirect
         self._destination = destination
         self._rate = rate
+        self._trace = trace
+        # Latches propagation for the whole process: until a client exists there
+        # is nothing to propagate *to*, and the request path must not pay a
+        # `ContextVar.set` to discover that. Same shape as `_nplusone.WATCHING`.
+        _telemetry.propagates()
         # One shared bucket per client (single key); reuses the native TokenBucket.
         self._rate_bucket = (
             _TokenBucket(capacity=rate.capacity, rate=rate.rate, max_entries=1)
@@ -1036,6 +1072,32 @@ class HTTPClient:
         except TimeoutError as error:
             raise RequestTimeout("outbound request exceeded total timeout") from error
 
+    def _propagated(
+        self, headers: tuple[tuple[bytes, bytes], ...]
+    ) -> tuple[tuple[bytes, bytes], ...]:
+        """Add this request's trace context, unless there is a reason not to.
+
+        Three reasons not to, in the order they are cheapest to check: this
+        client was told not to; nothing in the process ever binds a context; or
+        the caller wrote a `traceparent` of their own, which is an explicit
+        decision the framework does not overrule.
+
+        Applied once, before the redirect loop, so every hop of one outbound
+        call carries the same context -- a redirect is the same causal step.
+        """
+        if not self._trace.propagate or not _telemetry.PROPAGATING:
+            return headers
+        context = _telemetry.outbound_context.get(None)
+        if context is None:
+            return headers
+        if any(name.lower() == b"traceparent" for name, _ in headers):
+            return headers
+        parent, state = context
+        headers = (*headers, (b"traceparent", parent.encode("ascii")))
+        if self._trace.tracestate and state:
+            headers = (*headers, (b"tracestate", state.encode("ascii")))
+        return headers
+
     async def _request_flow(
         self,
         method: str,
@@ -1053,6 +1115,7 @@ class HTTPClient:
                 *request_headers,
                 (b"idempotency-key", idempotency_key.encode("ascii")),
             )
+        request_headers = self._propagated(request_headers)
         current_target = self._request_target(target).decode("ascii")
         method_upper = method.upper()
         payload = bytes(body)

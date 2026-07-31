@@ -226,6 +226,12 @@ with nothing to check, one level up.
   offered and quietly not installed. The enforcement *inside* your dependency
   is still mutated; it is the declaration that is out of reach. If you want
   your route declarations covered, build them in a function.
+
+    This applies to every declaration, not only routes: `router =
+    crud_router(Model, …, authorize={…})` and `@mcp.tool(action=…)` written at
+    module level are in exactly the same position, and their controls are not
+    offered. Inside a `create_app()`, a `mount()` or a fixture, they are — which
+    is where the camera-trap example declares both of its generated routers.
 - **A mutation inside a factory nothing calls again.** Same mechanism, other
   end: a factory that ran once at import and was never called again keeps its
   original behaviour, and that mutant will survive for a reason that has
