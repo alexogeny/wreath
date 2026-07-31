@@ -68,14 +68,19 @@ async def test_cedar_adapter_is_final_authorization_after_coarse_route_pruning()
 
     assert allowed[0]["status"] == 200
     assert denied[0]["status"] == 403
-    # The context mapper here returns only `method`; `flags` is the authorizer's
-    # own key and is supplied whatever the mapper does, empty when no provider is
-    # configured. That is deliberate rather than incidental: an *absent* `flags`
-    # makes `forbid ... unless { context.flags.contains(...) }` evaluate to
-    # allowed -- the forbid is skipped rather than standing -- so a custom mapper
-    # that omitted the key would silently disable every flag kill-switch in the
-    # policy set. `tests/test_cedar_flags.py` pins that engine behaviour.
-    assert engine.calls[0]["context"] == {"method": "GET", "flags": frozenset()}
+    # The context mapper here returns only `method`; `flags` and `regions` are
+    # the authorizer's own keys and are supplied whatever the mapper does, empty
+    # when no provider is configured. That is deliberate rather than incidental:
+    # an *absent* set makes `forbid ... unless { context.<set>.contains(...) }`
+    # evaluate to allowed -- the forbid is skipped rather than standing -- so a
+    # custom mapper that omitted either key would silently disable every
+    # kill-switch written in that shape. `tests/test_cedar_flags.py` and
+    # `tests/test_cedar_geofence.py` pin that engine behaviour for each.
+    assert engine.calls[0]["context"] == {
+        "method": "GET",
+        "flags": frozenset(),
+        "regions": frozenset(),
+    }
 
 
 # --- policy identity, delegated from the engine -------------------------------
