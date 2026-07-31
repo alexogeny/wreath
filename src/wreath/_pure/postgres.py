@@ -737,7 +737,18 @@ def _encode_text(value: object, oid: int) -> bytes | None:
     if oid in {_FLOAT4, _FLOAT8}:
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             raise TypeError("float codec requires int or float")
-        return repr(float(value)).encode("ascii")
+        if isinstance(value, int):
+            # An int goes out as its own digits, which is what the native codec
+            # sends, and the server does the conversion. Rounding to a float here
+            # first was lossy in two ways that differential testing found: 2**53+1
+            # went on the wire as 9007199254740992, silently a different number
+            # before PostgreSQL ever saw it, and anything past the float range
+            # (10**400) raised OverflowError on this path while the native build
+            # sent the digits and let the server rule on them. Text format exists
+            # to hand the server a literal; narrowing it client-side is the one
+            # thing it must not do.
+            return str(value).encode("ascii")
+        return repr(value).encode("ascii")
     if oid in {_TEXT, _VARCHAR}:
         if not isinstance(value, str):
             raise TypeError("text codec requires str")
@@ -769,7 +780,12 @@ def _encode_text(value: object, oid: int) -> bytes | None:
         return _encode_vector_text(value)
     if extension_kind == _EXT_KIND_SPARSEVEC:
         return _encode_sparsevec_text(value)
-    return str(value).encode("utf-8")
+    # ASCII, matching the native codec, for every type without a branch of its own
+    # -- `time` among them. UTF-8 here let a non-ASCII string through as a literal
+    # for a column that cannot hold one, so the native build refused it up front
+    # and this one sent it and let the server raise. `text`/`varchar` are UTF-8
+    # above, where the encoding is the point rather than an accident.
+    return str(value).encode("ascii")
 
 
 def _encode_binary(value: object, oid: int) -> bytes | None:
@@ -800,11 +816,24 @@ def _encode_binary(value: object, oid: int) -> bytes | None:
     if oid == _FLOAT4:
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             raise TypeError("float4 codec requires int or float")
-        return struct.pack("!f", value)
+        try:
+            return struct.pack("!f", value)
+        except struct.error:
+            # An int with more magnitude than a C double can hold. `struct` calls
+            # that `struct.error: required argument is not a float`, which is both
+            # the wrong diagnosis and the wrong type -- it inherits from Exception,
+            # not OverflowError, so a caller handling the native codec's
+            # OverflowError did not catch this one. The int codecs above already
+            # raise OverflowError for their own ranges; this makes the float codecs
+            # agree with them and with native.
+            raise OverflowError("int too large to convert to float") from None
     if oid == _FLOAT8:
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             raise TypeError("float8 codec requires int or float")
-        return struct.pack("!d", value)
+        try:
+            return struct.pack("!d", value)
+        except struct.error:
+            raise OverflowError("int too large to convert to float") from None
     if oid in {_TEXT, _VARCHAR}:
         if not isinstance(value, str):
             raise TypeError("text codec requires str")
