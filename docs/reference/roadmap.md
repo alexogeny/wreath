@@ -23,5 +23,15 @@ to end and reads the captured headers, query parameters, and bounded bodies back
 out of the file. `wreath.orm.TenantContext` is not on this list either; a tenant
 session binds its schema and role transaction-locally and executes.
 
+Feature flags as Cedar context is **not** on this list either: a
+`CedarAuthorizer(flags=...)` puts the caller's enabled flags in `context.flags`
+as a set of names, resolved once per request, with a misspelled name refused at
+startup — see [Auth](../guides/auth.md#feature-flags-in-a-policy). It shares one
+known limit with the `@second_factor` note above, and for the same reason: the
+permission manifest tags flag state into its `ETag`, so a conditional request
+sees a flip, but no stream event announces one, so a manifest can read as
+permitted and then answer 403. That is the optimistic-chrome property the
+manifest already documents, in a second place rather than a new kind.
+
 When one of these ships, its row leaves this page and its reference page tells
 the full story.
