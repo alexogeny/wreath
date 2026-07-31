@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import pytest
 
-from wreath import telemetry
+from wreath import Wreath, telemetry
 from wreath.http_client import HTTPClient, TracePolicy
+from wreath.middleware.base import PipelineHooks
+from wreath.testing import TestClient
 
 PARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 
@@ -125,15 +127,20 @@ def test_binding_carries_tracestate_when_the_request_had_one(unpropagated):
 
 
 def test_an_unpropagated_request_binds_nothing(unpropagated):
-    """No incoming traceparent is the common case, and must cost nothing."""
+    """No incoming traceparent is the common case: nothing to send.
+
+    It binds *None* rather than skipping the bind, so a reused context cannot
+    carry the previous request's parent -- see the inheritance test below.
+    """
     telemetry.propagates()
-    assert telemetry.bind_propagation(_Traced(parent=None)) is None
+    telemetry.bind_propagation(_Traced(parent=None))
     assert telemetry.outbound_context.get(None) is None
 
 
 def test_a_malformed_traceparent_binds_nothing(unpropagated):
     telemetry.propagates()
-    assert telemetry.bind_propagation(_Traced(parent="not-a-traceparent")) is None
+    telemetry.bind_propagation(_Traced(parent="not-a-traceparent"))
+    assert telemetry.outbound_context.get(None) is None
 
 
 def test_binding_is_inert_until_a_client_exists(unpropagated):
@@ -145,3 +152,113 @@ def test_binding_is_inert_until_a_client_exists(unpropagated):
 
     telemetry.bind_propagation(_Request())
     assert telemetry.outbound_context.get(None) is None
+
+
+def test_an_unpropagated_request_does_not_inherit_the_previous_one(unpropagated):
+    """A context reused across requests must not leak the last one's parent.
+
+    Keep-alive can hand two requests the same context. If the second binds
+    nothing because it carries no traceparent, it must still not send outbound
+    calls stamped with the *first* request's trace -- that is a misattribution,
+    which is worse than no trace at all.
+    """
+    telemetry.propagates()
+    telemetry.bind_propagation(_Traced())
+    assert telemetry.outbound_context.get(None) is not None
+    telemetry.bind_propagation(_Traced(parent=None))
+    assert telemetry.outbound_context.get(None) is None
+
+
+# --- stage 1: the pipeline binding, which makes all of the above live --------
+
+
+async def test_a_handler_inherits_the_requests_context_end_to_end(unpropagated):
+    """The pipeline binding. Without it every test above is inert in a real app.
+
+    Drives the whole chain in one assertion: an incoming `traceparent` reaches
+    the request pipeline, the pipeline binds it, and the client the handler
+    calls out with puts it on the wire.
+    """
+    app = Wreath()
+    outbound = _client()  # constructing it arms PROPAGATING
+
+    @app.get("/call")
+    async def call(request):
+        return {"sent": _sent_headers(outbound).get(b"traceparent", b"").decode()}
+
+    async with TestClient(app) as client:
+        response = await client.get("/call", headers={"traceparent": PARENT})
+
+    assert response.json()["sent"] == PARENT
+
+
+async def test_an_untraced_request_leaves_the_handler_nothing_to_send(unpropagated):
+    """The common case: no upstream tracer, so nothing is invented."""
+    app = Wreath()
+    outbound = _client()
+
+    @app.get("/call")
+    async def call(request):
+        return {"sent": _sent_headers(outbound).get(b"traceparent", b"").decode()}
+
+    async with TestClient(app) as client:
+        response = await client.get("/call")
+
+    assert response.json()["sent"] == ""
+
+
+async def test_an_app_with_no_outbound_client_never_binds(unpropagated, monkeypatch):
+    """The guide claims such an app pays nothing. This is that claim, asserted.
+
+    `PROPAGATING` is a *cost* guard -- `bind_propagation` would no-op anyway --
+    so nothing about the response can distinguish it. What is observable is the
+    call itself, and the claim is about the call.
+    """
+    calls: list[object] = []
+    monkeypatch.setattr(telemetry, "bind_propagation", lambda request: calls.append(request))
+
+    # Both binding sites: the request is built in one place when global hooks
+    # exist and another when they do not, so an app without middleware exercises
+    # only one of the two guards.
+    async def passthrough(request):
+        return None
+
+    for hooks in (False, True):
+        app = Wreath()
+        if hooks:
+            app.add_global_middleware(PipelineHooks(before=passthrough))
+
+        @app.get("/quiet")
+        async def quiet(request):
+            return {}
+
+        async with TestClient(app) as client:
+            assert (await client.get("/quiet")).status == 200
+
+    assert calls == []
+
+
+async def test_a_global_middleware_call_carries_the_context(unpropagated):
+    """Binding happens before the first `before` hook, not after it.
+
+    A global middleware that calls out -- an auth introspection, a flag fetch --
+    is doing so because of this request, so its call belongs in the same trace.
+    """
+    seen: list[str] = []
+    app = Wreath()
+    outbound = _client()
+
+    async def look(request):
+        seen.append(_sent_headers(outbound).get(b"traceparent", b"").decode())
+        return None
+
+    app.add_global_middleware(PipelineHooks(before=look))
+
+    @app.get("/call")
+    async def call(request):
+        return {}
+
+    async with TestClient(app) as client:
+        await client.get("/call", headers={"traceparent": PARENT})
+
+    assert seen == [PARENT]

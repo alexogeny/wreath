@@ -47,6 +47,7 @@ from pathlib import Path
 from types import CodeType
 from typing import Any
 
+from .. import telemetry as _telemetry
 from .measure import scope as _scope
 from .native_lint import repo_root
 from .sample_app import SCENARIOS
@@ -248,6 +249,15 @@ async def _drive(app: Any, method: str, path: str, headers: dict[str, str]) -> t
     # ingress with work the app never does.
     scope = _scope(method, path, headers)
     tracer = _Tracer(_handler_codes(app))
+    # `telemetry.PROPAGATING` is a process-global latch set by *any*
+    # `HTTPClient.__init__` and never cleared, so under `pytest -n` an unrelated
+    # test that built a client would arm outbound trace propagation and add a
+    # crossing to a scenario whose app has no client at all. The measurement has
+    # to describe the app in front of it, not the process it happens to run in,
+    # so the latch is set from the app and restored afterwards.
+    armed = getattr(app, "_http_clients", None)
+    previous = _telemetry.PROPAGATING
+    _telemetry.PROPAGATING = bool(armed)
     sys.setprofile(tracer)
     tracer.enabled = True
     try:
@@ -255,6 +265,7 @@ async def _drive(app: Any, method: str, path: str, headers: dict[str, str]) -> t
     finally:
         tracer.enabled = False
         sys.setprofile(None)
+        _telemetry.PROPAGATING = previous
     return tracer.trace, status
 
 
