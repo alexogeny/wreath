@@ -83,6 +83,7 @@ async def test_nested_router_flattens_prefixes_and_inherits_metadata() -> None:
     definition = app._routes[0]
     assert definition.path == "/v1/admin/users/{user_id}"
     assert definition.tags == ("v1", "admin", "users")
+    assert definition.requirement.authenticated is True
 
 
 @pytest.mark.asyncio
@@ -125,3 +126,38 @@ def test_router_snapshots_included_routes() -> None:
         return "second"
 
     assert [route.path for route in parent.routes] == ["/parent/child/first"]
+
+
+def test_router_preserves_response_and_security_metadata() -> None:
+    router = Router()
+
+    @router.post(
+        "/items",
+        status_code=201,
+        responses={409: dict},
+        security={"bearer": ("items:write",)},
+    )
+    async def create(request: Any) -> dict:
+        return {}
+
+    definition = router.routes[0]
+    assert definition.status_code == 201
+    assert definition.responses == ((409, dict),)
+    assert definition.security == (("bearer", ("items:write",)),)
+
+
+def test_router_permission_requirement_demands_an_identity() -> None:
+    router = Router(permissions=("items:read",))
+
+    @router.get("/items")
+    async def list_items(request: Any) -> list[object]:
+        return []
+
+    assert router.routes[0].requirement.authenticated is True
+
+
+@pytest.mark.parametrize("status", [99, 600])
+def test_router_refuses_an_invalid_status_code(status: int) -> None:
+    router = Router()
+    with pytest.raises(ValueError, match="status_code"):
+        router.get("/items", status_code=status)

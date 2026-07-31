@@ -23,7 +23,7 @@ ordinary Python default — `limit: Annotated[int, Query(...)] = 20`, never
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -104,6 +104,15 @@ class RouteDefinition:
     #: and OpenAPI layers derive a deterministic id from method and path.
     operation_id: str | None = None
     response_only: bool = False
+    status_code: int = 200
+    response_description: str = "Successful response"
+    response_media_type: str = "application/json"
+    responses: tuple[tuple[int, Any], ...] = ()
+    deprecated: bool = False
+    include_in_schema: bool = True
+    security: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    name: str | None = None
+    host: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +255,15 @@ class Router:
         permissions: Iterable[str] = (),
         operation_id: str | None = None,
         response_only: bool = False,
+        status_code: int = 200,
+        response_description: str = "Successful response",
+        response_media_type: str = "application/json",
+        responses: Mapping[int, Any] | None = None,
+        deprecated: bool = False,
+        include_in_schema: bool = True,
+        security: Mapping[str, Iterable[str]] | None = None,
+        name: str | None = None,
+        host: str | None = None,
     ) -> Callable[[Handler], Handler]:
         """Register a handler for `path` under one or more methods.
 
@@ -303,6 +321,12 @@ class Router:
         requirement = merge_requirements(
             self._requirement, _permission_requirement(permissions)
         )
+        if not 100 <= status_code <= 599:
+            raise ValueError("status_code must be between 100 and 599")
+        response_specs = tuple((int(code), spec) for code, spec in (responses or {}).items())
+        route_security = tuple(
+            (name, tuple(scopes)) for name, scopes in (security or {}).items()
+        )
 
         def register(handler: Handler) -> Handler:
             self._routes.append(
@@ -317,6 +341,15 @@ class Router:
                     requirement,
                     operation_id,
                     response_only,
+                    status_code,
+                    response_description,
+                    response_media_type,
+                    response_specs,
+                    deprecated,
+                    include_in_schema,
+                    route_security,
+                    name,
+                    host,
                 )
             )
             return handler
