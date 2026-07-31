@@ -30,6 +30,18 @@ class TestSetCookieAttributes:
         with pytest.raises(ValueError):
             response.set_cookie("sid", "abc", domain="example.com\r\nX-Evil: 1")
 
+    @pytest.mark.parametrize(
+        "attributes",
+        [
+            {"path": "/; Secure"},
+            {"domain": "example.com; Secure"},
+        ],
+    )
+    def test_attribute_separator_in_path_or_domain_is_refused(self, attributes):
+        response = Response(b"")
+        with pytest.raises(ValueError, match="attribute separator"):
+            response.set_cookie("sid", "abc", **attributes)
+
     def test_ordinary_attributes_still_work(self):
         response = Response(b"")
         response.set_cookie("sid", "abc", path="/app", domain="example.com")

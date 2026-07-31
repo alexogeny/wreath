@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gc
 import os
+from typing import Any, cast
 
 import pytest
 
@@ -48,6 +49,34 @@ async def test_file_response_prefers_native_descriptor_path(tmp_path) -> None:
 
     assert protocol.started and protocol.finished
     assert protocol.payload == b"native-file"
+
+
+@pytest.mark.asyncio
+async def test_file_reader_errors_are_relayed_to_the_sender(
+    monkeypatch, tmp_path
+) -> None:
+    import wreath.response as response_module
+
+    path = tmp_path / "asset.bin"
+    path.write_bytes(b"broken")
+    descriptor = os.open(path, os.O_RDONLY)
+
+    def fail_read(fd: int, size: int) -> bytes:
+        raise OSError("reader failed")
+
+    async def send(message) -> None:
+        if message["type"] == "http.response.body":
+            assert isinstance(message["body"], bytes)
+
+    monkeypatch.setattr(response_module.os, "read", fail_read)
+    with pytest.raises(OSError, match="reader failed"):
+        await response_module._send_from_descriptor(
+            descriptor,
+            path.stat().st_size,
+            200,
+            [],
+            send,
+        )
 
 
 def test_default_headers() -> None:
@@ -191,7 +220,7 @@ async def test_prepared_is_reusable_and_immutable() -> None:
 
 def test_prepared_rejects_non_bytes() -> None:
     with pytest.raises(TypeError):
-        PreparedResponse("not bytes")  # type: ignore[arg-type]
+        PreparedResponse(cast(Any, "not bytes"))
 
 
 def _fd_is_open(fd: int) -> bool:
