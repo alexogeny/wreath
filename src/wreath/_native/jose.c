@@ -1,5 +1,7 @@
 #include "wreathcore.h"
 
+#include "simd.h"
+
 /* ---- JOSE / JWT native fast paths (see design 02-oidc-jwt-sso-auth) -------
  *
  * This owns only the hot, allocation-light, *non-crypto-inventing* pieces of
@@ -38,35 +40,9 @@ static PyObject *jose_hmac_digest_fn = NULL;   /* _hashlib.hmac_digest */
  * feeding a giant string to the JSON parser. Callers pass their own cap too. */
 #define JOSE_ABS_MAX_TOKEN (1 << 20)   /* 1 MiB compact token, absolute */
 
-/* base64url decode table: maps an input byte to its 6-bit value, 0xFF invalid.
- * '-'/'_' are the URL-safe alphabet; '+'/'/' are NOT accepted. No '=' padding. */
-static const unsigned char B64URL_DECODE[256] = {
-    ['A'] = 0,  ['B'] = 1,  ['C'] = 2,  ['D'] = 3,  ['E'] = 4,  ['F'] = 5,
-    ['G'] = 6,  ['H'] = 7,  ['I'] = 8,  ['J'] = 9,  ['K'] = 10, ['L'] = 11,
-    ['M'] = 12, ['N'] = 13, ['O'] = 14, ['P'] = 15, ['Q'] = 16, ['R'] = 17,
-    ['S'] = 18, ['T'] = 19, ['U'] = 20, ['V'] = 21, ['W'] = 22, ['X'] = 23,
-    ['Y'] = 24, ['Z'] = 25,
-    ['a'] = 26, ['b'] = 27, ['c'] = 28, ['d'] = 29, ['e'] = 30, ['f'] = 31,
-    ['g'] = 32, ['h'] = 33, ['i'] = 34, ['j'] = 35, ['k'] = 36, ['l'] = 37,
-    ['m'] = 38, ['n'] = 39, ['o'] = 40, ['p'] = 41, ['q'] = 42, ['r'] = 43,
-    ['s'] = 44, ['t'] = 45, ['u'] = 46, ['v'] = 47, ['w'] = 48, ['x'] = 49,
-    ['y'] = 50, ['z'] = 51,
-    ['0'] = 52, ['1'] = 53, ['2'] = 54, ['3'] = 55, ['4'] = 56, ['5'] = 57,
-    ['6'] = 58, ['7'] = 59, ['8'] = 60, ['9'] = 61, ['-'] = 62, ['_'] = 63,
-    /* Everything else stays 0; a companion validity table disambiguates 'A'. */
-};
-static const unsigned char B64URL_VALID[256] = {
-    ['A'] = 1, ['B'] = 1, ['C'] = 1, ['D'] = 1, ['E'] = 1, ['F'] = 1, ['G'] = 1,
-    ['H'] = 1, ['I'] = 1, ['J'] = 1, ['K'] = 1, ['L'] = 1, ['M'] = 1, ['N'] = 1,
-    ['O'] = 1, ['P'] = 1, ['Q'] = 1, ['R'] = 1, ['S'] = 1, ['T'] = 1, ['U'] = 1,
-    ['V'] = 1, ['W'] = 1, ['X'] = 1, ['Y'] = 1, ['Z'] = 1,
-    ['a'] = 1, ['b'] = 1, ['c'] = 1, ['d'] = 1, ['e'] = 1, ['f'] = 1, ['g'] = 1,
-    ['h'] = 1, ['i'] = 1, ['j'] = 1, ['k'] = 1, ['l'] = 1, ['m'] = 1, ['n'] = 1,
-    ['o'] = 1, ['p'] = 1, ['q'] = 1, ['r'] = 1, ['s'] = 1, ['t'] = 1, ['u'] = 1,
-    ['v'] = 1, ['w'] = 1, ['x'] = 1, ['y'] = 1, ['z'] = 1,
-    ['0'] = 1, ['1'] = 1, ['2'] = 1, ['3'] = 1, ['4'] = 1, ['5'] = 1, ['6'] = 1,
-    ['7'] = 1, ['8'] = 1, ['9'] = 1, ['-'] = 1, ['_'] = 1,
-};
+/* The alphabet table and the decoder itself live in `simd.h`, which picks a
+ * width per call: a JWT payload segment is a few hundred characters, where the
+ * vector arm is roughly four times the table-driven loop. */
 
 /* Constant-time compare, like hmac.compare_digest. Never early-exit. */
 static int
@@ -80,52 +56,11 @@ jose_ct_equal(const unsigned char *a, const unsigned char *b, Py_ssize_t len)
 }
 
 /* Decode `len` base64url chars into `out` (caller-sized >= (len/4)*3 + 2).
- * Returns the decoded byte count, or -1 on any invalid char / illegal length.
- * Rejects len % 4 == 1 (impossible base64) and any non-alphabet byte. */
+ * Returns the decoded byte count, or -1 on any invalid char / illegal length. */
 static Py_ssize_t
 b64url_decode_into(const char *in, Py_ssize_t len, unsigned char *out)
 {
-    Py_ssize_t o = 0;
-    Py_ssize_t i = 0;
-    if (len % 4 == 1) {
-        return -1;
-    }
-    for (; i + 4 <= len; i += 4) {
-        if (!B64URL_VALID[(unsigned char)in[i]] ||
-            !B64URL_VALID[(unsigned char)in[i + 1]] ||
-            !B64URL_VALID[(unsigned char)in[i + 2]] ||
-            !B64URL_VALID[(unsigned char)in[i + 3]]) {
-            return -1;
-        }
-        unsigned int q = ((unsigned int)B64URL_DECODE[(unsigned char)in[i]] << 18) |
-                         ((unsigned int)B64URL_DECODE[(unsigned char)in[i + 1]] << 12) |
-                         ((unsigned int)B64URL_DECODE[(unsigned char)in[i + 2]] << 6) |
-                         ((unsigned int)B64URL_DECODE[(unsigned char)in[i + 3]]);
-        out[o++] = (unsigned char)((q >> 16) & 0xFF);
-        out[o++] = (unsigned char)((q >> 8) & 0xFF);
-        out[o++] = (unsigned char)(q & 0xFF);
-    }
-    Py_ssize_t rem = len - i;
-    if (rem == 2) {
-        if (!B64URL_VALID[(unsigned char)in[i]] || !B64URL_VALID[(unsigned char)in[i + 1]]) {
-            return -1;
-        }
-        unsigned int q = ((unsigned int)B64URL_DECODE[(unsigned char)in[i]] << 18) |
-                         ((unsigned int)B64URL_DECODE[(unsigned char)in[i + 1]] << 12);
-        out[o++] = (unsigned char)((q >> 16) & 0xFF);
-    }
-    else if (rem == 3) {
-        if (!B64URL_VALID[(unsigned char)in[i]] || !B64URL_VALID[(unsigned char)in[i + 1]] ||
-            !B64URL_VALID[(unsigned char)in[i + 2]]) {
-            return -1;
-        }
-        unsigned int q = ((unsigned int)B64URL_DECODE[(unsigned char)in[i]] << 18) |
-                         ((unsigned int)B64URL_DECODE[(unsigned char)in[i + 1]] << 12) |
-                         ((unsigned int)B64URL_DECODE[(unsigned char)in[i + 2]] << 6);
-        out[o++] = (unsigned char)((q >> 16) & 0xFF);
-        out[o++] = (unsigned char)((q >> 8) & 0xFF);
-    }
-    return o;
+    return (Py_ssize_t)wreath_b64url_decode(in, (ptrdiff_t)len, out);
 }
 
 /* jose_b64url_decode(data: str) -> bytes

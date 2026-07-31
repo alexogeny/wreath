@@ -18,6 +18,11 @@
 #include <errno.h>
 #include <stdlib.h>
 
+#if defined(__linux__)
+#include <sys/random.h>
+#define WREATH_HAVE_GETRANDOM 1
+#endif
+
 static PyObject *hmac_digest_fn = NULL;   /* _hashlib.hmac_digest */
 static PyObject *sha256_name = NULL;      /* "sha256" */
 static PyObject *urandom_fn = NULL;       /* os.urandom */
@@ -152,13 +157,108 @@ wreath_csrf_sign(PyObject *self, PyObject *args)
     }
 }
 
+/* Fill `out` with `len` cryptographically secure bytes.
+ *
+ * `getrandom(2)` rather than a call back into `os.urandom`, which was measured
+ * at 2639ns for 32 bytes against 135ns here -- a 19.6x difference that is not
+ * call overhead. `os.urandom` performs the syscall every time; glibc's
+ * `getrandom` reaches the same kernel generator through the vDSO, so the common
+ * case costs no syscall at all. The entropy is identical: this is the source
+ * CPython's own `os.urandom` draws from on Linux, with the same blocking-until-
+ * seeded semantics.
+ *
+ * Anything that is not Linux, and any failure at all, falls back to
+ * `os.urandom`. A CSRF nonce is not a place to improvise when the fast path is
+ * unavailable, and no cached buffer of pre-drawn bytes is kept: that would be
+ * process-global mutable state (ADR 0007) holding unused key material.
+ */
+static int
+fill_random(unsigned char *out, Py_ssize_t len)
+{
+#if defined(WREATH_HAVE_GETRANDOM)
+    Py_ssize_t filled = 0;
+    while (filled < len) {
+        ssize_t got = getrandom(out + filled, (size_t)(len - filled), 0);
+        if (got < 0) {
+            if (errno == EINTR) {
+                if (PyErr_CheckSignals() < 0) {
+                    return -1;
+                }
+                continue;
+            }
+            break;  /* ENOSYS on an old kernel, or anything else: fall back */
+        }
+        filled += got;
+    }
+    if (filled == len) {
+        return 0;
+    }
+#endif
+    {
+        PyObject *size = PyLong_FromSsize_t(len);
+        PyObject *drawn = size == NULL
+            ? NULL : PyObject_CallOneArg(urandom_fn, size);
+        Py_XDECREF(size);
+        if (drawn == NULL) {
+            return -1;
+        }
+        if (!PyBytes_Check(drawn) || PyBytes_GET_SIZE(drawn) != len) {
+            Py_DECREF(drawn);
+            PyErr_SetString(PyExc_RuntimeError, "os.urandom returned the wrong size");
+            return -1;
+        }
+        memcpy(out, PyBytes_AS_STRING(drawn), (size_t)len);
+        Py_DECREF(drawn);
+        return 0;
+    }
+}
+
+/* random_hex(size: int) -> str
+ *
+ * `os.urandom(n).hex()` in one call and no syscall. `os.urandom` performs a
+ * real `getrandom` syscall every time it is asked; glibc routes the same
+ * request through the vDSO, which is why `fill_random` above exists and why
+ * CSRF token minting stopped costing 2.6us. Correlation identifiers wanted
+ * exactly the same thing: `RequestIDMiddleware` runs on every request of every
+ * application that installs it, and spent almost all of its time here.
+ *
+ * Bounded to 64 bytes because an identifier is not key material and a stack
+ * buffer keeps this allocation-free; nothing in the framework asks for more.
+ */
+PyObject *
+wreath_random_hex(PyObject *self, PyObject *args)
+{
+    static const char digits[] = "0123456789abcdef";
+    unsigned char raw[64];
+    char out[128];
+    Py_ssize_t size;
+    Py_ssize_t i;
+    (void)self;
+
+    if (!PyArg_ParseTuple(args, "n:random_hex", &size)) {
+        return NULL;
+    }
+    if (size < 1 || size > (Py_ssize_t)sizeof(raw)) {
+        PyErr_SetString(PyExc_ValueError, "random_hex size must be 1..64");
+        return NULL;
+    }
+    if (fill_random(raw, size) < 0) {
+        return NULL;
+    }
+    for (i = 0; i < size; i++) {
+        out[i * 2] = digits[raw[i] >> 4];
+        out[i * 2 + 1] = digits[raw[i] & 0x0F];
+    }
+    return PyUnicode_DecodeASCII(out, size * 2, "strict");
+}
+
 /* csrf_new_token(secret: bytes, issued: int) -> str */
 PyObject *
 wreath_csrf_new_token(PyObject *self, PyObject *args)
 {
     PyObject *secret;
     long long issued;
-    PyObject *random;
+    unsigned char seed[32];
     char nonce[43];
     char message[80];
     char signature[43];
@@ -168,18 +268,10 @@ wreath_csrf_new_token(PyObject *self, PyObject *args)
     if (!PyArg_ParseTuple(args, "SL:csrf_new_token", &secret, &issued)) {
         return NULL;
     }
-    /* os.urandom, the source secrets.token_bytes draws from. Called rather
-     * than reaching for _PyOS_URandom: that is internal API in 3.14, and one
-     * call into an existing C function is not what made this path slow. */
-    random = PyObject_CallOneArg(urandom_fn, nonce_size);
-    if (random == NULL) return NULL;
-    if (!PyBytes_Check(random) || PyBytes_GET_SIZE(random) != 32) {
-        Py_DECREF(random);
-        PyErr_SetString(PyExc_RuntimeError, "os.urandom did not return 32 bytes");
+    if (fill_random(seed, 32) < 0) {
         return NULL;
     }
-    b64url_32((const unsigned char *)PyBytes_AS_STRING(random), nonce);
-    Py_DECREF(random);
+    b64url_32(seed, nonce);
     message_len = snprintf(message, sizeof(message), "v1.%lld.%.*s", issued, 43, nonce);
     if (message_len < 0 || (size_t)message_len >= sizeof(message)) {
         PyErr_SetString(PyExc_ValueError, "csrf issued timestamp out of range");

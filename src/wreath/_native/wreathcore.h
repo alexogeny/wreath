@@ -22,6 +22,7 @@ PyObject *wreath_read_osenv(PyObject *self, PyObject *ignored);
 /* security.c */
 PyObject *wreath_host_allowed(PyObject *self, PyObject *args);
 PyObject *wreath_csrf_sign(PyObject *self, PyObject *args);
+PyObject *wreath_random_hex(PyObject *self, PyObject *args);
 PyObject *wreath_csrf_new_token(PyObject *self, PyObject *args);
 PyObject *wreath_csrf_validate(PyObject *self, PyObject *args);
 /* Resolves _hashlib.hmac_digest once; returns -1 on failure. */
@@ -66,6 +67,7 @@ PyObject *wreath_parse_cookies(PyObject *self, PyObject *args);
 
 /* ws.c */
 PyObject *wreath_ws_mask(PyObject *self, PyObject *args);
+PyObject *wreath_b64encode(PyObject *self, PyObject *args, PyObject *kwargs);
 PyObject *wreath_simd_arms(PyObject *self, PyObject *ignored);
 PyObject *wreath_simd_probe(PyObject *self, PyObject *args);
 PyObject *wreath_ws_parse_frame(PyObject *self, PyObject *args);

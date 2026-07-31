@@ -88,6 +88,27 @@ write_json_string(Writer *w, PyObject *str)
     if (utf8 == NULL) {
         return -1;
     }
+    /* The overwhelmingly common string needs no escaping at all, and for that
+     * one the whole result -- both quotes and the body -- is known before
+     * anything is written. Reserving once and copying once removes three
+     * capacity checks and a call per string, which is most of the cost at the
+     * lengths a JSON document is actually made of: keys and short values.
+     * Escaped strings fall through to the general loop below unchanged. */
+    if (writer_reserve(w, len + 2) < 0) {
+        return -1;
+    }
+    {
+        unsigned unused_high = 0;
+        Py_ssize_t plain = (Py_ssize_t)wreath_json_run(utf8, (ptrdiff_t)len, &unused_high);
+        if (plain == len) {
+            char *out = w->buf + w->len;
+            out[0] = '"';
+            memcpy(out + 1, utf8, (size_t)len);
+            out[len + 1] = '"';
+            w->len += len + 2;
+            return 0;
+        }
+    }
     if (write_char(w, '"') < 0) {
         return -1;
     }
