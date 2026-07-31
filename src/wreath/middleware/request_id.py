@@ -33,6 +33,13 @@ if _core is not None and hasattr(_core, "request_id_valid"):
 else:  # pragma: no cover - exercised by the WREATH_PURE test matrix
     from .._pure.observability import request_id_valid as _request_id_valid
 
+if _core is not None and hasattr(_core, "random_hex"):
+    _random_hex: Any = _core.random_hex
+else:  # pragma: no cover - exercised by the WREATH_PURE test matrix
+
+    def _random_hex(size: int) -> str:
+        return os.urandom(size).hex()
+
 _STATE_KEY = "_wreath_request_id"
 
 
@@ -145,9 +152,11 @@ class RequestIDMiddleware:
         """Record the inbound id, or a freshly minted one, on request state."""
         value = self._inbound(request) if self._trust_inbound else None
         if value is None:
-            # 16 bytes of stdlib randomness, hex-encoded: collision-free in
-            # practice for correlation, and never crypto material.
-            value = os.urandom(16).hex()
+            # 16 bytes of randomness, hex-encoded: collision-free in practice
+            # for correlation, and never crypto material. Drawn through
+            # `getrandom(2)`, which glibc answers from the vDSO -- `os.urandom`
+            # performs a syscall per call, and this hook runs on every request.
+            value = _random_hex(16)
         request.state.__setattr__(_STATE_KEY, value)
         return None
 

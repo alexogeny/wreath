@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from typing import Any
 
 import pytest
@@ -135,3 +137,44 @@ def test_configuration_is_validated() -> None:
         RequestIDMiddleware(header="")
     with pytest.raises(ValueError):
         RequestIDMiddleware(max_length=0)
+
+
+@pytest.mark.skipif(
+    _core is None or not hasattr(_core, "random_hex"),
+    reason="native _core is not built",
+)
+class TestNativeRandomHex:
+    """`_core.random_hex` replaced `os.urandom(n).hex()` on the mint path.
+
+    `os.urandom` performs a real syscall per call; the C twin draws through
+    `getrandom(2)`, which glibc answers from the vDSO. That is an 11x
+    difference on a hook that runs for every request of every application that
+    installs this middleware -- but it is also a *different source of
+    randomness*, so the properties the identifier depends on are asserted here
+    rather than assumed from the speedup.
+    """
+
+    def test_it_produces_lowercase_hex_of_the_requested_length(self) -> None:
+        for size in (1, 8, 16, 32, 64):
+            value = _core.random_hex(size)
+            assert len(value) == size * 2
+            assert re.fullmatch(r"[0-9a-f]+", value)
+
+    def test_it_does_not_repeat(self) -> None:
+        """Correlation ids collide silently: two requests become one in a trace."""
+        drawn = {_core.random_hex(16) for _ in range(5000)}
+        assert len(drawn) == 5000
+
+    def test_it_refuses_a_size_its_buffer_cannot_hold(self) -> None:
+        """A stack buffer bounds this; the bound is checked, not assumed."""
+        for size in (0, -1, 65, 1 << 20):
+            with pytest.raises(ValueError):
+                _core.random_hex(size)
+
+    def test_the_pure_fallback_agrees_on_shape(self) -> None:
+        """`WREATH_PURE` and an older `_core` both take `os.urandom(n).hex()`."""
+        native = _core.random_hex(16)
+        pure = os.urandom(16).hex()
+        assert len(native) == len(pure)
+        assert re.fullmatch(r"[0-9a-f]{32}", native)
+        assert re.fullmatch(r"[0-9a-f]{32}", pure)
