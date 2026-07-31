@@ -20,25 +20,43 @@ Two ways in, one vocabulary:
 
 Both produce a `Finding`, so the sentence a developer reads in a
 traceback is the sentence an operator reads in `wreath doctor`.
+
+A request is not the only place an N+1 happens, and it is not the worst. A
+durable job, a workflow step and a chunked-pass shift do the heaviest ORM work
+in most systems, and an N+1 *per chunk* is the classic production disaster --
+it passes every test on a table small enough to fit in one chunk, then runs for
+six hours against the real one. `watching` is the general scope those bind, and
+`Origin` is what tells a reader which of them a finding came from.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 __all__ = [
     "WATCHING",
     "Finding",
     "NPlusOneDetected",
+    "Origin",
     "QueryLedger",
     "Repetition",
+    "check_budget",
     "find_n_plus_one",
     "query_ledger",
+    "scope_for",
     "watch",
+    "watching",
 ]
+
+#: What an observing scope counts to before it has anything to report. Only
+#: reached by a scope that did not declare a budget, which is every background
+#: scope in a process that installed a guard: it counts and reports, and the
+#: number is the same ten a request guard defaults to.
+DEFAULT_OBSERVE_LIMIT = 10
 
 #: The running request's `QueryLedger`, or `None`.
 query_ledger: ContextVar[Any] = ContextVar("wreath_query_ledger", default=None)
@@ -64,7 +82,7 @@ _DB_QUERY = "db_query"
 
 @dataclass(frozen=True, slots=True)
 class Repetition:
-    """One model queried repeatedly inside a single request."""
+    """One model queried repeatedly inside a single execution scope."""
 
     model: str
     count: int
@@ -72,19 +90,45 @@ class Repetition:
 
 
 @dataclass(frozen=True, slots=True)
+class Origin:
+    """Which execution scope a finding came from.
+
+    `kind` is one of `request`, `job`, `step` or `shift`. `label` is what a
+    reader should be shown -- a route, a task name, a step name -- and
+    `identifier` is what they should go and look up: a job id, a workflow
+    instance id, empty for a request (whose id lives on `Finding.request_id`,
+    where `wreath replay` already looks for it).
+    """
+
+    kind: str = "request"
+    label: str = ""
+    identifier: str = ""
+
+    def describe(self) -> str:
+        """`GET /llamas` for a request; `job ingest_card#41` for an attempt."""
+        if self.kind == "request":
+            return self.label
+        suffix = f"#{self.identifier}" if self.identifier else ""
+        return f"{self.kind} {self.label}{suffix}"
+
+
+@dataclass(frozen=True, slots=True)
 class Finding:
-    """One request that queried a model far more often than it should have."""
+    """One scope that queried a model far more often than it should have."""
 
     route: str
     #: Repetitions past the threshold, worst first.
     repetitions: tuple[Repetition, ...]
-    #: Database statements attributed to the request. From a recorded trace this
+    #: Database statements attributed to the scope. From a recorded trace this
     #: is every statement; from a live ledger it is the ORM's, which is what the
     #: guard can see.
     queries: int = 0
     #: The recorded request this came from, or 0 when it came from a live
     #: ledger. It is what `wreath replay` needs to turn this into a test.
     request_id: int = 0
+    #: Which scope produced this. Defaults to a request named by `route`, so
+    #: every existing producer and reader of a `Finding` keeps working.
+    origin: Origin = field(default_factory=Origin)
 
     @property
     def worst(self) -> Repetition:
@@ -97,8 +141,9 @@ class Finding:
         others = (
             f" (and {len(self.repetitions) - 1} more)" if len(self.repetitions) > 1 else ""
         )
+        where = self.origin.describe() or self.route
         return (
-            f"{self.route} issued {self.queries} statements; "
+            f"{where} issued {self.queries} statements; "
             f"{worst.count} of them hydrated {worst.model}{others}"
         )
 
@@ -127,20 +172,25 @@ class QueryLedger:
     thousand.
     """
 
-    __slots__ = ("counts", "limit", "on_exceeded", "route", "_tripped")
+    __slots__ = ("counts", "limit", "on_exceeded", "origin", "route", "_tripped")
 
     def __init__(
         self,
         *,
         limit: int,
         route: str = "",
+        origin: Origin | None = None,
         on_exceeded: Callable[[Finding], None] | None = None,
     ) -> None:
         if limit < 1:
             raise ValueError("limit must be >= 1")
         self.counts: dict[str, int] = {}
         self.limit = limit
-        self.route = route
+        #: A request scope is spelled with `route=`, which is the older and
+        #: shorter way to say `Origin(kind="request", label=route)`. Keeping
+        #: both means no existing caller changed.
+        self.origin = origin if origin is not None else Origin(label=route)
+        self.route = route or self.origin.label
         self.on_exceeded = on_exceeded
         self._tripped: set[str] = set()
 
@@ -162,6 +212,7 @@ class QueryLedger:
                 route=self.route,
                 repetitions=(Repetition(model=self._display(model), count=count),),
                 queries=sum(self.counts.values()),
+                origin=self.origin,
             )
         )
 
@@ -197,10 +248,79 @@ class QueryLedger:
             route=self.route,
             repetitions=repetitions,
             queries=sum(self.counts.values()),
+            origin=self.origin,
         )
 
     def __repr__(self) -> str:
-        return f"<QueryLedger route={self.route!r} limit={self.limit} {self.counts}>"
+        return f"<QueryLedger origin={self.origin.describe()!r} limit={self.limit} {self.counts}>"
+
+
+@contextmanager
+def watching(
+    origin: Origin,
+    *,
+    limit: int,
+    raises: bool = False,
+) -> Iterator[QueryLedger]:
+    """Bind a `QueryLedger` for one execution scope, and unbind it after.
+
+    This is the general form the request guard is the first caller of. It arms
+    the ORM seam, binds the ledger to the running context, and resets the
+    binding on every exit path -- including a raise and a cancellation, which
+    is not optional: a worker that leaked a ledger would accumulate counts for
+    its whole lifetime and eventually report a fiction.
+
+    `raises=True` makes the scope fail at the query that crossed `limit`, which
+    is what a declared budget means. It is deliberately not the default:
+    raising inside a durable job turns a slow job into a failed one and then
+    into a retry storm, and the framework does not know whether five hundred
+    queries was a defect or the point of the task.
+    """
+    watch()
+    ledger = QueryLedger(limit=limit, origin=origin, on_exceeded=_raise if raises else None)
+    token = query_ledger.set(ledger)
+    try:
+        yield ledger
+    finally:
+        # Reset rather than set(None): a nested scope must hand the outer one
+        # its own binding back, not a cleared one.
+        query_ledger.reset(token)
+
+
+def scope_for(origin: Origin, *, budget: int | None) -> Any:
+    """The ledger scope for one background execution, or nothing when nobody asked.
+
+    The one place the three-state rule lives, so a job, a workflow step and a
+    pass shift cannot drift apart on it:
+
+    * a declared budget -- count, and fail at the ceiling;
+    * no budget, but a guard exists somewhere in this process -- count and
+      report, because something already asked to be told;
+    * neither -- bind nothing. An application that never asked for this must
+      not pay a ContextVar read per query to discover that, which is the whole
+      reason `WATCHING` is a latched module flag rather than a lookup.
+    """
+    if budget is None and not WATCHING:
+        return nullcontext(None)
+    return watching(
+        origin,
+        limit=budget if budget is not None else DEFAULT_OBSERVE_LIMIT,
+        raises=budget is not None,
+    )
+
+
+def check_budget(budget: int | None, subject: str) -> None:
+    """Refuse a nonsense budget where the traceback still names the declaration."""
+    if budget is not None and budget < 1:
+        raise ValueError(
+            f"{subject} declares query_budget={budget}; a budget is a count of "
+            "queries to one model and must be >= 1. Omit it to observe without "
+            "a ceiling."
+        )
+
+
+def _raise(finding: Finding) -> None:
+    raise NPlusOneDetected(finding)
 
 
 def find_n_plus_one(
@@ -259,12 +379,17 @@ def find_n_plus_one(
         if not repetitions:
             continue
         route_id = trace.get("route_id", 0)
+        route = route_names.get(route_id) or f"route:{route_id}"
         findings.append(
             Finding(
-                route=route_names.get(route_id) or f"route:{route_id}",
+                route=route,
                 repetitions=repetitions,
                 queries=statements,
                 request_id=trace.get("request_id", 0),
+                # A recorded trace is a request by construction. Naming the
+                # origin here rather than leaving it defaulted means the report
+                # groups these the same way it groups a live background finding.
+                origin=Origin(kind="request", label=route),
             )
         )
     findings.sort(key=lambda f: (-f.worst.count, f.request_id))
