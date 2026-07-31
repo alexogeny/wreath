@@ -200,7 +200,7 @@ WITH migration_objects AS (
         JOIN pg_catalog.pg_opclass op ON op.oid = key.opcoid
     ) opclasses
     WHERE n.nspname = $1::text
-      AND am.amname IN ('btree', 'gin', 'hnsw', 'ivfflat')
+      AND am.amname IN ('btree', 'gin', 'gist', 'hnsw', 'ivfflat')
       AND i.indisvalid
       AND i.indisready
       -- indexprs stays excluded: an index *on* an expression is a different
