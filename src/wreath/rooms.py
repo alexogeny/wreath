@@ -40,6 +40,18 @@ durable delivery.
 from __future__ import annotations
 
 from base64 import b64decode, b64encode
+
+from ._native import _core
+
+if _core is not None and hasattr(_core, "b64encode"):
+    # A broadcast encodes the whole payload once per room, so this is the one
+    # base64 call in the tree that meets large inputs; the native encoder is
+    # about ten times `base64.b64encode` there and returns the `str` this needs
+    # rather than bytes to decode.
+    _b64encode_str = _core.b64encode
+else:
+    def _b64encode_str(payload: bytes) -> str:
+        return b64encode(payload).decode("ascii")
 from collections.abc import Awaitable, Callable
 from time import monotonic_ns as _monotonic_ns
 from typing import Any
@@ -200,7 +212,7 @@ class RoomRegistry:
             # that could not travel at all before.
             return {
                 "room": room,
-                "data": b64encode(payload).decode("ascii"),
+                "data": _b64encode_str(payload),
                 "binary": True,
                 "encoding": "base64",
             }
