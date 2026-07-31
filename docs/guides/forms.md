@@ -40,11 +40,11 @@ file instead of becoming a `bytes`. Read it with `upload.chunks()` to stream, or
 `upload.read()` to materialise; `upload.spooled` and `upload.size` say which
 kind you have, and `form.close()` releases the spools.
 
-This bounds what a parsed form *retains*. It does not bound the body buffer:
-`body()` still materialises the whole request before parsing, so a concurrent
-upload still costs its own size once. Making that incremental means an
-incremental multipart parser — a native module with a byte-for-byte pure twin —
-which is why `max_body_bytes` is still the ceiling on upload size.
+Multipart parsing is incremental. Boundary fragments may span transport chunks,
+and a file is written to its spool as soon as it crosses the threshold; the
+complete request body is never retained by `form()`. `max_body_bytes` remains
+the total upload ceiling, enforced while chunks arrive, while the part and
+aggregate form limits bound the parser's retained work.
 
 
 ## Bind an entire model from a form
