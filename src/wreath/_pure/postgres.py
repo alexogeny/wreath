@@ -91,6 +91,7 @@ _INT2 = 21
 _INT4 = 23
 _TEXT = 25
 _JSON = 114
+_POINT = 600
 _FLOAT4 = 700
 _FLOAT8 = 701
 _VARCHAR = 1043
@@ -788,6 +789,26 @@ def _encode_text(value: object, oid: int) -> bytes | None:
     return str(value).encode("ascii")
 
 
+def _parse_point_literal(value: object) -> tuple[float, float]:
+    """`(x,y)` -> (x, y). Raises TypeError, as every other codec here does."""
+    text = value.decode("ascii") if isinstance(value, (bytes, bytearray)) else value
+    if not isinstance(text, str):
+        raise TypeError("point codec requires the '(x,y)' literal")
+    body = text.strip()
+    if not body.startswith("(") or not body.endswith(")") or body.count(",") != 1:
+        raise TypeError(f"point codec requires the '(x,y)' literal, got {text!r}")
+    x_text, _, y_text = body[1:-1].partition(",")
+    try:
+        return float(x_text), float(y_text)
+    except ValueError as exc:
+        raise TypeError(f"point codec requires the '(x,y)' literal, got {text!r}") from exc
+
+
+def _encode_point(value: object) -> bytes:
+    x, y = _parse_point_literal(value)
+    return struct.pack("!dd", x, y)
+
+
 def _encode_binary(value: object, oid: int) -> bytes | None:
     if value is None:
         return None
@@ -863,6 +884,13 @@ def _encode_binary(value: object, oid: int) -> bytes | None:
         return b"\x01" + _as_json(value).encode("utf-8")
     if oid == _BIT:
         return _encode_bit(value)
+    if oid == _POINT:
+        # `point` is two float8 in x,y order -- longitude then latitude. The
+        # value arrives as the text literal `to_wire` produced, because that is
+        # also what the *text* parameter path sends and one `to_wire` serves
+        # both; parsing it back here keeps the column type's contract in one
+        # place rather than splitting it across two encoders.
+        return _encode_point(value)
     extension_kind = _extension_kinds.get(oid)
     if extension_kind == _EXT_KIND_VECTOR:
         return _encode_vector(value)

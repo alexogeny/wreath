@@ -4,6 +4,8 @@
 
 #include <datetime.h>
 #include <limits.h>
+#include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Nibble value per ASCII byte; 0xFF marks a non-hex byte. Decoding `bytea`
@@ -70,6 +72,9 @@ wreath_pg_decode_hex_bytea(const unsigned char *data, Py_ssize_t length)
 #define PG_FLOAT8 701
 #define PG_VARCHAR 1043
 #define PG_BIT 1560
+/* Core `point`, OID 600. Not an extension type -- the catalog allocates it --
+   so it is a case here rather than a registration-table lookup. */
+#define PG_POINT 600
 #define PG_DATE 1082
 #define PG_TIMESTAMP 1114
 #define PG_TIMESTAMPTZ 1184
@@ -985,6 +990,70 @@ done:
     Py_XDECREF(inner);
     Py_XDECREF(parts);
     Py_XDECREF(mapping);
+    return result;
+}
+
+/* PostgreSQL's binary `point`: two big-endian float8, x then y -- longitude
+ * then latitude, the order PostGIS and GeoJSON use and the opposite of the one
+ * people say aloud. The value arriving here is the `(x,y)` text literal that
+ * `Point.to_wire` produced, because one `to_wire` has to serve both the text
+ * and the binary parameter paths; this parses it rather than the column type
+ * carrying two representations. Kept byte-for-byte equal to the pure twin's
+ * `_encode_point` by tests/orm/test_geospatial_codec_parity.py. */
+static PyObject *
+encode_point(PyObject *value)
+{
+    const char *text;
+    Py_ssize_t length;
+    char buffer[64];
+    char *comma;
+    char *end;
+    double x;
+    double y;
+    PyObject *result;
+
+    if (PyUnicode_Check(value)) {
+        text = PyUnicode_AsUTF8AndSize(value, &length);
+        if (text == NULL) return NULL;
+    } else if (PyBytes_Check(value)) {
+        text = PyBytes_AS_STRING(value);
+        length = PyBytes_GET_SIZE(value);
+    } else {
+        PyErr_SetString(PyExc_TypeError, "point codec requires the '(x,y)' literal");
+        return NULL;
+    }
+    if (length < 5 || length >= (Py_ssize_t)sizeof(buffer) || text[0] != '(' ||
+        text[length - 1] != ')') {
+        PyErr_SetString(PyExc_TypeError, "point codec requires the '(x,y)' literal");
+        return NULL;
+    }
+    memcpy(buffer, text + 1, (size_t)(length - 2));
+    buffer[length - 2] = '\0';
+    comma = strchr(buffer, ',');
+    if (comma == NULL || strchr(comma + 1, ',') != NULL) {
+        PyErr_SetString(PyExc_TypeError, "point codec requires the '(x,y)' literal");
+        return NULL;
+    }
+    *comma = '\0';
+    errno = 0;
+    x = strtod(buffer, &end);
+    if (end == buffer || *end != '\0' || errno != 0) {
+        PyErr_SetString(PyExc_TypeError, "point codec requires the '(x,y)' literal");
+        return NULL;
+    }
+    errno = 0;
+    y = strtod(comma + 1, &end);
+    if (end == comma + 1 || *end != '\0' || errno != 0) {
+        PyErr_SetString(PyExc_TypeError, "point codec requires the '(x,y)' literal");
+        return NULL;
+    }
+    result = PyBytes_FromStringAndSize(NULL, 16);
+    if (result == NULL) return NULL;
+    if (PyFloat_Pack8(x, PyBytes_AS_STRING(result), 0) < 0 ||
+        PyFloat_Pack8(y, PyBytes_AS_STRING(result) + 8, 0) < 0) {
+        Py_DECREF(result);
+        return NULL;
+    }
     return result;
 }
 
@@ -1938,6 +2007,8 @@ wreath_pg_encode_binary_value(PyObject *value, uint32_t oid)
     }
     case PG_BIT:
         return encode_bit(value);
+    case PG_POINT:
+        return encode_point(value);
     default: {
         uint32_t element_oid = array_element_oid(oid);
         if (element_oid != 0) {
