@@ -44,15 +44,39 @@ other application resources register themselves.
 ## Reading the environment
 
 ```python
-from wreath.config import load_env
-env = load_env(".env", apply=True)      # strict KEY=value; no shell expansion
+from dataclasses import dataclass
+from typing import Annotated, Literal
+
+from wreath.config import Env, Environment, Secret
+
+@dataclass(frozen=True)
+class DatabaseSettings:
+    host: str
+    port: int = 5432
+    password: Secret[str] = Secret("")
+
+@dataclass(frozen=True)
+class Settings:
+    debug: bool
+    mode: Literal["development", "production"]
+    database: DatabaseSettings
+    token: Annotated[Secret[str], Env("SERVICE_TOKEN")] = Secret("")
+
+env = Environment.load(".env")
+settings = env.bind(Settings, prefix="APP")
 ```
 
-The dotenv parser is deliberately strict and literal: `KEY=value`, nothing
-clever, no variable expansion or command substitution to surprise you. Server
-settings bind from `WREATH_*` variables — document them in a committed
-`.env.example` — and you can declare the application secrets you can't start
-without, so a missing one is a friendly warning at boot rather than a crash later:
+The dotenv parser remains strict and literal: `KEY=value`, no expansion or
+command substitution. Root fields use `APP_FIELD`; nested fields use
+`APP_DATABASE__HOST`. `Env` supplies an absolute alias. Binding converts the
+stdlib scalar/container types, enums, literals, optionals, UUID, Decimal, Path,
+and ISO dates, and reports every missing or malformed value in one
+`SettingsError`. `Secret` redacts both `repr` and `str`; call `reveal()` only at
+the integration boundary. `Environment.source(key)` reports whether the winning
+value came from the process or the resolved dotenv path.
+
+Server settings still bind from `WREATH_*` variables, and a server process can
+also require raw variables at its boundary:
 
 ```python
 from wreath.server import run
