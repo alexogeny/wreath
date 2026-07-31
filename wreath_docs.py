@@ -54,6 +54,7 @@ nav = Nav(
             Page("Dates and times", "guides/dates-and-times.md"),
             Page("Places and distances", "guides/geospatial.md"),
             Page("Protocol Buffers", "guides/protobuf.md"),
+            Page("gRPC", "guides/grpc.md"),
         ),
         Section(
             "Working with data",
@@ -133,6 +134,7 @@ nav = Nav(
             Page("Rate-limit an endpoint", "cookbook/recipes/rate-limiting.md"),
             Page("JSON or MessagePack from one handler", "cookbook/recipes/negotiate-format.md"),
             Page("Accept a Protocol Buffers body", "cookbook/recipes/accept-a-protobuf-body.md"),
+            Page("Serve a gRPC method", "cookbook/recipes/serve-a-grpc-method.md"),
         ),
         Section(
             "Users, auth, and security",
@@ -226,6 +228,7 @@ nav = Nav(
         Page("Dates and times", "reference/temporal.md"),
         Page("Places and distances", "reference/geospatial.md"),
         Page("Protocol Buffers", "reference/protobuf.md"),
+        Page("gRPC", "reference/grpc.md"),
         Page("Keyed store", "reference/store.md"),
         Page("Application cache", "reference/cache.md"),
         Page("Cache-Control policies", "reference/cache_control.md"),
