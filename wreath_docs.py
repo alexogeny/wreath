@@ -52,6 +52,8 @@ nav = Nav(
             Page("Form-model binding", "guides/forms.md"),
             Page("Templates", "guides/templates.md"),
             Page("Dates and times", "guides/dates-and-times.md"),
+            Page("Places and distances", "guides/geospatial.md"),
+            Page("Protocol Buffers", "guides/protobuf.md"),
         ),
         Section(
             "Working with data",
@@ -130,6 +132,7 @@ nav = Nav(
             Page("Handle file uploads", "cookbook/recipes/file-uploads.md"),
             Page("Rate-limit an endpoint", "cookbook/recipes/rate-limiting.md"),
             Page("JSON or MessagePack from one handler", "cookbook/recipes/negotiate-format.md"),
+            Page("Accept a Protocol Buffers body", "cookbook/recipes/accept-a-protobuf-body.md"),
         ),
         Section(
             "Users, auth, and security",
@@ -221,6 +224,8 @@ nav = Nav(
         Page("Webhooks", "reference/webhooks.md"),
         Page("Templates", "reference/templates.md"),
         Page("Dates and times", "reference/temporal.md"),
+        Page("Places and distances", "reference/geospatial.md"),
+        Page("Protocol Buffers", "reference/protobuf.md"),
         Page("Keyed store", "reference/store.md"),
         Page("Application cache", "reference/cache.md"),
         Page("Cache-Control policies", "reference/cache_control.md"),
