@@ -11,8 +11,8 @@ from typing import Any
 
 import pytest
 
-from wreath.exceptions import PayloadTooLarge
-from wreath.request import Request, RequestLimits
+from wreath.exceptions import ClientDisconnect, PayloadTooLarge
+from wreath.request import Request, RequestLimits, StreamConsumed, _multipart_boundary
 
 HEADERS = [
     (b"host", b"example"),
@@ -191,6 +191,67 @@ async def test_the_body_limit_applies_across_chunk_boundaries() -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_stream_yields_transport_chunks_without_materialising() -> None:
+    request = _limited_request(
+        [b"first", b"-second", b"-third"], RequestLimits(max_body_bytes=64)
+    )
+
+    chunks = [chunk async for chunk in request.stream()]
+
+    assert chunks == [b"first", b"-second", b"-third"]
+    with pytest.raises(StreamConsumed):
+        await request.body()
+
+
+@pytest.mark.asyncio
+async def test_stream_replays_a_body_that_was_already_buffered() -> None:
+    request = _limited_request([b"one", b"two"], RequestLimits(max_body_bytes=64))
+
+    assert await request.body() == b"onetwo"
+    assert [chunk async for chunk in request.stream()] == [b"onetwo"]
+
+
+@pytest.mark.asyncio
+async def test_a_second_stream_is_refused_while_the_first_is_active() -> None:
+    request = _limited_request([b"one", b"two"], RequestLimits(max_body_bytes=64))
+    first = request.stream()
+
+    assert await anext(first) == b"one"
+    with pytest.raises(StreamConsumed):
+        await anext(request.stream())
+    await first.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stream_ignores_extension_messages_and_reports_disconnect() -> None:
+    messages = iter(
+        [
+            {"type": "http.extension"},
+            {"type": "http.disconnect"},
+        ]
+    )
+
+    async def receive() -> Any:
+        return next(messages)
+
+    request = Request({"type": "http", "headers": []}, receive)
+    with pytest.raises(ClientDisconnect):
+        await request.body()
+    assert await request.body() == b""
+
+
+def test_multipart_boundary_parameter_is_strict_and_supports_quotes() -> None:
+    assert _multipart_boundary(b"multipart/form-data; boundary=valid-123") == b"valid-123"
+    assert _multipart_boundary(b'multipart/form-data; charset=utf-8; boundary="quoted"') == (
+        b"quoted"
+    )
+    for invalid in (b"", b"x" * 71, b"invalid@character"):
+        assert _multipart_boundary(b"multipart/form-data; boundary=" + invalid) is None
+    assert _multipart_boundary(b'multipart/form-data; boundary="trailing "') is None
+    assert _multipart_boundary(b"multipart/form-data; notboundary=B") is None
+
+
+@pytest.mark.asyncio
 async def test_an_oversized_body_is_refused_before_it_is_all_buffered() -> None:
     """The limit must stop the stream, not filter it after the fact."""
     delivered = 0
@@ -274,6 +335,27 @@ async def test_a_malformed_multipart_body_is_not_a_413() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"--B x\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nv\r\n--B--\r\n",
+        b"--B\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nunterminated",
+    ],
+)
+async def test_multipart_rejects_bad_boundary_lines_and_unterminated_parts(
+    body: bytes,
+) -> None:
+    request = _limited_request(
+        [body],
+        RequestLimits(),
+        [(b"content-type", b"multipart/form-data; boundary=B")],
+    )
+
+    with pytest.raises(ValueError):
+        await request.form()
+
+
+@pytest.mark.asyncio
 async def test_a_valid_multipart_form_still_yields_exact_bytes() -> None:
     body = (
         b"--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n"
@@ -290,6 +372,30 @@ async def test_a_valid_multipart_form_still_yields_exact_bytes() -> None:
     assert form.files["f"].data == b"hello"
     assert type(form.files["f"].data) is bytes
     assert form["g"] == "v"
+
+
+@pytest.mark.asyncio
+async def test_multipart_parses_incrementally_and_spools_without_buffering_body() -> None:
+    body = (
+        b"--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n"
+        b"Content-Type: application/octet-stream\r\n\r\n"
+        + b"0123456789" * 20
+        + b"\r\n--B\r\nContent-Disposition: form-data; name=\"label\"\r\n\r\nwreath"
+        b"\r\n--B--\r\n"
+    )
+    request = _limited_request(
+        [body[index : index + 3] for index in range(0, len(body), 3)],
+        RequestLimits(spool_max_bytes=32, max_body_bytes=1024),
+        [(b"content-type", b"multipart/form-data; boundary=B")],
+    )
+
+    form = await request.form()
+
+    assert form.files["f"].spooled is True
+    assert b"".join(form.files["f"].chunks(17)) == b"0123456789" * 20
+    assert form["label"] == "wreath"
+    with pytest.raises(StreamConsumed):
+        await request.body()
 
 
 def test_request_limits_reject_a_non_positive_value() -> None:

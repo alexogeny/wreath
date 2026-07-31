@@ -13,7 +13,7 @@ refused. An application owns one and hands it to every request it builds.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from tempfile import TemporaryFile
 from typing import Any, cast
@@ -22,7 +22,6 @@ from ._auth.models import Identity
 from ._codecs import parse_cookies, parse_qs
 from ._headers import build_header_map, find_header
 from ._json import loads as _json_loads
-from ._multipart import parse as multipart_parse
 from .exceptions import (
     ClientDisconnect,
     PayloadTooLarge,
@@ -88,12 +87,9 @@ class RequestLimits:
     #: `bytes` once on its way to the spool, so this bounds what is *retained*,
     #: not the peak.
     #:
-    #: This bounds what a parsed form *retains*, which is what made an upload
-    #: cost memory for as long as the handler ran. It does **not** bound the
-    #: body buffer itself -- `body()` still materialises the whole request
-    #: before parsing, so a concurrent upload still costs its own size once.
-    #: Making that incremental means an incremental parser, which is a native
-    #: module with a byte-for-byte pure twin; see report 23 G-44.
+    #: Multipart parsing is incremental: once a file part crosses this value,
+    #: subsequent bytes go straight to its temporary file and `form()` never
+    #: retains a complete request-body buffer.
     spool_max_bytes: int = 1024 * 1024
     #: Bytes the `Cookie` header may carry. Browsers stay far under this; a
     #: request past it is either broken or probing, and parsing it builds a dict
@@ -140,20 +136,6 @@ class RequestLimits:
 
 
 DEFAULT_LIMITS = RequestLimits()
-
-#: How `form()` tells a multipart *limit* from a malformed multipart body: both
-#: leave the parser as `ValueError`, and only the limits are a 413. These are
-#: the exact message prefixes both parsers emit, and
-#: `tests/test_native_parity.py::test_multipart_limit_parity` compares the C and
-#: pure messages byte for byte on every limit -- which is what makes the prefix
-#: a contract to key on rather than a guess. Adding a limit to the parser adds a
-#: prefix here; `tests/test_request.py` fails if one goes missing.
-_MULTIPART_LIMIT_MESSAGES = (
-    "multipart form has more than ",
-    "multipart part headers exceed ",
-    "multipart part exceeds ",
-)
-
 
 class UploadedFile:
     """One file field from a multipart form.
@@ -409,25 +391,215 @@ def _multipart_boundary(content_type: bytes) -> bytes | None:
             return value if _valid_boundary(value) else None
     return None
 
-def _uploaded(part: Any, spool_max_bytes: int) -> UploadedFile:
-    """Build an `UploadedFile`, spooling the payload when it is large.
+def _stream_part_headers(block: bytes) -> list[tuple[bytes, bytes]]:
+    headers: list[tuple[bytes, bytes]] = []
+    if not block:
+        return headers
+    for line in block.split(b"\r\n"):
+        name, separator, value = line.partition(b":")
+        if not separator or not name:
+            raise ValueError("malformed multipart header line")
+        headers.append((name.lower(), value.strip(b" \t")))
+    return headers
 
-    The threshold is on the *part*, not the request: one 4 MiB attachment is
-    what fills a heap, and ten 40 KiB ones are not.
-    """
-    if len(part.data) <= spool_max_bytes:
-        return UploadedFile(part.name, part.filename, part.headers, part.data)
-    spool = TemporaryFile()
-    spool.write(part.data)
-    spool.flush()
-    return UploadedFile(
-        part.name, part.filename, part.headers,
-        data=None, spool=spool, size=len(part.data),
-    )
+
+def _disposition_value(value: bytes, parameter: bytes) -> str | None:
+    for fragment in value.split(b";"):
+        key, separator, raw = fragment.strip(b" \t").partition(b"=")
+        if not separator or key.strip(b" \t").lower() != parameter:
+            continue
+        raw = raw.strip(b" \t")
+        if len(raw) >= 2 and raw.startswith(b'"') and raw.endswith(b'"'):
+            raw = raw[1:-1].replace(b'\\"', b'"').replace(b"\\\\", b"\\")
+        return raw.decode("utf-8", "replace")
+    return None
+
+
+async def _stream_multipart(
+    chunks: AsyncIterator[bytes], boundary: bytes, limits: RequestLimits
+) -> FormData:
+    """Parse multipart data incrementally, spooling file bytes as they arrive."""
+    opening = b"--" + boundary
+    delimiter = b"\r\n" + opening
+    buffer = bytearray()
+    state = "preamble"
+    closed = False
+    part_count = 0
+    retained = 0
+    fields: dict[str, str] = {}
+    files: dict[str, UploadedFile] = {}
+    all_values: dict[str, list[str]] = {}
+    headers: list[tuple[bytes, bytes]] = []
+    field_name: str | None = None
+    filename: str | None = None
+    part_data = bytearray()
+    part_spool: Any = None
+    part_size = 0
+
+    def begin_part(header_block: bytes) -> None:
+        nonlocal headers, field_name, filename, part_data, part_spool, part_size
+        nonlocal part_count
+        if part_count >= limits.max_parts:
+            raise PayloadTooLarge(
+                f"multipart form has more than {limits.max_parts} parts"
+            )
+        part_count += 1
+        headers = _stream_part_headers(header_block)
+        disposition = find_header(headers, b"content-disposition")
+        field_name = filename = None
+        if disposition is not None:
+            field_name = _disposition_value(disposition, b"name")
+            filename = _disposition_value(disposition, b"filename")
+        part_data = bytearray()
+        part_spool = None
+        part_size = 0
+
+    def feed_part(data: bytes | bytearray) -> None:
+        nonlocal part_spool, part_size
+        if not data:
+            return
+        if len(data) > limits.max_part_bytes - part_size:
+            raise PayloadTooLarge(
+                f"multipart part exceeds {limits.max_part_bytes} bytes"
+            )
+        part_size += len(data)
+        if field_name is None:
+            return
+        if filename is not None and part_spool is not None:
+            part_spool.write(data)
+            return
+        if filename is not None and len(part_data) + len(data) > limits.spool_max_bytes:
+            part_spool = TemporaryFile()
+            part_spool.write(part_data)
+            part_spool.write(data)
+            part_data.clear()
+            return
+        if retained + len(part_data) + len(data) > limits.max_form_memory_bytes:
+            raise PayloadTooLarge(
+                f"form parts exceed {limits.max_form_memory_bytes} bytes in memory"
+            )
+        part_data.extend(data)
+
+    def finish_part() -> None:
+        nonlocal retained, part_spool
+        if field_name is None:
+            if part_spool is not None:
+                part_spool.close()
+                part_spool = None
+            return
+        if filename is not None:
+            if part_spool is None:
+                data = bytes(part_data)
+                retained += len(data)
+                uploaded = UploadedFile(field_name, filename, headers, data)
+            else:
+                part_spool.flush()
+                uploaded = UploadedFile(
+                    field_name,
+                    filename,
+                    headers,
+                    data=None,
+                    spool=part_spool,
+                    size=part_size,
+                )
+                part_spool = None
+            previous = files.setdefault(field_name, uploaded)
+            if previous is not uploaded:
+                uploaded.close()
+            return
+        data = bytes(part_data)
+        retained += len(data)
+        decoded = data.decode("utf-8", "replace")
+        fields.setdefault(field_name, decoded)
+        all_values.setdefault(field_name, []).append(decoded)
+
+    try:
+        async for chunk in chunks:
+            if closed:
+                continue
+            buffer.extend(chunk)
+            while True:
+                if state == "preamble":
+                    position = buffer.find(opening)
+                    if position < 0:
+                        keep = max(0, len(buffer) - len(opening) + 1)
+                        if keep:
+                            del buffer[:keep]
+                        break
+                    del buffer[: position + len(opening)]
+                    state = "boundary"
+                elif state == "boundary":
+                    if buffer.startswith(b"--"):
+                        closed = True
+                        state = "epilogue"
+                        buffer.clear()
+                        break
+                    whitespace = 0
+                    while whitespace < len(buffer) and buffer[whitespace] in b" \t":
+                        whitespace += 1
+                    if len(buffer) < whitespace + 2:
+                        break
+                    if buffer[whitespace : whitespace + 2] != b"\r\n":
+                        raise ValueError("malformed multipart boundary line")
+                    del buffer[: whitespace + 2]
+                    state = "headers"
+                elif state == "headers":
+                    if buffer.startswith(b"\r\n"):
+                        header_end = 0
+                        consumed = 2
+                    else:
+                        header_end = buffer.find(b"\r\n\r\n")
+                        if header_end < 0:
+                            if len(buffer) > limits.max_part_header_bytes + 3:
+                                raise PayloadTooLarge(
+                                    "multipart part headers exceed "
+                                    f"{limits.max_part_header_bytes} bytes"
+                                )
+                            break
+                        consumed = header_end + 4
+                    if header_end > limits.max_part_header_bytes:
+                        raise PayloadTooLarge(
+                            "multipart part headers exceed "
+                            f"{limits.max_part_header_bytes} bytes"
+                        )
+                    header_block = bytes(buffer[:header_end])
+                    del buffer[:consumed]
+                    begin_part(header_block)
+                    state = "body"
+                elif state == "body":
+                    position = buffer.find(delimiter)
+                    if position >= 0:
+                        feed_part(buffer[:position])
+                        del buffer[: position + len(delimiter)]
+                        finish_part()
+                        state = "boundary"
+                        continue
+                    safe = len(buffer) - len(delimiter) + 1
+                    if safe > 0:
+                        feed_part(buffer[:safe])
+                        del buffer[:safe]
+                    break
+                else:
+                    break
+        if not closed:
+            raise ValueError("unterminated multipart part")
+    except BaseException:
+        if part_spool is not None:
+            part_spool.close()
+        for uploaded in files.values():
+            uploaded.close()
+        raise
+    return FormData(fields, files, all_values)
 
 
 Receive = Callable[[], Awaitable[dict[str, Any]]]
 _MISSING = object()
+_STREAMING = object()
+_STREAM_CONSUMED = object()
+
+
+class StreamConsumed(RuntimeError):
+    """The one-shot request body stream has already been consumed."""
 
 
 class Request:
@@ -457,6 +629,7 @@ class Request:
 
     __slots__ = (
         "_body",
+        "_app",
         "_cookies",
         "_form",
         "_header_map",
@@ -478,6 +651,7 @@ class Request:
         receive: Receive,
         path_params: dict[str, str] | None = None,
         limits: RequestLimits = DEFAULT_LIMITS,
+        app: Any = None,
     ) -> None:
         """Wrap one request. Two backings, one interface.
 
@@ -494,6 +668,7 @@ class Request:
             self._scope = None
             self._context = scope
         self._receive = receive
+        self._app = app
         self._body: bytes | object = _MISSING
         self._cookies: dict[str, str] | object = _MISSING
         self._json: Any = _MISSING
@@ -608,7 +783,8 @@ class Request:
         scope = self._scope
         if scope is None:
             context = self._context
-            assert context is not None
+            if context is None:
+                raise RuntimeError("request has neither an ASGI scope nor a native context")
             scope = self._scope = context._asgi_scope()
         return scope
 
@@ -623,7 +799,8 @@ class Request:
         if context is not None:
             return context.method
         scope = self._scope
-        assert scope is not None
+        if scope is None:
+            raise RuntimeError("request scope is unavailable")
         return scope["method"]
 
     @property
@@ -638,8 +815,39 @@ class Request:
         if context is not None:
             return context.path
         scope = self._scope
-        assert scope is not None
+        if scope is None:
+            raise RuntimeError("request scope is unavailable")
         return scope["path"]
+
+    def url_path_for(self, name: str, **parameters: Any) -> str:
+        """Build a path for a route named on this request's application."""
+        app = self._app
+        if app is None:
+            raise RuntimeError("this Request is not attached to a Wreath application")
+        root_path = self.scope.get("root_path", "").rstrip("/")
+        return root_path + app.url_path_for(name, **parameters)
+
+    def url_for(self, name: str, **parameters: Any) -> str:
+        """Build an absolute URL for a named route.
+
+        A host-specific route renders its declared host placeholders. Other
+        routes use the request's Host header, falling back to the ASGI server
+        address when the header is absent.
+        """
+        app = self._app
+        if app is None:
+            raise RuntimeError("this Request is not attached to a Wreath application")
+        host = app._host_for(name, parameters)
+        if host is None:
+            host = self.header("host")
+        if not host:
+            server = self.scope.get("server")
+            if server is None:
+                raise RuntimeError("cannot build an absolute URL without a host")
+            address, port = server
+            default_port = 443 if self.scheme == "https" else 80
+            host = str(address) if port in (None, default_port) else f"{address}:{port}"
+        return f"{self.scheme}://{host}{self.url_path_for(name, **parameters)}"
 
     @property
     def path_params(self) -> dict[str, str]:
@@ -685,7 +893,8 @@ class Request:
         if context is not None:
             return cast("tuple[str, int | None] | None", context.client)
         scope = self._scope
-        assert scope is not None
+        if scope is None:
+            raise RuntimeError("request scope is unavailable")
         return scope.get("client")
 
     @property
@@ -703,7 +912,8 @@ class Request:
         if context is not None:
             return cast(str, context.scheme)
         scope = self._scope
-        assert scope is not None
+        if scope is None:
+            raise RuntimeError("request scope is unavailable")
         return scope.get("scheme", "http")
 
     def _set_client(self, client: tuple[str, int | None]) -> None:
@@ -715,7 +925,8 @@ class Request:
             context._set_client(client)
             return
         scope = self._scope
-        assert scope is not None
+        if scope is None:
+            raise RuntimeError("request scope is unavailable")
         scope["client"] = client
 
     def _set_scheme(self, scheme: str) -> None:
@@ -724,7 +935,8 @@ class Request:
             context._set_scheme(scheme)
             return
         scope = self._scope
-        assert scope is not None
+        if scope is None:
+            raise RuntimeError("request scope is unavailable")
         scope["scheme"] = scheme
 
     @property
@@ -740,7 +952,8 @@ class Request:
         if context is not None:
             return context.query_string
         scope = self._scope
-        assert scope is not None
+        if scope is None:
+            raise RuntimeError("request scope is unavailable")
         return scope.get("query_string", b"")
 
     @property
@@ -759,7 +972,8 @@ class Request:
         if context is not None:
             return context.headers
         scope = self._scope
-        assert scope is not None
+        if scope is None:
+            raise RuntimeError("request scope is unavailable")
         return scope.get("headers", [])
 
     @property
@@ -919,12 +1133,12 @@ class Request:
     async def body(self) -> bytes:
         """The whole request body as bytes, read once and cached.
 
-        The first call drains the ASGI receive channel; every call after it
+        The first call drains `stream()` and caches the result; every call after it
         returns the same object without touching the channel, so middleware, a
-        dependency and the handler can each ask for the body. There is no
-        streaming read: the body is materialised in full, bounded by
-        `RequestLimits.max_body_bytes`, and the limit is checked as chunks
-        arrive rather than after the whole thing is in memory.
+        dependency and the handler can each ask for the body. This method
+        materialises the body in full; use `stream()` to process chunks without
+        retaining them. Both paths are bounded by `RequestLimits.max_body_bytes`,
+        checked as chunks arrive rather than after joining them.
 
         A request that is refused or cut short caches an **empty** body, so a
         second call returns `b""` instead of raising again. The channel is
@@ -936,50 +1150,24 @@ class Request:
             ClientDisconnect: the peer went away before the body finished
         """
         cached = self._body
+        if cached is _STREAMING or cached is _STREAM_CONSUMED:
+            raise StreamConsumed("request body stream has already been consumed")
         if cached is not _MISSING:
             return cast(bytes, cached)
 
-        limit = self._limits.max_body_bytes
         first_chunk: bytes | None = None
         buffer: bytearray | None = None
-        total = 0
-        while True:
-            message = await self._receive()
-            message_type = message["type"]
-            if message_type == "http.disconnect":
-                # Not an end-of-body. Returning what had arrived handed the
-                # handler a truncated payload that could still parse -- half a
-                # JSON document is rarely valid, but half a form or half an
-                # upload very often is, and the handler had no way to tell.
-                self._body = b""
-                raise ClientDisconnect(
-                    "the client disconnected before the request body was received"
-                )
-            if message_type != "http.request":
-                continue
-            body = message.get("body", b"")
+        async for body in self.stream():
             if body:
-                # Checked before the chunk is retained and before the join, so
-                # an oversized body is refused while it is still arriving rather
-                # than after the whole thing is in memory twice. A conforming
-                # ASGI server may hand over chunks of any size, and may not
-                # have applied a limit of its own.
-                if len(body) > limit - total:
-                    self._body = b""
-                    raise PayloadTooLarge(
-                        f"request body exceeds {limit} bytes"
-                    )
-                total += len(body)
                 if first_chunk is None and buffer is None:
                     first_chunk = body
                 else:
                     if buffer is None:
-                        assert first_chunk is not None
+                        if first_chunk is None:
+                            raise RuntimeError("request body collector lost its first chunk")
                         buffer = bytearray(first_chunk)
                         first_chunk = None
                     buffer.extend(body)
-            if not message.get("more_body", False):
-                break
 
         if buffer is not None:
             result = bytes(buffer)
@@ -990,6 +1178,50 @@ class Request:
             result = b""
         self._body = result
         return result
+
+    async def stream(self) -> AsyncIterator[bytes]:
+        """Yield request-body chunks directly from the ASGI receive channel.
+
+        Streaming enforces `max_body_bytes` as bytes arrive but retains no
+        complete body. It is one-shot: after a streamed body completes (or a
+        consumer stops early), `body()`, `json()`, `form()`, and a second stream
+        raise `StreamConsumed`. If `body()` ran first, its cached bytes are
+        replayed once without touching the receive channel.
+        """
+        cached = self._body
+        if cached is _STREAMING or cached is _STREAM_CONSUMED:
+            raise StreamConsumed("request body stream has already been consumed")
+        if cached is not _MISSING:
+            body = cast(bytes, cached)
+            if body:
+                yield body
+            return
+        self._body = _STREAMING
+        total = 0
+        limit = self._limits.max_body_bytes
+        try:
+            while True:
+                message = await self._receive()
+                message_type = message["type"]
+                if message_type == "http.disconnect":
+                    self._body = b""
+                    raise ClientDisconnect(
+                        "the client disconnected before the request body was received"
+                    )
+                if message_type != "http.request":
+                    continue
+                body = message.get("body", b"")
+                if body:
+                    if len(body) > limit - total:
+                        self._body = b""
+                        raise PayloadTooLarge(f"request body exceeds {limit} bytes")
+                    total += len(body)
+                    yield body
+                if not message.get("more_body", False):
+                    return
+        finally:
+            if self._body is _STREAMING:
+                self._body = _STREAM_CONSUMED
 
     async def json(self) -> Any:
         """The body decoded as JSON, decoded once and cached.
@@ -1027,15 +1259,15 @@ class Request:
         Uploaded parts, meaning the ones carrying a filename, land in
         `FormData.files`; every other part is a text field.
 
-        Reads `body()`, so the body limit applies first, and then the form
-        limits: `max_parts`, `max_part_header_bytes` and `max_part_bytes` inside
-        the parser, `max_form_memory_bytes` across the parts kept in memory, and
+        Multipart input drains `stream()` incrementally, so the body limit and
+        form limits are checked while data arrives: `max_parts`,
+        `max_part_header_bytes`, `max_part_bytes`, `max_form_memory_bytes` across
+        the parts kept in memory, and
         `max_form_fields` while scanning a urlencoded body. A part over
         `spool_max_bytes` is written to a temporary file and does not count
         against the in-memory total. **Every one of those limits refuses with a
-        413**, including the three the codec reports as a `ValueError`, which
-        this method converts: a limit that exists to refuse hostile input has to
-        report the caller's fault as the caller's, not as a 500.
+        413**: a limit that exists to refuse hostile input has to report the
+        caller's fault as the caller's, not as a 500.
 
         A body the parser cannot read -- a bad boundary, an unterminated part, a
         malformed header line -- is a different failure and still raises
@@ -1055,60 +1287,14 @@ class Request:
         # Via the `headers` property, not `self.scope`: on the native path the
         # ASGI scope is lazily built, and reading one header should not force it.
         content_type = find_header(self.headers, b"content-type")
-        body = await self.body()
         if content_type is not None and content_type.startswith(b"multipart/form-data"):
             boundary = _multipart_boundary(content_type)
             if boundary is None:
                 raise ValueError("multipart body without a boundary parameter")
-            fields: dict[str, str] = {}
-            files: dict[str, UploadedFile] = {}
-            limits = self._limits
-            retained = 0
-            all_values: dict[str, list[str]] = {}
-            try:
-                parts = multipart_parse(
-                    body,
-                    boundary,
-                    limits.max_parts,
-                    limits.max_part_header_bytes,
-                    limits.max_part_bytes,
-                )
-            except ValueError as error:
-                # The parser reports a *limit* and a *malformed body* with the
-                # same type, so the message is what tells them apart. Only the
-                # limits become a 413: they refuse well-formed but oversized
-                # input, which is the caller's fault and answerable. A malformed
-                # body keeps raising `ValueError`, which is the documented
-                # contract for `form()` and a different conversation.
-                message = str(error)
-                if message.startswith(_MULTIPART_LIMIT_MESSAGES):
-                    raise PayloadTooLarge(message) from None
-                raise
-            for part in parts:
-                if part.name is None:
-                    continue
-                # Bound the aggregate payload retained *in memory* across all
-                # parts, checked before this part is kept so the crossing part is
-                # refused rather than materialised into the result. A part large
-                # enough to spool does not count: it is not in memory, which is
-                # the whole point of spooling it.
-                if part.filename is None or len(part.data) <= limits.spool_max_bytes:
-                    retained += len(part.data)
-                if retained > limits.max_form_memory_bytes:
-                    raise PayloadTooLarge(
-                        f"form parts exceed {limits.max_form_memory_bytes} bytes in memory"
-                    )
-                if part.filename is not None:
-                    files.setdefault(
-                        part.name, _uploaded(part, limits.spool_max_bytes)
-                    )
-                else:
-                    decoded = part.data.decode("utf-8", "replace")
-                    fields.setdefault(part.name, decoded)
-                    all_values.setdefault(part.name, []).append(decoded)
-            result = FormData(fields, files, all_values)
+            result = await _stream_multipart(self.stream(), boundary, self._limits)
             self._form = result
             return result
+        body = await self.body()
         fields = {}
         every: dict[str, list[str]] = {}
         limit = self._limits.max_form_fields

@@ -15,21 +15,22 @@ uncommon case fully within reach.
 > ASGI for either.*
 
 ```python
-from wreath.response import JSONResponse, RedirectResponse
+from wreath.response import RedirectResponse
 
-@app.post("/users")
-async def create_user(request) -> JSONResponse:
+@app.post("/users", status_code=201)
+async def create_user(request) -> dict:
     user = await save(await request.json())
-    return JSONResponse({"id": user.id}, status=201)
+    return {"id": user.id}
 
 @app.get("/old-path")
 async def moved(request) -> RedirectResponse:
     return RedirectResponse("/new-path", status=308)
 ```
 
-Return a plain dict for the ordinary case and Wreath sends `200
-application/json`; reach for a response type only when you need to say something
-more — a specific status, a redirect, a stream, or a file.
+Return a plain dict for the ordinary case and Wreath sends JSON. `status_code=`
+on the route changes the status for a coerced value and the OpenAPI response
+together; reach for a response type when one call needs to own the status,
+headers, redirect, stream, or file itself.
 
 `RequestLimits.max_cookie_bytes` (16 KiB) bounds the `Cookie` header before it is
 parsed — parsing builds a dict proportional to whatever arrived, on every route
@@ -59,7 +60,29 @@ expect and depend on — path and query parameters, a typed body — prefer
 [declaring it](binding.md). Declared inputs are validated and documented for you,
 and your handler receives clean, typed values instead of raw strings.
 
+For a body that must not be retained, iterate the receive channel directly:
+
+```python
+@app.post("/events")
+async def ingest(request: Request) -> dict:
+    async for chunk in request.stream():
+        await sink.write(chunk)
+    return {"accepted": True}
+```
+
+The stream is one-shot and still enforces `RequestLimits.max_body_bytes` while
+chunks arrive. Calling `body()`, `json()`, or `form()` after it raises
+`StreamConsumed`. Calling `stream()` after `body()` replays the cached body.
+Multipart forms use this incremental path themselves, so a large uploaded file
+can cross the spool threshold without a second whole-request buffer.
+
 ## Responses
+
+A supported return annotation is also the runtime output contract. A dataclass
+response filters undeclared mapping keys, validates the remaining values, and
+serializes aliases and rich scalar types before JSON encoding. Returning a
+`Response` object bypasses that projection because the response owns its wire
+representation explicitly.
 
 Return a `dict` and Wreath sends JSON. When you need to shape the response
 yourself — a specific status, custom headers, a stream, a file — reach for the
