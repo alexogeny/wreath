@@ -16,6 +16,7 @@ import datetime
 import hashlib
 import math
 import re
+import struct
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
@@ -24,6 +25,7 @@ from typing import Any
 from .._json import dumps as _json_dumps
 from .._json import loads as _json_loads
 from .._sparsevec import MAX_SPARSEVEC_DIM, MAX_SPARSEVEC_NNZ, SparseVector
+from ..geospatial import Coordinate
 from .errors import DeclarationError, ExtensionNotInstalledError
 
 
@@ -444,6 +446,59 @@ def _json_to_wire(value: Any) -> str:
     return _json_dumps(value).decode("utf-8")
 
 
+def _check_point(value: Any) -> Coordinate:
+    if type(value) is not Coordinate:
+        raise _type_error("Coordinate", value)
+    return value
+
+
+def _point_to_wire(value: Any) -> str:
+    """The literal PostgreSQL parses: `(x,y)`, and x is longitude.
+
+    PostGIS, GeoJSON and PostgreSQL's own `point` all put longitude first;
+    only humans say "lat, lon". `Coordinate` refuses a positional pair for
+    exactly that reason, and this is the one place the order is written down
+    in the direction the database wants it.
+    """
+    return f"({value.lon!r},{value.lat!r})"
+
+
+def _point_from_wire(value: Any) -> Coordinate:
+    """Read `point` off the wire in either format the driver may hand over.
+
+    An OID the driver's codec does not enumerate falls through to its terminal
+    arm, which returns the field's bytes unchanged -- so what arrives here is
+    the server's own representation and not a decoded value. That is the text
+    form `(x,y)` on an unprepared path and 16 bytes of two big-endian float8 on
+    a prepared one, so both are read rather than one being assumed.
+    """
+    if isinstance(value, Coordinate):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+        if len(raw) == 16 and not raw.startswith(b"("):
+            x, y = struct.unpack("!dd", raw)
+            return Coordinate(lat=y, lon=x)
+        try:
+            text = raw.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"invalid point wire value {raw!r}") from exc
+    elif isinstance(value, str):
+        text = value
+    else:
+        raise ValueError(f"invalid point wire value {value!r}")
+    body = text.strip()
+    if not body.startswith("(") or not body.endswith(")") or body.count(",") != 1:
+        raise ValueError(f"invalid point wire value {text!r}")
+    x_text, _, y_text = body[1:-1].partition(",")
+    try:
+        x = float(x_text)
+        y = float(y_text)
+    except ValueError as exc:
+        raise ValueError(f"invalid point wire value {text!r}") from exc
+    return Coordinate(lat=y, lon=x)
+
+
 Bool = PgType("bool", 16, "boolean", _check_bool)
 Int16 = PgType("int2", 21, "smallint", _integer(16))
 Int32 = PgType("int4", 23, "integer", _integer(32))
@@ -463,6 +518,13 @@ Json = PgType(
 )
 Jsonb = PgType(
     "jsonb", 3802, "jsonb", _check_json, to_wire=_json_to_wire, from_wire=_json_loads
+)
+#: A WGS84 position, stored in core PostgreSQL's `point`. Not an extension type:
+#: OID 600 is in the catalog, and core ships a GiST `point_ops` opclass, so the
+#: index a proximity search needs is available with nothing installed. That is
+#: the whole tier-1 claim -- see `docs/guides/geospatial.md`.
+Point = PgType(
+    "point", 600, "point", _check_point, to_wire=_point_to_wire, from_wire=_point_from_wire
 )
 
 

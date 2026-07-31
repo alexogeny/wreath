@@ -17,6 +17,8 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from ..geospatial import Coordinate
+from ..pagination import Page
 from ..temporal import Instant
 from .model import (
     BOOLEAN,
@@ -51,6 +53,7 @@ _SCALARS: dict[Any, TypeRef] = {
     float: NUMBER,
     str: STRING,
     Instant: DATE_TIME,
+    Coordinate: TypeRef("coordinate", name="coordinate"),
     datetime.datetime: DATE_TIME,   # before `date`: datetime subclasses it
     datetime.date: DATE,
     UUID: TypeRef("string", name="uuid"),
@@ -259,6 +262,14 @@ class _Builder:
                 return self._unsupported(annotation)
             value = self.type_ref(args[1]) if len(args) == 2 else UNKNOWN
             return TypeRef("record", arguments=(value,))
+        if origin is Page:
+            # `Page[T]` is a parameterized generic alias, so `is_dataclass` is
+            # False for it and it would otherwise fall to `_unsupported` --
+            # which is what made a paginated route ungeneratable for *every*
+            # target, not just one.
+            args = typing.get_args(annotation)
+            element = self.type_ref(args[0]) if args else UNKNOWN
+            return TypeRef("page", arguments=(element,))
         if dataclasses.is_dataclass(annotation) or _is_wreath_model(annotation):
             return self._reference(annotation)
         return self._unsupported(annotation)

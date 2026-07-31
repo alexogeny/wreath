@@ -147,6 +147,23 @@ def ts_type(node: tuple[Any, ...]) -> str:
         return " | ".join(ts_type(arg) for arg in args)
     if kind == "literal":
         return " | ".join(_ts_literal(value) for value in literals)
+    if kind == "coordinate":
+        # Named components, not `[number, number]`: a tuple type-checks with the
+        # arguments the wrong way round, which is the transposition the whole
+        # declaration exists to make unrepresentable.
+        return "{ lat: number; lon: number }"
+    if kind == "page":
+        # Structural, not a named `Page<T>` alias. The Python target imports
+        # `wreath.pagination.Page` because there is a real type to *be*; a
+        # TypeScript client is standalone, so a named alias would have to be
+        # declared somewhere -- and `models.ts` is rendered by this module's
+        # native twin, where adding a preamble means keeping two emitters
+        # byte-identical for no gain. Inline always compiles and cannot drift.
+        inner = ts_type(args[0]) if args else "unknown"
+        return (
+            "{ items: readonly " + inner + "[]; total: number; "
+            "page: number; size: number }"
+        )
     raise ValueError(
         f"no TypeScript type for TypeKind {kind!r}. A kind added to "
         "`wreath.typegen.model.TypeKind` must be rendered here and in "

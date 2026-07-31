@@ -24,6 +24,18 @@ TypeKind = Literal[
     "union",
     "literal",
     "reference",
+    # `wreath.pagination.Page[T]`, carrying the element type as its one
+    # argument. A distinct kind rather than a `reference`, because every target
+    # must render it as *wreath's own* `Page` -- a generated near-copy
+    # type-checks and behaves identically until someone passes one to a
+    # function annotated with the real thing.
+    "page",
+    # `wreath.geospatial.Coordinate`. A distinct kind rather than a `reference`
+    # for the same reason as `page`: the Python target must annotate the *real*
+    # type, and the wire shape is an object with named `lat`/`lon` so a client
+    # cannot transpose the pair -- which is the trap the constructor refuses
+    # positionally, closed again at every other surface.
+    "coordinate",
 ]
 
 
