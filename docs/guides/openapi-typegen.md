@@ -33,6 +33,37 @@ from wreath.openapi import generate_openapi
 spec = generate_openapi(app)
 ```
 
+The generator refuses an unsupported annotation instead of publishing an empty
+schema. `Field` aliases, descriptions, examples, numeric/length bounds and
+patterns come from the same metadata runtime validation uses. Route metadata
+owns the rest of the operation contract:
+
+```python
+from wreath.openapi import ResponseSpec
+
+app.add_security_scheme(
+    "bearerAuth",
+    {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"},
+)
+
+@app.post(
+    "/widgets",
+    status_code=201,
+    response_description="Created widget",
+    responses={409: ResponseSpec(Conflict, description="Name conflict")},
+    security={"bearerAuth": ()},
+    deprecated=False,
+)
+async def create(request, body: NewWidget) -> Widget:
+    ...
+```
+
+`include_in_schema=False` withholds an internal operation. The declared success
+status is also the runtime status for a plain return value, so documentation and
+dispatch cannot disagree. `compare_openapi(previous, current)` returns stable
+breaking-change records for removed operations/responses and newly required or
+tightened parameters; use it as the compatibility decision in CI.
+
 ## Typed clients
 
 `wreath.typegen` goes a step further and renders a client for your frontend —

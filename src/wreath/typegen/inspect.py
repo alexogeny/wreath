@@ -13,7 +13,9 @@ import enum
 import inspect
 import types
 import typing
+from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from ..temporal import Instant
 from .model import (
@@ -51,6 +53,9 @@ _SCALARS: dict[Any, TypeRef] = {
     Instant: DATE_TIME,
     datetime.datetime: DATE_TIME,   # before `date`: datetime subclasses it
     datetime.date: DATE,
+    UUID: TypeRef("string", name="uuid"),
+    Decimal: TypeRef("string", name="decimal"),
+    bytes: TypeRef("string", name="byte"),
 }
 _JS_KEYWORDS = frozenset(
     {
@@ -91,7 +96,7 @@ def derive_operation_id(method: str, path: str) -> str:
         if not segment:
             continue
         if segment.startswith("{") and segment.endswith("}"):
-            words.append("By" + _pascal(segment[1:-1]))
+            words.append("By" + _pascal(segment[1:-1].split(":", 1)[0]))
         else:
             words.append(_pascal(segment))
     verb = method.lower()
@@ -99,6 +104,15 @@ def derive_operation_id(method: str, path: str) -> str:
     if not tail:
         return verb + "Root"
     return verb + tail
+
+
+def _public_path(path: str) -> str:
+    return "/".join(
+        "{" + segment[1:-1].split(":", 1)[0] + "}"
+        if segment.startswith("{") and segment.endswith("}")
+        else segment
+        for segment in path.split("/")
+    )
 
 
 def is_valid_identifier(name: str) -> bool:
@@ -123,7 +137,7 @@ def resolve_operation_ids(
                 Diagnostic(
                     f"operation_id {explicit!r} is not a valid client identifier",
                     method=definition.methods[0] if definition.methods else None,
-                    path=definition.path,
+                    path=_public_path(definition.path),
                 )
             )
         for method in definition.methods:
@@ -214,13 +228,19 @@ class _Builder:
         return UNKNOWN
 
     def type_ref(self, annotation: Any) -> TypeRef:
-        if annotation is Any or annotation is inspect.Parameter.empty:
+        if typing.get_origin(annotation) is typing.Annotated:
+            annotation = typing.get_args(annotation)[0]
+        if annotation in (Any, object) or annotation is inspect.Parameter.empty:
             return UNKNOWN
         if annotation is None or annotation is _NONE_TYPE:
             return NULL
         scalar = _SCALARS.get(annotation)
         if scalar is not None:
             return scalar
+        if annotation in (list, tuple, set, frozenset):
+            return TypeRef("array", arguments=(UNKNOWN,))
+        if annotation is dict:
+            return TypeRef("record", arguments=(UNKNOWN,))
         if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
             return self._enum_ref(annotation)
         origin = typing.get_origin(annotation)
@@ -296,20 +316,48 @@ class _Builder:
     def _model_fields(self, annotation: Any) -> list[Field]:
         if dataclasses.is_dataclass(annotation):
             try:
-                hints = typing.get_type_hints(annotation, include_extras=False)
+                hints = typing.get_type_hints(annotation, include_extras=True)
             except (TypeError, ValueError):
                 hints = {}
             fields: list[Field] = []
             for dc_field in dataclasses.fields(annotation):
+                field_annotation = hints.get(dc_field.name, Any)
+                metadata = None
+                if typing.get_origin(field_annotation) is typing.Annotated:
+                    _base, *items = typing.get_args(field_annotation)
+                    from ..binding import Field as BindingField
+
+                    metadata = next(
+                        (item for item in items if isinstance(item, BindingField)), None
+                    )
                 required = (
                     dc_field.default is dataclasses.MISSING
                     and dc_field.default_factory is dataclasses.MISSING
                 )
                 fields.append(
                     Field(
-                        dc_field.name,
-                        self.type_ref(hints.get(dc_field.name, Any)),
+                        (
+                            metadata.alias
+                            if metadata is not None and metadata.alias
+                            else dc_field.name
+                        ),
+                        self.type_ref(field_annotation),
                         required,
+                        description=metadata.description if metadata is not None else None,
+                        examples=metadata.examples if metadata is not None else (),
+                        gt=metadata.gt if metadata is not None else None,
+                        ge=metadata.ge if metadata is not None else None,
+                        lt=metadata.lt if metadata is not None else None,
+                        le=metadata.le if metadata is not None else None,
+                        min_length=metadata.min_length if metadata is not None else None,
+                        max_length=metadata.max_length if metadata is not None else None,
+                        pattern=metadata.pattern if metadata is not None else None,
+                        unique_items=typing.get_origin(
+                            typing.get_args(field_annotation)[0]
+                            if typing.get_origin(field_annotation) is typing.Annotated
+                            else field_annotation
+                        )
+                        in (set, frozenset),
                     )
                 )
             return fields
@@ -368,6 +416,8 @@ def build_api_model(
     operations: list[Operation] = []
 
     for index, definition in enumerate(routes):
+        if not definition.include_in_schema:
+            continue
         spec = binding_specs[index]
         # inspect_handler returns None for request-only handlers, so the return
         # annotation is resolved independently here -- a param-less handler still
@@ -527,8 +577,9 @@ def _operation_shape(
     if spec is None:
         for segment in definition.path.split("/"):
             if segment.startswith("{") and segment.endswith("}"):
+                name = segment[1:-1].split(":", 1)[0]
                 parameters.append(
-                    Parameter(segment[1:-1], segment[1:-1], "path", STRING, True)
+                    Parameter(name, name, "path", STRING, True)
                 )
         return parameters, None, None, builder.type_ref(return_annotation)
 

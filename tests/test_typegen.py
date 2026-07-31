@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import enum
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -61,7 +60,7 @@ class LocalItem:
 
 @dataclass
 class UnsupportedShape:
-    id: uuid.UUID
+    id: complex
 
 
 def _model(app: Wreath, **kwargs: Any) -> Any:

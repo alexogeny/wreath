@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
 
 from wreath import Wreath
@@ -10,7 +9,7 @@ from wreath import Wreath
 
 @dataclass
 class Token:
-    id: uuid.UUID
+    id: complex
 
 
 app = Wreath()

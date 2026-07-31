@@ -43,6 +43,16 @@ class Field:
     wire_name: str
     type: TypeRef
     required: bool
+    description: str | None = None
+    examples: tuple[object, ...] = ()
+    gt: int | float | object | None = None
+    ge: int | float | object | None = None
+    lt: int | float | object | None = None
+    le: int | float | object | None = None
+    min_length: int | None = None
+    max_length: int | None = None
+    pattern: str | None = None
+    unique_items: bool = False
 
 
 @dataclass(frozen=True, slots=True)
