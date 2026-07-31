@@ -134,6 +134,132 @@ def test_run_never_passes_a_stop(kind: str, arms: tuple[str, ...]) -> None:
             assert run == len(data) or is_stop(data[run]), f"{kind}/{arm} stopped early"
 
 
+def test_b64url_arms_agree_with_scalar(arms: tuple[str, ...]) -> None:
+    """Every base64url arm decodes, and rejects, exactly what scalar does.
+
+    Both halves matter. A vector arm that accepts a byte outside the alphabet
+    would let a malformed JWT segment through to the JSON parser, and one that
+    rejects a legal character would refuse valid tokens; only crossing accept
+    *and* reject against the definition covers both.
+    """
+    import base64
+
+    rng = random.Random(31337)
+    cases: list[bytes] = []
+    for n in range(0, 200):
+        cases.append(base64.urlsafe_b64encode(bytes(n)).rstrip(b"="))
+    for _ in range(3000):
+        raw = bytes(rng.randrange(256) for _ in range(rng.randrange(0, 120)))
+        cases.append(base64.urlsafe_b64encode(raw).rstrip(b"="))
+    # hostile: the alphabet plus the bytes most likely to be mistaken for it
+    hostile = b"ABCzab019-_+/=. \x00\xff\x80\x7f"
+    for _ in range(3000):
+        cases.append(bytes(rng.choice(hostile) for _ in range(rng.randrange(0, 120))))
+
+    for data in cases:
+        expected = _core.simd_probe("b64", "scalar", data)
+        for arm in arms[1:]:
+            got = _core.simd_probe("b64", arm, data)
+            if got is None:
+                continue
+            assert got == expected, f"b64/{arm} disagreed on {data[:48]!r}"
+
+
+def test_b64url_matches_the_standard_library(arms: tuple[str, ...]) -> None:
+    """The scalar definition is itself checked, against an outside reference.
+
+    Agreement between arms only proves they are the same; it does not prove
+    they are right. `base64` decides that.
+    """
+    import base64
+
+    rng = random.Random(4242)
+    for _ in range(3000):
+        raw = bytes(rng.randrange(256) for _ in range(rng.randrange(0, 90)))
+        encoded = base64.urlsafe_b64encode(raw).rstrip(b"=")
+        for arm in arms:
+            got = _core.simd_probe("b64", arm, encoded)
+            if got is None:
+                continue
+            assert got == raw
+
+
+def test_b64_encode_arms_agree_and_match_the_standard_library(
+    arms: tuple[str, ...],
+) -> None:
+    """The encoder's arms, against each other and against `base64`.
+
+    The vector arm builds each character by adding an offset chosen from a
+    sixteen-entry table indexed by an arithmetic bucket, not by the six-bit
+    value. Writing that table in value order instead produced 736,000
+    differential failures on its first run -- which is the whole argument for
+    having this test rather than trusting the transcription.
+    """
+    import base64
+
+    rng = random.Random(90210)
+    cases = [bytes(n) for n in range(0, 200)]
+    for _ in range(3000):
+        cases.append(bytes(rng.randrange(256) for _ in range(rng.randrange(0, 400))))
+
+    for data in cases:
+        expected = base64.b64encode(data)
+        for arm in arms:
+            got = _core.simd_probe("b64enc", arm, data)
+            if got is None:
+                continue
+            assert got == expected, f"b64enc/{arm} disagreed on {len(data)} bytes"
+
+
+def test_b64encode_entry_point_matches_the_standard_library() -> None:
+    """The public shape: both alphabets, padded and not, returning `str`."""
+    import base64
+
+    rng = random.Random(5150)
+    for _ in range(2000):
+        raw = bytes(rng.randrange(256) for _ in range(rng.randrange(0, 300)))
+        assert _core.b64encode(raw) == base64.b64encode(raw).decode("ascii")
+        assert _core.b64encode(raw, True) == base64.urlsafe_b64encode(raw).decode("ascii")
+        assert _core.b64encode(raw, True, False) == (
+            base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+        )
+        assert isinstance(_core.b64encode(raw), str)
+
+
+def test_hex_arms_agree_and_match_the_standard_library(arms: tuple[str, ...]) -> None:
+    """Hex decoding, arm against arm and against `bytes.fromhex`.
+
+    This is the path every `bytea` column takes: PostgreSQL sends binary in
+    text format as two characters per byte, so the scan is as long as the
+    value. Rejection matters as much as the decode -- an arm that accepted a
+    non-hex byte would hand silently wrong bytes to the application.
+    """
+    rng = random.Random(6180)
+    cases: list[bytes] = [b"", b"0", b"00", b"ff", b"FF", b"0g", b"g0", b"abcdef"]
+    for _ in range(3000):
+        raw = bytes(rng.randrange(256) for _ in range(rng.randrange(0, 200)))
+        cases.append(raw.hex().encode())
+        cases.append(raw.hex().upper().encode())
+    hostile = b"0123456789abcdefABCDEFghxyz \x00\xff"
+    for _ in range(3000):
+        cases.append(bytes(rng.choice(hostile) for _ in range(rng.randrange(0, 200))))
+
+    for data in cases:
+        expected = _core.simd_probe("hex", "scalar", data)
+        for arm in arms[1:]:
+            got = _core.simd_probe("hex", arm, data)
+            if got is None:
+                continue
+            assert got == expected, f"hex/{arm} disagreed on {data[:48]!r}"
+        # and the scalar definition itself, against an outside reference
+        try:
+            reference = bytes.fromhex(data.decode("ascii"))
+        except (UnicodeDecodeError, ValueError):
+            reference = False
+        if isinstance(reference, bytes) and b" " not in data:
+            assert expected == reference
+
+
 def test_json_run_reports_non_ascii_only_from_bytes_it_passed(
     arms: tuple[str, ...],
 ) -> None:

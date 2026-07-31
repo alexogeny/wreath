@@ -701,4 +701,398 @@ wreath_xor_mask(uint8_t *dst, const uint8_t *src, ptrdiff_t len, const uint8_t *
 #endif
 }
 
+/* ======================================================================== */
+/* base64url decoding: A-Z a-z 0-9 - _ , unpadded. Used per JWT segment.      */
+/* ======================================================================== */
+
+/* Six-bit value of each byte; 0xFF for everything outside the alphabet. Any
+ * legal value is <= 63, so four characters are validated with one OR. */
+static const unsigned char wreath_b64url_value[256] = {
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x3E, 0xFF, 0xFF,
+    0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+    0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0xFF, 0xFF, 0xFF, 0xFF, 0x3F,
+    0xFF, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+    0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+};
+
+static inline ptrdiff_t
+wreath_b64url_decode_scalar(const char *in, ptrdiff_t len, unsigned char *out)
+{
+    ptrdiff_t o = 0;
+    ptrdiff_t i = 0;
+    if (len % 4 == 1) {
+        return -1;  /* no whole number of characters encodes to this */
+    }
+    for (; i + 4 <= len; i += 4) {
+        unsigned v0 = wreath_b64url_value[(unsigned char)in[i]];
+        unsigned v1 = wreath_b64url_value[(unsigned char)in[i + 1]];
+        unsigned v2 = wreath_b64url_value[(unsigned char)in[i + 2]];
+        unsigned v3 = wreath_b64url_value[(unsigned char)in[i + 3]];
+        if ((v0 | v1 | v2 | v3) > 63) {
+            return -1;
+        }
+        unsigned q = (v0 << 18) | (v1 << 12) | (v2 << 6) | v3;
+        out[o++] = (unsigned char)((q >> 16) & 0xFF);
+        out[o++] = (unsigned char)((q >> 8) & 0xFF);
+        out[o++] = (unsigned char)(q & 0xFF);
+    }
+    ptrdiff_t rem = len - i;
+    if (rem == 2) {
+        unsigned v0 = wreath_b64url_value[(unsigned char)in[i]];
+        unsigned v1 = wreath_b64url_value[(unsigned char)in[i + 1]];
+        if ((v0 | v1) > 63) {
+            return -1;
+        }
+        out[o++] = (unsigned char)((((v0 << 18) | (v1 << 12)) >> 16) & 0xFF);
+    }
+    else if (rem == 3) {
+        unsigned v0 = wreath_b64url_value[(unsigned char)in[i]];
+        unsigned v1 = wreath_b64url_value[(unsigned char)in[i + 1]];
+        unsigned v2 = wreath_b64url_value[(unsigned char)in[i + 2]];
+        if ((v0 | v1 | v2) > 63) {
+            return -1;
+        }
+        unsigned q = (v0 << 18) | (v1 << 12) | (v2 << 6);
+        out[o++] = (unsigned char)((q >> 16) & 0xFF);
+        out[o++] = (unsigned char)((q >> 8) & 0xFF);
+    }
+    return o;
+}
+
+#if defined(WREATH_HAVE_AVX2)
+/* Thirty-two characters to twenty-four bytes per step.
+ *
+ * Validation and mapping both key off the two nibbles of each byte, looked up
+ * with `vpshufb`. `mask[lo] & bitpos[hi]` is zero exactly for bytes outside
+ * the alphabet -- the tables are derived from the alphabet itself, not written
+ * by hand, and `tests/test_native_simd.py` crosses this arm against the scalar
+ * one on every byte value. Bytes >= 0x80 land on a zero entry in `bitpos` and
+ * so are rejected with everything else.
+ *
+ * The value of a character is itself plus a shift chosen by its high nibble:
+ * one shift per nibble, except that 'P'-'Z' and '_' share nibble 5 and need
+ * different ones, so '_' is blended in separately.
+ *
+ * A block containing anything invalid stops the vector loop and hands the
+ * remainder to the scalar decoder, which reports precisely where it failed.
+ */
+WREATH_TARGET_AVX2 static inline ptrdiff_t
+wreath_b64url_decode_avx2(const char *in, ptrdiff_t len, unsigned char *out)
+{
+    const __m256i nibble = _mm256_set1_epi8(0x0F);
+    const __m256i bitpos = _mm256_setr_epi8(
+        1, 2, 4, 8, 16, 32, 64, -128, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 2, 4, 8, 16, 32, 64, -128, 0, 0, 0, 0, 0, 0, 0, 0);
+    const __m256i mask_lut = _mm256_setr_epi8(
+        0xA8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF0, 0x50, 0x50, 0x54, 0x50, 0x70, 0xA8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF0, 0x50, 0x50, 0x54, 0x50, 0x70);
+    const __m256i shift_lut = _mm256_setr_epi8(
+        0, 0, 17, 4, -65, -65, -71, -71, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 17, 4, -65, -65, -71, -71, 0, 0, 0, 0, 0, 0, 0, 0);
+    const __m256i underscore = _mm256_set1_epi8('_');
+    const __m256i pack = _mm256_setr_epi8(
+        2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, -1, -1, -1, -1,
+        2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, -1, -1, -1, -1);
+    const __m256i gather = _mm256_setr_epi32(0, 1, 2, 4, 5, 6, 7, 7);
+
+    ptrdiff_t i = 0;
+    ptrdiff_t o = 0;
+    if (len % 4 == 1) {
+        return -1;
+    }
+    while (len - i >= 32) {
+        __m256i v = _mm256_loadu_si256((const __m256i *)(const void *)(in + i));
+        __m256i hi = _mm256_and_si256(_mm256_srli_epi32(v, 4), nibble);
+        __m256i lo = _mm256_and_si256(v, nibble);
+        __m256i allowed = _mm256_and_si256(_mm256_shuffle_epi8(mask_lut, lo),
+                                           _mm256_shuffle_epi8(bitpos, hi));
+        if (_mm256_movemask_epi8(
+                _mm256_cmpeq_epi8(allowed, _mm256_setzero_si256())) != 0) {
+            break;  /* something outside the alphabet: let scalar place the blame */
+        }
+        __m256i shift = _mm256_blendv_epi8(_mm256_shuffle_epi8(shift_lut, hi),
+                                           _mm256_set1_epi8(-32),
+                                           _mm256_cmpeq_epi8(v, underscore));
+        __m256i values = _mm256_add_epi8(v, shift);
+        /* 4x6 bits -> 3 bytes: pair the sextets into twelve-bit halves, then
+         * the halves into one 24-bit value per dword. */
+        __m256i merged = _mm256_madd_epi16(
+            _mm256_maddubs_epi16(values, _mm256_set1_epi32(0x01400140)),
+            _mm256_set1_epi32(0x00011000));
+        __m256i packed = _mm256_permutevar8x32_epi32(
+            _mm256_shuffle_epi8(merged, pack), gather);
+        /* Twenty-four bytes exactly: the caller sizes `out` from the input
+         * length and a 32-byte store would run past it. */
+        _mm_storeu_si128((__m128i *)(void *)(out + o), _mm256_castsi256_si128(packed));
+        _mm_storel_epi64((__m128i *)(void *)(out + o + 16),
+                         _mm256_extracti128_si256(packed, 1));
+        i += 32;
+        o += 24;
+    }
+    ptrdiff_t rest = wreath_b64url_decode_scalar(in + i, len - i, out + o);
+    if (rest < 0) {
+        return -1;
+    }
+    return o + rest;
+}
+#endif
+
+static inline ptrdiff_t
+wreath_b64url_decode(const char *in, ptrdiff_t len, unsigned char *out)
+{
+#if defined(WREATH_HAVE_AVX2)
+    if (len >= 32 && wreath_simd_has_avx2()) {
+        return wreath_b64url_decode_avx2(in, len, out);
+    }
+#endif
+    return wreath_b64url_decode_scalar(in, len, out);
+}
+
+/* --- base64 encoding ------------------------------------------------------
+ *
+ * Encoding is not on the CSRF path in any meaningful way: `b64url_32` costs
+ * 28.6ns for its 32 bytes, twice per token, against a token that costs 2433ns.
+ * This exists for the *large* payloads -- a WebSocket room broadcast, a bytes
+ * field in a response body -- where CPython's `base64.b64encode` runs a scalar
+ * table loop at roughly 0.5 bytes/ns.
+ */
+
+/* Trailing two characters are all that separates the two alphabets. */
+#define WREATH_B64_STD 0
+#define WREATH_B64_URL 1
+
+static inline const char *
+wreath_b64_alphabet(int urlsafe)
+{
+    return urlsafe
+        ? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        : "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+}
+
+/* Encodes `len` bytes as `pad ? padded : unpadded` base64. Returns the number
+ * of characters written; `out` must hold at least ((len + 2) / 3) * 4. */
+static inline ptrdiff_t
+wreath_b64_encode_scalar(const unsigned char *in, ptrdiff_t len, char *out,
+                         int urlsafe, int pad)
+{
+    const char *alpha = wreath_b64_alphabet(urlsafe);
+    ptrdiff_t i = 0;
+    ptrdiff_t o = 0;
+    for (; i + 3 <= len; i += 3) {
+        unsigned t = ((unsigned)in[i] << 16) | ((unsigned)in[i + 1] << 8) | in[i + 2];
+        out[o++] = alpha[(t >> 18) & 0x3F];
+        out[o++] = alpha[(t >> 12) & 0x3F];
+        out[o++] = alpha[(t >> 6) & 0x3F];
+        out[o++] = alpha[t & 0x3F];
+    }
+    ptrdiff_t rem = len - i;
+    if (rem == 1) {
+        unsigned t = (unsigned)in[i] << 16;
+        out[o++] = alpha[(t >> 18) & 0x3F];
+        out[o++] = alpha[(t >> 12) & 0x3F];
+        if (pad) {
+            out[o++] = '=';
+            out[o++] = '=';
+        }
+    }
+    else if (rem == 2) {
+        unsigned t = ((unsigned)in[i] << 16) | ((unsigned)in[i + 1] << 8);
+        out[o++] = alpha[(t >> 18) & 0x3F];
+        out[o++] = alpha[(t >> 12) & 0x3F];
+        out[o++] = alpha[(t >> 6) & 0x3F];
+        if (pad) {
+            out[o++] = '=';
+        }
+    }
+    return o;
+}
+
+#if defined(WREATH_HAVE_AVX2)
+/* Twenty-four bytes to thirty-two characters per step.
+ *
+ * Each three bytes become four six-bit fields, extracted with one `and` and a
+ * multiply per pair rather than by shifting each field out; the six-bit values
+ * are then turned into characters by adding an offset chosen from a five-entry
+ * table, which is the only place the two alphabets differ.
+ *
+ * The loop runs while 32 input bytes remain, not 24: the load reads a little
+ * past the group it consumes, and stopping early keeps that read inside the
+ * caller's buffer. The tail goes to the scalar encoder, which also owns
+ * padding.
+ */
+WREATH_TARGET_AVX2 static inline ptrdiff_t
+wreath_b64_encode_avx2(const unsigned char *in, ptrdiff_t len, char *out,
+                       int urlsafe, int pad)
+{
+    const __m256i shuf = _mm256_setr_epi8(
+        1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10,
+        1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10);
+    /* Indexed by the bucket computed below, not by the sextet: bucket 0 is
+     * 26-51, buckets 1-10 are 52-61, 11 and 12 are the two alphabet-specific
+     * characters, and 13 is 0-25. Transcribing this table in sextet order
+     * instead produced 736k differential failures on the first run. */
+    const __m256i offsets = urlsafe
+        ? _mm256_setr_epi8(71, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -17, 32, 65, 0, 0,
+                           71, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -17, 32, 65, 0, 0)
+        : _mm256_setr_epi8(71, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -19, -16, 65, 0, 0,
+                           71, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -19, -16, 65, 0, 0);
+    ptrdiff_t i = 0;
+    ptrdiff_t o = 0;
+    while (len - i >= 32) {
+        __m256i v = _mm256_set_m128i(
+            _mm_loadu_si128((const __m128i *)(const void *)(in + i + 12)),
+            _mm_loadu_si128((const __m128i *)(const void *)(in + i)));
+        v = _mm256_shuffle_epi8(v, shuf);
+        __m256i hi = _mm256_mulhi_epu16(_mm256_and_si256(v, _mm256_set1_epi32(0x0fc0fc00)),
+                                        _mm256_set1_epi32(0x04000040));
+        __m256i lo = _mm256_mullo_epi16(_mm256_and_si256(v, _mm256_set1_epi32(0x003f03f0)),
+                                        _mm256_set1_epi32(0x01000010));
+        __m256i sextets = _mm256_or_si256(hi, lo);
+        /* Bucket each sextet into one of five ranges, then add that range's
+         * offset. `subs_epu8` saturates everything below 51 to zero, and the
+         * compare separates 0-25 from 26-51. */
+        __m256i bucket = _mm256_subs_epu8(sextets, _mm256_set1_epi8(51));
+        __m256i under26 = _mm256_cmpgt_epi8(_mm256_set1_epi8(26), sextets);
+        bucket = _mm256_or_si256(bucket, _mm256_and_si256(under26, _mm256_set1_epi8(13)));
+        _mm256_storeu_si256((__m256i *)(void *)(out + o),
+                            _mm256_add_epi8(sextets, _mm256_shuffle_epi8(offsets, bucket)));
+        i += 24;
+        o += 32;
+    }
+    return o + wreath_b64_encode_scalar(in + i, len - i, out + o, urlsafe, pad);
+}
+#endif
+
+static inline ptrdiff_t
+wreath_b64_encode(const unsigned char *in, ptrdiff_t len, char *out,
+                  int urlsafe, int pad)
+{
+#if defined(WREATH_HAVE_AVX2)
+    if (len >= 32 && wreath_simd_has_avx2()) {
+        return wreath_b64_encode_avx2(in, len, out, urlsafe, pad);
+    }
+#endif
+    return wreath_b64_encode_scalar(in, len, out, urlsafe, pad);
+}
+
+/* ======================================================================== */
+/* Hex decoding: PostgreSQL sends every `bytea` in text format as hex.        */
+/* ======================================================================== */
+
+/* Nibble value per byte, 0xFF for anything that is not a hex digit. Both
+ * cases are accepted; PostgreSQL emits lower. One table rather than a value
+ * table beside a validity table, for the same reason base64 needed only one:
+ * with invalid marked 0xFF, a pair of digits is checked with a single OR. */
+static const unsigned char wreath_hex_value[256] = {
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+};
+
+/* Decodes `len` hex characters into `len / 2` bytes. Returns the byte count,
+ * or -1 for an odd length or any non-hex byte. */
+static inline ptrdiff_t
+wreath_hex_decode_scalar(const char *in, ptrdiff_t len, unsigned char *out)
+{
+    if ((len & 1) != 0) {
+        return -1;
+    }
+    for (ptrdiff_t i = 0; i < len; i += 2) {
+        unsigned hi = wreath_hex_value[(unsigned char)in[i]];
+        unsigned lo = wreath_hex_value[(unsigned char)in[i + 1]];
+        if ((hi | lo) > 15) {
+            return -1;
+        }
+        out[i >> 1] = (unsigned char)((hi << 4) | lo);
+    }
+    return len >> 1;
+}
+
+#if defined(WREATH_HAVE_AVX2)
+/* Thirty-two characters to sixteen bytes per step.
+ *
+ * A digit and a letter are separated arithmetically rather than by table:
+ * `c - '0'` is at most 9 for a digit, and `(c | 0x20) - 'a'` is at most 5 for
+ * a letter, both tested as unsigned with `min`. Anything that is neither
+ * fails both and stops the vector loop, leaving the scalar decoder to report
+ * where. `maddubs` then folds each high/low nibble pair into one byte.
+ */
+WREATH_TARGET_AVX2 static inline ptrdiff_t
+wreath_hex_decode_avx2(const char *in, ptrdiff_t len, unsigned char *out)
+{
+    const __m256i zero_digit = _mm256_set1_epi8('0');
+    const __m256i nine = _mm256_set1_epi8(9);
+    const __m256i five = _mm256_set1_epi8(5);
+    const __m256i lower = _mm256_set1_epi8(0x20);
+    const __m256i letter_a = _mm256_set1_epi8('a');
+    const __m256i ten = _mm256_set1_epi8(10);
+    const __m256i gather = _mm256_setr_epi8(
+        0, 2, 4, 6, 8, 10, 12, 14, -1, -1, -1, -1, -1, -1, -1, -1,
+        0, 2, 4, 6, 8, 10, 12, 14, -1, -1, -1, -1, -1, -1, -1, -1);
+    if ((len & 1) != 0) {
+        return -1;
+    }
+    ptrdiff_t i = 0;
+    ptrdiff_t o = 0;
+    while (len - i >= 32) {
+        __m256i v = _mm256_loadu_si256((const __m256i *)(const void *)(in + i));
+        __m256i digit = _mm256_sub_epi8(v, zero_digit);
+        __m256i is_digit = _mm256_cmpeq_epi8(_mm256_min_epu8(digit, nine), digit);
+        __m256i alpha = _mm256_sub_epi8(_mm256_or_si256(v, lower), letter_a);
+        __m256i is_alpha = _mm256_cmpeq_epi8(_mm256_min_epu8(alpha, five), alpha);
+        if (_mm256_movemask_epi8(_mm256_or_si256(is_digit, is_alpha)) != -1) {
+            break;  /* not a hex digit somewhere in this block */
+        }
+        __m256i nibbles = _mm256_blendv_epi8(_mm256_add_epi8(alpha, ten), digit, is_digit);
+        /* (high << 4) | low for each adjacent pair, into 16-bit lanes. */
+        __m256i bytes = _mm256_maddubs_epi16(nibbles, _mm256_set1_epi16(0x0110));
+        __m256i packed = _mm256_permutevar8x32_epi32(
+            _mm256_shuffle_epi8(bytes, gather),
+            _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7));
+        _mm_storeu_si128((__m128i *)(void *)(out + o), _mm256_castsi256_si128(packed));
+        i += 32;
+        o += 16;
+    }
+    ptrdiff_t rest = wreath_hex_decode_scalar(in + i, len - i, out + o);
+    if (rest < 0) {
+        return -1;
+    }
+    return o + rest;
+}
+#endif
+
+static inline ptrdiff_t
+wreath_hex_decode(const char *in, ptrdiff_t len, unsigned char *out)
+{
+#if defined(WREATH_HAVE_AVX2)
+    if (len >= 32 && wreath_simd_has_avx2()) {
+        return wreath_hex_decode_avx2(in, len, out);
+    }
+#endif
+    return wreath_hex_decode_scalar(in, len, out);
+}
+
 #endif /* WREATH_SIMD_H */

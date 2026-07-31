@@ -192,6 +192,118 @@ wreath_simd_probe(PyObject *Py_UNUSED(self), PyObject *args)
         return out;
     }
 
+    if (strcmp(kind, "hex") == 0) {
+        PyObject *out = PyBytes_FromStringAndSize(NULL, data.len / 2);
+        if (out == NULL) {
+            PyBuffer_Release(&data);
+            PyBuffer_Release(&key);
+            return NULL;
+        }
+        unsigned char *dst = (unsigned char *)PyBytes_AS_STRING(out);
+        const char *src = (const char *)data.buf;
+        ptrdiff_t decoded;
+        switch (code) {
+            case WREATH_ARM_SCALAR:
+            case WREATH_ARM_SWAR:
+                decoded = wreath_hex_decode_scalar(src, data.len, dst);
+                break;
+#if defined(WREATH_HAVE_AVX2)
+            case WREATH_ARM_AVX2:
+                decoded = wreath_hex_decode_avx2(src, data.len, dst);
+                break;
+#endif
+            default:
+                PyBuffer_Release(&data);
+                PyBuffer_Release(&key);
+                Py_DECREF(out);
+                Py_RETURN_NONE;
+        }
+        PyBuffer_Release(&data);
+        PyBuffer_Release(&key);
+        if (decoded < 0) {
+            Py_DECREF(out);
+            Py_RETURN_FALSE;
+        }
+        return out;
+    }
+
+    if (strcmp(kind, "b64enc") == 0) {
+        Py_ssize_t room = ((data.len + 2) / 3) * 4;
+        PyObject *out = PyBytes_FromStringAndSize(NULL, room);
+        if (out == NULL) {
+            PyBuffer_Release(&data);
+            PyBuffer_Release(&key);
+            return NULL;
+        }
+        char *dst = PyBytes_AS_STRING(out);
+        const unsigned char *src = (const unsigned char *)data.buf;
+        ptrdiff_t written;
+        switch (code) {
+            case WREATH_ARM_SCALAR:
+            case WREATH_ARM_SWAR:
+                written = wreath_b64_encode_scalar(src, data.len, dst, 0, 1);
+                break;
+#if defined(WREATH_HAVE_AVX2)
+            case WREATH_ARM_AVX2:
+                written = wreath_b64_encode_avx2(src, data.len, dst, 0, 1);
+                break;
+#endif
+            default:
+                PyBuffer_Release(&data);
+                PyBuffer_Release(&key);
+                Py_DECREF(out);
+                Py_RETURN_NONE;
+        }
+        PyBuffer_Release(&data);
+        PyBuffer_Release(&key);
+        if (_PyBytes_Resize(&out, (Py_ssize_t)written) < 0) {
+            return NULL;
+        }
+        return out;
+    }
+
+    if (strcmp(kind, "b64") == 0) {
+        /* (len/4)*3 + 2 is what every caller sizes its buffer to; allocating
+         * exactly that here means an arm that writes past it corrupts this
+         * object rather than going unnoticed. */
+        Py_ssize_t room = (data.len / 4) * 3 + 2;
+        PyObject *out = PyBytes_FromStringAndSize(NULL, room);
+        if (out == NULL) {
+            PyBuffer_Release(&data);
+            PyBuffer_Release(&key);
+            return NULL;
+        }
+        unsigned char *dst = (unsigned char *)PyBytes_AS_STRING(out);
+        const char *src = (const char *)data.buf;
+        ptrdiff_t decoded;
+        switch (code) {
+            case WREATH_ARM_SCALAR:
+            case WREATH_ARM_SWAR:
+                decoded = wreath_b64url_decode_scalar(src, data.len, dst);
+                break;
+#if defined(WREATH_HAVE_AVX2)
+            case WREATH_ARM_AVX2:
+                decoded = wreath_b64url_decode_avx2(src, data.len, dst);
+                break;
+#endif
+            default:
+                PyBuffer_Release(&data);
+                PyBuffer_Release(&key);
+                Py_DECREF(out);
+                Py_RETURN_NONE;
+        }
+        PyBuffer_Release(&data);
+        PyBuffer_Release(&key);
+        if (decoded < 0) {
+            Py_DECREF(out);
+            Py_RETURN_FALSE;  /* rejected, which is an answer and not an error */
+        }
+        if (_PyBytes_Resize(&out, (Py_ssize_t)decoded) < 0) {
+            return NULL;
+        }
+        return out;
+    }
+
     unsigned seen_high = 0;
     ptrdiff_t run = run_kind(kind, code, (const char *)data.buf, data.len, &seen_high);
     Py_ssize_t length = data.len;
