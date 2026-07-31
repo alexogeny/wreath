@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import _nplusone
+from . import telemetry as _telemetry
 
 # Re-exported under this module's historic names: the supervision moved to
 # `_doorbell`, the names callers and tests already reach for did not.
@@ -97,6 +98,11 @@ class JobContext:
     key: str | None
     #: The runner's `ProgressRegistry`, or None.
     progress: Any = None
+    #: The `traceparent` of the request that enqueued this job, or None when it
+    #: was enqueued outside a traced request. Exposed so a handler can log the
+    #: cause; the runner has already rebound it, so an outbound call the handler
+    #: makes joins the same trace without the handler doing anything.
+    trace_context: str | None = None
 
     @property
     def task_id(self) -> str:
@@ -172,6 +178,9 @@ class _Claimed:
     max_attempts: int
     fence: int
     key: str | None
+    #: The `traceparent` of the request that enqueued this job, or None when it
+    #: was enqueued outside a traced request or against a version-1 schema.
+    trace_context: str | None = None
 
 
 class JobRunner:
@@ -216,6 +225,15 @@ class JobRunner:
         self._passes: list[tuple[str, Any]] = []
         self._table = f'"{self._schema}".jobs'
         self._channel = _channel(self._schema, self._name)
+        # The queue is a propagation seam: work enqueued here runs in a later
+        # process and belongs to the trace of the request that caused it. Arming
+        # the latch here is what makes the request pipeline bind a context for an
+        # application that has jobs but no outbound HTTP client -- otherwise the
+        # binding is skipped and every job row is enqueued without a cause.
+        _telemetry.propagates()
+        #: Whether this database's `jobs` table has the version-2 column. `None`
+        #: until the first enqueue asks; see `_carries_trace`.
+        self._trace_column: bool | None = None
         # Runtime (set at start()):
         self._supervisor: Any = None
         # One waiter per worker, not one shared Event. A shared Event is
@@ -244,6 +262,11 @@ class JobRunner:
         self.sweep_errors = 0
         #: Scheduler ticks that raised, for the same reason.
         self.schedule_errors = 0
+        #: Times the startup probe for the version-2 `trace_context` column
+        #: could not reach the database. Non-zero means this runner may be
+        #: enqueuing without trace context that the schema could hold -- an
+        #: observability gap, never a correctness one.
+        self.trace_probe_errors = 0
         #: Jobs that exhausted their attempts. The one outcome nothing else
         #: reports: a dead-lettered job is silent in the logs and invisible in
         #: the queue depth, because it has left the queue.
@@ -545,6 +568,43 @@ class JobRunner:
 
     # -- enqueue -------------------------------------------------------------
 
+    async def _carries_trace(self) -> bool:
+        """Whether this database's `jobs` table has the version-2 column.
+
+        Asked once per runner and cached. A deployment whose role cannot
+        `CREATE SCHEMA` applies the DDL by hand, so there is always a window
+        where this build is newer than what the DBA has applied -- and an
+        `INSERT` naming a column that is not there fails the *enqueue*. Turning
+        an observability feature into a queue outage is the wrong trade, so the
+        shape of the table is a precondition this checks rather than an error it
+        catches: a broad `except` here would swallow a revoked grant and a
+        genuine driver fault alongside the one case it means to survive, and
+        inside a caller's `tx` it would poison their transaction as well.
+
+        Cheap enough to leave unlocked. Two concurrent first-enqueues may both
+        ask; the read is idempotent and they agree.
+        """
+        if self._trace_column is None:
+            connection = await self._db.acquire(self._workload)
+            try:
+                self._trace_column = bool(
+                    await connection.fetchval(
+                        "SELECT true FROM pg_attribute a "
+                        "JOIN pg_class k ON k.oid = a.attrelid "
+                        "JOIN pg_namespace n ON n.oid = k.relnamespace "
+                        # `::text` because `nspname` is `name`: without the cast
+                        # PostgreSQL infers the parameter as `name` too, which
+                        # the driver cannot encode. `wreath-sql-lint` SQL002.
+                        "WHERE n.nspname = $1::text AND k.relname = 'jobs' "
+                        "AND a.attname = 'trace_context' "
+                        "AND a.attnum > 0 AND NOT a.attisdropped",
+                        self._schema,
+                    )
+                )
+            finally:
+                await self._db.release(self._workload, connection)
+        return self._trace_column
+
     async def enqueue(
         self,
         task: str,
@@ -561,12 +621,34 @@ class JobRunner:
         with your business writes — the job becomes visible only if that
         transaction commits (exactly-once *enqueue*). `key` sets an idempotency
         key: a second enqueue with the same `(queue, key)` is dropped.
+
+        The calling request's trace context rides the row when the schema has
+        somewhere to put it, so the job names the request that caused it. It
+        rides the *row* and never the `NOTIFY`: that payload is a doorbell, is
+        capped at 8000 bytes, and is deliberately empty.
         """
         if task not in self._tasks:
             raise KeyError(f"unknown task: {task!r} (register with @runner.task)")
         payload = json.dumps(list(args))
         dk = dedup_key(self._name, key) if key is not None else None
         max_att = max_attempts if max_attempts is not None else self._tasks[task].max_attempts
+        bound = _telemetry.outbound_context.get()
+        # The traceparent only. `tracestate` is vendor routing for the *next*
+        # hop of a live call; a job resumes the trace rather than continuing a
+        # conversation, and storing it would age in the queue.
+        parent = bound[0] if bound else None
+        if parent is not None and await self._carries_trace():
+            sql = (
+                f"INSERT INTO {self._table} "
+                "(queue, task, args, tenant, state, run_at, max_attempts, "
+                "dedup_key, trace_context) "
+                "VALUES ($1, $2, $3::jsonb, $4, 'ready', COALESCE($5, now()), "
+                "$6, $7, $8) "
+                "ON CONFLICT (queue, dedup_key) WHERE dedup_key IS NOT NULL "
+                "DO NOTHING RETURNING id"
+            )
+            params = (self._name, task, payload, tenant, run_at, max_att, dk, parent)
+            return await self._insert(sql, params, tx)
         sql = (
             f"INSERT INTO {self._table} "
             "(queue, task, args, tenant, state, run_at, max_attempts, dedup_key) "
@@ -575,6 +657,9 @@ class JobRunner:
             "RETURNING id"
         )
         params = (self._name, task, payload, tenant, run_at, max_att, dk)
+        return await self._insert(sql, params, tx)
+
+    async def _insert(self, sql: str, params: tuple[Any, ...], tx: Any) -> int | None:
         if tx is not None:
             job_id = await tx.fetchval(sql, *params)
             await tx.execute("SELECT pg_notify($1, '')", self._channel)
@@ -720,6 +805,23 @@ class JobRunner:
                         "(queue, dedup_key) WHERE dedup_key IS NOT NULL",
                     ),
                 ),
+                Step(
+                    version=2,
+                    statements=(
+                        # The W3C `traceparent` of the request that enqueued this
+                        # job, so a failure at 03:00 names its cause. Nullable and
+                        # defaulted-absent, which is what makes the step safe for
+                        # the previous release to keep running against: an older
+                        # build never writes it and never reads it.
+                        #
+                        # One text column rather than three integers. 55 bytes is
+                        # the interchange format, it is what a tracing UI accepts
+                        # pasted in, and splitting it would mean reassembling it
+                        # at every read for no gain.
+                        f"ALTER TABLE {t} "
+                        "ADD COLUMN IF NOT EXISTS trace_context text",
+                    ),
+                ),
             ),
         )
 
@@ -738,6 +840,23 @@ class JobRunner:
 
     async def start(self, supervisor: Any) -> None:
         self._supervisor = supervisor
+        # Establish the schema shape once, here, so `_claim` never pays for it
+        # in the worker loop. A producer that only ever enqueues resolves it on
+        # its first enqueue instead; between them every process that needs the
+        # answer has it before it needs it.
+        #
+        # Caught narrowly and counted, never raised: this runs on the startup
+        # path, and a database that is down at boot must not stop the runner
+        # coming up -- that exact failure once left a process with no doorbell
+        # for its entire life, which is why `Doorbell.open` below reports rather
+        # than raises. A runner that starts against a down database keeps the
+        # answer unresolved and carries no trace context until an `enqueue`
+        # resolves it; `trace_probe_errors` is what says that happened, because
+        # a silent degradation is the shape this repository treats as a defect.
+        try:
+            await self._carries_trace()
+        except (PostgresError, OSError):
+            self.trace_probe_errors += 1
         # A dedicated held connection for the NOTIFY doorbell (never leased back
         # while listening — design 01 §5). Correctness does not depend on it, so
         # a failure to establish it degrades to pure polling — but *permanently*
@@ -888,6 +1007,7 @@ class JobRunner:
         ctx = JobContext(
             job_id=job.id, task=job.task, attempt=job.attempts + 1, fence=job.fence,
             tenant=job.tenant, key=job.key, progress=self._progress,
+            trace_context=job.trace_context,
         )
         if handler is None:
             await self._fail(job, f"no handler registered for task {job.task!r}")
@@ -914,7 +1034,22 @@ class JobRunner:
         deadline = self.deadline_for(job.task)
         # The ledger is bound *before* the task is created, because
         # `ensure_future` copies the current context into the task: bind it
-        # after and the handler runs with an empty one.
+        # after and the handler runs with an empty one. The trace context is
+        # bound outside it for exactly the same reason, and unbound in a
+        # `finally` so a worker that runs thousands of jobs does not hand job
+        # N+1 the context of job N -- the same staleness the request pipeline
+        # binds `None` to avoid.
+        trace_token = _telemetry.outbound_context.set(
+            (job.trace_context, "") if job.trace_context else None
+        )
+        try:
+            await self._run_handler(job, ctx, handler, deadline)
+        finally:
+            _telemetry.outbound_context.reset(trace_token)
+
+    async def _run_handler(
+        self, job: _Claimed, ctx: JobContext, handler: Any, deadline: float
+    ) -> None:
         with self._query_scope(handler, job) as ledger:
             future = asyncio.ensure_future(handler.func(ctx, *job.args))
             self._inflight.add(future)
@@ -1065,6 +1200,14 @@ class JobRunner:
         return current.percent if current is not None else 0.0
 
     async def _claim(self, batch: int) -> list[_Claimed]:
+        # Read from the cache, never probed here. `_claim` runs in the worker
+        # loop, and putting a catalog lookup on that path would buy one bit of
+        # schema shape at the cost of a query per poll on every worker. The
+        # answer is established once, by `start()` on a worker and by the first
+        # `enqueue` on a producer, which between them cover every process that
+        # can reach this line. Unknown means "do not select it": a runner that
+        # never started and never enqueued has no context to carry anyway.
+        trace = ", j.trace_context" if self._trace_column else ""
         sql = (
             f"WITH claimable AS ( SELECT id FROM {self._table} "
             "WHERE queue=$1 AND state='ready' AND run_at <= now() "
@@ -1073,7 +1216,7 @@ class JobRunner:
             "lease_expiry = now() + ($4 || ' seconds')::interval, "
             "fence = j.fence + 1, updated_at=now() FROM claimable c WHERE j.id=c.id "
             "RETURNING j.id, j.task, j.args, j.tenant, "
-            "j.attempts, j.max_attempts, j.fence, j.dedup_key"
+            f"j.attempts, j.max_attempts, j.fence, j.dedup_key{trace}"
         )
         connection = await self._db.acquire(self._workload)
         try:
@@ -1089,10 +1232,17 @@ class JobRunner:
         args = row["args"]
         if isinstance(args, (str, bytes)):
             args = json.loads(args)
+        # Asked of the row rather than of `self`, because a claim made before an
+        # upgrade can still be in flight after one. Guarding on the key's
+        # presence keeps both shapes readable by one function.
+        try:
+            trace = row["trace_context"]
+        except (KeyError, IndexError):
+            trace = None
         return _Claimed(
             id=row["id"], task=row["task"], args=list(args or []), tenant=row["tenant"],
             attempts=row["attempts"], max_attempts=row["max_attempts"], fence=row["fence"],
-            key=row["dedup_key"],
+            key=row["dedup_key"], trace_context=trace,
         )
 
     async def _sweeper(self) -> None:
