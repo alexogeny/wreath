@@ -30,6 +30,54 @@ else:
         extra_compile_args += ["-g", "-fno-omit-frame-pointer"]
         hot_compile_args += ["-g", "-fno-omit-frame-pointer"]
 
+# Profile-guided optimization, in two passes and off by default.
+#
+#   WREATH_PGO=generate python setup.py build_ext --inplace
+#   ... run a representative workload, which writes .gcda counters ...
+#   WREATH_PGO=use      python setup.py build_ext --inplace
+#
+# Worth having because the hot C here is exactly the shape PGO helps: an HTTP
+# parser and a dispatcher, dense in branches whose direction is stable in
+# production and invisible to the compiler. `-O3 -flto` already lays out code
+# well; what it cannot know is which way each branch actually goes.
+#
+# `-fprofile-dir` is absolute so both passes agree on where counters live --
+# setuptools builds objects under a platform-specific `build/temp.*` path, and
+# a relative profile directory silently produced "no profile data" on the second
+# pass while still linking a valid, unoptimized extension.
+#
+# `-fprofile-partial-training` tells GCC to optimize un-exercised functions
+# normally rather than for size; without it, any path the training run missed
+# gets pessimized, which is the classic way a PGO build is faster on the
+# benchmark and slower everywhere else.
+pgo_mode = os.environ.get("WREATH_PGO", "")
+if pgo_mode and sys.platform != "win32":
+    profile_dir = os.path.abspath(os.environ.get("WREATH_PGO_DIR", "build/pgo"))
+    os.makedirs(profile_dir, exist_ok=True)
+    if pgo_mode == "generate":
+        pgo_args = [f"-fprofile-dir={profile_dir}", "-fprofile-generate"]
+        pgo_link = [f"-fprofile-dir={profile_dir}", "-fprofile-generate"]
+    elif pgo_mode == "use":
+        pgo_args = [
+            f"-fprofile-dir={profile_dir}",
+            "-fprofile-use",
+            "-fprofile-correction",
+            "-fprofile-partial-training",
+            "-Wno-missing-profile",
+        ]
+        pgo_link = [f"-fprofile-dir={profile_dir}"]
+    else:
+        raise SystemExit(f"WREATH_PGO must be 'generate' or 'use', got {pgo_mode!r}")
+    # Only the `hot_*` extensions -- `_reactor` and `_server`, the poller and
+    # the HTTP parser/dispatcher. They are what PGO is for, and they are the
+    # only ones declaring *both* compile and link arguments. Instrumenting an
+    # extension whose Extension() passes no `extra_link_args` produces objects
+    # referencing `__gcov_*` with no gcov runtime linked in: the build succeeds,
+    # the `.so` fails to import, and `_core` comes back as None -- which reads
+    # as `WREATH_PURE=1` and silently turns every benchmark into a no-op.
+    hot_compile_args += pgo_args
+    hot_link_args += pgo_link
+
 
 def _http3_extension() -> Extension:
     """Configure the optional HTTP/3 extension (WREATH_BUILD_HTTP3=1).
