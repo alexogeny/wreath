@@ -491,18 +491,20 @@ def _add_flight_parser(commands: Any) -> None:
     process left behind, and reading it is a file operation.
     """
     flight_parser = commands.add_parser(
-        "flight", help="read a flight recorder ring file left behind by a crash"
+        "flight", help="read a flight recorder file left behind by a crash"
     )
     actions = flight_parser.add_subparsers(dest="flight_action", required=True)
 
     read = actions.add_parser(
-        "read", help="decode the records a ring file still held"
+        "read",
+        help="decode a recorder file: a WFRR ring, or a WFR1 recording and the "
+             "job attempts inside it",
     )
-    read.add_argument("path", help="the file the recorder mapped its ring from")
+    read.add_argument("path", help="a WFRR ring file or a WFR1 recording")
     read.add_argument(
         "--kind", default=None,
         choices=("completion", "correlation", "phase", "log"),
-        help="show only records of one kind",
+        help="show only records of one kind (ring files only)",
     )
     read.add_argument("--limit", type=int, default=50,
                      help="records to print (0 = all)")
@@ -2338,6 +2340,122 @@ def _execute_flight_replay(namespace: argparse.Namespace) -> int:
     return 0 if outcome.reproduced else 1
 
 
+#: The `WFR1` container's first four bytes. Named here rather than imported
+#: from `_recording_format` so reading the magic costs no import of the decoder
+#: for a file that turns out to be a ring.
+_RECORDING_MAGIC = b"WFR1"
+
+#: A `WTR1` transport recording -- a third container this command does not read,
+#: named so the refusal points at the command that does.
+_TRANSPORT_MAGIC = b"WTR1"
+
+
+def _flight_magic(path: str) -> bytes:
+    """The first four bytes, or `b""` for a file too short to have any.
+
+    A short file is *not* refused here: the ring reader's own message about a
+    file shorter than a header is better than anything this could say, and it
+    is already tested.
+    """
+    with open(path, "rb") as handle:
+        return handle.read(4)
+
+
+def _execute_flight_read_recording(namespace: argparse.Namespace) -> int:
+    """`wreath flight read` over a `WFR1` recording rather than a ring file.
+
+    The library decoder shipped with the attempt record kind and this dispatch
+    did not, so a `.wfr1` handed to `flight read` was answered with the ring
+    reader's complaint about a `WFRR` magic -- a true statement about the wrong
+    thing. Every refusal below is the decoder's own, by name: this function
+    adds no error text of its own, because two spellings of "truncated" is how
+    they drift apart.
+    """
+    import json as _json
+
+    from ._recording_format import read_recording
+
+    with open(namespace.path, "rb") as handle:
+        data = handle.read()
+    decoded = read_recording(data)
+    attempts = decoded.attempts if namespace.limit == 0 else decoded.attempts[: namespace.limit]
+
+    if namespace.as_json:
+        print(
+            _json.dumps(
+                {
+                    "schema_version": 1,
+                    "container": "WFR1",
+                    "clean": decoded.clean,
+                    "capture_slabs": len(decoded.slabs),
+                    "event_cells": len(decoded.events),
+                    "attempts": [
+                        {
+                            "job_id": record.job_id,
+                            "queue": record.queue,
+                            "task": record.task,
+                            "attempt": record.attempt,
+                            "max_attempts": record.max_attempts,
+                            "tenant": record.tenant,
+                            "dedup_key": record.dedup_key,
+                            "fence": record.fence,
+                            "trace_context": record.trace_context,
+                            "outcome": record.outcome,
+                            "error_type": record.error_type,
+                            "error_message": record.error_message,
+                            "argument_count": record.argument_count,
+                            "arguments": dict(record.arguments),
+                            "boundaries": [
+                                {
+                                    "seam": event.seam,
+                                    "target": event.target,
+                                    "coordinate": event.coordinate,
+                                    "error_type": event.error_type,
+                                }
+                                for event in record.boundaries
+                            ],
+                        }
+                        for record in attempts
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print(f"recording {namespace.path}")
+    print(f"  WFR1 container: {len(decoded.slabs)} capture slab(s), "
+          f"{len(decoded.events)} event cell(s), {len(decoded.attempts)} attempt(s)")
+    if not decoded.clean:
+        # Said before the contents, for the reason the ring reader prints its
+        # losses first: a torn file read as a complete one loses exactly the
+        # records nearest the failure.
+        print("  no footer -- the process died mid-write, so what is missing "
+              "cannot be counted")
+    print()
+    for record in attempts:
+        print(f"  {record.task} job {record.job_id} on queue {record.queue!r}: "
+              f"attempt {record.attempt} of {record.max_attempts} -> {record.outcome}")
+        if record.error_type:
+            print(f"      raised {record.error_type}: {record.error_message}")
+        kept = "none allowed by name" if not record.arguments else (
+            f"{len(record.arguments)} captured"
+        )
+        print(f"      fence {record.fence}, tenant {record.tenant!r}, "
+              f"{record.argument_count} argument(s), {kept}")
+        for name, captured in record.arguments:
+            print(f"      arg {name} = {captured}")
+        if record.trace_context:
+            print(f"      enqueued under trace context {record.trace_context}")
+        for event in record.boundaries:
+            failed = f" -> {event.error_type}" if event.error_type else ""
+            print(f"      boundary seam {event.seam} target {event.target!r} "
+                  f"at {event.coordinate}{failed}")
+    if len(decoded.attempts) > len(attempts):
+        print(f"  ... {len(decoded.attempts) - len(attempts)} more (--limit 0 for all)")
+    return 0
+
+
 def execute_flight(namespace: argparse.Namespace) -> int:
     """Decode a ring file and report what it held -- and what it could not.
 
@@ -2349,11 +2467,32 @@ def execute_flight(namespace: argparse.Namespace) -> int:
     """
     import json as _json
 
-    from ._flight_schema import EventKind, LossReason
+    from ._flight_schema import EventKind, LossReason, SchemaError
     from .recording import read_ring_file
 
     if namespace.flight_action == "replay":
         return _execute_flight_replay(namespace)
+
+    # One command, one question -- "what is in this file?" -- and the recorder
+    # writes two containers that answer it. `WFRR` is the ring the process
+    # mapped and died holding; `WFR1` is a recording it wrote deliberately, and
+    # a job attempt is a record kind *inside* that container rather than a
+    # second format. Dispatching on the magic is what stops the ring reader
+    # from telling somebody holding an attempt recording that they should have
+    # brought a `WFRR` file, which names the wrong half of the mistake.
+    magic = _flight_magic(namespace.path)
+    if magic == _RECORDING_MAGIC:
+        return _execute_flight_read_recording(namespace)
+    if magic == _TRANSPORT_MAGIC:
+        # The third container, and the one this command does not read. Named
+        # rather than left to the ring reader's "not a wreath ring file",
+        # which is true and sends the reader looking for a different file
+        # instead of for a different command.
+        raise SchemaError(
+            f"{namespace.path} is a WTR1 transport recording of a connection's "
+            "bytes, not a flight recorder file. `wreath replay transport` "
+            "replays it, and `wreath replay to-test` turns it into a test"
+        )
 
     ring = read_ring_file(namespace.path)
     header = ring.header
