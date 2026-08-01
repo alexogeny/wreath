@@ -445,9 +445,42 @@ are filed under the zone they were computed in — reading the same view in
 another zone settles separately rather than lying about it. Declare it with
 `stored_in=`.
 
-Two tables hold this, and like every other table Wreath owns, **a migration
-applies them and nothing applies them for you**:
-`wreath._series.settle.schema_sql()` emits the DDL.
+Two tables hold this, and like every other table Wreath owns they are created
+by the lifespan — but a `Series` is a declaration the application never holds,
+so it has to be told they are wanted:
+
+```python
+app.postgres("main", dsn=...)
+app.series(database="main")   # only needed for a sealed view
+```
+
+That puts the claim in `app.schema_components()`, which is what creates
+`wreath.series_buckets` and `wreath.series_corrections` at startup, exactly the
+way the job ledger is created. A deployment whose role cannot issue DDL calls
+`app.manage_schema(False)` and gets the usual startup refusal naming what a DBA
+must create; `wreath schema sql --component series` emits it.
+
+### Settling is a job, not a read
+
+**Reading a sealed view never writes.** A `run()` over a sealed range that
+nobody has settled computes it from the source rows and returns it — the same
+numbers, not stored. Storing is `settle()`:
+
+```python
+stored = await activity.settle(session, range=Range(start, end))
+```
+
+That is deliberate and it is worth knowing why: a chart is served by a `GET`,
+which should run on a read-workload session, on a replica, or under a role with
+no `INSERT`. A read that settled as a side effect answered `cannot execute
+INSERT in a read-only transaction` from inside the series machinery, on a route
+that wrote nothing the application can see.
+
+`settle()` is idempotent — the insert is `ON CONFLICT DO NOTHING`, and two
+workers settling one bucket compute the same number from the same rows — so it
+belongs in the same scheduled job as `reconcile()`, which runs it for you.
+Until a settling job exists a sealed view is *correct* and simply pays the
+source query every time, which is the honest failure direction.
 
 ### The write that arrives late
 
@@ -486,9 +519,11 @@ would put per-row bookkeeping on every write in the application. Instead you run
 corrected = await activity.reconcile(session, range=Range(start, end))
 ```
 
-It recomputes the sealed part, compares it to what was settled, and records the
-differences. Until something calls it, the gap is *visible* rather than assumed
-away: `sealed_through` says exactly how far the settled data goes.
+It `settle()`s the sealed part first — since reading stores nothing, this is
+where a bucket becomes stored at all — then recomputes it, compares it to what
+was settled, and records the differences. So one scheduled job covers both
+halves. Until something calls it, the gap is *visible* rather than assumed away:
+`sealed_through` says exactly how far the settled data goes.
 
 `on_late="reopen"` is available and replaces the settled value outright instead
 of recording a delta. It is never the default, because it is only sound while

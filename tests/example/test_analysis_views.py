@@ -358,6 +358,10 @@ async def test_a_card_pulled_late_records_a_correction() -> None:
         assert first.state is not None and first.state.settled, (
             "a day a year old must be sealed at a fortnight's lateness"
         )
+        # Reading computes a sealed day and deliberately does not store it, so
+        # the settling job is an explicit step -- and it has to run *before* the
+        # late card, which is the situation this test is about.
+        await view.settle(session, range=window, now=now, station=station)
 
         # The card comes out of the camera a year late, carrying that day.
         connection = await database.acquire("write")
