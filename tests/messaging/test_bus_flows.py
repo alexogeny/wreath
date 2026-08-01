@@ -27,6 +27,19 @@ class FakeConn:
         self.calls.append((sql, args))
         return self._fetchrow
 
+    async def fetchval(self, sql: str, *args: Any) -> Any:
+        """The version-2 `trace_context` column probe, and nothing else.
+
+        `None` -- a real `SELECT true ... WHERE` returns *no rows* when the
+        column is absent, which the driver reads as None, so that is the shape
+        of the negative answer rather than `False`. This double's rows carry no
+        `trace_context`, so answering yes would model a database whose catalog
+        and whose rows disagree. The traced world is modelled in
+        `tests/messaging/test_trace.py`; between them both schema versions run.
+        """
+        self.calls.append((sql, args))
+        return None
+
     def sqls(self) -> list[str]:
         return [sql for sql, _ in self.calls]
 

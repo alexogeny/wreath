@@ -38,6 +38,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from . import telemetry as _telemetry
+
 # Re-exported under this module's historic names: the supervision moved to
 # `_doorbell`, the names callers and tests already reach for did not.
 from ._doorbell import BACKOFF_BASE as DOORBELL_BACKOFF_BASE  # noqa: F401
@@ -97,6 +99,10 @@ class Message:
     fence: int | None = None
     #: Attempts already recorded on the row, so a retry's backoff can grow.
     attempts: int = 0
+    #: The traceparent of the publish that produced this row, or `None`. Durable
+    #: only: ephemeral fan-out has no row to carry one -- see `MessageBus.publish`
+    #: for why that is deferred rather than absent by accident.
+    trace_context: str | None = None
     _disposition: str = _ACK
 
     def ack(self) -> None:
@@ -189,6 +195,18 @@ class MessageBus:
         #: leaves messages in `leased` forever with nothing to read, and the
         #: degradation is invisible unless it is countable.
         self.sweep_errors = 0
+        #: Tri-state: None until probed, then whether this database's `messages`
+        #: table has `trace_context`. See `_carries_trace`.
+        self._trace_column: bool | None = None
+        # A durable publish hands work to a later process exactly as an outbound
+        # call hands it to another service, so the bus is a propagation seam and
+        # arms the same latch. **Third arming site**, after `HTTPClient.__init__`
+        # and `JobRunner.__init__`: `PROPAGATING` is a process-global that is
+        # never cleared, which is fine in production and makes any *measurement*
+        # order-dependent -- `_devtools/request_trace.py` sets it from the app in
+        # front of it and restores it, which is what a fourth site would have to
+        # keep working.
+        _telemetry.propagates()
 
     @property
     def name(self) -> str:
@@ -217,6 +235,50 @@ class MessageBus:
         subscriber must never read as a flapping database.
         """
         return self._doorbell.reconnects
+
+    async def _carries_trace(self, executor: Any) -> bool:
+        """Whether this database's `messages` table has the version-2 column.
+
+        Asked once per bus and cached. A deployment whose role cannot
+        `CREATE SCHEMA` applies the DDL by hand, so there is always a window in
+        which this build is newer than what the DBA applied -- and an `INSERT`
+        naming a column that is not there fails the *publish*. Turning an
+        observability feature into a lost message is the wrong trade, so the
+        shape of the table is a precondition this checks rather than an error it
+        catches: a broad `except` here would swallow a revoked grant and a
+        genuine driver fault alongside the one case it means to survive.
+
+        **It runs on the executor the statement itself will use, and never on a
+        connection of its own.** That is not a tidiness: `publish(..., tx=tx)`
+        is the outbox guarantee, and a probe on a second connection during the
+        caller's transaction is a read outside their snapshot issued behind
+        their back -- `tests/test_exactly_once.py` asserts nothing does that,
+        and it was right to catch this. On the caller's own transaction it is an
+        ordinary read that sees exactly what their `INSERT` will.
+
+        `wreath.jobs` reaches the same place by a different road: it resolves
+        the answer in `start` so the claim loop never asks. A bus cannot, because
+        its `start` is the path three tests assert survives a database that is
+        down at boot -- putting a catalog read in front of `Doorbell.open` would
+        need a broad `except` on a startup path, which AGENTS.md names as the one
+        place that is never the answer.
+        """
+        if self._trace_column is None:
+            self._trace_column = bool(
+                await executor.fetchval(
+                    "SELECT true FROM pg_attribute a "
+                    "JOIN pg_class k ON k.oid = a.attrelid "
+                    "JOIN pg_namespace n ON n.oid = k.relnamespace "
+                    # `::text` because `nspname` is `name`: without the cast
+                    # PostgreSQL infers the parameter as `name` too, which
+                    # the driver cannot encode. `wreath-sql-lint` SQL002.
+                    "WHERE n.nspname = $1::text AND k.relname = 'messages' "
+                    "AND a.attname = 'trace_context' "
+                    "AND a.attnum > 0 AND NOT a.attisdropped",
+                    self._schema,
+                )
+            )
+        return self._trace_column
 
     def stats(self) -> dict[str, int]:
         """Every counter this bus keeps, by name.
@@ -330,6 +392,25 @@ class MessageBus:
         no group is known for `channel` anywhere in the fleet, for the caller
         who knows a consumer must exist. Without it the publish is a counted
         no-op, because shipping a producer before its consumer is normal.
+
+        **Trace context rides the durable row and not the ephemeral NOTIFY, and
+        the asymmetry is deliberate.** A durable publish writes a row per group,
+        so the calling request's `traceparent` goes on it and the consumer --
+        often a different service on a different day -- runs its handler under
+        that context. Ephemeral fan-out has no row: `pg_notify($1, $2)` carries
+        the caller's payload *as* the message, so the only place a traceparent
+        could go is inside that payload, which means wrapping every ephemeral
+        message in an envelope.
+
+        That is a **breaking change to a live wire format between processes**,
+        and it is deferred rather than skipped. A rolling deploy has publishers
+        on the new build and subscribers on the old one at the same time, so the
+        envelope has to be versioned and the old build has to keep reading plain
+        payloads -- which is a design with its own compatibility window, not a
+        line of code. The 8000-byte NOTIFY bound is *not* the obstacle; a
+        traceparent is 55 bytes. `docs/reference/roadmap.md` carries the row, and
+        `tests/messaging/test_trace.py` pins the current format so the deferral
+        stays a decision rather than becoming an omission.
         """
         _validate_channel(channel)
         if require_group and not durable:
@@ -387,8 +468,50 @@ class MessageBus:
         # the publish path -- inside the caller's transaction, where each one
         # also holds their locks a little longer -- and the count grows with the
         # fleet, which is exactly when it is least affordable.
+        # The traceparent only. `tracestate` is vendor routing for the *next*
+        # hop of a live call; a durable message is consumed minutes or hours
+        # later, so a routing hint would age in the queue exactly as it would in
+        # `wreath.jobs`. `None` rather than `''` when there is nothing to carry:
+        # an empty string is a value, and `WHERE trace_context IS NOT NULL` would
+        # then match every message ever published.
+        bound = _telemetry.outbound_context.get()
+        parent = bound[0] if bound else None
+        runner = tx
+        connection = None
+        if runner is None:
+            connection = await self._db.acquire(self._workload)
+            runner = connection
+        try:
+            await self._insert_durable(
+                runner, channel, body, tenant, key, groups, parent
+            )
+        finally:
+            if connection is not None:
+                await self._db.release(self._workload, connection)
+
+    async def _insert_durable(
+        self,
+        runner: Any,
+        channel: str,
+        body: str,
+        tenant: str,
+        key: str | None,
+        groups: list[str],
+        parent: str | None,
+    ) -> None:
+        # The column probe runs on `runner` -- the caller's transaction when
+        # there is one -- so a durable publish never opens a connection of its
+        # own behind an outbox transaction's back. See `_carries_trace`.
+        carries = await self._carries_trace(runner)
         rows = []
         params: list[Any] = [channel, body, tenant]
+        # One bind for the whole fan-out -- every group's row is the same
+        # publish, so they share one context rather than repeating it per row --
+        # and it goes *after* the per-group pairs so the `(channel, payload,
+        # tenant, group, dedup, group, dedup, ...)` layout everything else reads
+        # is unchanged. Its index is arithmetic rather than `len(params)`
+        # because the value is appended once the loop below has finished.
+        trace_mark = f", ${2 * len(groups) + 4}" if carries else ""
         for group in groups:
             dk = dedup_key(f"{channel}:{group}", key) if key is not None else None
             params.extend([group, dk])
@@ -396,29 +519,25 @@ class MessageBus:
             # A generous default attempt cap; per-subscription retries govern
             # the live consumer's backoff decisions.
             rows.append(
-                f"($1, ${group_index}, $2::jsonb, $3, 'ready', now(), 6, ${dedup_index})"
+                f"($1, ${group_index}, $2::jsonb, $3, 'ready', now(), 6, "
+                f"${dedup_index}{trace_mark})"
             )
+        if carries:
+            params.append(parent)
+        trace_column = ", trace_context" if carries else ""
         sql = (
             f"INSERT INTO {self._table} "
-            '(channel, "group", payload, tenant, state, run_at, max_attempts, dedup_key) '
+            '(channel, "group", payload, tenant, state, run_at, max_attempts, '
+            f"dedup_key{trace_column}) "
             f"VALUES {', '.join(rows)} "
             'ON CONFLICT (channel, "group", dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING'
         )
-        runner = tx if tx is not None else None
-        connection = None
-        if runner is None:
-            connection = await self._db.acquire(self._workload)
-            runner = connection
-        try:
-            await runner.execute(sql, *params)
-            # One doorbell for the whole fan-out. The notification carries no
-            # payload -- it only sets the consumers' wake event -- so a second
-            # one says nothing new, and with fleet-wide discovery a busy channel
-            # can have many groups.
-            await runner.execute("SELECT pg_notify($1, '')", self._channel_wire(channel))
-        finally:
-            if connection is not None:
-                await self._db.release(self._workload, connection)
+        await runner.execute(sql, *params)
+        # One doorbell for the whole fan-out. The notification carries no
+        # payload -- it only sets the consumers' wake event -- so a second one
+        # says nothing new, and with fleet-wide discovery a busy channel can
+        # have many groups.
+        await runner.execute("SELECT pg_notify($1, '')", self._channel_wire(channel))
 
     # -- the shared group registry -------------------------------------------
 
@@ -622,6 +741,17 @@ class MessageBus:
                         ")",
                     ),
                 ),
+                # Version 1 is left exactly as it shipped: `wreath.schema`
+                # records the version rather than the DDL, so rewriting the
+                # `CREATE TABLE` would leave a cluster already at 1 without the
+                # column forever. Additive, so a publisher on the previous build
+                # keeps working against an upgraded database mid-rollout.
+                Step(
+                    version=2,
+                    statements=(
+                        f"ALTER TABLE {t} ADD COLUMN IF NOT EXISTS trace_context text",
+                    ),
+                ),
             ),
         )
 
@@ -645,6 +775,19 @@ class MessageBus:
         # bus must still start and drain its own queue without one.
         await self._register_groups()
         await self._refresh_groups()
+        # **No schema probe here, deliberately, and this is where the bus
+        # departs from `wreath.jobs`.** That runner resolves the column shape in
+        # `start` so its claim loop never pays for it; it can, because its probe
+        # was already caught narrowly and counted for the boot case. Doing the
+        # same here would put a catalog read in front of `Doorbell.open` on a
+        # path three tests assert survives a database that is down at boot --
+        # the failure that once cost a process its doorbell for its entire life
+        # -- and the only way to keep that property would be a broad `except` on
+        # a startup path, which is the one place AGENTS.md says a broad catch is
+        # never the answer. `_carries_trace` is cached, so resolving it on the
+        # first claim or the first durable publish costs one catalog read per
+        # bus either way; a claim that fails to resolve it parks and retries
+        # through machinery that already exists.
         # Spawned unconditionally, including on a bus with no subscriptions at
         # all: a service that only *publishes* is exactly the one that needs to
         # discover other services' groups.
@@ -797,6 +940,22 @@ class MessageBus:
                 await self._park(wake)
 
     async def _deliver(self, sub: _Subscription, message: Message) -> None:
+        # Bound *before* `ensure_future`, because that copies the current context
+        # into the task: bind after it and the handler runs with an empty one.
+        # Reset in a `finally` so a consumer that runs thousands of messages
+        # cannot hand message N+1 the context of message N, and `None` rather
+        # than not binding at all so an untraced message does not inherit
+        # whatever the worker already held -- a trace naming the wrong cause is
+        # worse than one naming none.
+        token = _telemetry.outbound_context.set(
+            (message.trace_context, "") if message.trace_context else None
+        )
+        try:
+            await self._deliver_bound(sub, message)
+        finally:
+            _telemetry.outbound_context.reset(token)
+
+    async def _deliver_bound(self, sub: _Subscription, message: Message) -> None:
         future = asyncio.ensure_future(sub.handler(message))
         self._inflight.add(future)
         errored: str | None = None
@@ -821,17 +980,25 @@ class MessageBus:
             await self._retry(sub, message, errored or "nacked")
 
     async def _claim(self, sub: _Subscription) -> Message | None:
-        sql = (
-            f"WITH claimable AS ( SELECT id FROM {self._table} "
-            'WHERE channel=$1 AND "group"=$2 AND state=\'ready\' AND run_at <= now() '
-            "ORDER BY run_at FOR UPDATE SKIP LOCKED LIMIT 1 ) "
-            f"UPDATE {self._table} m SET state='leased', owner=$3, "
-            "lease_expiry = now() + ($4 || ' seconds')::interval, fence = m.fence + 1, "
-            "updated_at=now() FROM claimable c WHERE m.id=c.id "
-            "RETURNING m.id, m.payload, m.tenant, m.fence, m.attempts"
-        )
         connection = await self._db.acquire(self._workload)
         try:
+            # Returned only where the column exists, so a build newer than its
+            # schema consumes untraced instead of failing on an unknown column.
+            # Probed on the claim's own connection and cached, so this is one
+            # catalog read for the life of the bus rather than one per message
+            # -- the steady state issues no extra query at all.
+            trace = ", m.trace_context" if await self._carries_trace(connection) else ""
+            sql = (
+                f"WITH claimable AS ( SELECT id FROM {self._table} "
+                'WHERE channel=$1 AND "group"=$2 AND state=\'ready\' '
+                "AND run_at <= now() "
+                "ORDER BY run_at FOR UPDATE SKIP LOCKED LIMIT 1 ) "
+                f"UPDATE {self._table} m SET state='leased', owner=$3, "
+                "lease_expiry = now() + ($4 || ' seconds')::interval, "
+                "fence = m.fence + 1, "
+                "updated_at=now() FROM claimable c WHERE m.id=c.id "
+                f"RETURNING m.id, m.payload, m.tenant, m.fence, m.attempts{trace}"
+            )
             row = await connection.fetchrow(
                 sql, sub.channel, sub.group, self._name, f"{self._lease:.3f}"
             )
@@ -844,7 +1011,8 @@ class MessageBus:
             payload = json.loads(payload)
         return Message(channel=sub.channel, group=sub.group, tenant=row["tenant"],
                        payload=payload, id=row["id"], fence=row["fence"],
-                       attempts=row["attempts"])
+                       attempts=row["attempts"],
+                       trace_context=row["trace_context"] if trace else None)
 
     async def _complete(self, message: Message) -> None:
         await self._exec(

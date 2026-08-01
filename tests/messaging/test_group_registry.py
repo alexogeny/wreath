@@ -48,6 +48,17 @@ class FakeConnection:
             raise self.fetch_error
         return list(self.group_rows)
 
+    async def fetchval(self, sql: str, *args: Any) -> Any:
+        """The version-2 `trace_context` column probe, and nothing else.
+
+        Answering `True` models a database the schema component has been applied
+        to. A real `SELECT true ... WHERE` returns *no rows* when the column is
+        absent, which the driver reads as `None` -- so that is the shape of the
+        negative answer, not `False`.
+        """
+        self.calls.append((sql, args))
+        return True
+
     def sqls(self) -> list[str]:
         return [sql for sql, _ in self.calls]
 
@@ -55,12 +66,17 @@ class FakeConnection:
         """The group each durable message row was enqueued for, in order.
 
         One statement carries every group, so the parameters are
-        ``(channel, payload, tenant, group, dedup, group, dedup, ...)``.
+        ``(channel, payload, tenant, group, dedup, group, dedup, ..., trace)``.
+        The trailing traceparent is one bind for the whole fan-out -- every
+        group's row is the same publish -- and it is sliced off rather than
+        stepped over, because a pairwise walk to the end of the tuple would
+        read it as a group.
         """
         groups: list[str] = []
         for sql, args in self.calls:
             if "INSERT INTO" in sql and ".messages" in sql:
-                groups.extend(args[3::2])
+                pairs = args[3:-1] if "trace_context" in sql else args[3:]
+                groups.extend(pairs[::2])
         return groups
 
     def registrations(self) -> list[tuple[Any, ...]]:
