@@ -86,6 +86,10 @@ else:
         return base64.b64encode(value).decode("ascii")
 from .exceptions import BadRequest
 from .geospatial import Coordinate
+from .negotiation import PROTOBUF_MEDIA_TYPES as _PROTOBUF_MEDIA_TYPES
+from .protobuf import ProtobufDecodeError as _ProtobufDecodeError
+from .protobuf import decode as _protobuf_decode
+from .protobuf import is_message as _is_message
 from .request import Request
 from .temporal import Instant, TemporalError
 
@@ -1928,6 +1932,58 @@ class _FormModelValidationTape:
         kwargs[self._name] = self._validator(payload, ("form",))
 
 
+def _protobuf_requested(request: Request) -> bool:
+    """Whether this request's `Content-Type` asks for the protobuf decoder.
+
+    The set of spellings lives in `wreath.negotiation` beside the serializer
+    that emits one of them, so the request half and the response half cannot
+    disagree about what protobuf is called.
+    """
+    header = request.header("content-type")
+    if header is None:
+        return False
+    return header.split(";")[0].strip().lower() in _PROTOBUF_MEDIA_TYPES
+
+
+def _decode_protobuf_body(annotation: Any, body: bytes) -> Any:
+    """Read a protobuf request body into the handler's declared message.
+
+    **Unknown fields are preserved, where an unknown JSON name is refused.** The
+    same handler, the same declared shape, two strictnesses chosen by
+    `Content-Type` -- and that asymmetry is the decision rather than an
+    accident, so it is stated here as well as in the guide:
+
+    * An unexpected **name** in a JSON object is almost always a typo, and the
+      sender has no way to have meant it. Refusing tells them which one.
+    * An unexpected **number** on a protobuf wire is a peer compiled against a
+      newer `.proto`. That is the situation field numbers exist for, and
+      tolerating it is the mechanism -- `wreath.protobuf` keeps the bytes and
+      `encode` puts them back, so a service that reads, edits and forwards a
+      message does not strip what a newer peer sent through it. Refusing would
+      make every schema rollout a synchronised deploy of every consumer.
+
+    The refusals below are three different sentences on purpose: "your bytes are
+    not protobuf" and "this endpoint's body is not a declared message" have
+    different remedies, and one message covering both is a message that tells
+    nobody which happened.
+
+    Raises:
+        BadRequest: the annotation is not a `@message`, or the bytes are not a
+            readable encoding of it.
+    """
+    if not _is_message(annotation):
+        raise BadRequest(
+            f"this endpoint's body is {getattr(annotation, '__name__', annotation)!s}, "
+            "which is not a @message: protobuf carries field numbers rather than "
+            "names, so there is nothing to read the wire against. Declare the "
+            "body with @message from wreath.protobuf, or send JSON."
+        )
+    try:
+        return _protobuf_decode(annotation, body)
+    except _ProtobufDecodeError as exc:
+        raise BadRequest(f"invalid protobuf body: {exc}") from None
+
+
 def _body_validator(annotation: Any) -> _BodyValidator:
     """Compile the body checker once, at route-compile time.
 
@@ -2559,12 +2615,24 @@ def compile_binder(
             except ValueError as exc:
                 raise BadRequest(f"invalid form body: {exc}") from None
         if body_spec is not None and body_validator is not None:
-            name, _annotation = body_spec
-            try:
-                body = await request.body()
-                kwargs[name] = body_validator.decode_json_validation_tape(body, ("body",))
-            except ValueError as exc:
-                raise BadRequest(f"invalid JSON body: {exc}") from None
+            name, annotation = body_spec
+            body = await request.body()
+            # Which decoder reads the bytes is the client's to say. A `@message`
+            # annotation does **not** mean protobuf-only: it is an ordinary
+            # dataclass and bound from JSON before this branch existed, so
+            # narrowing it here would have silently broken every handler that
+            # already had one -- and OTLP/HTTP, the format's own reference
+            # consumer, serves both encodings of one message behind one path.
+            # See `_decode_protobuf_body` for the strictness that comes with it.
+            if _protobuf_requested(request):
+                kwargs[name] = _decode_protobuf_body(annotation, body)
+            else:
+                try:
+                    kwargs[name] = body_validator.decode_json_validation_tape(
+                        body, ("body",)
+                    )
+                except ValueError as exc:
+                    raise BadRequest(f"invalid JSON body: {exc}") from None
 
     async def bound_simple(request: Request) -> Any:
         """No connection, session, or dependency: nothing to lease or release."""
