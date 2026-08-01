@@ -98,5 +98,46 @@ from wreath.server import run
 run(app, required_env=["DATABASE_URL", "SECRET_KEY"])
 ```
 
+### The `WREATH_*` variables
+
+The single source of truth for these names is `_SERVER_ENV_REGISTRY` in
+`src/wreath/server.py`; `ServerConfig.from_env()` iterates it, and the repository's
+own `.env.example` lists exactly those keys — a test asserts the two agree, so
+the file cannot quietly drift the way it had (`WREATH_PREARM` was missing from
+it). Precedence is dataclass default < environment < explicit code argument, and
+**an unset or empty value keeps the default** — which is why every key in the
+template carries an empty value. Copying it therefore changes nothing until you
+fill something in, and it cannot pin today's defaults into a deployment that
+should have inherited tomorrow's.
+
+| Variable | Field | Default |
+| --- | --- | --- |
+| `WREATH_HOST` | `host` | `127.0.0.1` — reaching the network is a decision |
+| `WREATH_PORT` | `port` | `8000`; `0` asks the OS |
+| `WREATH_BACKLOG` | `backlog` | `2048` |
+| `WREATH_KEEP_ALIVE_TIMEOUT` | `keep_alive_timeout` | `5.0` seconds |
+| `WREATH_REQUEST_TIMEOUT` | `request_timeout` | `30.0` seconds |
+| `WREATH_SHUTDOWN_TIMEOUT` | `shutdown_timeout` | `10.0` seconds |
+| `WREATH_SERVER_HEADER` | `server_header` | `wreath` |
+| `WREATH_DATE_HEADER` | `date_header` | `true`; `true/false/1/0/yes/no/on/off` |
+| `WREATH_MAX_REQUEST_LINE` | `max_request_line` | `8192` bytes, then 414 |
+| `WREATH_MAX_HEADER_COUNT` | `max_header_count` | `100` fields |
+| `WREATH_MAX_HEADER_BYTES` | `max_header_bytes` | `32768` bytes, then 431 |
+| `WREATH_MAX_BODY_BYTES` | `max_body_bytes` | `1048576` bytes, then 413 |
+| `WREATH_MAX_BODY_CHUNKS` | `max_body_chunks` | `4096` frames |
+| `WREATH_LIFESPAN` | `lifespan` | `auto`; `auto`/`on`/`off` |
+| `WREATH_PREARM` | `prearm` | connections pre-armed before accept |
+| `WREATH_PROTOCOLS` | `protocols` | `http/1.1`; comma-separated from `http/1.1,h2,h3` |
+
+The HTTP/2 and HTTP/3 window sizes are deliberately code-only: they are tuning
+an operator has no way to choose well from outside.
+
+Three more are read outside `ServerConfig`. `WREATH_PURE` forces the
+pure-Python implementation over the compiled extensions and any non-empty value
+enables it. `WREATH_BUILD_HTTP3` and `WREATH_NATIVE_PROFILE` are read by
+`setup.py` during `pip install`/`uv sync` and must be exactly `1` — the first
+builds the optional HTTP/3 extension (it needs the from-source nghttp3/ngtcp2
+toolchain), the second produces a profiling build.
+
 **Reference:** [`wreath.config`](../reference/config.md),
 [`wreath.state`](../reference/state.md).
