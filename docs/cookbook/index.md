@@ -75,6 +75,7 @@ There are two circles of readers here, and each gets its own set.
 - [Expose a Prometheus `/metrics` endpoint](recipes/prometheus-metrics.md)
 - [Trace requests with OpenTelemetry](recipes/otel-tracing.md)
 - [Deploy behind a proxy or load balancer](recipes/behind-a-proxy.md)
+- [Find out what a service needs provisioned](recipes/infer-infrastructure.md)
 
 ### Migrating and quality
 

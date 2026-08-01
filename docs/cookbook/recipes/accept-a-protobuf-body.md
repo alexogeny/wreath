@@ -25,9 +25,33 @@ class Batch:
 `sfixed64` is a better fit than a varint for a timestamp, whose high bits are
 always set. Neither choice changes the Python you write.
 
-## Read it in a handler
+## Let binding read it
 
-The body arrives as bytes, so read it and decode:
+Annotate the body with the message and Wreath decodes it for you when the
+request says `Content-Type: application/x-protobuf`:
+
+```python
+from wreath import Wreath
+
+app = Wreath()
+
+@app.post("/readings")
+async def ingest(request, batch: Batch) -> dict:
+    for reading in batch.readings:
+        await store(reading)
+    return {"accepted": len(batch.readings)}
+```
+
+A body that is not readable protobuf is a `400` naming protobuf, so the
+`try`/`except` below is already done for you. The same handler still accepts a
+JSON body — the annotation is content-negotiated, not protobuf-only — and
+[Binding](../../guides/binding.md#a-protobuf-body) explains why, and why the
+two content types are deliberately not equally strict about unknown fields.
+
+## Or read it in the handler
+
+Decoding by hand is still there when the endpoint takes a body it cannot
+annotate — several message types on one path, or an envelope chosen by a header:
 
 ```python
 from wreath import Wreath
@@ -67,9 +91,13 @@ async def ingest(request) -> Response:
     ...
     return Response(
         encode(Receipt(accepted=len(batch.readings))),
-        media_type="application/x-protobuf",
+        media_type=b"application/x-protobuf",
     )
 ```
+
+`media_type` is **bytes**, not `str` — it goes onto the wire as a header value,
+and a `str` there is not a valid ASGI header. Passing one raises at the
+`Response`, naming the byte literal to use.
 
 ## Guard the size before you parse
 
@@ -86,7 +114,8 @@ heard of, the decoder keeps the bytes and hands them back on re-encode, so a
 relay in the middle of your estate does not destroy data it was never taught
 about. That is the difference between a field number and a JSON key, and it is
 why this codec preserves unknown fields where
-[binding](../../guides/binding.md) rejects extra ones.
+[binding](../../guides/binding.md#a-protobuf-body) rejects an extra *name* in
+JSON. Both rules apply to the same handler, chosen by `Content-Type`.
 
 See [the guide](../../guides/protobuf.md) for the full argument, and
 [`wreath.protobuf`](../../reference/protobuf.md) for the API.
