@@ -100,6 +100,27 @@ Raising `max_size` is the right fix only when the pool is genuinely saturated by
 concurrent in-flight queries. When it is saturated by *slow* queries, more
 connections move the queue rather than shorten it.
 
+## A client that goes away stops the query
+
+When the caller disconnects mid-request, Wreath's own HTTP/1.1 server cancels
+the handler's task, the driver sends PostgreSQL a wire-level `CancelRequest` on
+a second connection, and the backend stops scanning. The connection comes back
+to the pool clean — `idle`, not `idle in transaction` — and serves the next
+request.
+
+**This happens for safe methods only.** `GET`, `HEAD` and `OPTIONS` are defined
+by RFC 9110 as having no intended effect on the server, so abandoning one can
+lose nothing but the work. A `POST` is left running, and that default is not
+timidity: cancelling it rolls its transaction back cleanly, but it does not roll
+back the job it enqueued, the card it charged or the mail it sent — and the
+client is gone and cannot be told which of those happened. Declare
+`cancel_on_disconnect=` on the route to override it in either direction; see
+[the server guide](server.md#cancelling-a-handler-when-the-client-goes-away).
+
+The `CancelRequest` is best effort by design: a race can let a statement finish
+first, and PostgreSQL is free to ignore one. What is guaranteed is that the
+connection is not left poisoned.
+
 Because the exact signatures for pooling, transactions, workloads, and result
 types come straight from the driver, the reference is the authoritative place for
 them.
