@@ -67,7 +67,22 @@ settings = env.bind(Settings, prefix="APP")
 ```
 
 The dotenv parser remains strict and literal: `KEY=value`, no expansion or
-command substitution. Root fields use `APP_FIELD`; nested fields use
+command substitution. **It has no comment syntax at all**, and that is the part
+that surprises people: a `#` line is not skipped, it is a `ValueError` naming
+the line number, the same as an `export KEY=value` line or a line with no `=`.
+The reasoning is that a config file which quietly means something other than
+what it reads is worse than one that refuses to parse.
+
+The practical consequence is worth stating plainly, because wreath's own
+example got it wrong: **an `.env.example` cannot be an annotated file.** If it
+carries explanatory comments then the instruction to copy it produces a `.env`
+that fails to load on the first line, which is the least helpful moment to
+discover the dialect. Keep the template to the keys and their defaults, one per
+line, and put the explanation of what each key does next to the settings
+dataclass that reads it -- where it is in view of the code, and where it cannot
+be copied into a file that then refuses to parse.
+
+Root fields use `APP_FIELD`; nested fields use
 `APP_DATABASE__HOST`. `Env` supplies an absolute alias. Binding converts the
 stdlib scalar/container types, enums, literals, optionals, UUID, Decimal, Path,
 and ISO dates, and reports every missing or malformed value in one

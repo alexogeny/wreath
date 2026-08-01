@@ -37,6 +37,28 @@ def test_dotenv_parser_is_literal_and_strict() -> None:
         parse_dotenv(b"export NAME=wreath\n")
     with pytest.raises(ValueError, match="line 1"):
         parse_dotenv(b"NO_EQUALS\n")
+    # A whole-line comment too. This dialect has no comment syntax, which is
+    # the clause the next test exists to keep honest.
+    with pytest.raises(ValueError, match="line 1"):
+        parse_dotenv(b"# a comment\nNAME=wreath\n")
+
+
+def test_the_shipped_dotenv_template_can_actually_be_copied() -> None:
+    """`example/.env.example` says "copy me", so copying it must produce a
+    loadable `.env`.
+
+    It did not: the template opened with two comment lines explaining that the
+    parser is strict, and the parser rejected the first of them --
+    `ValueError: invalid dotenv entry on line 1`. A template nobody can use is
+    a documentation defect whatever the parser does, and this dialect has no
+    comment syntax to loosen its way out of. Parsed here rather than eyeballed,
+    because the next person to annotate the file will find out from this test
+    instead of from a reader who copied it.
+    """
+    template = Path(__file__).resolve().parents[1] / "example" / ".env.example"
+    values = parse_dotenv(template.read_bytes())
+    assert "CAMERA_TRAP_DSN" in values
+    assert values["CAMERA_TRAP_MAX_WINDOW_DAYS"] == "90"
 
 
 def test_explicit_dotenv_path_searches_parents(tmp_path: Path) -> None:
