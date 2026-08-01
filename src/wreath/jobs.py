@@ -1173,13 +1173,28 @@ class JobRunner:
     def _attempt_record(
         self, job: _Claimed, outcome: Any, error: BaseException | None, trace: Any
     ) -> Any:
-        """Identity, cause, boundaries, outcome -- and never the arguments.
+        """Identity, cause, boundaries, outcome -- and the arguments an operator
+        allowed by name, if any.
 
-        `argument_count` is the whole of what the payload contributes. See
-        `wreath.recording.AttemptPolicy` for why a positional array has no
-        name for a name-keyed redaction policy to deny.
+        `argument_count` is what the payload contributes when nobody has named
+        one, which is the default. `AttemptPolicy.argument_allowlist` supplies
+        the names a positional array does not have, out of the *handler's*
+        signature -- so a task this process does not have registered captures
+        nothing, rather than falling back to position.
         """
         from ._recording_format import AttemptRecord
+
+        registered = self._tasks.get(job.task)
+        arguments = self._attempts.policy.capture_arguments(
+            task=job.task,
+            handler=None if registered is None else registered.func,
+            args=job.args or (),
+            kwargs=getattr(job, "kwargs", None) or {},
+            # `handler.func(ctx, *job.args)` -- the context is this process's
+            # object and never the payload's, so it is aligned past rather than
+            # offered as a nameable parameter.
+            framework_parameters=1,
+        )
 
         return AttemptRecord(
             job_id=job.id,
@@ -1200,6 +1215,7 @@ class JobRunner:
             error_type="" if error is None else type(error).__name__,
             error_message="" if error is None else str(error),
             argument_count=len(job.args),
+            arguments=arguments,
         )
 
     def _query_scope(self, handler: _Task, job: _Claimed) -> Any:

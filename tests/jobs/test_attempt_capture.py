@@ -395,3 +395,65 @@ def test_every_outcome_is_a_value_the_policy_can_be_asked_about(outcome):
     assert policy.captures(
         task="send", outcome=outcome, attempt=1, max_attempts=5, job_id=1
     ) is (outcome is not AttemptOutcome.COMPLETED)
+
+
+# --- and what may reach it, when somebody says which --------------------------
+
+
+async def test_an_allowlisted_argument_reaches_the_file_and_its_neighbour_does_not(
+    tmp_path,
+):
+    """The pair that justifies the whole mechanism, through a real runner.
+
+    `send(ctx, address, token)` -- the operator allowed `address` and not
+    `token`, and the *bytes on disk* are what says whether that held. Asserted
+    against the raw file rather than the decoded record, because a reader that
+    masked on the way out would pass the decoded assertion while the token sat
+    in the file forever.
+    """
+    from wreath.recording import RedactionPolicy
+
+    runner = _runner(
+        tmp_path,
+        AttemptTrigger(AttemptTriggerKind.FAILURE),
+        argument_allowlist=frozenset({"send.address"}),
+        redaction=RedactionPolicy(max_fields=16, max_depth=3, max_body_bytes=1024),
+    )
+
+    @runner.task("send")
+    async def send(ctx, address, token):
+        raise ValueError("boom")
+
+    await runner._run(_claim())
+    raw = (tmp_path / "work-41-4.wfr1").read_bytes()
+    assert b"alex@example.com" in raw
+    assert b"reset-token-nobody-may-keep" not in raw
+
+    record = read_attempt_recording(raw)
+    assert record.arguments == (("address", '{"value":"alex@example.com"}'),)
+    assert record.argument_count == 2, "the count is unchanged by what was kept"
+
+
+async def test_a_task_whose_handler_takes_varargs_captures_nothing(tmp_path):
+    """The runner's own shape for a handler it cannot name: `*args` has no
+    declared parameter, so no allowlist entry reaches it and the bytes stay
+    clean. This is the rule that keeps a signature change from silently
+    starting to record."""
+    from wreath.recording import RedactionPolicy
+
+    runner = _runner(
+        tmp_path,
+        AttemptTrigger(AttemptTriggerKind.FAILURE),
+        argument_allowlist=frozenset({"send.address", "send.args"}),
+        redaction=RedactionPolicy(max_fields=16, max_depth=3, max_body_bytes=1024),
+    )
+
+    @runner.task("send")
+    async def send(ctx, *args):
+        raise ValueError("boom")
+
+    await runner._run(_claim())
+    raw = (tmp_path / "work-41-4.wfr1").read_bytes()
+    assert b"alex@example.com" not in raw
+    assert b"reset-token-nobody-may-keep" not in raw
+    assert read_attempt_recording(raw).arguments == ()

@@ -196,11 +196,25 @@ recording on your laptop.
 A pass shift is an ordinary task, so a shift that fails is captured by the same
 arming with nothing extra to configure.
 
-**Job arguments are never recorded.** `args jsonb` is a positional array and the
-redaction policy is name-keyed, so there is no name for an operator to allow;
-only the count is kept, and the replay asks you for the values. The reasoning,
-and what would have to be settled to change it, is in
-[`wreath.recording`](../reference/recording.md#the-arguments-are-not-captured-and-that-is-structural).
+**Job arguments are recorded only where you name one.** `args jsonb` is a
+positional array and the redaction policy is name-keyed, so the names come from
+the handler's own signature:
+
+```python
+AttemptPolicy(
+    triggers=(AttemptTrigger(AttemptTriggerKind.FAILURE),),
+    argument_allowlist=frozenset({"send_password_reset.user_id"}),
+    redaction=RedactionPolicy(max_fields=32, max_depth=4, max_body_bytes=4096),
+)
+```
+
+`send_password_reset(ctx, user_id, token)` then records `user_id` and never
+`token`. The default allowlist is empty and keeps only the count. A task this
+process has no handler for captures nothing rather than falling back to
+position, a value that lands in `*args` is never nameable, and a value that
+will not normalise is withheld *with its reason* rather than dropped. The four
+rules and the bounds are in
+[`wreath.recording`](../reference/recording.md#the-arguments-and-the-names-a-positional-array-does-not-have).
 
 ## Transactional enqueue
 
