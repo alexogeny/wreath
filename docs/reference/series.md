@@ -16,7 +16,15 @@ bucket is deliberately **not** a cache: no TTL, no eviction, no recomputation.
 A row that lands behind the watermark is recorded as a correction beside the
 settled value rather than rewriting it, and `reconcile()` is what finds one —
 the ORM's write events are model-grained by design and cannot say which bucket a
-late row belongs to. See
+late row belongs to.
+
+**Reading a sealed view never writes.** `settle()` is the write half and it
+belongs in a scheduled job; `reconcile()` runs it first, so one job covers both.
+A `run()` over a range nobody has settled returns the same numbers and does not
+keep them, which is what lets a chart route use a read-workload session, a
+replica, or a role with no `INSERT`. The two tables behind it are created by the
+lifespan once the application declares `app.series(database=...)` — a `Series`
+is a declaration the application never holds, so the claim needs an owner. See
 [the guide](../guides/calculated-views.md#sealing-when-a-bucket-stops-being-able-to-change).
 
 `.retain(raw=..., day=..., month=None)` keeps the same view at more than one

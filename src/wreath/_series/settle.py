@@ -133,6 +133,34 @@ def schema_sql(*, schema: str = SCHEMA) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class SettledStore:
+    """What a sealed `Series` stores, as something an application can hold.
+
+    A `Series` is a declaration, not a registered subsystem: it is built where
+    it is used and the application never sees it, so `app.schema_components()`
+    had nothing to ask and the settled-bucket tables were created by nothing.
+    An application declaring a sealed view had to reach into
+    `wreath._series.settle` past a leading underscore and run the DDL itself,
+    or discover the absence at the first `settle()`.
+
+    `app.series(database=...)` registers one of these instead. It holds no
+    state and does no work; it exists so the claim has an owner in the same
+    place every other wreath-owned table's claim has one, and so the lifespan
+    that creates the job ledger creates these too.
+    """
+
+    schema: str = SCHEMA
+
+    def component(self) -> Any:
+        """This store's claim on the wreath schema."""
+        return component(schema=self.schema)
+
+    def schema_sql(self) -> str:
+        """The DDL, semicolon-joined. A derivation of `component()`."""
+        return self.component().sql()
+
+
+@dataclass(frozen=True, slots=True)
 class Seal:
     """How long after a bucket closes it stops being able to change.
 

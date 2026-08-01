@@ -76,6 +76,7 @@ from ._series.envelope import aggregate_rows, cell_rows, fill, series_rows
 from ._series.settle import (
     Seal,
     SealState,
+    SettledStore,
     clear_correction,
     difference,
     fold,
@@ -136,6 +137,7 @@ __all__ = [
     "SeriesError",
     "SeriesEvent",
     "SeriesResult",
+    "SettledStore",
     "Tier",
     "avg",
     "count",
@@ -1562,6 +1564,15 @@ class Series(_Builder):
                 self._bucket.end_of(max(settled), zone_name) if settled else start
             )
             if gap_from < sealed_end:
+                # Computed and returned, deliberately **not** stored. Reading is
+                # a read: a `GET` serving a sealed view runs on a read-workload
+                # session, against a replica, or under a role with no INSERT,
+                # and a read that settles as a side effect answers `cannot
+                # execute INSERT in a read-only transaction` from inside the
+                # series machinery on a route that wrote nothing the
+                # application can see. `settle()` is the write half, and it is
+                # a job. The number is identical either way -- what changes is
+                # whether the next reader recomputes it.
                 fresh = await self._compute(
                     session, predicates, gap_from, sealed_end, zone_name
                 )
@@ -1569,9 +1580,6 @@ class Series(_Builder):
                     if bucket in settled:
                         continue
                     settled[bucket] = measures
-                    await session.declared(
-                        insert_settled(), (view, params, bucket, _as_jsonb(measures))
-                    )
 
         open_part: dict[Any, dict[str, Any]] = {}
         if end > sealed_end:
@@ -1785,6 +1793,76 @@ class Series(_Builder):
             added.append(bucket)
         return tuple(added)
 
+    async def settle(
+        self,
+        session: Any,
+        *,
+        range: Range,
+        zone: Any = None,
+        now: Any = None,
+        **values: Any,
+    ) -> tuple[Any, ...]:
+        """Store every sealed bucket in `range` that nobody has settled yet.
+
+        **The write half of `.seal()`, and the only one there is.** Reading a
+        sealed view never writes: a `GET` runs on a read-workload session, on a
+        replica, or under a role with no `INSERT`, and settling as a side effect
+        of a read answers `cannot execute INSERT in a read-only transaction`
+        from inside the series machinery, on a route that wrote nothing the
+        application can see. So the store is filled here, from a scheduled job,
+        beside the `reconcile` that keeps it honest — `reconcile` runs this
+        first, so an application already scheduling one needs no second job.
+
+        Idempotent by construction: the insert is `ON CONFLICT DO NOTHING`, and
+        two workers settling the same bucket compute the same number from the
+        same rows, so the loser has nothing to add.
+
+        A `run()` over a range this has never covered returns exactly the same
+        numbers — it computes the sealed part and does not keep it. What
+        settling buys is that the *next* reader does not have to.
+
+        Returns:
+            The bucket starts it stored, so a job can log what it did.
+
+        Raises:
+            SeriesError: this view declares no `seal()`.
+        """
+        if self._seal is None:
+            raise SeriesError(
+                "settle() needs a seal: with no watermark no bucket is ever "
+                "final, so there is nothing that could be stored once and read"
+            )
+        zone_name = _zone_name(zone if zone is not None else self._stored_in)
+        predicates = self._bind(values)
+        instant = _instant(now) if now is not None else _now()
+        edge = watermark(
+            instant, bucket=self._bucket, zone_name=zone_name, after=self._seal.after
+        )
+        start = _instant(range.start)
+        sealed_end = min(_instant(range.end), edge)
+        if sealed_end <= start:
+            return ()
+        view, params = self._identity(zone_name, values)
+        stored = await session.declared(
+            select_settled(), (view, params, start, sealed_end)
+        )
+        known = {row[0] for row in stored}
+        # The same suffix argument the read path makes: sealing advances
+        # forwards, so what is missing starts just past the last stored bucket.
+        gap_from = self._bucket.end_of(max(known), zone_name) if known else start
+        if gap_from >= sealed_end:
+            return ()
+        fresh = await self._compute(session, predicates, gap_from, sealed_end, zone_name)
+        written: list[Any] = []
+        for bucket in sorted(fresh):
+            if bucket in known:
+                continue
+            await session.declared(
+                insert_settled(), (view, params, bucket, _as_jsonb(fresh[bucket]))
+            )
+            written.append(bucket)
+        return tuple(written)
+
     async def reconcile(
         self,
         session: Any,
@@ -1804,13 +1882,16 @@ class Series(_Builder):
         chart would put per-row bookkeeping on every write in the application.
 
         So the application runs this: from a scheduled job, after an import,
-        after a backfill. It recomputes the sealed part of `range` from the
-        source rows, compares each bucket to what was settled, and writes a
-        delta where they disagree — or replaces the settled value outright if
-        the view declared `on_late="reopen"`.
+        after a backfill. It `settle`s the sealed part of `range` first — since
+        reading stores nothing, this is where a bucket becomes stored at all —
+        then recomputes it from the source rows, compares each bucket to what
+        was settled, and writes a delta where they disagree, or replaces the
+        settled value outright if the view declared `on_late="reopen"`.
 
         Returns the bucket starts it corrected, so a caller can log or alert on
-        late data arriving rather than discovering it in a discrepancy later.
+        late data arriving rather than discovering it in a discrepancy later. A
+        bucket settled by this same call is not a correction and is not in it;
+        `settle` returns those.
         """
         if self._seal is None:
             raise SeriesError(
@@ -1818,6 +1899,12 @@ class Series(_Builder):
                 "already recomputes from the source rows and there is nothing "
                 "to compare against"
             )
+        # Settle first, because reading no longer does. Without this an
+        # application that only ever `run()`s a sealed view would never store a
+        # bucket at all, and a reconcile would keep finding nothing to compare
+        # against -- sealing would be a declaration with no effect. One job, two
+        # steps, in the only order that makes the second one meaningful.
+        await self.settle(session, range=range, zone=zone, now=now, **values)
         zone_name = _zone_name(zone if zone is not None else self._stored_in)
         predicates = self._bind(values)
         instant = _instant(now) if now is not None else _now()

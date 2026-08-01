@@ -331,11 +331,15 @@ class TestSchema:
     def test_a_settled_row_is_keyed_by_view_params_and_bucket(self):
         assert "PRIMARY KEY (view, params, bucket)" in schema_sql()
 
-    def test_nothing_applies_it_for_you(self):
+    def test_the_view_itself_never_applies_it(self):
         """The same rule the job ledger and the pass ledger follow.
 
-        A chart declaration is a poor place to acquire DDL rights, so this
-        returns a string and there is no code path that runs it.
+        A chart declaration is a poor place to acquire DDL rights, so nothing in
+        the read or settle path runs this. What *does* apply it is the schema
+        lifespan, through `app.series(database=...)` — see
+        `test_app_schema_components.py`. Before that registrar existed the
+        answer was "nothing at all", and an application had to reach into
+        `wreath._series.settle` past a leading underscore.
         """
         import wreath.series as module
 
@@ -377,9 +381,18 @@ class TestReadingASealedView:
     def declared(self):
         return sealed(after="0s")
 
-    async def test_the_first_read_computes_and_stores_the_sealed_part(
+    async def test_the_first_read_computes_the_sealed_part_and_writes_nothing(
         self, declared, session, database
     ):
+        """Reading is a read. It used to settle as a side effect.
+
+        The number is the same either way; what the write cost was a `GET` that
+        could only run on a write-workload session. On a read session -- which
+        is what this fixture gives, and what a chart route should use -- the
+        `INSERT` answered `cannot execute INSERT in a read-only transaction`
+        from inside the series machinery, on a route that wrote nothing the
+        application can see. `settle()` is the write half now.
+        """
         database.connection.script("generate_series", _rows((utc(2026, 3, 1), 5)))
         result = await declared.run(
             session,
@@ -387,8 +400,45 @@ class TestReadingASealedView:
             now=utc(2026, 3, 4),
         )
         statements = [sql for sql, _args in database.connection.calls]
+        assert not any(
+            keyword in sql.upper() for sql in statements
+            for keyword in ("INSERT", "UPDATE", "DELETE")
+        ), statements
+        assert result.series[0].values == (5,), "the value is unchanged by not storing it"
+
+    async def test_settling_is_what_stores_it(self, declared, session, database):
+        """The other half of the pair above, so "no write" is not "no feature"."""
+        database.connection.script("generate_series", _rows((utc(2026, 3, 1), 5)))
+        written = await declared.settle(
+            session,
+            range=Range(utc(2026, 3, 1), utc(2026, 3, 2)),
+            now=utc(2026, 3, 4),
+        )
+        statements = [sql for sql, _args in database.connection.calls]
         assert any("INSERT INTO" in sql and "series_buckets" in sql for sql in statements)
-        assert result.series[0].values == (5,)
+        assert written == (utc(2026, 3, 1),)
+
+    async def test_settling_the_same_range_twice_writes_once(
+        self, declared, session, database
+    ):
+        """Idempotent, so a job that runs late and a job that reruns are equal."""
+        database.connection.script(
+            "series_buckets", [(utc(2026, 3, 1), {"n": 5}, None)]
+        )
+        written = await declared.settle(
+            session,
+            range=Range(utc(2026, 3, 1), utc(2026, 3, 2)),
+            now=utc(2026, 3, 4),
+        )
+        statements = [sql for sql, _args in database.connection.calls]
+        assert written == ()
+        assert not any("INSERT INTO" in sql for sql in statements), statements
+
+    async def test_settling_an_open_view_is_refused_by_name(self, session):
+        with pytest.raises(SeriesError, match="settle\\(\\) needs a seal"):
+            await view(stored_in=tz("UTC")).settle(
+                session, range=Range(utc(2026, 3, 1), utc(2026, 3, 2))
+            )
 
     async def test_a_settled_bucket_is_read_rather_than_recomputed(
         self, declared, session, database
