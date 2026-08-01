@@ -49,6 +49,20 @@ object. An import-time constant — a bound, a redaction pattern, a deny-list �
 has no function to recompile, so it is rebound by value in the defining module
 and in every module that imported it, matched by identity rather than equality.
 
+A **Cedar policy set is the one value that rebinding alone does not reach**, and
+it is worth knowing why the tool goes further for it. The shape every
+application writes is a module-level `POLICY_SOURCE` with
+`ENGINE = CedarPolicies(POLICY_SOURCE)` on the next line, and `CedarPolicies`
+parses at construction — deliberately, so a syntax error is a start-up failure
+rather than a request one. Rebinding the text therefore leaves the engine that
+answers every question holding the policies it was built from: the control was
+not removed, and the mutant survived having changed nothing. So a `cedar.*`
+mutation also rebuilds every live `CedarPolicies` that was compiled from that
+exact string, and puts each one back afterwards. Measured over the camera-trap
+example, the difference is 0 killed / 18 survived before and 12 killed / 5
+survived after. A `CedarEngine` that is not `CedarPolicies` is still out of
+reach, because there is no way to ask an arbitrary one to recompile.
+
 Two consequences are worth knowing. The patch target is the **outermost**
 enclosing function, not the innermost, because a handler defined inside a router
 factory has no reachable function object of its own; recompiling the factory

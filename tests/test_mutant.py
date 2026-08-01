@@ -1026,6 +1026,182 @@ def test_the_wholesale_keyword_mutant_is_the_one_that_overstates(
     assert all(m["outcome"] == "killed" for m in wholesale), wholesale
 
 
+# -- a Cedar policy compiled at import time ---------------------------------
+#
+# The shape every application writes, and the one this tool used to be unable
+# to touch: the text is bound to a module global and a `CedarPolicies` is built
+# from it on the next line, so rebinding the global reaches the string and not
+# the engine that answers. Measured over `example/camera_trap/policies.py`
+# before the fix: 0 killed, 18 survived. The project below is that shape in
+# miniature, with one watched policy and one unwatched one, so a run that
+# reports both KILLED is as wrong as one that reports both SURVIVED.
+
+CEDAR_PROJECT = {
+    "guard/__init__.py": "",
+    "guard/policy.py": textwrap.dedent(
+        '''
+        """One policy set, parsed at import, exactly as an application writes it."""
+
+        from wreath.authorization import CedarEntity, CedarPolicies, EntityUid
+
+        POLICY_SOURCE = """
+        // Rangers respond to incidents; they may read a sensitive record.
+        permit(principal in Role::"ranger", action == Action::"read", resource)
+          when { resource.tier == "sensitive" };
+
+        // Anyone signed in may read an open record. Note the semicolon in this
+        // sentence; splitting the source on a bare `;` used to cut it in half.
+        permit(principal, action == Action::"read", resource)
+          when { resource.tier == "open" };
+
+        // Forbid wins over every permit, including ones added later.
+        forbid(principal, action, resource)
+          when { principal has suspended && principal.suspended == true };
+        """
+
+        ENGINE = CedarPolicies(POLICY_SOURCE)
+
+
+        def may_read(*, roles=(), tier="open", suspended=False):
+            principal = CedarEntity(
+                EntityUid("User", "u1"),
+                attrs={"suspended": suspended},
+                parents=tuple(EntityUid("Role", role) for role in sorted(roles)),
+            )
+            resource = EntityUid("Record", tier)
+            decision = ENGINE.is_authorized(
+                principal=principal.uid,
+                action=EntityUid("Action", "read"),
+                resource=resource,
+                context={},
+                entities=(principal, CedarEntity(resource, attrs={"tier": tier})),
+            )
+            return bool(getattr(decision, "allowed", decision))
+        '''
+    ),
+    "tests/test_policy.py": textwrap.dedent(
+        '''
+        from guard.policy import may_read
+
+
+        def test_a_volunteer_cannot_read_a_sensitive_record():
+            # Watches the open-record permit's `when` clause: dropping it lets
+            # anyone read anything, and this is what notices.
+            assert may_read(roles=(), tier="sensitive") is False
+
+
+        def test_a_ranger_can_read_a_sensitive_record():
+            assert may_read(roles=("ranger",), tier="sensitive") is True
+
+
+        def test_a_suspended_ranger_is_refused():
+            # Watches the standing `forbid`. Flipping it to a permit makes this
+            # pass -- but only if the mutation reaches the compiled engine.
+            assert may_read(roles=("ranger",), tier="sensitive", suspended=True) is False
+
+
+        def test_an_open_record_is_readable():
+            # Exercises the ranger permit's tier without ever asserting that a
+            # ranger is refused anything, so widening that clause goes unseen.
+            assert may_read(roles=(), tier="open") is True
+        '''
+    ),
+    "pyproject.toml": textwrap.dedent(
+        """
+        [tool.pytest.ini_options]
+        testpaths = ["tests"]
+        """
+    ),
+}
+
+
+@pytest.fixture(scope="module")
+def cedar_run(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    root = tmp_path_factory.mktemp("mutant-cedar")
+    for relative, body in CEDAR_PROJECT.items():
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, "-m", "wreath._mutant.cli", "--path", "guard",
+         "--format", "json", "--quiet"],
+        cwd=root, capture_output=True, text=True, timeout=_NESTED_TIMEOUT, check=False,
+        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(root), "HOME": str(root)},
+    )
+    if completed.returncode != 0:
+        pytest.fail(f"wreath mutant exited {completed.returncode}\n{completed.stderr[-4000:]}")
+    return json.loads(completed.stdout)
+
+
+def _cedar_outcomes(run: dict, operator: str) -> dict[str, str]:
+    return {
+        mutant["control"].split("`")[1]: mutant["outcome"]
+        for mutant in run["mutants"]
+        if mutant["operator"] == operator
+    }
+
+
+def test_flipping_a_forbid_reaches_the_engine_compiled_at_import(
+    cedar_run: dict,
+) -> None:
+    """The load-bearing one.
+
+    `ENGINE` was built from `POLICY_SOURCE` while the module imported, so a
+    patch that only rebinds the name leaves the standing refusal in force and
+    the mutant survives having removed nothing. There *is* a test watching it,
+    so KILLED is the only honest outcome.
+    """
+    outcomes = [
+        mutant["outcome"]
+        for mutant in cedar_run["mutants"]
+        if mutant["operator"] == "cedar.flip-effect"
+    ]
+    assert outcomes == ["killed"], cedar_run["mutants"]
+
+
+def test_a_watched_and_an_unwatched_clause_are_told_apart(cedar_run: dict) -> None:
+    """The pair. Reaching the engine is worth nothing if everything now dies."""
+    outcomes = _cedar_outcomes(cedar_run, "cedar.drop-condition")
+    # Dropping the open-record permit's condition lets *anyone* read a
+    # sensitive record, which the volunteer test asserts against.
+    watched = 'when { resource.tier == "open" }'
+    # Dropping the ranger permit's condition widens rangers to every tier, and
+    # nothing here ever asserts that a ranger is refused anything.
+    unwatched = 'when { resource.tier == "sensitive" }'
+    assert outcomes.get(watched) == "killed", cedar_run["mutants"]
+    assert outcomes.get(unwatched) in ("survived", "unreached"), cedar_run["mutants"]
+
+
+def test_deleting_the_policy_a_test_watches_is_killed(cedar_run: dict) -> None:
+    deleted = _cedar_outcomes(cedar_run, "cedar.delete-policy")
+    ranger = next(key for key in deleted if 'Role::"ranger"' in key)
+    assert deleted[ranger] == "killed", cedar_run["mutants"]
+
+
+def test_no_cedar_mutant_is_declined_for_failing_to_parse(cedar_run: dict) -> None:
+    """A mutation nobody could have noticed is not evidence about a suite.
+
+    Splitting the source on every `;` produced fragments cut out of the middle
+    of a comment; some deleted a sentence and one did not parse. Both were
+    invisible while the patch changed nothing.
+    """
+    declined = [m for m in cedar_run["mutants"] if m["outcome"] in ("error", "declined")]
+    assert declined == [], declined
+
+
+def test_a_comment_is_never_offered_as_a_policy(cedar_run: dict) -> None:
+    controls = [
+        mutant["control"]
+        for mutant in cedar_run["mutants"]
+        if mutant["operator"] == "cedar.delete-policy"
+    ]
+    assert controls, cedar_run["mutants"]
+    assert all("//" not in control for control in controls), controls
+    assert all(
+        "permit" in control or "forbid" in control for control in controls
+    ), controls
+
+
 # -- bounding a pass onto code you just wrote -------------------------------
 
 

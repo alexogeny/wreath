@@ -214,6 +214,13 @@ with nothing to check, one level up.
 - **A policy loaded from a file at runtime.** Cedar policies written as a string
   literal in your source are mutated; a `.cedar` file read at startup is out of
   reach, because there is no source construct to rewrite.
+
+    A policy set built at import — `ENGINE = CedarPolicies(POLICY_SOURCE)` — *is*
+    reached, and it is the one declaration where that took extra work. The engine
+    parses its text once, at construction, so rebinding the string leaves the
+    compiled policies in force; the mutation rebuilds the engine as well. An
+    engine that is not `CedarPolicies` cannot be asked to recompile and so keeps
+    whatever it built.
 - **A control declared by data.** A role name in a database row, a limit in an
   environment variable, a policy served by another service: the tool mutates
   what your repository says, not what your deployment says.

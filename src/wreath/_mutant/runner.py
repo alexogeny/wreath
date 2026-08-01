@@ -42,6 +42,7 @@ from .operators import Candidate, scan, tag
 from .patch import (
     CodePatch,
     PatchError,
+    PolicyPatch,
     ValuePatch,
     compile_module,
     find_code,
@@ -238,7 +239,10 @@ def _build(
 ) -> Mutation | str:
     site = Site(path=relative, line=candidate.line, scope=candidate.scope_name)
     if candidate.kind == "value":
-        patch = ValuePatch(module_name=module, path=candidate.value_path, value=candidate.value)
+        # A Cedar policy is compiled the moment the module binds it, so
+        # rebinding the text is only half the mutation -- see `PolicyPatch`.
+        build = PolicyPatch if candidate.operator.startswith("cedar.") else ValuePatch
+        patch = build(module_name=module, path=candidate.value_path, value=candidate.value)
         try:
             if patch.is_noop():
                 return "the replacement value equals the declared one"

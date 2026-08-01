@@ -38,7 +38,7 @@ import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from types import ModuleType
-from typing import Any
+from typing import Any, NamedTuple
 
 #: A function is a candidate for the predicate operators when its own source
 #: names one of these. The list is deliberately readable rather than clever: it
@@ -850,6 +850,86 @@ _CEDAR_FORBID = re.compile(r"\bforbid\s*\(")
 _CEDAR_CONDITION = re.compile(r"\b(when|unless)\s*\{[^{}]*\}", re.DOTALL)
 
 
+class _CedarMasks(NamedTuple):
+    """Two per-character views of one policy source.
+
+    `code` is what the operators may key on -- punctuation and keywords outside
+    both commentary and string literals. `uncommented` keeps the literals, and
+    is what a mutant's label is built from, so the report names
+    `permit(principal in Role::"ranger", ...)` rather than a policy with every
+    quoted id blanked out.
+    """
+
+    code: tuple[bool, ...]
+    uncommented: tuple[bool, ...]
+
+
+def _cedar_code_mask(text: str) -> _CedarMasks:
+    """Per character, whether it is Cedar code rather than a comment or a string.
+
+    Cedar policy sets are written with `//` commentary and quoted literals, and
+    both may contain the punctuation this module keys on. That is not
+    hypothetical: `example/camera_trap/policies.py` has the comment *"Researchers
+    hold a permit; rangers are the people who respond."*, and splitting the
+    source on a bare `;` cut it in half -- producing one mutant that deleted a
+    sentence rather than a policy and another that did not parse at all.
+
+    Neither was visible until `PolicyPatch` made these mutations reach the
+    compiled engine, because a mutation that changed only a rebound string
+    survived whatever it said.
+    """
+    length = len(text)
+    code = [True] * length
+    uncommented = [True] * length
+    index = 0
+    while index < length:
+        character = text[index]
+        if character == '"':
+            code[index] = False
+            index += 1
+            while index < length:
+                code[index] = False
+                if text[index] == "\\" and index + 1 < length:
+                    code[index + 1] = False
+                    index += 2
+                    continue
+                if text[index] == '"':
+                    index += 1
+                    break
+                index += 1
+            continue
+        if character == "/" and text.startswith("//", index):
+            end = text.find("\n", index)
+            end = length if end < 0 else end
+            for position in range(index, end):
+                code[position] = False
+                uncommented[position] = False
+            index = end
+            continue
+        index += 1
+    return _CedarMasks(tuple(code), tuple(uncommented))
+
+
+def _cedar_masked_text(text: str, mask: tuple[bool, ...], start: int, end: int) -> str:
+    """`text[start:end]` with everything `mask` excludes removed."""
+    return "".join(text[i] for i in range(start, end) if mask[i])
+
+
+def _cedar_statements(text: str, mask: tuple[bool, ...]) -> list[tuple[int, int]]:
+    """Half-open spans of each policy statement, ending at its own `;`.
+
+    Text after the final `;` is whitespace or trailing commentary and is not a
+    statement, so it is never offered for deletion.
+    """
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for index, character in enumerate(text):
+        if character == ";" and mask[index]:
+            spans.append((start, index + 1))
+            start = index + 1
+    return spans
+
+
 def _cedar_offer(
     line: int, scope: tuple[str, ...], node_id: int, name: str | None
 ) -> Callable[[str, str, str], Candidate]:
@@ -907,27 +987,44 @@ def _cedar_operators(context: _Context) -> Iterator[Candidate]:
         if not scope and name is None:
             continue
 
+        masks = _cedar_code_mask(text)
+        mask = masks.code
         offer = _cedar_offer(node.lineno, scope, node_id, name)
-        if _CEDAR_FORBID.search(text):
+        forbids = [m for m in _CEDAR_FORBID.finditer(text) if mask[m.start()]]
+        if forbids:
+            flipped = text
+            for match in reversed(forbids):
+                flipped = flipped[: match.start()] + "permit(" + flipped[match.end() :]
             yield offer(
                 "cedar.flip-effect",
                 "a Cedar `forbid` turned into a `permit`",
-                _CEDAR_FORBID.sub("permit(", text),
+                flipped,
             )
         for match in _CEDAR_CONDITION.finditer(text):
+            if not mask[match.start()]:
+                continue
             clause = match.group(0)
             yield offer(
                 "cedar.drop-condition",
                 f"the Cedar clause `{' '.join(clause.split())[:56]}`",
-                text.replace(clause, "", 1),
+                text[: match.start()] + text[match.end() :],
             )
-        statements = [s for s in text.split(";") if s.strip()]
-        if len(statements) > 1:
-            for index in range(len(statements)):
+        spans = _cedar_statements(text, mask)
+        policies = [
+            (start, end)
+            for start, end in spans
+            if any(
+                keyword in _cedar_masked_text(text, mask, start, end)
+                for keyword in ("permit", "forbid")
+            )
+        ]
+        if len(policies) > 1:
+            for start, end in policies:
+                body = " ".join(_cedar_masked_text(text, masks.uncommented, start, end).split())
                 yield offer(
                     "cedar.delete-policy",
-                    f"the Cedar policy `{' '.join(statements[index].split())[:56]}`",
-                    ";".join(s for i, s in enumerate(statements) if i != index) + ";",
+                    f"the Cedar policy `{body[:56]}`",
+                    text[:start] + text[end:],
                 )
 
 
