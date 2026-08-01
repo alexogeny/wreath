@@ -172,6 +172,22 @@ class SessionMiddleware:
         # session stays in the cookie, exactly as before.
         self._store = store
 
+    @property
+    def schema_owners(self) -> tuple[Any, ...]:
+        """The store this middleware delegates its tables to, if it has one.
+
+        It owns no tables itself, so it answers with the store it was given
+        rather than forwarding a `component()`. Answering at all is the point:
+        `Wreath.schema_components` walks middleware and asks each holder this
+        question, and this class used to expose neither it nor `component()`,
+        so a `PostgresSessionStore`'s `wreath_session` table was emitted by
+        `wreath schema sql` and created by nothing.
+
+        Empty without a store, which is the cookie-only session and owns no
+        tables at all -- not a claim that could not be attributed.
+        """
+        return () if self._store is None else (self._store,)
+
     # --- signing -------------------------------------------------------------
 
     def describe(self):
