@@ -554,6 +554,14 @@ class MCP:
             )
         )
 
+    #: The name `wreath._auth.permissions` looks for on a route's endpoint (or
+    #: on the object it is bound to) when it asks what a surface declares. An
+    #: MCP endpoint is one route in front of every tool, resource and prompt, so
+    #: without this the application's vocabulary would be silently missing every
+    #: action a model can reach -- and the two lists would agree only by
+    #: somebody remembering to read both.
+    __wreath_declared_actions__ = declared_actions
+
     def mount(self, app: Any) -> None:
         """Register this server's routes on `app`, which may be a `Router`."""
         self._app = app
