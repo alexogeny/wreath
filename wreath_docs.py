@@ -30,6 +30,9 @@ nav = Nav(
         Page("The read API", "example/read-api.md"),
         Page("Uploads and ingest", "example/ingest.md"),
         Page("Charts and calculated views", "example/analysis.md"),
+        Page("The tracking example", "tracking/index.md"),
+        Page("Ingest and realtime", "tracking/ingest.md"),
+        Page("Place and policy", "tracking/place.md"),
     ),
     Page("Performance", "perf/index.md"),
     Section(
@@ -118,6 +121,7 @@ nav = Nav(
             Page("Configuration and state", "guides/config-state.md"),
             Page("Health, flags, and versioning", "guides/health-flags-versioning.md"),
             Page("GraphQL", "guides/graphql.md"),
+            Page("What this service needs provisioned", "guides/infra.md"),
             Page("Observability bridges", "guides/observability.md"),
             Page("Logging", "guides/logging.md"),
             Page("Native server and protocols", "guides/server.md"),
@@ -194,6 +198,7 @@ nav = Nav(
             Page("Prometheus metrics", "cookbook/recipes/prometheus-metrics.md"),
             Page("OpenTelemetry tracing", "cookbook/recipes/otel-tracing.md"),
             Page("Deploy behind a proxy", "cookbook/recipes/behind-a-proxy.md"),
+            Page("Infer what to provision", "cookbook/recipes/infer-infrastructure.md"),
         ),
         Section(
             "Migrating and quality",
@@ -262,6 +267,7 @@ nav = Nav(
         Page("API versioning", "reference/versioning.md"),
         Page("Codemod (wreath port)", "reference/port.md"),
         Page("Configuration", "reference/config.md"),
+        Page("Inferred infrastructure", "reference/infra.md"),
         Page("Inspector", "reference/inspector.md"),
         Page("Telemetry", "reference/telemetry.md"),
         Page("Logging", "reference/logging.md"),
