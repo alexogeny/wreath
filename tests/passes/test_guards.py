@@ -71,12 +71,27 @@ def test_a_pass_guards_the_fact_its_gate_publishes() -> None:
 
 
 class RecordingExecutor:
+    #: Whether this stand-in's ledger has the version-2 ``trace_context``
+    #: column. `seed` asks once per `Ledger` and caches, so the answer is read
+    #: at most once per test here.
+    trace_column = True
+
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple]] = []
+        #: Catalog reads, kept apart from `calls` so the assertions below still
+        #: read the statement they are about rather than counting past a probe.
+        self.probes: list[str] = []
 
     async def execute(self, sql: str, *args: object) -> str:
         self.calls.append((sql, args))
         return "INSERT 0 1"
+
+    async def fetchval(self, sql: str, *args: object) -> object:
+        # Only the column probe reaches here. Answering `None` for "absent" and
+        # not `False` is the shape a real `SELECT true ... WHERE` produces: no
+        # rows at all, which the driver reads as None.
+        self.probes.append(sql)
+        return True if self.trace_column else None
 
 
 @pytest.mark.asyncio

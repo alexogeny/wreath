@@ -183,6 +183,10 @@ class World:
         #: What `pg_class.reltuples` reports. ``None`` stands for a table that
         #: has never been analysed, which really does answer -1.
         self.reltuples: Any = None
+        #: Whether this database's ledger has the version-2 ``trace_context``
+        #: column. Set it False to stand in for a schema an operator has not yet
+        #: brought up to date -- the case a build newer than its database meets.
+        self.trace_column = True
         self.statements: list[tuple[str, tuple[Any, ...]]] = []
         #: Called with (sql, args) before each statement runs, so a test can
         #: make one of them fail exactly where it wants to.
@@ -314,6 +318,12 @@ def _run(world: World, sql: str, args: tuple[Any, ...]) -> Any:
         return "SET"
     if text.startswith("SELECT clock_timestamp() - make_interval"):
         return [{"value": world.now - datetime.timedelta(seconds=float(args[0]))}]
+    if "pg_attribute" in text:
+        # The version-2 column probe. A real server answers one row of `true` or
+        # no rows at all, and `fetchval` reads `None` from the second -- so the
+        # absent case has to be an empty list rather than a false value, or the
+        # fake would model a shape PostgreSQL never produces.
+        return [{"exists": True}] if world.trace_column else []
     if text.startswith("SELECT reltuples"):
         # A table that has never been analysed really does answer -1, which is
         # why the denominator has to check rather than trust.
@@ -345,7 +355,9 @@ def _key(args: tuple[Any, ...]) -> tuple[str, str]:
 
 
 def _new_ledger_row(world: World, args: tuple[Any, ...]) -> dict[str, Any]:
+    trace = {"trace_context": args[5] if len(args) > 5 else None}
     return {
+        **(trace if world.trace_column else {}),
         "name": args[0], "tenant": args[1], "phase": "walking", "cursor": None,
         "ceiling": None, "keyspace_from": None, "pending": [], "units_done": 0,
         "rows_done": 0, "denominator": None, "denominator_kind": None,
@@ -369,7 +381,14 @@ def _decorate(world: World, row: dict[str, Any]) -> dict[str, Any]:
 
 def _ledger_statement(world: World, text: str, args: tuple[Any, ...]) -> Any:
     if text.startswith("INSERT INTO"):
-        world.ledger.setdefault(_key(args), _new_ledger_row(world, args))
+        row = world.ledger.setdefault(_key(args), _new_ledger_row(world, args))
+        if "trace_context = COALESCE" in text:
+            # The one half of this statement's `DO UPDATE` the fake models, and
+            # it has to: `COALESCE(existing, incoming)` is what makes the first
+            # *traced* drive own the cycle and every later one leave it alone,
+            # which is the whole behaviour of the column. `guards`/`rewrites`
+            # are left as they were, as this fake has always left them.
+            row["trace_context"] = row.get("trace_context") or args[5]
         return "INSERT 0 1"
     if text.startswith("WITH held"):
         # claim_pending: take the oldest queued unit, atomically.
@@ -470,6 +489,11 @@ def _ledger_statement(world: World, text: str, args: tuple[Any, ...]) -> Any:
         row["cursor"] = None
         row["phase"] = "walking"
         row["cycle_started"] = world.now
+        if "trace_context = $3" in text:
+            # Replaced, never coalesced: a new cycle belongs to the drive that
+            # began it, or to nothing. That is the retention bound on a trace
+            # that would otherwise outlive every backend that could hold it.
+            row["trace_context"] = args[2]
         return "UPDATE 1"
     if "SET pending = pending ||" in text:
         unit = _json(args[2])[0]

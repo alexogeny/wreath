@@ -47,6 +47,7 @@ from time import monotonic
 from typing import Any
 
 from .. import _nplusone
+from .. import telemetry as _telemetry
 from . import keyset
 from .ledger import APPLYING, BLOCKED, DONE, STOPPED, UNVERIFIED, VERIFIED, VERIFYING, WALKING
 
@@ -54,6 +55,19 @@ from .ledger import APPLYING, BLOCKED, DONE, STOPPED, UNVERIFIED, VERIFIED, VERI
 #: these retries happen inside a shift whose whole budget is seconds.
 RETRY_BASE_SECONDS = 0.05
 RETRY_CAP_SECONDS = 2.0
+
+
+def _driving_trace() -> str | None:
+    """The traceparent of whatever is driving this shift, or None.
+
+    The traceparent only, for the reason `wreath.jobs.JobRunner.enqueue` gives
+    and which applies with more force to a pass: `tracestate` is vendor routing
+    for the *next hop of a live call*, and a backfill's second day is not a hop
+    of anything. It would age in the ledger exactly as it would age in the
+    queue.
+    """
+    bound = _telemetry.outbound_context.get()
+    return bound[0] if bound else None
 
 
 class Binds:
@@ -336,13 +350,31 @@ async def _shift(
     sleeper: Any,
     clock: Any,
 ) -> ShiftResult:
+    """Record and adopt the pass's trace, then walk under it.
+
+    The binding wraps the whole of `_shift_bound`, so the chunk work, the
+    dead-letter writes, the terminal gate and its irreversible step all run
+    under one context: a hole written on day three of a backfill names the
+    drive that started it, and anything a chunk calls out to joins the same
+    trace with the caller doing nothing.
+
+    The ledger's context wins over the driving shift's, and a pass that has
+    never been driven with a trace binds `None` rather than leaving the ambient
+    value in place. Not binding is the defect here, not the cost: a worker
+    running one shift of pass A and then one of pass B would otherwise hand B
+    A's trace, and a trace naming the wrong cause is worse than one naming
+    none. `_driving_trace` is read *before* the bind for the same reason -- once
+    the ledger's value is bound it is what the ambient read returns, so a cycle
+    rollover would re-capture the value it was about to replace.
+    """
     ledger = walk.ledger
-    keys = walk.units.keys
+    driving = _driving_trace()
     await ledger.seed(
         connection,
         chunk_limit=walk.units.limit,
         guards=walk.guards,
         rewrites=walk.rewrites,
+        trace=driving,
     )
     await ledger.set_pacing(
         connection, chunk_limit=walk.units.limit, reason=walk.pace.reason
@@ -360,11 +392,40 @@ async def _shift(
     if row.phase == DONE and not finished_but_requeued:
         if not walk.frontier.recurring:
             return ShiftResult(complete=True)
-        if not await ledger.begin_cycle(connection):
+        # Resolved *before* the bind rather than inside it: a rollover replaces
+        # the row's traceparent, so binding first would run the new cycle under
+        # the old one's trace -- which is the very thing the cycle boundary
+        # exists to prevent. Nothing here runs the caller's code, so there is no
+        # work that would be missing its context.
+        if not await ledger.begin_cycle(connection, trace=driving):
             return ShiftResult(stopped="lost")
         row = await ledger.read(connection)
         if row is None:  # pragma: no cover - the row cannot vanish under us
             return ShiftResult(stopped="failed", error="the ledger row vanished")
+    parent = row.trace_context
+    token = _telemetry.outbound_context.set((parent, "") if parent else None)
+    try:
+        return await _shift_bound(
+            walk, connection, row=row, finished_but_requeued=finished_but_requeued,
+            stopping=stopping, deadline=deadline, sleeper=sleeper, clock=clock,
+        )
+    finally:
+        _telemetry.outbound_context.reset(token)
+
+
+async def _shift_bound(
+    walk: Any,
+    connection: Any,
+    *,
+    row: Any,
+    finished_but_requeued: bool,
+    stopping: asyncio.Event | None,
+    deadline: float | None,
+    sleeper: Any,
+    clock: Any,
+) -> ShiftResult:
+    ledger = walk.ledger
+    keys = walk.units.keys
     if row.phase in STOPPED:
         # A stopped pass stays stopped until someone acts. Retrying it
         # automatically is how a halt turns back into a silent skip -- and for

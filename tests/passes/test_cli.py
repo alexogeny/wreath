@@ -55,6 +55,7 @@ def _seed(world, **overrides):
         "driven_at": NOW - datetime.timedelta(seconds=4),
         "last_drive_error": None,
         "verified_at": None, "verified_fact": None, "last_error": None,
+        "trace_context": None,
     }
     row.update(overrides)
     world.ledger[(row["name"], row["tenant"])] = row
@@ -171,6 +172,126 @@ def test_status_surfaces_a_recorded_error(cli, capsys):
     execute_passes(_namespace())
 
     assert "deadlock detected" in capsys.readouterr().out
+
+
+def test_a_failed_pass_prints_the_trace_that_started_the_walk(cli, capsys):
+    """Plan 01 stage 4: the thread from a chunk that broke back to its cause.
+
+    A backfill's third day is a long way from whatever started it, and the
+    ledger row is the only thing that still holds the link.
+    """
+    parent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    world, _, _ = cli
+    _seed(world, last_error="RuntimeError('deadlock')", trace_context=parent)
+
+    execute_passes(_namespace())
+
+    out = capsys.readouterr().out
+    assert f"trace: {'a' * 32}" in out
+    assert f"wreath doctor trace {'a' * 32}" in out
+
+
+def test_a_healthy_pass_does_not_print_a_trace_line(cli, capsys):
+    """Deliberate: on a pass that is fine the id is noise on every line.
+
+    The column is a forensic aid, and printing it unconditionally would make
+    the surface an operator scans for trouble noisier rather than clearer.
+    """
+    parent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    world, _, _ = cli
+    _seed(world, trace_context=parent)
+
+    execute_passes(_namespace())
+
+    assert "trace:" not in capsys.readouterr().out
+
+
+def test_a_pass_stopped_at_a_hole_prints_its_trace(cli, capsys):
+    """`holes_open` is its own reason, not a spelling of `last_error`.
+
+    A pass that skipped a chunk reaches `done` with the hole still barring its
+    gate and no error on the row -- and that is precisely when somebody needs
+    the thread back to whatever started the walk. A mutant sweep found this
+    operand of the guard untested.
+    """
+    parent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    world, _, _ = cli
+    _seed(world, trace_context=parent)
+    world.holes[("purge_replays", "", "x")] = {}
+
+    execute_passes(_namespace())
+
+    assert f"trace: {'a' * 32}" in capsys.readouterr().out
+
+
+def test_a_pass_blocked_without_an_error_still_prints_its_trace(cli, capsys):
+    """The third operand: `blocked` with nothing in `last_error`.
+
+    `wreath passes retry` clears a hole and the row's error with it, so a pass
+    can sit blocked with no error text at all -- and it is still stopped.
+    """
+    parent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    world, _, _ = cli
+    _seed(world, phase="blocked", last_error=None, trace_context=parent)
+
+    execute_passes(_namespace())
+
+    assert f"trace: {'a' * 32}" in capsys.readouterr().out
+
+
+def test_a_version_one_ledger_is_never_asked_for_the_column(cli, capsys):
+    """`read_all` has its own projection, and its own version-1 arm.
+
+    Asserted on the statement rather than the value: the fake hands back
+    whatever row it holds regardless of what the `SELECT` named, so only the
+    emitted SQL can tell the two arms apart -- which a mutant sweep found.
+    """
+    world, database, _ = cli
+    world.trace_column = False
+    _seed(world)
+    del world.ledger[("purge_replays", "")]["trace_context"]
+
+    execute_passes(_namespace())
+
+    reads = [
+        sql for sql, _args in world.statements
+        if "trace_context" in sql and "pg_attribute" not in sql
+    ]
+    assert not reads, reads
+
+
+def test_a_version_two_ledger_is_asked_for_the_column(cli, capsys):
+    world, _, _ = cli
+    _seed(world)
+
+    execute_passes(_namespace())
+
+    assert any(
+        "trace_context" in sql and "pg_attribute" not in sql
+        for sql, _args in world.statements
+    )
+
+
+def test_a_pass_with_no_trace_prints_no_trace_line(cli, capsys):
+    """A pass driven only by `cron` has no originating request and mints none."""
+    world, _, _ = cli
+    _seed(world, last_error="RuntimeError('deadlock')", trace_context=None)
+
+    execute_passes(_namespace())
+
+    assert "trace:" not in capsys.readouterr().out
+
+
+def test_the_json_status_carries_the_traceparent_and_its_id(cli, capsys):
+    parent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    world, _, _ = cli
+    _seed(world, trace_context=parent)
+
+    execute_passes(_namespace(as_json=True))
+
+    body = json.loads(capsys.readouterr().out)["passes"][0]
+    assert body["trace_context"] == parent
+    assert body["trace_id"] == "a" * 32
 
 
 def test_a_blocked_pass_says_so(cli, capsys):
