@@ -98,6 +98,70 @@ request, or replay the whole connection with `wreath replay transport`.
 
 ::: wreath.replay.generate_test
 
+## Replaying a durable job attempt
+
+The same command, a second record kind. `wreath replay to-test` dispatches on
+the container magic, so a `.wfr1` job attempt goes through it without being
+announced — what changes is that the target names the **job runner** the task is
+registered on rather than an ASGI application:
+
+```console
+$ wreath replay to-test herd.app:jobs work-4171-4.wfr1 -o tests/test_incident.py
+```
+
+A failed durable job is the thing that actually wakes people, and it is far
+harder to reproduce than a request: the request that caused it succeeded hours
+ago, the arguments came from state that has since changed, and the failure is on
+attempt 4 after two retries and a lease expiry. What
+[`wreath.recording`](recording.md#recording-a-durable-job-attempt) writes down is
+identity, cause, boundaries and outcome; `replay_attempt` re-runs the registered
+handler with every one of those boundaries doubled.
+
+**The join between the two is the coordinate space.** A recorded `BoundaryEvent`
+is `(seam, target, coordinate)` — exactly what an `AdapterFaultDescriptor`
+addresses — so a boundary that raised becomes an injected fault, and no payload
+passes between the recording and the replay. A boundary the attempt crossed
+*successfully* contributes no fault; the double answers with its empty default.
+A recorded error type with no modelled fault that produces it is **refused by
+name**, because injecting the nearest one would replay a different failure and
+report it as a reproduction.
+
+**A replay never touches the queue.** It does not claim, complete, fail, sweep,
+or enqueue: it calls the registered handler directly, and the runner's own
+database is replaced with a double for the duration, so even a handler that
+reaches for the queue table arrives at a double instead. That is the property
+that makes it safe to point at a production recording on a developer's machine,
+and it is asserted against a real PostgreSQL in
+`tests/jobs/test_attempt_capture_live.py`.
+
+**The arguments are not in the recording** — see
+[why](recording.md#the-arguments-are-not-captured-and-that-is-structural) —
+so `replay_attempt` refuses to run with the wrong arity rather than inventing
+values. Supply them from the queue row or from a fixture; the generated test
+says so in its docstring.
+
+A recorded *failure* generates a test asserting the raise: the outcome, the
+error type, its message, and the boundary events that produced it, written into
+the file so the doubles are rebuilt the same way on every run. A
+characterisation test for a failure is as useful as one for a success and more
+often what you want.
+
+::: wreath.replay.recording_kind
+
+::: wreath.replay.open_attempt_recording
+
+::: wreath.replay.replay_attempt
+
+::: wreath.replay.AttemptReplayResult
+
+::: wreath.replay.attempt_fault_schedule
+
+::: wreath.replay.attempt_adapters
+
+::: wreath.replay.generate_attempt_test
+
+::: wreath.replay.AttemptReplayError
+
 ## Fault injection
 
 A [`FaultSchedule`](#wreath.replay.FaultSchedule) carries transport faults (keyed
