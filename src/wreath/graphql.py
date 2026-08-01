@@ -39,6 +39,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from ._auth.permissions import SURFACE_ACTIONS
 from ._graphql.cost import weigh
 from ._graphql.execute import ExecutionError, execute
 from ._graphql.parser import GraphQLSyntaxError, Limits, parse
@@ -321,6 +322,42 @@ class GraphQL:
         )
         self._frozen = True
 
+    def declared_actions(self) -> dict[str, tuple[str, ...]]:
+        """Resource type -> the Cedar actions this endpoint is gated on.
+
+        The same shape `wreath.authorization.declared_actions` returns for an
+        application's routes, and read off the same declarations enforcement
+        uses -- every field's policy resource, resolved through
+        `policy_resource`, grouped by its entity type.
+
+        GraphQL's half of the shared vocabulary is the mirror image of REST's.
+        A route names one action over a resource type whose *rows* it cannot
+        enumerate; a GraphQL endpoint names one action -- the `action=` it was
+        constructed with -- over resources it can enumerate exactly, because a
+        field is declared rather than stored. So the manifest's type-level
+        answer is the coarse one here, and `POST {prefix}` with the field names
+        as ids is the exact one: it asks `authorize(action, User::"email")`,
+        which is character for character the decision the endpoint takes.
+
+        Empty when no authorizer was given, because then nothing is enforced
+        and a vocabulary entry would advertise a control that does not exist.
+        """
+        if self._authorizer is None:
+            return {}
+        found: dict[str, set[str]] = {}
+        policies = (
+            *(
+                schema_field.policy
+                for object_type in self._schema.types.values()
+                for schema_field in object_type.fields.values()
+            ),
+            *(root.policy for root in self._schema.roots.values()),
+            *(root.policy for root in self._schema.mutations.values()),
+        )
+        for policy in policies:
+            found.setdefault(policy_resource(policy).type, set()).add(self._action)
+        return {name: tuple(sorted(actions)) for name, actions in sorted(found.items())}
+
     def sdl(self) -> str:
         """The schema in SDL form."""
         return self._schema.sdl()
@@ -484,6 +521,12 @@ class GraphQL:
             # GraphQL answers 200 with an `errors` array; a transport status
             # would be read as a network failure by every client library.
             return JSONResponse(body)
+
+        # One route fronts every field in the schema, so the route's own
+        # requirement says nothing about what this endpoint enforces.
+        # `permissions_router` and `wreath typegen` read the field policies
+        # back through this name rather than being handed a copy of them.
+        setattr(_run, SURFACE_ACTIONS, self.declared_actions)
 
         if self._introspection:
 
