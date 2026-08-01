@@ -68,13 +68,15 @@ from ._series.compile import (
     CURRENT,
     PREVIOUS,
     compile_aggregate,
+    compile_cells,
     compile_events,
     compile_series,
 )
-from ._series.envelope import aggregate_rows, fill, series_rows
+from ._series.envelope import aggregate_rows, cell_rows, fill, series_rows
 from ._series.settle import (
     Seal,
     SealState,
+    SettledStore,
     clear_correction,
     difference,
     fold,
@@ -90,6 +92,7 @@ from ._series.tiers import Ladder, Segment, Tier
 from ._series.tiers import build as _build_ladder
 from ._series.tiers import plan as _plan_tiers
 from ._series.tiers import width as _grain_width
+from .geospatial import grid as _grid
 from .orm.compiler import check_predicate_columns, compile_rebind
 from .orm.errors import DeclarationError
 from .orm.expressions import ColumnExpr, Predicate, RelatedColumnExpr
@@ -123,6 +126,9 @@ __all__ = [
     "Aggregate",
     "AggregateResult",
     "AggregateRow",
+    "Cell",
+    "Cells",
+    "CellsResult",
     "Measure",
     "Range",
     "Series",
@@ -131,6 +137,7 @@ __all__ = [
     "SeriesError",
     "SeriesEvent",
     "SeriesResult",
+    "SettledStore",
     "Tier",
     "avg",
     "count",
@@ -186,6 +193,13 @@ MAX_EVENTS = 100
 #: silently dropping some of them draws a chart that is wrong rather than
 #: absent.
 DEFAULT_GROUP_LIMIT = 50
+
+#: How many cells a `Cells` declaration may produce before it refuses.
+#: Every cell is a row on the wire whether or not anything is in it — that is
+#: the point of a dense axis — so the ceiling is on the lattice rather than on
+#: the rows that matched. 10 000 is a 100x100 map, which is already more cells
+#: than a screen has room to distinguish.
+DEFAULT_CELL_LIMIT = 10_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,6 +488,15 @@ class AggregateResult:
 
 
 @dataclass(frozen=True, slots=True)
+class _CellAxis:
+    """The spatial axis: two columns and the lattice they are bucketed onto."""
+
+    lat: ColumnExpr
+    lon: ColumnExpr
+    grid: Any
+
+
+@dataclass(frozen=True, slots=True)
 class _Declaration:
     """What both shapes have in common, kept immutable so it can be shared."""
 
@@ -482,6 +505,7 @@ class _Declaration:
     predicates: tuple[Predicate, ...] = ()
     group: Any = None
     fills: dict[str, Any] = field(default_factory=dict)
+    cell: _CellAxis | None = None
 
 
 class _Builder:
@@ -512,6 +536,16 @@ class _Builder:
     @property
     def group(self) -> Any:
         return self._d.group
+
+    @property
+    def cell(self) -> Any:
+        """The spatial axis, or `None` on a declaration that has no place."""
+        return self._d.cell
+
+    @property
+    def fills(self) -> dict[str, Any]:
+        """Per-measure overrides for what an empty bucket or cell reads as."""
+        return self._d.fills
 
     @property
     def sources(self) -> tuple[type, ...]:
@@ -705,6 +739,174 @@ class _Builder:
         return tuple(
             predicate if binder is None else binder(values)
             for predicate, binder in zip(self._d.predicates, binders, strict=True)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Cell:
+    """One cell of a heatmap: where it is, and what was in it."""
+
+    #: Index from the extent's south-west corner.
+    row: int
+    column: int
+    #: The ground the cell covers, and the point a renderer pins a marker to.
+    bounds: Any
+    centre: Any
+    values: dict[str, Any]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "row": self.row,
+            "column": self.column,
+            "bounds": {
+                "lat_min": self.bounds.lat_min,
+                "lat_max": self.bounds.lat_max,
+                "lon_min": self.bounds.lon_min,
+                "lon_max": self.bounds.lon_max,
+            },
+            "centre": {"lat": self.centre.lat, "lon": self.centre.lon},
+            "values": dict(self.values),
+        }
+
+    def __jsonable__(self) -> dict[str, Any]:
+        return self.as_dict()
+
+
+@dataclass(frozen=True, slots=True)
+class CellsResult:
+    """Every cell of the lattice, in row-major order."""
+
+    cells: tuple[Cell, ...]
+    measures: tuple[str, ...]
+    grid: Any
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "cells": [cell.as_dict() for cell in self.cells],
+            "measures": list(self.measures),
+            "grid": {
+                "rows": self.grid.rows,
+                "columns": self.grid.columns,
+                "metres": self.grid.metres,
+                "distortion": self.grid.distortion,
+                "extent": {
+                    "lat_min": self.grid.extent.lat_min,
+                    "lat_max": self.grid.extent.lat_max,
+                    "lon_min": self.grid.extent.lon_min,
+                    "lon_max": self.grid.extent.lon_max,
+                },
+            },
+        }
+
+    def __jsonable__(self) -> dict[str, Any]:
+        return self.as_dict()
+
+
+class Cells(_Builder):
+    """A quantity per cell over an extent — a heatmap as a declaration.
+
+    The spatial sibling of `Series`, and it exists for the same reason.
+    Every cell in the extent is present whether or not anything happened in it,
+    and fill is decided per measure, so a quiet cell is a zero count and an
+    undefined average rather than a hole in the map or a plunge to the floor.
+
+    ```python
+    heat = (
+        Cells(Sighting)
+            .where(Sighting.species == Param("species"))
+            .measure(seen=count(), mean_weight=avg(Sighting.weight_kg))
+            .over(Sighting.lat, Sighting.lon, metres=10_000, extent=reserve)
+    )
+    ```
+
+    The lattice is a declaration-time fact, so the number of cells a request
+    will produce is knowable before it runs — which is what lets the ceiling be
+    enforced where a reviewer reads it rather than after the database has done
+    the work.
+    """
+
+    __slots__ = ()
+
+    def __init__(self, model: type, *, _state: _Declaration | None = None) -> None:
+        self._d = _state if _state is not None else _Declaration(model=model)
+
+    def _with(self, **changes: Any) -> Cells:
+        return Cells(self._d.model, _state=replace_declaration(self._d, **changes))
+
+    @property
+    def grid(self) -> Any:
+        """The lattice this declaration buckets onto, or `None` before `over`."""
+        return None if self._d.cell is None else self._d.cell.grid
+
+    def over(
+        self,
+        lat: Any,
+        lon: Any,
+        *,
+        metres: float,
+        extent: Any,
+        limit: int = DEFAULT_CELL_LIMIT,
+    ) -> Cells:
+        """Bucket onto a lattice of `metres` cells covering `extent`.
+
+        The ceiling is declared rather than passed per request, for the same
+        reason `by(limit=)` is: it lives where it is reviewed instead of in a
+        query parameter a client can set to a million. It is checked here, not
+        at run time, because `rows * columns` is arithmetic on the extent.
+        """
+        for name, column in (("lat", lat), ("lon", lon)):
+            if not isinstance(column, ColumnExpr):
+                raise SeriesError(
+                    f"over({name}=...) takes a model column such as "
+                    f"Sighting.{name}, got {column!r}"
+                )
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise SeriesError(f"over(limit=) must be a positive integer, got {limit!r}")
+        lattice = _grid(extent, metres=metres)
+        if lattice.count > limit:
+            raise SeriesError(
+                f"this extent at {lattice.metres:g} m is {lattice.rows}x"
+                f"{lattice.columns} = {lattice.count} cells, past the {limit} "
+                f"ceiling. Every cell is a row on the wire whether or not "
+                f"anything is in it, so widen the cells, narrow the extent, or "
+                f"raise the ceiling in the declaration with over(..., limit=N)"
+            )
+        return self._with(cell=_CellAxis(lat=lat, lon=lon, grid=lattice))
+
+    async def run(self, session: Any, **values: Any) -> CellsResult:
+        """Run this declaration on `session` and assemble every cell."""
+        if not self._d.measures:
+            raise SeriesError("this view declares no measures; there is nothing to compute")
+        if self._d.cell is None:
+            raise SeriesError(
+                "this view declares no spatial axis; call over(lat, lon, "
+                "metres=..., extent=...)"
+            )
+        predicates = self._bind(values)
+        sql, args, _oids = compile_cells(session.registry, self, predicates)
+        rows = await session.declared(sql, args)
+        lattice = self._d.cell.grid
+        return CellsResult(
+            cells=tuple(
+                Cell(
+                    row=row,
+                    column=column,
+                    bounds=lattice.cell(row, column),
+                    centre=lattice.centre(row, column),
+                    values=found,
+                )
+                for row, column, found in cell_rows(self, rows)
+            ),
+            measures=tuple(name for name, _measure in self._d.measures),
+            grid=lattice,
+        )
+
+    def __repr__(self) -> str:
+        lattice = self.grid
+        shape = "-" if lattice is None else f"{lattice.rows}x{lattice.columns}"
+        return (
+            f"<Cells {self._d.model.__name__} "
+            f"measures={len(self._d.measures)} grid={shape}>"
         )
 
 
@@ -1362,6 +1564,15 @@ class Series(_Builder):
                 self._bucket.end_of(max(settled), zone_name) if settled else start
             )
             if gap_from < sealed_end:
+                # Computed and returned, deliberately **not** stored. Reading is
+                # a read: a `GET` serving a sealed view runs on a read-workload
+                # session, against a replica, or under a role with no INSERT,
+                # and a read that settles as a side effect answers `cannot
+                # execute INSERT in a read-only transaction` from inside the
+                # series machinery on a route that wrote nothing the
+                # application can see. `settle()` is the write half, and it is
+                # a job. The number is identical either way -- what changes is
+                # whether the next reader recomputes it.
                 fresh = await self._compute(
                     session, predicates, gap_from, sealed_end, zone_name
                 )
@@ -1369,9 +1580,6 @@ class Series(_Builder):
                     if bucket in settled:
                         continue
                     settled[bucket] = measures
-                    await session.declared(
-                        insert_settled(), (view, params, bucket, _as_jsonb(measures))
-                    )
 
         open_part: dict[Any, dict[str, Any]] = {}
         if end > sealed_end:
@@ -1585,6 +1793,76 @@ class Series(_Builder):
             added.append(bucket)
         return tuple(added)
 
+    async def settle(
+        self,
+        session: Any,
+        *,
+        range: Range,
+        zone: Any = None,
+        now: Any = None,
+        **values: Any,
+    ) -> tuple[Any, ...]:
+        """Store every sealed bucket in `range` that nobody has settled yet.
+
+        **The write half of `.seal()`, and the only one there is.** Reading a
+        sealed view never writes: a `GET` runs on a read-workload session, on a
+        replica, or under a role with no `INSERT`, and settling as a side effect
+        of a read answers `cannot execute INSERT in a read-only transaction`
+        from inside the series machinery, on a route that wrote nothing the
+        application can see. So the store is filled here, from a scheduled job,
+        beside the `reconcile` that keeps it honest — `reconcile` runs this
+        first, so an application already scheduling one needs no second job.
+
+        Idempotent by construction: the insert is `ON CONFLICT DO NOTHING`, and
+        two workers settling the same bucket compute the same number from the
+        same rows, so the loser has nothing to add.
+
+        A `run()` over a range this has never covered returns exactly the same
+        numbers — it computes the sealed part and does not keep it. What
+        settling buys is that the *next* reader does not have to.
+
+        Returns:
+            The bucket starts it stored, so a job can log what it did.
+
+        Raises:
+            SeriesError: this view declares no `seal()`.
+        """
+        if self._seal is None:
+            raise SeriesError(
+                "settle() needs a seal: with no watermark no bucket is ever "
+                "final, so there is nothing that could be stored once and read"
+            )
+        zone_name = _zone_name(zone if zone is not None else self._stored_in)
+        predicates = self._bind(values)
+        instant = _instant(now) if now is not None else _now()
+        edge = watermark(
+            instant, bucket=self._bucket, zone_name=zone_name, after=self._seal.after
+        )
+        start = _instant(range.start)
+        sealed_end = min(_instant(range.end), edge)
+        if sealed_end <= start:
+            return ()
+        view, params = self._identity(zone_name, values)
+        stored = await session.declared(
+            select_settled(), (view, params, start, sealed_end)
+        )
+        known = {row[0] for row in stored}
+        # The same suffix argument the read path makes: sealing advances
+        # forwards, so what is missing starts just past the last stored bucket.
+        gap_from = self._bucket.end_of(max(known), zone_name) if known else start
+        if gap_from >= sealed_end:
+            return ()
+        fresh = await self._compute(session, predicates, gap_from, sealed_end, zone_name)
+        written: list[Any] = []
+        for bucket in sorted(fresh):
+            if bucket in known:
+                continue
+            await session.declared(
+                insert_settled(), (view, params, bucket, _as_jsonb(fresh[bucket]))
+            )
+            written.append(bucket)
+        return tuple(written)
+
     async def reconcile(
         self,
         session: Any,
@@ -1604,13 +1882,16 @@ class Series(_Builder):
         chart would put per-row bookkeeping on every write in the application.
 
         So the application runs this: from a scheduled job, after an import,
-        after a backfill. It recomputes the sealed part of `range` from the
-        source rows, compares each bucket to what was settled, and writes a
-        delta where they disagree — or replaces the settled value outright if
-        the view declared `on_late="reopen"`.
+        after a backfill. It `settle`s the sealed part of `range` first — since
+        reading stores nothing, this is where a bucket becomes stored at all —
+        then recomputes it from the source rows, compares each bucket to what
+        was settled, and writes a delta where they disagree, or replaces the
+        settled value outright if the view declared `on_late="reopen"`.
 
         Returns the bucket starts it corrected, so a caller can log or alert on
-        late data arriving rather than discovering it in a discrepancy later.
+        late data arriving rather than discovering it in a discrepancy later. A
+        bucket settled by this same call is not a correction and is not in it;
+        `settle` returns those.
         """
         if self._seal is None:
             raise SeriesError(
@@ -1618,6 +1899,12 @@ class Series(_Builder):
                 "already recomputes from the source rows and there is nothing "
                 "to compare against"
             )
+        # Settle first, because reading no longer does. Without this an
+        # application that only ever `run()`s a sealed view would never store a
+        # bucket at all, and a reconcile would keep finding nothing to compare
+        # against -- sealing would be a declaration with no effect. One job, two
+        # steps, in the only order that makes the second one meaningful.
+        await self.settle(session, range=range, zone=zone, now=now, **values)
         zone_name = _zone_name(zone if zone is not None else self._stored_in)
         predicates = self._bind(values)
         instant = _instant(now) if now is not None else _now()

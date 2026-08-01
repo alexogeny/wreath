@@ -324,6 +324,60 @@ the previous generation. A failed replacement leaves the current generation in
 service; an unexpectedly exited current worker is replaced. Multiworker mode is
 metal-only and requires a fixed port.
 
+## Cancelling a handler when the client goes away
+
+ASGI's `http.disconnect` is a *message*, not an interrupt. A server that only
+queues it stops nothing, because a handler parked on a database query or an
+upstream call is not awaiting `receive()` — the work runs to completion against
+a socket nobody will ever read. So Wreath's HTTP/1.1 server queues the message
+**and** cancels the application task.
+
+**Only for safe methods, by default.** `GET`, `HEAD` and `OPTIONS` are defined
+by RFC 9110 as having no intended effect on the server, so abandoning one can
+lose nothing but work in progress. Every other method is left to finish. That is
+the whole decision, and the reason is what a cancel does *not* undo: unwinding a
+`POST` rolls its transaction back cleanly, but the job it enqueued, the card it
+charged and the mail it sent all already happened — and the client is gone and
+cannot be told which. Wreath draws the same safe/unsafe line
+`wreath.middleware.idempotency` does.
+
+Declare the exception on the route:
+
+```python
+@app.get("/report")                                  # cancelled, by default
+async def report(request: Request) -> Response: ...
+
+@app.post("/import", cancel_on_disconnect=True)      # opt in deliberately
+async def importer(request: Request) -> Response: ...
+
+@app.get("/audit", cancel_on_disconnect=False)       # opt out deliberately
+async def audit(request: Request) -> Response: ...
+```
+
+Two boundaries are deliberate:
+
+- **A disconnect after the response has started never cancels.** The status line
+  is already on the wire, so aborting there produces a truncated body rather
+  than a saved scan. Such a handler still unwinds, at its own next `send`, so
+  its cleanup runs where it stands.
+- **A WebSocket session is never cancelled.** It observes its own
+  `websocket.disconnect`, which it *is* reading, so the message is the mechanism
+  there and an interrupt would be a second one.
+
+**What carries this and what does not.** The trigger lives in the HTTP/1.1
+protocol — the native one and the pure reference alike — because that is where a
+lost connection is observed. HTTP/2 and HTTP/3 multiplex, so a reset stream is
+not a lost connection and cancelling the wrong task because a sibling stream
+reset would be worse than not cancelling at all; they are not covered yet, and a
+route's declaration is simply inert there. On somebody else's ASGI server it is
+inert too: nothing in the ASGI spec lets an application ask to be interrupted,
+so the handler keeps running exactly as it did before.
+
+The chain past the server is already built. A cancelled task reaching the
+PostgreSQL driver sends a wire-level `CancelRequest` on a second connection,
+PostgreSQL stops the statement, and the connection returns to the pool usable —
+see [the PostgreSQL guide](postgres.md#a-client-that-goes-away-stops-the-query).
+
 ## Choosing protocols
 
 HTTP/2 and HTTP/3 need the native extension. A listener that offers both

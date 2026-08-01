@@ -28,15 +28,18 @@ import pathlib
 
 import pytest
 from camera_trap.policies import (
+    ADMINISTER,
     ENGINE,
     PROTECTIONS,
     ROLES,
     may_locate,
     may_see_protection,
+    principal_entity,
     visible_protections,
 )
 
 from wreath.auth import Identity
+from wreath.authorization import CedarEntity, EntityUid
 
 _DSN = os.environ.get("WREATH_TEST_POSTGRES_DSN")
 _ARTIFACT = pathlib.Path(__file__).resolve().parents[2] / "example" / "migrations" / "migration.sql"
@@ -124,6 +127,29 @@ def test_an_anonymous_caller_sees_nothing_at_all() -> None:
     for tier in PROTECTIONS:
         assert may_see_protection(None, tier) is False
     assert may_locate(None, sensitive=False) is False
+
+
+#: The other half of the policy file, and it had no test of its own until
+#: `wreath mutant` could reach a policy set compiled at import: deleting the
+#: researcher's `Registry::administer` permit changed nothing any test asserted.
+#: The ranger's twin was covered only by a database-gated route test, so on a
+#: machine with no PostgreSQL neither was watched at all.
+REGISTRY_GRID = {"volunteer": False, "researcher": True, "ranger": True}
+
+
+@pytest.mark.parametrize("role", sorted(REGISTRY_GRID))
+def test_who_may_administer_the_registry(role: str) -> None:
+    """Asked of the engine, so it runs without a database like the grid above."""
+    principal = principal_entity(observer(role))
+    registry = EntityUid("Registry", RESERVE)
+    decision = ENGINE.is_authorized(
+        principal=principal.uid,
+        action=EntityUid("Action", ADMINISTER),
+        resource=registry,
+        context={},
+        entities=(principal, CedarEntity(registry, attrs={})),
+    )
+    assert bool(getattr(decision, "allowed", decision)) is REGISTRY_GRID[role]
 
 
 def test_a_forbid_cannot_be_undone_by_a_later_permit() -> None:

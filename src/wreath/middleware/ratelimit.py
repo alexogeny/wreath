@@ -243,6 +243,18 @@ class PostgresRateLimitStore:
         """
         return self._store.component(name="ratelimit")
 
+    @property
+    def schema_database(self) -> Any:
+        """The database `component()`'s tables belong to.
+
+        The application never saw this store constructed -- a caller builds it
+        and hands it to `RateLimitMiddleware` -- so it cannot know which
+        `app.postgres()` the tables go to unless the store says. This is that
+        contract, and it is one name rather than a list of plausible ones:
+        `Wreath._schema_database` reads exactly `schema_database`.
+        """
+        return self._database
+
     def schema_sql(self) -> str:
         """DDL for the backing table, semicolon-joined. A derivation of
         `component()`."""
@@ -495,6 +507,23 @@ class RateLimitMiddleware:
     #: to let a request past deliberately.
     UNKEYED = "\x00unkeyed"
 
+    @property
+    def schema_owners(self) -> tuple[Any, ...]:
+        """The store this limiter delegates its tables to.
+
+        A limiter owns no tables itself, so it answers with the store it was
+        given rather than forwarding a `component()`. Answering at all is the
+        point: `Wreath.schema_components` walks middleware and asks each holder
+        this question, and this class used to expose neither it nor
+        `component()`, so a `PostgresRateLimitStore`'s `wreath_rate_limit`
+        table was emitted by `wreath schema sql` and created by nothing.
+
+        The default in-process store is returned too and contributes nothing --
+        it has no `component()`, and the walk asks rather than assumes, so
+        filtering here would be a second copy of that test.
+        """
+        return (self._store,)
+
     def describe(self) -> Any:
         """The 429 this limiter can answer, and the headers it puts on it.
 
@@ -643,7 +672,7 @@ class TieredRateLimitMiddleware:
     """
 
     global_scope = False
-    __slots__ = ("_default", "_dispatch", "_tier", "_tiers")
+    __slots__ = ("_children", "_default", "_dispatch", "_tier", "_tiers")
 
     def __init__(
         self,
@@ -670,6 +699,12 @@ class TieredRateLimitMiddleware:
         # for a local store and an awaiting one for a remote store, and which it
         # is cannot change afterwards.
         self._dispatch: dict[str | None, tuple[Any, bool]] = {}
+        # The children themselves, not only their hooks. Dispatch never needs
+        # them, but `schema_owners` does: a `store_factory` returning a
+        # `PostgresRateLimitStore` puts this middleware's tables in a database,
+        # and reaching them back through a bound hook's `__self__` would be a
+        # second way to say what a tuple already says.
+        children: list[Any] = []
         for name, (limit, window) in {**tiers, None: default}.items():
             # `_route_scoped` is the declaration that this limiter runs after
             # authentication, which is what makes `principal_key` valid -- the
@@ -682,6 +717,21 @@ class TieredRateLimitMiddleware:
             self._dispatch[name] = (
                 (hook, True) if hook is not None else (child.before_sync, False)
             )
+            children.append(child)
+        self._children = tuple(children)
+
+    @property
+    def schema_owners(self) -> tuple[Any, ...]:
+        """Every tier's store, so their tables are collected too.
+
+        A tier is a whole `RateLimitMiddleware`, and the walk that asks this
+        question goes one level down, not all the way -- so the tiers' answers
+        are flattened here rather than returning the tiers themselves and
+        trusting a recursion that does not happen. Every tier built by one
+        `store_factory` claims the same table name and `schema_components`
+        deduplicates by name, so N tiers still contribute one claim.
+        """
+        return tuple(owner for child in self._children for owner in child.schema_owners)
 
     def _tier_from_roles(self, request: Request) -> str | None:
         """The most generous tier among the caller's roles, or None."""

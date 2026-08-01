@@ -1,8 +1,16 @@
 # `wreath.compression`
 
-The reusable compression codecs: gzip (`GzipCompressor`, `gzip_compress`) and
-zstd (`ZstdCompressor`, `zstd_compress`). Content-encoding negotiation lives in
-`wreath.middleware`'s `CompressionMiddleware`.
+The reusable compression codecs: gzip (`GzipCompressor`, `gzip_compress`,
+`gzip_decompress`) and zstd (`ZstdCompressor`, `zstd_compress`).
+Content-encoding negotiation lives in `wreath.middleware`'s
+`CompressionMiddleware`.
+
+`gzip_decompress` is the only entry point here that decodes, and so the only one
+with an adversary on the other end. Its `max_output_bytes` is a required
+keyword: a gzip member's input length says nothing about its output length, so a
+bound on the compressed bytes cannot catch a decompression bomb and the caller
+has to name the decoded ceiling it is willing to hold. A limit of zero is
+refused, because `zlib` reads a `max_length` of zero as unbounded.
 
 Both codings are the interpreter's own — `zlib` and, since Python 3.14 and
 PEP 784, `compression.zstd`. Neither needs a third-party package, which is why

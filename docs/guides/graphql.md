@@ -265,6 +265,29 @@ async def balance(users, info): ...
 **Decisions are cached per request.** The same field under three aliases, or on
 three levels of a nested query, is one authorizer call — not one per occurrence.
 
+### The UI can ask what it may select
+
+`api.declared_actions()` returns this endpoint's half of the application's
+authorization vocabulary — its schema types against the `action=` it was built
+with — and mounting the router puts it in
+[`permissions_router`](permissions.md#one-vocabulary-four-protocols) and in the
+generated client alongside REST, gRPC and MCP.
+
+The row-level endpoint answers a field question **exactly**, because a field is
+declared and finite where a row is neither, and `POST /permissions` asks
+precisely the question the executor asks:
+
+```json
+POST /permissions
+{"type": "User", "ids": ["id", "email"]}     →  authorize("read", User::"email")
+```
+
+So a component can decide which columns to render in one call rather than
+selecting them and reading the `errors` array. An endpoint built with **no**
+`authorizer=` contributes nothing: it enforces nothing, and a vocabulary entry
+for an unchecked action would be the one kind of entry that document must never
+carry.
+
 ### Denied fields: fail, or null
 
 ```python

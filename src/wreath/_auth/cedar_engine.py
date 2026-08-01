@@ -89,20 +89,22 @@ _SCOPE_IN_SET = 3
 _SCOPE_IS = 4
 
 
-#: The compiled shape of `context.flags`, which is what a flag test reads.
-_FLAGS_ATTRIBUTE = (_OP_GETATTR, (_OP_VAR, _VARS["context"]), "flags")
+def _context_attribute(name: str) -> tuple[Any, ...]:
+    """The compiled shape of `context.<name>`, which is what a set test reads."""
+    return (_OP_GETATTR, (_OP_VAR, _VARS["context"]), name)
 
-#: Set methods whose argument names flags. `isEmpty` takes none and names none.
-_FLAG_METHODS = frozenset({_METHOD_IDS["contains"], _METHOD_IDS["containsAll"],
-                           _METHOD_IDS["containsAny"]})
+
+#: Set methods whose argument names members. `isEmpty` takes none and names none.
+_NAMING_METHODS = frozenset({_METHOD_IDS["contains"], _METHOD_IDS["containsAll"],
+                             _METHOD_IDS["containsAny"]})
 
 
 def _literal_names(node: object) -> Iterator[str]:
-    """The string literals in a flag method's argument.
+    """The string literals in a naming method's argument.
 
     `contains("a")` is one constant; `containsAll(["a", "b"])` is a set literal
     of them. A non-literal argument yields nothing -- absence of evidence, not
-    evidence that no flag is named, which is why the caller treats an empty
+    evidence that no name is given, which is why the caller treats an empty
     result as "cannot validate" rather than "references nothing".
     """
     if not isinstance(node, tuple) or not node:
@@ -114,36 +116,45 @@ def _literal_names(node: object) -> Iterator[str]:
             yield from _literal_names(element)
 
 
-def _referenced_flags(policies: Iterable[Any]) -> frozenset[str] | None:
-    """Every literal `context.flags` name, or None when they cannot be listed.
+def _referenced_members(
+    policies: Iterable[Any], attribute: str
+) -> frozenset[str] | None:
+    """Every literal name tested against `context.<attribute>`, or None.
+
+    One walk for every set-valued context key the authorizer resolves lazily —
+    `flags` and `regions` today. They ask an identical question ("which members
+    does the policy set actually name?") for an identical reason (resolve those
+    and no more), so they are one implementation parameterised by the attribute
+    rather than two that must be kept in step.
 
     A generic walk over the expression tuples rather than a shape-by-shape
-    visitor: a flag test is legal anywhere an expression is, including nested
+    visitor: such a test is legal anywhere an expression is, including nested
     inside `if`, `&&` and a set literal, and a visitor that knew only the
     top-level shapes would silently miss half the policy set.
 
-    **`None` means "resolve every flag".** The caller resolves only the names
+    **`None` means "resolve every member".** The caller resolves only the names
     listed here, which is exact while every reference is a literal `contains`,
     `containsAll` or `containsAny`. Two shapes break that: `isEmpty()` names no
-    flag but its answer depends on all of them, and a computed argument names
+    member but its answer depends on all of them, and a computed argument names
     one this walk cannot know. Either makes the list incomplete rather than
     short, so it is withheld entirely -- an optimisation that changes an
     authorization answer is a defect, and a partial list would.
     """
+    target = _context_attribute(attribute)
     found: set[str] = set()
     stack: list[Any] = list(policies)
     while stack:
         node = stack.pop()
         if not isinstance(node, tuple | list):
             continue
-        if isinstance(node, tuple) and _FLAGS_ATTRIBUTE in node:
-            # A read of `context.flags`. Enumerable only as the target of one
-            # of the naming methods, with a literal argument.
+        if isinstance(node, tuple) and target in node:
+            # A read of `context.<attribute>`. Enumerable only as the target of
+            # one of the naming methods, with a literal argument.
             if (
                 len(node) == 4
                 and node[0] == _OP_METHOD
-                and node[1] in _FLAG_METHODS
-                and node[2] == _FLAGS_ATTRIBUTE
+                and node[1] in _NAMING_METHODS
+                and node[2] == target
             ):
                 names = frozenset(_literal_names(node[3]))
                 if not names:
@@ -965,7 +976,24 @@ class CedarPolicies:
         Optional capability, probed with `getattr` the way `source` is — an
         outside `CedarEngine` that cannot answer simply gets the safe path.
         """
-        return _referenced_flags(self._policies)
+        return _referenced_members(self._policies, "flags")
+
+    def referenced_regions(self) -> frozenset[str] | None:
+        """Every geofence region name this policy set tests, or None for "all".
+
+        The geospatial twin of `referenced_flags`, and the same two jobs: the
+        vocabulary a `CedarAuthorizer` validates its region set against at
+        startup, and the names it resolves per request.
+
+        The difference is what the work costs. A flag is a hash and a
+        comparison; a region is a great-circle distance against the caller's
+        position, so a policy naming two of a hundred regions does two of them.
+        `context.regions.contains(resource.reserve)` — the shape a geofence is
+        most naturally written in — has a *computed* argument, so this answers
+        `None` and every region is resolved. That is the honest answer rather
+        than a short one, and it is why a region set is worth keeping small.
+        """
+        return _referenced_members(self._policies, "regions")
 
     def is_authorized(
         self,

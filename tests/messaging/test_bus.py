@@ -20,6 +20,18 @@ class FakeConnection:
         self.calls.append((sql, args))
         return "OK"
 
+    async def fetchval(self, sql, *args):
+        """The version-2 `trace_context` column probe, and nothing else.
+
+        `None`, because a real server answers no rows at all when the column is
+        absent and the driver reads that as None. This double models a schema
+        that has not had the version-2 step applied; the upgraded one is
+        modelled in `tests/messaging/test_trace.py`.
+        """
+        check_statement(sql, args)
+        self.calls.append((sql, args))
+        return None
+
 
 class FakeDatabase:
     def __init__(self):

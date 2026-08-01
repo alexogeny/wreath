@@ -209,3 +209,52 @@ outside their own bucket. So this is the shared answer rather than a wrinkle in
 this module.
 
 Reference: [`wreath.temporal`](../reference/temporal.md).
+
+## On the protobuf wire
+
+`Timestamp` is `google.protobuf.Timestamp` — the well-known type a peer in
+another language expects — and `to_timestamp` / `from_timestamp` convert:
+
+```python
+from wreath.protobuf import field, message
+from wreath.temporal import Timestamp, now, to_timestamp, from_timestamp
+
+@message
+class Sighting:
+    at: Timestamp = field(1)
+    species: str = field(2)
+
+Sighting(at=to_timestamp(now()), species="llama")
+```
+
+Three properties are worth knowing, because each is a place the obvious
+implementation is wrong:
+
+**`nanos` is always non-negative, even before the epoch.** The specification
+requires `0 <= nanos <= 999_999_999` and the sign to live on `seconds`, so half
+a second before the epoch is `seconds=-1, nanos=500_000_000`. Deriving it from
+`datetime.timestamp()` and truncating toward zero produces the illegal
+`seconds=0, nanos=-500_000_000`, which reads a second out on the other side.
+
+**The wire carries a moment, not a zone.** A `Timestamp` has no zone field, so a
+round trip returns UTC:
+
+```python
+sydney = Instant.parse("2026-07-31T22:00:00+10:00")
+from_timestamp(to_timestamp(sydney)) == sydney      # same moment
+                                                    # ... expressed in UTC
+```
+
+That is a property of the format rather than a loss of information — but if the
+reader's zone matters, it has to travel in its own field. `.to(zone)` places the
+result once it arrives.
+
+**Sub-microsecond precision is refused, not truncated.** The field holds
+nanoseconds and a Python `datetime` holds microseconds, so a peer sending
+`nanos=500` gets a `TemporalError` rather than a silently rounded value. Quiet
+truncation is the kind of loss that stays invisible until two systems disagree
+about the order of two events.
+
+A naive `datetime` is refused by `to_timestamp` exactly as it is everywhere else
+in this module: there is no moment to encode without an offset, and guessing UTC
+is the bug the type exists to prevent.

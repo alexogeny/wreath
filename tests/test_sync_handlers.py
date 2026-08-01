@@ -47,7 +47,7 @@ def _app() -> Wreath:
 
     @app.get("/response")
     def response(request: Any) -> Any:
-        return Response(b"raw", media_type="text/plain")
+        return Response(b"raw", media_type=b"text/plain")
 
     @app.get("/typed/{item_id}")
     def typed(request: Any, item_id: int) -> dict[str, int]:

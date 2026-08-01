@@ -37,6 +37,13 @@ dev = [
   # the benchmark group, so any `uv sync` without that group pruned it and 21
   # HTTP/3 tests plus the TLS transport tests skipped themselves silently.
   "cryptography>=44",
+  # The reference peer for `tests/test_grpc_interop.py`. Wreath serves gRPC but
+  # ships no client, and a framing implementation that satisfies only its own
+  # tests is the classic way this work goes wrong -- both halves agree because
+  # both are wrong. Never a runtime dependency: nothing under `src/wreath`
+  # imports it, and `wreath.grpc` is pure stdlib over the ASGI messages the
+  # native HTTP/2 server already understands.
+  "grpcio>=1.60",
   "pytest>=8.4",
   "pytest-asyncio>=1.0",
   # Opt-in, never in addopts: the default suite is ~3.5s and worker startup

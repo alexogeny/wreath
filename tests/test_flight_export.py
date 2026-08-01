@@ -8,7 +8,6 @@ in one integration test.
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -224,17 +223,22 @@ def test_concurrent_producers_conserve_every_trace() -> None:
 
 
 class _OtlpHandler(BaseHTTPRequestHandler):
-    posts: list[tuple[str, dict]] = []
+    #: The raw body, deliberately not parsed. This handler used to
+    #: `json.loads` it, which quietly made every test through it a JSON-encoding
+    #: test as well as a routing one. The exporter now defaults to protobuf, and
+    #: the assertions below are about *which paths get posted to* and *that
+    #: empty requests are skipped* -- neither of which is about the encoding.
+    #: `tests/test_otlp_protobuf.py` covers the bodies in both encodings.
+    posts: list[tuple[str, bytes]] = []
 
     def do_POST(self) -> None:  # http.server API
         length = int(self.headers.get("content-length", 0))
         body = self.rfile.read(length)
-        type(self).posts.append((self.path, json.loads(body)))
+        type(self).posts.append((self.path, body))
         self.send_response(200)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", "2")
+        self.send_header("content-type", "application/x-protobuf")
+        self.send_header("content-length", "0")
         self.end_headers()
-        self.wfile.write(b"{}")
 
     def log_message(self, *args: object) -> None:  # silence the test server
         pass

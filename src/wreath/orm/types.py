@@ -16,6 +16,7 @@ import datetime
 import hashlib
 import math
 import re
+import struct
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
@@ -24,6 +25,7 @@ from typing import Any
 from .._json import dumps as _json_dumps
 from .._json import loads as _json_loads
 from .._sparsevec import MAX_SPARSEVEC_DIM, MAX_SPARSEVEC_NNZ, SparseVector
+from ..geospatial import Coordinate
 from .errors import DeclarationError, ExtensionNotInstalledError
 
 
@@ -137,6 +139,10 @@ class GeneratedType(PgType):
 EXT_KIND_VECTOR = 1
 EXT_KIND_HALFVEC = 2
 EXT_KIND_SPARSEVEC = 3
+#: PostGIS's `geography`. A kind of its own rather than a reuse of a vector
+#: kind: the wire formats share nothing, and a codec that guessed wrong would
+#: return a plausible value for the wrong type rather than raising.
+EXT_KIND_GEOGRAPHY = 4
 
 
 class WireList(list):
@@ -338,6 +344,7 @@ _EXTENSION_KINDS: dict[str, int] = {
     "vector": EXT_KIND_VECTOR,
     "halfvec": EXT_KIND_HALFVEC,
     "sparsevec": EXT_KIND_SPARSEVEC,
+    "geography": EXT_KIND_GEOGRAPHY,
 }
 
 
@@ -444,6 +451,59 @@ def _json_to_wire(value: Any) -> str:
     return _json_dumps(value).decode("utf-8")
 
 
+def _check_point(value: Any) -> Coordinate:
+    if type(value) is not Coordinate:
+        raise _type_error("Coordinate", value)
+    return value
+
+
+def _point_to_wire(value: Any) -> str:
+    """The literal PostgreSQL parses: `(x,y)`, and x is longitude.
+
+    PostGIS, GeoJSON and PostgreSQL's own `point` all put longitude first;
+    only humans say "lat, lon". `Coordinate` refuses a positional pair for
+    exactly that reason, and this is the one place the order is written down
+    in the direction the database wants it.
+    """
+    return f"({value.lon!r},{value.lat!r})"
+
+
+def _point_from_wire(value: Any) -> Coordinate:
+    """Read `point` off the wire in either format the driver may hand over.
+
+    An OID the driver's codec does not enumerate falls through to its terminal
+    arm, which returns the field's bytes unchanged -- so what arrives here is
+    the server's own representation and not a decoded value. That is the text
+    form `(x,y)` on an unprepared path and 16 bytes of two big-endian float8 on
+    a prepared one, so both are read rather than one being assumed.
+    """
+    if isinstance(value, Coordinate):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+        if len(raw) == 16 and not raw.startswith(b"("):
+            x, y = struct.unpack("!dd", raw)
+            return Coordinate(lat=y, lon=x)
+        try:
+            text = raw.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"invalid point wire value {raw!r}") from exc
+    elif isinstance(value, str):
+        text = value
+    else:
+        raise ValueError(f"invalid point wire value {value!r}")
+    body = text.strip()
+    if not body.startswith("(") or not body.endswith(")") or body.count(",") != 1:
+        raise ValueError(f"invalid point wire value {text!r}")
+    x_text, _, y_text = body[1:-1].partition(",")
+    try:
+        x = float(x_text)
+        y = float(y_text)
+    except ValueError as exc:
+        raise ValueError(f"invalid point wire value {text!r}") from exc
+    return Coordinate(lat=y, lon=x)
+
+
 Bool = PgType("bool", 16, "boolean", _check_bool)
 Int16 = PgType("int2", 21, "smallint", _integer(16))
 Int32 = PgType("int4", 23, "integer", _integer(32))
@@ -463,6 +523,13 @@ Json = PgType(
 )
 Jsonb = PgType(
     "jsonb", 3802, "jsonb", _check_json, to_wire=_json_to_wire, from_wire=_json_loads
+)
+#: A WGS84 position, stored in core PostgreSQL's `point`. Not an extension type:
+#: OID 600 is in the catalog, and core ships a GiST `point_ops` opclass, so the
+#: index a proximity search needs is available with nothing installed. That is
+#: the whole tier-1 claim -- see `docs/guides/geospatial.md`.
+Point = PgType(
+    "point", 600, "point", _check_point, to_wire=_point_to_wire, from_wire=_point_from_wire
 )
 
 
@@ -749,6 +816,153 @@ def Sparsevec(dim: int) -> ExtensionType:
     )
 
 
+# --- PostGIS geography --------------------------------------------------------
+#
+# Tier 2 of `wreath.geospatial`, and the only part of it that needs an extension.
+# Tier 1 -- `Point`, its GiST index, `within()` and `nearest()` -- is core
+# PostgreSQL and stays available on a server with nothing installed; see
+# `docs/guides/geospatial.md` for which questions each tier answers.
+
+#: EWKB's geometry code for a 2D point, ORed with the flag that says an SRID
+#: follows. PostGIS writes this on output and reads it on input, so it is the
+#: one form that needs no conversion in either direction.
+_EWKB_POINT = 0x00000001
+_EWKB_SRID_FLAG = 0x20000000
+
+#: One EWKB point with an SRID: order byte, geometry code, SRID, x, y.
+_EWKB_SRID_POINT = struct.Struct("<BIIdd")
+_EWKB_BARE_POINT = struct.Struct("<BIdd")
+
+
+def _geography_to_wire(srid: int) -> Callable[[Any], str]:
+    """Build the encoder for one SRID: a `Coordinate` to EWKB hex.
+
+    Hex rather than either of the two things it could be instead, because it is
+    the one spelling *both* parameter paths accept: `geography_in` reads EWKB
+    hex on the text path, and un-hexing it gives `geography_recv` exactly what
+    it wants on the binary one. `Point` makes the same choice for the same
+    reason -- one `to_wire` per column type, so the longitude-first order is
+    written down once rather than once per path.
+    """
+
+    def to_wire(value: Any) -> str:
+        # Longitude is x. PostGIS, GeoJSON and PostgreSQL's `point` all agree on
+        # that and every human sentence disagrees, which is why `Coordinate`
+        # refuses a positional pair and why this is the only place the order is
+        # transcribed for this type.
+        return _EWKB_SRID_POINT.pack(
+            1, _EWKB_POINT | _EWKB_SRID_FLAG, srid, value.lon, value.lat
+        ).hex()
+
+    return to_wire
+
+
+def _geography_from_wire(value: Any) -> Coordinate:
+    """Read a `geography` off the wire in either format the driver may hand over.
+
+    A prepared read returns the server's own EWKB bytes and an unprepared one
+    returns the same bytes spelled as hex text; the codec hands both back
+    unread, so this is the single place a geography is interpreted. Byte order
+    is a field of the format rather than an assumption, and the SRID is
+    optional, so both are read rather than either being presumed.
+
+    `bytes.fromhex` here rather than the strict `binascii.unhexlify` the
+    *encoder* uses: PostgreSQL is the writer on this side, so leniency admits
+    nothing wreath has to reason about, while on the way out a lenient reading
+    would have let the two codec twins accept different input.
+    """
+    if isinstance(value, Coordinate):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+    elif isinstance(value, str):
+        raw = value.encode("ascii", "replace")
+    else:
+        raise ValueError(f"invalid geography wire value {value!r}")
+    if raw[:1] not in (b"\x00", b"\x01"):
+        # Not raw EWKB, so it is the hex spelling of it.
+        try:
+            raw = bytes.fromhex(raw.decode("ascii"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValueError(f"invalid geography wire value {value!r}") from exc
+    # Not redundant with the exact-length check below: the geometry code is read
+    # *before* the layout is known, and `raw[1:5]` on a short buffer silently
+    # yields a shorter slice and a plausible-looking integer, so the length
+    # failure would be reported as "not a point".
+    if len(raw) < _EWKB_BARE_POINT.size:
+        raise ValueError(f"geography wire value is too short to be a point: {raw!r}")
+    big_endian = raw[0] == 0
+    code = int.from_bytes(raw[1:5], "big" if big_endian else "little")
+    if code & ~_EWKB_SRID_FLAG != _EWKB_POINT:
+        raise ValueError(
+            f"wreath declares geography(Point,...) columns and this value is EWKB "
+            f"geometry type {code & ~_EWKB_SRID_FLAG}, not a point"
+        )
+    layout = _EWKB_SRID_POINT if code & _EWKB_SRID_FLAG else _EWKB_BARE_POINT
+    if len(raw) != layout.size:
+        raise ValueError(
+            f"geography wire value is {len(raw)} bytes where an EWKB point is "
+            f"{layout.size}: {raw!r}"
+        )
+    # `struct` has no runtime byte-order switch, so the big-endian arm reverses
+    # the two doubles rather than a second Struct being kept in step with the
+    # first. Big-endian EWKB is what a peer wrote, never what wreath writes.
+    if big_endian:
+        x = struct.unpack_from(">d", raw, layout.size - 16)[0]
+        y = struct.unpack_from(">d", raw, layout.size - 8)[0]
+    else:
+        x, y = struct.unpack_from("<dd", raw, layout.size - 16)
+    return Coordinate(lat=y, lon=x)
+
+
+def Geography(*, srid: int = 4326) -> ExtensionType:
+    """Declare a PostGIS `geography(Point,srid)` column.
+
+    The Python value is a `wreath.geospatial.Coordinate`, the same value type a
+    tier-1 `Point` column holds, so a model can move between the tiers without
+    its handlers changing.
+
+    ```python
+    class Station(Model, table="stations"):
+        at: Mapped[Coordinate] = column(Geography(), index="gist")
+    ```
+
+    **Only the point form is declarable.** `geography` also spells polygons and
+    line strings, and wreath has no value type for either -- a
+    `geography(Polygon,4326)` column would have nothing to hold and nothing to
+    validate, so it is left to a hand-written migration rather than declared
+    with a hole in it.
+
+    Requires `CREATE EXTENSION postgis` in the column's database. A registry
+    that declares one against a database without it fails at startup, naming
+    the extension and the schema, rather than at the first query with an OID
+    error -- the same contract `Vector` has, because it is the same mechanism.
+
+    **Tier 1 needs none of this.** `Point` stores a coordinate in core
+    PostgreSQL and answers "within" and "nearest" through a core GiST index.
+    Reach for `Geography` when you need what tier 1 does not do: a true KNN
+    ordering, containment against a polygon, or a projection.
+    """
+    # `__class__` rather than `isinstance`, for the reason `_integer` gives:
+    # bool is an int subclass, and `Geography(srid=True)` is a mistake rather
+    # than a declaration of SRID 1.
+    if srid.__class__ is not int or srid <= 0:
+        raise DeclarationError(
+            f"Geography() requires a positive int SRID, got {srid!r}; 4326 is "
+            "WGS84 and is what every GPS fix, GeoJSON document and "
+            "wreath.geospatial.Coordinate is already in"
+        )
+    return ExtensionType(
+        "postgis",
+        "geography",
+        f"geography(Point,{srid})",
+        _check_point,
+        kind=EXT_KIND_GEOGRAPHY,
+        to_wire=_geography_to_wire(srid),
+        from_wire=_geography_from_wire,
+    )
+
+
 #: PostgreSQL's own `bit`. Binary quantization needs no extension for the *type*
 #: -- only for the operators over it -- so this is a compile-time constant like
 #: every other built-in here, and none of the dynamic-OID machinery applies.
@@ -982,9 +1196,11 @@ TextArray = Array(Text)
 __all__ = [
     "BIT_OID",
     "BY_OID",
+    "EXT_KIND_GEOGRAPHY",
     "EXT_KIND_HALFVEC",
     "EXT_KIND_SPARSEVEC",
     "EXT_KIND_VECTOR",
+    "Geography",
     "Halfvec",
     "MAX_BIT_LENGTH",
     "MAX_HALFVEC_DIM",
@@ -1014,6 +1230,7 @@ __all__ = [
     "Jsonb",
     "Numeric",
     "PgType",
+    "Point",
     "SparseVector",
     "Sparsevec",
     "Text",

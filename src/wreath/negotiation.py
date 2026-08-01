@@ -31,6 +31,8 @@ from typing import Any
 
 from ._json import dumps as _json_dumps
 from ._native import _core
+from .protobuf import encode as _protobuf_encode
+from .protobuf import is_message as _is_message
 from .request import Request
 from .response import ProblemResponse, Response
 
@@ -42,7 +44,16 @@ if _core is not None and hasattr(_core, "msgpack_dumps"):
 else:
     from ._pure.msgpack import packb as _msgpack
 
-__all__ = ["JSON", "MSGPACK", "Serializer", "negotiate", "parse_accept", "serialize"]
+__all__ = [
+    "JSON",
+    "MSGPACK",
+    "PROTOBUF",
+    "PROTOBUF_MEDIA_TYPES",
+    "Serializer",
+    "negotiate",
+    "parse_accept",
+    "serialize",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,10 +78,53 @@ def _to_bytes(data: Any) -> bytes:
     return encoded if isinstance(encoded, bytes) else encoded.encode("utf-8")
 
 
+def _to_protobuf(data: Any) -> bytes:
+    """Encode a declared message, refusing anything else by name.
+
+    JSON and MessagePack are self-describing and encode any plain structure.
+    Protobuf is schema-driven: it can only encode a class built by
+    `@wreath.protobuf.message`, because the field numbers *are* the wire
+    contract and there is nothing to infer them from. Reaching the codec with a
+    plain dict raises `AttributeError` on a private attribute, which tells the
+    caller nothing, so the precondition is guarded here instead.
+
+    Asked of `wreath.protobuf` rather than read off the class: the private plan
+    marker was spelled out here, which put a second notion of "is this a
+    message?" in a second module, to drift the first time the marker moved.
+    """
+    if not _is_message(data):
+        raise TypeError(
+            "application/x-protobuf can only encode a class declared with "
+            f"@message from wreath.protobuf; got {type(data).__name__}. "
+            "Protobuf carries field numbers rather than names, so there is "
+            "nothing to derive them from for an undeclared value."
+        )
+    return _protobuf_encode(data)
+
+
 JSON = Serializer("application/json", _to_bytes)
 MSGPACK = Serializer("application/msgpack", _msgpack)
+PROTOBUF = Serializer("application/x-protobuf", _to_protobuf)
+
+#: Content types `wreath.binding` reads a **request** body as protobuf under.
+#:
+#: Wreath emits exactly one of them -- `PROTOBUF.media_type`, which is what
+#: OTLP/HTTP and every tool around it sends -- and reads both, because
+#: `application/protobuf` is the IANA registration and the two name one format.
+#: Being strict about a sender's spelling of an unambiguous type buys nothing
+#: and costs a caller a body refused for a reason that is not about the body.
+PROTOBUF_MEDIA_TYPES: frozenset[str] = frozenset(
+    {PROTOBUF.media_type, "application/protobuf"}
+)
 
 #: JSON first, so it wins ties and is the default when Accept is absent/`*/*`.
+#:
+#: `PROTOBUF` is deliberately absent. JSON and MessagePack encode whatever a
+#: handler returns, so offering them everywhere costs nothing; protobuf can only
+#: encode a declared message, and a handler returning a dict is the common case.
+#: Adding it here would turn every existing `serialize()` call site into a
+#: runtime error for any client that sent `Accept: application/x-protobuf`. Pass
+#: `serializers=(PROTOBUF, JSON)` at the call sites that return a message.
 DEFAULT_SERIALIZERS: tuple[Serializer, ...] = (JSON, MSGPACK)
 
 

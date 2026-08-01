@@ -159,12 +159,64 @@ honours one.
 ### Pinning the contract
 
 Each generated client carries a `SPEC_DIGEST` over the document it was built
-from. It is **not** checked at runtime — a client that refused to start because
-the provider added an optional field would be an outage generator, and OpenAPI
-calls that change compatible. The pin is for CI: regenerate, compare, and let
-`compare_openapi` fail the consumer's build when the provider broke something.
-The failure lands in the consumer's pipeline, before a deploy, which is the
-whole point of generating the client rather than writing it.
+from, and a `spec.json` beside it holding that document. It is **not** checked
+at runtime — a client that refused to start because the provider added an
+optional field would be an outage generator, and OpenAPI calls that change
+compatible. The pin is for CI:
+
+```bash
+wreath typegen llama_service:app --target python --output ./llama_api \
+  --check-contract
+```
+
+That compares the provider *now* against the document the client was generated
+from, and exits non-zero only on a **breaking** change — a removed operation, a
+new required parameter, an optional one made required, a removed response
+status, a removed behaviour. Additions are compatible and say nothing.
+
+The digest alone could not do this. A digest answers *changed or not*; telling
+a breaking change from a compatible one needs the previous document itself,
+which is why `spec.json` is emitted and kept.
+
+Two checks, two questions, and it is worth keeping them apart:
+
+| Flag | Asks | Fails when |
+| --- | --- | --- |
+| `--check` | Did you forget to regenerate? | The files on disk differ from what the generator would emit now |
+| `--check-contract` | Has the provider broken you? | Regenerating would change your call sites |
+
+`--check-contract` refuses rather than passing when there is no pinned document
+to compare against: a gate that succeeds because it found no baseline is a gate
+with nothing to check, and it would read as a green build forever.
+
+## A schema for other languages
+
+`--target proto` emits a `.proto` of the shapes this API exchanges, from the
+same model that produced the OpenAPI document and the two clients:
+
+```bash
+wreath typegen llama_service:app --target proto --output ./schema
+```
+
+The usual arrangement is a hand-maintained `.proto` beside a hand-maintained
+REST contract, agreeing by discipline. These cannot disagree, because one model
+produces both.
+
+Two things to know before you depend on it. **Field numbers come from
+declaration order**, so reordering a field in the source dataclass renumbers it
+on the wire — a breaking change no test on either side will notice. Pin the
+file in review, or declare the message with
+[`wreath.protobuf`](protobuf.md), where numbers are explicit. And **no
+`service` block is generated**: turning REST operations into RPCs means
+inventing a request and response message per operation, and that invented
+surface would be a second contract with nothing to check it against.
+`wreath.grpc` declares its methods against real `@message` classes, which is
+where an RPC contract belongs.
+
+What proto3 cannot express is **refused by name** — a heterogeneous tuple, a
+multi-type union, an unannotated value, a nested `repeated`. A schema that
+compiles and describes the wrong bytes fails in another team's decoder, which
+is the worst place to find out.
 
 **Reference:** [`wreath.openapi`](../reference/openapi.md),
 [`wreath.typegen`](../reference/typegen.md).

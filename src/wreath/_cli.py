@@ -336,6 +336,9 @@ def build_parser() -> argparse.ArgumentParser:
     migration_down.add_argument("--dsn-env", default="WREATH_MIGRATION_DSN")
     migration_down.add_argument("--json", action="store_true")
 
+    from ._infra_cli import add_infra_parser
+
+    add_infra_parser(commands)
     docs_parser = commands.add_parser(
         "docs", help="build a documentation site from markdown (no third-party toolchain)"
     )
@@ -474,6 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_capture_parser(commands)
     _add_replay_parser(commands)
     _add_passes_parser(commands)
+    _add_jobs_parser(commands)
     _add_schema_parser(commands)
     _add_flight_parser(commands)
     return parser
@@ -487,18 +491,20 @@ def _add_flight_parser(commands: Any) -> None:
     process left behind, and reading it is a file operation.
     """
     flight_parser = commands.add_parser(
-        "flight", help="read a flight recorder ring file left behind by a crash"
+        "flight", help="read a flight recorder file left behind by a crash"
     )
     actions = flight_parser.add_subparsers(dest="flight_action", required=True)
 
     read = actions.add_parser(
-        "read", help="decode the records a ring file still held"
+        "read",
+        help="decode a recorder file: a WFRR ring, or a WFR1 recording and the "
+             "job attempts inside it",
     )
-    read.add_argument("path", help="the file the recorder mapped its ring from")
+    read.add_argument("path", help="a WFRR ring file or a WFR1 recording")
     read.add_argument(
         "--kind", default=None,
         choices=("completion", "correlation", "phase", "log"),
-        help="show only records of one kind",
+        help="show only records of one kind (ring files only)",
     )
     read.add_argument("--limit", type=int, default=50,
                      help="records to print (0 = all)")
@@ -606,6 +612,129 @@ def _add_passes_parser(commands: Any) -> None:
     retry.add_argument("--json", action="store_true", dest="as_json")
 
 
+def _add_jobs_parser(commands: Any) -> None:
+    """`wreath jobs list` -- what is in the durable queue, and what caused it.
+
+    One read of one table, like `wreath passes status`, and it defaults to the
+    dead letters because that is the row somebody is looking for at three in the
+    morning. Each row prints the trace id of the request that enqueued it, which
+    is the whole point of the column: the request finished hours ago and is
+    otherwise unrecoverable from the failure.
+    """
+    jobs_parser = commands.add_parser(
+        "jobs", help="report on the durable job queue"
+    )
+    actions = jobs_parser.add_subparsers(dest="jobs_action", required=True)
+    listing = actions.add_parser(
+        "list", help="show queue rows, dead-lettered ones by default"
+    )
+    listing.add_argument("target", help="application target as module:attribute")
+    listing.add_argument("--factory", action="store_true")
+    listing.add_argument(
+        "--database", default=None,
+        help="read one database's queue (default: every one a job runner uses)",
+    )
+    listing.add_argument(
+        "--schema", default=None, help="queue schema (default: the job runner's)"
+    )
+    listing.add_argument(
+        "--state", action="append", default=None, dest="states",
+        help="a state to include; repeatable (default: dead)",
+    )
+    listing.add_argument(
+        "--all", action="store_true", dest="every_state",
+        help="every state, not just the dead letters",
+    )
+    listing.add_argument("--queue", default=None, help="one queue by name")
+    listing.add_argument("--limit", type=int, default=50)
+    listing.add_argument("--json", action="store_true", dest="as_json")
+
+
+def execute_jobs(namespace: argparse.Namespace) -> int:
+    """Read the queue and print it, trace id included."""
+    import asyncio
+    import json as _json
+
+    application = load_application(namespace.target, factory=namespace.factory)
+    targets = _pass_ledgers(application, namespace)
+    if not targets:
+        raise CliError(
+            "no job queue to read: the application configures no job runner, "
+            "and no --database was given",
+            exit_code=2,
+        )
+    states: tuple[str, ...]
+    if namespace.every_state:
+        states = ()
+    elif namespace.states:
+        states = tuple(namespace.states)
+    else:
+        states = ("dead",)
+    rows = asyncio.run(
+        _read_jobs(targets, states=states, queue=namespace.queue, limit=namespace.limit)
+    )
+    if namespace.as_json:
+        print(_json.dumps({"jobs": [row.as_dict() for row in rows]}, indent=2))
+        return 0
+    _print_jobs(rows, states)
+    return 0
+
+
+async def _read_jobs(
+    targets: list[tuple[Any, str]],
+    *,
+    states: tuple[str, ...],
+    queue: str | None,
+    limit: int,
+) -> list[Any]:
+    from .jobs import read_jobs
+
+    rows: list[Any] = []
+    for database, schema in targets:
+        await database.start()
+        try:
+            connection = await database.acquire("write")
+            try:
+                rows.extend(
+                    await read_jobs(
+                        connection, schema=schema, states=states,
+                        queue=queue, limit=limit,
+                    )
+                )
+            finally:
+                await database.release("write", connection)
+        finally:
+            await database.stop()
+    return rows
+
+
+def _print_jobs(rows: list[Any], states: tuple[str, ...]) -> None:
+    if not rows:
+        wanted = ", ".join(states) if states else "any state"
+        print(f"no jobs in the queue ({wanted})")
+        return
+    header = f"{'ID':>10}  {'TASK':<28} {'STATE':<9} {'TRIES':>6}  UPDATED"
+    print(header)
+    print("-" * len(header))
+    for row in rows:
+        label = row.task if not row.tenant else f"{row.task}@{row.tenant}"
+        print(
+            f"{row.id:>10}  {label[:28]:<28} {row.state:<9} "
+            f"{row.attempts:>3}/{row.max_attempts:<2}  {row.updated_at}"
+        )
+        if row.last_error:
+            print(f"{'':>12}error: {row.last_error}")
+        # Printed for a failed row above all: the request that enqueued it
+        # finished hours ago, and this identifier is what joins the two.
+        if row.trace_id:
+            print(f"{'':>12}trace: {row.trace_id}  (wreath doctor trace {row.trace_id})")
+        elif row.state == "dead":
+            print(
+                f"{'':>12}trace: none -- enqueued outside a traced request, or "
+                "this database predates the trace_context column"
+            )
+
+
 def _add_mcp_parser(commands: Any) -> None:
     """`wreath mcp stdio` -- the MCP endpoint you already have, behind a pipe.
 
@@ -678,6 +807,41 @@ def _add_doctor_parser(commands: Any) -> None:
         help="exit non-zero when anything is found, for a CI gate",
     )
 
+    trace = actions.add_parser(
+        "trace",
+        help="show every job, message, workflow and pass carrying one trace id",
+    )
+    trace.add_argument("trace_id", help="the 32-hex W3C trace id, or a whole traceparent")
+    trace.add_argument(
+        "target", nargs="?", default=None,
+        help="application target as module:attribute, for the durable half",
+    )
+    trace.add_argument("--factory", action="store_true")
+    trace.add_argument(
+        "--database", default=None,
+        help="read one database (default: every one a job runner uses)",
+    )
+    trace.add_argument(
+        "--schema", default=None, help="wreath's schema (default: the job runner's)"
+    )
+    trace.add_argument(
+        "--workflow-schema", default="wreath_system", dest="workflow_schema",
+        help="where workflow instances live (default: wreath_system)",
+    )
+    trace.add_argument(
+        "--workflow-table", default="workflow_steps", dest="workflow_table",
+        help="the workflow step table's name (default: workflow_steps)",
+    )
+    trace.add_argument(
+        "--socket", default=None,
+        help="an Inspector socket, to find the recorded request as well",
+    )
+    trace.add_argument(
+        "--limit", type=int, default=256,
+        help="how many recent traces to scan on that socket (default: 256)",
+    )
+    trace.add_argument("--json", action="store_true", dest="as_json")
+
 
 def _add_replay_parser(commands: Any) -> None:
     """`wreath replay {transport,plan}` -- replay a recording through the owned
@@ -731,10 +895,17 @@ def _add_replay_parser(commands: Any) -> None:
 
     to_test = actions.add_parser(
         "to-test",
-        help="write a runnable pytest that re-drives a recorded request",
+        help="write a runnable pytest that re-drives a recorded request or job attempt",
     )
-    to_test.add_argument("target", metavar="MODULE[:ATTRIBUTE]")
-    to_test.add_argument("recording", metavar="RECORDING", help="a .wtr1 recording")
+    to_test.add_argument(
+        "target", metavar="MODULE[:ATTRIBUTE]",
+        help="the application for a .wtr1 request, or the JobRunner for a "
+             ".wfr1 job attempt",
+    )
+    to_test.add_argument(
+        "recording", metavar="RECORDING",
+        help="a .wtr1 transport recording or a .wfr1 job-attempt recording",
+    )
     to_test.add_argument(
         "--output", "-o", metavar="PATH", default=None,
         help="write the test here instead of to stdout",
@@ -1529,6 +1700,15 @@ def _print_passes(rows: list[Any]) -> None:
             # next advance clears it. Worth showing: it is the difference between
             # a pass that is fine and one that is fine *for now*.
             print(f"{'':<28} last chunk error: {row.last_error}")
+        if row.trace_id and (row.last_error or row.holes_open or row.state == "blocked"):
+            # Only where something went wrong, deliberately. On a healthy pass
+            # the id is noise on every line; on a failed one it is the single
+            # thing that connects a chunk that broke on day three to whatever
+            # started the walk.
+            print(
+                f"{'':<28} trace: {row.trace_id}  "
+                f"(wreath doctor trace {row.trace_id})"
+            )
         if row.progress.eta_absent:
             print(f"{'':<28} no ETA: {row.progress.eta_absent}")
         if row.holes_open:
@@ -1655,6 +1835,169 @@ def execute_inspect(namespace: argparse.Namespace) -> int:
 
 
 def execute_doctor(namespace: argparse.Namespace) -> int:
+    if getattr(namespace, "action", None) == "trace":
+        return execute_doctor_trace(namespace)
+    return execute_doctor_n_plus_one(namespace)
+
+
+def execute_doctor_trace(namespace: argparse.Namespace) -> int:
+    """Resolve a trace id to the request and every durable unit it caused.
+
+    Two halves with two failure modes, kept apart on purpose. The durable half
+    reads the application's database and is as complete as the schema is. The
+    request half reads the Flight Recorder over an Inspector socket and is as
+    complete as the ring is -- it needs `--socket`, and without one the report
+    says so rather than implying the request was not found.
+    """
+    import asyncio
+    import json as _json
+
+    from .doctor import TraceLookup, find_requests_with_trace
+    from .inspector import InspectorClient, InspectorError
+    from .telemetry import trace_id_of
+
+    # A whole traceparent is accepted as well as a bare id: it is what the CLI
+    # itself stores and what a `traceparent` header carries, so pasting one back
+    # in should work rather than silently match nothing.
+    raw = namespace.trace_id.strip()
+    trace_id = trace_id_of(raw) or raw.lower()
+    if len(trace_id) != 32 or any(c not in "0123456789abcdef" for c in trace_id):
+        raise CliError(
+            f"{namespace.trace_id!r} is not a trace id: expected 32 hex "
+            "characters, or a whole traceparent to take one from",
+            exit_code=2,
+        )
+
+    lookup = TraceLookup(trace_id=trace_id)
+    if namespace.target is None:
+        lookup = TraceLookup(
+            trace_id=trace_id,
+            omitted=(
+                "jobs, durable messages, workflows and passes: no application "
+                "target was given, so no database was read",
+            ),
+        )
+    else:
+        application = load_application(namespace.target, factory=namespace.factory)
+        targets = _pass_ledgers(application, namespace)
+        if not targets:
+            raise CliError(
+                "no database to search: the application configures no job "
+                "runner, and no --database was given",
+                exit_code=2,
+            )
+        lookup = asyncio.run(
+            _read_traced_work(
+                targets, trace_id,
+                workflow_schema=namespace.workflow_schema,
+                workflow_table=namespace.workflow_table,
+            )
+        )
+
+    requests: tuple[Any, ...] = ()
+    omitted = list(lookup.omitted)
+    if namespace.socket is None:
+        omitted.append(
+            "the request itself: it lives in the Flight Recorder's ring, not in "
+            "the database. Pass --socket to search it"
+        )
+    else:
+        async def query() -> tuple[Any, ...]:
+            async with InspectorClient(namespace.socket) as client:
+                return await find_requests_with_trace(
+                    client, trace_id, limit=namespace.limit
+                )
+
+        try:
+            requests = asyncio.run(query())
+        except InspectorError as error:
+            print(f"wreath doctor: error: {error}", file=sys.stderr)
+            return 1
+        except (ConnectionError, FileNotFoundError) as error:
+            print(f"wreath doctor: cannot reach inspector: {error}", file=sys.stderr)
+            return 1
+        if not requests:
+            omitted.append(
+                f"the request itself: no recorded trace in the last "
+                f"{namespace.limit} carries this id, so it has aged out of the "
+                "ring or was never sampled"
+            )
+
+    lookup = TraceLookup(
+        trace_id=trace_id,
+        work=lookup.work,
+        requests=requests,
+        omitted=tuple(omitted),
+    )
+    if namespace.as_json:
+        print(_json.dumps({"version": 1, "check": "trace", **lookup.as_dict()}, indent=2))
+        return 0
+    _print_trace_lookup(lookup)
+    return 0
+
+
+async def _read_traced_work(
+    targets: list[tuple[Any, str]],
+    trace_id: str,
+    *,
+    workflow_schema: str,
+    workflow_table: str,
+) -> Any:
+    from .doctor import TraceLookup, find_work_with_trace
+
+    work: list[Any] = []
+    omitted: list[str] = []
+    for database, schema in targets:
+        await database.start()
+        try:
+            connection = await database.acquire("write")
+            try:
+                found = await find_work_with_trace(
+                    connection, trace_id, schema=schema,
+                    workflow_schema=workflow_schema, workflow_table=workflow_table,
+                )
+            finally:
+                await database.release("write", connection)
+        finally:
+            await database.stop()
+        work.extend(found.work)
+        for note in found.omitted:
+            if note not in omitted:
+                omitted.append(note)
+    return TraceLookup(trace_id=trace_id, work=tuple(work), omitted=tuple(omitted))
+
+
+def _print_trace_lookup(lookup: Any) -> None:
+    print(f"trace {lookup.trace_id}")
+    print()
+    if lookup.requests:
+        print(f"{len(lookup.requests)} recorded request(s):")
+        for request in lookup.requests:
+            outcome = "FAILED" if request.is_failure else "ok"
+            print(
+                f"  request {request.request_id}  route {request.route_id}  "
+                f"status {request.status}  {request.duration_us}us  {outcome}"
+            )
+        print()
+    if lookup.work:
+        print(f"{len(lookup.work)} durable unit(s) of work:")
+        for item in lookup.work:
+            label = item.label if not item.tenant else f"{item.label}@{item.tenant}"
+            print(f"  {item.kind:<9} {item.identifier:<24} {label}  [{item.state}]")
+            if item.detail:
+                print(f"{'':<12}error: {item.detail}")
+    else:
+        print("no durable work carries this trace")
+    if lookup.omitted:
+        # Printed always, and last, because it is what stops the reader
+        # concluding "nothing else" from a search that did not run.
+        print()
+        print("not searched:")
+        for note in lookup.omitted:
+            print(f"  - {note}")
+
+
+def execute_doctor_n_plus_one(namespace: argparse.Namespace) -> int:
     # A protocol client, like `inspect`: the diagnosis is assembled entirely
     # from what the recorder already holds, so nothing has to be reproduced.
     import asyncio
@@ -1997,6 +2340,122 @@ def _execute_flight_replay(namespace: argparse.Namespace) -> int:
     return 0 if outcome.reproduced else 1
 
 
+#: The `WFR1` container's first four bytes. Named here rather than imported
+#: from `_recording_format` so reading the magic costs no import of the decoder
+#: for a file that turns out to be a ring.
+_RECORDING_MAGIC = b"WFR1"
+
+#: A `WTR1` transport recording -- a third container this command does not read,
+#: named so the refusal points at the command that does.
+_TRANSPORT_MAGIC = b"WTR1"
+
+
+def _flight_magic(path: str) -> bytes:
+    """The first four bytes, or `b""` for a file too short to have any.
+
+    A short file is *not* refused here: the ring reader's own message about a
+    file shorter than a header is better than anything this could say, and it
+    is already tested.
+    """
+    with open(path, "rb") as handle:
+        return handle.read(4)
+
+
+def _execute_flight_read_recording(namespace: argparse.Namespace) -> int:
+    """`wreath flight read` over a `WFR1` recording rather than a ring file.
+
+    The library decoder shipped with the attempt record kind and this dispatch
+    did not, so a `.wfr1` handed to `flight read` was answered with the ring
+    reader's complaint about a `WFRR` magic -- a true statement about the wrong
+    thing. Every refusal below is the decoder's own, by name: this function
+    adds no error text of its own, because two spellings of "truncated" is how
+    they drift apart.
+    """
+    import json as _json
+
+    from ._recording_format import read_recording
+
+    with open(namespace.path, "rb") as handle:
+        data = handle.read()
+    decoded = read_recording(data)
+    attempts = decoded.attempts if namespace.limit == 0 else decoded.attempts[: namespace.limit]
+
+    if namespace.as_json:
+        print(
+            _json.dumps(
+                {
+                    "schema_version": 1,
+                    "container": "WFR1",
+                    "clean": decoded.clean,
+                    "capture_slabs": len(decoded.slabs),
+                    "event_cells": len(decoded.events),
+                    "attempts": [
+                        {
+                            "job_id": record.job_id,
+                            "queue": record.queue,
+                            "task": record.task,
+                            "attempt": record.attempt,
+                            "max_attempts": record.max_attempts,
+                            "tenant": record.tenant,
+                            "dedup_key": record.dedup_key,
+                            "fence": record.fence,
+                            "trace_context": record.trace_context,
+                            "outcome": record.outcome,
+                            "error_type": record.error_type,
+                            "error_message": record.error_message,
+                            "argument_count": record.argument_count,
+                            "arguments": dict(record.arguments),
+                            "boundaries": [
+                                {
+                                    "seam": event.seam,
+                                    "target": event.target,
+                                    "coordinate": event.coordinate,
+                                    "error_type": event.error_type,
+                                }
+                                for event in record.boundaries
+                            ],
+                        }
+                        for record in attempts
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print(f"recording {namespace.path}")
+    print(f"  WFR1 container: {len(decoded.slabs)} capture slab(s), "
+          f"{len(decoded.events)} event cell(s), {len(decoded.attempts)} attempt(s)")
+    if not decoded.clean:
+        # Said before the contents, for the reason the ring reader prints its
+        # losses first: a torn file read as a complete one loses exactly the
+        # records nearest the failure.
+        print("  no footer -- the process died mid-write, so what is missing "
+              "cannot be counted")
+    print()
+    for record in attempts:
+        print(f"  {record.task} job {record.job_id} on queue {record.queue!r}: "
+              f"attempt {record.attempt} of {record.max_attempts} -> {record.outcome}")
+        if record.error_type:
+            print(f"      raised {record.error_type}: {record.error_message}")
+        kept = "none allowed by name" if not record.arguments else (
+            f"{len(record.arguments)} captured"
+        )
+        print(f"      fence {record.fence}, tenant {record.tenant!r}, "
+              f"{record.argument_count} argument(s), {kept}")
+        for name, captured in record.arguments:
+            print(f"      arg {name} = {captured}")
+        if record.trace_context:
+            print(f"      enqueued under trace context {record.trace_context}")
+        for event in record.boundaries:
+            failed = f" -> {event.error_type}" if event.error_type else ""
+            print(f"      boundary seam {event.seam} target {event.target!r} "
+                  f"at {event.coordinate}{failed}")
+    if len(decoded.attempts) > len(attempts):
+        print(f"  ... {len(decoded.attempts) - len(attempts)} more (--limit 0 for all)")
+    return 0
+
+
 def execute_flight(namespace: argparse.Namespace) -> int:
     """Decode a ring file and report what it held -- and what it could not.
 
@@ -2008,11 +2467,32 @@ def execute_flight(namespace: argparse.Namespace) -> int:
     """
     import json as _json
 
-    from ._flight_schema import EventKind, LossReason
+    from ._flight_schema import EventKind, LossReason, SchemaError
     from .recording import read_ring_file
 
     if namespace.flight_action == "replay":
         return _execute_flight_replay(namespace)
+
+    # One command, one question -- "what is in this file?" -- and the recorder
+    # writes two containers that answer it. `WFRR` is the ring the process
+    # mapped and died holding; `WFR1` is a recording it wrote deliberately, and
+    # a job attempt is a record kind *inside* that container rather than a
+    # second format. Dispatching on the magic is what stops the ring reader
+    # from telling somebody holding an attempt recording that they should have
+    # brought a `WFRR` file, which names the wrong half of the mistake.
+    magic = _flight_magic(namespace.path)
+    if magic == _RECORDING_MAGIC:
+        return _execute_flight_read_recording(namespace)
+    if magic == _TRANSPORT_MAGIC:
+        # The third container, and the one this command does not read. Named
+        # rather than left to the ring reader's "not a wreath ring file",
+        # which is true and sends the reader looking for a different file
+        # instead of for a different command.
+        raise SchemaError(
+            f"{namespace.path} is a WTR1 transport recording of a connection's "
+            "bytes, not a flight recorder file. `wreath replay transport` "
+            "replays it, and `wreath replay to-test` turns it into a test"
+        )
 
     ring = read_ring_file(namespace.path)
     header = ring.header
@@ -2091,6 +2571,53 @@ def execute_flight(namespace: argparse.Namespace) -> int:
     return 0
 
 
+def _execute_to_test(namespace: argparse.Namespace) -> int:
+    """`wreath replay to-test` -- one command, two record kinds.
+
+    `open_recording` dispatches on the container magic, so a `.wtr1` request
+    recording and a `.wfr1` job attempt reach the same subcommand rather than a
+    second one nobody finds. They differ in what the target names: a request
+    replays against the **application**, an attempt against the **job runner**
+    its task is registered on, which is not callable and so is not loaded by
+    `load_application`.
+    """
+    import asyncio
+    import importlib
+
+    from . import replay as rp
+
+    if rp.recording_kind(namespace.recording) == rp.KIND_ATTEMPT:
+        module_name, attribute = _split_target(namespace.target)
+        _ensure_cwd_importable()
+        try:
+            runner = getattr(importlib.import_module(module_name), attribute)
+        except (ImportError, AttributeError) as error:
+            raise CliError(
+                f"could not load the job runner {namespace.target!r}: {error}. An "
+                "attempt recording replays against the runner its task is "
+                "registered on, spelled module:attribute"
+            ) from error
+        generate = rp.generate_attempt_test(
+            runner, rp.open_attempt_recording(namespace.recording),
+            target=namespace.target,
+            name=namespace.name, origin=namespace.recording,
+        )
+    else:
+        generate = rp.generate_test(
+            load_application(namespace.target, factory=namespace.factory),
+            rp.open_recording(namespace.recording), target=namespace.target,
+            name=namespace.name, origin=namespace.recording,
+        )
+    source = asyncio.run(generate)
+    if namespace.output:
+        with open(namespace.output, "w", encoding="utf-8") as handle:
+            handle.write(source)
+        print(f"wrote {namespace.output}")
+    else:
+        print(source, end="")
+    return 0
+
+
 def execute_replay(namespace: argparse.Namespace) -> int:
     """Run a transport or endpoint-plan replay and print the owned outcome.
 
@@ -2103,26 +2630,11 @@ def execute_replay(namespace: argparse.Namespace) -> int:
 
     from . import replay as rp
 
-    app = load_application(namespace.target, factory=namespace.factory)
     action = namespace.replay_action
-
     if action == "to-test":
-        source = asyncio.run(
-            rp.generate_test(
-                app,
-                rp.open_recording(namespace.recording),
-                target=namespace.target,
-                name=namespace.name,
-                origin=namespace.recording,
-            )
-        )
-        if namespace.output:
-            with open(namespace.output, "w", encoding="utf-8") as handle:
-                handle.write(source)
-            print(f"wrote {namespace.output}")
-        else:
-            print(source, end="")
-        return 0
+        return _execute_to_test(namespace)
+
+    app = load_application(namespace.target, factory=namespace.factory)
 
     if action == "transport":
         recording = rp.open_recording(namespace.recording)
@@ -2223,6 +2735,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return execute_passes(namespace)
             except (OSError, KeyError, ValueError) as error:
                 raise CliError(str(error), exit_code=2) from error
+        if namespace.command == "jobs":
+            try:
+                return execute_jobs(namespace)
+            except (OSError, KeyError, ValueError) as error:
+                raise CliError(str(error), exit_code=2) from error
         if namespace.command == "schema":
             try:
                 return execute_schema(namespace)
@@ -2234,6 +2751,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 return execute_migrations(namespace, load_application)
             except (OSError, RuntimeError, ValueError) as error:
+                raise CliError(str(error), exit_code=2) from error
+        if namespace.command == "infra":
+            from ._infra_cli import execute as execute_infra
+
+            try:
+                return execute_infra(namespace, load_application)
+            except (OSError, TypeError, ValueError) as error:
                 raise CliError(str(error), exit_code=2) from error
         if namespace.command == "docs":
             from ._docs_cli import execute as execute_docs

@@ -360,6 +360,43 @@ is still serving correctly — failing readiness for it turns that into an outag
 built non-critical as well, so putting it in the wrong list still cannot drop
 traffic.
 
+## Which drive started this walk
+
+The ledger row carries a `traceparent`, and every shift rebinds it — so a chunk that
+dead-letters on day three of a backfill still names whatever started the walk, and
+`wreath passes status` prints the trace id for a pass that has stopped:
+
+```
+normalize_grades             blocked  61.4% (estimated)      2,140,000  -
+                             last chunk error: RuntimeError('deadlock detected')
+                             trace: 4bf92f3577b34da6a3ce929d0e0e4736  (wreath doctor trace 4bf9...)
+```
+
+Two decisions shape what that trace *is*, and both are worth knowing before you rely on
+one.
+
+**Capture, never mint.** A pass driven only by `cron` has no originating request. Its
+ledger row stores SQL `NULL` and its shifts run untraced, rather than being handed a
+freshly invented trace id. Wreath propagates context; it does not generate spans, and it
+carries the upstream sampling decision rather than re-deciding it — a minted traceparent
+would have to pick a sampled flag, and neither choice survives scrutiny. `-01` forces
+every backend in the path to retain a trace that may run for three days; `-00` produces
+an id that is stored, printed by the CLI, and collected by nothing. To get a trace on a
+pass, drive a shift from something that has one — an admin endpoint that enqueues the
+first shift is the ordinary way, and every later shift inherits it.
+
+**The trace belongs to the cycle, not to the pass.** The first drive that *has* a trace
+names it (`COALESCE`, so a later drive does not re-attribute a walk already under way),
+and a recurring pass re-captures when a new cycle begins. That is the retention bound: a
+recurring pass runs for the life of the deployment, and carrying one drive's traceparent
+across every cycle would produce a trace that never ends and that no backend assembles.
+A single finite backfill is still one trace for as long as it runs — that is the reading
+you asked for when you drove it from a traced request, and the alternative expressible in
+one `traceparent` column is no trace at all.
+
+The column arrives as version 2 of the `passes` schema component. A build newer than its
+database asks the catalog once, walks untraced, and does not fail the shift.
+
 ## A query budget for a shift
 
 A pass is where an N+1 costs the most. Per chunk it is invisible; multiplied by

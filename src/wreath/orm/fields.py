@@ -229,7 +229,10 @@ _FK_ACTIONS = frozenset({"no action", "restrict", "cascade", "set null", "set de
 #: `hnsw` and `ivfflat` are pgvector's; both are only meaningful on a vector
 #: column, and both are expensive to build, which the migrations guide says out
 #: loud rather than leaving to be discovered during a deploy.
-_INDEX_METHODS = frozenset({"btree", "gin", "hnsw", "ivfflat"})
+#: `gist` is here for `point`, and unlike `hnsw`/`ivfflat` it needs no
+#: extension: core PostgreSQL ships the `point_ops` operator class, which is
+#: what makes a proximity search indexable on a stock server.
+_INDEX_METHODS = frozenset({"btree", "gin", "gist", "hnsw", "ivfflat"})
 
 #: The access methods whose index descriptor carries no operator-class field at
 #: all. Everything else spells its operator class and its method options, which

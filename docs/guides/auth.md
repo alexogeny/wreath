@@ -203,6 +203,93 @@ cannot be read off the source — `context.flags.isEmpty()`, or an argument
 computed at evaluation time — falls back to resolving everything, because a
 short list would change the answer rather than merely cost less.
 
+## Geofencing: policies that read where the caller is
+
+`context.regions` is the same idea for *place*. Declare the areas your policies
+name, tell the authorizer how to find the caller's position, and a geofence
+becomes a policy rather than a predicate rewritten at every call site:
+
+```python
+from wreath.authorization import CedarAuthorizer, Regions
+from wreath.geospatial import BoundingBox, Coordinate
+
+regions = Regions(
+    depot=(Coordinate(lat=-23.68, lon=133.88), 5_000),   # centre and metres
+    reserve=BoundingBox(-26.0, -24.0, 132.0, 135.0),
+)
+
+CedarAuthorizer(
+    engine=engine,
+    regions=regions,
+    location=lambda request: request.state.get("device_fix"),
+)
+```
+
+```cedar
+permit (principal in Role::"ranger", action == Action::"read", resource is Collar)
+when { context.regions.contains(resource.reserve) };
+```
+
+Like `flags`, it is a **set of names** and it is supplied unconditionally —
+an absent `regions` makes `forbid(...) unless { context.regions.contains(...) }`
+evaluate to *allowed*, so an application that never configured regions would
+silently stop geofencing.
+
+**Where the position comes from is yours.** `location` defaults to returning
+`None`, because a device fix, an identity attribute and an IP lookup are
+different evidence with different trust, and the framework guessing would put a
+policy's geofence on something nobody chose. No location means every region set
+is empty, and an empty set denies in both the `when` and the `unless` shape.
+
+Only the regions your policies name are measured, and the saving is larger than
+for flags because a region test is a great-circle distance rather than a
+dictionary lookup: against fifty declared regions, resolving the one a policy
+names measured **+0.81us** per request and resolving all fifty **+6.08us**,
+over a 0.24us noise floor. Note that `contains(resource.reserve)` — the most
+natural way to write a geofence — computes its argument, so its names cannot be
+read off the source and every region is resolved. Keeping the declared set small
+is the tuning knob.
+
+## Precision as an outcome, not a verdict
+
+A withheld field is a boolean: present or absent. Real deployments want a scale,
+and want the policy engine to choose it — a ranger sees an endangered animal's
+exact position, a partner sees it to a kilometre, a volunteer to ten, and the
+public not at all. A `PrecisionLadder` is an ordered set of ordinary actions,
+asked finest-first until one permits:
+
+```python
+from wreath.authorization import PrecisionLadder
+
+ladder = PrecisionLadder(
+    ("Station::locate_exact", None),      # exact
+    ("Station::locate_fine", 1_000),      # 1 km
+    ("Station::locate_coarse", 10_000),   # 10 km
+)
+
+crud_router(Station, open_session, precision={"location": ladder})
+```
+
+A caller permitted no rung gets **no key at all** — absent, not null, because a
+null says the row has no position and that is a different and false statement.
+
+The degradation is a **fixed grid**, never per-request jitter, and that is the
+security property rather than an implementation detail: jitter averages away, so
+an attacker who can ask repeatedly recovers the true position, while a grid cell
+reveals the cell however many times it is asked. It is applied in `serialize`,
+the only path a column takes out of a generated route, so there is no
+select-the-column-directly way around it.
+
+A ladder is a real authorization query per laddered column: measured at
+**+15.9us** on top of a geofenced request, because it *is* another Cedar
+evaluation. It is resolved once per request and cached, so a page of a hundred
+rows pays it once rather than a hundred times.
+
+Today the ladder is asked at **resource-type** level, matching the permission
+manifest's own split. Row-level precision — where one station is sensitive and
+its neighbour is not — needs the row before deciding, which is
+`object_authorizer`'s shape rather than this one.
+
 When a request is denied, Wreath still runs your global finalizers — so the
 `401` or `403` carries the same security headers and CORS treatment as a success
 — but it skips the route middleware and your handler entirely. The person who

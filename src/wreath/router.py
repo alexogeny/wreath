@@ -90,6 +90,8 @@ class RouteDefinition:
         requirement: The merged authentication and authorization requirement.
         operation_id: Explicit client-facing operation id, or None to derive one.
         response_only: Handler promises to return a response object directly.
+        cancel_on_disconnect: Cancel the handler when the client goes away, or
+            None to let the request method decide.
     """
 
     path: str
@@ -113,6 +115,12 @@ class RouteDefinition:
     security: tuple[tuple[str, tuple[str, ...]], ...] = ()
     name: str | None = None
     host: str | None = None
+    #: Whether losing the client cancels this route's handler. `None` -- the
+    #: default -- defers to the request method: RFC 9110's safe methods (`GET`,
+    #: `HEAD`, `OPTIONS`) are cancelled, everything else is left to finish.
+    #: Setting it here overrides that either way, for every method the route
+    #: answers.
+    cancel_on_disconnect: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +272,7 @@ class Router:
         security: Mapping[str, Iterable[str]] | None = None,
         name: str | None = None,
         host: str | None = None,
+        cancel_on_disconnect: bool | None = None,
     ) -> Callable[[Handler], Handler]:
         """Register a handler for `path` under one or more methods.
 
@@ -306,6 +315,9 @@ class Router:
             permissions: Additional permissions required, all of them.
             operation_id: Explicit operation id; when omitted one is derived from method and path.
             response_only: Promise that the handler returns a response object directly.
+            cancel_on_disconnect: Cancel this handler when the client goes away.
+                Omitted, the request method decides: safe methods are cancelled,
+                unsafe ones are not.
 
         Returns:
             A decorator that registers the handler and returns it unchanged.
@@ -350,6 +362,7 @@ class Router:
                     route_security,
                     name,
                     host,
+                    cancel_on_disconnect,
                 )
             )
             return handler

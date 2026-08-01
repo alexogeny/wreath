@@ -16,6 +16,8 @@ import pytest
 from wreath import Wreath
 from wreath.binding import Body, Header, Query
 from wreath.openapi import generate_openapi
+from wreath.pagination import Page
+from wreath.temporal import Instant
 from wreath.typegen.inspect import build_api_model
 from wreath.typegen.targets.python import render_python, spec_digest
 
@@ -91,8 +93,24 @@ def test_adding_the_python_target_left_typescript_byte_identical() -> None:
 
 
 def test_the_target_emits_a_module_set() -> None:
+    """`spec.json` joined the set when the contract gate landed.
+
+    It is the document the package was generated from, kept so
+    `--check-contract` has a baseline: `SPEC_DIGEST` can only say *changed*,
+    and telling breaking from compatible needs the document itself.
+    """
     files = _rendered()
-    assert set(files) == {"models.py", "client.py", "__init__.py"}
+    assert set(files) == {"models.py", "client.py", "__init__.py", "spec.json"}
+
+
+def test_no_document_means_no_pinned_spec() -> None:
+    """Rendering without a document must not emit an empty or fabricated pin.
+
+    A `spec.json` that did not come from a provider would give the gate a
+    baseline it could compare against and be wrong about.
+    """
+    files = render_python(build_api_model(_app()), class_name="LlamaClient")
+    assert "spec.json" not in files
 
 
 def test_generated_modules_are_valid_python() -> None:
@@ -472,3 +490,135 @@ async def test_the_generated_client_round_trips_against_the_real_app(
     assert result.name == "Bo"
     # Bound into the *generated* dataclass, not a dict that happens to match.
     assert isinstance(result, models_module.Llama)
+
+
+# --- the scalar vocabulary: a timestamp survives the hop --------------------
+#
+# This file's own docstring claims that "the client and the server disagree
+# about what a timestamp is" stops being a category of bug. Nothing asserted
+# it: no test app declared a temporal type, so the mapping went unexercised and
+# `Instant` reached the generated dataclass as `str`. `DATE_TIME` is
+# `TypeRef("string", "date-time")`, and a target matching on `kind` alone emits
+# `str` -- which type-checks, round-trips, and silently loses the zone.
+
+
+@dataclass
+class Sighting:
+    id: int
+    at: Instant
+    ended: Instant | None = None
+
+
+def _temporal_app() -> Wreath:
+    app = Wreath()
+
+    @app.get("/sightings/{sighting_id}")
+    async def get_sighting(request: Any, sighting_id: int) -> Sighting:
+        return Sighting(id=sighting_id, at=Instant.parse("2026-07-31T09:30:00+10:00"))
+
+    return app
+
+
+def _temporal_rendered() -> dict[str, str]:
+    app = _temporal_app()
+    return render_python(
+        build_api_model(app), document=generate_openapi(app), class_name="SightingClient"
+    )
+
+
+def test_an_instant_field_is_annotated_instant_not_str() -> None:
+    models = _temporal_rendered()["models.py"]
+    assert "at: Instant" in models, models
+    assert "at: str" not in models
+
+
+def test_the_generated_models_import_instant_from_wreath() -> None:
+    models = _temporal_rendered()["models.py"]
+    assert "from wreath.temporal import Instant" in models, models
+
+
+def test_an_optional_instant_keeps_its_scalar() -> None:
+    models = _temporal_rendered()["models.py"]
+    assert "ended: Instant | None" in models, models
+
+
+# --- Page[T] is wreath's own, not a generated near-copy ---------------------
+
+
+@dataclass
+class Herd:
+    id: int
+    name: str
+
+
+def _paged_app() -> Wreath:
+    app = Wreath()
+
+    @app.get("/herds")
+    async def list_herds(request: Any) -> Page[Herd]:
+        return Page(items=[Herd(id=1, name="north")], total=1, page=1, size=20)
+
+    return app
+
+
+def _paged_rendered() -> dict[str, str]:
+    app = _paged_app()
+    return render_python(
+        build_api_model(app), document=generate_openapi(app), class_name="HerdClient"
+    )
+
+
+def test_a_paginated_route_reuses_wreaths_own_page() -> None:
+    """`Page[T]` must *be* `wreath.pagination.Page`, not a lookalike.
+
+    A generated near-copy type-checks and behaves identically right up until
+    someone passes one to a function annotated with the real thing.
+    """
+    rendered = _paged_rendered()
+    source = rendered["client.py"] + rendered["models.py"]
+    assert "from wreath.pagination import Page" in source, source
+    assert "class Page" not in rendered["models.py"], "Page was re-declared, not imported"
+
+
+def test_the_paginated_return_is_annotated_with_the_element_type() -> None:
+    source = _paged_rendered()["client.py"]
+    assert "Page[Herd]" in source, source
+
+
+def test_an_instant_round_trips_zone_aware_through_the_binder() -> None:
+    """The annotation has to be load-bearing, not decorative.
+
+    Asserting the generated source says `Instant` proves the mapping; it does
+    not prove the value survives. The client binds through
+    `wreath.binding.validate` -- the server's own validator -- so this is what
+    turns the wire string back into an aware instant.
+    """
+    from wreath.binding import validate
+
+    bound = validate(Sighting, {"id": 1, "at": "2026-07-31T09:30:00+10:00"})
+
+    assert isinstance(bound.at, Instant)
+    assert bound.at.utcoffset() is not None, "a naive value would defeat the point"
+    assert bound.at.utcoffset().total_seconds() == 10 * 3600
+
+
+def test_a_naive_instant_from_the_wire_is_refused() -> None:
+    """Never assumed UTC -- that assumption is the bug the type exists to stop."""
+    from wreath.binding import ValidationError, validate
+
+    with pytest.raises(ValidationError):
+        validate(Sighting, {"id": 1, "at": "2026-07-31T09:30:00"})
+
+
+def test_the_typescript_target_emits_no_undeclared_page_type() -> None:
+    """The other target must not reference a `Page` nothing declares.
+
+    A TypeScript client is standalone -- there is no `wreath.pagination` to
+    import from -- so the page renders structurally. Naming it would emit a
+    client that references an undeclared type and still reports success.
+    """
+    from wreath.typegen.targets.typescript import render_typescript
+
+    source = "\n".join(render_typescript(build_api_model(_paged_app())).values())
+    assert "items: readonly Herd[]" in source, source
+    assert "Page<" not in source, "named a type the generated module never declares"

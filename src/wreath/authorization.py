@@ -15,6 +15,7 @@ from ._auth.backends import AuthorizationProvider
 from ._auth.cedar import CedarAuthorizer, CedarEngine
 from ._auth.cedar_engine import CedarEntity, CedarParseError, CedarPolicies, EntityUid
 from ._auth.decorators import authorize, permissions, roles
+from ._auth.geofence import PrecisionLadder, Regions, coarsen
 from ._auth.models import AuthorizationDecision
 from ._auth.permissions import (
     PERMISSION_CHANNEL,
@@ -37,7 +38,10 @@ __all__ = [
     "CedarPolicies",
     "EntityUid",
     "LiveDocument",
+    "PrecisionLadder",
+    "Regions",
     "authorize",
+    "coarsen",
     "declared_actions",
     "permission_document",
     "permissions",

@@ -70,6 +70,66 @@ projects a mapping onto its declared wire fields, so an accidental internal key
 cannot escape, then validates and serializes it. A violation is a server defect
 and answers 500, never a caller-facing 422.
 
+## A protobuf body
+
+A body annotated with a [`@message`](protobuf.md) class binds from protobuf
+bytes when the request says `Content-Type: application/x-protobuf` (or
+`application/protobuf`, the IANA spelling — Wreath emits the first and reads
+both):
+
+```python
+from wreath.protobuf import field, message
+
+@message
+class Sighting:
+    species: str = field(1)
+    count: int = field(2)
+
+@app.post("/sightings")
+async def record(request, sighting: Sighting) -> dict:
+    return {"species": sighting.species}
+```
+
+**The annotation is content-negotiated, not protobuf-only.** The same handler
+still binds a JSON body, because that is what the `Content-Type` asked for. A
+`@message` class is an ordinary dataclass and bound from JSON before protobuf
+reached the boundary at all, so reading the annotation as "protobuf only" would
+have silently broken every handler that already had one; it also keeps the
+request half symmetric with the response half, where
+`serialize(request, msg, serializers=(PROTOBUF, JSON))` has always negotiated.
+It is what the format's own users need, too: OTLP/HTTP defines a protobuf *and*
+a JSON encoding of the same messages behind one path.
+
+### The same shape has two strictnesses, and that is deliberate
+
+Read the body as JSON and an unknown field is **rejected**. Read the same body
+as protobuf and an unknown field number is **kept**. One declared shape, two
+answers, chosen by `Content-Type` — so it is worth being explicit about why,
+rather than leaving it to be discovered:
+
+| Sent as | An unexpected member is | Because |
+| --- | --- | --- |
+| JSON | a `422` naming it | an unexpected *name* is a typo, and the sender had no way to mean it |
+| protobuf | preserved on the message | an unexpected *number* is a peer built against a newer `.proto` |
+
+The second is not leniency, it is the mechanism protobuf exists to provide. The
+bytes are kept on the decoded message and `encode` puts them back, so a service
+that reads a message, edits one field and forwards it does not strip what a
+newer peer sent through it — and a schema rollout does not have to be a
+synchronised deploy of every consumer. Refusing would give up the one property
+field numbers are for.
+
+Three refusals, three different sentences, because the remedies differ: bytes
+that are not readable protobuf (`400`, naming protobuf), a body annotated with a
+plain dataclass rather than a `@message` (`400`, naming the class — protobuf
+carries numbers, and there is nothing to read the wire against), and an
+unreadable JSON body (`400`, naming JSON).
+
+Note that the protobuf path is the codec's validation, not the binding tape's:
+the wire types *are* the contract, so `Field(...)` constraints declared for the
+JSON path do not run over protobuf bytes. Validate those in the handler when the
+same shape is served both ways.
+
 ## User story: a search endpoint with safe bounds
 
 > *As an API author, my `/search` endpoint takes a required `q`, an optional

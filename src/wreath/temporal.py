@@ -45,6 +45,9 @@ from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .protobuf import field as _protobuf_field
+from .protobuf import message as _message
+
 __all__ = [
     "BUCKETS",
     "Bucket",
@@ -55,17 +58,20 @@ __all__ = [
     "Month",
     "Quarter",
     "TemporalError",
+    "Timestamp",
     "Week",
     "Year",
     "bucket",
     "format_duration",
     "format_iso",
+    "from_timestamp",
     "from_wall_clock",
     "jsonable",
     "now",
     "parse",
     "parse_duration",
     "relative",
+    "to_timestamp",
     "wall_clock",
     "zone",
 ]
@@ -720,3 +726,112 @@ def jsonable(value: Any) -> Any:
     if hook is not None:
         return jsonable(hook(value))
     return value
+
+
+# -- protobuf: the well-known Timestamp -------------------------------------
+#
+# `google.protobuf.Timestamp` is the interchange shape for an instant, and it is
+# what a peer in another language expects on the wire. Declaring it here rather
+# than in `wreath.protobuf` keeps the direction of dependency the same as every
+# other surface time crosses: the codec knows nothing about time, and temporal
+# says how time is spelled for it -- exactly as it already does for JSON, the
+# OpenAPI format, the ORM column and the GraphQL scalar.
+
+
+@_message
+class Timestamp:
+    """`google.protobuf.Timestamp`: seconds and nanos from the Unix epoch, UTC.
+
+    The two field numbers are the wire contract with every peer and are fixed
+    by the specification. `nanos` is **always** in `0..999_999_999`, including
+    before the epoch -- see `to_timestamp`.
+    """
+
+    seconds: int = _protobuf_field(1)
+    nanos: int = _protobuf_field(2, kind="int32")
+
+
+#: The specification's bound on `Timestamp.nanos`, restated because a value
+#: outside it is a peer's bug that would otherwise become a wrong time here.
+_NANOS_PER_SECOND = 1_000_000_000
+_NANOS_PER_MICROSECOND = 1_000
+
+#: The Unix epoch as an `Instant`, not a bare `datetime`. Arithmetic preserves
+#: the subclass, so `from_timestamp` returns an `Instant` -- which is the whole
+#: contract of this module and must not have a hole at the decode boundary.
+#: `to_timestamp` subtracts from it rather than calling `datetime.timestamp()`
+#: so the pre-epoch sign convention falls out of `timedelta`'s own
+#: normalisation instead of a correction applied afterwards.
+_EPOCH = Instant(1970, 1, 1, tzinfo=datetime.UTC)
+
+
+def to_timestamp(value: datetime.datetime) -> Timestamp:
+    """`value` as a `google.protobuf.Timestamp`.
+
+    A naive value is refused rather than assumed UTC, for the same reason
+    `Instant` refuses one: guessing is the bug this module exists to prevent.
+
+    **`nanos` is normalised non-negative.** For an instant before the epoch the
+    specification requires `seconds` to carry the sign and `nanos` to stay in
+    `0..999_999_999` -- so half a second before the epoch is
+    `seconds=-1, nanos=500_000_000`, never `seconds=0, nanos=-500_000_000`.
+    Python's `timestamp()` returns a signed float, and the obvious `int()` of it
+    truncates toward zero, which produces exactly the illegal second form and
+    puts a peer's reading one second out.
+
+    Raises:
+        TemporalError: `value` has no offset.
+    """
+    # `utcoffset()` alone, not `tzinfo is None or utcoffset() is None`. The
+    # first clause is subsumed -- `datetime.utcoffset()` already returns None
+    # when `tzinfo` is -- and it is *narrower*: a tzinfo whose `utcoffset()`
+    # returns None is naive in effect while `tzinfo is not None`, which the
+    # short-circuit would have waved through had the second clause ever been
+    # dropped. One spelling of one check, so the two cannot drift apart.
+    if value.utcoffset() is None:
+        raise TemporalError(
+            "a naive datetime has no moment to encode; attach a tzinfo whose "
+            "utcoffset() is not None, or use Instant.of(value, "
+            "assume='Area/City') to place it"
+        )
+    delta = value - _EPOCH
+    # `timedelta` already normalises to non-negative microseconds with the sign
+    # carried by `days`, which is the same convention Timestamp requires -- so
+    # deriving from it gets the pre-epoch case right by construction rather than
+    # by a correction applied afterwards.
+    seconds = delta.days * 86400 + delta.seconds
+    return Timestamp(seconds=seconds, nanos=delta.microseconds * _NANOS_PER_MICROSECOND)
+
+
+def from_timestamp(value: Timestamp) -> Instant:
+    """A `google.protobuf.Timestamp` as an aware `Instant` in UTC.
+
+    The wire carries a moment and no zone, so the result is in UTC. Where the
+    reader's zone matters it has to travel in its own field; `.to(zone)` places
+    the result once it arrives.
+
+    Sub-microsecond `nanos` are **refused rather than truncated**. Python's
+    resolution is microseconds, and silently dropping the remainder would make a
+    round trip through wreath lossy for a peer that had the precision -- the
+    kind of loss that is invisible until two systems disagree about ordering.
+
+    Raises:
+        TemporalError: `nanos` is outside `0..999_999_999`, or carries
+            precision finer than a microsecond.
+    """
+    if not 0 <= value.nanos < _NANOS_PER_SECOND:
+        raise TemporalError(
+            f"Timestamp.nanos must be in 0..999999999, got {value.nanos}; a "
+            "negative remainder means the sender did not normalise a pre-epoch "
+            "instant onto the seconds field"
+        )
+    if value.nanos % _NANOS_PER_MICROSECOND:
+        remainder = value.nanos % _NANOS_PER_MICROSECOND
+        raise TemporalError(
+            f"Timestamp.nanos={value.nanos} carries {remainder} nanosecond(s) "
+            "below microsecond resolution, which a Python datetime cannot "
+            "hold; truncating would lose the remainder silently"
+        )
+    return _EPOCH + datetime.timedelta(
+        seconds=value.seconds, microseconds=value.nanos // _NANOS_PER_MICROSECOND
+    )

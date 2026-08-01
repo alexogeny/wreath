@@ -17,6 +17,13 @@ something a content encoding is worth.
 Each coding has a whole-buffer form and a streaming form:
 
 - `gzip_compress(data, level=5)` / `GzipCompressor(level=5)`, levels 0-9.
+- `gzip_decompress(data, max_output_bytes=...)` reads one back. It is the only
+  entry point here that *decodes*, because decoding is the direction with an
+  adversary in it: a gzip member's input length says nothing about its output
+  length, so the bound is a required keyword rather than a default. It reads a
+  compressed request body -- `wreath.grpc` decodes `grpc-encoding: gzip`
+  through it -- and the ceiling is whatever the caller was already willing to
+  hold decoded.
 - `zstd_compress(data, level=3)` / `ZstdCompressor(level=3)`, levels
   `ZSTD_MIN_LEVEL` to `ZSTD_MAX_LEVEL`, read from libzstd rather than
   hardcoded. Note there is no zstd equivalent of gzip's `0`: levels below 1 are
@@ -51,6 +58,7 @@ from ._pure.compression import (
     GzipCompressor,
     ZstdCompressor,
     gzip_compress,
+    gzip_decompress,
     zstd_compress,
 )
 
@@ -61,5 +69,6 @@ __all__ = [
     "GzipCompressor",
     "ZstdCompressor",
     "gzip_compress",
+    "gzip_decompress",
     "zstd_compress",
 ]

@@ -109,8 +109,10 @@ def sealed_activity(timezone: str) -> Series:
         timezone: an IANA zone name, from the reserve that owns the station.
 
     Returns:
-        A declaration whose sealed buckets are stored on first read and
-        thereafter answered from storage.
+        A declaration whose sealed buckets are answered from storage once a
+        settling job has stored them, and computed from the source rows until
+        then. Reading never writes -- this endpoint is served from a
+        `ReadSession` -- so `settle()` is a job, not a side effect of a `GET`.
     """
     return (
         Series(

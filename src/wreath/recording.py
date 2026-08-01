@@ -17,11 +17,19 @@ file recovered from a crash is where a strict reader is least useful.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping
+import zlib
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
 from ._flight_schema import CaptureDisposition, CaptureFieldClass
+from ._recording_format import (
+    AttemptOutcome,
+    AttemptRecord,
+    BoundaryEvent,
+    read_attempt_recording,
+)
 from ._ring_file import DecodedRing, RingRecord, read_ring_file
 
 __all__ = [
@@ -41,6 +49,15 @@ __all__ = [
     "DecodedRing",
     "RingRecord",
     "read_ring_file",
+    "AttemptOutcome",
+    "AttemptRecord",
+    "AttemptTriggerKind",
+    "AttemptTrigger",
+    "AttemptPolicy",
+    "AttemptRecorder",
+    "BoundaryEvent",
+    "BoundaryTrace",
+    "read_attempt_recording",
 ]
 
 #: Header/field classes that are never captured, regardless of policy. This set
@@ -590,6 +607,555 @@ class ArmRegistry:
             remaining_matches=remaining,
             expires_in=max(0.0, state.expiry_monotonic - now),
         )
+
+
+# --- durable work: arming a job attempt --------------------------------------
+#
+# The request vocabulary above governs "which requests may be captured". This
+# governs "which job attempts may be captured", with the same posture: an
+# `AttemptPolicy` with no triggers captures nothing, and the tempting exception
+# -- "surely a *failed* attempt is always worth keeping" -- is exactly the one
+# that would make a queue full of personal data record itself by default.
+
+
+class AttemptTriggerKind(StrEnum):
+    """When an attempt is worth keeping."""
+
+    #: Any outcome that is not completion: raised, deadline-cancelled, or
+    #: lease-expired. The case worth most of this feature.
+    FAILURE = "failure"
+    #: A handler that raised, and only that. Distinct from FAILURE because a
+    #: deadline cancellation is not a defect and a lease expiry is not either.
+    RAISED = "raised"
+    #: The attempt that exhausted `max_attempts` -- the one that dead-lettered.
+    FINAL_FAILURE = "final_failure"
+    #: Every outcome of one named task, optionally sampled. For a task under
+    #: investigation, where the successes are as informative as the failures.
+    TASK = "task"
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptTrigger:
+    """One arming predicate for a job attempt.
+
+    `task` narrows any kind to one task name; `TASK` *requires* it, because a
+    `TASK` trigger with no name means "record every attempt of every task" and
+    this subsystem does not have a spelling for that.
+
+    `rate` samples deterministically **from the job id**, never from an RNG: two
+    workers looking at the same row have to agree on whether it is being
+    recorded, and a re-run has to reach the same answer as the run it is
+    reproducing.
+    """
+
+    kind: AttemptTriggerKind
+    task: str = ""
+    rate: float = 1.0
+
+    def __post_init__(self) -> None:
+        # Unconditional: `AttemptTriggerKind(member)` returns that member, so an
+        # `isinstance` guard in front of this is two spellings of one condition
+        # and only the guard would be tested.
+        object.__setattr__(self, "kind", AttemptTriggerKind(self.kind))
+        _require(0.0 <= self.rate <= 1.0, "trigger rate must be in [0, 1]")
+        if self.kind is AttemptTriggerKind.TASK and not self.task:
+            raise RecordingPolicyError(
+                "a sampled task trigger names the task under investigation; an "
+                "unnamed one is 'record every attempt', which is the opposite of "
+                "this subsystem's posture"
+            )
+
+    def selects(
+        self, *, task: str, outcome: AttemptOutcome, attempt: int, max_attempts: int
+    ) -> bool:
+        """Whether this trigger's *kind* matches, before sampling."""
+        if self.task and self.task != task:
+            return False
+        if self.kind is AttemptTriggerKind.TASK:
+            return True
+        if outcome is AttemptOutcome.COMPLETED:
+            return False
+        if self.kind is AttemptTriggerKind.RAISED:
+            return outcome is AttemptOutcome.RAISED
+        if self.kind is AttemptTriggerKind.FINAL_FAILURE:
+            return attempt >= max_attempts
+        return True  # FAILURE: any outcome that is not completion
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptPolicy:
+    """What job attempts a runner may record. Deny-by-default: no triggers, no
+    recordings.
+
+    **Arguments are captured only where an operator named one, by task and
+    parameter.** `args jsonb` is a *positional* array, so the name-keyed model
+    the rest of `RedactionPolicy` uses has nothing to key on — and
+    deny-by-default over a nameless unit degenerates to "capture nothing" or
+    "capture everything", the second of which is the disclosure this subsystem
+    ranks above correctness. `argument_allowlist` supplies the missing names
+    from the *handler's signature*, which the recording process already holds:
+
+    ```python
+    AttemptPolicy(
+        triggers=(AttemptTrigger(AttemptTriggerKind.FAILURE),),
+        argument_allowlist=frozenset({"send_password_reset.user_id"}),
+        redaction=RedactionPolicy(max_fields=32, max_depth=4, max_body_bytes=4096),
+    )
+    ```
+
+    `send_password_reset(user_id, token)` then records `user_id` and never
+    `token`, which is the whole point. Four rules make that safe, and each one
+    fails **closed**:
+
+    1. **No signature, no capture.** A task whose handler is not registered in
+       this process — the dead-letter path already has one, from a release that
+       accepted a different arity — has no names, so nothing is captured. The
+       rule is *deny*, never fall back to position.
+    2. **The mapping must be total and unambiguous.** A value that lands in
+       `*args` or `**kwargs` maps to no declared parameter, so it is never
+       captured however the allowlist is spelled.
+    3. **The parameter is the unit of consent, and it is the whole argument.**
+       Allowing `payload` allows everything inside it, bounded by the limits
+       below. There is no per-field key space, because a path language whose
+       leaves an operator has never seen is a consent nobody gave.
+    4. **The value must normalise.** Strings, numbers, booleans, `None`, and
+       lists/tuples/dicts of them, within `max_depth` and `max_fields` and
+       `max_body_bytes`. Anything else — an object, `bytes`, a set, a cycle, an
+       oversize structure — is **withheld with the reason recorded in its
+       place**, so a reader can tell a refusal from an absence.
+
+    A non-empty allowlist therefore needs those three bounds set; an
+    `AttemptPolicy` that names an argument without them is refused where it is
+    written. An empty allowlist is the default and records only the argument
+    *count*, exactly as before.
+
+    `max_boundaries` bounds one recording. Crossing it **refuses the recording**
+    rather than truncating it: a job that walks ten thousand rows would
+    otherwise produce a boundary trace that silently stops part-way, and a
+    replay driven from it would report a different failure from the one that
+    happened. The ring sets the same precedent with `RING_FULL`.
+    """
+
+    triggers: tuple[AttemptTrigger, ...] = ()
+    redaction: RedactionPolicy = field(default_factory=RedactionPolicy.deny_by_default)
+    max_boundaries: int = 512
+    #: `"task.parameter"` keys. Split on the **last** dot, so a dotted task name
+    #: still names one parameter.
+    argument_allowlist: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        _require(self.max_boundaries > 0, "max_boundaries must be > 0")
+        _require(self.max_boundaries <= _MAX_FIELDS, "max_boundaries out of range")
+        allowlist = frozenset(self.argument_allowlist)
+        for key in sorted(allowlist):
+            task, dot, parameter = key.rpartition(".")
+            _require(
+                bool(dot) and bool(task) and bool(parameter),
+                f"argument allowlist entry {key!r} must be 'task.parameter'",
+            )
+        object.__setattr__(self, "argument_allowlist", allowlist)
+        if allowlist:
+            _require(
+                self.redaction.max_fields > 0
+                and self.redaction.max_depth > 0
+                and self.redaction.max_body_bytes > 0,
+                "capturing an argument needs redaction limits: set max_fields, "
+                "max_depth and max_body_bytes, because an argument is a value of "
+                "unknown shape and an unbounded one is a recording nobody can open",
+            )
+
+    def capture_arguments(
+        self,
+        *,
+        task: str,
+        handler: Any,
+        args: Sequence[Any],
+        kwargs: Mapping[str, Any],
+        framework_parameters: int = 0,
+    ) -> tuple[tuple[str, str], ...]:
+        """The allowlisted arguments of one call, normalised and bounded.
+
+        Returns `(parameter_name, json_text)` pairs, where the JSON is exactly
+        one of `{"value": ...}` or `{"withheld": "<reason>"}` — a refusal is
+        recorded rather than dropped, because an operator who allowed a
+        parameter and finds nothing cannot otherwise tell whether the job did
+        not carry it or this refused it.
+
+        Args:
+            task: The task name, the left half of an allowlist key.
+            handler: The registered callable, or `None` when this process has
+                none — which captures nothing.
+            args: Positional arguments, as the queue row carried them.
+            kwargs: Keyword arguments, likewise.
+            framework_parameters: Leading parameters the *runner* supplies
+                rather than the payload — `JobRunner` calls
+                `handler(ctx, *job.args)`, so it passes 1. They are aligned past
+                and never capturable: `ctx` is this process's object, not
+                anything the queue row carried, and an allowlist entry naming
+                one records nothing.
+
+        Returns:
+            One pair per allowed parameter the call actually supplied, in
+            signature order.
+        """
+        if not self.argument_allowlist or handler is None:
+            return ()
+        wanted = {
+            key.rpartition(".")[2]
+            for key in self.argument_allowlist
+            if key.rpartition(".")[0] == task
+        }
+        if not wanted:
+            return ()
+        bound = _bind_arguments(handler, args, kwargs, framework_parameters)
+        if bound is None:
+            return ()
+        limits = self.redaction
+        out: list[tuple[str, str]] = []
+        for name, value in bound:
+            if name not in wanted:
+                continue
+            out.append((name, _normalise_argument(value, limits)))
+        return tuple(out)
+
+    def captures(
+        self,
+        *,
+        task: str,
+        outcome: AttemptOutcome,
+        attempt: int,
+        max_attempts: int,
+        job_id: int,
+    ) -> bool:
+        """Whether this attempt is one an operator asked to keep."""
+        if not isinstance(outcome, AttemptOutcome):
+            outcome = AttemptOutcome(outcome)
+        for trigger in self.triggers:
+            if not trigger.selects(
+                task=task, outcome=outcome, attempt=attempt, max_attempts=max_attempts
+            ):
+                continue
+            if trigger.rate >= 1.0:
+                return True
+            if trigger.rate > 0.0 and sample_value(task, job_id) < trigger.rate:
+                return True
+        return False
+
+
+#: Values an argument may be made of. Deliberately the JSON scalars and nothing
+#: else: `args jsonb` is what the queue stored, so anything outside this set
+#: arrived by some other route and its `repr` is not a thing to write to a
+#: forensic file. `bool` is checked before `int` everywhere below, because it is
+#: a subclass of one.
+_ARGUMENT_SCALARS = (str, bool, int, float)
+
+
+#: Stands in for a leading parameter the runner supplies. Never recorded: it is
+#: dropped by name before any value is looked at.
+_FRAMEWORK_ARGUMENT = object()
+
+
+def _bind_arguments(
+    handler: Any,
+    args: Sequence[Any],
+    kwargs: Mapping[str, Any],
+    framework_parameters: int = 0,
+) -> list[tuple[str, Any]] | None:
+    """`(parameter_name, value)` for a call, or `None` when that is not knowable.
+
+    `None` -- capture nothing -- for a handler with no readable signature and
+    for a call that does not bind to it. **A value that lands in `*args` or
+    `**kwargs` is dropped rather than named**, because the name it would be
+    given is a position or a caller's spelling and neither is the declared
+    parameter an operator allowed.
+    """
+    import inspect
+
+    target = getattr(handler, "__wrapped__", handler)
+    leading = [_FRAMEWORK_ARGUMENT] * max(0, framework_parameters)
+    try:
+        signature = inspect.signature(target)
+        bound = signature.bind(*leading, *args, **kwargs)
+    except (TypeError, ValueError):
+        # A builtin with no signature, a C callable, or a row enqueued by a
+        # release whose handler took a different arity -- the dead-letter path
+        # already has the second one. Deny, never guess.
+        return None
+    named: list[tuple[str, Any]] = []
+    for name, parameter in signature.parameters.items():
+        if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+            continue
+        if name not in bound.arguments:
+            continue
+        value = bound.arguments[name]
+        if value is _FRAMEWORK_ARGUMENT:
+            continue
+        named.append((name, value))
+    return named
+
+
+def _normalise_argument(value: Any, limits: RedactionPolicy) -> str:
+    """One argument as JSON text: `{"value": ...}` or `{"withheld": "<reason>"}`.
+
+    Bounded four ways, and a breach of any of them withholds the *whole*
+    argument rather than a truncated version of it. A half-recorded structure
+    is the shape this subsystem refuses everywhere else -- a reader cannot tell
+    a list of three from the first three of nine, and a replay driven off the
+    short one reports a different failure from the one that happened.
+
+    Immutable by construction: the normalised copy is built out of new lists
+    and dicts and then serialised immediately, so a handler that mutates its
+    own argument after this returns cannot change what was recorded.
+    """
+    import json
+
+    try:
+        copied = _copy_bounded(value, limits, depth=0, seen=set(), budget=[limits.max_fields])
+    except _ArgumentRefused as refusal:
+        return json.dumps({"withheld": str(refusal)})
+    text = json.dumps({"value": copied}, separators=(",", ":"), allow_nan=False)
+    if len(text.encode("utf-8")) > limits.max_body_bytes:
+        return json.dumps(
+            {"withheld": f"over the {limits.max_body_bytes}-byte argument budget"}
+        )
+    return text
+
+
+class _ArgumentRefused(Exception):
+    """Why one argument could not be normalised. Never escapes this module."""
+
+
+def _copy_bounded(
+    value: Any, limits: RedactionPolicy, *, depth: int, seen: set[int], budget: list[int]
+) -> Any:
+    """An immutable-by-construction copy, or a refusal naming what stopped it."""
+    if value is None or isinstance(value, _ARGUMENT_SCALARS):
+        if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+            # JSON has no NaN or infinity and `allow_nan=False` would raise from
+            # inside `json.dumps`, past the refusal path that records a reason.
+            raise _ArgumentRefused("a non-finite number has no JSON form")
+        return value
+    if depth >= limits.max_depth:
+        raise _ArgumentRefused(f"nested deeper than the {limits.max_depth}-level limit")
+    if isinstance(value, list | tuple):
+        # Identity, not equality: a cycle is what this catches, and two equal
+        # sibling lists are not one. Removed on the way out so a value that
+        # appears twice side by side is not mistaken for a cycle.
+        if id(value) in seen:
+            raise _ArgumentRefused("contains a cycle")
+        seen.add(id(value))
+        try:
+            return [
+                _copy_bounded(item, limits, depth=depth + 1, seen=seen, budget=_spend(budget))
+                for item in value
+            ]
+        finally:
+            seen.discard(id(value))
+    if isinstance(value, dict):
+        if id(value) in seen:
+            raise _ArgumentRefused("contains a cycle")
+        seen.add(id(value))
+        try:
+            copied: dict[str, Any] = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise _ArgumentRefused(
+                        f"a mapping keyed by {type(key).__name__} has no JSON form"
+                    )
+                copied[key] = _copy_bounded(
+                    item, limits, depth=depth + 1, seen=seen, budget=_spend(budget)
+                )
+            return copied
+        finally:
+            seen.discard(id(value))
+    raise _ArgumentRefused(f"unsupported type {type(value).__name__}")
+
+
+def _spend(budget: list[int]) -> list[int]:
+    """Charge one field against the shared budget, or refuse.
+
+    A single mutable cell rather than a per-level count, because the limit that
+    matters is the size of the whole recorded value: a thousand one-element
+    lists is the same file as one thousand-element list.
+    """
+    budget[0] -= 1
+    if budget[0] < 0:
+        raise _ArgumentRefused("more fields than the policy's max_fields allows")
+    return budget
+
+
+class BoundaryTrace:
+    """The boundary crossings of one attempt, in order.
+
+    Owned by the attempt that is running, so it needs no locking: a job handler
+    is one coroutine on one event loop, and a crossing is written between two
+    awaits of that coroutine.
+
+    Crossing `max_boundaries` sets `overflowed` and stops recording. The
+    recorder then **refuses to write the recording at all**, because a
+    boundary trace that stops part-way replays as a different failure from the
+    one that happened -- the fault would land at whatever statement is at that
+    coordinate in the shorter run. Refusing is the same answer the ring gives
+    with `RING_FULL`.
+    """
+
+    __slots__ = ("_events", "_next", "_max", "overflowed")
+
+    def __init__(self, max_boundaries: int) -> None:
+        self._events: list[BoundaryEvent] = []
+        self._next: dict[tuple[int, str], int] = {}
+        self._max = max_boundaries
+        self.overflowed = False
+
+    def note(self, seam: int, target: str) -> int:
+        """Write down a crossing and hand back its coordinate.
+
+        The coordinate advances even when the trace is full, so a replay driven
+        from a *refused* recording could not accidentally be keyed to a
+        renumbered position; nothing consumes an overflowed trace, and this
+        keeps that true by construction rather than by convention.
+        """
+        key = (seam, target)
+        coordinate = self._next.get(key, 0)
+        self._next[key] = coordinate + 1
+        if len(self._events) >= self._max:
+            self.overflowed = True
+            return -1
+        self._events.append(BoundaryEvent(seam=seam, target=target, coordinate=coordinate))
+        return len(self._events) - 1
+
+    def fail(self, index: int, error_type: str) -> None:
+        """Mark the crossing at `index` as having raised `error_type`."""
+        if 0 <= index < len(self._events):
+            self._events[index] = BoundaryEvent(
+                seam=self._events[index].seam,
+                target=self._events[index].target,
+                coordinate=self._events[index].coordinate,
+                error_type=error_type,
+            )
+
+    @property
+    def events(self) -> tuple[BoundaryEvent, ...]:
+        return tuple(self._events)
+
+
+class AttemptRecorder:
+    """Decides which job attempts are kept, and writes the ones that are.
+
+    Hand one to `wreath.jobs.JobRunner(attempts=...)`. It arms nothing on its
+    own: an `AttemptPolicy` with no triggers is the default and records nothing.
+
+    Recordings land in `directory` as `<queue>-<job_id>-<attempt>.wfr1`, owner-
+    only, one attempt per file. One attempt per file is not a storage decision:
+    attempt 4 of a job is a different execution from attempt 3, and a reader
+    that had to pick between them would be choosing which failure to reproduce.
+    """
+
+    __slots__ = (
+        "_policy", "_directory", "_image", "scope",
+        "written", "refused_oversize", "errors",
+    )
+
+    def __init__(
+        self,
+        policy: AttemptPolicy,
+        *,
+        directory: str,
+        scope: object | None = None,
+        image: object | None = None,
+    ) -> None:
+        self._policy = policy
+        self._directory = directory
+        self._image = image
+        #: The application whose `_databases`/`_http_clients`/`_object_stores`
+        #: an attempt is watched through, or None to watch only the runner's own
+        #: database. A `JobRunner` has no reference to its application, and
+        #: inventing one to record a job would put the recorder's needs into the
+        #: queue's public shape.
+        self.scope = scope
+        #: Recordings written to disk.
+        self.written = 0
+        #: Attempts an operator armed and this refused to write because their
+        #: boundary trace crossed `max_boundaries`. Counted rather than
+        #: truncated: a recording nobody can open is still a recording, and one
+        #: that quietly holds half a trace is not.
+        self.refused_oversize = 0
+        #: Recordings that could not be written -- a full disk, a missing
+        #: directory. The attempt itself is untouched; only the evidence is.
+        self.errors = 0
+
+    @property
+    def policy(self) -> AttemptPolicy:
+        return self._policy
+
+    def trace(self) -> BoundaryTrace:
+        """A boundary trace bounded by this recorder's policy."""
+        return BoundaryTrace(self._policy.max_boundaries)
+
+    def captures(
+        self,
+        *,
+        task: str,
+        outcome: AttemptOutcome | str,
+        attempt: int,
+        max_attempts: int,
+        job_id: int,
+    ) -> bool:
+        """Whether the policy arms for this attempt. See `AttemptPolicy.captures`."""
+        return self._policy.captures(
+            task=task,
+            outcome=AttemptOutcome(outcome),
+            attempt=attempt,
+            max_attempts=max_attempts,
+            job_id=job_id,
+        )
+
+    def write(self, record: AttemptRecord, trace: BoundaryTrace | None = None) -> str | None:
+        """Write one attempt recording, or refuse it and say why in a counter.
+
+        Returns the path written, or `None` when nothing was. Never raises: a
+        recorder that can take a worker down with it is worse than no recorder,
+        and the attempt it is describing has already happened.
+        """
+        import os
+
+        from ._flight_schema import SCHEMA_VERSION, MetadataImage
+        from ._recording_format import WFR1Writer
+
+        if trace is not None and trace.overflowed:
+            self.refused_oversize += 1
+            return None
+        image = self._image
+        if image is None:
+            image = MetadataImage(SCHEMA_VERSION, *([()] * 11))
+        path = os.path.join(
+            self._directory, f"{record.queue}-{record.job_id}-{record.attempt}.wfr1"
+        )
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                writer = WFR1Writer(handle, image)  # ty: ignore[invalid-argument-type]
+                writer.write_attempt(record)
+                writer.close()
+        except OSError:
+            # Narrow on purpose: a full disk or a missing directory is the
+            # failure this survives. Anything else is a defect in the encoder
+            # and must not be swallowed into a counter nobody reads.
+            self.errors += 1
+            return None
+        self.written += 1
+        return path
+
+
+def sample_value(task: str, job_id: int) -> float:
+    """A stable value in [0, 1) for one (task, job) pair.
+
+    A checksum rather than a hash: `hash()` is salted per process, so two
+    workers would disagree about the same row and a re-run would disagree with
+    the run it is reproducing.
+    """
+    digest = zlib.crc32(f"{task}:{job_id}".encode()) & 0xFFFFFFFF
+    return digest / 0x100000000
 
 
 def _require(condition: bool, message: str) -> None:

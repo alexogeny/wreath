@@ -81,6 +81,7 @@ from ._passes.keyset import Key, PassDeclarationError
 from ._passes.ledger import Hole, PendingFact, PublishedFact
 from ._passes.pace import DutyCycle
 from ._passes.progress import Denominator, Estimated, Exact, Keyspace, Progress
+from .telemetry import trace_id_of as _trace_id
 
 
 def _seconds(value: Any, *, what: str, allow_zero: bool = False) -> float:
@@ -674,6 +675,22 @@ class PassStatus:
     #: seeded. Present *before* verification, which is the point: a migration
     #: has to tell an unguarded column from one still being converted.
     guards: str | None = None
+    #: The traceparent of the drive that started this cycle, or `None`. A pass
+    #: driven only by `cron` has no originating request and carries none --
+    #: nothing is minted, so this being absent means "nobody named a cause",
+    #: never "the cause was lost". See `_passes.ledger.Ledger.seed`.
+    trace_context: str | None = None
+
+    @property
+    def trace_id(self) -> str | None:
+        """The 32-hex trace id out of the stored `traceparent`, or `None`.
+
+        What an operator pastes into a tracing UI, and what `wreath doctor
+        trace` matches on. A malformed value reads as absent rather than
+        raising: this is a forensic surface, and it must survive whatever is in
+        the row.
+        """
+        return _trace_id(self.trace_context)
 
     @property
     def state(self) -> str:
@@ -723,6 +740,8 @@ class PassStatus:
             "holes_open": self.holes_open,
             "pending": self.pending,
             "gate_barred": self.gate_barred,
+            "trace_context": self.trace_context,
+            "trace_id": self.trace_id,
             **self.progress.as_dict(),
         }
 
@@ -740,6 +759,7 @@ def _status_from(row: Any, keys: tuple[Key, ...] = ()) -> PassStatus:
         holes_open=row.holes_open,
         pending=len(row.pending or ()),
         guards=row.guards,
+        trace_context=row.trace_context,
     )
 
 

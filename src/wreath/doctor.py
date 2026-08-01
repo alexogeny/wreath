@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging as _stdlib_logging
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from ._nplusone import (
@@ -50,8 +51,13 @@ __all__ = [
     "NPlusOneGuard",
     "Origin",
     "Repetition",
+    "TraceLookup",
+    "TracedRequest",
+    "TracedWork",
     "diagnose_n_plus_one",
     "find_n_plus_one",
+    "find_requests_with_trace",
+    "find_work_with_trace",
 ]
 
 _STATE_TOKEN = "_wreath_nplusone_token"
@@ -77,6 +83,301 @@ async def diagnose_n_plus_one(
     return find_n_plus_one(
         timeline.get("traces", ()), threshold=threshold, routes=routes, models=models
     )
+
+
+# --- what one trace caused ---------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class TracedWork:
+    """One durable unit of work carrying a trace id."""
+
+    #: `job` | `message` | `workflow` | `pass`.
+    kind: str
+    #: How that subsystem names this unit: a job id, a message id, an instance
+    #: key, a pass name.
+    identifier: str
+    #: What it is: the task, the channel, the workflow, the pass name.
+    label: str
+    #: The row's own state word. `passes` calls its column `phase`, and this is
+    #: that value rather than a translation of it -- an operator reading this
+    #: report goes on to `wreath passes status`, where the same word appears.
+    state: str
+    tenant: str
+    #: The row's `last_error`, or `None` when it has none. Workflow instances
+    #: record their failure per step rather than on the instance, so they carry
+    #: nothing here.
+    detail: str | None
+    #: The whole stored `traceparent`, so the span id survives to the report.
+    traceparent: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "identifier": self.identifier,
+            "label": self.label,
+            "state": self.state,
+            "tenant": self.tenant,
+            "detail": self.detail,
+            "traceparent": self.traceparent,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TracedRequest:
+    """One recorded request carrying a trace id, out of the Flight Recorder."""
+
+    request_id: int
+    route_id: int
+    status: int
+    duration_us: int
+    is_failure: bool
+    error_class: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "route_id": self.route_id,
+            "status": self.status,
+            "duration_us": self.duration_us,
+            "is_failure": self.is_failure,
+            "error_class": self.error_class,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TraceLookup:
+    """Everything one trace id was found on, and everywhere it could not be looked for.
+
+    `omitted` is the load-bearing half. A forensic answer that silently leaves a
+    source out is worse than no answer: the reader concludes "nothing else
+    carries this trace" from a search that never ran. Every source this could
+    not read -- a table that is not there, a schema still on version 1, a
+    recorder nobody pointed it at -- is named here in the same sentence as the
+    findings.
+    """
+
+    trace_id: str
+    work: tuple[TracedWork, ...] = ()
+    requests: tuple[TracedRequest, ...] = ()
+    omitted: tuple[str, ...] = field(default_factory=tuple)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "trace_id": self.trace_id,
+            "work": [item.as_dict() for item in self.work],
+            "requests": [item.as_dict() for item in self.requests],
+            "omitted": list(self.omitted),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _Source:
+    """One durable table this lookup reads, and how to name what it finds.
+
+    Kept as data rather than four near-identical coroutines: every source asks
+    the same question of a different table, and all that varies is which column
+    is the identity, which is the label, and which holds the state.
+    """
+
+    kind: str
+    #: The plural an operator reads in the `omitted` list. Spelled out rather
+    #: than `kind + "s"`, which produced "passs".
+    plural: str
+    relation: str
+    #: The column that identifies a row: a job id, a message id, a pass name.
+    key: str
+    #: The column that says what the row *is*: the task, the channel, the pass.
+    label: str
+    #: The column holding its state. `passes` calls it `phase`.
+    state: str
+    #: The column holding whatever went wrong. Every source has one; there is no
+    #: `None` case, and a mutant sweep confirmed the branch that allowed for one
+    #: could never be reached.
+    detail: str = "last_error"
+
+
+_SOURCES: tuple[_Source, ...] = (
+    _Source("job", "jobs", "jobs", "id", "task", "state"),
+    _Source("message", "durable messages", "messages", "id", "channel", "state"),
+    _Source("pass", "passes", "passes", "name", "name", "phase"),
+)
+
+
+async def _relation_columns(connection: Any, schema: str, relation: str) -> set[str]:
+    """Which columns a relation has, or an empty set when it is not there.
+
+    One catalog read answers both questions this lookup needs -- does the table
+    exist, and is it at the version that has `trace_context` -- and answering
+    them together is what lets the caller say *why* a source was omitted
+    instead of reporting an empty result for two different reasons.
+    """
+    rows = await connection.fetch(
+        # `attname::text` because `name` comes back as *bytes*, not `str`: the
+        # set would then contain `b'trace_context'`, every membership test would
+        # answer no, and the lookup would report "this database is still on the
+        # version before propagation" against a database that is not. It said
+        # exactly that until a live test caught it.
+        "SELECT a.attname::text AS attname FROM pg_attribute a "
+        "JOIN pg_class k ON k.oid = a.attrelid "
+        "JOIN pg_namespace n ON n.oid = k.relnamespace "
+        # `::text` on the parameters for the mirror-image reason: `nspname` and
+        # `relname` are `name`, which the driver cannot *encode*.
+        # `wreath-sql-lint` SQL002.
+        "WHERE n.nspname = $1::text AND k.relname = $2::text "
+        "AND a.attnum > 0 AND NOT a.attisdropped",
+        schema,
+        relation,
+    )
+    return {row["attname"] for row in rows or ()}
+
+
+async def find_work_with_trace(
+    connection: Any,
+    trace_id: str,
+    *,
+    schema: str = "wreath",
+    workflow_schema: str = "wreath_system",
+    workflow_table: str = "workflow_steps",
+) -> TraceLookup:
+    """Every durable row carrying `trace_id`, plus what could not be searched.
+
+    The forensic half of cross-seam causality: given a trace id off a log line,
+    a dashboard or a failed job, say which jobs, durable messages, workflow
+    instances and chunked passes that request caused. All four carry the
+    enqueuing request's `traceparent` on their own durable row, which is what
+    makes this one read per table rather than a join nobody can write.
+
+    Matched with `split_part(trace_context, '-', 2)` rather than a `LIKE`: the
+    stored value is a whole `traceparent`, the trace id is its second field, and
+    an exact comparison has no wildcard to escape and no way to match a span id
+    that happens to share a prefix.
+
+    **What this does not answer.** It reads the database, so it finds durable
+    work and nothing else. The *request* lives in the Flight Recorder's ring --
+    `find_requests_with_trace` reads that, over the Inspector socket, and only
+    as far back as the ring goes. Ephemeral bus messages carry no context at
+    all and never appear here; that is a deliberate deferral rather than a gap
+    in this function (see `wreath.messaging.MessageBus.publish`).
+    """
+    work: list[TracedWork] = []
+    omitted: list[str] = []
+    for source in _SOURCES:
+        columns = await _relation_columns(connection, schema, source.relation)
+        if not columns:
+            omitted.append(
+                f'{source.plural}: "{schema}".{source.relation} does not exist '
+                "on this database"
+            )
+            continue
+        if "trace_context" not in columns:
+            omitted.append(
+                f'{source.plural}: "{schema}".{source.relation} has no '
+                "trace_context column, so this database is still on the schema "
+                "version before propagation; apply the pending step and future "
+                "work will be found"
+            )
+            continue
+        # `dict.fromkeys` rather than a set: `passes` names the same column as
+        # both its key and its label, and the projection has to stay ordered and
+        # de-duplicated.
+        wanted = dict.fromkeys(
+            (
+                source.key, source.label, source.state, "tenant",
+                "trace_context", source.detail,
+            )
+        )
+        rows = await connection.fetch(
+            f'SELECT {", ".join(wanted)} FROM "{schema}".{source.relation} '
+            "WHERE split_part(trace_context, '-', 2) = $1 "
+            f"ORDER BY {source.key}",
+            trace_id,
+        )
+        for row in rows:
+            work.append(
+                TracedWork(
+                    kind=source.kind,
+                    identifier=str(row[source.key]),
+                    label=str(row[source.label]),
+                    state=str(row[source.state]),
+                    tenant=str(row["tenant"]),
+                    detail=row[source.detail],
+                    traceparent=str(row["trace_context"]),
+                )
+            )
+    instances = f"{workflow_table}_instances"
+    columns = await _relation_columns(connection, workflow_schema, instances)
+    if not columns:
+        omitted.append(
+            f'workflows: "{workflow_schema}".{instances} does not exist on this '
+            "database"
+        )
+    elif "trace_context" not in columns:
+        omitted.append(
+            f'workflows: "{workflow_schema}".{instances} has no trace_context column'
+        )
+    else:
+        rows = await connection.fetch(
+            f'SELECT key, workflow, state, tenant, trace_context '
+            f'FROM "{workflow_schema}".{instances} '
+            "WHERE split_part(trace_context, '-', 2) = $1 ORDER BY key",
+            trace_id,
+        )
+        for row in rows:
+            work.append(
+                TracedWork(
+                    kind="workflow",
+                    identifier=str(row["key"]),
+                    label=str(row["workflow"]),
+                    state=str(row["state"]),
+                    tenant=str(row["tenant"]),
+                    detail=None,
+                    traceparent=str(row["trace_context"]),
+                )
+            )
+    omitted.append(
+        "ephemeral bus messages: they carry no trace context, because doing so "
+        "would mean a versioned envelope around a live wire format -- deferred "
+        "deliberately, see docs/reference/roadmap.md"
+    )
+    return TraceLookup(trace_id=trace_id, work=tuple(work), omitted=tuple(omitted))
+
+
+async def find_requests_with_trace(
+    client: Any, trace_id: str, *, limit: int = 256
+) -> tuple[TracedRequest, ...]:
+    """Recorded requests carrying `trace_id`, read over the Inspector socket.
+
+    The other end of the causal chain from `find_work_with_trace`: that says
+    what a request caused, this says which request it was. Bounded by the
+    recorder's ring, so a trace older than `limit` recent requests is simply not
+    there any more -- which is a property of the ring, not of this lookup, and
+    is why the two are separate functions with separate failure modes.
+
+    Requires the server to be recording with correlation on; an unsampled
+    request carries no trace id at all and cannot be found by one.
+    """
+    timeline = await client.timeline(limit=limit)
+    found = []
+    for trace in timeline.get("traces", ()):
+        if trace.get("trace_id") != trace_id:
+            continue
+        found.append(
+            # `.get` with a default rather than `x or 0`: the Inspector's own
+            # `_trace_payload` always writes these keys, but this is a *protocol*
+            # boundary and a peer on another build is the case worth surviving.
+            # A dict default is not a branch, so there is nothing here that can
+            # go untested.
+            TracedRequest(
+                request_id=int(trace.get("request_id", 0)),
+                route_id=int(trace.get("route_id", 0)),
+                status=int(trace.get("status", 0)),
+                duration_us=int(trace.get("duration_us", 0)),
+                is_failure=bool(trace.get("is_failure")),
+                error_class=int(trace.get("error_class", 0)),
+            )
+        )
+    return tuple(found)
 
 
 class NPlusOneGuard:

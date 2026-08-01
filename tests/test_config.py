@@ -37,6 +37,68 @@ def test_dotenv_parser_is_literal_and_strict() -> None:
         parse_dotenv(b"export NAME=wreath\n")
     with pytest.raises(ValueError, match="line 1"):
         parse_dotenv(b"NO_EQUALS\n")
+    # A whole-line comment too. This dialect has no comment syntax, which is
+    # the clause the next test exists to keep honest.
+    with pytest.raises(ValueError, match="line 1"):
+        parse_dotenv(b"# a comment\nNAME=wreath\n")
+
+
+def test_the_shipped_dotenv_template_can_actually_be_copied() -> None:
+    """`example/.env.example` says "copy me", so copying it must produce a
+    loadable `.env`.
+
+    It did not: the template opened with two comment lines explaining that the
+    parser is strict, and the parser rejected the first of them --
+    `ValueError: invalid dotenv entry on line 1`. A template nobody can use is
+    a documentation defect whatever the parser does, and this dialect has no
+    comment syntax to loosen its way out of. Parsed here rather than eyeballed,
+    because the next person to annotate the file will find out from this test
+    instead of from a reader who copied it.
+    """
+    template = Path(__file__).resolve().parents[1] / "example" / ".env.example"
+    values = parse_dotenv(template.read_bytes())
+    assert "CAMERA_TRAP_DSN" in values
+    assert values["CAMERA_TRAP_MAX_WINDOW_DAYS"] == "90"
+
+
+def test_the_repositorys_own_dotenv_template_can_be_copied_too() -> None:
+    """The same defect, one directory up, and it outlived the first fix.
+
+    The root `.env.example` said "Copy to `.env` for local use" and was fifty
+    lines of `#`, so copying it raised on line 1 — while
+    `docs/getting-started/deployment.md` recommended an `.env.example` that was
+    "documented and committed", which this dialect makes impossible. The file
+    is what changed, not the parser: the dialect is a shipped public contract
+    implemented twice under a byte-for-byte parity requirement, and the prose
+    moved to the guides.
+    """
+    template = Path(__file__).resolve().parents[1] / ".env.example"
+    values = parse_dotenv(template.read_bytes())
+    assert values, "the template must carry keys, not just parse"
+    assert set(values.values()) == {""}, (
+        "every value is empty on purpose: an unset or empty variable keeps the "
+        "default, so copying this file changes nothing until somebody fills it "
+        "in -- and it cannot pin today's defaults into tomorrow's deployment"
+    )
+
+
+def test_the_template_names_exactly_the_server_variables_that_exist() -> None:
+    """The file and the registry cannot drift, because one of them has drifted.
+
+    `WREATH_PREARM` was in `_SERVER_ENV_REGISTRY` and missing from the template,
+    which is the failure mode a hand-maintained mirror always has: it is wrong
+    silently, and the reader has no way to tell.
+    """
+    from wreath.server import _SERVER_ENV_REGISTRY
+
+    template = Path(__file__).resolve().parents[1] / ".env.example"
+    listed = {key for key in parse_dotenv(template.read_bytes()) if key.startswith("WREATH_")}
+    declared = {spec.var for spec in _SERVER_ENV_REGISTRY}
+    # The build-time and runtime toggles are read outside `ServerConfig`, so
+    # they are named rather than derived -- there is no registry to read them
+    # from, and inventing one to satisfy a test would be the tail wagging.
+    outside = {"WREATH_PURE", "WREATH_BUILD_HTTP3", "WREATH_NATIVE_PROFILE"}
+    assert listed - outside == declared
 
 
 def test_explicit_dotenv_path_searches_parents(tmp_path: Path) -> None:

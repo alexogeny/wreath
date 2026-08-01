@@ -193,7 +193,48 @@ def component(schema: str) -> Any:
         name="passes",
         schema=schema,
         relations=("passes", "pass_holes", "pass_rewrites"),
-        steps=(Step(version=1, statements=statements(schema)),),
+        steps=(
+            Step(version=1, statements=statements(schema)),
+            # Version 1 is left exactly as it shipped. Rewriting its `CREATE
+            # TABLE` would change what an already-bootstrapped database was told
+            # it had -- `wreath.schema` records the version, not the DDL -- so a
+            # cluster already at 1 would never see the column. Additive, so a
+            # worker on the previous build keeps running against it.
+            Step(
+                version=2,
+                statements=(
+                    f"ALTER TABLE {table_name(schema)} "
+                    "ADD COLUMN IF NOT EXISTS trace_context text",
+                ),
+            ),
+        ),
+    )
+
+
+async def has_trace_column(executor: Any, *, schema: str) -> bool:
+    """Whether this database's ledger table has the version-2 column.
+
+    A deployment whose role cannot `CREATE SCHEMA` applies the DDL by hand, so
+    there is always a window in which this build is newer than the table it
+    meets. The shape of the table is therefore a precondition callers *check*
+    rather than an error they catch: a broad `except` around the seed would
+    swallow a revoked grant and a driver fault alongside the one case it means
+    to survive, and the seed runs inside the shift, where poisoning the
+    connection would take the walk with it.
+    """
+    return bool(
+        await executor.fetchval(
+            "SELECT true FROM pg_attribute a "
+            "JOIN pg_class k ON k.oid = a.attrelid "
+            "JOIN pg_namespace n ON n.oid = k.relnamespace "
+            # `::text` because `nspname` is `name`: without the cast PostgreSQL
+            # infers the parameter as `name` too, which the driver cannot
+            # encode. `wreath-sql-lint` SQL002.
+            "WHERE n.nspname = $1::text AND k.relname = 'passes' "
+            "AND a.attname = 'trace_context' "
+            "AND a.attnum > 0 AND NOT a.attisdropped",
+            schema,
+        )
     )
 
 
@@ -266,6 +307,10 @@ class LedgerRow:
     #: with no `verified_at` filter, because a *finished* re-encode is the
     #: dangerous case rather than the safe one.
     rewrites: str | None = None
+    #: The traceparent of the drive that started this cycle, or `None` when
+    #: nothing traced has ever driven it. See `Ledger.seed` for what "started"
+    #: means and why nothing is minted when there is no such drive.
+    trace_context: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,6 +397,10 @@ def row_from_record(record: Any) -> LedgerRow:
         last_error=field("last_error", 25),
         now=field("now", 26),
         holes_open=int(field("holes_open", 27) or 0),
+        # Absent from the record when the column is not there, so a build newer
+        # than its schema reads `None` rather than raising a KeyError from a
+        # stack frame that says nothing useful.
+        trace_context=field("trace_context", 28),
     )
 
 
@@ -372,7 +421,9 @@ def hole_from_record(record: Any) -> Hole:
 class Ledger:
     """The statements one pass issues against its own ledger row."""
 
-    __slots__ = ("_holes", "_name", "_rewrites", "_schema", "_table", "_tenant")
+    __slots__ = (
+        "_holes", "_name", "_rewrites", "_schema", "_table", "_tenant", "_trace_column",
+    )
 
     def __init__(self, *, schema: str, name: str, tenant: str = "") -> None:
         self._schema = schema
@@ -381,6 +432,18 @@ class Ledger:
         self._table = table_name(schema)
         self._holes = holes_table_name(schema)
         self._rewrites = rewrites_table_name(schema)
+        #: Tri-state: None until probed, then whether this database's ledger has
+        #: the version-2 `trace_context` column. Cached because a pass reads its
+        #: row several times a shift and runs for days -- `wreath.jobs`'s first
+        #: draft put the same lookup on the claim path and a robustness double
+        #: caught it immediately.
+        self._trace_column: bool | None = None
+
+    async def carries_trace(self, executor: Any) -> bool:
+        """Whether the trace column is there, asked once per ledger and cached."""
+        if self._trace_column is None:
+            self._trace_column = await has_trace_column(executor, schema=self._schema)
+        return self._trace_column
 
     @property
     def table(self) -> str:
@@ -400,6 +463,7 @@ class Ledger:
         chunk_limit: int,
         guards: str | None = None,
         rewrites: str | None = None,
+        trace: str | None = None,
     ) -> None:
         """Create this pass's row if it is not already there. Idempotent.
 
@@ -423,6 +487,31 @@ class Ledger:
         *before* the ledger row so a crash between the two leaves the safe
         residue -- a record with no pass reads as "these values were changed",
         which is true, where the reverse would read as "they were not".
+
+        *trace* is the traceparent of the drive running this shift, and the
+        rule for it is **capture, never mint**.
+
+        `COALESCE(existing, incoming)`, so the first drive that *has* a trace
+        names this cycle's trace and every later shift runs under it -- the
+        instance owns the trace, exactly as a workflow instance row does.
+        Later drives do not replace it, or a backfill already three days in
+        would be re-attributed to whoever last poked it.
+
+        A pass driven only by `cron` has no originating request and stores SQL
+        `NULL`, not a minted id and not `''`. Two of plan 01's own non-goals
+        forbid minting one: wreath propagates context rather than generating
+        spans, and it carries the sampling decision rather than re-deciding it
+        -- a minted traceparent has to choose a flag, and neither choice is
+        defensible. `-01` forces every backend in the path to retain a trace
+        that may run for days; `-00` produces an id that is stored, printed by
+        `wreath passes status`, and collected by nothing, which is an answer
+        that looks like an answer. The empty string is refused for the reason
+        `enqueue` refuses it: `WHERE trace_context IS NOT NULL` would then match
+        every untraced pass.
+
+        The trace is re-captured at the cycle boundary rather than carried over
+        -- see `begin_cycle` -- so a recurring pass's trace lives one cycle
+        instead of the process's lifetime.
         """
         if rewrites is not None:
             await executor.execute(
@@ -432,6 +521,24 @@ class Ledger:
                 self._name,
                 self._tenant,
             )
+        if await self.carries_trace(executor):
+            await executor.execute(
+                f"INSERT INTO {self._table} "
+                "(name, tenant, phase, chunk_limit, started_at, guards, rewrites, "
+                "trace_context) "
+                "VALUES ($1, $2, 'walking', $3, clock_timestamp(), $4, $5, $6) "
+                "ON CONFLICT (name, tenant) DO UPDATE SET guards = EXCLUDED.guards, "
+                "rewrites = COALESCE(EXCLUDED.rewrites, "
+                f"{self._table}.rewrites), trace_context = COALESCE("
+                f"{self._table}.trace_context, EXCLUDED.trace_context)",
+                self._name,
+                self._tenant,
+                int(chunk_limit),
+                guards,
+                rewrites,
+                trace,
+            )
+            return
         await executor.execute(
             f"INSERT INTO {self._table} "
             "(name, tenant, phase, chunk_limit, started_at, guards, rewrites) "
@@ -447,10 +554,13 @@ class Ledger:
         )
 
     async def read(self, executor: Any) -> LedgerRow | None:
+        # Selected only where the column exists, so a build newer than its
+        # schema walks untraced instead of failing on an unknown column.
+        trace = ", trace_context" if await self.carries_trace(executor) else ""
         record = await executor.fetchrow(
             f"SELECT {_COLUMNS}, clock_timestamp() AS now, "
             f"(SELECT count(*) FROM {self._holes} h WHERE h.name = p.name "
-            "AND h.tenant = p.tenant) AS holes_open "
+            f"AND h.tenant = p.tenant) AS holes_open{trace} "
             f"FROM {self._table} p WHERE name = $1 AND tenant = $2",
             self._name,
             self._tenant,
@@ -669,7 +779,7 @@ class Ledger:
             (fact if fact is not None else detail)[:2000],
         )
 
-    async def begin_cycle(self, executor: Any) -> bool:
+    async def begin_cycle(self, executor: Any, *, trace: str | None = None) -> bool:
         """Rewind a recurring pass to the start of a fresh cycle.
 
         A recurring pass has no completion; a *cycle* completes, the cursor
@@ -677,7 +787,26 @@ class Ledger:
         Rows that expired behind the cursor while the last cycle ran are found by
         this one, which is the property that makes a re-derived frontier sound
         where a fixed ceiling would need the key to be monotone.
+
+        The trace is **replaced**, not carried over, and that is the retention
+        bound on this whole feature. A recurring pass runs for the life of the
+        deployment, so keeping the first cycle's traceparent would produce a
+        trace that never ends -- which no backend assembles, and which a
+        forensic tool would report as one causal chain covering months. The
+        cycle is the instance, so the cycle boundary is where the trace
+        restarts: this cycle belongs to the drive that began it, or to nothing.
         """
+        if await self.carries_trace(executor):
+            tag = await executor.execute(
+                f"UPDATE {self._table} SET cursor = NULL, phase = 'walking', "
+                "cycle_started = clock_timestamp(), trace_context = $3 "
+                "WHERE name = $1 AND tenant = $2 "
+                "AND phase IN ('walking', 'done', 'verified')",
+                self._name,
+                self._tenant,
+                trace,
+            )
+            return _affected(tag) == 1
         tag = await executor.execute(
             f"UPDATE {self._table} SET cursor = NULL, phase = 'walking', "
             "cycle_started = clock_timestamp() "
@@ -1020,9 +1149,13 @@ async def read_all(executor: Any, *, schema: str, name: str | None = None) -> li
     """Every pass in one schema's ledger, or one of them by name."""
     table = table_name(schema)
     holes = holes_table_name(schema)
+    # Probed per call rather than cached: this is the CLI's read, issued once
+    # per invocation against a database it has just connected to, so there is no
+    # steady state to keep a lookup out of.
+    trace = ", trace_context" if await has_trace_column(executor, schema=schema) else ""
     extra = (
         f"clock_timestamp() AS now, (SELECT count(*) FROM {holes} h "
-        "WHERE h.name = p.name AND h.tenant = p.tenant) AS holes_open"
+        f"WHERE h.name = p.name AND h.tenant = p.tenant) AS holes_open{trace}"
     )
     if name is None:
         records = await executor.fetch(
@@ -1078,6 +1211,7 @@ __all__ = [
     "Hole",
     "Ledger",
     "LedgerRow",
+    "has_trace_column",
     "hole_from_record",
     "holes_table_name",
     "read_all",

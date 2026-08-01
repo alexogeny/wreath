@@ -21,6 +21,7 @@ caught one accepted-then-worthless optimization.
 | Proving behaviour rather than green tests | [`docs/cookbook/agents/verify-a-change.md`](docs/cookbook/agents/verify-a-change.md) |
 | The docs a new public module must ship with | [`docs/cookbook/agents/documenting-a-module.md`](docs/cookbook/agents/documenting-a-module.md) |
 | What is deliberately not shipped yet | `docs/reference/roadmap.md` |
+| Traps where the tool says "clean" and nothing ran | [`AGENTS.md`](AGENTS.md#traps-that-have-already-cost-someone-a-day) — read before a native, mutant, or worktree session |
 
 **The public API is literal.** Each feature lives in the module its name
 implies: `wreath.pagination` is `src/wreath/pagination.py`, `wreath.jobs` is

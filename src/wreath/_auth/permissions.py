@@ -61,11 +61,29 @@ from .requirements import (
 
 __all__ = [
     "PERMISSION_CHANNEL",
+    "SURFACE_ACTIONS",
     "TYPE_LEVEL_ID",
     "declared_actions",
     "permission_document",
     "permissions_router",
 ]
+
+#: How a route says "I front declarations of my own".
+#:
+#: REST and gRPC need nothing here: a gRPC method *is* a route, so its
+#: `action=` is already on the route's requirement and the route table is
+#: already the whole vocabulary. MCP and GraphQL are the other shape -- **one**
+#: route fronting many declarations, every tool and every field -- and that
+#: route's own requirement says nothing about them.
+#:
+#: So an endpoint may carry this attribute, or be a bound method of an object
+#: that does, and its value is a callable returning the same
+#: `{resource type: actions}` mapping `declared_actions` builds. A *callable*
+#: rather than a mapping, deliberately: the point of this whole module is that
+#: there is no second list, and a snapshot taken at mount time would be one --
+#: it would miss every tool declared after the server was mounted, which is the
+#: order every MCP application is written in.
+SURFACE_ACTIONS = "__wreath_declared_actions__"
 
 #: Default bus channel carrying "this manifest moved" between workers. A valid
 #: SQL identifier, because `wreath.messaging` validates channel names as one.
@@ -102,8 +120,20 @@ DEFAULT_MAX_CONCURRENCY = 8
 def declared_actions(app: Any) -> dict[str, tuple[str, ...]]:
     """Resource type -> the actions this application enforces on it.
 
-    Read off the routes' `@authorize(action=...)` declarations, so it cannot
-    disagree with what is enforced. A route with no policy contributes nothing.
+    Read off the declarations themselves, so it cannot disagree with what is
+    enforced. All four protocols wreath serves land here, and the differences
+    between them are only in where the declaration sits:
+
+    * **REST** declares `@authorize(action=...)` on a route handler.
+    * **gRPC** declares `action=` on a method, which *is* a route -- so it
+      arrives through the same requirement, with no second path.
+    * **MCP** declares `action=` on a tool, a resource or a prompt, and its
+      endpoint advertises them through `SURFACE_ACTIONS`.
+    * **GraphQL** declares a policy per field, and its endpoint advertises the
+      schema's types the same way.
+
+    A surface with nothing enforcing it contributes nothing, exactly as a route
+    with no policy does.
     """
     found: dict[str, set[str]] = {}
     for definition in getattr(app, "_routes", ()):
@@ -121,6 +151,14 @@ def declared_actions(app: Any) -> dict[str, tuple[str, ...]]:
             found.setdefault(resource_type if separator else "", set()).add(
                 policy.action
             )
+        # `__self__` because an MCP endpoint is a bound method: the declarations
+        # belong to the server object, and an attribute set on a bound method
+        # would be discarded the moment that temporary object is.
+        holder = getattr(endpoint, "__self__", endpoint)
+        reader = getattr(holder, SURFACE_ACTIONS, None)
+        if callable(reader):
+            for resource_type, actions in reader().items():
+                found.setdefault(resource_type, set()).update(actions)
     return {name: tuple(sorted(actions)) for name, actions in sorted(found.items())}
 
 

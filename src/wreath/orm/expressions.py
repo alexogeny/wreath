@@ -38,6 +38,27 @@ NOT_IN = "NOT IN"
 # ordinary `left <op> right` and only widen the operator allowlist.
 CONTAINS = "@>"
 CONTAINED_BY = "<@"
+#: Geospatial tokens. Each is a `BinaryExpr` operator rather than a node type of
+#: its own, for the reason `BinaryExpr` already documents for the distance and
+#: text-search nodes: every walker in the compiler dispatches on that type and
+#: recurses through `left`/`right`, so a new token costs three renderer cases and
+#: no change in either language. `point` and `box` are function calls the
+#: renderer builds from both operands, as `ts_rank` already is.
+GEO_POINT = "point"
+GEO_BOX = "box"
+GEO_DISTANCE = "geo_distance"
+#: PostGIS tier-2 tokens: the second rendering `within()` and `nearest()` gain
+#: for a `Geography` column, and the containment tier 1 has no answer for.
+#:
+#: `GEO_KNN` is a token of its own rather than pgvector's `<->`, and the reason
+#: is the refusal rather than the SQL -- both render the same two characters. An
+#: unbounded `ORDER BY embedding <-> $1` is allowed today for vector search and
+#: must stay allowed, while an unbounded geography KNN is refused, so the guard
+#: has to be able to tell them apart *after* the node is built. A shared token
+#: would make the two indistinguishable at exactly that point.
+GEO_KNN = "geo_knn"
+GEO_DWITHIN = "geo_dwithin"
+GEO_COVERS = "geo_covers"
 HAS_KEY = "?"
 HAS_ANY = "?|"
 HAS_ALL = "?&"
@@ -71,8 +92,22 @@ DISTANCE_OPERATORS = frozenset(
         L1_DISTANCE,
         HAMMING_DISTANCE,
         JACCARD_DISTANCE,
+        # Great-circle metres. A distance like the pgvector ones, and ordered by
+        # the same way -- smallest first, with a ceiling, which is the only
+        # shape an index answers.
+        GEO_DISTANCE,
+        # Spheroidal metres, measured by PostGIS rather than by the renderer.
+        # In here for the same reason: `where()` refuses a distance on its own,
+        # and tier 2 earns that refusal by being one rather than by declaring a
+        # second copy of it.
+        GEO_KNN,
     }
 )
+#: Orderings that need a `LIMIT`. Both are proximity searches, which an index
+#: answers only as `ORDER BY ... LIMIT n`; every other distance in
+#: `DISTANCE_OPERATORS` may be ordered by without one, and pgvector's has been
+#: able to since it shipped.
+BOUNDED_ORDER_OPERATORS = frozenset({GEO_DISTANCE, GEO_KNN})
 
 # Full-text search. `@@` answers a boolean and `ts_rank` answers a relevance
 # score, and both take a *tsquery* built by a parser function on the right-hand
@@ -471,6 +506,200 @@ class ColumnExpr(Expression):
             )
         return pg_type.element
 
+    def _require_point(self, method: str) -> None:
+        from .types import Point
+
+        if self.column.pg_type is not Point:
+            raise DeclarationError(
+                f".{method}() requires a Point column, not {self.column.pg_type.name}"
+            )
+
+    def _geography(self) -> Any:
+        """The column's PostGIS `geography` type, or None for a tier-1 column.
+
+        The dispatch point for the whole second rendering. It asks the *column*
+        what it is rather than asking the caller which tier they meant, which is
+        what lets a model move from `Point` to `Geography` without its queries
+        changing -- the promise `Geography`'s own docstring already makes.
+        """
+        from .types import ExtensionType
+
+        pg_type = self.column.pg_type
+        if isinstance(pg_type, ExtensionType) and pg_type.type_name == "geography":
+            return pg_type
+        return None
+
+    def covered_by(self, region: Any) -> BinaryExpr:
+        """`ST_Covers(ST_GeogFromText($1), self)` — rows inside a region.
+
+        The question tier 1 structurally cannot answer: a catchment, a council
+        boundary, an exclusion zone. `region` is a `wreath.geospatial.Polygon`,
+        which is built from `Coordinate`s and therefore cannot arrive with its
+        longitude and latitude the wrong way round.
+
+        `ST_Covers` rather than `ST_Contains`, and not as a preference:
+        **`ST_Contains(geography, geography)` does not exist**, so a query
+        reaching for it fails at the database. `ST_Covers` also answers "yes"
+        for a point exactly on the boundary, which is the reading a catchment
+        wants -- an address on the line is in the district.
+
+        The polygon travels out as `text` and PostGIS lifts it, so there is no
+        bind-only column type and no OID to resolve. Storing polygons is a
+        different feature; this one only queries against them.
+
+        Args:
+            region: The `Polygon` to test containment in.
+
+        Returns:
+            The predicate, ready for `.where()`.
+
+        Raises:
+            DeclarationError: This is not a `Geography` column.
+            TypeError: `region` is not a `Polygon`.
+        """
+        from ..geospatial import Polygon
+        from .types import Text
+
+        if self._geography() is None:
+            raise DeclarationError(
+                f".covered_by() requires a Geography column, not "
+                f"{self.column.pg_type.name}; containment against a shape is the "
+                "operation tier 1 does not have, because PostgreSQL's own "
+                "geometry has no polygon operator a GiST index answers -- declare "
+                "the column as Geography() and CREATE EXTENSION postgis"
+            )
+        if not isinstance(region, Polygon):
+            raise TypeError(
+                f"covered_by() takes a wreath.geospatial.Polygon, got "
+                f"{type(region).__name__}; a BoundingBox is a rectangle in "
+                "degrees and .within() already covers a circle, so a region with "
+                "a shape is the only thing this adds"
+            )
+        return BinaryExpr(GEO_COVERS, self, _bind_as(region.wkt, Text))
+
+    def within(self, centre: Any, metres: Any) -> Predicate:
+        """Rows whose point is within `metres` of `centre`, great-circle.
+
+        On a **`Geography`** column this is `ST_DWithin(col, $1, $2)`, which
+        PostGIS plans as an `&&` index condition with the exact spheroidal test
+        filtered over what survives -- literally the shape the tier-1 rendering
+        below hand-builds, which is why both are spelled `within()`.
+
+        On a `Point` column it renders as two things ANDed, and both halves are
+        load-bearing:
+
+        * `self <@ box(point(...), point(...))` -- the degree-aligned bounding
+          box, which is the only form a GiST `point_ops` index can answer, and
+          therefore the only reason this does not read the whole table.
+        * the exact haversine distance, compared against `metres`.
+
+        The box is a *superset* of the circle -- its corners reach about 40%
+        further than its edges -- so dropping the second half would return
+        rows that are not within the radius. Dropping the first half would be
+        correct and would scan everything. Neither is optional.
+
+        A circle crossing the antimeridian produces two boxes, ORed, because
+        `<@` has no notion of a wrapped edge; one reaching a pole produces a
+        box spanning every longitude. `wreath.geospatial.bounding_boxes` makes
+        that decision and this method only renders it.
+        """
+        from ..geospatial import _metres, bounding_boxes
+        from .types import Float64
+
+        geography = self._geography()
+        if geography is not None:
+            # Two leaves under one node, because `BinaryExpr` carries two
+            # operands and `ST_DWithin` takes three arguments. The renderer
+            # reads this shape directly, and it emits the centre before the
+            # radius -- the order the tree is walked in, which is what keeps the
+            # placeholder numbering and the bind program in step.
+            return BinaryExpr(
+                GEO_DWITHIN,
+                self,
+                BinaryExpr(
+                    GEO_DWITHIN,
+                    _bind_as(centre, geography),
+                    _bind_as(_metres(metres), Float64),
+                ),
+            )
+        self._require_point("within")
+        boxes = bounding_boxes(centre, metres)
+        contained = [
+            BinaryExpr(
+                CONTAINED_BY,
+                self,
+                BinaryExpr(
+                    GEO_BOX,
+                    BinaryExpr(GEO_POINT, _bind_as(box.lon_min, Float64),
+                               _bind_as(box.lat_min, Float64)),
+                    BinaryExpr(GEO_POINT, _bind_as(box.lon_max, Float64),
+                               _bind_as(box.lat_max, Float64)),
+                ),
+            )
+            for box in boxes
+        ]
+        # `or_` of one predicate is that predicate, so the single-box case needs
+        # no branch of its own. A mutant that always took `or_` survived, which
+        # is the tool reporting a redundant condition rather than a missing test.
+        box_test = or_(*contained)
+        exact = BinaryExpr(
+            "<=", self._distance_to(centre), _bind_as(float(metres), Float64)
+        )
+        return and_(box_test, exact)
+
+    def nearest(self, centre: Any) -> BinaryExpr:
+        """Distance to `centre` in metres -- an order key, not a predicate.
+
+        `order_by(Model.at.nearest(here))` with a `limit` is the shape an
+        index answers. A number rather than a boolean, exactly as the pgvector
+        distances and `ts_rank` are, so `where()` refuses it on its own.
+
+        On a **`Geography`** column this is PostGIS's `<->`, which the GiST
+        index answers directly as an `Index Scan ... Order By:` -- a true
+        nearest-neighbour search rather than tier 1's bounding-box
+        approximation, and measured on the spheroid rather than on a sphere.
+        Both answer metres, so the two tiers are comparable; they differ by the
+        ~0.5% the guide states.
+
+        On a `Point` column it renders the great-circle haversine, unchanged.
+        """
+        geography = self._geography()
+        if geography is not None:
+            return BinaryExpr(GEO_KNN, self, _bind_as(centre, geography))
+        self._require_point("nearest")
+        return self._distance_to(centre)
+
+    def _distance_to(self, centre: Any) -> BinaryExpr:
+        from ..geospatial import Coordinate
+        from .types import Float64
+
+        if type(centre) is not Coordinate:
+            raise TypeError(
+                "a geospatial query takes a Coordinate centre; build one with "
+                "Coordinate(lat=..., lon=...)"
+            )
+        # Three leaves, not two, and the count is load-bearing. The bind
+        # *program* walks this tree once and emits one value per ValueExpr
+        # node, while the renderer emits one placeholder per render -- so a
+        # node rendered twice would desynchronise them and the statement would
+        # be prepared with more parameters than the plan supplies. The haversine
+        # needs the centre's latitude twice (once in the delta, once in
+        # `cos phi2`) and its longitude once, so the tree carries exactly that,
+        # in exactly the order `_render_geo_distance` emits them.
+        return BinaryExpr(
+            GEO_DISTANCE,
+            self,
+            BinaryExpr(
+                GEO_POINT,
+                _bind_as(centre.lat, Float64),
+                BinaryExpr(
+                    GEO_POINT,
+                    _bind_as(centre.lat, Float64),
+                    _bind_as(centre.lon, Float64),
+                ),
+            ),
+        )
+
     def asc(self) -> OrderExpr:
         return OrderExpr(self, ASC)
 
@@ -660,6 +889,13 @@ class UnaryExpr(Predicate):
     __slots__ = ("operand", "operator")
 
     def __init__(self, operator: str, operand: Expression) -> None:
+        # Unconditionally, with no `operator == NOT` guard: the other two unary
+        # operators are `IS NULL` and `IS NOT NULL`, and both are built by
+        # `ColumnExpr` over a column, so the only way this walk reaches a
+        # containment at all is through a negation. A mutation pass forced the
+        # guard always-true and nothing objected, which is the tool reporting
+        # exactly that -- and two spellings of one rule is how they drift apart.
+        _refuse_negated_containment(operand)
         self.operator = operator
         self.operand = operand
 
@@ -792,6 +1028,40 @@ def _check_subquery(column: Any, select: Any, method: str) -> Any:
     for predicate in select.predicates:
         _refuse_related(predicate, method)
     return select
+
+
+def _refuse_negated_containment(node: Any) -> None:
+    """Raise if `node` negates a `covered_by()`.
+
+    `NOT ST_Covers(region, col)` is "everywhere else", which is every row the
+    index would have excluded -- so the predicate that made the query indexable
+    is the one being inverted, and PostGIS answers it with a sequential scan
+    over the whole table. Refused here rather than at render time because it is
+    a property of the query as written, and the caller who wrote it is who can
+    fix it: filter positively, or describe the complement as a region.
+
+    Written on the *node* rather than on `__invert__`, so `not_(...)` and a
+    directly constructed `UnaryExpr` are refused by the same rule.
+
+    Two arms, not `_refuse_related`'s five: a containment is a top-level
+    predicate, so the only way one hides under a negation is inside an `AND`/
+    `OR`. It cannot be the operand of a comparison -- `_threshold` refuses that,
+    because a containment is not a distance -- and it cannot be under a nested
+    negation, because the inner `UnaryExpr` was checked when it was built. A
+    mutation pass showed both of the wider arms surviving, which is the tool
+    saying the same thing.
+    """
+    if isinstance(node, BooleanExpr):
+        for operand in node.operands:
+            _refuse_negated_containment(operand)
+        return
+    if getattr(node, "operator", None) == GEO_COVERS:
+        raise DeclarationError(
+            "a containment cannot be negated: NOT ST_Covers(region, column) asks "
+            "for everywhere else, which is every row the index would have "
+            "excluded, so PostGIS answers it by reading the whole table. Filter "
+            "positively, or describe the complement as a region of its own"
+        )
 
 
 def _refuse_related(node: Any, method: str) -> None:

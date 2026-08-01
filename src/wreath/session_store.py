@@ -131,6 +131,18 @@ class PostgresSessionStore:
         """
         return self._store.component(name="session")
 
+    @property
+    def schema_database(self) -> Any:
+        """The database `component()`'s tables belong to.
+
+        The application never saw this store constructed -- a caller builds it
+        and hands it to `SessionMiddleware` -- so it cannot know which
+        `app.postgres()` the tables go to unless the store says. This is that
+        contract, and it is one name rather than a list of plausible ones:
+        `Wreath._schema_database` reads exactly `schema_database`.
+        """
+        return self._database
+
     def schema_sql(self) -> str:
         """DDL for the backing table, semicolon-joined. A derivation of
         `component()`."""

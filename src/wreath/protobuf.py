@@ -74,6 +74,7 @@ __all__ = [
     "decode",
     "encode",
     "field",
+    "is_message",
     "message",
     "unknown_fields",
 ]
@@ -335,7 +336,8 @@ def _zero(kind: int, flags: int, subplan: Any) -> Any:
     return 0
 
 
-def message(cls: type) -> type:
+@typing.dataclass_transform(field_specifiers=(field,))
+def message[T](cls: type[T]) -> type[T]:
     """Compile `cls` into a protobuf message and make it a dataclass.
 
     Raises:
@@ -499,6 +501,17 @@ def _build(cls: type, values: list, unknown: bytes) -> Any:
     built = cls(**kwargs)
     object.__setattr__(built, _UNKNOWN, unknown)
     return built
+
+
+def is_message(candidate: Any) -> bool:
+    """Whether `candidate` is a `@message` class (or an instance of one).
+
+    Public because consumers need to ask. Without it, a caller that wants to
+    branch on "is this a protobuf message?" reads the private plan marker
+    directly and thereby encodes its own second notion of what a message is --
+    which then drifts from this one the first time the marker moves.
+    """
+    return hasattr(candidate, _PLAN)
 
 
 def unknown_fields(msg: Any) -> bytes:

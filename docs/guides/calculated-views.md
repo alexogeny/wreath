@@ -272,6 +272,64 @@ With no `by`, it is one row: a KPI. With two measures and a `by`, it is a
 scatter — two quantities per entity. That is a declared ceiling rather than a
 separate type, which is why there is no third class here.
 
+## With a place axis instead
+
+`Cells` is the same core again, bucketed by *where* rather than *when* — a
+heatmap as a declaration, with the same obligation a line chart has.
+
+```python
+from wreath.geospatial import BoundingBox
+from wreath.series import Cells, avg, count
+
+reserve = BoundingBox(lat_min=-30.0, lat_max=-29.0, lon_min=150.0, lon_max=151.0)
+
+heat = (
+    Cells(Sighting)
+        .where(Sighting.species == Param("species"))
+        .measure(seen=count(), mean_weight=avg(Sighting.weight_kg, unit="kg"))
+        .over(Sighting.lat, Sighting.lon, metres=10_000, extent=reserve)
+)
+
+result = await heat.run(session, species="llama")
+for cell in result.cells:
+    cell.row, cell.column     # index from the extent's south-west corner
+    cell.bounds               # the ground it covers, a BoundingBox
+    cell.centre               # a Coordinate, for pinning a marker
+    cell.values["seen"]
+```
+
+**Every cell in the extent is present, and fill is per measure** — the same two
+rules as the time axis, taken from the same function rather than restated. A
+cell nothing fell into reads `seen: 0` and `mean_weight: None`, because a count
+of nothing is zero and an average of nothing is undefined. A heatmap with
+missing cells lies about a gap in exactly the way a line chart with missing days
+does, and one that fills every measure with zero puts a hole in the map on the
+quietest ground.
+
+The lattice comes from [`grid`](geospatial.md), so the number of cells is known
+before the query runs. `over` refuses past a declared ceiling — every cell is a
+row on the wire whether or not anything is in it, which is the point of a dense
+axis and also its cost:
+
+```python
+wide = (
+    Cells(Sighting)
+        .measure(seen=count())
+        .over(
+            Sighting.lat,
+            Sighting.lon,
+            metres=10_000,
+            extent=reserve,
+            limit=50_000,
+        )
+)
+```
+
+The refusal happens at declaration time, where a reviewer reads it, rather than
+after the database has already scanned. `grid`'s own refusals — an extent
+crossing the antimeridian, or one too tall for a single longitude step to tile
+squarely — surface here too.
+
 ## Where it stops
 
 A calculated view takes **one source model, declared measures, and a bounded
@@ -387,9 +445,42 @@ are filed under the zone they were computed in — reading the same view in
 another zone settles separately rather than lying about it. Declare it with
 `stored_in=`.
 
-Two tables hold this, and like every other table Wreath owns, **a migration
-applies them and nothing applies them for you**:
-`wreath._series.settle.schema_sql()` emits the DDL.
+Two tables hold this, and like every other table Wreath owns they are created
+by the lifespan — but a `Series` is a declaration the application never holds,
+so it has to be told they are wanted:
+
+```python
+app.postgres("main", dsn=...)
+app.series(database="main")   # only needed for a sealed view
+```
+
+That puts the claim in `app.schema_components()`, which is what creates
+`wreath.series_buckets` and `wreath.series_corrections` at startup, exactly the
+way the job ledger is created. A deployment whose role cannot issue DDL calls
+`app.manage_schema(False)` and gets the usual startup refusal naming what a DBA
+must create; `wreath schema sql --component series` emits it.
+
+### Settling is a job, not a read
+
+**Reading a sealed view never writes.** A `run()` over a sealed range that
+nobody has settled computes it from the source rows and returns it — the same
+numbers, not stored. Storing is `settle()`:
+
+```python
+stored = await activity.settle(session, range=Range(start, end))
+```
+
+That is deliberate and it is worth knowing why: a chart is served by a `GET`,
+which should run on a read-workload session, on a replica, or under a role with
+no `INSERT`. A read that settled as a side effect answered `cannot execute
+INSERT in a read-only transaction` from inside the series machinery, on a route
+that wrote nothing the application can see.
+
+`settle()` is idempotent — the insert is `ON CONFLICT DO NOTHING`, and two
+workers settling one bucket compute the same number from the same rows — so it
+belongs in the same scheduled job as `reconcile()`, which runs it for you.
+Until a settling job exists a sealed view is *correct* and simply pays the
+source query every time, which is the honest failure direction.
 
 ### The write that arrives late
 
@@ -428,9 +519,11 @@ would put per-row bookkeeping on every write in the application. Instead you run
 corrected = await activity.reconcile(session, range=Range(start, end))
 ```
 
-It recomputes the sealed part, compares it to what was settled, and records the
-differences. Until something calls it, the gap is *visible* rather than assumed
-away: `sealed_through` says exactly how far the settled data goes.
+It `settle()`s the sealed part first — since reading stores nothing, this is
+where a bucket becomes stored at all — then recomputes it, compares it to what
+was settled, and records the differences. So one scheduled job covers both
+halves. Until something calls it, the gap is *visible* rather than assumed away:
+`sealed_through` says exactly how far the settled data goes.
 
 `on_late="reopen"` is available and replaces the settled value outright instead
 of recording a delta. It is never the default, because it is only sound while

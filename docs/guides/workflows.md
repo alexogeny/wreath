@@ -121,6 +121,31 @@ Omitted, the step is observed rather than bounded — see
 [Finding the N+1 query](n-plus-one.md) for why failing is opt-in everywhere
 outside a request.
 
+## A saga is one trace
+
+The instance records the traceparent of the run that began it, and every later
+execution of that instance runs under it — including a `resume` in a different
+worker on a different day, and including the compensation chain.
+
+That is deliberately *not* "whatever the resuming worker happened to be doing".
+A saga's whole reason to exist is surviving a crash and carrying on elsewhere,
+so if the resume adopted the new worker's context the trace would break at the
+one moment you are relying on it, and the two halves of one business
+transaction would appear as two unrelated traces.
+
+An instance begun with no trace binds nothing, rather than leaving the resuming
+worker's context in place — a trace that names the wrong cause is worse than one
+that names none.
+
+Only the `traceparent` is stored, not `tracestate`. `tracestate` is vendor
+routing for the next hop of a live call; a saga that resumes an hour later is
+resuming a trace, not continuing a conversation, so storing it would only age in
+the row.
+
+A workflow instance created by an older build has no such column. That resumes
+untraced rather than failing: losing the trace is a degradation, losing the saga
+is not.
+
 ## Choosing a store
 
 `InMemoryWorkflowStore` is for tests and single-process work. Be clear-eyed about

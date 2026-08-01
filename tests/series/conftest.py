@@ -59,6 +59,22 @@ class Deploy(Model, table="deploys"):
     happened_at: Mapped[object] = column(TimestampTz)
 
 
+class Sighting(Model, table="sightings"):
+    """Something observed at a place and a time.
+
+    Carries a place *and* a clock, because the spatial axis is only interesting
+    where it composes with the temporal one — a heatmap of everything ever is a
+    much easier query than "sightings per week per 10 km cell".
+    """
+
+    id: Mapped[int] = column(Int64, primary_key=True)
+    species: Mapped[str] = column(Text)
+    lat: Mapped[float] = column(Float64)
+    lon: Mapped[float] = column(Float64)
+    weight_kg: Mapped[float] = column(Float64, nullable=True)
+    seen_at: Mapped[object] = column(TimestampTz)
+
+
 @pytest.fixture
 def database() -> FakeDatabase:
     return FakeDatabase()
@@ -66,7 +82,9 @@ def database() -> FakeDatabase:
 
 @pytest.fixture
 def registry(database: FakeDatabase) -> Registry:
-    return Registry(database, [Trek, Herd, Paddock, Deploy], validate_schema="off")
+    return Registry(
+        database, [Trek, Herd, Paddock, Deploy, Sighting], validate_schema="off"
+    )
 
 
 @pytest.fixture

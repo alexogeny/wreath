@@ -1,12 +1,9 @@
 <div align="center">
 
-<pre>
-            ·  ❧  ·
-         ❧           ❧
-        ✿      ◦      ✿        W R E A T H
-         ❧           ❧         ───────────
-            ·  ❧  ·
-</pre>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/wreath-dark.png">
+  <img src="docs/assets/wreath-light.png" alt="Wreath" width="320">
+</picture>
 
 # Wreath
 
@@ -199,13 +196,18 @@ Here is the shape of the path that carries it, and where the language boundary
 sits when the native build is in use:
 
 ```text
-  request
-     │
-     ▼
-  ingress ──▶ middleware ──▶ routing ──▶ authentication ──▶ authorization
-                                                                 │
-                                                                 ▼
-  response ◀────── egress ◀────── your handler, in Python
+   request
+      │
+      ▼
+   ingress ─▶ middleware ─▶ routing ─▶ authentication ─▶ authorization
+                                                               │
+   ═══ into Python ════════════════════════════════════════════╪══════
+                                                               ▼
+                                                         your handler
+                                                               │
+   ═══ back to native ═════════════════════════════════════════╪══════
+                                                               │
+   response ◀───────────────── egress ◀────────────────────────╯
 ```
 
 The intended shape is that everything before the handler stays native, and
@@ -318,6 +320,6 @@ forks are legal; they're just not the point. The MPL grants no rights to the
 
 <div align="center">
 
-**❧ Many parts. One shape. ❧**
+**Many parts. One shape.**
 
 </div>

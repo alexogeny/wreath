@@ -69,3 +69,61 @@ The first serializer in the list is the default (used for a missing or `*/*`
 `Accept`), so put your preferred format first. Just picking a format without
 serializing? `negotiate(accept_header, serializers)` returns the chosen
 `Serializer` (or `None`).
+
+## Protocol Buffers
+
+`PROTOBUF` serves `application/x-protobuf` from the same handler, for a mobile
+client on a metered link or a service-to-service call where the bytes matter:
+
+```python
+from wreath.negotiation import JSON, PROTOBUF, serialize
+from wreath.protobuf import field, message
+
+@message
+class Reading:
+    sensor: int = field(1)
+    celsius: float = field(2)
+
+@app.get("/readings/{sensor}")
+async def reading(request, sensor: int) -> Response:
+    return serialize(request, Reading(sensor=sensor, celsius=21.5),
+                     serializers=(PROTOBUF, JSON))
+```
+
+**It is deliberately not one of the defaults**, and that is the one thing worth
+understanding before reaching for it. JSON and MessagePack are self-describing:
+hand them any dict, list or dataclass and they encode it. Protobuf is
+schema-driven — the field *numbers* are the wire contract, and there is nothing
+to derive them from for an undeclared value. So `serialize` can only offer it
+where the handler returns a class built by
+[`@message`](protobuf.md), and it has to be named at the call site.
+
+Adding it to `DEFAULT_SERIALIZERS` would mean every existing `serialize()` call
+in an application — most of which return a plain dict — started failing for any
+client that sent `Accept: application/x-protobuf`. Handing `PROTOBUF.encode` an
+undeclared value refuses by name rather than raising from inside the codec:
+
+```
+TypeError: application/x-protobuf can only encode a class declared with
+@message from wreath.protobuf; got dict.
+```
+
+That refusal reaches the caller. `Serializer.encode` never falls back to another
+format, because a client that asked for protobuf and silently received JSON
+would parse the bytes as a message and get garbage.
+
+### The request half
+
+Reading a protobuf **request body** is a separate question from negotiating a
+response, and `wreath.binding` answers it symmetrically: a body annotated with a
+`@message` class binds from protobuf bytes when `Content-Type` says so, and from
+JSON otherwise. The annotation does not mean protobuf-only — see
+[Binding](binding.md#a-protobuf-body), which also sets out why an unknown field
+*name* in JSON is refused while an unknown field *number* on the protobuf wire
+is preserved.
+
+`PROTOBUF_MEDIA_TYPES` is the set binding matches against: Wreath emits
+`PROTOBUF.media_type` and reads both that and `application/protobuf`, the IANA
+registration. The set lives beside the serializer that emits one of them, so the
+request half and the response half cannot disagree about what protobuf is
+called.

@@ -253,6 +253,18 @@ class PostgresIdempotencyStore:
         """
         return self._store.component(name="idempotency")
 
+    @property
+    def schema_database(self) -> Any:
+        """The database `component()`'s tables belong to.
+
+        The application never saw this store constructed -- a caller builds it
+        and hands it to `IdempotencyMiddleware` -- so it cannot know which
+        `app.postgres()` the tables go to unless the store says. This is that
+        contract, and it is one name rather than a list of plausible ones:
+        `Wreath._schema_database` reads exactly `schema_database`.
+        """
+        return self._database
+
     def schema_sql(self) -> str:
         """DDL for the backing table, semicolon-joined. A derivation of
         `component()`."""
@@ -449,6 +461,22 @@ class IdempotencyMiddleware:
         #: process that died between reserving one and storing its response
         #: leaves it claimed for the whole TTL. `release()` is the lever.
         self.conflicts = 0
+
+    @property
+    def schema_owners(self) -> tuple[Any, ...]:
+        """The store this middleware delegates its tables to.
+
+        It owns no tables itself, so it answers with the store it was given
+        rather than forwarding a `component()`. Answering at all is the point:
+        `Wreath.schema_components` walks middleware and asks each holder this
+        question, and this class used to expose neither it nor `component()`,
+        so a `PostgresIdempotencyStore`'s `wreath_idempotency` table was
+        emitted by `wreath schema sql` and created by nothing.
+
+        The default in-process store is returned too and contributes nothing --
+        it has no `component()`, and the walk asks rather than assumes.
+        """
+        return (self._store,)
 
     def describe(self) -> Any:
         """The key this middleware reads, and the 409 a concurrent repeat gets.

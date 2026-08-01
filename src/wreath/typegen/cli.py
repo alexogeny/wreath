@@ -12,6 +12,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .inspect import build_api_model
 from .model import TypegenError
@@ -24,7 +25,13 @@ class TypegenOptions:
     output: str
     react_query: bool = False
     base_url_env: str | None = None
+    #: Files on disk are stale — regenerate and diff. A build hygiene check.
     check: bool = False
+    #: The *provider* has changed incompatibly — semantic, compared against the
+    #: document the package was generated from. A different question from
+    #: `check`, so a different flag: one asks whether you forgot to regenerate,
+    #: the other whether regenerating would break you.
+    check_contract: bool = False
     allow_unknown: bool = False
     pure: bool = False
     factory: bool = False
@@ -42,7 +49,7 @@ class TypegenCliError(Exception):
 
 #: Targets this CLI can emit. Named here so an unknown one is refused with the
 #: list rather than a bare "unknown target".
-TARGETS = ("typescript", "python")
+TARGETS = ("typescript", "python", "proto")
 
 
 def _generate(app: object, options: TypegenOptions) -> dict[str, str]:
@@ -71,6 +78,13 @@ def _generate(app: object, options: TypegenOptions) -> dict[str, str]:
         return render_python(
             api, document=document, class_name=options.class_name
         )
+    if options.target == "proto":
+        from .targets.proto import ProtoTargetError, render_proto
+
+        try:
+            return render_proto(api)
+        except ProtoTargetError as error:
+            raise TypegenCliError(str(error)) from error
     return render_typescript(
         api,
         react_query=options.react_query,
@@ -116,6 +130,31 @@ def check(files: dict[str, str], output_dir: Path) -> list[str]:
     return problems
 
 
+def check_contract(current: dict[str, Any], output_dir: Path) -> tuple[Any, ...]:
+    """Backwards-incompatible changes between the pinned document and `current`.
+
+    Empty means the provider is still compatible; additions are compatible and
+    are not reported. Raises when nothing is pinned, rather than returning
+    empty: a gate that passes because it found no baseline is a gate with
+    nothing to check, and it would read as a green build forever.
+    """
+    from ..openapi import compare_openapi
+    from .targets.python import SPEC_FILE
+
+    pinned = output_dir / SPEC_FILE
+    if not pinned.exists():
+        raise TypegenCliError(
+            f"no pinned document at {pinned}: generate the client first, so the "
+            "gate has a baseline to compare against",
+            exit_code=2,
+        )
+    try:
+        previous = json.loads(pinned.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise TypegenCliError(f"pinned document at {pinned} is unreadable") from error
+    return compare_openapi(previous, current)
+
+
 def write(files: dict[str, str], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     # Remove previously-owned files that are no longer generated (only ours).
@@ -131,8 +170,29 @@ def write(files: dict[str, str], output_dir: Path) -> None:
 
 
 def run(app: object, options: TypegenOptions) -> int:
-    files = _generate(app, options)
     output_dir = Path(options.output)
+    if options.check_contract:
+        if options.target != "python":
+            raise TypegenCliError(
+                "--check-contract needs a pinned document, which only the "
+                f"python target emits; {options.target!r} does not",
+                exit_code=2,
+            )
+        from ..openapi import generate_openapi
+
+        current = generate_openapi(app, title=options.title, version=options.version)
+        changes = check_contract(current, output_dir)
+        if changes:
+            for change in changes:
+                print(f"wreath typegen --check-contract: {change.kind}: {change.detail}")
+            print(
+                f"wreath typegen --check-contract: {len(changes)} breaking change(s); "
+                "regenerate the client and fix the call sites"
+            )
+            return 1
+        print("wreath typegen --check-contract: the provider is still compatible")
+        return 0
+    files = _generate(app, options)
     if options.check:
         problems = check(files, output_dir)
         if problems:
@@ -146,4 +206,11 @@ def run(app: object, options: TypegenOptions) -> int:
     return 0
 
 
-__all__ = ["TypegenCliError", "TypegenOptions", "check", "run", "write"]
+__all__ = [
+    "TypegenCliError",
+    "TypegenOptions",
+    "check",
+    "check_contract",
+    "run",
+    "write",
+]

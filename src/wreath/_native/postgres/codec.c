@@ -6,6 +6,8 @@
 
 #include <datetime.h>
 #include <limits.h>
+#include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* The nibble table and the decoder live in `simd.h`, which picks a width per
@@ -56,6 +58,9 @@ wreath_pg_decode_hex_bytea(const unsigned char *data, Py_ssize_t length)
 #define PG_FLOAT8 701
 #define PG_VARCHAR 1043
 #define PG_BIT 1560
+/* Core `point`, OID 600. Not an extension type -- the catalog allocates it --
+   so it is a case here rather than a registration-table lookup. */
+#define PG_POINT 600
 #define PG_DATE 1082
 #define PG_TIMESTAMP 1114
 #define PG_TIMESTAMPTZ 1184
@@ -143,6 +148,7 @@ array_element_oid(uint32_t oid)
 #define WREATH_PG_EXT_VECTOR 1
 #define WREATH_PG_EXT_HALFVEC 2
 #define WREATH_PG_EXT_SPARSEVEC 3
+#define WREATH_PG_EXT_GEOGRAPHY 4
 #define WREATH_PG_EXT_NAME_MAX 63
 
 /* pgvector's SPARSEVEC_MAX_NNZ, matching _sparsevec.py::MAX_SPARSEVEC_NNZ. A
@@ -185,7 +191,7 @@ codec_register_extension_type(PyObject *module, PyObject *args)
             args, "s#Ii:_register_extension_type", &name, &name_length, &oid, &kind))
         return NULL;
     if (kind != WREATH_PG_EXT_VECTOR && kind != WREATH_PG_EXT_HALFVEC &&
-        kind != WREATH_PG_EXT_SPARSEVEC) {
+        kind != WREATH_PG_EXT_SPARSEVEC && kind != WREATH_PG_EXT_GEOGRAPHY) {
         PyErr_Format(PyExc_ValueError, "unknown extension codec kind %d for '%s'",
                      kind, name);
         return NULL;
@@ -974,6 +980,124 @@ done:
     return result;
 }
 
+/* PostgreSQL's binary `point`: two big-endian float8, x then y -- longitude
+ * then latitude, the order PostGIS and GeoJSON use and the opposite of the one
+ * people say aloud. The value arriving here is the `(x,y)` text literal that
+ * `Point.to_wire` produced, because one `to_wire` has to serve both the text
+ * and the binary parameter paths; this parses it rather than the column type
+ * carrying two representations. Kept byte-for-byte equal to the pure twin's
+ * `_encode_point` by tests/orm/test_geospatial_codec_parity.py. */
+static PyObject *
+encode_point(PyObject *value)
+{
+    const char *text;
+    Py_ssize_t length;
+    char buffer[64];
+    char *comma;
+    char *end;
+    double x;
+    double y;
+    PyObject *result;
+
+    if (PyUnicode_Check(value)) {
+        text = PyUnicode_AsUTF8AndSize(value, &length);
+        if (text == NULL) return NULL;
+    } else if (PyBytes_Check(value)) {
+        text = PyBytes_AS_STRING(value);
+        length = PyBytes_GET_SIZE(value);
+    } else {
+        PyErr_SetString(PyExc_TypeError, "point codec requires the '(x,y)' literal");
+        return NULL;
+    }
+    if (length < 5 || length >= (Py_ssize_t)sizeof(buffer) || text[0] != '(' ||
+        text[length - 1] != ')') {
+        PyErr_SetString(PyExc_TypeError, "point codec requires the '(x,y)' literal");
+        return NULL;
+    }
+    memcpy(buffer, text + 1, (size_t)(length - 2));
+    buffer[length - 2] = '\0';
+    comma = strchr(buffer, ',');
+    if (comma == NULL || strchr(comma + 1, ',') != NULL) {
+        PyErr_SetString(PyExc_TypeError, "point codec requires the '(x,y)' literal");
+        return NULL;
+    }
+    *comma = '\0';
+    errno = 0;
+    x = strtod(buffer, &end);
+    if (end == buffer || *end != '\0' || errno != 0) {
+        PyErr_SetString(PyExc_TypeError, "point codec requires the '(x,y)' literal");
+        return NULL;
+    }
+    errno = 0;
+    y = strtod(comma + 1, &end);
+    if (end == comma + 1 || *end != '\0' || errno != 0) {
+        PyErr_SetString(PyExc_TypeError, "point codec requires the '(x,y)' literal");
+        return NULL;
+    }
+    result = PyBytes_FromStringAndSize(NULL, 16);
+    if (result == NULL) return NULL;
+    if (PyFloat_Pack8(x, PyBytes_AS_STRING(result), 0) < 0 ||
+        PyFloat_Pack8(y, PyBytes_AS_STRING(result) + 8, 0) < 0) {
+        Py_DECREF(result);
+        return NULL;
+    }
+    return result;
+}
+
+/* PostGIS `geography`: EWKB bytes, arriving here as the hex spelling
+ * `Geography.to_wire` produced. PostGIS reads that hex on the text parameter
+ * path and the un-hexed bytes on the binary one, so one `to_wire` serves both
+ * and this only has to reverse the hex -- deliberately without a second opinion
+ * about what the geometry may be, which is the server's to hold. Kept
+ * byte-for-byte equal to the pure twin's `_encode_geography` by
+ * tests/orm/test_geospatial_codec_parity.py. */
+static int
+hex_nibble(unsigned char digit)
+{
+    if (digit >= '0' && digit <= '9') return digit - '0';
+    if (digit >= 'a' && digit <= 'f') return digit - 'a' + 10;
+    if (digit >= 'A' && digit <= 'F') return digit - 'A' + 10;
+    return -1;
+}
+
+static PyObject *
+encode_geography(PyObject *value)
+{
+    const char *text;
+    Py_ssize_t length;
+    PyObject *result;
+    char *out;
+
+    if (PyUnicode_Check(value)) {
+        text = PyUnicode_AsUTF8AndSize(value, &length);
+        if (text == NULL) return NULL;
+    } else if (PyBytes_Check(value)) {
+        text = PyBytes_AS_STRING(value);
+        length = PyBytes_GET_SIZE(value);
+    } else {
+        PyErr_SetString(PyExc_TypeError, "geography codec requires EWKB hex");
+        return NULL;
+    }
+    if (length % 2 != 0) {
+        PyErr_SetString(PyExc_TypeError, "geography codec requires EWKB hex");
+        return NULL;
+    }
+    result = PyBytes_FromStringAndSize(NULL, length / 2);
+    if (result == NULL) return NULL;
+    out = PyBytes_AS_STRING(result);
+    for (Py_ssize_t index = 0; index < length; index += 2) {
+        int high = hex_nibble((unsigned char)text[index]);
+        int low = hex_nibble((unsigned char)text[index + 1]);
+        if (high < 0 || low < 0) {
+            Py_DECREF(result);
+            PyErr_SetString(PyExc_TypeError, "geography codec requires EWKB hex");
+            return NULL;
+        }
+        out[index / 2] = (char)((high << 4) | low);
+    }
+    return result;
+}
+
 /* PostgreSQL's binary `bit`: int32 bit count, then the bits MSB-first, the final
  * byte padded on the right with zeros. A 3-bit '101' is one byte 0b10100000, not
  * 0b00000101 -- reversed, it is a value the server accepts and pgvector's hamming
@@ -1083,6 +1207,20 @@ wreath_pg_decode_extension(
     if (kind == WREATH_PG_EXT_SPARSEVEC) {
         if (format == 1) return decode_sparsevec(data, length);
         if (format == 0) return decode_sparsevec_text(data, length);
+        PyErr_Format(PyExc_ValueError, "invalid field format code %d", format);
+        return NULL;
+    }
+    if (kind == WREATH_PG_EXT_GEOGRAPHY) {
+        /* EWKB, arriving as raw bytes in binary and as its hex spelling in
+         * text. Handed back unread in both cases, which is what the fallback
+         * decoder would have produced -- the arm exists because `decoder_for`
+         * routes *every* registered extension OID here, so a kind with no case
+         * raises rather than falling through. `Geography.from_wire` is the one
+         * place a geography is interpreted, and reading it twice is how the
+         * two readings drift apart. */
+        if (format == 0 || format == 1) {
+            return PyBytes_FromStringAndSize((const char *)data, length);
+        }
         PyErr_Format(PyExc_ValueError, "invalid field format code %d", format);
         return NULL;
     }
@@ -1924,6 +2062,8 @@ wreath_pg_encode_binary_value(PyObject *value, uint32_t oid)
     }
     case PG_BIT:
         return encode_bit(value);
+    case PG_POINT:
+        return encode_point(value);
     default: {
         uint32_t element_oid = array_element_oid(oid);
         if (element_oid != 0) {
@@ -1934,6 +2074,7 @@ wreath_pg_encode_binary_value(PyObject *value, uint32_t oid)
             if (kind == WREATH_PG_EXT_VECTOR) return encode_vector(value);
             if (kind == WREATH_PG_EXT_HALFVEC) return encode_halfvec(value);
             if (kind == WREATH_PG_EXT_SPARSEVEC) return encode_sparsevec(value);
+            if (kind == WREATH_PG_EXT_GEOGRAPHY) return encode_geography(value);
         }
         PyErr_Format(PyExc_TypeError, "no binary encoder for PostgreSQL OID %u", oid);
         return NULL;

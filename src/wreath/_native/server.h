@@ -162,6 +162,13 @@ typedef struct {
     int request_more_body;
     int pending_empty_request;
     int disconnected;
+    /* Whether losing the peer cancels the application task as well as queueing
+     * `http.disconnect`. Set per request from the method (RFC 9110's safe
+     * methods, matching `_SAFE_METHODS` in the pure twin) and overridden by the
+     * application through `_wreath_cancel_on_disconnect` for a route that
+     * declared one. Cleared for a WebSocket session, which observes its own
+     * disconnect message instead. */
+    int cancel_on_disconnect;
 
     /* ASGI receive plumbing. The queue owns one reference per entry and uses a
      * head index, so taking the front is O(1) without a Python list allocation. */

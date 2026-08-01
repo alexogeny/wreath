@@ -11,8 +11,18 @@ myapp/
   routes/           # Router modules, gathered into the app
   models.py         # wreath.orm models
   .env              # local configuration (gitignored)
-  .env.example      # the same keys, documented and committed
+  .env.example      # the same keys and nothing else, committed
 ```
+
+**`.env.example` cannot be an annotated file**, and that is worth knowing before
+you write one. Wreath's dotenv dialect is `KEY=value` and has no comment syntax
+at all: a `#` line is a `ValueError` naming the line number, not a line that is
+skipped. So a template carrying explanatory comments produces a `.env` that
+fails to load on its first line, which is the least helpful moment to discover
+the dialect. Keep the template to the keys — an empty value keeps the default,
+so a copied file is inert until somebody fills it in — and put the explanation
+of what each key does beside the settings dataclass that reads it. See
+[Configuration and state](../guides/config-state.md).
 
 The idea is to keep related routes together as [`Router`](../reference/router.md)
 modules and weave them into the application in one place, rather than growing a

@@ -29,6 +29,7 @@ import time
 import uuid
 import zlib
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Final
 
 from ._flight_schema import (
@@ -47,6 +48,10 @@ __all__ = [
     "DecodedRecording",
     "read_recording",
     "RecordingSink",
+    "AttemptOutcome",
+    "BoundaryEvent",
+    "AttemptRecord",
+    "read_attempt_recording",
 ]
 
 #: Container magic. The trailing digit is the container (not schema) version.
@@ -65,10 +70,16 @@ MAX_CHUNK_BYTES: Final = 256 * 1024 * 1024
 _HEADER = struct.Struct("<4sBBH16s16sQQQQQ")
 _CHUNK = struct.Struct("<4sII")  # tag, byte_length, crc32
 _FOOTER = struct.Struct("<QQQ")  # chunk_count, capture_slabs, event_cells
+#: Appended after `_FOOTER` rather than widening it. A reader that predates the
+#: attempt record kind stops at `_FOOTER.size` and still gets every count it
+#: knows about; widening the struct instead would have made an old footer fail
+#: the length check and silently report zero slabs and zero cells.
+_FOOTER_ATTEMPTS = struct.Struct("<Q")  # attempt records
 
 _TAG_META: Final = b"META"
 _TAG_CAPTURE: Final = b"CAPT"
 _TAG_EVENT: Final = b"EVNT"
+_TAG_ATTEMPT: Final = b"ATMP"
 _TAG_FOOTER: Final = b"FOOT"
 
 
@@ -96,6 +107,284 @@ def _chunk(tag: bytes, payload: bytes) -> bytes:
     return _CHUNK.pack(tag, len(payload), zlib.crc32(payload) & 0xFFFFFFFF) + payload
 
 
+# --- the job-attempt record kind ---------------------------------------------
+#
+# A job attempt is a *record kind inside `WFR1`*, not a second container: one
+# decoder, one reader, one set of forensics tooling. What it holds is identity,
+# cause, boundaries, and outcome -- see `docs/reference/recording.md`.
+#
+# What it deliberately does not hold is the job's **arguments**. `args jsonb` is
+# a positional array and `RedactionPolicy` is entirely name-keyed, so
+# deny-by-default has no name to deny; only the *count* is recorded, so a reader
+# can see that arguments existed without any of them reaching the disk.
+
+_ATTEMPT_MAGIC: Final = b"ATT1"
+_ATTEMPT_VERSION: Final = 1
+#: This chunk holds only part of one attempt record. Refused, never joined:
+#: an attempt assembled from pieces is a recording of less than it claims.
+_ATTEMPT_FLAG_CONTINUED: Final = 0x01
+#: magic 4s | version u8 | flags u8 | reserved u16 | total_bytes u32
+_ATTEMPT_HEADER = struct.Struct("<4sBBHI")
+#: job_id i64 | fence i64 | attempt u32 | max_attempts u32
+#: | argument_count u32 | boundary_count u32
+_ATTEMPT_FIXED = struct.Struct("<qqIIII")
+_BOUNDARY_FIXED = struct.Struct("<Bi")  # seam u8 | coordinate i32
+
+#: A recorded error message is clamped to what the queue itself keeps in
+#: `last_error`, so a recording cannot hold more of a failure than the row does.
+MAX_ERROR_MESSAGE = 2000
+
+
+class AttemptOutcome(StrEnum):
+    """How one execution of one task by one worker ended.
+
+    Four, not three. `deadline_cancelled` is separate from `raised` because
+    nothing failed -- `JobRunner._run` cancels the handler at
+    `deadline_for(task)` and counts it in `run_timeouts` precisely because the
+    cause is usually a slow dependency. Folding it into `raised` would make a
+    recording report a defect where there was none.
+    """
+
+    COMPLETED = "completed"
+    RAISED = "raised"
+    DEADLINE_CANCELLED = "deadline_cancelled"
+    LEASE_EXPIRED = "lease_expired"
+
+
+@dataclass(frozen=True, slots=True)
+class BoundaryEvent:
+    """One boundary crossing during an attempt, at an owned coordinate.
+
+    The coordinate space is the *same* one a `wreath.replay.FaultSchedule` is
+    keyed to -- the named target and the Nth operation at that seam -- which is
+    what lets a recorded failure be replayed as an injected fault rather than
+    re-derived from a payload nobody may keep.
+
+    Attributes:
+        seam: A `wreath.replay.AdapterSeam` value, held as an int for the same
+            reason `AdapterFaultDescriptor.seam` is: the container must not
+            import the replay module to decode a number.
+        target: The named database, HTTP client, or object store.
+        coordinate: The Nth operation at this seam on this target.
+        error_type: The exception class name when the call raised, or `""`
+            when it returned. The *message* is not kept: a driver error quotes
+            the statement, and a statement quotes its parameters.
+    """
+
+    seam: int
+    target: str
+    coordinate: int
+    error_type: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptRecord:
+    """One execution of one task by one worker, and the boundaries it crossed.
+
+    Identity is `job_id`/`queue`/`task`/`attempt`/`tenant`/`dedup_key` **and
+    `fence`**. The fence is not decoration: after a lease expiry two workers can
+    both believe they own a job, and a recording that cannot say which one it
+    was is a recording of an ambiguity.
+
+    `trace_context` is the `traceparent` of the request that enqueued the job,
+    which the queue already stores -- so an attempt recording joins to the
+    request that produced its arguments at no extra cost.
+
+    `argument_count` is how many arguments the job carried. The arguments
+    themselves are never recorded; see the module comment above.
+    """
+
+    job_id: int
+    queue: str
+    task: str
+    attempt: int
+    max_attempts: int
+    tenant: str
+    dedup_key: str
+    fence: int
+    trace_context: str
+    boundaries: tuple[BoundaryEvent, ...]
+    outcome: str
+    error_type: str = ""
+    error_message: str = ""
+    argument_count: int = 0
+    #: `(parameter_name, json_text)` for the arguments an operator allowed by
+    #: name, where the JSON is exactly one of `{"value": ...}` or
+    #: `{"withheld": "<reason>"}`. Empty unless `AttemptPolicy` names one, which
+    #: is the default; see `wreath.recording.AttemptPolicy`.
+    arguments: tuple[tuple[str, str], ...] = ()
+
+    def encode(self) -> bytes:
+        body = bytearray(
+            _ATTEMPT_FIXED.pack(
+                self.job_id,
+                self.fence,
+                self.attempt,
+                self.max_attempts,
+                self.argument_count,
+                len(self.boundaries),
+            )
+        )
+        for text in (
+            self.queue,
+            self.task,
+            self.tenant,
+            self.dedup_key,
+            self.trace_context,
+            str(self.outcome),
+            self.error_type,
+            self.error_message[:MAX_ERROR_MESSAGE],
+        ):
+            body += _text(text)
+        for event in self.boundaries:
+            body += _BOUNDARY_FIXED.pack(event.seam, event.coordinate)
+            body += _text(event.target) + _text(event.error_type)
+        # Appended after the boundaries rather than folded into the fixed
+        # header, the same way the footer's attempt count was appended rather
+        # than widening the footer: a record written before argument capture
+        # existed simply runs out of bytes here, and the decoder below reads
+        # this section only when there are any.
+        if self.arguments:
+            body += struct.pack("<I", len(self.arguments))
+            for name, value in self.arguments:
+                body += _text(name) + _text(value)
+        total = _ATTEMPT_HEADER.size + len(body)
+        header = _ATTEMPT_HEADER.pack(_ATTEMPT_MAGIC, _ATTEMPT_VERSION, 0, 0, total)
+        return header + bytes(body)
+
+    @classmethod
+    def decode(cls, payload: bytes) -> AttemptRecord:
+        """Parse one attempt record, refusing anything partial *by name*.
+
+        A recording that decodes to a prefix of itself is the failure this
+        refuses: every boundary after the tear is missing and nothing in the
+        bytes says how many there were.
+        """
+        if len(payload) < _ATTEMPT_HEADER.size:
+            raise SchemaError(
+                f"attempt recording is truncated: {len(payload)} bytes is shorter "
+                f"than its {_ATTEMPT_HEADER.size}-byte header"
+            )
+        magic, version, flags, _reserved, total = _ATTEMPT_HEADER.unpack_from(payload, 0)
+        if magic != _ATTEMPT_MAGIC:
+            raise SchemaError(f"not an attempt recording: bad record magic {magic!r}")
+        if version != _ATTEMPT_VERSION:
+            raise SchemaError(f"unsupported attempt record version {version}")
+        if flags & _ATTEMPT_FLAG_CONTINUED:
+            raise SchemaError(
+                "attempt recording is chunked across records; it is refused rather "
+                "than joined, because a partially assembled attempt reports fewer "
+                "boundaries than the attempt crossed and reads as complete"
+            )
+        if total != len(payload):
+            raise SchemaError(
+                f"attempt recording is truncated: it declares {total} bytes and "
+                f"holds {len(payload)}"
+            )
+        offset = _ATTEMPT_HEADER.size
+        (
+            job_id, fence, attempt, max_attempts, argument_count, boundary_count,
+        ) = _ATTEMPT_FIXED.unpack_from(payload, offset)
+        offset += _ATTEMPT_FIXED.size
+        texts: list[str] = []
+        for _ in range(8):
+            text, offset = _read_text(payload, offset)
+            texts.append(text)
+        queue, task, tenant, dedup_key, trace, outcome, error_type, message = texts
+        boundaries: list[BoundaryEvent] = []
+        for _ in range(boundary_count):
+            seam, coordinate = _BOUNDARY_FIXED.unpack_from(payload, offset)
+            offset += _BOUNDARY_FIXED.size
+            target, offset = _read_text(payload, offset)
+            failure, offset = _read_text(payload, offset)
+            boundaries.append(BoundaryEvent(seam, target, coordinate, failure))
+        arguments: list[tuple[str, str]] = []
+        if offset < len(payload):
+            if offset + 4 > len(payload):
+                raise SchemaError(
+                    "attempt recording is truncated inside its argument count"
+                )
+            (argument_fields,) = struct.unpack_from("<I", payload, offset)
+            offset += 4
+            for _ in range(argument_fields):
+                name, offset = _read_text(payload, offset)
+                captured, offset = _read_text(payload, offset)
+                arguments.append((name, captured))
+        return cls(
+            job_id=job_id,
+            queue=queue,
+            task=task,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            tenant=tenant,
+            dedup_key=dedup_key,
+            fence=fence,
+            trace_context=trace,
+            boundaries=tuple(boundaries),
+            outcome=outcome,
+            error_type=error_type,
+            error_message=message,
+            argument_count=argument_count,
+            arguments=tuple(arguments),
+        )
+
+
+def _text(value: str) -> bytes:
+    raw = value.encode("utf-8")
+    if len(raw) > 0xFFFFFFFF:  # pragma: no cover - a 4 GiB field is not reachable
+        raise SchemaError("attempt recording field is too long to encode")
+    return struct.pack("<I", len(raw)) + raw
+
+
+def _read_text(payload: bytes, offset: int) -> tuple[str, int]:
+    if offset + 4 > len(payload):
+        raise SchemaError("attempt recording is truncated inside a text field")
+    (length,) = struct.unpack_from("<I", payload, offset)
+    offset += 4
+    end = offset + length
+    if end > len(payload):
+        raise SchemaError(
+            f"attempt recording is truncated: a field declares {length} bytes and "
+            f"only {len(payload) - offset} remain"
+        )
+    return payload[offset:end].decode("utf-8"), end
+
+
+def read_attempt_recording(data: bytes) -> AttemptRecord:
+    """The one attempt recording in a `WFR1` file, or a refusal naming why not.
+
+    Stricter than `read_recording` on purpose. A capture slab stream recovers a
+    torn tail because every complete slab before the tear is forensic material
+    worth keeping; an attempt is *one* record, so a tear does not leave a
+    smaller attempt, it leaves an attempt that is missing the part nobody can
+    enumerate. A file with no footer, more than one attempt, or none at all is
+    refused by name rather than reported as the thing it nearly is.
+    """
+    decoded = read_recording(data)
+    # The tear is checked *first*, and the order is the diagnosis. A cut that
+    # lands inside the `ATMP` chunk leaves a file with no attempt in it, and
+    # reporting "this file holds no attempt recording" would send a reader
+    # looking for the wrong file rather than at the truncation in front of them.
+    if not decoded.clean:
+        raise SchemaError(
+            "attempt recording is truncated: the file has no footer, so the "
+            "process died while writing it and the boundaries it had not "
+            "written yet cannot be counted"
+        )
+    if not decoded.attempts:
+        raise SchemaError(
+            "this recording holds no attempt recording; `wreath replay to-test` "
+            "reads a job attempt from an `ATMP` record and this file has none"
+        )
+    if len(decoded.attempts) > 1:
+        raise SchemaError(
+            f"this recording holds {len(decoded.attempts)} attempt recordings; one "
+            "file is one attempt, because attempt 4 of a job is a different "
+            "execution from attempt 3 and a test can only characterise one"
+        )
+    return decoded.attempts[0]
+
+
 class WFR1Writer:
     """Streams a `WFR1` recording to a binary file object.
 
@@ -105,13 +394,16 @@ class WFR1Writer:
     decides how often to flush and owns the file's permissions and lifetime.
     """
 
-    __slots__ = ("_file", "_chunk_count", "_capture_slabs", "_event_cells", "_closed")
+    __slots__ = (
+        "_file", "_chunk_count", "_capture_slabs", "_event_cells", "_attempts", "_closed",
+    )
 
     def __init__(self, file: Any, image: MetadataImage) -> None:
         self._file = file
         self._chunk_count = 0
         self._capture_slabs = 0
         self._event_cells = 0
+        self._attempts = 0
         self._closed = False
         now_unix = time.time_ns()
         header = _HEADER.pack(
@@ -154,12 +446,19 @@ class WFR1Writer:
         self._event_cells += len(cells) // CELL_SIZE
         return len(cells) // CELL_SIZE
 
+    def write_attempt(self, record: AttemptRecord) -> None:
+        """Append one `ATMP` chunk holding a whole job-attempt record."""
+        self._write_chunk(_TAG_ATTEMPT, record.encode())
+        self._attempts += 1
+
     def close(self) -> None:
         """Write the footer (proving a clean close) and flush. Idempotent."""
         if self._closed:
             return
         self._closed = True
-        footer = _FOOTER.pack(self._chunk_count + 1, self._capture_slabs, self._event_cells)
+        footer = _FOOTER.pack(
+            self._chunk_count + 1, self._capture_slabs, self._event_cells
+        ) + _FOOTER_ATTEMPTS.pack(self._attempts)
         self._file.write(_chunk(_TAG_FOOTER, footer))
         flush = getattr(self._file, "flush", None)
         if callable(flush):
@@ -183,6 +482,9 @@ class DecodedRecording:
     clean: bool
     footer_capture_slabs: int = 0
     footer_event_cells: int = 0
+    #: Job-attempt records, in the order they were written.
+    attempts: tuple[AttemptRecord, ...] = ()
+    footer_attempts: int = 0
 
 
 def read_recording(data: bytes) -> DecodedRecording:
@@ -219,9 +521,11 @@ def read_recording(data: bytes) -> DecodedRecording:
     image: MetadataImage | None = None
     slabs: list[CaptureSlab] = []
     events: list[bytes] = []
+    attempts: list[AttemptRecord] = []
     clean = False
     footer_captures = 0
     footer_events = 0
+    footer_attempts = 0
 
     while offset + _CHUNK.size <= len(data):
         tag, length, crc = _CHUNK.unpack_from(data, offset)
@@ -247,9 +551,15 @@ def read_recording(data: bytes) -> DecodedRecording:
                 if cell[0] != SCHEMA_VERSION:
                     raise SchemaError("event cell has an unsupported schema version")
                 events.append(cell)
+        elif tag == _TAG_ATTEMPT:
+            # Refused rather than skipped: an `ATMP` chunk this reader cannot
+            # decode is the whole recording, not one slab out of many.
+            attempts.append(AttemptRecord.decode(payload))
         elif tag == _TAG_FOOTER:
             if len(payload) >= _FOOTER.size:
                 _count, footer_captures, footer_events = _FOOTER.unpack_from(payload, 0)
+            if len(payload) >= _FOOTER.size + _FOOTER_ATTEMPTS.size:
+                (footer_attempts,) = _FOOTER_ATTEMPTS.unpack_from(payload, _FOOTER.size)
             clean = True
             break
         # Unknown tags are skipped (forward compatibility within a major version).
@@ -268,6 +578,8 @@ def read_recording(data: bytes) -> DecodedRecording:
         clean=clean,
         footer_capture_slabs=footer_captures,
         footer_event_cells=footer_events,
+        attempts=tuple(attempts),
+        footer_attempts=footer_attempts,
     )
 
 

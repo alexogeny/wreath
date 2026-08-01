@@ -58,6 +58,9 @@ def _default_entities(request: Request) -> object:
 #: Where one request's resolved flag set lives for the rest of that request.
 _FLAGS_SLOT = "_cedar_flags"
 
+#: The same, for the geofence region set.
+_REGIONS_SLOT = "_cedar_regions"
+
 #: The answer for an application with no provider. Shared rather than rebuilt,
 #: and *always supplied* -- see `request_flags` for why absence is not an option.
 _NO_FLAGS: frozenset[str] = frozenset()
@@ -126,6 +129,61 @@ def request_flags(
     return resolved
 
 
+def _default_location(request: Request) -> object:
+    """Where the caller is, for an application that has not said.
+
+    `None`, deliberately. A position is something the deployment knows and the
+    framework cannot guess -- a device fix on the request, a field on the
+    identity, an IP lookup -- and inventing one would put a policy's geofence
+    on evidence nobody chose. With no location every region set is empty, and
+    an empty set denies in both the `when` and the `unless` shape.
+    """
+    return None
+
+
+def request_regions(
+    request: Request,
+    regions: Any,
+    location: Callable[[Request], object],
+    vocabulary: frozenset[str] | None = frozenset(),
+) -> frozenset[str]:
+    """The declared regions containing this caller, as a set of names.
+
+    **Resolved once per request and cached on `request.state`**, for the reason
+    `request_flags` is: a route behind several policies asks the authorizer once
+    per policy, and a caller who moved between two of them would have two
+    positions inside one decision. One request, one position, one answer.
+
+    A set of *names*, matching `context.flags`, so a geofence is written with
+    the set operations Cedar already has:
+
+        permit (principal in Role::"ranger", action == Action::"read", resource)
+        when { context.regions.contains(resource.site) };
+
+    `vocabulary` is the region names the policy set actually tests, read off the
+    engine once at startup; `None` means they are not statically knowable and
+    every declared region is resolved. That distinction costs more here than it
+    does for flags -- a region test is a great-circle distance rather than a
+    dictionary lookup -- and the shape above, testing a *resource attribute*,
+    is exactly the unknowable case. Keeping the declared region set small is
+    therefore the tuning knob, not the policy.
+    """
+    if regions is None:
+        return _NO_FLAGS
+    state = request.state
+    cached = state.get(_REGIONS_SLOT)
+    if cached is not None:
+        return cast(frozenset[str], cached)
+    where = location(request)
+    resolved = (
+        _NO_FLAGS
+        if where is None
+        else regions.containing(where, None if vocabulary is None else vocabulary)
+    )
+    state.__setattr__(_REGIONS_SLOT, resolved)
+    return resolved
+
+
 def _default_context(request: Request) -> Mapping[str, object]:
     context: dict[str, object] = {"method": request.method, "path": request.path}
     # Step-up, expressed where a policy can read it:
@@ -148,29 +206,38 @@ def _default_context(request: Request) -> Mapping[str, object]:
     return context
 
 
-def _referenced_flag_names(engine: Any) -> frozenset[str] | None:
-    """The flag names `engine`'s policies test, or None for "resolve them all".
+def _referenced_names(engine: Any, capability: str) -> frozenset[str] | None:
+    """The names `engine`'s policies test for `capability`, or None for "all".
 
     Optional capability, probed the way `fingerprint`/`source`/`policies` are:
     the `CedarEngine` protocol does not require it. An engine that cannot
     introspect its own policy set answers `None` here, which costs the eager
     resolution rather than risking a short list -- an outside evaluator whose
-    policies this walk has never seen must not have its flags guessed at.
+    policies this walk has never seen must not have its vocabulary guessed at.
     """
-    referenced = getattr(engine, "referenced_flags", None)
+    referenced = getattr(engine, capability, None)
     if not callable(referenced):
         return None
     names = referenced()
     return None if names is None else frozenset(names)
 
 
-def _validate_flag_names(referenced: frozenset[str] | None, provider: Any) -> None:
-    """Refuse, at startup, a policy naming a flag the provider does not hold.
+def _validate_names(
+    referenced: frozenset[str] | None,
+    provider: Any,
+    *,
+    noun: str = "feature flags",
+    singular: str = "flag",
+    attribute: str = "flags",
+) -> None:
+    """Refuse, at startup, a policy naming something the provider does not hold.
 
     A typo inside `context.flags.contains("new_iu")` is the likeliest mistake
     here and the least visible one: the name is simply absent from the set, the
     condition is false, and the policy denies forever with nothing to see. This
-    turns that into a boot failure naming the flag.
+    turns that into a boot failure naming the flag. `context.regions` gets the
+    same treatment from the same code, because a misspelled *region* fails in
+    exactly the same silent way.
 
     Two branches, because only some providers can enumerate. One that offers
     `names()` is checked. One that cannot -- an external service that would need
@@ -180,38 +247,38 @@ def _validate_flag_names(referenced: frozenset[str] | None, provider: Any) -> No
     is written, rather than either failing on a guess or staying silent.
 
     A configured-but-empty provider is still a provider, so `names()` returning
-    nothing means every referenced flag is unknown and the raise is correct.
+    nothing means every referenced name is unknown and the raise is correct.
     Passing no provider at all skips validation entirely: that application has
-    decided flags are off, every set is empty, and every flag test denies.
+    decided the capability is off, every set is empty, and every test denies.
     """
     if referenced is not None and not referenced:
-        return  # no policy reads a flag; nothing to check and nothing to say
+        return  # no policy reads one; nothing to check and nothing to say
     if provider is None:
-        return  # flags deliberately off: every test denies, and that is written down
+        return  # deliberately off: every test denies, and that is written down
     enumerate_names = getattr(provider, "names", None)
     if referenced is None:
-        # The policy set reads flags in a shape whose names cannot be listed, so
+        # The policy set reads them in a shape whose names cannot be listed, so
         # the provider has to supply all of them -- and this one cannot be
-        # enumerated either. Nothing can ever be resolved, so every flag test
+        # enumerated either. Nothing can ever be resolved, so every test
         # denies forever: working, fail-closed, and completely silent, which is
         # the shape worth a warning rather than a shrug.
         if not callable(enumerate_names):
             warnings.warn(
-                "cedar policies read context.flags in a shape whose names "
+                f"cedar policies read context.{attribute} in a shape whose names "
                 "cannot be read off the source (isEmpty(), or a computed "
-                f"argument), and the flag provider {type(provider).__name__} "
-                "cannot enumerate its names either, so no flag can be resolved "
-                "and every flag test will deny",
+                f"argument), and the {singular} provider {type(provider).__name__} "
+                f"cannot enumerate its names either, so no {singular} can be "
+                f"resolved and every {singular} test will deny",
                 RuntimeWarning,
                 stacklevel=3,
             )
         return  # no name list to validate against either way
     if not callable(enumerate_names):
         warnings.warn(
-            "cedar policies reference feature flags "
-            f"({', '.join(sorted(referenced))}) but the flag provider "
+            f"cedar policies reference {noun} "
+            f"({', '.join(sorted(referenced))}) but the {singular} provider "
             f"{type(provider).__name__} cannot enumerate its names, so they "
-            "cannot be checked; a misspelled flag will deny silently",
+            f"cannot be checked; a misspelled {singular} will deny silently",
             RuntimeWarning,
             stacklevel=3,
         )
@@ -220,9 +287,9 @@ def _validate_flag_names(referenced: frozenset[str] | None, provider: Any) -> No
     unknown = sorted(name for name in referenced if name.lower() not in known)
     if unknown:
         raise ValueError(
-            "cedar policies reference feature flags the provider does not "
-            f"hold: {', '.join(unknown)}. A flag absent from the provider is "
-            "absent from context.flags, so the policy would deny forever."
+            f"cedar policies reference {noun} the provider does not "
+            f"hold: {', '.join(unknown)}. A {singular} absent from the provider "
+            f"is absent from context.{attribute}, so the policy would deny forever."
         )
 
 
@@ -312,7 +379,10 @@ class CedarAuthorizer:
         "_entities",
         "_flag_names",
         "_flags",
+        "_location",
         "_principal",
+        "_region_names",
+        "_regions",
         "_resource",
     )
 
@@ -326,6 +396,8 @@ class CedarAuthorizer:
         entities: Callable[[Request], object] = _default_entities,
         context: Callable[[Request], Mapping[str, object]] = _default_context,
         flags: Any = None,
+        regions: Any = None,
+        location: Callable[[Request], object] = _default_location,
     ) -> None:
         self._engine = engine
         self._principal = principal
@@ -334,8 +406,18 @@ class CedarAuthorizer:
         self._entities = entities
         self._context = context
         self._flags = flags
-        self._flag_names = _referenced_flag_names(engine)
-        _validate_flag_names(self._flag_names, flags)
+        self._regions = regions
+        self._location = location
+        self._flag_names = _referenced_names(engine, "referenced_flags")
+        self._region_names = _referenced_names(engine, "referenced_regions")
+        _validate_names(self._flag_names, flags)
+        _validate_names(
+            self._region_names,
+            regions,
+            noun="geofence regions",
+            singular="region",
+            attribute="regions",
+        )
 
     # --- policy identity, delegated from the engine -------------------------
     #
@@ -373,6 +455,18 @@ class CedarAuthorizer:
         tagging a manifest costs no extra resolution.
         """
         return request_flags(request, self._flags, self._flag_names)
+
+    def regions_for(self, request: Request) -> frozenset[str]:
+        """This request's containing regions, from the resolution `authorize` uses.
+
+        The manifest's counterpart to `flags_for`: once a policy can read
+        `context.regions`, a caller's answer changes when they move, and a tag
+        that ignored position would let a stale manifest outlive the geofence
+        that produced it.
+        """
+        return request_regions(
+            request, self._regions, self._location, self._region_names
+        )
 
     @property
     def fingerprint(self) -> object:
@@ -461,6 +555,16 @@ class CedarAuthorizer:
         # for the opposite reason: it is guarded by `has`, and a *number* has
         # no value that fails closed in both shapes.)
         context["flags"] = request_flags(request, self._flags, self._flag_names)
+        # Supplied unconditionally for the reason `flags` is, and verified for
+        # this key rather than assumed to transfer: against a context with no
+        # `regions` at all, `forbid(...) unless { context.regions.contains(x) }`
+        # evaluates to *allowed* -- the forbid is skipped rather than standing,
+        # so an application that never configured regions, or a custom context
+        # mapper that dropped the key, would silently stop geofencing. An empty
+        # set denies in both the `when` and the `unless` shape.
+        context["regions"] = request_regions(
+            request, self._regions, self._location, self._region_names
+        )
         result = await _resolve(
             self._engine.is_authorized(
                 principal=principal,

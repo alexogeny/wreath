@@ -366,6 +366,63 @@ def test_an_mcp_tools_gates_are_mutable(tmp_path: Path) -> None:
         assert any(f"`{gate}=`" in control for control in dropped), (gate, dropped)
 
 
+def test_a_grpc_methods_controls_are_mutable(tmp_path: Path) -> None:
+    """`service.unary(..., roles=...)` in a factory.
+
+    `wreath.grpc` declares a method with `**metadata` forwarded to
+    `RouteDefinition`, so its controls *are* a route's -- but the call is not
+    route-shaped (no verb, no literal `/`-path) and `service` is a local, so both
+    branches of the declaration operator declined and a gRPC method's guards were
+    mutated not at all. An authorization control the mutation tester cannot see
+    is the hole this whole section exists to close.
+
+    The source is written the way a real service is rather than imported from
+    `wreath.grpc`: the operators read the tree, and the table is keyed on the
+    call name, so this holds whether or not the module is present.
+    """
+    found = _scan_resolved(tmp_path, """
+        from typing import Any
+
+
+        def build(service: Any) -> None:
+            @service.unary(request=dict, response=dict,
+                           permissions=("track:read",))
+            async def GetPosition(request, message): ...
+
+            @service.server_stream(request=dict, response=dict,
+                                   roles=("ranger",), rate_limit=(2, 60.0))
+            async def WatchPositions(request, message): ...
+    """, "grpc_service")
+    dropped = {c.control for c in _by(found, "declaration.drop-keyword")}
+    for control in ("permissions", "roles", "rate_limit"):
+        assert any(f"`{control}=`" in name for name in dropped), (control, dropped)
+
+
+def test_a_grpc_methods_wire_types_are_not_treated_as_controls(
+    tmp_path: Path,
+) -> None:
+    """The negative space, and the reason the table names calls not keywords.
+
+    `request=`/`response=` are the message types, not guards -- and they are
+    *required* keyword parameters, so dropping one does not fall back to a
+    default, it raises. A broken mutant that a test kills inflates the score,
+    which is the failure `_defaulted_keywords` already declines a `**kwargs`
+    callee to avoid. They stay out because the entry lists controls explicitly.
+    """
+    found = _scan_resolved(tmp_path, """
+        from typing import Any
+
+
+        def build(service: Any) -> None:
+            @service.bidi(request=dict, response=dict, roles=("ranger",))
+            async def Chat(request, message): ...
+    """, "grpc_wire_types")
+    dropped = {c.control for c in _by(found, "declaration.drop-keyword")}
+    assert any("`roles=`" in name for name in dropped), dropped
+    for wire in ("request", "response"):
+        assert not any(f"`{wire}=`" in name for name in dropped), (wire, dropped)
+
+
 def test_an_mcp_servers_bounds_are_already_widenable(tmp_path: Path) -> None:
     """`MCPLimits(...)` needs no operator of its own.
 
@@ -412,6 +469,104 @@ def test_a_graphql_authorizer_is_a_control(tmp_path: Path) -> None:
     """, "graphql_factory")
     dropped = {c.control for c in _by(found, "declaration.drop-keyword")}
     assert any("`authorizer=`" in control for control in dropped), dropped
+
+
+def test_a_graphql_fields_policy_is_mutable_where_the_endpoint_is_built(
+    tmp_path: Path,
+) -> None:
+    """`@api.field(..., policy=...)` in a factory, which is the whole surface.
+
+    `GraphQL(authorizer=...)` was reachable because `GraphQL` is an imported
+    module global. The *per-field* declarations were not: `api` is a local, so
+    `_resolve_callee` declined, and `api.field(...)`/`api.query(...)`/
+    `api.mutation(...)` are not route-shaped -- which left GraphQL's entire
+    authorization vocabulary, one policy per field, mutated not at all while the
+    constructor keyword beside it was covered.
+
+    A GraphQL field's `policy=` is the same kind of sentence as an MCP tool's
+    `action=`: *this field was gated on that resource*. Dropping it falls back to
+    the derived `Type.field`, which is a different resource, so a policy set
+    written for the explicit one no longer names it.
+    """
+    found = _scan_resolved(tmp_path, """
+        from typing import Any
+
+
+        def build(registry: Any) -> Any:
+            from wreath.graphql import GraphQL
+
+            api = GraphQL(registry, models=[], authorizer=None)
+
+            @api.field("User", "postCount", returns="Int", policy="Billing::read")
+            async def post_count(users, info): ...
+
+            @api.query("search", returns="User", policy="Query::search", cost=25)
+            async def search(info): ...
+
+            @api.mutation("retire", returns="User", policy="Mutation::retire")
+            async def retire(info): ...
+
+            return api
+    """, "graphql_fields")
+    dropped = {c.control for c in _by(found, "declaration.drop-keyword")}
+    for call in ("api.field", "api.query", "api.mutation"):
+        assert any(
+            f"`policy=` on `{call}(...)`" in control for control in dropped
+        ), (call, dropped)
+
+
+def test_an_mcp_servers_oauth_boundary_is_a_control(tmp_path: Path) -> None:
+    """`MCP(auth=MCPAuth(...))` is the whole authorization boundary.
+
+    Without it the endpoint is exactly as protected as the route, which for a
+    bare application is not at all -- so dropping the keyword is the single
+    largest undeclaration available on this surface. It was not offered, because
+    `auth` was missing from `CONTROL_KEYWORDS` while `authorizer`, `verifier`
+    and `audience` were all in it.
+    """
+    found = _scan_resolved(tmp_path, """
+        from typing import Any
+
+        from wreath.mcp import MCP, MCPAuth
+
+
+        def build(app: Any, verifier: Any) -> Any:
+            return MCP(
+                app,
+                name="camera-trap",
+                version="1",
+                auth=MCPAuth(resource="https://example.test/mcp", verifier=verifier),
+            )
+    """, "mcp_boundary")
+    dropped = {c.control for c in _by(found, "declaration.drop-keyword")}
+    assert any("`auth=` on `MCP(...)`" in control for control in dropped), dropped
+
+
+def test_a_routes_permissions_keyword_is_mutable(tmp_path: Path) -> None:
+    """`@app.get(path, permissions=...)` is a control and was not offered.
+
+    `_route_metadata()` read `RouteDefinition`'s defaulted *fields*, and
+    `permissions=` is not one of them -- the router folds it into `requirement`
+    before building the record. So the decorator keyword that requires a named
+    permission, on the spelling applications actually use (an `app` that is a
+    local or a parameter), was the one route control the tester could not see.
+    """
+    path = tmp_path / "permissioned.py"
+    path.write_text(textwrap.dedent(
+        """
+        def build_app(app):
+            @app.get("/reports", permissions=("reports:read",))
+            async def reports(request) -> dict:
+                \"\"\"Every report.\"\"\"
+                return {}
+
+            return app
+        """
+    ), encoding="utf-8")
+    found = _by(_scan(path), "declaration.drop-keyword")
+    assert [c.control for c in found] == [
+        "`permissions=` on `app.get(...)` (it falls back to the default)"
+    ]
 
 
 def test_a_routes_own_controls_are_mutable_where_the_route_is_built(tmp_path: Path) -> None:
@@ -869,6 +1024,182 @@ def test_the_wholesale_keyword_mutant_is_the_one_that_overstates(
     ]
     assert wholesale, crud_run["mutants"]
     assert all(m["outcome"] == "killed" for m in wholesale), wholesale
+
+
+# -- a Cedar policy compiled at import time ---------------------------------
+#
+# The shape every application writes, and the one this tool used to be unable
+# to touch: the text is bound to a module global and a `CedarPolicies` is built
+# from it on the next line, so rebinding the global reaches the string and not
+# the engine that answers. Measured over `example/camera_trap/policies.py`
+# before the fix: 0 killed, 18 survived. The project below is that shape in
+# miniature, with one watched policy and one unwatched one, so a run that
+# reports both KILLED is as wrong as one that reports both SURVIVED.
+
+CEDAR_PROJECT = {
+    "guard/__init__.py": "",
+    "guard/policy.py": textwrap.dedent(
+        '''
+        """One policy set, parsed at import, exactly as an application writes it."""
+
+        from wreath.authorization import CedarEntity, CedarPolicies, EntityUid
+
+        POLICY_SOURCE = """
+        // Rangers respond to incidents; they may read a sensitive record.
+        permit(principal in Role::"ranger", action == Action::"read", resource)
+          when { resource.tier == "sensitive" };
+
+        // Anyone signed in may read an open record. Note the semicolon in this
+        // sentence; splitting the source on a bare `;` used to cut it in half.
+        permit(principal, action == Action::"read", resource)
+          when { resource.tier == "open" };
+
+        // Forbid wins over every permit, including ones added later.
+        forbid(principal, action, resource)
+          when { principal has suspended && principal.suspended == true };
+        """
+
+        ENGINE = CedarPolicies(POLICY_SOURCE)
+
+
+        def may_read(*, roles=(), tier="open", suspended=False):
+            principal = CedarEntity(
+                EntityUid("User", "u1"),
+                attrs={"suspended": suspended},
+                parents=tuple(EntityUid("Role", role) for role in sorted(roles)),
+            )
+            resource = EntityUid("Record", tier)
+            decision = ENGINE.is_authorized(
+                principal=principal.uid,
+                action=EntityUid("Action", "read"),
+                resource=resource,
+                context={},
+                entities=(principal, CedarEntity(resource, attrs={"tier": tier})),
+            )
+            return bool(getattr(decision, "allowed", decision))
+        '''
+    ),
+    "tests/test_policy.py": textwrap.dedent(
+        '''
+        from guard.policy import may_read
+
+
+        def test_a_volunteer_cannot_read_a_sensitive_record():
+            # Watches the open-record permit's `when` clause: dropping it lets
+            # anyone read anything, and this is what notices.
+            assert may_read(roles=(), tier="sensitive") is False
+
+
+        def test_a_ranger_can_read_a_sensitive_record():
+            assert may_read(roles=("ranger",), tier="sensitive") is True
+
+
+        def test_a_suspended_ranger_is_refused():
+            # Watches the standing `forbid`. Flipping it to a permit makes this
+            # pass -- but only if the mutation reaches the compiled engine.
+            assert may_read(roles=("ranger",), tier="sensitive", suspended=True) is False
+
+
+        def test_an_open_record_is_readable():
+            # Exercises the ranger permit's tier without ever asserting that a
+            # ranger is refused anything, so widening that clause goes unseen.
+            assert may_read(roles=(), tier="open") is True
+        '''
+    ),
+    "pyproject.toml": textwrap.dedent(
+        """
+        [tool.pytest.ini_options]
+        testpaths = ["tests"]
+        """
+    ),
+}
+
+
+@pytest.fixture(scope="module")
+def cedar_run(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    root = tmp_path_factory.mktemp("mutant-cedar")
+    for relative, body in CEDAR_PROJECT.items():
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, "-m", "wreath._mutant.cli", "--path", "guard",
+         "--format", "json", "--quiet"],
+        cwd=root, capture_output=True, text=True, timeout=_NESTED_TIMEOUT, check=False,
+        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(root), "HOME": str(root)},
+    )
+    if completed.returncode != 0:
+        pytest.fail(f"wreath mutant exited {completed.returncode}\n{completed.stderr[-4000:]}")
+    return json.loads(completed.stdout)
+
+
+def _cedar_outcomes(run: dict, operator: str) -> dict[str, str]:
+    return {
+        mutant["control"].split("`")[1]: mutant["outcome"]
+        for mutant in run["mutants"]
+        if mutant["operator"] == operator
+    }
+
+
+def test_flipping_a_forbid_reaches_the_engine_compiled_at_import(
+    cedar_run: dict,
+) -> None:
+    """The load-bearing one.
+
+    `ENGINE` was built from `POLICY_SOURCE` while the module imported, so a
+    patch that only rebinds the name leaves the standing refusal in force and
+    the mutant survives having removed nothing. There *is* a test watching it,
+    so KILLED is the only honest outcome.
+    """
+    outcomes = [
+        mutant["outcome"]
+        for mutant in cedar_run["mutants"]
+        if mutant["operator"] == "cedar.flip-effect"
+    ]
+    assert outcomes == ["killed"], cedar_run["mutants"]
+
+
+def test_a_watched_and_an_unwatched_clause_are_told_apart(cedar_run: dict) -> None:
+    """The pair. Reaching the engine is worth nothing if everything now dies."""
+    outcomes = _cedar_outcomes(cedar_run, "cedar.drop-condition")
+    # Dropping the open-record permit's condition lets *anyone* read a
+    # sensitive record, which the volunteer test asserts against.
+    watched = 'when { resource.tier == "open" }'
+    # Dropping the ranger permit's condition widens rangers to every tier, and
+    # nothing here ever asserts that a ranger is refused anything.
+    unwatched = 'when { resource.tier == "sensitive" }'
+    assert outcomes.get(watched) == "killed", cedar_run["mutants"]
+    assert outcomes.get(unwatched) in ("survived", "unreached"), cedar_run["mutants"]
+
+
+def test_deleting_the_policy_a_test_watches_is_killed(cedar_run: dict) -> None:
+    deleted = _cedar_outcomes(cedar_run, "cedar.delete-policy")
+    ranger = next(key for key in deleted if 'Role::"ranger"' in key)
+    assert deleted[ranger] == "killed", cedar_run["mutants"]
+
+
+def test_no_cedar_mutant_is_declined_for_failing_to_parse(cedar_run: dict) -> None:
+    """A mutation nobody could have noticed is not evidence about a suite.
+
+    Splitting the source on every `;` produced fragments cut out of the middle
+    of a comment; some deleted a sentence and one did not parse. Both were
+    invisible while the patch changed nothing.
+    """
+    declined = [m for m in cedar_run["mutants"] if m["outcome"] in ("error", "declined")]
+    assert declined == [], declined
+
+
+def test_a_comment_is_never_offered_as_a_policy(cedar_run: dict) -> None:
+    controls = [
+        mutant["control"]
+        for mutant in cedar_run["mutants"]
+        if mutant["operator"] == "cedar.delete-policy"
+    ]
+    assert controls, cedar_run["mutants"]
+    assert all("//" not in control for control in controls), controls
+    assert all(
+        "permit" in control or "forbid" in control for control in controls
+    ), controls
 
 
 # -- bounding a pass onto code you just wrote -------------------------------

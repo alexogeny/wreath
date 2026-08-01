@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import contextlib
 import datetime
 import hashlib
@@ -91,6 +92,7 @@ _INT2 = 21
 _INT4 = 23
 _TEXT = 25
 _JSON = 114
+_POINT = 600
 _FLOAT4 = 700
 _FLOAT8 = 701
 _VARCHAR = 1043
@@ -112,12 +114,15 @@ _JSONB = 3802
 _EXT_KIND_VECTOR = 1
 _EXT_KIND_HALFVEC = 2
 _EXT_KIND_SPARSEVEC = 3
+_EXT_KIND_GEOGRAPHY = 4
 _MAX_EXTENSION_TYPES = 16
 
 #: Codec kinds this twin can frame. A kind absent from here is refused at
 #: registration rather than falling through to `bytes` at decode time, which is
 #: what "never a silent fall-through" means one layer down in `orm/types.py`.
-_EXT_KINDS = frozenset((_EXT_KIND_VECTOR, _EXT_KIND_HALFVEC, _EXT_KIND_SPARSEVEC))
+_EXT_KINDS = frozenset(
+    (_EXT_KIND_VECTOR, _EXT_KIND_HALFVEC, _EXT_KIND_SPARSEVEC, _EXT_KIND_GEOGRAPHY)
+)
 
 #: The kinds whose text form is pgvector's bracketed list, `[1,2,3]`. `sparsevec`
 #: is deliberately not one of them: it prints `{1:1.5,3:3.5}/5`, and a decoder
@@ -788,6 +793,56 @@ def _encode_text(value: object, oid: int) -> bytes | None:
     return str(value).encode("ascii")
 
 
+def _parse_point_literal(value: object) -> tuple[float, float]:
+    """`(x,y)` -> (x, y). Raises TypeError, as every other codec here does."""
+    text = value.decode("ascii") if isinstance(value, (bytes, bytearray)) else value
+    if not isinstance(text, str):
+        raise TypeError("point codec requires the '(x,y)' literal")
+    body = text.strip()
+    if not body.startswith("(") or not body.endswith(")") or body.count(",") != 1:
+        raise TypeError(f"point codec requires the '(x,y)' literal, got {text!r}")
+    x_text, _, y_text = body[1:-1].partition(",")
+    try:
+        return float(x_text), float(y_text)
+    except ValueError as exc:
+        raise TypeError(f"point codec requires the '(x,y)' literal, got {text!r}") from exc
+
+
+def _encode_point(value: object) -> bytes:
+    x, y = _parse_point_literal(value)
+    return struct.pack("!dd", x, y)
+
+
+def _encode_geography(value: object) -> bytes:
+    """EWKB bytes from the hex spelling `Geography.to_wire` produced.
+
+    PostGIS reads EWKB hex on the text parameter path and raw EWKB on the
+    binary one, so the column type produces the hex once and this un-hexes it
+    -- there is no second representation to keep in step. Deliberately no
+    validation of the geometry beyond what hex decoding enforces: the server
+    is the authority on what a `geography` may hold, and a second opinion here
+    would be a place for the two to disagree.
+    """
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, (bytes, bytearray, memoryview)):
+        try:
+            text = bytes(value).decode("ascii")
+        except UnicodeDecodeError:
+            raise TypeError("geography codec requires EWKB hex") from None
+    else:
+        raise TypeError("geography codec requires EWKB hex")
+    try:
+        # `binascii.unhexlify`, never `bytes.fromhex`: `fromhex` skips ASCII
+        # whitespace, so `"01 02"` would encode here and be refused by the
+        # native twin, which reads the digits in pairs. A parity test caught
+        # exactly that. Nothing wreath emits contains whitespace, so the strict
+        # reading loses no input and keeps the two encoders one behaviour.
+        return binascii.unhexlify(text)
+    except binascii.Error:
+        raise TypeError("geography codec requires EWKB hex") from None
+
+
 def _encode_binary(value: object, oid: int) -> bytes | None:
     if value is None:
         return None
@@ -863,6 +918,13 @@ def _encode_binary(value: object, oid: int) -> bytes | None:
         return b"\x01" + _as_json(value).encode("utf-8")
     if oid == _BIT:
         return _encode_bit(value)
+    if oid == _POINT:
+        # `point` is two float8 in x,y order -- longitude then latitude. The
+        # value arrives as the text literal `to_wire` produced, because that is
+        # also what the *text* parameter path sends and one `to_wire` serves
+        # both; parsing it back here keeps the column type's contract in one
+        # place rather than splitting it across two encoders.
+        return _encode_point(value)
     extension_kind = _extension_kinds.get(oid)
     if extension_kind == _EXT_KIND_VECTOR:
         return _encode_vector(value)
@@ -870,6 +932,8 @@ def _encode_binary(value: object, oid: int) -> bytes | None:
         return _encode_halfvec(value)
     if extension_kind == _EXT_KIND_SPARSEVEC:
         return _encode_sparsevec(value)
+    if extension_kind == _EXT_KIND_GEOGRAPHY:
+        return _encode_geography(value)
     raise TypeError(f"no binary encoder for PostgreSQL OID {oid}")
 
 

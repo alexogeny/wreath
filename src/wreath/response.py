@@ -108,6 +108,18 @@ class Response:
             if media_type is None:
                 media_type_header = self._media_type_header
             else:
+                # A `str` here used to travel all the way onto the wire, so the
+                # app emitted `(b"content-type", "application/x-protobuf")` --
+                # a bytes name beside a str value, which is not a valid ASGI
+                # header. Nothing raised at the call site; what surfaced was a
+                # `TypeError` from whatever read the header later, far from the
+                # `media_type=` that caused it. The annotation has always said
+                # bytes, so this enforces the contract rather than widening it.
+                if isinstance(media_type, str):
+                    raise TypeError(
+                        f"media_type must be bytes, not str: pass "
+                        f"b{media_type!r} rather than {media_type!r}"
+                    )
                 media_type_header = (_CONTENT_TYPE, media_type) if media_type else None
             response_headers: list[tuple[bytes, bytes]] = (
                 [media_type_header] if media_type_header is not None else []

@@ -60,6 +60,7 @@ __all__ = [
     "bind_propagation",
     "outbound_context",
     "propagates",
+    "trace_id_of",
     "activate_otel",
     "activate_prometheus",
     "activate_openmetrics",
@@ -473,6 +474,37 @@ class SpanContextView:
         return f"00-{self.trace_id_hex}-{self.span_id_hex}-{'01' if self.sampled else '00'}"
 
 
+_HEX = frozenset("0123456789abcdef")
+
+
+def trace_id_of(traceparent: str | None) -> str | None:
+    """The 32-hex trace id out of a stored `traceparent`, or `None`.
+
+    The inverse of `SpanContextView.traceparent`, and the reader every durable
+    row needs: what is stored is the whole interchange string, because that is
+    what pastes into a tracing UI, but what an operator *searches* by is the
+    trace id alone. `wreath jobs`, `wreath passes status` and `wreath doctor
+    trace` all go through here so they agree on what a trace id is.
+
+    Anything that is not a well-formed `traceparent` reads as `None` rather than
+    raising. These are forensic surfaces: they run against whatever is actually
+    in the table, including a row written by a build that is not this one, and a
+    lookup that crashes on a malformed value is worse than one that reports it
+    has nothing. An all-zero id is invalid per the W3C spec and is refused here
+    too -- it is the shape a broken instrumentation emits, and treating it as a
+    real id would join every such row to every other.
+    """
+    if not traceparent:
+        return None
+    parts = traceparent.split("-")
+    if len(parts) != 4 or len(parts[1]) != 32:
+        return None
+    ident = parts[1]
+    if not _HEX.issuperset(ident) or ident == "0" * 32:
+        return None
+    return ident
+
+
 #: The serialized `(traceparent, tracestate)` an outbound call should carry, or
 #: `None` outside a propagating request. Serialized rather than structured
 #: because it is written once per request and read once per outbound call, and
@@ -481,16 +513,38 @@ outbound_context: ContextVar[tuple[str, str] | None] = ContextVar(
     "wreath_outbound_context", default=None
 )
 
-#: Whether anything in this process could *make* an outbound call. Latched by
-#: `HTTPClient.__init__`, and read before the request path binds anything --
-#: the same shape as `_nplusone.WATCHING`, and for the same reason: an
-#: application with no outbound client must not pay a `ContextVar.set` per
-#: request to discover that it has nothing to propagate to.
+#: Whether anything in this process could *carry this request's context past
+#: its own boundary*. Latched by `HTTPClient.__init__`, by `JobRunner` and by
+#: `MessageBus`, and read before the request path binds anything -- the same shape as
+#: `_nplusone.WATCHING`, and for the same reason: an application with no
+#: outbound seam must not pay a `ContextVar.set` per request to discover that it
+#: has nothing to propagate to.
+#:
+#: It started as "could make an outbound HTTP call" and widened when the queue
+#: became the second seam, then the durable bus the third. The distinction that
+#: matters is *causal*, not transport: enqueuing a durable job or publishing a
+#: durable message hands work to a later process exactly as a client call hands
+#: it to another service, and a trace that stops at the queue loses the same
+#: link for the same reason.
 PROPAGATING = False
 
 
 def propagates() -> None:
-    """Arm outbound propagation. Called when an HTTP client is constructed."""
+    """Arm context propagation. Called when a seam that can carry it is built.
+
+    Idempotent and never cleared: a process that has ever constructed such a
+    seam keeps the latch, because the cost it guards is one `ContextVar.set` and
+    the alternative -- reference-counting live seams -- would be a far larger
+    mechanism than the thing it saves.
+
+    **Three sites arm it**: `HTTPClient.__init__`, `JobRunner.__init__` and
+    `MessageBus.__init__`. Because the latch is a process global that is never
+    cleared, any *measurement* over it is order-dependent -- a test that happens
+    to build a client arms propagation for an unrelated scenario, which is how
+    the request-boundary gate once passed alone and failed under `pytest -n`.
+    `_devtools/request_trace.py` sets the latch from the app in front of it and
+    restores it afterwards, and a fourth arming site has to keep that working.
+    """
     global PROPAGATING
     PROPAGATING = True
 

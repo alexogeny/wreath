@@ -39,6 +39,10 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from ._auth.geofence import WITHHELD as _WITHHELD
+from ._auth.geofence import coarsen as _coarsen
+from ._auth.geofence import resolve_precision as _resolve_precision
+from .geospatial import Coordinate as _Coordinate
 from .response import JSONResponse, Response
 
 if TYPE_CHECKING:
@@ -309,6 +313,13 @@ def _jsonable(value: Any) -> Any:
         return str(value)
     if isinstance(value, (bytes, bytearray, memoryview)):
         return bytes(value).hex()
+    if isinstance(value, _Coordinate):
+        # Deferred to the type's own canonical REST form rather than spelled
+        # again here. `Coordinate.__jsonable__` is what the JSON encoder uses,
+        # so a route that serialises through CRUD and one that returns the
+        # value directly cannot disagree about the shape -- which they could
+        # while this branch built its own dict.
+        return value.__jsonable__()
     return value
 
 
@@ -326,6 +337,7 @@ def crud_router(
     tags: Iterable[str] = (),
     authorize: Access | Mapping[str, Access] | None = None,
     object_authorizer: Callable[..., Any] | None = None,
+    precision: Mapping[str, Any] | None = None,
 ) -> Any:
     """Build a `Router` of CRUD routes for `model`, mounted under `prefix`.
 
@@ -394,9 +406,15 @@ def crud_router(
         page_size: default page size for `GET /`, raisable per request up to 100
         authorize: one `Access` rule, or a mapping keyed by operation, group or `"*"`
         object_authorizer: `(request, op, instance) -> bool`, optionally async
+        precision: column name to `PrecisionLadder`, making a coordinate's
+            *resolution* an authorization outcome rather than a verdict — exact
+            for one caller, 10 km for another, absent for a third. Applied in
+            `serialize`, which is the only path a column takes out of these
+            routes, so there is no select-the-column-directly way around it.
 
     Raises:
-        ValueError: the model has a composite primary key, or the field lists conflict
+        ValueError: the model has a composite primary key, the field lists
+            conflict, or `precision` names a column that is not serialized
     """
     from .router import Router
 
@@ -467,8 +485,66 @@ def crud_router(
     resource = prefix if prefix is not None else "/" + model.__name__.lower()
     router = Router(prefix=resource.rstrip("/"), tags=tuple(tags) or (model.__name__.lower(),))
 
-    def serialize(instance: Any) -> dict[str, Any]:
-        return {name: _jsonable(getattr(instance, name)) for name in output_fields}
+    precision_ladders = dict(precision or {})
+    unknown_precision = sorted(set(precision_ladders) - set(output_fields))
+    if unknown_precision:
+        raise ValueError(
+            "crud_router(precision=...) names columns this router does not "
+            f"serialize: {', '.join(unknown_precision)}. A ladder on a column "
+            "that never leaves would read as protection and protect nothing."
+        )
+
+    def serialize(instance: Any, resolutions: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """The one path a column takes out of these routes.
+
+        Every operation's response goes through here, which is what makes
+        `precision` unbypassable: there is no second projection to forget, and
+        a column withheld at this level cannot be reached by asking for it
+        another way.
+        """
+        row = {name: _jsonable(getattr(instance, name)) for name in output_fields}
+        if not resolutions:
+            return row
+        for name, metres in resolutions.items():
+            value = getattr(instance, name, None)
+            if metres is _WITHHELD:
+                # Absent, not null: a null says "this row has no location",
+                # which is a different and false statement about the world.
+                row.pop(name, None)
+            elif value is not None:
+                row[name] = _jsonable(
+                    value if metres is None else _coarsen(value, metres)
+                )
+        return row
+
+    #: The Cedar resource a ladder's rungs are asked about. Resource-type level,
+    #: matching the permission manifest's own split: a per-row answer would need
+    #: the row before deciding, which is `object_authorizer`'s shape rather than
+    #: this one. Row-level precision is a follow-up, noted in the guide.
+    precision_resource = f'{model.__name__}::"*"'
+
+    async def resolutions_for(request: Any) -> dict[str, Any] | None:
+        """This request's resolution for each laddered column, or None.
+
+        Resolved once per request rather than once per row: a list response
+        would otherwise multiply `rows x rungs` authorization calls, and the
+        answer cannot differ between rows of one response anyway.
+        """
+        if not precision_ladders:
+            return None
+        authorizer = getattr(getattr(request, "app", None), "_authorizer", None)
+        if authorizer is None:
+            # No authorizer configured: a ladder cannot be evaluated, and the
+            # fail-closed answer is to withhold rather than to publish. A
+            # deployment that declared a ladder and no authorizer has asked for
+            # a decision nobody can make, and publishing would answer it "yes".
+            return dict.fromkeys(precision_ladders, _WITHHELD)
+        return {
+            name: await _resolve_precision(
+                request, authorizer, ladder, precision_resource
+            )
+            for name, ladder in precision_ladders.items()
+        }
 
     coerce_pk = _coerce_pk_for(model)
 
@@ -506,8 +582,9 @@ def crud_router(
                         row for row in rows
                         if not await object_denied(request, "list", row)
                     ]
+                grades = await resolutions_for(request)
                 return JSONResponse({
-                    "items": [serialize(row) for row in rows],
+                    "items": [serialize(row, grades) for row in rows],
                     "page": page, "size": size,
                 })
             finally:
@@ -528,7 +605,7 @@ def crud_router(
                     return _not_found()
                 if await object_denied(request, "retrieve", instance):
                     return _forbidden()
-                return JSONResponse(serialize(instance))
+                return JSONResponse(serialize(instance, await resolutions_for(request)))
             finally:
                 await session.close()
         _apply_requirement(retrieve, retrieve_rule)
@@ -551,7 +628,7 @@ def crud_router(
                 async with session.begin():
                     session.add(instance)
                     await session.flush()
-                    payload = serialize(instance)
+                    payload = serialize(instance, await resolutions_for(request))
                 return JSONResponse(payload, status=201)
             except Exception as error:  # noqa: BLE001 - see `_unprocessable`
                 return _unprocessable(error)
@@ -580,7 +657,7 @@ def crud_router(
                     for name, value in values.items():
                         setattr(instance, name, value)
                     await session.flush()
-                    payload = serialize(instance)
+                    payload = serialize(instance, await resolutions_for(request))
                 return JSONResponse(payload)
             except Exception as error:  # noqa: BLE001 - see `_unprocessable`
                 return _unprocessable(error)

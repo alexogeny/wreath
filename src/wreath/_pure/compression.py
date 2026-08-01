@@ -32,6 +32,64 @@ def gzip_compress(data: bytes, level: int = 5) -> bytes:
     return zlib.compress(data, level=level, wbits=31)
 
 
+def gzip_decompress(data: bytes, *, max_output_bytes: int) -> bytes:
+    """The inverse of `gzip_compress`, refusing an output past `max_output_bytes`.
+
+    **The bound is not optional, which is why it has no default.** A gzip
+    member's *input* length says nothing about its output length -- a few
+    hundred bytes of zeros expand to megabytes, and that ratio is the whole
+    mechanism of a decompression bomb. Anything reading a compressed body off
+    the network already has a ceiling on the decoded size it is willing to hold;
+    this makes the caller name it rather than discover it as memory pressure.
+
+    Args:
+        data: One complete gzip member, header and trailer included.
+        max_output_bytes: The largest decoded result to produce, in bytes. Must
+            be positive: `zlib` reads a `max_length` of zero as *unbounded*, so
+            a caller that computed a limit of zero would silently get the
+            opposite of the guarantee this function exists to make.
+
+    Returns:
+        The decoded bytes.
+
+    Raises:
+        ValueError: `max_output_bytes` is not positive; the member expands past
+            it; the member is truncated; bytes follow it; or it is not a gzip
+            member at all. One exception type, because every one of these is
+            "the bytes were not what the caller was promised", and `zlib.error`
+            is not something a caller of this facade should have to know about.
+    """
+    if max_output_bytes < 1:
+        raise ValueError(
+            f"max_output_bytes must be positive, got {max_output_bytes}: zlib "
+            "reads a limit of zero as unbounded"
+        )
+    decompressor = zlib.decompressobj(wbits=31)
+    try:
+        # One byte of headroom, then a length check: asking for exactly the
+        # limit can leave the member's own trailer sitting in `unconsumed_tail`
+        # for a payload that is *exactly* the size allowed, which would refuse a
+        # message the caller said was acceptable.
+        #
+        # The length is the whole test. `unconsumed_tail` is non-empty only when
+        # the output limit was hit, and hitting a limit of `max + 1` means the
+        # length check has already fired -- so testing both is one check written
+        # twice. (A mutation pass found that second clause redundant, which is
+        # how it came to be deleted rather than tested.)
+        out = decompressor.decompress(data, max_output_bytes + 1)
+        if len(out) > max_output_bytes:
+            raise ValueError(
+                f"gzip member expands past the {max_output_bytes}-byte limit"
+            )
+        if not decompressor.eof:
+            raise ValueError("gzip member is truncated")
+        if decompressor.unused_data:
+            raise ValueError("trailing bytes follow the gzip member")
+    except zlib.error as error:
+        raise ValueError(f"not a readable gzip member: {error}") from error
+    return out
+
+
 class GzipCompressor:
     """The streaming form of `gzip_compress`: feed it chunks, then finish.
 
@@ -253,5 +311,6 @@ __all__ = [
     "GzipCompressor",
     "ZstdCompressor",
     "gzip_compress",
+    "gzip_decompress",
     "zstd_compress",
 ]

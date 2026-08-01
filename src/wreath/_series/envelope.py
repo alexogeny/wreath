@@ -43,6 +43,33 @@ def aggregate_rows(declaration: Any, rows: list[Any]) -> list[tuple[Any, dict[st
     return out
 
 
+def cell_rows(declaration: Any, rows: list[Any]) -> list[tuple[int, int, dict[str, Any]]]:
+    """`(row, column, {measure: value})` for every cell the spine generated.
+
+    The statement's spine is dense, so this does not have to reconcile a sparse
+    map against a run the way `series_rows` and `fill` do between
+    them — every cell is already a row. What it *does* still owe is the fill
+    rule, and it takes it from `fill` rather than restating it: a count
+    of nothing is zero and an average of nothing is undefined, on the spatial
+    axis for exactly the reason it is on the temporal one.
+    """
+    # Computed once, exactly as the temporal path does it: `fill` takes the
+    # *declared* override as its value and falls back to the measure's identity,
+    # so passing a measured value there would read a null row as an override.
+    empty = {
+        name: fill(declaration, name, declaration.fills.get(name))
+        for name, _measure in declaration.measures
+    }
+    out: list[tuple[int, int, dict[str, Any]]] = []
+    for row in rows:
+        values = {}
+        for index, (name, _measure) in enumerate(declaration.measures):
+            found = _value(row, 2 + index)
+            values[name] = empty[name] if found is None else found
+        out.append((int(_value(row, 0)), int(_value(row, 1)), values))
+    return out
+
+
 def series_rows(declaration: Any, rows: list[Any], *, periods: bool = False) -> Any:
     """Split returned rows into the bucket run and a per-series value map.
 

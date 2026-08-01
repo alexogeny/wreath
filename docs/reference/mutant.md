@@ -49,6 +49,20 @@ object. An import-time constant — a bound, a redaction pattern, a deny-list �
 has no function to recompile, so it is rebound by value in the defining module
 and in every module that imported it, matched by identity rather than equality.
 
+A **Cedar policy set is the one value that rebinding alone does not reach**, and
+it is worth knowing why the tool goes further for it. The shape every
+application writes is a module-level `POLICY_SOURCE` with
+`ENGINE = CedarPolicies(POLICY_SOURCE)` on the next line, and `CedarPolicies`
+parses at construction — deliberately, so a syntax error is a start-up failure
+rather than a request one. Rebinding the text therefore leaves the engine that
+answers every question holding the policies it was built from: the control was
+not removed, and the mutant survived having changed nothing. So a `cedar.*`
+mutation also rebuilds every live `CedarPolicies` that was compiled from that
+exact string, and puts each one back afterwards. Measured over the camera-trap
+example, the difference is 0 killed / 18 survived before and 12 killed / 5
+survived after. A `CedarEngine` that is not `CedarPolicies` is still out of
+reach, because there is no way to ask an arbitrary one to recompile.
+
 Two consequences are worth knowing. The patch target is the **outermost**
 enclosing function, not the innermost, because a handler defined inside a router
 factory has no reachable function object of its own; recompiling the factory
@@ -115,13 +129,23 @@ receiver is a *parameter*, and `mcp.tool(...)`, where it is a *local* built
 inside the factory. Both declined for every keyword, so the newest
 authorization surfaces in the framework went unmutated entirely.
 
-A small table names those call sites and the keywords that are controls on them
-— `crud`/`crud_router`, and `tool`/`resource`/`prompt` for MCP. It is consulted
-**only after** resolution has already failed, so a callee that can be asked is
-still asked and the table never overrides a real signature. It is a heuristic in
-the same way `CONTROL_TOKENS` is, and it is the same argument `RouteDefinition`
+A small table names those call sites and the keywords that are controls on them:
+`crud`/`crud_router`; `tool`/`resource`/`prompt` for MCP; `unary`,
+`server_stream`, `client_stream` and `bidi` for gRPC; and `field`/`query`/
+`mutation` for GraphQL, whose `policy=` is one control per field and therefore
+the whole of that surface's authorization vocabulary. It is consulted **only
+after** resolution has already failed, so a callee that can be asked is still
+asked and the table never overrides a real signature. It is a heuristic in the
+same way `CONTROL_TOKENS` is, and it is the same argument `RouteDefinition`
 already makes one layer down: the name and the keyword together are specific
 enough to answer without resolving the callee.
+
+The route branch reads **two** layers, not one. `RouteDefinition`'s defaulted
+fields are what the record carries, but `permissions=` never becomes a field —
+the router folds it into `requirement` before building the record — so reading
+the record alone left the one decorator keyword that demands a named permission
+invisible while `dependencies=` beside it was covered. `Router.route`'s own
+signature is the decorator's real vocabulary, and both are used.
 
 ### Why an operation gets its own mutant
 

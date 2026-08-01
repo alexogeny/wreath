@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
 
+from ._recording_format import AttemptRecord
 from ._replay_adapters import (
     AdapterFault,
     DatabaseDouble,
@@ -81,6 +82,17 @@ __all__ = [
     "recorded_request",
     "RingReproduction",
     "reproduce_from_ring",
+    "AttemptRecord",
+    "KIND_ATTEMPT",
+    "KIND_TRANSPORT",
+    "recording_kind",
+    "open_attempt_recording",
+    "AttemptReplayError",
+    "AttemptReplayResult",
+    "attempt_adapters",
+    "attempt_fault_schedule",
+    "replay_attempt",
+    "generate_attempt_test",
 ]
 
 
@@ -94,6 +106,10 @@ MAX_CHUNK_BYTES = 256 * 1024 * 1024
 _CHUNK = struct.Struct("<4sII")  # tag, byte_length, crc32
 _MAGIC_TRANSPORT = b"WTR1"
 _MAGIC_FAULTS = b"WFS1"
+#: The flight recorder's container, which carries the job-attempt record kind.
+#: Spelled here rather than imported so `open_recording` can dispatch on four
+#: bytes without pulling the recording format in for a `WTR1` file.
+_MAGIC_RECORDING = b"WFR1"
 #: Every chunk tag a `WFS1` schedule may carry. See `_chunk_map`'s
 #: `known`: a tag is not checksummed, so an open vocabulary would let one
 #: flipped bit drop the optional `ADPT` chunk without a word.
@@ -1169,14 +1185,69 @@ def fault_corpus() -> dict[str, FaultSchedule]:
 # --- open a recording from disk ----------------------------------------------
 
 
+#: What `recording_kind` reports, and the two things a recording can be.
+KIND_TRANSPORT = "transport"
+KIND_ATTEMPT = "attempt"
+
+
+def recording_kind(path: str) -> str:
+    """Whether a file is a `WTR1` transport recording or a `WFR1` job attempt.
+
+    Four bytes decide it, so a command that accepts both -- `wreath replay
+    to-test` -- never has to be told which it was handed. An attempt is a
+    *record kind* inside the flight recorder's own container rather than a
+    second format, which is why this reads a magic and not an extension.
+    """
+    with open(path, "rb") as handle:
+        magic = handle.read(4)
+    if magic == _MAGIC_TRANSPORT:
+        return KIND_TRANSPORT
+    if magic == _MAGIC_RECORDING:
+        return KIND_ATTEMPT
+    raise ReplayError(f"unrecognized recording container {magic!r}")
+
+
 def open_recording(path: str) -> TransportRecording:
-    """Read a recording file. Currently the `WTR1` transport recording; the
-    reader dispatches on the container magic so future kinds slot in here."""
+    """Read a `WTR1` transport recording -- one connection's inbound bytes.
+
+    A `WFR1` file is refused *by name* rather than silently mis-parsed: it is
+    the flight recorder's container, and `open_attempt_recording` is what reads
+    the job attempt inside it.
+    """
     with open(path, "rb") as handle:
         data = handle.read()
     magic = data[:4]
     if magic == _MAGIC_TRANSPORT:
         return TransportRecording.from_bytes(data)
+    if magic == _MAGIC_RECORDING:
+        raise ReplayError(
+            f"{path} is a WFR1 flight recording, not a WTR1 transport recording. "
+            "If it holds a job attempt, `wreath replay to-test` reads it; "
+            "`wreath replay transport` replays a connection's bytes and this "
+            "file has none"
+        )
+    raise ReplayError(f"unrecognized recording container {magic!r}")
+
+
+def open_attempt_recording(path: str) -> AttemptRecord:
+    """Read the one job-attempt record in a `WFR1` file.
+
+    A `WTR1` file is refused by name, for the same reason `open_recording`
+    refuses a `WFR1`: the two carry different things and guessing is worse than
+    saying so.
+    """
+    from ._recording_format import read_attempt_recording
+
+    with open(path, "rb") as handle:
+        data = handle.read()
+    magic = data[:4]
+    if magic == _MAGIC_RECORDING:
+        return read_attempt_recording(data)
+    if magic == _MAGIC_TRANSPORT:
+        raise ReplayError(
+            f"{path} is a WTR1 transport recording of a connection, not a job "
+            "attempt. `wreath replay transport` replays it"
+        )
     raise ReplayError(f"unrecognized recording container {magic!r}")
 
 
@@ -1470,6 +1541,385 @@ async def generate_test(
         "",
         f"    assert response.status == {response.status}",
         f"    assert response.body == {response.body!r}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+# --- replaying a durable job attempt ------------------------------------------
+#
+# A failed durable job is harder to reproduce than a failed request: the request
+# that caused it succeeded hours ago, the arguments came from state that has
+# since changed, and the failure is on attempt 4 after two retries and a lease
+# expiry. Wreath owns the queue, the retry policy, the driver, and the doubles,
+# so it can re-run *that attempt* with every boundary it crossed replaced.
+#
+# The join between recording and replay is the coordinate space. A recorded
+# `BoundaryEvent` is `(seam, target, coordinate)` -- which is exactly what an
+# `AdapterFaultDescriptor` addresses -- so a recorded failure becomes an
+# injected fault without anything in between having to keep a payload.
+
+
+class AttemptReplayError(ReplayError):
+    """An attempt recording cannot be replayed against this build."""
+
+
+#: Recorded exception type name -> the fault that reproduces it, per seam family.
+#: Each entry is the inverse of `_replay_adapters._db_error`/`_object_error`,
+#: which are the only places a fault's exception is constructed.
+_DB_FAULT_FOR_ERROR: dict[str, AdapterFault] = {
+    "PostgresError": AdapterFault.SERVER_ERROR,
+    "OperationalError": AdapterFault.CONNECTION_DROP,
+    "InterfaceError": AdapterFault.POOL_EXHAUSTED,
+    "TimeoutError": AdapterFault.POOL_TIMEOUT,
+    "ValueError": AdapterFault.DECODE_ERROR,
+    "TypeError": AdapterFault.PREPARED_POISON,
+}
+_HTTP_FAULT_FOR_ERROR: dict[str, AdapterFault] = {
+    "ConnectionError": AdapterFault.CONNECT_ERROR,
+    "TimeoutError": AdapterFault.READ_TIMEOUT,
+}
+_OBJECT_FAULT_FOR_ERROR: dict[str, AdapterFault] = {
+    "ObjectError": AdapterFault.OBJECT_UNREACHABLE,
+}
+_FAULT_TABLES: dict[int, dict[str, AdapterFault]] = {
+    int(AdapterSeam.DB_ACQUIRE): _DB_FAULT_FOR_ERROR,
+    int(AdapterSeam.DB_QUERY): _DB_FAULT_FOR_ERROR,
+    int(AdapterSeam.DB_RELEASE): _DB_FAULT_FOR_ERROR,
+    int(AdapterSeam.DB_TRANSACTION): _DB_FAULT_FOR_ERROR,
+    int(AdapterSeam.HTTP_REQUEST): _HTTP_FAULT_FOR_ERROR,
+    int(AdapterSeam.OBJECT_STORE): _OBJECT_FAULT_FOR_ERROR,
+}
+#: Which seams live on a database double rather than a client or a store.
+_DB_SEAMS = frozenset(
+    {
+        int(AdapterSeam.DB_ACQUIRE), int(AdapterSeam.DB_QUERY),
+        int(AdapterSeam.DB_RELEASE), int(AdapterSeam.DB_LISTEN),
+        int(AdapterSeam.DB_TRANSACTION), int(AdapterSeam.DB_CONNECTION),
+    }
+)
+
+
+def attempt_fault_schedule(record: Any) -> FaultSchedule:
+    """The fault schedule that reproduces a recorded attempt's boundary failures.
+
+    A boundary the attempt crossed *successfully* contributes no fault -- the
+    double answers with its empty default -- and one that raised contributes the
+    fault whose modelled exception is the one the recording names.
+
+    An error type with no fault that produces it is **refused by name** rather
+    than approximated. Injecting the nearest fault instead would replay a
+    different failure while reporting that it had reproduced the recorded one,
+    which is the whole thing an attempt replay exists to avoid.
+    """
+    faults: list[AdapterFaultDescriptor] = []
+    for event in record.boundaries:
+        if not event.error_type:
+            continue
+        table = _FAULT_TABLES.get(event.seam)
+        fault = None if table is None else table.get(event.error_type)
+        if fault is None:
+            raise AttemptReplayError(
+                f"the recorded attempt failed at seam {event.seam} on "
+                f"{event.target!r} with {event.error_type}, and no modelled fault "
+                "produces that exception. Replaying it would inject a different "
+                "failure and report a reproduction; add the mapping rather than "
+                "guessing at the nearest one"
+            )
+        faults.append(
+            AdapterFaultDescriptor(
+                seam=event.seam,
+                target=event.target,
+                kind=str(fault),
+                coordinate=event.coordinate,
+            )
+        )
+    return FaultSchedule(adapter_faults=tuple(faults))
+
+
+def attempt_adapters(record: Any, *, databases: tuple[str, ...] = ()) -> ReplayAdapters:
+    """Doubles for every boundary a recorded attempt touched, plus `databases`.
+
+    `databases` names boundaries that must be doubled whether or not the
+    recording mentions them -- the queue's own database is always one, because
+    an attempt that never queried it still runs on a runner that would.
+    """
+    adapters = ReplayAdapters.from_faults(attempt_fault_schedule(record).adapter_faults)
+    for event in record.boundaries:
+        if event.seam in _DB_SEAMS:
+            adapters.databases.setdefault(event.target, DatabaseDouble(event.target))
+        elif event.seam == int(AdapterSeam.HTTP_REQUEST):
+            adapters.clients.setdefault(event.target, FaultyHttpClient(event.target))
+        elif event.seam == int(AdapterSeam.OBJECT_STORE):
+            adapters.object_stores.setdefault(
+                event.target, ObjectStoreDouble(event.target)
+            )
+        else:
+            # A seam this build has no double for. Refused rather than skipped:
+            # a boundary with no double is one the replay reaches for real, and
+            # the crossing that *succeeded* is the one that would slip through
+            # -- `attempt_fault_schedule` above only sees the ones that raised.
+            raise AttemptReplayError(
+                f"the recording crosses seam {event.seam} on {event.target!r}, "
+                "which this build has no boundary double for. A replay would "
+                "reach the real resource there; the recording is from a newer "
+                "build than this one"
+            )
+    for name in databases:
+        adapters.databases.setdefault(name, DatabaseDouble(name))
+    return adapters
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptReplayResult:
+    """What re-running a recorded job attempt produced.
+
+    Attributes:
+        outcome: A `wreath.recording.AttemptOutcome` value for *this* run.
+        error_type: The exception class name this run raised, or `""`.
+        error_message: That exception's message, or `""`.
+        matched: Whether this run reproduced the recorded outcome *and* error
+            type. False is a finding, not a failure: the handler changed, or the
+            failure depended on something no double models.
+        adapters: The doubles the replay ran against, so a test can assert the
+            pool came back balanced or an object store was reached.
+        note: What diverged, when something did.
+    """
+
+    outcome: str
+    error_type: str
+    error_message: str
+    matched: bool
+    adapters: ReplayAdapters
+    note: str | None = None
+
+
+async def replay_attempt(
+    runner: Any,
+    record: Any,
+    *,
+    args: tuple[Any, ...] = (),
+    scope: Any = None,
+    adapters: ReplayAdapters | None = None,
+) -> AttemptReplayResult:
+    """Re-run one recorded job attempt with every boundary it crossed doubled.
+
+    Args:
+        runner: The `wreath.jobs.JobRunner` the task is registered on. It must
+            be the build that produced the recording, for the same reason
+            `reproduce_from_ring` must be.
+        record: An `AttemptRecord`, from `open_recording`.
+        args: The job's arguments. **The recording does not contain them** --
+            see `wreath.recording.AttemptPolicy` -- so a handler that takes
+            arguments needs them supplied here, from the queue row or from a
+            fixture. `record.argument_count` says how many there were.
+        scope: The application whose database/HTTP/object-store registries the
+            handler reaches, if it reaches any. Doubled for the duration.
+        adapters: Doubles to use instead of the ones derived from the
+            recording, for a test that wants to script a result.
+
+    Raises:
+        AttemptReplayError: If the task is not registered on this runner, if the
+            supplied arity does not match what the recording says the job
+            carried, or if a recorded boundary failure has no modelled fault.
+
+    **This never enqueues, dedupes against, or otherwise mutates the queue.** It
+    does not claim, complete, fail, or sweep: it calls the registered handler
+    directly, and the runner's own database is replaced with a double for the
+    duration, so even a handler that reaches for it cannot arrive at the real
+    table. That is what makes it safe to point at a production recording on a
+    developer's machine.
+    """
+    from ._recording_format import AttemptOutcome
+    from ._replay_adapters import installed_boundaries
+    from .jobs import JobContext
+
+    task = runner._tasks.get(record.task)
+    if task is None:
+        raise AttemptReplayError(
+            f"task {record.task!r} is not registered on runner {runner.name!r}, so "
+            "there is no handler to replay. Point this at the build the recording "
+            "came from"
+        )
+    if len(args) != record.argument_count:
+        raise AttemptReplayError(
+            f"the recorded job carried {record.argument_count} argument(s) and "
+            f"{len(args)} were supplied. The recording deliberately does not hold "
+            "the values, so a replay cannot invent them; supply them from the "
+            "queue row or from a fixture"
+        )
+
+    queue_database = getattr(runner._db, "name", "main")
+    if adapters is None:
+        adapters = attempt_adapters(record, databases=(queue_database,))
+    context = JobContext(
+        job_id=record.job_id,
+        task=record.task,
+        attempt=record.attempt,
+        fence=record.fence,
+        tenant=record.tenant,
+        key=record.dedup_key or None,
+        progress=None,
+    )
+    outcome: Any = AttemptOutcome.COMPLETED
+    error: BaseException | None = None
+    deadline = runner.deadline_for(record.task)
+    with installed_boundaries(
+        scope, adapters, slots=((runner, "_db", queue_database),)
+    ):
+        try:
+            async with asyncio.timeout(deadline):
+                await task.func(context, *args)
+        except TimeoutError:
+            outcome = AttemptOutcome.DEADLINE_CANCELLED
+        # Broad on purpose, and nothing is suppressed: the handler's exception
+        # is the *product* of this function, reported as `outcome` and
+        # `error_type` and compared against the recording. Narrowing it would
+        # mean deciding in advance which failures a job is allowed to have.
+        # `CancelledError` is not an `Exception` and so is not caught here.
+        except Exception as failure:  # noqa: BLE001 - see above; it is reported, not swallowed
+            outcome = AttemptOutcome.RAISED
+            error = failure
+    error_type = "" if error is None else type(error).__name__
+    matched = str(outcome) == str(record.outcome) and error_type == record.error_type
+    note = None
+    if not matched:
+        recorded = f" ({record.error_type})" if record.error_type else ""
+        observed = f" ({error_type})" if error_type else ""
+        note = (
+            f"the recording ended {record.outcome}{recorded}; this replay ended "
+            f"{outcome}{observed}"
+        )
+    return AttemptReplayResult(
+        outcome=str(outcome),
+        error_type=error_type,
+        error_message="" if error is None else str(error),
+        matched=matched,
+        adapters=adapters,
+        note=note,
+    )
+
+
+def _attempt_test_name(record: Any) -> str:
+    slug = "".join(c if c.isalnum() else "_" for c in record.task).strip("_")
+    return f"test_{slug}_attempt_{record.attempt}".replace("__", "_")
+
+
+async def generate_attempt_test(
+    runner: Any,
+    record: Any,
+    *,
+    target: str,
+    args: tuple[Any, ...] = (),
+    scope: Any = None,
+    name: str | None = None,
+    origin: str | None = None,
+) -> str:
+    """A runnable pytest module that re-drives a recorded job attempt.
+
+    `target` is how the generated file should import the **runner** --
+    `"herd.app:jobs"` -- because a job attempt replays against the queue its
+    task is registered on, not against an ASGI application.
+
+    The attempt is replayed **now** and what it produces becomes the assertion,
+    exactly as the request generator works: this is a *characterisation* test.
+    When the replay and the recording disagree the assertion follows the replay
+    and the docstring says what the recording held, because a generated test
+    that fails the moment it is written teaches nothing about which of the two
+    is wrong.
+
+    A recorded *failure* generates a test that asserts the raise -- the outcome,
+    the error type, its message, and the boundary events that produced it,
+    written into the file so the doubles are rebuilt the same way on every run.
+    A characterisation test for a failure is as useful as one for a success and
+    more often what you want.
+    """
+    result = await replay_attempt(runner, record, args=args, scope=scope)
+
+    module, _, attribute = target.partition(":")
+    import_line = (
+        f"from {module} import {attribute}" if attribute else f"import {module}"
+    )
+    queue = attribute or f"{module}.jobs"
+    where = f" from {origin}" if origin else ""
+    tenant = f" for tenant {record.tenant!r}" if record.tenant else ""
+    cause = (
+        f"Enqueued under trace context {record.trace_context}."
+        if record.trace_context
+        else "The queue row carried no trace context, so the enqueuing request "
+        "is not named."
+    )
+    lines = [
+        _GENERATED_HEADER,
+        '"""A recorded job attempt, replayed.',
+        "",
+        f"Attempt {record.attempt} of {record.max_attempts} of task "
+        f"{record.task!r}, job {record.job_id} on queue {record.queue!r}{tenant}.",
+        f"The worker held fence {record.fence}.",
+        cause,
+        "",
+        f"Captured{where} and generated by `wreath replay to-test`. Every boundary",
+        "the attempt crossed is doubled, so this runs against no real database,",
+        "object store, or upstream -- and it never touches the queue.",
+    ]
+    if record.argument_count:
+        lines += [
+            "",
+            f"The job carried {record.argument_count} argument(s) and the recording",
+            "holds none of their values: `args jsonb` is positional and the",
+            "redaction policy is name-keyed, so there is no name to allow. Supply",
+            "them below if the handler needs them.",
+        ]
+    if result.note:
+        lines += ["", f"Replay divergence: {result.note}."]
+    lines += [
+        '"""',
+        "",
+        "import pytest",
+        "",
+        "from wreath.recording import AttemptRecord, BoundaryEvent",
+        "from wreath.replay import replay_attempt",
+        "",
+        import_line,
+        "",
+        "",
+        "RECORDED = AttemptRecord(",
+        f"    job_id={record.job_id!r},",
+        f"    queue={record.queue!r},",
+        f"    task={record.task!r},",
+        f"    attempt={record.attempt!r},",
+        f"    max_attempts={record.max_attempts!r},",
+        f"    tenant={record.tenant!r},",
+        f"    dedup_key={record.dedup_key!r},",
+        f"    fence={record.fence!r},",
+        f"    trace_context={record.trace_context!r},",
+        "    boundaries=(",
+    ]
+    lines += [
+        f"        BoundaryEvent(seam={event.seam!r}, target={event.target!r}, "
+        f"coordinate={event.coordinate!r}, error_type={event.error_type!r}),"
+        for event in record.boundaries
+    ]
+    lines += [
+        "    ),",
+        f"    outcome={str(record.outcome)!r},",
+        f"    error_type={record.error_type!r},",
+        f"    error_message={record.error_message!r},",
+        f"    argument_count={record.argument_count!r},",
+        ")",
+        "",
+        "",
+        "@pytest.mark.asyncio",
+        f"async def {name or _attempt_test_name(record)}() -> None:",
+        f"    result = await replay_attempt({queue}, RECORDED, args={args!r})",
+        "",
+        f"    assert result.outcome == {result.outcome!r}",
+        f"    assert result.error_type == {result.error_type!r}",
+    ]
+    if result.error_message:
+        lines.append(f"    assert result.error_message == {result.error_message!r}")
+    lines += [
+        f"    assert result.matched is {result.matched!r}",
         "",
     ]
     return "\n".join(lines)

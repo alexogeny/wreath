@@ -749,7 +749,41 @@ deliver_disconnect(WreathHttpProtocol *self)
         Py_DECREF(waiter);
         Py_DECREF(msg);
     }
+    /* The message alone stops nothing: it is passive, and a handler parked on a
+     * database query or an upstream call is not awaiting receive(), so the work
+     * runs to completion against a socket nobody will read. Cancelling the task
+     * is what reaches the query; the message is still delivered, because an
+     * application that does poll for it is entitled to see it.
+     *
+     * Not once the response has started -- the status line is already on the
+     * wire, so aborting there truncates a body rather than saving a scan, and
+     * that case unwinds by itself when the next send raises _Disconnect. Not for
+     * a WebSocket session either: its disconnect is an ordinary message the
+     * application is already reading.
+     *
+     * cancel() only schedules; nothing of the application's runs from here. */
+    if (!self->cancel_on_disconnect || self->ws_mode || self->response_started ||
+        self->task == NULL) {
+        return 0;
+    }
+    PyObject *cancelled = PyObject_CallMethod(self->task, "cancel", NULL);
+    if (cancelled == NULL) {
+        return -1;
+    }
+    Py_DECREF(cancelled);
     return 0;
+}
+
+
+static PyObject *
+http_wreath_cancel_on_disconnect(WreathHttpProtocol *self, PyObject *enabled)
+{
+    int value = PyObject_IsTrue(enabled);
+    if (value < 0) {
+        return NULL;
+    }
+    self->cancel_on_disconnect = value;
+    Py_RETURN_NONE;
 }
 
 
@@ -2380,6 +2414,9 @@ begin_websocket(WreathHttpProtocol *self, PyObject *method, long minor, PyObject
     }
 
     self->ws_mode = 1;
+    /* A handshake is a GET, so begin_request armed this; a session observes its
+     * own `websocket.disconnect` and must not be torn out from under itself. */
+    self->cancel_on_disconnect = 0;
     self->ws_accepted = 0;
     self->ws_close_sent = 0;
     self->ws_frag_opcode = -1;
@@ -2466,6 +2503,15 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
 
     self->http11 = (minor == 1);
     self->method_is_head = PyUnicode_CompareWithASCIIString(method, "HEAD") == 0;
+    /* RFC 9110's safe methods have no intended effect on the server, so losing
+     * the client can cost nothing but the work in flight; everything else is
+     * left to finish, because unwinding a POST rolls its transaction back and
+     * not the job it already enqueued. GET first: it is the common case, and a
+     * miss here costs three comparisons. `_SAFE_METHODS` is the pure twin. */
+    self->cancel_on_disconnect =
+        PyUnicode_CompareWithASCIIString(method, "GET") == 0 ||
+        self->method_is_head ||
+        PyUnicode_CompareWithASCIIString(method, "OPTIONS") == 0;
 
     for (Py_ssize_t i = 0; i < ts; i++) {
         if (td[i] == '?') {
@@ -4402,6 +4448,9 @@ static PyMethodDef http_protocol_methods[] = {
      "ASGI send callable (returns an awaitable)."},
     {"_wreath_response", (PyCFunction)(void (*)(void))http_wreath_response,
      METH_FASTCALL, "Emit one complete Wreath response without an ASGI message dict."},
+    {"_wreath_cancel_on_disconnect",
+     (PyCFunction)http_wreath_cancel_on_disconnect, METH_O,
+     "Override this request's cancel-on-disconnect for the route matched."},
     {"_wreath_file_start", (PyCFunction)(void (*)(void))http_wreath_file_start,
      METH_FASTCALL, "Start a private wreath.file descriptor response."},
     {"_wreath_file_finish", (PyCFunction)http_wreath_file_finish, METH_NOARGS,

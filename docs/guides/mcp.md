@@ -698,6 +698,15 @@ rejected before any policy is consulted.
 server, grouped by resource type, read off what is enforced rather than a second
 list someone has to remember to update.
 
+**The application's vocabulary contains them too.** An MCP endpoint is one route
+in front of many declarations, so it tells `declared_actions(app)` what it
+fronts — and a tool's `action=` therefore appears in the
+[permission manifest](permissions.md#one-vocabulary-four-protocols) and in the
+generated client's action union, beside every REST route, gRPC method and
+GraphQL field. Two lists that agree by inspection would be two lists; this is
+one, read live from the registry, so a tool declared after the server was
+mounted is in it.
+
 A denied call comes back as a JSON-RPC error and counts in
 `mcp.unauthorized_calls`. It is deliberately not a `tool_error`: a refusal and a
 failure are different facts about a deployment, and a single counter for both

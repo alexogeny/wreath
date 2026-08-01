@@ -63,6 +63,18 @@ _WS_PONG = 0xA
 _STATUS_NO_BODY = frozenset({204, 304})
 _HOP_BODY_METHODS = frozenset({"HEAD"})
 
+# RFC 9110's safe methods: defined as having no intended effect on the server,
+# so a client that goes away mid-request loses nothing but the work in flight.
+# Losing the client cancels the application task for these and only these, and
+# an application overrides that per route through
+# `_wreath_cancel_on_disconnect`. Anything else -- a POST that has already
+# enqueued a job or charged a card -- is left to finish, because unwinding it
+# rolls the transaction back and not the effect outside it.
+#
+# `server_http1.c` carries the same three in `is_safe_method`; the two files are
+# twins throughout, as `_HOP_BODY_METHODS` and `method_is_head` already are.
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
 # ASGI extensions advertised in every HTTP scope.  "wreath.response" accepts a
 # single one-shot message carrying status, headers, and the complete body.
 # Shared across connections; consumers treat scope contents as read-only.
@@ -142,6 +154,10 @@ class HttpProtocol(asyncio.Protocol):
         self._body_chunks = 0  # non-empty chunks in this HTTP request
         self._disconnected = False
         self._request_more_body = True
+        # Whether losing the peer cancels the application task. Set per request
+        # from the method and overridden by the application through
+        # `_wreath_cancel_on_disconnect` when a route declared one.
+        self._cancel_on_disconnect = False
 
         # Incremental head-scan offsets: search only newly-arrived bytes (with a
         # small delimiter overlap) so a byte-at-a-time head stays linear.
@@ -376,6 +392,7 @@ class HttpProtocol(asyncio.Protocol):
         self._body_chunks = 0
         self._disconnected = False
         self._request_more_body = True
+        self._cancel_on_disconnect = method in _SAFE_METHODS
 
         if kind == "none":
             self._request_more_body = False
@@ -930,9 +947,35 @@ class HttpProtocol(asyncio.Protocol):
         if self._ws_mode:
             # 1006: abnormal closure, no close frame from the peer.
             self._receive_queue.append({"type": "websocket.disconnect", "code": 1006})
-        else:
-            self._receive_queue.append({"type": "http.disconnect"})
+            self._wake_receive()
+            return
+        self._receive_queue.append({"type": "http.disconnect"})
         self._wake_receive()
+        # The message alone stops nothing. It is passive, and a handler parked
+        # on a database query or an upstream call is not awaiting `receive()`,
+        # so the work runs to completion against a socket nobody will read.
+        # Cancelling the task is what reaches the query; `http.disconnect` stays
+        # queued as well, because an application that *does* poll for it is
+        # entitled to see it.
+        #
+        # Not once the response has started: the status line is on the wire, so
+        # aborting produces a truncated body rather than a saved scan. That case
+        # already unwinds by itself -- the next `send` raises `_Disconnect`.
+        if not self._cancel_on_disconnect or self._response_started:
+            return
+        task = self._task
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _wreath_cancel_on_disconnect(self, enabled: bool) -> None:
+        """Override this request's cancel-on-disconnect for the route matched.
+
+        Private, and named for the server extension it is: the application calls
+        it once, during dispatch, only for a route that declared
+        `cancel_on_disconnect=`. Everything else keeps the safe-method default
+        set when the request head was parsed.
+        """
+        self._cancel_on_disconnect = enabled
 
     def _disconnect_message(self) -> Message:
         if self._ws_mode:

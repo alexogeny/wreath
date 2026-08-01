@@ -147,6 +147,75 @@ count as `nplusone_findings`.
 See [Finding the N+1 query](n-plus-one.md) for the whole picture, including the
 workflow-step and pass-shift scopes.
 
+### Recording an attempt, and replaying it as a test
+
+The job that failed at 03:00 is the one you cannot reproduce. The request that
+caused it succeeded hours ago, its arguments came from state that has since
+changed, and the failure is on attempt 4 after two retries and a lease expiry.
+Wreath owns the queue, the retry policy, the driver and the recorder, so it can
+write that attempt down and hand it back to you as a pytest.
+
+Arm the runner with what you want kept — nothing, by default:
+
+```python
+from wreath.recording import (
+    AttemptPolicy, AttemptRecorder, AttemptTrigger, AttemptTriggerKind,
+)
+
+runner = app.jobs(
+    "work",
+    attempts=AttemptRecorder(
+        AttemptPolicy(triggers=(AttemptTrigger(AttemptTriggerKind.FAILURE),)),
+        directory="/var/lib/wreath/attempts",
+        scope=app,   # so the handler's databases and clients are watched too
+    ),
+)
+```
+
+Each captured attempt is one `WFR1` file holding its identity — including **the
+fence the worker held**, so a recording made either side of a lease expiry says
+which of two claimants it describes — the enqueuing request's trace context, the
+boundaries it crossed in order, and one of four outcomes: `completed`, `raised`,
+`deadline_cancelled`, or `lease_expired`. A deadline cancellation is not a raise:
+nothing failed, work was stopped, and a recording that conflated them would send
+you looking for a bug in a handler that has none.
+
+Then:
+
+```console
+$ wreath replay to-test myapp:runner work-4171-4.wfr1 -o tests/test_incident.py
+```
+
+The attempt is re-run with every boundary it crossed doubled — the database
+statement that raised is injected as the fault that produces the same exception —
+and what comes out is a characterisation test asserting the raise. It **never
+touches the queue**: no claim, no complete, no enqueue, and the runner's own
+database is a double for the duration, so it is safe to point at a production
+recording on your laptop.
+
+A pass shift is an ordinary task, so a shift that fails is captured by the same
+arming with nothing extra to configure.
+
+**Job arguments are recorded only where you name one.** `args jsonb` is a
+positional array and the redaction policy is name-keyed, so the names come from
+the handler's own signature:
+
+```python
+AttemptPolicy(
+    triggers=(AttemptTrigger(AttemptTriggerKind.FAILURE),),
+    argument_allowlist=frozenset({"send_password_reset.user_id"}),
+    redaction=RedactionPolicy(max_fields=32, max_depth=4, max_body_bytes=4096),
+)
+```
+
+`send_password_reset(ctx, user_id, token)` then records `user_id` and never
+`token`. The default allowlist is empty and keeps only the count. A task this
+process has no handler for captures nothing rather than falling back to
+position, a value that lands in `*args` is never nameable, and a value that
+will not normalise is withheld *with its reason* rather than dropped. The four
+rules and the bounds are in
+[`wreath.recording`](../reference/recording.md#the-arguments-and-the-names-a-positional-array-does-not-have).
+
 ## Transactional enqueue
 
 Enqueue from a handler on the *same transaction* as the business row, so the job commits atomically with the work that spawned it. Pass a `key` for idempotency:
@@ -274,6 +343,30 @@ Two properties worth knowing:
 - **A publish that reaches nobody is counted**, not hidden: `bus.unrouted_publishes`. Publishing to a channel no consumer exists for yet is legitimate, so it stays a no-op — but pass `require_group=True` when you know a consumer must exist and want `NoSubscriberGroup` instead of silence.
 
 `bus.known_groups("order_placed")` answers "will anything actually receive this?" before you ship, which is the check that used to require reading someone else's deployment.
+
+### Which request caused this message
+
+A **durable** publish writes the calling request's W3C `traceparent` onto every group's
+row, and the consumer runs its handler under it. That is the whole point when the
+consumer is in another service on another day: `wreath doctor trace <id>` will name the
+message alongside the jobs, sagas and passes the same request caused, and an outbound
+call the handler makes joins the same trace without the handler doing anything.
+
+**Ephemeral fan-out carries nothing, deliberately.** There is no row to put it on:
+`pg_notify($1, $2)` sends your payload *as* the message, so the only place a traceparent
+could go is inside your payload — which means wrapping every ephemeral message in an
+envelope, and that is a breaking change to a live wire format between two processes that
+upgrade at different moments. It needs a *versioned* envelope an old-build subscriber can
+still read through a rolling deploy, so it is a [roadmap row](../reference/roadmap.md)
+rather than a line of code. The 8000-byte `NOTIFY` bound is not the obstacle; a
+traceparent is 55 bytes. If you need the causality today, publish durably.
+
+The column arrives as version 2 of the `messaging` schema component, so a mid-rollout
+fleet keeps working in both directions: an older build never names the column, and a
+newer build against a version-1 schema asks the catalog once and publishes without it
+rather than failing the publish. That probe runs on the *caller's* transaction when
+`tx=` is given, never on a connection of its own — the outbox guarantee is that nothing
+goes out behind your transaction's back.
 
 ## Running the workers
 

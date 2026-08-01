@@ -18,7 +18,17 @@ from typing import Any
 from uuid import UUID
 
 from ..binding import _return_annotation
+from ..geospatial import Coordinate
+from ..pagination import Page
+from ..response import FileResponse, PreparedResponse, Response, StreamingResponse
 from ..temporal import Instant
+
+#: The four classes `app.py`'s return-value coercion accepts directly. A handler
+#: annotated with one of them has declared an **opaque** response rather than
+#: failed to declare a schema, so typegen reports `unknown` and not a
+#: diagnostic. Kept as a tuple because they share no base class -- the closed
+#: `isinstance` check in `app.py` is the definition of the set.
+_Response = (Response, StreamingResponse, FileResponse, PreparedResponse)
 from .model import (
     BOOLEAN,
     DATE,
@@ -52,6 +62,7 @@ _SCALARS: dict[Any, TypeRef] = {
     float: NUMBER,
     str: STRING,
     Instant: DATE_TIME,
+    Coordinate: TypeRef("coordinate", name="coordinate"),
     datetime.datetime: DATE_TIME,   # before `date`: datetime subclasses it
     datetime.date: DATE,
     UUID: TypeRef("string", name="uuid"),
@@ -244,6 +255,17 @@ class _Builder:
             return TypeRef("record", arguments=(UNKNOWN,))
         if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
             return self._enum_ref(annotation)
+        if isinstance(annotation, type) and issubclass(annotation, _Response):
+            # `-> Response` is a *declaration*, not an omission: the handler has
+            # said it is producing the bytes itself, which is exactly what a
+            # file download, an SSE stream and every `crud_router` route do.
+            # Reporting that as an unsupported annotation made
+            # `build_api_model` refuse the **whole application** -- the
+            # camera-trap example generated nothing at all, because fourteen of
+            # its routes are spelled this way. The response is opaque, so it is
+            # `unknown`, which is what `unknown` is for; a genuinely unsupported
+            # type is still a diagnostic.
+            return UNKNOWN
         origin = typing.get_origin(annotation)
         if origin is typing.Literal:
             return self._literal_ref(typing.get_args(annotation))
@@ -260,6 +282,14 @@ class _Builder:
                 return self._unsupported(annotation)
             value = self.type_ref(args[1]) if len(args) == 2 else UNKNOWN
             return TypeRef("record", arguments=(value,))
+        if origin is Page:
+            # `Page[T]` is a parameterized generic alias, so `is_dataclass` is
+            # False for it and it would otherwise fall to `_unsupported` --
+            # which is what made a paginated route ungeneratable for *every*
+            # target, not just one.
+            args = typing.get_args(annotation)
+            element = self.type_ref(args[0]) if args else UNKNOWN
+            return TypeRef("page", arguments=(element,))
         if dataclasses.is_dataclass(annotation) or _is_wreath_model(annotation):
             return self._reference(annotation)
         return self._unsupported(annotation)

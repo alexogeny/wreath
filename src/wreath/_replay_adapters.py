@@ -29,7 +29,7 @@ import datetime
 import decimal
 import re
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -48,6 +48,11 @@ __all__ = [
     "ScriptedRecord",
     "driver_row_value",
     "installed_adapters",
+    "installed_boundaries",
+    "ObservedDatabase",
+    "ObservedHttpClient",
+    "ObservedObjectStore",
+    "observed_boundaries",
     "scripted_row",
 ]
 
@@ -838,6 +843,221 @@ class FaultyHttpClient(HTTPClient):
         return ClientResponse(status=200, headers=(), body=b"", http_version="1.1")
 
 
+# --- the other direction: watching a real boundary instead of replacing it ----
+#
+# A double answers *for* a boundary so a replay is deterministic. An observer
+# wraps a boundary that is really there and writes down what crossed it, so an
+# attempt that has already happened can be replayed later. They are the same
+# shape on purpose: an observer records a `(seam, target, coordinate)` triple,
+# which is exactly the coordinate a `FaultSchedule` addresses a double with.
+#
+# **A `Statement` registered before the observer was installed is not seen.**
+# `postgres.Statement` holds its own reference to the `Database` it was
+# registered on, so swapping the registry entry does not reach it. That is the
+# same gap `DatabaseDouble` has on the replay side, and it is symmetric: a
+# recording made through such a statement is missing the crossing, and a replay
+# would not have doubled it either. Register statements on the scope's database
+# by name, or reach the connection directly, for either to see them.
+
+
+class _ObservedConnection:
+    """A leased connection that writes each query down as it goes."""
+
+    __slots__ = ("_inner", "_trace", "_target")
+
+    def __init__(self, inner: Any, trace: Any, target: str) -> None:
+        self._inner = inner
+        self._trace = trace
+        self._target = target
+
+    async def _run(self, method: str, sql: object, args: tuple[Any, ...]) -> Any:
+        return await _observe(
+            self._trace, _SEAM_DB_QUERY, self._target,
+            getattr(self._inner, method)(sql, *args),
+        )
+
+    async def execute(self, sql: object, *args: object) -> Any:
+        return await self._run("execute", sql, args)
+
+    async def fetch(self, sql: object, *args: object) -> Any:
+        return await self._run("fetch", sql, args)
+
+    async def fetchrow(self, sql: object, *args: object) -> Any:
+        return await self._run("fetchrow", sql, args)
+
+    async def fetchval(self, sql: object, *args: object) -> Any:
+        return await self._run("fetchval", sql, args)
+
+    def transaction(self) -> Any:
+        self._trace.note(_SEAM_DB_TRANSACTION, self._target)
+        return self._inner.transaction()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class ObservedDatabase:
+    """A `Database` that records the attempt's crossings without changing them.
+
+    Every call reaches the real database; the observer only counts. A call that
+    raises is written down *with its exception's type name* and the exception is
+    re-raised untouched -- the recording is a witness, never a participant.
+    """
+
+    __slots__ = ("_inner", "_trace", "name")
+
+    def __init__(self, inner: Any, trace: Any, name: str) -> None:
+        self._inner = inner
+        self._trace = trace
+        self.name = name
+
+    async def acquire(self, workload: str = "read") -> Any:
+        connection = await _observe(
+            self._trace, _SEAM_DB_ACQUIRE, self.name, self._inner.acquire(workload)
+        )
+        return _ObservedConnection(connection, self._trace, self.name)
+
+    async def release(self, workload: str, connection: Any) -> None:
+        inner = getattr(connection, "_inner", connection)
+        await _observe(
+            self._trace, _SEAM_DB_RELEASE, self.name, self._inner.release(workload, inner)
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class ObservedHttpClient:
+    """An `HTTPClient` whose transport seam is watched rather than replaced."""
+
+    __slots__ = ("_inner", "_trace", "name")
+
+    def __init__(self, inner: Any, trace: Any, name: str) -> None:
+        self._inner = inner
+        self._trace = trace
+        self.name = name
+
+    async def _request_timed(self, method, target, **kwargs):
+        return await _observe(
+            self._trace, _SEAM_HTTP_REQUEST, self.name,
+            self._inner._request_timed(method, target, **kwargs),
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class ObservedObjectStore:
+    """An `ObjectStore` that records each operation, in order."""
+
+    __slots__ = ("_inner", "_trace", "name")
+
+    def __init__(self, inner: Any, trace: Any, name: str) -> None:
+        self._inner = inner
+        self._trace = trace
+        self.name = name
+
+    async def read(self, key: str) -> bytes:
+        return await _observe(
+            self._trace, _SEAM_OBJECT_STORE, self.name, self._inner.read(key)
+        )
+
+    async def write(self, key: str, data: bytes, **kwargs: Any) -> Any:
+        return await _observe(
+            self._trace, _SEAM_OBJECT_STORE, self.name,
+            self._inner.write(key, data, **kwargs),
+        )
+
+    async def stat(self, key: str) -> Any:
+        return await _observe(
+            self._trace, _SEAM_OBJECT_STORE, self.name, self._inner.stat(key)
+        )
+
+    async def delete(self, key: str) -> None:
+        return await _observe(
+            self._trace, _SEAM_OBJECT_STORE, self.name, self._inner.delete(key)
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+#: `wreath.replay.AdapterSeam` values, spelled here as ints so this module does
+#: not import `replay` (which imports this one). The enum stays the one
+#: definition; these are the two constants an observer needs to name.
+_SEAM_DB_ACQUIRE = 0
+_SEAM_DB_QUERY = 1
+_SEAM_DB_RELEASE = 2
+_SEAM_HTTP_REQUEST = 3
+_SEAM_DB_TRANSACTION = 5
+_SEAM_OBJECT_STORE = 6
+
+
+async def _observe(trace: Any, seam: int, target: str, awaitable: Any) -> Any:
+    """Await `awaitable`, writing its crossing down whichever way it ends.
+
+    The coordinate is taken *before* the call, so a crossing that raises keeps
+    the position it actually had: taking it afterwards would renumber every
+    later event past a failure and put a replayed fault at the wrong statement.
+    """
+    coordinate = trace.note(seam, target)
+    try:
+        return await awaitable
+    except asyncio.CancelledError:
+        # A deadline cancellation is an outcome of the *attempt*, recorded by
+        # the runner. It is not a property of this boundary, and marking the
+        # boundary failed would have a recording blame the statement that
+        # happened to be in flight when the clock ran out.
+        raise
+    except BaseException as error:
+        trace.fail(coordinate, type(error).__name__)
+        raise
+
+
+@contextmanager
+def observed_boundaries(
+    scope: Any,
+    trace: Any,
+    *,
+    slots: Sequence[tuple[Any, str, str]] = (),
+) -> Iterator[None]:
+    """Watch every boundary `scope` holds for the duration of one execution.
+
+    The recording mirror of `installed_boundaries`: same registries, same
+    `slots` escape hatch for a boundary held on an attribute, same restoration
+    in a `finally`. Nothing here substitutes behaviour, so an observed execution
+    does exactly what an unobserved one does.
+    """
+    saved: list[tuple[Any, Any, Any]] = []
+
+    def wrap(registry: Any, factory: Any) -> None:
+        if registry is None:
+            return
+        for name, inner in list(registry.items()):
+            saved.append((registry, name, inner))
+            registry[name] = factory(inner, trace, name)
+
+    saved_slots: list[tuple[Any, str, Any]] = []
+    try:
+        wrap(getattr(scope, "_databases", None), ObservedDatabase)
+        wrap(getattr(scope, "_http_clients", None), ObservedHttpClient)
+        wrap(getattr(scope, "_object_stores", None), ObservedObjectStore)
+        for holder, attribute, name in slots:
+            inner = getattr(holder, attribute)
+            saved_slots.append((holder, attribute, inner))
+            setattr(holder, attribute, ObservedDatabase(inner, trace, name))
+        if saved and hasattr(scope, "_dirty"):
+            scope._dirty = True  # the binder must bind against the observers
+        yield
+    finally:
+        for registry, name, inner in saved:
+            registry[name] = inner
+        for holder, attribute, inner in saved_slots:
+            setattr(holder, attribute, inner)
+        if saved and hasattr(scope, "_dirty"):
+            scope._dirty = True
+
+
 @dataclass(frozen=True, slots=True)
 class ReplayAdapters:
     """A bundle of request-scoped boundary doubles installed for one replay."""
@@ -916,23 +1136,53 @@ class ReplayAdapters:
 
 
 @contextmanager
-def installed_adapters(app: Any, adapters: ReplayAdapters | None) -> Iterator[None]:
-    """Install boundary doubles on `app` for the duration of a replay.
+def installed_boundaries(
+    scope: Any,
+    adapters: ReplayAdapters | None,
+    *,
+    slots: Sequence[tuple[Any, str, str]] = (),
+) -> Iterator[None]:
+    """Install boundary doubles on `scope` for the duration of one execution.
 
-    Databases are swapped in place and the routes are marked dirty so the binder
-    recompiles against the doubles; HTTP clients and object stores are swapped by
-    name. Everything is restored on exit, even if the replay raised.
+    An *execution*, not a request. Nothing here was ever request-shaped: the
+    registries this swaps -- `_databases`, `_http_clients`, `_object_stores`,
+    and each ORM registry's `database` -- belong to the application, and the
+    `_dirty` writes are a binder recompile so a route binds against the doubles
+    rather than the real boundaries. A job attempt needs the recompile for the
+    same reason a request does. Everything is restored on exit, even if the
+    execution raised.
+
+    `slots` reaches the boundaries a scope holds on an *attribute* rather than
+    in a name -> object mapping, as `(holder, attribute, double_name)` triples.
+    `JobRunner` holds its one `Database` on `_db`, so without this the runner's
+    own claim/complete statements would reach the live queue while every other
+    boundary was doubled. A name with no double is refused rather than skipped:
+    a half-installed scope is the state that makes replaying a production
+    recording unsafe, and it is silent.
+
+    `installed_adapters` is the same installer under its original name, kept so
+    every request-replay caller reads as it did.
     """
     if adapters is None:
         yield
         return
-    saved_databases = dict(getattr(app, "_databases", {}))
-    saved_clients = dict(getattr(app, "_http_clients", {}))
-    saved_stores = dict(getattr(app, "_object_stores", {}))
-    databases = getattr(app, "_databases", None)
-    clients = getattr(app, "_http_clients", None)
-    stores = getattr(app, "_object_stores", None)
-    registries = getattr(app, "_orm_registries", None)
+    saved_databases = dict(getattr(scope, "_databases", {}))
+    saved_clients = dict(getattr(scope, "_http_clients", {}))
+    saved_stores = dict(getattr(scope, "_object_stores", {}))
+    databases = getattr(scope, "_databases", None)
+    clients = getattr(scope, "_http_clients", None)
+    stores = getattr(scope, "_object_stores", None)
+    registries = getattr(scope, "_orm_registries", None)
+    saved_slots: list[tuple[Any, str, Any]] = []
+    for holder, attribute, name in slots:
+        if name not in adapters.databases:
+            raise KeyError(
+                f"no database double named {name!r} for {type(holder).__name__}."
+                f"{attribute}; installing the rest would leave one boundary "
+                "pointing at the real resource, which is how a replay reaches "
+                "something it was never meant to touch"
+            )
+        saved_slots.append((holder, attribute, getattr(holder, attribute)))
     # An ORM Session acquires its connection from `registry.database`, so swap the
     # double there too -- that alone makes ORM Session-based handlers replay
     # against the double, no separate Session double needed.
@@ -953,8 +1203,10 @@ def installed_adapters(app: Any, adapters: ReplayAdapters | None) -> Iterator[No
         if stores is not None:
             for name, double in adapters.object_stores.items():
                 stores[name] = double
-        if adapters.databases and hasattr(app, "_dirty"):
-            app._dirty = True  # force the binder to recompile against the doubles
+        for holder, attribute, name in slots:
+            setattr(holder, attribute, adapters.databases[name])
+        if adapters.databases and hasattr(scope, "_dirty"):
+            scope._dirty = True  # force the binder to recompile against the doubles
         yield
     finally:
         if databases is not None:
@@ -969,5 +1221,16 @@ def installed_adapters(app: Any, adapters: ReplayAdapters | None) -> Iterator[No
         if stores is not None:
             stores.clear()
             stores.update(saved_stores)
-        if adapters.databases and hasattr(app, "_dirty"):
-            app._dirty = True
+        for holder, attribute, original in saved_slots:
+            setattr(holder, attribute, original)
+        if adapters.databases and hasattr(scope, "_dirty"):
+            scope._dirty = True
+
+
+def installed_adapters(app: Any, adapters: ReplayAdapters | None) -> Any:
+    """Install boundary doubles on `app` for one request replay.
+
+    The request-scoped spelling of `installed_boundaries`, which is the same
+    installer under a name that does not claim a scope it never had.
+    """
+    return installed_boundaries(app, adapters)

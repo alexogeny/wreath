@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import gc
 import sys
 from dataclasses import dataclass, field
 from types import CodeType, FunctionType, MethodType, ModuleType
@@ -268,6 +269,131 @@ class ValuePatch:
             setattr(module, key, self._previous)
         self._previous = _UNSET
         self._aliases = ()
+
+
+def _slot_names(cls: type) -> tuple[str, ...]:
+    """Every `__slots__` name `cls` and its bases declare, in definition order."""
+    names: list[str] = []
+    for base in reversed(cls.__mro__):
+        declared = base.__dict__.get("__slots__", ())
+        if isinstance(declared, str):
+            declared = (declared,)
+        for name in declared:
+            if name not in names:
+                names.append(name)
+    return tuple(names)
+
+
+def _policy_engine_type() -> type | None:
+    """`CedarPolicies`, if it is imported. Never imports it to find out.
+
+    A run over an application that has no authorization engine should not pay
+    for one, and `sys.modules` already holds it whenever a policy string was
+    compiled -- which is the only case this reaches.
+    """
+    module = sys.modules.get("wreath._auth.cedar_engine")
+    engine = getattr(module, "CedarPolicies", None)
+    return engine if isinstance(engine, type) else None
+
+
+@dataclass
+class PolicyPatch(ValuePatch):
+    """Rebind a Cedar policy string *and* recompile what was built from it.
+
+    A `ValuePatch` alone is not enough here, and the gap was silent. The shape
+    every application writes is
+
+    ```python
+    POLICY_SOURCE = \"\"\"permit(...); forbid(...) when { ... };\"\"\"
+    ENGINE = CedarPolicies(POLICY_SOURCE)
+    ```
+
+    and `CedarPolicies` **parses at construction** -- deliberately, so a syntax
+    error surfaces at startup rather than during a request. So rebinding the
+    name reaches the text and nothing else: the engine that answers every
+    `is_authorized` still holds the policies it was built from, the control was
+    never actually removed, and the mutant survives for a reason that has
+    nothing to do with the suite.
+
+    Measured rather than reasoned: over `example/camera_trap/policies.py` this
+    reported **0 killed / 18 survived** -- including flipping the `forbid` that
+    refuses a suspended principal and deleting the restricted-species policy --
+    against a suite whose whole purpose is that grid.
+
+    So the patch reaches the compiled state as well. Engines are found by
+    identity through `gc.get_referrers`, not by a registry: a registry would be
+    live global state in `wreath._auth` that exists only for this tool, and it
+    would still miss an engine built before it was added. Every slot is copied
+    from a freshly parsed twin, so a slot added to the engine later is carried
+    without this file being edited.
+
+    Two limits, stated rather than discovered:
+
+    * A `CedarEngine` that is not `CedarPolicies` is out of reach. It may cache
+      whatever it likes and offers no way to rebuild it.
+    * `CedarAuthorizer` caches `referenced_flags`/`referenced_regions` at
+      construction. Every mutation here only ever *removes* a reference, so the
+      cache stays a superset and resolves names the mutated policy no longer
+      reads -- more work, never a different decision.
+    """
+
+    _rebuilt: tuple[tuple[Any, dict[str, Any]], ...] = field(default=(), repr=False)
+
+    def apply(self) -> None:
+        previous = self.current()
+        super().apply()
+        try:
+            self._rebuilt = _recompile_policy_engines(previous, self.value)
+        except Exception:
+            # Leave nothing half-applied: the name is already rebound, and a
+            # child that reported the failure while still holding the mutation
+            # would be reporting on a state no run can reproduce.
+            super().undo()
+            raise
+
+    def undo(self) -> None:
+        for engine, state in self._rebuilt:
+            for name, value in state.items():
+                setattr(engine, name, value)
+        self._rebuilt = ()
+        super().undo()
+
+
+def _recompile_policy_engines(
+    previous: Any, replacement: Any
+) -> tuple[tuple[Any, dict[str, Any]], ...]:
+    """Rebuild every live `CedarPolicies` compiled from `previous`.
+
+    Returns what each engine held, so `undo` can put it back. A mutated policy
+    set that does not parse raises `PatchError`, which the runner reports as an
+    error rather than as a survivor -- a mutation nobody could have noticed is
+    not evidence about anybody's tests.
+    """
+    engine_type = _policy_engine_type()
+    if engine_type is None or not isinstance(previous, str):
+        return ()
+    slots = _slot_names(engine_type)
+    if not slots:  # pragma: no cover - defensive; the engine declares five
+        return ()
+    engines = [
+        holder
+        for holder in gc.get_referrers(previous)
+        if type(holder) is engine_type and getattr(holder, "_source", None) is previous
+    ]
+    rebuilt: list[tuple[Any, dict[str, Any]]] = []
+    for holder in engines:
+        try:
+            fresh = engine_type(replacement, entities=getattr(holder, "_entities", ()))
+        except Exception as error:
+            for engine, state in reversed(rebuilt):
+                for name, value in state.items():
+                    setattr(engine, name, value)
+            raise PatchError(f"the mutated policy set does not parse: {error}") from error
+        state = {name: getattr(holder, name) for name in slots if hasattr(holder, name)}
+        for name in state:
+            setattr(holder, name, getattr(fresh, name))
+        rebuilt.append((holder, state))
+    return tuple(rebuilt)
 
 
 @dataclass

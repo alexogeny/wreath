@@ -1,0 +1,110 @@
+Infrastructure inferred from trek.app:app
+=========================================
+
+PostgreSQL (2)
+--------------
+  main  db.internal:5432/trek as trek
+    pool read           1..10 -> replica.internal:5432
+    pool write          0..10
+    held write          2 of 10 for the life of the process (jobs runner 'ingest' LISTEN doorbell, message bus 'events' LISTEN doorbell); 8 left for requests
+    schemas             trek, wreath
+    extensions          vector
+    application tables  1 ORM model(s); their DDL comes from wreath migrations
+    wreath tables       wreath.jobs  (jobs, from app.jobs('ingest'))
+                        wreath.messages, wreath.message_groups  (messaging, from app.messaging('events'))
+  archive  warehouse.internal:5432/archive
+    pool read           1..10
+    pool write          0..10
+    schemas             public
+    extensions          none
+    application tables  0 ORM model(s); their DDL comes from wreath migrations
+    wreath tables       none: no registered subsystem owns tables here
+
+Object storage (2)
+------------------
+  scratch  local disk, root {root}
+      requires  a writable directory that survives a restart -- a volume, not a container layer
+  cards  s3 bucket trek-cards in eu-west-2, path-style at minio.internal
+      credentials from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, unless app.objects was passed access_key= and secret_key= directly
+      requires  a bucket
+      requires  a role or key permitted to GET/PUT/DELETE and to start, complete and abort multipart uploads on it
+      requires  a lifecycle rule that reaps incomplete multipart uploads
+      requires  egress to the bucket host
+
+Egress (4)
+----------
+  objects_cards  http://minio.internal:9000
+      declared by  app.objects('cards', backend='s3')
+      max sockets  20
+      destination  schemes http/https; global addresses only
+  forage  https://forage.example.com/v2
+      declared by  app.http_client('forage')
+      max sockets  20
+      destination  schemes http/https; global addresses only
+  legacy  http://legacy.internal
+      declared by  app.http_client('legacy')
+      max sockets  20
+      destination  schemes http/https; global addresses only
+  metrics  http://metrics.internal:8086
+      declared by  app.http_client('metrics')
+      max sockets  20
+      destination  schemes http/https; hosts metrics.internal; ports 8086; also permits private
+
+Listener
+--------
+  http  2 route(s), 0 websocket route(s)
+      methods  GET, POST
+      the port, the TLS termination and the load balancer are
+      deployment decisions; the application does not declare them
+
+What would be a separate service somewhere else
+-----------------------------------------------
+  Every row is PostgreSQL, the local disk, or this process. There is no
+  broker, no cache server and no second datastore anywhere in this plan,
+  and that is a property of wreath rather than of this application.
+
+                subsystem             lives in                   instead of
+  declared      durable jobs          PostgreSQL                 Celery, RQ, Redis, RabbitMQ
+  declared      message bus           PostgreSQL                 Kafka, RabbitMQ, SNS + SQS
+  absent        webhook inbox/outbox  PostgreSQL                 SQS, Celery
+  absent        sessions              PostgreSQL                 Redis, Memcached
+  absent        rate limits           PostgreSQL                 Redis
+  absent        idempotency           PostgreSQL                 Redis
+  unobservable  workflows             PostgreSQL                 Temporal, Airflow
+  absent        chunked passes        PostgreSQL                 Celery, a bespoke backfill script
+  absent        progress              PostgreSQL LISTEN/NOTIFY   Redis pub/sub
+  unobservable  rooms                 PostgreSQL LISTEN/NOTIFY   Redis pub/sub
+  unobservable  calculated views      PostgreSQL                 a warehouse, dbt
+  unobservable  distributed locks     PostgreSQL advisory locks  Redis, etcd, ZooKeeper
+  unobservable  application cache     in-process memory          Redis, Memcached
+  unobservable  response cache        in-process memory          Varnish, Redis
+
+  durable jobs: runner 'ingest' on database 'main'
+  message bus: bus 'events' on database 'main'
+  workflows: a Workflow is constructed with a store and handed to a handler; nothing registers it on the application
+  rooms: a RoomRegistry is constructed over a message bus and held by the application author, not by the application
+  calculated views: a Series is a declared class queried through a session; it registers nothing on the application
+  distributed locks: advisory locks are taken per call site, so there is no declaration to read
+  application cache: @cached decorates a function; the application never sees it
+  response cache: response caching is a route decoration, not an application registration
+
+Settings contract
+-----------------
+  not checked: no settings model was named.
+
+Gaps (0)
+--------
+  none.
+
+Notes
+-----
+  - No settings model was named, so the environment contract is unchecked.
+    Pass --settings module:Class[=PREFIX]; a field with no supplier is the
+    gap this command exists to find.
+  - No environment supplier was named, so every required key reads as a gap.
+    Pass --env PATH for a dotenv file, or --environ to use this process's
+    own environment.
+  - Telemetry sinks are not derivable from an application: TelemetryConfig
+    is a field of wreath.server.ServerConfig, not of Wreath, so a sink is a
+    property of how the application is served rather than of the
+    application.

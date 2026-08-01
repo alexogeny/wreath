@@ -66,6 +66,17 @@ class FakeListenConnection:
         self.calls.append((sql, args))
         return None
 
+    async def fetchval(self, sql: str, *args: Any) -> Any:
+        """The version-2 `trace_context` column probe, and nothing else.
+
+        Answering `True` models a database the schema component has been applied
+        to. A real `SELECT true ... WHERE` returns *no rows* when the column is
+        absent, which the driver reads as `None` -- so that is the shape of the
+        negative answer, not `False`.
+        """
+        self.calls.append((sql, args))
+        return True
+
     def deliver(self, wire: str, payload: str) -> None:
         self._queue.append(FakeNotification(channel=wire, payload=payload))
         self._event.set()

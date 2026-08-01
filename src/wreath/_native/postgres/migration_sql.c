@@ -414,6 +414,12 @@ sql_type_for_oid(uint32_t oid)
         case 1114: return "timestamp without time zone";
         case 1184: return "timestamp with time zone";
         case 1700: return "numeric";
+        /* `point` is core PostgreSQL, not PostGIS: OID 600 is in the catalog on
+           a stock server and so is the GiST `point_ops` operator class. That is
+           what makes wreath's tier-1 proximity search indexable with nothing
+           installed, and it is why this belongs in the built-in switch rather
+           than carrying a spelling the way an extension type does. */
+        case 600: return "point";
         case 2950: return "uuid";
         /* tsvector is built in, so unlike pgvector's types it has a fixed OID
            and needs no spelling in the descriptor. */
@@ -440,13 +446,22 @@ sql_type_for_oid(uint32_t oid)
 }
 
 
-/* A type spelling an extension supplied, such as "vector(1536)". An extension's
-   OIDs are assigned by CREATE EXTENSION, so `sql_type_for_oid` cannot map them
-   and the descriptor carries the text instead. It is emitted into DDL rather
-   than bound, so only the shape PostgreSQL's own `format_type` produces for a
-   parameterised type is accepted -- an identifier, optionally followed by a
-   parenthesised list of digits and commas. Anything else falls back to MANUAL
-   rather than being written out verbatim. */
+/* A type spelling an extension supplied, such as "vector(1536)" or
+   "geography(Point,4326)". An extension's OIDs are assigned by CREATE EXTENSION,
+   so `sql_type_for_oid` cannot map them and the descriptor carries the text
+   instead. It is emitted into DDL rather than bound, so only the shape
+   PostgreSQL's own `format_type` produces for a parameterised type is accepted
+   -- an identifier, optionally followed by a parenthesised list of words,
+   digits and commas. Anything else falls back to MANUAL rather than being
+   written out verbatim.
+
+   The modifier list carries *letters* because a real `format_type` does:
+   PostGIS spells a geography column `geography(Point,4326)`, and a digits-only
+   rule refused it, so the column became an empty MANUAL and `generate` omitted
+   it while still emitting the index that referenced it. Nothing that could
+   close a statement or open a literal is admitted at any point -- no quote, no
+   semicolon, no backslash, no second parenthesis -- so widening the alphabet
+   does not widen what can be injected. */
 static int
 spelling_is_safe(const WreathSqlPart *part)
 {
@@ -460,8 +475,11 @@ spelling_is_safe(const WreathSqlPart *part)
                 /* A closing paren must be the last byte. */
                 return index + 1 == part->length;
             }
-            if ((byte < '0' || byte > '9') && byte != ',' && byte != ' ') return 0;
-            continue;
+            if ((byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'z') ||
+                (byte >= 'A' && byte <= 'Z') || byte == ',' || byte == ' ' ||
+                byte == '_')
+                continue;
+            return 0;
         }
         if (byte == '(') {
             if (index == 0) return 0;
@@ -811,8 +829,16 @@ append_index_options(WreathPgBuffer *buffer, const WreathSqlPart *options)
 static int
 index_method_is_known(const WreathSqlPart *method)
 {
+    /* `gist` needs no extension, unlike `hnsw` and `ivfflat`: core PostgreSQL
+       ships it and the `point_ops` operator class, which is what a tier-1
+       proximity search is answered by. It is the fourth entry in
+       `wreath.orm.fields._INDEX_METHODS` and in `_SINGLE_CATALOG_SQL`, and all
+       three lists have to agree -- a method a declaration accepts and a
+       renderer does not becomes an empty MANUAL statement, so `generate`
+       silently omits the index. */
     return (method->length == 5 && memcmp(method->data, "btree", 5) == 0) ||
            (method->length == 3 && memcmp(method->data, "gin", 3) == 0) ||
+           (method->length == 4 && memcmp(method->data, "gist", 4) == 0) ||
            (method->length == 4 && memcmp(method->data, "hnsw", 4) == 0) ||
            (method->length == 7 && memcmp(method->data, "ivfflat", 7) == 0);
 }

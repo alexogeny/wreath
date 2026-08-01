@@ -23,6 +23,7 @@ from .errors import DeclarationError, ORMError
 from .expressions import (
     AND,
     ASC,
+    BOUNDED_ORDER_OPERATORS,
     DESC,
     BinaryExpr,
     BooleanExpr,
@@ -55,7 +56,27 @@ _BINARY_OPERATORS = frozenset({
     # operation, so the allowlist still decides every byte reaching SQL.
     "@@ websearch_to_tsquery", "@@ to_tsquery",
     "ts_rank websearch_to_tsquery", "ts_rank to_tsquery",
+    # Geospatial. `point` and `box` are two-argument function calls that build
+    # the right operand of a `<@`; `geo_distance` yields metres, so like the
+    # pgvector distances it reaches SQL as an ORDER BY key or the left side of a
+    # comparison and never as a predicate on its own.
+    "point", "box", "geo_distance",
+    # PostGIS. `geo_knn` is the same two characters pgvector's `<->` renders and
+    # a different token on purpose -- see `expressions.GEO_KNN`. The other two
+    # are function calls that yield a boolean, so they are predicates and only
+    # predicates.
+    "geo_knn", "geo_dwithin", "geo_covers",
 })
+#: Two-argument SQL function calls rendered from both operands, in the shape
+#: `name(left, right)`. `ts_rank` predates this table and keeps its own path
+#: because it also has to build a tsquery from its right operand.
+_GEO_CALLS = {"point": "point", "box": "box"}
+#: Tokens that evaluate to a number rather than to a boolean, so they render as
+#: an ORDER BY key or the left side of a comparison and never as a predicate.
+_GEO_VALUES = frozenset({"geo_distance", "geo_knn"})
+#: PostGIS predicates. Each is a function call the renderer builds from the
+#: node's own operands, so each has a render path rather than a table entry.
+_GEO_PREDICATES = frozenset({"geo_dwithin", "geo_covers"})
 #: Operators that render `left = ANY(right)` / `left = ALL(right)` rather
 #: than the ordinary infix form, with the array column on the right.
 _ARRAY_QUANTIFIERS = {"= ANY": "ANY", "= ALL": "ALL"}
@@ -794,6 +815,25 @@ def _build_plan(registry: Any, select: Select, spec: ModelSpec) -> _CachedPlan:
             conjoin(select.predicates), builder, "t0", filter_aliases, registry=registry
         )
     if select.orderings:
+        if select.limit_ is None and any(
+            isinstance(item.expression, BinaryExpr)
+            and item.expression.operator in BOUNDED_ORDER_OPERATORS
+            for item in select.orderings
+        ):
+            # An ordered proximity search with no ceiling reads and sorts every
+            # row, and the index cannot help: `ORDER BY ... LIMIT n` is the only
+            # shape it answers. Refusing here rather than returning a correct
+            # answer slowly is the same call `.within()` makes by ANDing the box
+            # on, and the same one hybrid search makes at declaration time.
+            #
+            # A *token* test, never an operator test. Tier 2's KNN renders the
+            # same `<->` pgvector does, and an unbounded `ORDER BY embedding
+            # <-> $1` has always been allowed -- so the two have to stay
+            # distinguishable here, which is why `geo_knn` is a token of its own.
+            raise DeclarationError(
+                "ordering by .nearest() needs a limit; an unbounded proximity "
+                "search sorts the whole table and no index can answer it"
+            )
         builder.text(" ORDER BY ")
         if select.plain_orderings:
             # `plain_orderings` is exactly the statement that every expression
@@ -1128,6 +1168,22 @@ def render_predicate(
                 )
             _render_text_search(node, builder, alias, joins, *text_search)
             return
+        if node.operator in _GEO_CALLS or node.operator in _GEO_VALUES:
+            # Same refusal as `ts_rank`, for the same reason: these yield a
+            # point, a box, or metres. PostgreSQL would reject the query later
+            # with a message about the argument of WHERE rather than about the
+            # line that wrote it.
+            raise ORMError(
+                f"cannot render {node.operator!r} as a predicate: it yields a "
+                "value, not a boolean; use .within() to filter or .nearest() "
+                "as an ORDER BY key"
+            )
+        if node.operator == "geo_dwithin":
+            _render_geo_dwithin(node, builder, alias, joins)
+            return
+        if node.operator == "geo_covers":
+            _render_geo_covers(node, builder, alias, joins)
+            return
         _render_operand(node.left, builder, alias, joins)
         builder.text(f" {node.operator} ")
         _render_operand(node.right, builder, alias, joins)
@@ -1235,6 +1291,40 @@ def _render_operand(
             # branch rather than the infix one below.
             _render_text_search(node, builder, alias, joins, *text_search)
             return
+        call = _GEO_CALLS.get(node.operator)
+        if call is not None:
+            # `point(lon, lat)` / `box(point(...), point(...))`. Both operands
+            # are rendered, so the binds inside them are collected by the same
+            # walk that collects every other bind.
+            builder.text(f"{call}(")
+            _render_operand(node.left, builder, alias, joins)
+            builder.text(", ")
+            _render_operand(node.right, builder, alias, joins)
+            builder.text(")")
+            return
+        if node.operator == "geo_distance":
+            _render_geo_distance(node, builder, alias, joins)
+            return
+        if node.operator in _GEO_PREDICATES:
+            # The mirror of the refusal above, and it has to be written rather
+            # than left to the infix fallthrough: that would render
+            # `("t0"."at" geo_dwithin ...)`, which is not SQL, from an operator
+            # the allowlist admits.
+            raise ORMError(
+                f"cannot render {node.operator!r} as a value: it yields a boolean, "
+                "so it belongs in where() rather than in an ORDER BY or a "
+                "comparison"
+            )
+        if node.operator == "geo_knn":
+            # `<->`, PostGIS's KNN operator. Parenthesised like every other
+            # nested operand, which the planner reads through: the live plan is
+            # `Index Scan ... Order By: (at <-> ...)` either way.
+            builder.text("(")
+            _render_operand(node.left, builder, alias, joins)
+            builder.text(" <-> ")
+            _render_operand(node.right, builder, alias, joins)
+            builder.text(")")
+            return
         builder.text("(")
         _render_operand(node.left, builder, alias, joins)
         builder.text(f" {node.operator} ")
@@ -1242,6 +1332,120 @@ def _render_operand(
         builder.text(")")
         return
     raise ORMError(f"cannot render {type(node).__name__} as an operand")
+
+
+def _render_geo_distance(
+    node: BinaryExpr,
+    builder: SqlBuilder,
+    alias: str,
+    joins: dict[tuple[Any, ...], str],
+) -> None:
+    """Render great-circle metres between a `point` column and a `point(...)`.
+
+    The haversine, in SQL, over the same sphere radius the Python and C twins
+    use -- `wreath.geospatial.EARTH_RADIUS_M`. Three implementations of one
+    formula is two too many, so the radius is written once here and asserted
+    equal to the module's constant by a test rather than being retyped.
+
+    PostgreSQL indexes a `point` as `p[0]` = x = longitude and `p[1]` = y =
+    latitude. Getting that pair backwards is the single most likely defect in
+    this function and it fails silently on a symmetric test case, so the live
+    tests use a centre whose latitude and longitude differ in sign.
+    """
+    from ..geospatial import EARTH_RADIUS_M
+
+    if not isinstance(node.left, ColumnExpr) or not isinstance(node.right, BinaryExpr):
+        raise ORMError("a geospatial distance needs a Point column and a centre")
+    inner = node.right.right
+    if not isinstance(inner, BinaryExpr):
+        raise ORMError("a geospatial distance needs a Point column and a centre")
+    column: ColumnExpr = node.left
+    # The centre's three leaves, in the order they are emitted below. Each is
+    # rendered exactly once, so the placeholder count matches what the bind
+    # program collected -- see the comment where this tree is built.
+    lat_delta = node.right.left
+    lat_cos = inner.left
+    lon_delta = inner.right
+    name = column.column.database_name
+    joined = joins.get(getattr(column, "path", ()), alias) if joins else alias
+
+    def _lat(part: str) -> None:
+        builder.text(f"({quote(joined)}.{quote(name)})[{part}]")
+
+    builder.text(f"(2 * {EARTH_RADIUS_M!r} * asin(sqrt(power(sin(radians(")
+    _render_operand(lat_delta, builder, alias, joins)
+    builder.text(" - ")
+    _lat("1")
+    builder.text(") / 2), 2) + cos(radians(")
+    _lat("1")
+    builder.text(")) * cos(radians(")
+    _render_operand(lat_cos, builder, alias, joins)
+    builder.text(")) * power(sin(radians(")
+    _render_operand(lon_delta, builder, alias, joins)
+    builder.text(" - ")
+    _lat("0")
+    builder.text(") / 2), 2))))")
+
+
+def _render_geo_dwithin(
+    node: BinaryExpr,
+    builder: SqlBuilder,
+    alias: str,
+    joins: dict[tuple[Any, ...], str],
+) -> None:
+    """Render `ST_DWithin(column, centre, metres)` — tier 2's `within()`.
+
+    Three arguments under a two-operand node, so the centre and the radius
+    share the right-hand child. The order they are emitted in is the order
+    `_append_bind_paths` walks them, which is what keeps the placeholder
+    numbering and the bind program in step; a renderer that emitted the radius
+    first would prepare the statement with the two transposed and PostgreSQL
+    would report a type error rather than a wrong answer.
+
+    PostGIS adds the `&&` index condition itself and filters the exact
+    spheroidal test over what survives -- the shape `within()` hand-builds for
+    tier 1. Building one here as well would be a second spelling of the same
+    coarse filter, and two spellings of one rule is how they drift apart.
+    """
+    if not isinstance(node.left, ColumnExpr) or not isinstance(node.right, BinaryExpr):
+        raise ORMError(
+            "a geography proximity test needs a Geography column, a centre and a radius"
+        )
+    builder.text("ST_DWithin(")
+    _render_operand(node.left, builder, alias, joins)
+    builder.text(", ")
+    _render_operand(node.right.left, builder, alias, joins)
+    builder.text(", ")
+    _render_operand(node.right.right, builder, alias, joins)
+    builder.text(")")
+
+
+def _render_geo_covers(
+    node: BinaryExpr,
+    builder: SqlBuilder,
+    alias: str,
+    joins: dict[tuple[Any, ...], str],
+) -> None:
+    """Render `ST_Covers(ST_GeogFromText($1), column)` — tier 2's containment.
+
+    The region comes first, because that is the argument order `ST_Covers`
+    takes: the container, then the thing contained. `ST_Contains` is not an
+    option and not a preference -- **`ST_Contains(geography, geography)` does
+    not exist**, so a rendering that reached for it would fail at the database
+    rather than at declaration.
+
+    The operands are emitted in the opposite order to the walk that collects
+    binds, which is safe here for exactly one reason: the left operand is a
+    column and carries no bound value, so the statement has one placeholder
+    however it is walked. The guard below is what keeps that true.
+    """
+    if not isinstance(node.left, ColumnExpr):
+        raise ORMError("a geography containment needs a Geography column")
+    builder.text("ST_Covers(ST_GeogFromText(")
+    _render_operand(node.right, builder, alias, joins)
+    builder.text("), ")
+    _render_operand(node.left, builder, alias, joins)
+    builder.text(")")
 
 
 def _render_text_search(
