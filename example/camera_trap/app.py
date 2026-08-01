@@ -66,6 +66,12 @@ def build(*, validate_schema: str = "error") -> Wreath:
     registry = application.orm(
         database="main", models=list(MODELS), validate_schema=validate_schema
     )
+    # The activity chart is a sealed `Series`, so wreath owns two tables for its
+    # settled buckets. Declaring them here is what puts them in
+    # `app.schema_components()`, which is what makes the lifespan create them --
+    # the same route the job ledger takes. Without it they were emitted by
+    # `wreath schema sql` and created by nothing.
+    application.series(database="main")
 
     # --- who you are ---------------------------------------------------------
     #

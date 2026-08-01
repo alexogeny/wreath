@@ -596,6 +596,7 @@ class Wreath:
         "_route_methods",
         "_routes",
         "_routing",
+        "_series_stores",
         "_shutdown_handlers",
         "_startup_handlers",
         "_stage_hooks",
@@ -756,6 +757,10 @@ class Wreath:
         self._webhook_hubs: dict[str, Any] = {}
         self._job_runners: dict[str, Any] = {}
         self._message_buses: dict[str, Any] = {}
+        #: Settled-bucket stores, one per database at most. A `Series` is a
+        #: declaration the application never holds, so this is how its tables
+        #: get an owner that `schema_components` can ask.
+        self._series_stores: dict[str, Any] = {}
         self._object_stores: dict[str, Any] = {}
         # Built at lifespan startup from the registered runners/buses; owns their
         # process-lifetime worker/consumer/sweeper tasks.
@@ -791,6 +796,7 @@ class Wreath:
             *self._job_runners.values(),
             *self._message_buses.values(),
             *self._webhook_hubs.values(),
+            *self._series_stores.values(),
             # The middleware registries hold `(priority, order, middleware)`.
             # Walking the tuples asked a tuple for `component()`, so every
             # middleware-owned table was silently never collected.
@@ -926,6 +932,7 @@ class Wreath:
             *self._job_runners.values(),
             *self._message_buses.values(),
             *self._webhook_hubs.values(),
+            *self._series_stores.values(),
             # See `schema_components`: these registries hold tuples, and the
             # middleware is the third element.
             *(item[2] for item in self._global_middleware),
@@ -1149,6 +1156,52 @@ class Wreath:
         self.state.__setattr__(f"jobs_{name}", runner)
         self._dirty = True
         return runner
+
+    def series(self, *, database: str, schema: str = "wreath") -> Any:
+        """Declare that this application reads a **sealed** `Series`.
+
+        A `Series` is a declaration built where it is used, so the application
+        never holds one and `schema_components()` had nothing to ask: the
+        settled-bucket tables were emitted by `wreath schema sql` and created by
+        nothing. An application therefore had to import
+        `wreath._series.settle` — past a leading underscore — and run the DDL
+        itself, or find out at the first `settle()`.
+
+        Registering here puts the claim where every other wreath-owned table's
+        claim already is, so the lifespan that creates the job ledger and the
+        message bus creates these too, idempotently, and a deployment with
+        `manage_schema(False)` gets the same startup refusal naming what a DBA
+        must create.
+
+        Only sealed views need this. An open `Series` stores nothing and reads
+        the source table every time.
+
+        Args:
+            database: The `app.postgres()` database the tables belong in.
+            schema: The schema wreath owns. The default is the right answer.
+
+        Returns:
+            The store, so a caller can read its `component()` or `schema_sql()`.
+
+        Raises:
+            KeyError: no database is configured under that name.
+            ValueError: that database already has a settled-bucket store.
+        """
+        from .series import SettledStore
+
+        if database not in self._databases:
+            known = ", ".join(sorted(self._databases)) or "none"
+            raise KeyError(f"unknown database {database!r}; configured: {known}")
+        if database in self._series_stores:
+            raise ValueError(
+                f"database {database!r} already has a settled-bucket store; one "
+                "pair of tables serves every sealed view on it"
+            )
+        store = SettledStore(schema=schema)
+        self._series_stores[database] = store
+        self._declared_databases[id(store)] = (store, self._databases[database])
+        self._dirty = True
+        return store
 
     def messaging(
         self,
