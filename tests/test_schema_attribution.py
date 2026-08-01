@@ -412,3 +412,82 @@ async def test_every_tier_of_a_tiered_limiter_is_walked() -> None:
     )
     assert [claim.name for claim in app.schema_components()] == ["ratelimit"]
     assert list(app._components_by_database(app.schema_components())) == [database]
+
+
+# --- defect 3: a sealed Series' tables, claimed by nobody --------------------
+#
+# A `Series` is a declaration built where it is used, so the application never
+# holds one and there was nothing for `schema_components()` to ask. The result
+# was the same shape as defect 2 one level worse: `wreath.series_buckets` and
+# `wreath.series_corrections` were printed by `wreath schema sql`, created by
+# nothing at all -- not even by a lifespan -- and an application declaring
+# `.seal()` had to import `wreath._series.settle` past a leading underscore and
+# run the DDL itself. `docs/tracking/ingest.md` documented that as a rough edge
+# rather than a defect. `app.series(database=...)` gives the claim an owner.
+
+
+async def test_a_sealed_series_claims_its_tables() -> None:
+    app = Wreath()
+    app.postgres("main", dsn="postgresql://u@one.invalid:5432/a")
+    app.series(database="main")
+    claims = app.schema_components()
+    assert [claim.name for claim in claims] == ["series"]
+    assert set(claims[0].relations) == {"series_buckets", "series_corrections"}
+
+
+async def test_an_application_with_no_sealed_view_claims_nothing() -> None:
+    """An open `Series` stores nothing, so the tables are not implied by the
+    module being importable. Claiming them for every application would create
+    two tables nobody uses in every deployment that draws a chart."""
+    app = Wreath()
+    app.postgres("main", dsn="postgresql://u@one.invalid:5432/a")
+    assert app.schema_components() == ()
+
+
+async def test_the_store_is_attributed_to_the_database_it_named() -> None:
+    """Through `_declared_databases`, the same record `app.jobs(database=)`
+    uses -- so a two-database application is not ambiguous."""
+    app = Wreath()
+    app.postgres("main", dsn="postgresql://u@one.invalid:5432/a")
+    analytics = app.postgres("analytics", dsn="postgresql://u@two.invalid:5432/b")
+    app.series(database="analytics")
+    assert list(app._components_by_database(app.schema_components())) == [analytics]
+
+
+async def test_a_second_store_on_one_database_is_refused() -> None:
+    app = Wreath()
+    app.postgres("main", dsn="postgresql://u@one.invalid:5432/a")
+    app.series(database="main")
+    with pytest.raises(ValueError, match="already has a settled-bucket store"):
+        app.series(database="main")
+
+
+async def test_naming_an_unknown_database_is_refused() -> None:
+    app = Wreath()
+    app.postgres("main", dsn="postgresql://u@one.invalid:5432/a")
+    with pytest.raises(KeyError, match="unknown database"):
+        app.series(database="analytics")
+
+
+@requires_db
+async def test_the_settled_bucket_tables_are_created_by_lifespan_startup() -> None:
+    """Applied, not merely collected -- and idempotent, because a second startup
+    is the ordinary case and `CREATE TABLE IF NOT EXISTS` is only half of that:
+    `bootstrap` also has to be happy to find the component already recorded."""
+    schema = _schema("series")
+    dsn = await _database("series", schema)
+    app = Wreath()
+    app.postgres("main", dsn=dsn)
+    app.series(database="main", schema=schema)
+
+    assert await _relations(dsn, schema) == set(), "the tables must not pre-exist"
+    sent = await _drive_startup(app)
+    assert sent[0]["type"] == "lifespan.startup.complete", sent
+    assert await _relations(dsn, schema) == {"series_buckets", "series_corrections"}
+
+    again = Wreath()
+    again.postgres("main", dsn=dsn)
+    again.series(database="main", schema=schema)
+    replies = await _drive_startup(again)
+    assert replies[0]["type"] == "lifespan.startup.complete", replies
+    assert await _relations(dsn, schema) == {"series_buckets", "series_corrections"}
