@@ -112,6 +112,18 @@ That refusal reaches the caller. `Serializer.encode` never falls back to another
 format, because a client that asked for protobuf and silently received JSON
 would parse the bytes as a message and get garbage.
 
+### The request half
+
 Reading a protobuf **request body** is a separate question from negotiating a
-response, and is not yet wired into `wreath.binding` — decode it in the handler
-with `wreath.protobuf.decode` for now.
+response, and `wreath.binding` answers it symmetrically: a body annotated with a
+`@message` class binds from protobuf bytes when `Content-Type` says so, and from
+JSON otherwise. The annotation does not mean protobuf-only — see
+[Binding](binding.md#a-protobuf-body), which also sets out why an unknown field
+*name* in JSON is refused while an unknown field *number* on the protobuf wire
+is preserved.
+
+`PROTOBUF_MEDIA_TYPES` is the set binding matches against: Wreath emits
+`PROTOBUF.media_type` and reads both that and `application/protobuf`, the IANA
+registration. The set lives beside the serializer that emits one of them, so the
+request half and the response half cannot disagree about what protobuf is
+called.

@@ -32,6 +32,7 @@ from typing import Any
 from ._json import dumps as _json_dumps
 from ._native import _core
 from .protobuf import encode as _protobuf_encode
+from .protobuf import is_message as _is_message
 from .request import Request
 from .response import ProblemResponse, Response
 
@@ -47,6 +48,7 @@ __all__ = [
     "JSON",
     "MSGPACK",
     "PROTOBUF",
+    "PROTOBUF_MEDIA_TYPES",
     "Serializer",
     "negotiate",
     "parse_accept",
@@ -85,8 +87,12 @@ def _to_protobuf(data: Any) -> bytes:
     contract and there is nothing to infer them from. Reaching the codec with a
     plain dict raises `AttributeError` on a private attribute, which tells the
     caller nothing, so the precondition is guarded here instead.
+
+    Asked of `wreath.protobuf` rather than read off the class: the private plan
+    marker was spelled out here, which put a second notion of "is this a
+    message?" in a second module, to drift the first time the marker moved.
     """
-    if not hasattr(type(data), "__wreath_protobuf_plan__"):
+    if not _is_message(data):
         raise TypeError(
             "application/x-protobuf can only encode a class declared with "
             f"@message from wreath.protobuf; got {type(data).__name__}. "
@@ -99,6 +105,17 @@ def _to_protobuf(data: Any) -> bytes:
 JSON = Serializer("application/json", _to_bytes)
 MSGPACK = Serializer("application/msgpack", _msgpack)
 PROTOBUF = Serializer("application/x-protobuf", _to_protobuf)
+
+#: Content types `wreath.binding` reads a **request** body as protobuf under.
+#:
+#: Wreath emits exactly one of them -- `PROTOBUF.media_type`, which is what
+#: OTLP/HTTP and every tool around it sends -- and reads both, because
+#: `application/protobuf` is the IANA registration and the two name one format.
+#: Being strict about a sender's spelling of an unambiguous type buys nothing
+#: and costs a caller a body refused for a reason that is not about the body.
+PROTOBUF_MEDIA_TYPES: frozenset[str] = frozenset(
+    {PROTOBUF.media_type, "application/protobuf"}
+)
 
 #: JSON first, so it wins ties and is the default when Accept is absent/`*/*`.
 #:
