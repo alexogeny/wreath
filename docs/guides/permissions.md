@@ -55,6 +55,80 @@ async def delete_llama(request): ...
 declared is refused with a `400` — otherwise the endpoint would be an oracle
 for probing policies that do not exist.
 
+## One vocabulary, four protocols
+
+Wreath serves REST, gRPC, MCP and GraphQL, and each of them declares
+authorization in the same words. **All four land in the same vocabulary**, read
+off their own declarations, so there is still exactly one list:
+
+```python
+@app.delete("/llamas/{llama_id}")                          # REST
+@authorize(action="Llama::delete", resource=...)
+async def delete_llama(request): ...
+
+@tracker.unary(request=Position, response=Position,        # gRPC
+               action="Collar::read", resource=...)
+async def GetPosition(request, message): ...
+
+@mcp.tool(action="Camera::read")                           # MCP
+async def read_camera(request): ...
+
+api = GraphQL(registry, models=[Llama], authorizer=authorizer)   # GraphQL
+```
+
+Nothing extra is wired up. A gRPC method **is** a route, so its `action=` is
+already on the route table; the MCP endpoint and the GraphQL endpoint are one
+route each in front of many declarations, so each of them tells the vocabulary
+what it fronts — live, by reading its own registry, never by handing over a
+copy that could go stale.
+
+`wreath typegen` reads the same function, so the generated client's action
+unions cover all four surfaces too. Declare a tool and the button that calls it
+is typed.
+
+### GraphQL is the interesting one, and it needs no new shape
+
+A GraphQL endpoint names **one** action — the `action=` you constructed it with,
+`"read"` by default — over resources that are *fields*: `User::"email"`,
+`Query::"llamas"`, `Mutation::"retire"`. So it joins the vocabulary as its
+schema types, and the existing two-endpoint split answers it exactly as it
+answers everything else:
+
+| question | endpoint | asks |
+| --- | --- | --- |
+| may this caller read `User` at all? | the manifest | `authorize("read", User::"…type-level")` |
+| may this caller read `User.email`? | `POST /permissions` | `authorize("read", User::"email")` |
+
+The second row is character for character the decision the GraphQL executor
+takes, so a client can ask which columns to render in one call:
+
+```json
+POST /permissions
+{"type": "User", "ids": ["id", "email", "phone"]}
+```
+
+That works because a **field is declared and finite** where a row is neither —
+the same reason the manifest can enumerate actions but not llamas.
+
+!!! note "An endpoint contributes only what it enforces"
+
+    `GraphQL` takes its authorizer explicitly and evaluates no policy without
+    one. An endpoint constructed with no `authorizer=` therefore adds nothing to
+    the vocabulary, because advertising an action nothing checks would be the
+    one kind of entry this document must never contain. If you hand GraphQL a
+    *different* authorizer from the application's, the manifest still answers
+    through the application's — hand both the same object, as
+    [the GraphQL guide](graphql.md) already asks.
+
+!!! warning "A wider vocabulary is still not a wider promise"
+
+    Four protocols in the manifest does not make the manifest authoritative for
+    any of them. It is chrome, exactly as before: a stale or coarse answer draws
+    a button that then 403s, and every surface takes its own decision again on
+    the actual call. A GraphQL type-level `yes` does **not** mean every field of
+    that type is readable, an MCP entry does not mean the tool's rate limit will
+    admit you, and neither is a substitute for the check on the route.
+
 ## Two questions, two endpoints
 
 This distinction is the one worth internalising:
