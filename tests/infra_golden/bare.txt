@@ -1,0 +1,73 @@
+Infrastructure inferred from trek.app:app
+=========================================
+
+PostgreSQL (0)
+--------------
+  none: this application registers no database.
+
+Object storage (0)
+------------------
+  none: this application registers no object store.
+
+Egress (0)
+----------
+  none: this application pins no outbound HTTP client.
+  A ServiceClient built over a client the application did not register is
+  invisible here; see the notes.
+
+Listener
+--------
+  http  0 route(s), 0 websocket route(s)
+      methods  none
+      the port, the TLS termination and the load balancer are
+      deployment decisions; the application does not declare them
+
+What would be a separate service somewhere else
+-----------------------------------------------
+  Every row is PostgreSQL, the local disk, or this process. There is no
+  broker, no cache server and no second datastore anywhere in this plan,
+  and that is a property of wreath rather than of this application.
+
+                subsystem             lives in                   instead of
+  absent        durable jobs          PostgreSQL                 Celery, RQ, Redis, RabbitMQ
+  absent        message bus           PostgreSQL                 Kafka, RabbitMQ, SNS + SQS
+  absent        webhook inbox/outbox  PostgreSQL                 SQS, Celery
+  absent        sessions              PostgreSQL                 Redis, Memcached
+  absent        rate limits           PostgreSQL                 Redis
+  absent        idempotency           PostgreSQL                 Redis
+  unobservable  workflows             PostgreSQL                 Temporal, Airflow
+  absent        chunked passes        PostgreSQL                 Celery, a bespoke backfill script
+  absent        progress              PostgreSQL LISTEN/NOTIFY   Redis pub/sub
+  unobservable  rooms                 PostgreSQL LISTEN/NOTIFY   Redis pub/sub
+  unobservable  calculated views      PostgreSQL                 a warehouse, dbt
+  unobservable  distributed locks     PostgreSQL advisory locks  Redis, etcd, ZooKeeper
+  unobservable  application cache     in-process memory          Redis, Memcached
+  unobservable  response cache        in-process memory          Varnish, Redis
+
+  workflows: a Workflow is constructed with a store and handed to a handler; nothing registers it on the application
+  rooms: a RoomRegistry is constructed over a message bus and held by the application author, not by the application
+  calculated views: a Series is a declared class queried through a session; it registers nothing on the application
+  distributed locks: advisory locks are taken per call site, so there is no declaration to read
+  application cache: @cached decorates a function; the application never sees it
+  response cache: response caching is a route decoration, not an application registration
+
+Settings contract
+-----------------
+  not checked: no settings model was named.
+
+Gaps (0)
+--------
+  none.
+
+Notes
+-----
+  - No settings model was named, so the environment contract is unchecked.
+    Pass --settings module:Class[=PREFIX]; a field with no supplier is the
+    gap this command exists to find.
+  - No environment supplier was named, so every required key reads as a gap.
+    Pass --env PATH for a dotenv file, or --environ to use this process's
+    own environment.
+  - Telemetry sinks are not derivable from an application: TelemetryConfig
+    is a field of wreath.server.ServerConfig, not of Wreath, so a sink is a
+    property of how the application is served rather than of the
+    application.
