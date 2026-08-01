@@ -314,13 +314,12 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (bytes, bytearray, memoryview)):
         return bytes(value).hex()
     if isinstance(value, _Coordinate):
-        # Named rather than positional, for the reason `Coordinate` refuses a
-        # bare pair at construction: GeoJSON writes [lon, lat] and mapping UIs
-        # write "lat, lon", so an array on the wire silently picks one. When
-        # `wreath.geospatial` grows a canonical REST form (plan 11's "one
-        # declaration settles every surface" row), this should defer to it
-        # rather than stay a second spelling.
-        return {"lat": value.lat, "lon": value.lon}
+        # Deferred to the type's own canonical REST form rather than spelled
+        # again here. `Coordinate.__jsonable__` is what the JSON encoder uses,
+        # so a route that serialises through CRUD and one that returns the
+        # value directly cannot disagree about the shape -- which they could
+        # while this branch built its own dict.
+        return value.__jsonable__()
     return value
 
 
