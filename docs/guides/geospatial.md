@@ -192,6 +192,9 @@ pinned against the module constant by a live test rather than retyped.
 the prepared path binds parameters in binary and neither twin has a shared
 fallback for an unenumerated OID. Reading needs no such thing: the driver hands
 back an OID it does not know as raw bytes, and `Point.from_wire` reads them.
+PostGIS's `geography` hits the same wall for the same reason and has the same
+pair of encoders; its wire form is EWKB hex, which is the one spelling both the
+text and the binary parameter paths accept.
 
 ## One declaration, every surface
 
@@ -202,6 +205,7 @@ the way an `Instant` does for time:
 | --- | --- |
 | ORM column | PostgreSQL `point`, with its GiST index |
 | Binding | `{"lat": …, "lon": …}`, range-checked |
+| REST JSON | `{"lat": …, "lon": …}` — the same object, on the way out |
 | OpenAPI | an object with `format: coordinate` and bounded `lat`/`lon` |
 | TypeScript | `{ lat: number; lon: number }` |
 | Python client | the real `wreath.geospatial.Coordinate` |
@@ -228,12 +232,26 @@ class Station:
 # [-33.8, 151.2]                                 ->  refused
 ```
 
-**One gap, stated rather than discovered:** returning a bare `Coordinate` from
-a handler does not encode yet — the type needs a `__jsonable__` hook, which
-`wreath.temporal.jsonable` keeps opt-in so that "serialize any dataclass" can
-never put a withheld field on the wire. Binding *in* works; the way out is not
-wired. Return a dataclass containing the coordinate, or convert it yourself,
-until that lands.
+A handler may return a `Coordinate` directly, or anything containing one:
+
+```python
+@app.get("/depot")
+async def depot(request) -> Coordinate:
+    return Coordinate(lat=-27.4698, lon=153.0251)
+
+# {"lat": -27.4698, "lon": 153.0251}
+```
+
+That works because `Coordinate` defines `__jsonable__`, which is how a type
+tells the encoder it knows how to become JSON. The hook is **opt-in on
+purpose** — a blanket "serialize any object with fields" rule would put every
+field of every model a handler happened to return on the wire, including the
+ones a sensitive-field guard exists to keep off it. So a type has to say so,
+and this one says an object rather than a pair.
+
+It is also the *only* spelling. `wreath.crud` serialises a coordinate column
+through the same hook rather than building its own dict, because two
+independent spellings of one wire contract is how they drift apart.
 
 ## What this deliberately is not
 
@@ -244,11 +262,135 @@ stock database.
 
 It does not do polygons, containment, projections other than WGS84, geocoding,
 routing, or map matching. Those need a real spatial engine, and wreath's answer
-there is PostGIS as an opt-in client half, in the same shape it already supports
-pgvector: wreath implements the client side, `CREATE EXTENSION postgis` is
-required and always will be. See the roadmap for where that stands.
+there is PostGIS as an opt-in client half — the next section.
 
 Reference: [`wreath.geospatial`](../reference/geospatial.md).
+
+## Tier 2: PostGIS, opt-in
+
+When tier 1 is not enough — you need a projection, a true KNN ordering, or
+containment against a polygon — declare a `Geography` column instead:
+
+```python
+from wreath.orm.types import Geography
+
+class Station(Model, table="stations"):
+    id: Mapped[int] = column(Int64, primary_key=True)
+    at: Mapped[Coordinate] = column(Geography(), index="gist")
+```
+
+The Python value is the same `Coordinate`, so handlers do not change when a
+model moves between the tiers. The column is `geography(Point,4326)`; only the
+point form is declarable, because wreath has no value type for a polygon and a
+column with nothing to hold is a hole rather than a feature.
+
+**`CREATE EXTENSION postgis` is required and always will be.** Wreath ships the
+client half only. The contract is word-for-word `pgvector`'s, because it is the
+same mechanism: the type's OID is assigned by `CREATE EXTENSION`, so it is read
+once at startup and a database without the extension fails **there**, naming
+it, rather than at the first query with an unrecognised OID.
+
+```
+Station.at declares the 'geography' type, which the 'main' database does not
+provide: the 'postgis' extension is not installed on the search path ...
+Run CREATE EXTENSION IF NOT EXISTS postgis in that database
+```
+
+Two things deliberately do *not* move with that OID: the plan-cache shape token
+and the model fingerprint. Both are derived from the type's name. An OID in
+either would give one query two cache entries against two databases, or report
+every model as drifted when the extension is reinstalled.
+
+`detect`, `generate`, `apply` and `down` round-trip the column and its GiST
+index like any other, and a matching index is not rediscovered as drift.
+
+### One name, two renderings
+
+`within()` and `nearest()` gain a **second rendering, not a second name**. The
+compiler dispatches on the column's own type, so a model that moves from `Point`
+to `Geography` keeps its queries:
+
+```python
+Beacon.select().where(Beacon.at.within(here, 20_000))
+# tier 1:  at <@ box(point($1,$2), point($3,$4)) AND <haversine> <= $5
+# tier 2:  ST_DWithin(at, $1, $2)
+
+Beacon.select().order_by(Beacon.at.nearest(here)).limit(5)
+# tier 1:  ORDER BY <haversine> ASC LIMIT $n
+# tier 2:  ORDER BY (at <-> $1) ASC LIMIT $n
+```
+
+The second one is the reason to be here. `<->` on a `geography` is a **true
+nearest-neighbour search**: PostgreSQL plans it as
+`Index Scan ... Order By: (at <-> …)`, walking the GiST index in distance order
+rather than filtering a bounding box and sorting what survives. It answers
+**metres**, like tier 1, so the two are comparable — they differ by the ~0.5%
+between a sphere and the WGS84 spheroid.
+
+`ST_DWithin` plans as a `&&` index condition with the exact test filtered over
+what it returns — *literally the shape tier 1 hand-builds*, which is the
+strongest argument that the two belong behind one name.
+
+### Containment against a region
+
+The question tier 1 structurally cannot answer:
+
+```python
+from wreath.geospatial import Coordinate, Polygon
+
+catchment = Polygon([
+    Coordinate(lat=-34.0, lon=150.0),
+    Coordinate(lat=-34.0, lon=152.0),
+    Coordinate(lat=-33.0, lon=152.0),
+    Coordinate(lat=-33.0, lon=151.0),
+    Coordinate(lat=-32.0, lon=151.0),
+    Coordinate(lat=-32.0, lon=150.0),
+])
+
+Beacon.select().where(Beacon.at.covered_by(catchment))
+# ST_Covers(ST_GeogFromText($1), at)
+```
+
+A `Polygon` is built from `Coordinate`s and **nothing else** — not `(lon, lat)`
+pairs and not a WKT string, both of which are this module's founding refusal
+wearing a different hat. WKT writes longitude first and every mapping UI writes
+"lat, lon", so a hand-typed `POLYGON((...))` that got the pair backwards is a
+valid document describing the wrong hemisphere, and nothing would ever raise.
+The ring is closed for you; wreath writes the WKT.
+
+`ST_Covers` rather than `ST_Contains`, and not as a preference:
+**`ST_Contains(geography, geography)` does not exist**, so a query reaching for
+it fails at the database. `ST_Covers` also answers "yes" for a point exactly on
+the boundary, which is the reading a catchment wants — an address on the line is
+in the district.
+
+The region travels out as **text**, lifted by `ST_GeogFromText`. There is no
+`geography(Polygon)` column type, no OID to resolve for it, and nothing new on
+the wire: containment is a predicate and KNN is an ordering, and both return the
+model's own columns.
+
+### The refusals tier 2 keeps
+
+| Written | Refused because |
+| --- | --- |
+| `covered_by()` on a `point` column | tier 1 has no polygon operator an index answers |
+| `~at.covered_by(region)` | "everywhere else" is every row the index excluded |
+| `order_by(at.nearest(here))` with no `limit` | an unbounded proximity search sorts the whole table |
+| `where(at.nearest(here))` | a distance is a number; compare it or order by it |
+
+The limit rule is a **token** test, not an operator test: geography KNN renders
+the same `<->` that pgvector does, and an unbounded
+`ORDER BY embedding <-> $1` is allowed and stays allowed. The two are different
+tokens inside the compiler precisely so this refusal can tell them apart.
+
+### What tier 2 does not do yet
+
+`geography(Polygon)` **columns**: storing a polygon is a different problem from
+querying against one, and it is the case that needs a decoder for a type the
+driver does not enumerate. Projections other than 4326. `ST_Intersects`,
+`ST_Buffer`, and the rest of the PostGIS surface. Two operations, done properly,
+with honest refusals around them — stated here rather than discovered at the
+first call.
 
 ## Tiling a region
 

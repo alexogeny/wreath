@@ -74,22 +74,75 @@ def test_a_non_numeric_component_is_refused() -> None:
         validate(Station, {"id": 1, "at": {"lat": "north", "lon": 0.0}})
 
 
-# --- REST JSON: NOT WIRED, and deliberately untested here --------------------
+# --- REST JSON ---------------------------------------------------------------
 #
 # Encoding a `Coordinate` needs a `__jsonable__` hook on the type itself --
 # `wreath.temporal.jsonable` documents it as opt-in, precisely so that
 # "serialize any dataclass" cannot put every field of every returned model on
-# the wire past a sensitive-field guard. That hook belongs in
-# `wreath/geospatial.py`, which another lane owns this round, so the row is
-# left open rather than tested against an implementation that is not there.
-#
-# One line closes it:
-#
-#     def __jsonable__(self) -> dict[str, float]:
-#         return {"lat": self.lat, "lon": self.lon}
-#
-# Until then a handler returning a `Coordinate` raises `TypeError` at encode.
-# Binding *in* works; only the way out is missing.
+# the wire past a sensitive-field guard. So the hook is declared on
+# `Coordinate` in `wreath/geospatial.py`, next to the constructor whose refusal
+# it carries outward, rather than inferred by the encoder.
+
+
+def test_a_coordinate_encodes_as_a_named_object() -> None:
+    """The way out, matching the way in.
+
+    Asserts the *bytes*, not a round trip through `loads`: the ordering trap
+    lives in the wire text, and a test that decodes first cannot see the
+    difference between an object and a pair.
+    """
+    from wreath._json import dumps
+
+    assert dumps(Coordinate(lat=-33.8, lon=151.2)) == b'{"lat":-33.8,"lon":151.2}'
+
+
+def test_the_encoded_form_is_never_a_bare_pair() -> None:
+    """The GeoJSON trap, closed on the way out too.
+
+    A two-element array would round-trip through anything that agreed with it
+    and silently transpose against everything else. This is the assertion that
+    would fail if the hook were ever "simplified" to a tuple.
+    """
+    from wreath._json import dumps
+
+    encoded = dumps(Coordinate(lat=1.0, lon=2.0))
+    assert not encoded.startswith(b"["), encoded
+    assert b"lat" in encoded and b"lon" in encoded, encoded
+
+
+def test_a_coordinate_nested_in_a_payload_encodes() -> None:
+    """What a handler actually returns: a model with a coordinate on it."""
+    from wreath._json import dumps, loads
+
+    payload = {"id": 7, "at": Coordinate(lat=0.5, lon=-0.5), "seen": [Coordinate(lat=1.0, lon=2.0)]}
+    assert loads(dumps(payload)) == {
+        "id": 7,
+        "at": {"lat": 0.5, "lon": -0.5},
+        "seen": [{"lat": 1.0, "lon": 2.0}],
+    }
+
+
+def test_a_handler_may_return_a_coordinate_directly() -> None:
+    """End to end through the response layer, not just the encoder."""
+    from wreath._json import loads
+    from wreath.response import JSONResponse
+
+    body = JSONResponse(Coordinate(lat=12.0, lon=34.0)).body
+    assert loads(body) == {"lat": 12.0, "lon": 34.0}
+
+
+def test_crud_serialization_defers_to_the_canonical_form() -> None:
+    """One spelling, not two.
+
+    `crud._jsonable` carried its own `Coordinate` branch while the canonical
+    form did not exist. Two independent spellings of one wire contract is how
+    they drift apart, so this asserts they are the *same* answer rather than
+    two answers that happen to agree today.
+    """
+    from wreath.crud import _jsonable
+
+    point = Coordinate(lat=-27.4698, lon=153.0251)
+    assert _jsonable(point) == point.__jsonable__()
 
 
 # --- the API contract --------------------------------------------------------
