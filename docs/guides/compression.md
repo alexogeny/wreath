@@ -71,7 +71,34 @@ BREACH class of attacks). If a protected endpoint is known not to mix those,
 opt in deliberately with `compress_authenticated=True`; public responses keep
 the ordinary compression fast path.
 
-For the ordinary case, though, you don't touch the codec directly. You add
+## Reading one back, with a ceiling you have to name
+
+`gzip_decompress` is the only entry point here that decodes, and it takes a
+required `max_output_bytes`:
+
+```python
+from wreath.compression import gzip_decompress
+
+payload = gzip_decompress(chunk, max_output_bytes=4 * 1024 * 1024)
+```
+
+The keyword has no default on purpose. **A gzip member's input length says
+nothing about its output length** — a couple of kilobytes of zeros expand to
+megabytes, and that ratio is the whole mechanism of a decompression bomb. A
+length check on the compressed bytes cannot catch one, so anything reading a
+compressed body off the network has to bound the decoded size as well, and
+making the caller say it is the difference between a refusal and memory
+pressure. `wreath.grpc` decodes `grpc-encoding: gzip` through this, applying its
+`max_message_bytes` on both sides of the decoder for exactly that reason.
+
+Every failure is a `ValueError` — past the limit, truncated, trailing bytes,
+not gzip at all — so a caller of this facade never has to import `zlib` to
+catch what it raises. A `max_output_bytes` of zero is refused rather than
+honoured, because `zlib` reads a limit of zero as *unbounded*: a caller whose
+arithmetic produced zero would otherwise get the exact opposite of the guarantee
+this function exists to make.
+
+For the ordinary response case, though, you don't touch the codec directly. You add
 `CompressionMiddleware` from the [middleware](middleware.md) module, which reads
 the request's `Accept-Encoding`, checks that the content type is worth
 compressing, and does the rest:
