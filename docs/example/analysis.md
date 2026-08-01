@@ -156,8 +156,17 @@ so there is no edge to round at. Sealing the count and recomputing the confidenc
 is the honest split until the encoder learns `Decimal`.
 
 `test_a_card_pulled_late_records_a_correction` drives exactly that against a
-seeded database: seal a day, insert a sighting for it a year later, reconcile,
+seeded database: settle a day, insert a sighting for it a year later, reconcile,
 and read the corrected total back.
+
+**Settling is a job, and reading a sealed view never writes.** The activity
+endpoint is served from a `ReadSession`, so it computes any sealed day nobody
+has stored and returns it without storing it; `sealed_activity(...).settle(...)`
+is what fills the table, and `reconcile()` runs it first so one scheduled job
+covers both. The two tables it writes are wreath's own, claimed by
+`application.series(database="main")` in `app.py` and created at lifespan
+startup — a `Series` is a declaration the application never holds, so without
+that line nothing created them.
 
 ## One defect worked around
 
