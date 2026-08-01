@@ -471,6 +471,104 @@ def test_a_graphql_authorizer_is_a_control(tmp_path: Path) -> None:
     assert any("`authorizer=`" in control for control in dropped), dropped
 
 
+def test_a_graphql_fields_policy_is_mutable_where_the_endpoint_is_built(
+    tmp_path: Path,
+) -> None:
+    """`@api.field(..., policy=...)` in a factory, which is the whole surface.
+
+    `GraphQL(authorizer=...)` was reachable because `GraphQL` is an imported
+    module global. The *per-field* declarations were not: `api` is a local, so
+    `_resolve_callee` declined, and `api.field(...)`/`api.query(...)`/
+    `api.mutation(...)` are not route-shaped -- which left GraphQL's entire
+    authorization vocabulary, one policy per field, mutated not at all while the
+    constructor keyword beside it was covered.
+
+    A GraphQL field's `policy=` is the same kind of sentence as an MCP tool's
+    `action=`: *this field was gated on that resource*. Dropping it falls back to
+    the derived `Type.field`, which is a different resource, so a policy set
+    written for the explicit one no longer names it.
+    """
+    found = _scan_resolved(tmp_path, """
+        from typing import Any
+
+
+        def build(registry: Any) -> Any:
+            from wreath.graphql import GraphQL
+
+            api = GraphQL(registry, models=[], authorizer=None)
+
+            @api.field("User", "postCount", returns="Int", policy="Billing::read")
+            async def post_count(users, info): ...
+
+            @api.query("search", returns="User", policy="Query::search", cost=25)
+            async def search(info): ...
+
+            @api.mutation("retire", returns="User", policy="Mutation::retire")
+            async def retire(info): ...
+
+            return api
+    """, "graphql_fields")
+    dropped = {c.control for c in _by(found, "declaration.drop-keyword")}
+    for call in ("api.field", "api.query", "api.mutation"):
+        assert any(
+            f"`policy=` on `{call}(...)`" in control for control in dropped
+        ), (call, dropped)
+
+
+def test_an_mcp_servers_oauth_boundary_is_a_control(tmp_path: Path) -> None:
+    """`MCP(auth=MCPAuth(...))` is the whole authorization boundary.
+
+    Without it the endpoint is exactly as protected as the route, which for a
+    bare application is not at all -- so dropping the keyword is the single
+    largest undeclaration available on this surface. It was not offered, because
+    `auth` was missing from `CONTROL_KEYWORDS` while `authorizer`, `verifier`
+    and `audience` were all in it.
+    """
+    found = _scan_resolved(tmp_path, """
+        from typing import Any
+
+        from wreath.mcp import MCP, MCPAuth
+
+
+        def build(app: Any, verifier: Any) -> Any:
+            return MCP(
+                app,
+                name="camera-trap",
+                version="1",
+                auth=MCPAuth(resource="https://example.test/mcp", verifier=verifier),
+            )
+    """, "mcp_boundary")
+    dropped = {c.control for c in _by(found, "declaration.drop-keyword")}
+    assert any("`auth=` on `MCP(...)`" in control for control in dropped), dropped
+
+
+def test_a_routes_permissions_keyword_is_mutable(tmp_path: Path) -> None:
+    """`@app.get(path, permissions=...)` is a control and was not offered.
+
+    `_route_metadata()` read `RouteDefinition`'s defaulted *fields*, and
+    `permissions=` is not one of them -- the router folds it into `requirement`
+    before building the record. So the decorator keyword that requires a named
+    permission, on the spelling applications actually use (an `app` that is a
+    local or a parameter), was the one route control the tester could not see.
+    """
+    path = tmp_path / "permissioned.py"
+    path.write_text(textwrap.dedent(
+        """
+        def build_app(app):
+            @app.get("/reports", permissions=("reports:read",))
+            async def reports(request) -> dict:
+                \"\"\"Every report.\"\"\"
+                return {}
+
+            return app
+        """
+    ), encoding="utf-8")
+    found = _by(_scan(path), "declaration.drop-keyword")
+    assert [c.control for c in found] == [
+        "`permissions=` on `app.get(...)` (it falls back to the default)"
+    ]
+
+
 def test_a_routes_own_controls_are_mutable_where_the_route_is_built(tmp_path: Path) -> None:
     """`@app.get(path, dependencies=...)` goes through `**metadata`.
 

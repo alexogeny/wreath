@@ -63,7 +63,8 @@ CONTROL_TOKENS: frozenset[str] = frozenset({
 #: is the source-level spelling of "this control was never declared".
 CONTROL_KEYWORDS: frozenset[str] = frozenset({
     "action", "algorithms", "allow", "allow_list", "allowed", "audience",
-    "authenticated", "authorize", "authorizer", "burst", "challenge", "cost",
+    "auth", "authenticated", "authorize", "authorizer", "burst",
+    "cancel_on_disconnect", "challenge", "cost",
     "csrf", "dependencies", "elicitation", "exempt", "expose", "http_only",
     "identify", "issuer", "key", "limit", "limits", "max_age", "middleware",
     "object_authorizer", "origins", "policies", "policy", "permissions",
@@ -268,20 +269,29 @@ def _route_metadata() -> frozenset[str]:
     `**metadata` catch-all, so asking the decorator's signature whether
     `dependencies` has a default answers "there is no such parameter" and the
     operator would decline -- silently leaving *the* control this tool was built
-    to remove unmutated. The answer lives one layer down, on the record the
-    metadata is forwarded to.
+    to remove unmutated. The answer lives one layer down.
+
+    **Two layers down, and both are needed.** `RouteDefinition`'s defaulted
+    fields are what the record carries, but not every keyword survives as a
+    field: `permissions=` is folded into `requirement` by `Router.route` before
+    the record is built, so reading the record alone made the one decorator
+    keyword that demands a named permission invisible -- while `dependencies=`
+    beside it was covered. `Router.route`'s own signature is the decorator's
+    real vocabulary, so it is unioned in.
     """
     try:
         from dataclasses import MISSING, fields
 
-        from ..router import RouteDefinition
+        from ..router import RouteDefinition, Router
     except ImportError:  # pragma: no cover - wreath is always importable here
         return frozenset()
-    return frozenset(
+    names = {
         field.name
         for field in fields(RouteDefinition)
         if field.default is not MISSING or field.default_factory is not MISSING
-    )
+    }
+    declared = _defaulted_keywords(Router.route)
+    return frozenset(names if declared is None else names | declared)
 
 
 #: Attributes that introduce a route when called with a literal path.
@@ -334,6 +344,15 @@ _DECLARING_CALLS: dict[str, frozenset[str]] = {
     }),
     "resource": frozenset({"action", "rate_limit", "second_factor"}),
     "prompt": frozenset({"action", "rate_limit", "second_factor"}),
+    # `wreath.graphql`'s per-field declarations. `GraphQL(authorizer=...)` was
+    # already reachable because the class is an imported module global, but
+    # `api` is a local in every factory, so the *policy per field* -- which is
+    # the whole of GraphQL's authorization vocabulary -- resolved to nothing.
+    # `cost=` rides along because a complexity weight is a bound, and a field
+    # whose weight falls back to 1 is a field that no longer counts.
+    "field": frozenset({"policy", "cost"}),
+    "query": frozenset({"policy", "cost"}),
+    "mutation": frozenset({"policy", "cost"}),
 }
 
 #: `wreath.grpc`'s four method shapes. `service.unary(...)` is not route-shaped to

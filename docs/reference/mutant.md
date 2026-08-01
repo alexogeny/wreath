@@ -115,13 +115,23 @@ receiver is a *parameter*, and `mcp.tool(...)`, where it is a *local* built
 inside the factory. Both declined for every keyword, so the newest
 authorization surfaces in the framework went unmutated entirely.
 
-A small table names those call sites and the keywords that are controls on them
-— `crud`/`crud_router`, and `tool`/`resource`/`prompt` for MCP. It is consulted
-**only after** resolution has already failed, so a callee that can be asked is
-still asked and the table never overrides a real signature. It is a heuristic in
-the same way `CONTROL_TOKENS` is, and it is the same argument `RouteDefinition`
+A small table names those call sites and the keywords that are controls on them:
+`crud`/`crud_router`; `tool`/`resource`/`prompt` for MCP; `unary`,
+`server_stream`, `client_stream` and `bidi` for gRPC; and `field`/`query`/
+`mutation` for GraphQL, whose `policy=` is one control per field and therefore
+the whole of that surface's authorization vocabulary. It is consulted **only
+after** resolution has already failed, so a callee that can be asked is still
+asked and the table never overrides a real signature. It is a heuristic in the
+same way `CONTROL_TOKENS` is, and it is the same argument `RouteDefinition`
 already makes one layer down: the name and the keyword together are specific
 enough to answer without resolving the callee.
+
+The route branch reads **two** layers, not one. `RouteDefinition`'s defaulted
+fields are what the record carries, but `permissions=` never becomes a field —
+the router folds it into `requirement` before building the record — so reading
+the record alone left the one decorator keyword that demands a named permission
+invisible while `dependencies=` beside it was covered. `Router.route`'s own
+signature is the decorator's real vocabulary, and both are used.
 
 ### Why an operation gets its own mutant
 
