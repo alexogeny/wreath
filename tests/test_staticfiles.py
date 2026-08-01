@@ -57,9 +57,12 @@ def test_close_waits_for_work_already_in_the_pool(tmp_path) -> None:
     """The wait is the precondition for closing the root fd at all."""
     files = StaticFiles(tmp_path, max_workers=1)
     finished: list[str] = []
-    files._executor.submit(lambda: (time.sleep(0.2), finished.append("done")))
-
+    # Sampled *before* the submit. The worker starts sleeping the moment it is
+    # handed the job, so a clock read after the submit begins after the sleep
+    # does -- and on a loaded machine that gap is enough to make the elapsed
+    # time come in under 0.2 while `close` waited exactly as it should.
     started = time.monotonic()
+    files._executor.submit(lambda: (time.sleep(0.2), finished.append("done")))
     files.close()
 
     assert finished == ["done"]

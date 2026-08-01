@@ -51,6 +51,13 @@ class _FailingCompletion:
             raise RuntimeError("connection reset while recording completion")
         return "OK"
 
+    async def fetchval(self, sql, *args):
+        # The version-2 `trace_context` column probe, and nothing else. `None`
+        # models a schema still on version 1 -- this double is about surviving a
+        # failed outcome write, and it holds rows with no trace column, so
+        # answering yes would model a catalog and rows that disagree.
+        return None
+
 
 class TestWorkerSurvivesAnOutcomeFailure:
     """R-18 / R-27: the try/except covers the *claim*, not the run, so a

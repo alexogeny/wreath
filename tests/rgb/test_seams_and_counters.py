@@ -187,6 +187,13 @@ class TestDurableFanOut:
                 statements.append(sql)
                 return "OK"
 
+            async def fetchval(self, sql, *args):
+                # The version-2 `trace_context` column probe, and nothing else.
+                # `None` models a schema still on version 1, which is what this
+                # double's INSERT assertion is about -- the fan-out shape, not
+                # the trace column.
+                return None
+
         class _Database:
             async def acquire(self, workload):
                 return _Connection()
