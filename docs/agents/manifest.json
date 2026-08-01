@@ -1385,7 +1385,7 @@
     },
     {
       "name": "tracking-example",
-      "capability": "A collar-tracking application demonstrating protobuf ingest, tier-1 geospatial queries, Cedar-graded coordinate precision, an SSE live map over RoomRegistry, and a sealed daily view that records corrections for late buffer dumps",
+      "capability": "A collar-tracking application demonstrating protobuf ingest over both HTTP and gRPC client-streaming, tier-1 geospatial queries, Cedar-graded coordinate precision, an SSE live map over RoomRegistry, and a sealed daily view that records corrections for late buffer dumps",
       "guides": [
         "docs/tracking/index.md",
         "docs/tracking/ingest.md",
@@ -1400,7 +1400,7 @@
         "tests/tracking/",
         "tests/_tracking.py"
       ],
-      "policy": "The second example, and deliberately the smaller one: three documentation pages, not six. It shares the camera trap's conservation universe and defers to it for routing, CRUD, paging, sessions, jobs and object storage -- a feature the camera trap already teaches is not taught again here. Nothing in src/wreath may import from example/, and neither package ships on pip install wreath. The seed is deterministic (no clock reads, one seeded Random) because docs/tracking/index.md pastes its output. Two framework workarounds carry a written reason at the site: tracking/wire.py MEDIA_TYPE_HEADER exists because Response(media_type=) accepts a str and emits an invalid ASGI header pair, and the quickstart applies wreath._series.settle.schema_sql() by hand because a sealed Series's tables are not claimed through app.schema_components(). Stage 6 of the plan (gRPC streaming ingest) is not built: wreath ships no gRPC surface."
+      "policy": "The second example, and deliberately the smaller one: three documentation pages, not six. It shares the camera trap's conservation universe and defers to it for routing, CRUD, paging, sessions, jobs and object storage -- a feature the camera trap already teaches is not taught again here. Nothing in src/wreath may import from example/, and neither package ships on pip install wreath. The seed is deterministic (no clock reads, one seeded Random) because docs/tracking/index.md pastes its output. One framework workaround carries a written reason at the site: tracking/wire.py MEDIA_TYPE_HEADER exists because Response(media_type=) accepts a str and emits an invalid ASGI header pair. Stage 6 ships: tracking/rpc.py serves the same accept() over a gRPC client-streaming method, which means wreath's own server and TLS -- the REST relay stays mounted for every other deployment. The sealed view's tables are claimed through app.series(database=...) and created by lifespan startup; reading a sealed Series never writes, so settling is Series.settle()."
     }
   ],
   "invariants": "AGENTS.md",
