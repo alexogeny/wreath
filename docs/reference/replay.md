@@ -134,9 +134,9 @@ that makes it safe to point at a production recording on a developer's machine,
 and it is asserted against a real PostgreSQL in
 `tests/jobs/test_attempt_capture_live.py`.
 
-**The arguments are not in the recording** — see
-[why](recording.md#the-arguments-are-not-captured-and-that-is-structural) —
-so `replay_attempt` refuses to run with the wrong arity rather than inventing
+**The arguments are in the recording only where an operator named one** — see
+[how, and the four rules that make it safe](recording.md#the-arguments-and-the-names-a-positional-array-does-not-have)
+— so `replay_attempt` refuses to run with the wrong arity rather than inventing
 values. Supply them from the queue row or from a fixture; the generated test
 says so in its docstring.
 
