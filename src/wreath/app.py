@@ -100,6 +100,25 @@ _build_capability_mask = (
 _RESPONSE_CALL = Response.__call__
 
 
+def _arm_cancel_on_disconnect(send: Any, enabled: bool) -> None:
+    """Tell the server whether losing the client cancels this handler.
+
+    Reached only from a route that declared `cancel_on_disconnect=`, because the
+    server already applies the safe/unsafe default by itself and being told the
+    answer it had would be a crossing bought for nothing.
+
+    The hook is looked up rather than assumed: `send` is the server's own bound
+    method on Wreath's HTTP/1.1 protocols, an unrelated closure on somebody
+    else's ASGI server, and a test double in between. Where it is absent the
+    declaration has nothing to act on and the route keeps whatever that server
+    does -- which for every ASGI server other than this one is "keep running",
+    since `http.disconnect` is a message and not an interrupt.
+    """
+    arm = getattr(getattr(send, "__self__", None), "_wreath_cancel_on_disconnect", None)
+    if arm is not None:
+        arm(enabled)
+
+
 def _ambiguous_request_path(scope: dict[str, Any], path: str) -> bool:
     """Whether proxy and application could route encoded separators differently."""
     raw_path = scope.get("raw_path")
@@ -527,6 +546,7 @@ class Wreath:
         "_auth_backend",
         "_app_scope",
         "_authorizer",
+        "_cancel_on_disconnect",
         "_capabilities",
         "_classify",
         "_compile_lock",
@@ -539,6 +559,7 @@ class Wreath:
         "_dirty",
         "_dynamic_matcher",
         "_databases",
+        "_declared_databases",
         "_manage_schema",
         "_exception_handlers",
         "_dispatch_http",
@@ -680,6 +701,12 @@ class Wreath:
         # then, and reset on every route recompile so it never goes stale.
         self._flight_route_ids: dict[Any, tuple[int, int]] | None = None
         self._flight_route_keys: dict[Any, tuple[str, str]] = {}
+        #: Compiled handler -> the `cancel_on_disconnect=` it declared, for the
+        #: routes that declared one at all. `None` when no route did, which is
+        #: the ordinary case: each dispatcher then costs one member read and a
+        #: branch, and no crossing, because the server already applies the
+        #: safe-method default without being told.
+        self._cancel_on_disconnect: dict[Any, bool] | None = None
         # Forensic capture: the compiled redaction plan (the startup ceiling) and
         # the runtime arm registry, both set by the server under a Forensic
         # recorder. None keeps the capture seam a single not-taken branch.
@@ -710,6 +737,14 @@ class Wreath:
         #: record that a close refused.
         self.lifespan_teardown_errors = 0
         self._databases: dict[str, Any] = {}
+        #: `id(holder) -> (holder, database)` for every subsystem whose
+        #: declaration named a database: `app.jobs(database=)`,
+        #: `app.messaging(database=)`. That argument *is* the schema
+        #: attribution, so it is written down here at the moment it is made
+        #: rather than recovered later from whatever private field the
+        #: subsystem stored it in. The holder is kept in the value so its `id`
+        #: cannot be recycled under the key while the application is alive.
+        self._declared_databases: dict[int, tuple[Any, Any]] = {}
         #: Whether wreath creates and upgrades its own tables. False for a
         #: deployment whose role cannot CREATE SCHEMA -- the common enterprise
         #: case -- which then gets a startup refusal naming what is missing
@@ -738,7 +773,15 @@ class Wreath:
 
         Middleware is walked as well as the registries, because the session,
         rate-limit and idempotency stores reach an application that way rather
-        than through a registry of their own.
+        than through a registry of their own. A middleware does not own tables
+        itself -- it delegates them to a store -- so it answers `schema_owners`
+        with the store it holds and the claim is collected from there. Both
+        halves are needed and for a while only one was present: the walk was
+        repaired to reach the middleware, but the shipped three still exposed
+        neither `component()` nor `schema_owners`, so `wreath_ratelimit`,
+        `wreath_idempotency` and `wreath_session` stayed emitted by
+        `wreath schema sql` and applied by nothing. This docstring claimed the
+        guarantee across that gap, which is worse than not claiming it.
 
         Returns:
             One `wreath.schema.Component` per registered subsystem that owns
@@ -750,8 +793,7 @@ class Wreath:
             *self._webhook_hubs.values(),
             # The middleware registries hold `(priority, order, middleware)`.
             # Walking the tuples asked a tuple for `component()`, so every
-            # middleware-owned table -- the session, rate-limit and idempotency
-            # stores this docstring names -- was silently never collected.
+            # middleware-owned table was silently never collected.
             *(item[2] for item in self._global_middleware),
             *(item[2] for item in self._middleware),
         ]
@@ -818,10 +860,13 @@ class Wreath:
           and leave the subsystem reading a different one -- a wrong answer
           delivered silently, which is worse than a startup error someone can act
           on.
+
+        The three cases are only reached when the owner has not *said*; see
+        `_schema_database` for the two ways it can.
         """
         owners: dict[int, tuple[Any, list[Any]]] = {}
-        for holder, claim in self._schema_owners(components):
-            database = getattr(holder, "_database", None) or getattr(holder, "database", None)
+        for holder, candidate, claim in self._schema_owners(components):
+            database = self._schema_database(holder, candidate)
             if database is None:
                 if not self._databases:
                     continue
@@ -838,9 +883,45 @@ class Wreath:
             owners.setdefault(id(database), (database, []))[1].append(claim)
         return {database: claims for database, claims in owners.values()}
 
-    def _schema_owners(self, components: tuple[Any, ...]) -> list[tuple[Any, Any]]:
+    def _schema_database(self, holder: Any, candidate: Any) -> Any:
+        """The database an owner's claim belongs to, or None if it does not say.
+
+        Two explicit sources, and no guessing at field names:
+
+        * **What the declaration said.** `app.jobs(database=)` and
+          `app.messaging(database=)` name a database, and the application
+          records the object each produced against it. Reading that record back
+          is not a guess; recovering it from whatever private field the
+          subsystem happened to store it in was, and it was wrong. This lookup
+          used to try `_database` and then `database`; `JobRunner` and
+          `MessageBus` call theirs `_db`, so an application that had written
+          `app.jobs(database="analytics")` was refused at lifespan startup with
+          "cannot tell which database" -- for a question its own declaration had
+          already answered. Adding `_db` to the list would have fixed those two
+          subsystems and left the next one to be found the same way.
+        * **`schema_database`, which the owner opts into.** One documented name,
+          for an owner the application never constructed and so never saw a
+          database for -- a `PostgresRateLimitStore` a caller built and handed
+          to `RateLimitMiddleware`.
+
+        None means the owner genuinely holds no database: a webhook inbox is
+        given a session per call and never sees one. The caller resolves that.
+        """
+        declared = self._declared_databases.get(id(holder))
+        if declared is not None:
+            return declared[1]
+        return getattr(candidate, "schema_database", None)
+
+    def _schema_owners(self, components: tuple[Any, ...]) -> list[tuple[Any, Any, Any]]:
+        """`(holder, candidate, claim)` for each collected component.
+
+        Both objects are carried because they are not always the same one: a
+        middleware delegates its tables to a store, so the *claim* comes from
+        the store while the *declaration* that named a database was made about
+        the middleware's holder. `_schema_database` consults each in turn.
+        """
         wanted = {claim.name: claim for claim in components}
-        pairs: list[tuple[Any, Any]] = []
+        triples: list[tuple[Any, Any, Any]] = []
         holders: list[Any] = [
             *self._job_runners.values(),
             *self._message_buses.values(),
@@ -857,8 +938,8 @@ class Wreath:
                     continue
                 found = claim()
                 if wanted.pop(found.name, None) is not None:
-                    pairs.append((candidate, found))
-        return pairs
+                    triples.append((holder, candidate, found))
+        return triples
 
     def webhooks(self, name: str) -> Any:
         """Register one named inbound/outbound webhook hub."""
@@ -1064,6 +1145,7 @@ class Wreath:
             schema=schema, batch=batch, progress=progress,
         )
         self._job_runners[name] = runner
+        self._declared_databases[id(runner)] = (runner, self._databases[database])
         self.state.__setattr__(f"jobs_{name}", runner)
         self._dirty = True
         return runner
@@ -1092,6 +1174,7 @@ class Wreath:
             poll_interval=poll_interval, lease=lease,
         )
         self._message_buses[name] = bus
+        self._declared_databases[id(bus)] = (bus, self._databases[database])
         self.state.__setattr__(f"messaging_{name}", bus)
         self._dirty = True
         return bus
@@ -1255,6 +1338,7 @@ class Wreath:
         security: Mapping[str, Iterable[str]] | None = None,
         name: str | None = None,
         host: str | None = None,
+        cancel_on_disconnect: bool | None = None,
     ) -> Callable[[Handler], Handler]:
         """Register the decorated handler for `path` under each of `methods`.
 
@@ -1280,6 +1364,15 @@ class Wreath:
         between the handler and the middleware; violating the promise may hand
         a non-response value to an egress hook.
 
+        `cancel_on_disconnect` decides what a lost client does to a handler that
+        is still working. Left alone, the request method decides: RFC 9110's
+        safe methods (`GET`, `HEAD`, `OPTIONS`) are cancelled, because nobody is
+        waiting for the answer and a cancelled query stops scanning; every other
+        method is left to finish, because unwinding it rolls the transaction
+        back but not the mail it already sent. Set it to opt a `POST` in or a
+        `GET` out. It is honoured by Wreath's own HTTP/1.1 server; another ASGI
+        server that does not offer the hook leaves every handler running.
+
         Registration only appends to the route table. Signature inspection, binder
         compilation, middleware fusing and capability-mask assignment all happen
         once, when the routes are compiled, and cost a request nothing.
@@ -1293,6 +1386,8 @@ class Wreath:
             permissions: Permission names the caller must hold, all of them.
             operation_id: OpenAPI operationId, and the generated clients' method name.
             response_only: Handler promises to return a response object directly.
+            cancel_on_disconnect: Cancel this handler when the client goes away;
+                omitted, the request method decides.
 
         Raises:
             ValueError: This method and path are already registered.
@@ -1354,6 +1449,7 @@ class Wreath:
                     route_security,
                     name,
                     host,
+                    cancel_on_disconnect,
                 )
             )
             self._dirty = True
@@ -1483,6 +1579,7 @@ class Wreath:
                     definition.security,
                     definition.name,
                     definition.host,
+                    definition.cancel_on_disconnect,
                 )
             )
         self._dirty = True
@@ -1919,6 +2016,17 @@ class Wreath:
             await self._handle_http(scope, receive, send, method, path, native_response)
             return
         handler, path_params = matched
+        # The declared override, if this route declared one. Placed in each of
+        # the three dispatchers rather than once: `_select_dispatch` chooses
+        # between them per application, so a seam in only the general one would
+        # silently ignore `cancel_on_disconnect=` for exactly the simplest
+        # applications -- no global middleware and no dynamic routes -- which is
+        # the shape most likely to have a slow read on a `GET`.
+        overrides = self._cancel_on_disconnect
+        if overrides is not None:
+            declared = overrides.get(handler)
+            if declared is not None:
+                _arm_cancel_on_disconnect(send, declared)
         request = Request(scope, receive, path_params, self._limits, app=self)
         if _telemetry.PROPAGATING:
             _telemetry.bind_propagation(request)
@@ -2001,6 +2109,12 @@ class Wreath:
             await self._handle_http(scope, receive, send, method, path, native_response)
             return
         handler, path_params = matched
+        # See `_handle_http_plain` for why this is repeated per dispatcher.
+        overrides = self._cancel_on_disconnect
+        if overrides is not None:
+            declared = overrides.get(handler)
+            if declared is not None:
+                _arm_cancel_on_disconnect(send, declared)
         before_hooks, after_hooks = programs.get(
             (method, handler), (self._global_before_hooks, self._global_after_hooks)
         )
@@ -2342,6 +2456,12 @@ class Wreath:
                 )
                 return
         handler, path_params = matched
+        # See `_handle_http_plain` for why this is repeated per dispatcher.
+        overrides = self._cancel_on_disconnect
+        if overrides is not None:
+            declared = overrides.get(handler)
+            if declared is not None:
+                _arm_cancel_on_disconnect(send, declared)
         # Attribute this completion to its route in the recorder. Only the native
         # HTTP/1 fast path (native_response) carries a _RequestContext, and its
         # `flight` flag is a T_INT member that is truthy only when a live recorder
@@ -2945,6 +3065,13 @@ class Wreath:
         # Compiled handler -> (method, path) so a later telemetry join can map
         # each route to its metadata-image IDs without re-walking the router.
         flight_route_keys: dict[Any, tuple[str, str]] = {}
+        # Compiled handler -> declared `cancel_on_disconnect`. Only routes that
+        # declared one are in here; the rest take the server's own safe-method
+        # default, so an application that never asks pays nothing for the
+        # feature at dispatch time. Keyed on the handler alone rather than on
+        # (method, handler): the declaration is per route, so every method a
+        # route answers wants the same answer.
+        cancel_on_disconnect: dict[Any, bool] = {}
         for definition, requirement, binding_spec in zip(
             self._routes, requirements, binding_specs, strict=True
         ):
@@ -3016,6 +3143,8 @@ class Wreath:
                     router.add(definition.path, method, compiled, access_clauses)
                 handler_requirements[compiled] = requirement
                 flight_route_keys[compiled] = (method, definition.path)
+                if definition.cancel_on_disconnect is not None:
+                    cancel_on_disconnect[compiled] = definition.cancel_on_disconnect
                 if excluded:
                     program = program_cache.get(excluded)
                     if program is None:
@@ -3057,6 +3186,10 @@ class Wreath:
             sorted({method for route in self._routes for method in route.methods})
         )
         self._flight_route_keys = flight_route_keys
+        # None rather than an empty dict: all three dispatchers test this member
+        # on every request, and `is not None` is the cheapest way to say "no
+        # route in this application ever asked".
+        self._cancel_on_disconnect = cancel_on_disconnect or None
         self._flight_route_ids = None  # rebuilt lazily against the new routes
         self.router = router
         self._dynamic_matcher = dynamic_matcher if dynamic_matcher._routes else None
