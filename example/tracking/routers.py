@@ -222,14 +222,15 @@ def routers(live: LiveMap) -> tuple[Router, ...]:
     async def read_daily(
         request: Request,
         animal_id: int,
-        # A *write* session on a `GET`, and it has to be. Reading a sealed
-        # `Series` materialises the buckets that have passed the horizon, so the
-        # first reader of a settled day performs an `INSERT` -- a read-workload
-        # session answers `cannot execute INSERT in a read-only transaction`,
-        # from inside the series machinery, on a route that never wrote
-        # anything the application can see. Worth stating plainly: with
-        # `.seal()`, reading is a write.
-        session: WriteSession,
+        # An ordinary read session, on an ordinary `GET`. Reading a sealed
+        # `Series` computes any day past the horizon that nobody has settled
+        # yet and does *not* store it: settling is `Series.settle()`, which a
+        # job runs. This used to be a `WriteSession`, because the read
+        # materialised as a side effect and a read-workload session answered
+        # `cannot execute INSERT in a read-only transaction` from inside the
+        # series machinery, on a route that wrote nothing the application can
+        # see.
+        session: ReadSession,
         since: datetime.date,
         days: Annotated[int, Query(minimum=1, maximum=MAX_TRACK_DAYS)] = 14,
     ) -> dict:

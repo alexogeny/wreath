@@ -214,24 +214,22 @@ applied migration 0000000000000000000000000000d101
 **One more table set, and it is not in the artifact.** The daily chart seals its
 buckets, and settled buckets live in wreath's own `wreath` schema rather than in
 this application's — the artifact describes what the author *declared*, and
-nobody declared a settled-bucket store. Nothing creates them for you:
+nobody declared a settled-bucket store. There is nothing to run by hand: `app.py`
+says so, and lifespan startup does the rest.
 
-```bash
-PYTHONPATH=. python -c \
-  'from wreath._series.settle import schema_sql; print(schema_sql() + ";")' \
-  | docker exec -i wreath-tracking-pg psql -U wreath -d wreath_test
+```python
+application.series(database="main")
 ```
 
 ```
-CREATE SCHEMA
-CREATE TABLE
-CREATE TABLE
+wreath schema: created wreath.series_buckets, wreath.series_corrections
 ```
 
-That private import is a rough edge and this page would rather say so than hide
-it: every other table wreath owns — the job ledger, the message bus — is claimed
-through `app.schema_components()` and created during lifespan startup, and this
-one is not. See [Ingest and realtime](ingest.md#the-rough-edges-this-example-hit).
+A `Series` is a declaration built where it is used, so unlike the job ledger and
+the message bus the application never holds one — that line is what gives the
+claim an owner in `app.schema_components()`. It used to be absent, and the
+tables were emitted by `wreath schema sql` and created by nothing at all. See
+[Ingest and realtime](ingest.md#the-rough-edges-this-example-hit).
 
 ### 3. Seed it
 

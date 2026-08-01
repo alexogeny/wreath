@@ -145,6 +145,50 @@ would fail the whole request rather than landing it once. The batch is therefore
 deduplicated before the statement. The conflict clause protects against the
 retry; nothing but the deduplication protects against the duplicate.
 
+### The same ingest, streamed
+
+A station that dials in, drains its spool and hangs up wants a `POST`. A station
+on a permanent link wants neither a request per fix nor a delay while it
+accumulates a batch worth sending, and that is what gRPC client-streaming is
+for. `tracking/rpc.py` is thirty lines and it adds no ingest:
+
+```python
+@service.client_stream(request=Position, response=BatchReceipt)
+async def Relay(request, positions) -> BatchReceipt:
+    relay = request.header(RELAY_METADATA) or ""
+    collected = [p async for p in positions]      # bounded by MAX_POSITIONS
+    receipt = await accept(session, PositionBatch(relay, collected), now=...)
+    await live.publish(receipt.published)
+    return BatchReceipt(...)
+```
+
+The point of the stage is the line that is *not* there: there is no second
+`accept`. The per-position rejection counting, the deduplication, the leg
+repair, the `ON CONFLICT DO NOTHING` retry and the broadcast-after-write
+ordering are all the ones stage one already argued about, so a divergence
+between the two transports would be a bug rather than a feature. Three
+decisions are the transport's own:
+
+- **The relay's name is call metadata, not a field.** `PositionBatch` names it
+  once for a whole batch; a stream has no batch to hang it on. gRPC metadata
+  arrives with the request headers, before the first message, which is exactly
+  when the server wants it.
+- **`IngestRefused` becomes `INVALID_ARGUMENT`,** never a retryable code. A
+  station told `UNAVAILABLE` retries forever at the rate its spool refills —
+  the gRPC form of the 500-instead-of-400 failure above.
+- **An empty stream is a zero receipt, not a refusal,** because that is what the
+  `POST` path answers an empty batch. Refusing here would have been the second
+  ingest this module exists not to be.
+
+**This runs on wreath's own server and nowhere else, and it needs TLS.** gRPC
+puts its status in HTTP/2 trailers, `_pure/server.py` has no HTTP/2 at all, and
+`serve` negotiates `h2` through ALPN rather than sniffing the first application
+bytes — so prior-knowledge `h2c` is unavailable too. A call arriving over
+HTTP/1.1 is answered `UNIMPLEMENTED` with a message naming the transport, which
+`tests/tracking/test_stream.py` asserts. The REST relay is not going anywhere:
+it is what a deployment behind somebody else's ASGI server keeps using, and both
+are mounted at once.
+
 ## The collar that lost the sky
 
 `Fix.leg_m` holds the distance from the previous fix, and the daily chart sums
@@ -190,7 +234,9 @@ position older than that is not "late", it is a recovery. That is a statement
 about *these* collars under *this* canopy, not a framework default, which is why
 it is declared in the application.
 
-Read a day, and it settles:
+Read a day past the horizon and the envelope says it is settled. Reading does
+not *store* it — `Series.settle()` does, from a job — so this is an ordinary
+`GET` on a read session:
 
 ```json
 {"days":[{"day":"2026-03-23T21:00:00+00:00","fixes":72,"distance_m":7797.4},
@@ -351,20 +397,21 @@ surfaces is a `TypeError` from whatever reads the headers next. The
 form, so anyone following it hits this; `tracking/wire.py` names a
 `MEDIA_TYPE_HEADER` constant that is the same string as `bytes`, and says why.
 
-**A sealed `Series` is the one wreath-owned table an application must create
-through a private import.** `app.schema_components()` returns nothing for an
-application whose only wreath-owned tables are settled buckets, so the lifespan
-machinery that creates the job ledger and the message bus does not create these
-— and the emitting function lives at `wreath._series.settle.schema_sql()`,
-behind a leading underscore. The [quickstart](index.md#2-a-schema-and-the-artifact)
-runs it explicitly.
+**A sealed `Series` needs one line the other wreath-owned tables do not.** A
+`Series` is a declaration built where it is used, so the application never holds
+one and `app.schema_components()` had nothing to ask: the settled-bucket tables
+were emitted by `wreath schema sql` and created by nothing at all. `app.py` now
+says `application.series(database="main")`, which gives the claim an owner and
+has the lifespan create the tables the same way it creates the message bus's.
 
-And one that is not a rough edge but is a surprise: **with `.seal()`, reading is
-a write.** The first reader of a settled day performs the `INSERT` that settles
-it, so a `GET` route serving a sealed view needs a write-workload session. A
-read session answers `cannot execute INSERT in a read-only transaction`, from
-inside the series machinery, on a route that never wrote anything the
-application can see.
+Two rough edges this page used to name are gone with it, and they are worth
+recording because both were real. The DDL no longer has to be applied through a
+private `wreath._series.settle` import. And **reading a sealed view is no longer
+a write**: it used to settle as a side effect, so a chart `GET` needed a
+write-workload session and a read session answered `cannot execute INSERT in a
+read-only transaction` from inside the series machinery, on a route that wrote
+nothing the application can see. `read_daily` takes a `ReadSession` now, and
+`Series.settle()` — which `reconcile()` runs first — is the write half.
 
 Next: [Place and policy](place.md), for the queries underneath all of this and
 the ceiling they run into.

@@ -74,17 +74,19 @@ async def build_schema(
         if statement.strip():
             await connection.execute(statement.strip())
 
-    # The settled-bucket tables, which are neither in the artifact nor claimed
-    # through `app.schema_components()` -- so unlike the bus above, *nothing*
-    # creates them, not even a lifespan. See `docs/tracking/ingest.md`.
+    # The settled-bucket tables. The application declares these with
+    # `app.series(database="main")` and lifespan startup creates them, but these
+    # fixtures build a schema directly rather than driving a lifespan, so the
+    # same claim is applied here -- through the public `SettledStore`, the way
+    # the bus above uses its own `component()`.
     #
     # Applied for every fixture rather than only the sealing suite, because the
     # daily-chart route reads a sealed view: a suite that did not create them
     # passed only on a database where another suite already had, which is a
     # green run that depends on the order somebody ran things in.
-    from wreath._series.settle import schema_sql
+    from wreath.series import SettledStore
 
-    for statement in schema_sql().split(";\n"):
+    for statement in SettledStore().schema_sql().split(";\n"):
         if statement.strip():
             await connection.execute(statement.strip())
 

@@ -207,6 +207,10 @@ async def test_a_late_position_corrects_a_sealed_day_without_rewriting_it(
 
     first = await view.run(session, range=window, now=NOW, animal=ANIMAL)
     measures = {item.measure: item.values[0] for item in first.series}
+    # Reading does not store, so the settling job is an explicit step. It has
+    # to happen *before* the buffer arrives, which is the situation the whole
+    # test is about: a day that was settled, and then moved.
+    await view.settle(session, range=window, now=NOW, animal=ANIMAL)
     settled_before = await stored_bucket(database, view, {"animal": ANIMAL}, window.start)
     assert settled_before is not None, "the day must have settled or this proves nothing"
     assert not first.state.corrections
@@ -254,6 +258,9 @@ async def test_the_distance_a_correction_carries_is_the_distance_that_changed(
 
     before = await view.run(session, range=window, now=NOW, animal=ANIMAL)
     was = {item.measure: item.values[0] for item in before.series}["distance_m"]
+    # Settle before the buffer arrives, or the reconcile below has nothing to
+    # compare against and stores the corrected number as if it were the first.
+    await view.settle(session, range=window, now=NOW, animal=ANIMAL)
 
     late = window.start + datetime.timedelta(hours=9, seconds=10)
     await _relay(session, late)

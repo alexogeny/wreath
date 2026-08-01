@@ -31,6 +31,7 @@ from .live import LiveMap
 from .models import MODELS
 from .policies import ENGINE
 from .routers import routers
+from .rpc import ingest_service
 
 
 def dsn() -> str:
@@ -64,9 +65,14 @@ def build(*, validate_schema: str = "error", cross_worker: bool = True) -> Wreat
     """
     application = Wreath()
     application.postgres("main", dsn=dsn())
-    application.orm(
+    registry = application.orm(
         database="main", models=list(MODELS), validate_schema=validate_schema
     )
+    # The daily-distance chart is a sealed `Series`, so wreath owns two tables
+    # for its settled buckets. This is what puts them in
+    # `app.schema_components()` and so has the lifespan create them, the same
+    # way the message bus below gets its own.
+    application.series(database="main")
 
     # --- who you are ---------------------------------------------------------
     #
@@ -99,6 +105,16 @@ def build(*, validate_schema: str = "error", cross_worker: bool = True) -> Wreat
 
     for router in routers(live):
         application.include_router(router)
+
+    # --- the same ingest, streamed -------------------------------------------
+    #
+    # A station on a permanent link streams positions instead of POSTing a
+    # batch. It is the same `accept()` underneath, which is the point: a second
+    # transport must not become a second ingest. gRPC needs HTTP/2 and therefore
+    # wreath's own server with TLS, so this is additive -- the REST relay is
+    # what a deployment behind another ASGI server keeps using. See
+    # `tracking.rpc`.
+    application.include_router(ingest_service(registry, live).router())
 
     # An SSE response finishes when its generator does, and a generator parked
     # on a queue nobody will fill again is a connection that outlives the
