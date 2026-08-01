@@ -58,7 +58,8 @@
         "tests/test_sync_handlers.py",
         "tests/test_problem_details.py",
         "tests/test_middleware_compartments.py",
-        "tests/test_middleware_native_mode.py"
+        "tests/test_middleware_native_mode.py",
+        "tests/test_schema_attribution.py"
       ],
       "policy": "Configuration is how Wreath starts; state is what it holds while running. They do not share an API. Route tables compile at startup, never per request. Dispatch is chosen at compile time too: `_select_dispatch` picks `_handle_http_plain` for an application with no global hooks and no dynamic matcher, and every delegation from it back to `_handle_http` must be decided *before* the specialized path has any effect a second dispatch would repeat -- before the Request exists, before a hook could run, before the recorder is told anything. A route handler may be `def` as well as `async def`; dispatch calls it and awaits only what came back awaitable, and every wrapper (binder, response validator, status coercion) preserves whichever convention it was handed. `_reject_session_after_authentication` scans **every** route-scoped registration -- `add_middleware`, `Router(middleware=[...])`, an included router's, and one route's `middleware=[...]` -- not just the application's. It used to read `self._middleware` alone, so a session middleware on a router walked past a refusal that had nothing to look at and shipped the 401 it exists to prevent (docs/decisions/0024). Nesting needs no special case: `Router.routes` folds an included router's middleware into each route before the application sees it. A global middleware may expose `applies_to(method, path)`, consulted once per route at compile time; routes it declines dispatch through a program compiled without it, so declining costs nothing per request. `_select_dispatch` then picks `_handle_http_compartment`, which routes *before* running the tape -- legal only because `classify` needs no Request, and only for an application with a classifying table, no dynamic matcher (host routing matches on a Host `ProxyHeaders` may rewrite) and no stage hooks. Per request it handles only `classify == 1`: a miss, an auth ticket, an armed recorder or an ambiguous path all hand back to `_handle_http` and run the full tape, so a rate limiter still counts 404s. Per-route programs are keyed by `(method, handler)` -- a multi-method route with no route middleware compiles to one shared endpoint object, and method is the axis compartments are most wanted on. `Wreath(middleware=\"native\")` opts into `_middleware_tape`, which records at boot every answer a configured `CORSMiddleware` can give a preflight and lets `_wreath_http` serve them before the tape, before routing and before a `Request` exists. The table is recorded by *asking the middleware*, never by rebuilding its answer beside it -- reconstruction missed the `content-type` a 204 inherits from the Response class default, and the recorded answer must include the middleware's own egress hook, which is where a 403 refusal picks up `access-control-allow-origin` (so refusals are recorded per origin). Each probe runs twice and a middleware whose answers differ is declined. An origin outside the table falls through to Python rather than being refused, because `CORSMiddleware`'s normalized compare accepts spellings the table does not carry. Opting in is a documented ordering change: middleware registered before CORS stops seeing preflights."
     },
@@ -222,6 +223,7 @@
         "tests/test_binding_sources.py",
         "tests/test_binding_complexity.py",
         "tests/test_binding_response_compilation.py",
+        "tests/test_binding_protobuf.py",
         "tests/test_native_validate_parity.py",
         "tests/test_form_model_binding.py",
         "tests/test_validation_errors.py",
@@ -391,6 +393,7 @@
         "tests/test_cedar_set_dedupe.py",
         "tests/test_cedar_flags.py",
         "tests/test_permissions.py",
+        "tests/test_permissions_four_protocols.py",
         "tests/test_jwt.py",
         "tests/test_livedoc.py",
         "tests/test_red_team_auth.py",
@@ -555,6 +558,30 @@
         "tests/postgres/test_cells_integration.py"
       ],
       "policy": "Chart data as a declaration over one source model, with a bounded result. Bucketing is a timezone problem before it is an aggregation problem: the bucket is assigned and the spine generated on the local wall clock, then converted back, because generate_series stepping naive timestamps advances a calendar day while stepping timestamptz advances exactly 24 hours -- the DST bug, twice a year, in one bucket. Ranges are half-open and stated once, for the filter and the spine bounds alike. Fill is per measure: count and sum fill with 0, avg/min/max stay null, because an average of no rows is undefined and drawing it as zero reads as a collapse rather than an absence. A series is identified by a stable key from the grouping value, never by rank, so a filter change cannot repaint a legend. Multiple measures are multiple named series and are never merged -- two units on one pair of axes is a dual-axis chart, whose alignment is arbitrary. Top-N folds (it preserves the total) and the fold is applied before aggregation, so the remainder's average is a real average and not an average of averages; every other ceiling refuses rather than truncating. Not plan-cached, following compile_count: a declaration runs once per chart request, not once per row. Bucket vocabulary lives in wreath.temporal because sealing will need end_of() too."
+    },
+    {
+      "name": "infra",
+      "capability": "Infrastructure inferred from an application's own declarations: databases, object stores, egress, and the environment contract it needs supplied",
+      "replaces": [
+        "terraform",
+        "pulumi"
+      ],
+      "guides": [
+        "docs/guides/infra.md"
+      ],
+      "reference": [
+        "docs/reference/infra.md"
+      ],
+      "sources": [
+        "src/wreath/infra/",
+        "src/wreath/_infra_cli.py"
+      ],
+      "tests": [
+        "tests/test_infra_infer.py",
+        "tests/test_infra_cli.py",
+        "tests/test_infra_docs_example.py"
+      ],
+      "policy": "Stage 1 is read-only: `wreath infra infer` derives a typed plan from the objects an application's declarations built, and never imports a cloud SDK, opens a socket, writes state, or applies anything -- both properties are asserted by tests. Inference walks the registries itself rather than calling Wreath._components_by_database, because that lookup misses JobRunner._db and a middleware's _store. A settings dataclass named with --settings is turned into the keys Environment.bind will read and checked against --env/--environ; a required key with no supplier is a gap and the command exits 1. Subsystems needing no new infrastructure are listed as such, including the ones the application does not use, because the absence of a broker is the finding. Declaring resources, emitting Terraform JSON, diffing live state, and applying are later stages and are not shipped."
     },
     {
       "name": "migrations",
@@ -901,7 +928,8 @@
         "src/wreath/_statsd.py",
         "src/wreath/_cloudwatch_emf.py",
         "src/wreath/_metricdelta.py",
-        "src/wreath/_ring_file.py"
+        "src/wreath/_ring_file.py",
+        "src/wreath/doctor.py"
       ],
       "tests": [
         "tests/test_flight_schema.py",
@@ -937,7 +965,14 @@
         "tests/http2/test_logging.py",
         "tests/test_flight_ring_file.py",
         "tests/test_flight_archive.py",
-        "tests/test_flight_reproduce.py"
+        "tests/test_flight_reproduce.py",
+        "tests/test_trace_propagation.py",
+        "tests/test_trace_queue.py",
+        "tests/test_trace_saga.py",
+        "tests/test_trace_cli.py",
+        "tests/test_replay_execution_scope.py",
+        "tests/test_attempt_recording.py",
+        "tests/test_attempt_replay.py"
       ],
       "policy": "Recording is deny-by-default: `wreath.recording` decides what may be captured, and capture itself ships -- the native recorder arms, triggers, redacts, and writes WFR1 (tests/test_flight_capture_live.py drives an armed forensic request end to end and reads the capture back). The projector drains the recorder's ring off the request path. `replay.generate_test` turns a WTR1 transport recording into a runnable pytest over TestClient: it parses the request out of the recorded bytes (request line + headers + Content-Length body only -- chunked or truncated is refused by name, never guessed), replays it now, and asserts what it observes. That makes it a *characterisation* test, and the generated docstring says so -- generated against a broken build it encodes the bug, generated after the fix it locks the fix in. Host/content-length/connection headers are dropped from the generated call because they are the test client's business, not the behaviour under test. Logging packs a *published* record in C (`Recorder.log`, `_flightmodule.c`) straight into a ring cell; the Python packer beside it is the pure twin of ADR 0005, checked byte for byte and by mismatch count over a corpus (tests/test_logging_native_parity.py), and it is what actually runs in three cases -- no recorder, a buffered record awaiting promotion, and a record made off the loop. The ring has exactly one writer, so an off-loop call is staged and published by the loop one interval later flagged LOG_FLAG_OFF_LOOP; before that existed such a call raced `ring_publish` and corrupted the ring. Every cost here is measured rather than asserted: benchmarks/bench_logging.py runs the six measurements and benchmarks/results/logging_2026-07-28_*.json retains before and after. The measurements found the fast tier was not fast (a pure-Python SipHash on the request path), and the parity corpus found three values that raised out of `pack_value`, which promises never to. The ring is heap memory by default and a MAP_SHARED file when `TelemetryConfig.ring_path` is set, so a process that dies badly leaves its last cells readable (`wreath.recording.read_ring_file`, `wreath flight read`). That is survival of the *process*, never durability: the pages are the kernel's, and only a clean shutdown msyncs. The ring refuses when full rather than overwriting, so a crash file's mirrored RING_FULL counter is what says whether it is the story or a sample of it; the archival EVNT stream in the WFR1 recording holds everything the projector already drained. tests/test_flight_ring_file.py forks a child and kills it with SIGSEGV and SIGKILL rather than simulating a crash, because the single claim the feature rests on is that the records are still there afterwards. A ring file and a WTR1 recording join through the *sequence of log call sites*, not an id -- a transport recording carries none: `replay.reproduce_from_ring` (and `wreath flight replay`) re-drives the recording and reports where the path parts from the one the crash file recorded, exiting 1 on divergence so it works as a check. Site ids are import order, so this is only meaningful against the build that crashed; a divergence at index 0 is the symptom of running it against a different one.",
       "decisions": [
@@ -984,6 +1019,8 @@
         "tests/test_server_fuzz.py",
         "tests/test_server_websocket.py",
         "tests/test_server_tls_ingress.py",
+        "tests/test_server_cancel_on_disconnect.py",
+        "tests/test_disconnect_cancels_query.py",
         "tests/test_cli.py",
         "tests/test_devserver.py",
         "tests/http2/",
@@ -1140,9 +1177,12 @@
         "tests/orm/test_geospatial_queries.py",
         "tests/orm/test_geospatial_live.py",
         "tests/orm/test_geospatial_codec_parity.py",
-        "tests/test_geospatial_surfaces.py"
+        "tests/test_geospatial_surfaces.py",
+        "tests/orm/test_postgis.py",
+        "tests/orm/test_postgis_queries.py",
+        "tests/migrations/test_geospatial_columns.py"
       ],
-      "policy": "A `Coordinate` is keyword-only and a bare pair is refused, for the reason `wreath.temporal` refuses a naive datetime: GeoJSON orders [lon, lat], humans say 'lat, lon', and a positional pair silently picks one -- the symptom is not an exception, it is a wrong place. Bounds are inclusive, since the poles and the antimeridian are real coordinates. Distance is haversine on the IUGG mean-radius sphere (6_371_008.8 m), not an ellipsoid: the guide states the ~0.5% modelling error rather than implying exactness, because a fleet billing by distance will care. The law of cosines is deliberately not used -- `acos` of a value within an ulp of 1 loses every significant figure, and consecutive GPS fixes are the common case. A proximity search is a bounding box an index can answer ANDed with the exact filter, never a bare distance comparison, in the same discipline vector search already enforces. `bounding_boxes` returns TWO boxes across the antimeridian (no comparison operator understands a wrapped edge) and widens to every longitude at a pole; both are answered rather than refused, because a fleet on the date line and a station near a pole are ordinary. The native/pure twins are held to a stated tolerance rather than byte-for-byte, unlike the codec twins: libm transcendentals are not required to be correctly rounded, so bit equality would fail on another platform's libm for no defect. Tier 1 needs no extension; PostGIS is the opt-in tier in the pgvector shape and is not yet built.",
+      "policy": "A `Coordinate` is keyword-only and a bare pair is refused, for the reason `wreath.temporal` refuses a naive datetime: GeoJSON orders [lon, lat], humans say 'lat, lon', and a positional pair silently picks one -- the symptom is not an exception, it is a wrong place. Bounds are inclusive, since the poles and the antimeridian are real coordinates. Distance is haversine on the IUGG mean-radius sphere (6_371_008.8 m), not an ellipsoid: the guide states the ~0.5% modelling error rather than implying exactness, because a fleet billing by distance will care. The law of cosines is deliberately not used -- `acos` of a value within an ulp of 1 loses every significant figure, and consecutive GPS fixes are the common case. A proximity search is a bounding box an index can answer ANDed with the exact filter, never a bare distance comparison, in the same discipline vector search already enforces. `bounding_boxes` returns TWO boxes across the antimeridian (no comparison operator understands a wrapped edge) and widens to every longitude at a pole; both are answered rather than refused, because a fleet on the date line and a station near a pole are ordinary. The native/pure twins are held to a stated tolerance rather than byte-for-byte, unlike the codec twins: libm transcendentals are not required to be correctly rounded, so bit equality would fail on another platform's libm for no defect. A `Coordinate` says how to become JSON with `__jsonable__` on the type -- opt-in, because a blanket dataclass rule would put withheld fields on the wire -- and `wreath.crud` defers to it rather than spelling the object a second time. Tier 1 needs no extension: `Point` is core PostgreSQL OID 600 with a core GiST `point_ops` opclass, and `tests/orm/test_geospatial_live.py` proves it in a database it creates from `template0`, because the PostGIS image installs the extension into POSTGRES_DB and the claim must not depend on which image was started. Tier 2 is `Geography()` -- `geography(Point,srid)` through `ExtensionType`, on pgvector's exact contract: the OID is read once at startup, a missing extension fails there naming it, and neither the plan-cache token nor the model fingerprint moves with it. Its wire form is EWKB hex, one spelling for both parameter paths, with an encoder in *both* codec twins because the prepared path binds in binary and neither falls back for an unenumerated OID. The tier-2 ORM *expressions* -- KNN by `<->`, containment against a polygon -- are not built; tier 1's `within()`/`nearest()` refuse a non-`Point` column by name.",
       "decisions": [
         "docs/decisions/0002-no-mandatory-runtime-dependencies.md"
       ]
@@ -1342,6 +1382,25 @@
         "tests/example/"
       ],
       "policy": "An application built on wreath, never part of it: nothing in src/wreath may import from example/, and the package must not ship on pip install wreath. The seed is deterministic -- no clock reads, one seeded Random -- because docs/example/walkthrough.md quotes its exact row counts and tests/example/ asserts them. The read API's handlers bind page/size/sort directly instead of Depends(page_params), and pass validate_schema=\"off\" in tests; both are workarounds for framework defects and carry a written reason at the site."
+    },
+    {
+      "name": "tracking-example",
+      "capability": "A collar-tracking application demonstrating protobuf ingest, tier-1 geospatial queries, Cedar-graded coordinate precision, an SSE live map over RoomRegistry, and a sealed daily view that records corrections for late buffer dumps",
+      "guides": [
+        "docs/tracking/index.md",
+        "docs/tracking/ingest.md",
+        "docs/tracking/place.md"
+      ],
+      "reference": [],
+      "sources": [
+        "example/tracking/",
+        "example/tracking/migrations/"
+      ],
+      "tests": [
+        "tests/tracking/",
+        "tests/_tracking.py"
+      ],
+      "policy": "The second example, and deliberately the smaller one: three documentation pages, not six. It shares the camera trap's conservation universe and defers to it for routing, CRUD, paging, sessions, jobs and object storage -- a feature the camera trap already teaches is not taught again here. Nothing in src/wreath may import from example/, and neither package ships on pip install wreath. The seed is deterministic (no clock reads, one seeded Random) because docs/tracking/index.md pastes its output. Two framework workarounds carry a written reason at the site: tracking/wire.py MEDIA_TYPE_HEADER exists because Response(media_type=) accepts a str and emits an invalid ASGI header pair, and the quickstart applies wreath._series.settle.schema_sql() by hand because a sealed Series's tables are not claimed through app.schema_components(). Stage 6 of the plan (gRPC streaming ingest) is not built: wreath ships no gRPC surface."
     }
   ],
   "invariants": "AGENTS.md",
