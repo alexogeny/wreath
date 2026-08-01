@@ -1,0 +1,647 @@
+{
+  "actual_fingerprint": "59ba344334afa8fdd8ed07d7ddd68bdfb38c37d0710f9bd860051f8cb5f991e4",
+  "artifact_checksum": "16dd46aa58dd9fb065cd079a625892d6cfddbe143a5e1e05aceef0067c77bc31",
+  "desired_fingerprint": "a1abddeba138133b671bdef078dee4e23efc5c61a7d3c6ad40cd1d66f7793f0c",
+  "destructive_count": 0,
+  "format": "WMP1+WMS1",
+  "manual_count": 0,
+  "migration_id": "0000000000000000000000000000d101",
+  "operation_count": 45,
+  "operations": [
+    {
+      "action": "add",
+      "after": "table\u001fr\u001fp",
+      "before": "",
+      "kind": "table",
+      "name": "",
+      "schema": "tracking",
+      "table": "animals"
+    },
+    {
+      "action": "add",
+      "after": "table\u001fr\u001fp",
+      "before": "",
+      "kind": "table",
+      "name": "",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "table\u001fr\u001fp",
+      "before": "",
+      "kind": "table",
+      "name": "",
+      "schema": "tracking",
+      "table": "landmarks"
+    },
+    {
+      "action": "add",
+      "after": "table\u001fr\u001fp",
+      "before": "",
+      "kind": "table",
+      "name": "",
+      "schema": "tracking",
+      "table": "collars"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f701\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "longitude",
+      "schema": "tracking",
+      "table": "landmarks"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "relay",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "name",
+      "schema": "tracking",
+      "table": "animals"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "id",
+      "schema": "tracking",
+      "table": "collars"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f1184\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "received_at",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f701\u001f\u001f0\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "accuracy_m",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "animal_id",
+      "schema": "tracking",
+      "table": "collars"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "taxon",
+      "schema": "tracking",
+      "table": "animals"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "protection",
+      "schema": "tracking",
+      "table": "animals"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f21\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "battery_pct",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "name",
+      "schema": "tracking",
+      "table": "landmarks"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "id",
+      "schema": "tracking",
+      "table": "landmarks"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "animal_id",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f701\u001f\u001f0\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "leg_m",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "collar_id",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f1184\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "fitted_at",
+      "schema": "tracking",
+      "table": "collars"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f1184\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "recorded_at",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f701\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "longitude",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f1184\u001f\u001f0\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "removed_at",
+      "schema": "tracking",
+      "table": "collars"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f701\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "latitude",
+      "schema": "tracking",
+      "table": "landmarks"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "kind",
+      "schema": "tracking",
+      "table": "landmarks"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f701\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "latitude",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f20\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "id",
+      "schema": "tracking",
+      "table": "animals"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f25\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "serial",
+      "schema": "tracking",
+      "table": "collars"
+    },
+    {
+      "action": "add",
+      "after": "column\u001f23\u001f\u001f1\u001f\u001f\u001f",
+      "before": "",
+      "kind": "column",
+      "name": "satellites",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "f:animal_id:tracking:animals:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:animal_id:tracking:animals:id",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "p:id:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "p:id:::",
+      "schema": "tracking",
+      "table": "landmarks"
+    },
+    {
+      "action": "add",
+      "after": "f:animal_id:tracking:animals:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:animal_id:tracking:animals:id",
+      "schema": "tracking",
+      "table": "collars"
+    },
+    {
+      "action": "add",
+      "after": "u:serial:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "u:serial:::",
+      "schema": "tracking",
+      "table": "collars"
+    },
+    {
+      "action": "add",
+      "after": "u:name:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "u:name:::",
+      "schema": "tracking",
+      "table": "landmarks"
+    },
+    {
+      "action": "add",
+      "after": "u:name:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "u:name:::",
+      "schema": "tracking",
+      "table": "animals"
+    },
+    {
+      "action": "add",
+      "after": "p:id:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "p:id:::",
+      "schema": "tracking",
+      "table": "collars"
+    },
+    {
+      "action": "add",
+      "after": "f:collar_id:tracking:collars:id:a:a:0",
+      "before": "",
+      "kind": "constraint",
+      "name": "f:collar_id:tracking:collars:id",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "p:collar_id,recorded_at:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "p:collar_id,recorded_at:::",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "p:id:::",
+      "before": "",
+      "kind": "constraint",
+      "name": "p:id:::",
+      "schema": "tracking",
+      "table": "animals"
+    },
+    {
+      "action": "add",
+      "after": "index:i:animal_id,received_at:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:animal_id,received_at",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "index:i:animal_id,fitted_at:btree\u001f(removed_at IS NULL)",
+      "before": "",
+      "kind": "index",
+      "name": "i:animal_id,fitted_at:btree:dd27680d",
+      "schema": "tracking",
+      "table": "collars"
+    },
+    {
+      "action": "add",
+      "after": "index:i:latitude,longitude:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:latitude,longitude",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "index:i:animal_id,recorded_at:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:animal_id,recorded_at",
+      "schema": "tracking",
+      "table": "fixes"
+    },
+    {
+      "action": "add",
+      "after": "index:i:protection,id:btree\u001f(protection = ANY (ARRAY['sensitive'::text, 'restricted'::text]))",
+      "before": "",
+      "kind": "index",
+      "name": "i:protection,id:btree:2a24b872",
+      "schema": "tracking",
+      "table": "animals"
+    },
+    {
+      "action": "add",
+      "after": "index:i:animal_id:btree",
+      "before": "",
+      "kind": "index",
+      "name": "i:animal_id",
+      "schema": "tracking",
+      "table": "collars"
+    }
+  ],
+  "output": "example/tracking/migrations",
+  "parent_checksum": "0000000000000000000000000000000000000000000000000000000000000000",
+  "review_sql": "create table \"tracking\".\"animals\" ();\ncreate table \"tracking\".\"fixes\" ();\ncreate table \"tracking\".\"landmarks\" ();\ncreate table \"tracking\".\"collars\" ();\nalter table \"tracking\".\"landmarks\" add column \"longitude\" double precision not null;\nalter table \"tracking\".\"fixes\" add column \"relay\" text not null;\nalter table \"tracking\".\"animals\" add column \"name\" text not null;\nalter table \"tracking\".\"collars\" add column \"id\" bigint not null;\nalter table \"tracking\".\"fixes\" add column \"received_at\" timestamp with time zone not null;\nalter table \"tracking\".\"fixes\" add column \"accuracy_m\" double precision;\nalter table \"tracking\".\"collars\" add column \"animal_id\" bigint not null;\nalter table \"tracking\".\"animals\" add column \"taxon\" text not null;\nalter table \"tracking\".\"animals\" add column \"protection\" text not null;\nalter table \"tracking\".\"fixes\" add column \"battery_pct\" smallint not null;\nalter table \"tracking\".\"landmarks\" add column \"name\" text not null;\nalter table \"tracking\".\"landmarks\" add column \"id\" bigint not null;\nalter table \"tracking\".\"fixes\" add column \"animal_id\" bigint not null;\nalter table \"tracking\".\"fixes\" add column \"leg_m\" double precision;\nalter table \"tracking\".\"fixes\" add column \"collar_id\" bigint not null;\nalter table \"tracking\".\"collars\" add column \"fitted_at\" timestamp with time zone not null;\nalter table \"tracking\".\"fixes\" add column \"recorded_at\" timestamp with time zone not null;\nalter table \"tracking\".\"fixes\" add column \"longitude\" double precision not null;\nalter table \"tracking\".\"collars\" add column \"removed_at\" timestamp with time zone;\nalter table \"tracking\".\"landmarks\" add column \"latitude\" double precision not null;\nalter table \"tracking\".\"landmarks\" add column \"kind\" text not null;\nalter table \"tracking\".\"fixes\" add column \"latitude\" double precision not null;\nalter table \"tracking\".\"animals\" add column \"id\" bigint not null;\nalter table \"tracking\".\"collars\" add column \"serial\" text not null;\nalter table \"tracking\".\"fixes\" add column \"satellites\" integer not null;\nalter table \"tracking\".\"landmarks\" add constraint \"wreath_288435ba44150dc5\" primary key (\"id\");\nalter table \"tracking\".\"collars\" add constraint \"wreath_6398fd495c2c8b68\" unique (\"serial\");\nalter table \"tracking\".\"landmarks\" add constraint \"wreath_8481f93ec972bcba\" unique (\"name\");\nalter table \"tracking\".\"animals\" add constraint \"wreath_8dcbbd67c314a0f2\" unique (\"name\");\nalter table \"tracking\".\"collars\" add constraint \"wreath_a68b28971882fe38\" primary key (\"id\");\nalter table \"tracking\".\"fixes\" add constraint \"wreath_c567d503613830d3\" primary key (\"collar_id\", \"recorded_at\");\nalter table \"tracking\".\"animals\" add constraint \"wreath_e15f08aa06a34e2d\" primary key (\"id\");\ncreate index \"wreath_053325473b31456d\" on \"tracking\".\"fixes\" (\"animal_id\", \"received_at\");\ncreate index \"wreath_290662c864b6d860\" on \"tracking\".\"collars\" (\"animal_id\", \"fitted_at\") where (removed_at IS NULL);\ncreate index \"wreath_5637df8dc01a1017\" on \"tracking\".\"fixes\" (\"latitude\", \"longitude\");\ncreate index \"wreath_a007ea693e49c646\" on \"tracking\".\"fixes\" (\"animal_id\", \"recorded_at\");\ncreate index \"wreath_a86e78d97d50ee74\" on \"tracking\".\"animals\" (\"protection\", \"id\") where (protection = ANY (ARRAY['sensitive'::text, 'restricted'::text]));\ncreate index \"wreath_f4fb75ef89a81e01\" on \"tracking\".\"collars\" (\"animal_id\");\nalter table \"tracking\".\"fixes\" add constraint \"wreath_1db3c410709b2033\" foreign key (\"animal_id\") references \"tracking\".\"animals\" (\"id\");\nalter table \"tracking\".\"collars\" add constraint \"wreath_31b949702c3de154\" foreign key (\"animal_id\") references \"tracking\".\"animals\" (\"id\");\nalter table \"tracking\".\"fixes\" add constraint \"wreath_b2068b28a17717f9\" foreign key (\"collar_id\") references \"tracking\".\"collars\" (\"id\");\n",
+  "statements": [
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create table \"tracking\".\"animals\" ();"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create table \"tracking\".\"fixes\" ();"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create table \"tracking\".\"landmarks\" ();"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create table \"tracking\".\"collars\" ();"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"landmarks\" add column \"longitude\" double precision not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"fixes\" add column \"relay\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"animals\" add column \"name\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"collars\" add column \"id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"fixes\" add column \"received_at\" timestamp with time zone not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"fixes\" add column \"accuracy_m\" double precision;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"collars\" add column \"animal_id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"animals\" add column \"taxon\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"animals\" add column \"protection\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"fixes\" add column \"battery_pct\" smallint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"landmarks\" add column \"name\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"landmarks\" add column \"id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"fixes\" add column \"animal_id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"fixes\" add column \"leg_m\" double precision;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"fixes\" add column \"collar_id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"collars\" add column \"fitted_at\" timestamp with time zone not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"fixes\" add column \"recorded_at\" timestamp with time zone not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"fixes\" add column \"longitude\" double precision not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"collars\" add column \"removed_at\" timestamp with time zone;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"landmarks\" add column \"latitude\" double precision not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"landmarks\" add column \"kind\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"fixes\" add column \"latitude\" double precision not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"animals\" add column \"id\" bigint not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"collars\" add column \"serial\" text not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"fixes\" add column \"satellites\" integer not null;"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"landmarks\" add constraint \"wreath_288435ba44150dc5\" primary key (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"collars\" add constraint \"wreath_6398fd495c2c8b68\" unique (\"serial\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"landmarks\" add constraint \"wreath_8481f93ec972bcba\" unique (\"name\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"animals\" add constraint \"wreath_8dcbbd67c314a0f2\" unique (\"name\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"collars\" add constraint \"wreath_a68b28971882fe38\" primary key (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"fixes\" add constraint \"wreath_c567d503613830d3\" primary key (\"collar_id\", \"recorded_at\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"animals\" add constraint \"wreath_e15f08aa06a34e2d\" primary key (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_053325473b31456d\" on \"tracking\".\"fixes\" (\"animal_id\", \"received_at\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_290662c864b6d860\" on \"tracking\".\"collars\" (\"animal_id\", \"fitted_at\") where (removed_at IS NULL);"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_5637df8dc01a1017\" on \"tracking\".\"fixes\" (\"latitude\", \"longitude\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_a007ea693e49c646\" on \"tracking\".\"fixes\" (\"animal_id\", \"recorded_at\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_a86e78d97d50ee74\" on \"tracking\".\"animals\" (\"protection\", \"id\") where (protection = ANY (ARRAY['sensitive'::text, 'restricted'::text]));"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "create index \"wreath_f4fb75ef89a81e01\" on \"tracking\".\"collars\" (\"animal_id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"fixes\" add constraint \"wreath_1db3c410709b2033\" foreign key (\"animal_id\") references \"tracking\".\"animals\" (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"collars\" add constraint \"wreath_31b949702c3de154\" foreign key (\"animal_id\") references \"tracking\".\"animals\" (\"id\");"
+    },
+    {
+      "destructive": false,
+      "manual": false,
+      "sql": "alter table \"tracking\".\"fixes\" add constraint \"wreath_b2068b28a17717f9\" foreign key (\"collar_id\") references \"tracking\".\"collars\" (\"id\");"
+    }
+  ]
+}
