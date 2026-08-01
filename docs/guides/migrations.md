@@ -281,8 +281,17 @@ multi-column btree indexes (including unique indexes). Column signatures include
 OID, nullability, identity/generated flags, and server-default text. Physical
 `attnum` position is deliberately excluded because PostgreSQL leaves gaps after
 dropped columns and Wreath does not mistake those gaps for schema drift.
-Expression, partial, covering, and non-btree indexes and index-method options
-are still being implemented and are emitted as `MANUAL`; changing an existing
+Non-btree indexes render for the access methods wreath knows — `gin`, `gist`,
+`hnsw` and `ivfflat` — with their operator class and their `WITH` options, and
+they round-trip: a declared operator class that is *this database's default* is
+blanked to match a catalog that does not record it, so a correct index is not
+rediscovered as drift on every run. **An access method wreath does not know is
+emitted as an empty `MANUAL`**, which means `generate` omits it rather than
+failing loudly, so a new method is added to three lists at once —
+`orm.fields._INDEX_METHODS`, `_SINGLE_CATALOG_SQL`, and
+`migration_sql.c::index_method_is_known` — and a type whose spelling the
+renderer will not accept behaves the same way. Expression, partial and covering
+indexes are still `MANUAL`; changing an existing
 foreign key's action is likewise `MANUAL` (drop and recreate it). So `detect` is
 not yet a complete Alembic replacement and must not be used as the sole
 production drift gate.
