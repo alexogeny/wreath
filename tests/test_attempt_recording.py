@@ -449,3 +449,443 @@ def _recrc(blob: bytearray, marker: int) -> None:
     tag, length, _ = struct.unpack_from("<4sII", blob, header)
     payload = bytes(blob[marker : marker + length])
     struct.pack_into("<4sII", blob, header, tag, length, zlib.crc32(payload) & 0xFFFFFFFF)
+
+
+# --- `wreath flight read` reaches the record kind ----------------------------
+#
+# The decoder shipped with the record kind and the *dispatch* did not, so a
+# `.wfr1` handed to `flight read` was answered with the ring reader's complaint
+# about a `WFRR` magic: a true statement about the wrong thing, to somebody who
+# had already had one crash that day. `flight read` now reads the magic first.
+
+
+def _flight(*argv: str) -> int:
+    from wreath import cli
+
+    return cli.main(["flight", "read", *argv])
+
+
+def _wfr1(tmp_path, *records: AttemptRecord, close: bool = True):
+    path = tmp_path / "attempt.wfr1"
+    path.write_bytes(_written(*records, close=close))
+    return str(path)
+
+
+def test_flight_read_decodes_an_attempt_recording(tmp_path, capsys) -> None:
+    """Success: the identity, the outcome and the boundary trace, in the file
+    the recorder actually wrote."""
+    assert _flight(_wfr1(tmp_path, _record())) == 0
+    out = capsys.readouterr().out
+    assert "WFR1 container" in out
+    assert "send_password_reset job 4171" in out
+    assert "attempt 4 of 5 -> raised" in out
+    assert "raised PostgresError" in out
+    assert "fence 7" in out
+    assert "boundary seam 1" in out
+    assert "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" in out
+
+
+def test_flight_read_says_when_no_argument_was_allowed(tmp_path, capsys) -> None:
+    """The count is forensic; the values are absent unless an operator named
+    one, and a reader looking for them should learn that here rather than
+    concluding the file was truncated."""
+    assert _flight(_wfr1(tmp_path, _record())) == 0
+    assert "2 argument(s), none allowed by name" in capsys.readouterr().out
+
+
+def test_flight_read_prints_a_captured_argument(tmp_path, capsys) -> None:
+    record = _record(arguments=(("user_id", '{"value":41}'),))
+    assert _flight(_wfr1(tmp_path, record)) == 0
+    assert 'arg user_id = {"value":41}' in capsys.readouterr().out
+
+
+def test_flight_read_emits_versioned_json_for_a_recording(tmp_path, capsys) -> None:
+    import json
+
+    assert _flight(_wfr1(tmp_path, _record()), "--json") == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 1
+    assert payload["container"] == "WFR1"
+    assert payload["clean"] is True
+    assert payload["attempts"][0]["task"] == "send_password_reset"
+    assert payload["attempts"][0]["boundaries"][1]["error_type"] == "PostgresError"
+
+
+def test_flight_read_refuses_a_truncated_recording_by_name(tmp_path, capsys) -> None:
+    """Malformed: no footer means the process died mid-write, and what is
+    missing cannot be counted. Reported, and the exit code says so."""
+    path = tmp_path / "torn.wfr1"
+    path.write_bytes(_written(_record(), close=False))
+    assert _flight(str(path)) == 0
+    out = capsys.readouterr().out
+    assert "no footer" in out
+    assert out.index("no footer") < out.index("send_password_reset"), (
+        "a torn file read as a complete one loses the records nearest the "
+        "failure, so the tear is stated before the contents"
+    )
+
+
+def test_flight_read_propagates_a_decoder_refusal_as_a_message(tmp_path, capsys) -> None:
+    """Error propagation: a `SchemaError` from the decoder is a usage failure
+    with exit 2, not a traceback -- the same contract the ring path has."""
+    path = tmp_path / "corrupt.wfr1"
+    blob = bytearray(_written(_record()))
+    blob[8:12] = b"\xff\xff\xff\xff"  # an unreadable schema version
+    path.write_bytes(bytes(blob))
+    assert _flight(str(path)) == 2
+    assert capsys.readouterr().err, "the refusal must name something"
+
+
+def test_flight_read_refuses_a_transport_recording_naming_the_command(
+    tmp_path, capsys
+) -> None:
+    """Unsupported, and the useful kind of unsupported.
+
+    A `WTR1` is a recorder file, just not this command's. Left to the ring
+    reader it answered "not a wreath ring file" -- true, and it sends the
+    reader looking for a different *file* rather than for a different command.
+    """
+    path = tmp_path / "connection.wtr1"
+    path.write_bytes(b"WTR1" + b"\x00" * 512)
+    assert _flight(str(path)) == 2
+    err = capsys.readouterr().err
+    assert "WTR1" in err
+    assert "wreath replay transport" in err
+
+
+def test_flight_read_refuses_a_file_that_is_no_container_at_all(
+    tmp_path, capsys
+) -> None:
+    """Neither a ring, a recording, nor a transport recording. The ring reader
+    owns this message, because "what even is this file" is its question."""
+    path = tmp_path / "elsewhere.bin"
+    path.write_bytes(b"ZZZZ" + b"\x00" * 512)
+    assert _flight(str(path)) == 2
+    assert "ring file" in capsys.readouterr().err.lower()
+
+
+def test_flight_read_still_reads_a_ring_file(tmp_path) -> None:
+    """The dispatch must not have moved the ring path. Its own suite is
+    `tests/test_flight_ring_file.py`; this is the pin that the magic check
+    sits in front of it rather than instead of it."""
+    from wreath._cli import _flight_magic
+
+    path = tmp_path / "attempt.wfr1"
+    path.write_bytes(_written(_record()))
+    assert _flight_magic(str(path)) == b"WFR1"
+
+    ring = tmp_path / "ring.wfrr"
+    ring.write_bytes(b"WFRR" + b"\x00" * 16)
+    assert _flight_magic(str(ring)) == b"WFRR"
+
+
+# --- capturing an argument, safely -------------------------------------------
+#
+# `args jsonb` is positional and `RedactionPolicy` is name-keyed, so the names
+# come from the *handler's signature* -- the one place in the recording process
+# that has them. Everything below is about the four rules that make that safe,
+# and every one of them fails closed.
+
+import json as _json  # noqa: E402 - the section it belongs to starts here
+
+
+def _policy(*names: str, **limits) -> AttemptPolicy:
+    from wreath.recording import RedactionPolicy
+
+    bounds = {"max_fields": 32, "max_depth": 4, "max_body_bytes": 4096}
+    bounds.update(limits)
+    return AttemptPolicy(
+        argument_allowlist=frozenset(names), redaction=RedactionPolicy(**bounds)
+    )
+
+
+def send_password_reset(user_id, token):
+    """The example the whole design note is written around."""
+
+
+def test_no_allowlist_captures_nothing() -> None:
+    """The default, and it is the behaviour that shipped before this existed."""
+    assert AttemptPolicy().capture_arguments(
+        task="send_password_reset",
+        handler=send_password_reset,
+        args=(41, "reset-token"),
+        kwargs={},
+    ) == ()
+
+
+def test_one_parameter_is_captured_and_its_neighbour_is_not() -> None:
+    """The whole point: `user_id` yes, `token` never."""
+    captured = _policy("send_password_reset.user_id").capture_arguments(
+        task="send_password_reset",
+        handler=send_password_reset,
+        args=(41, "reset-token-nobody-may-keep"),
+        kwargs={},
+    )
+    assert captured == (("user_id", '{"value":41}'),)
+    assert "reset-token-nobody-may-keep" not in repr(captured)
+
+
+def test_an_allowlist_for_another_task_captures_nothing() -> None:
+    """The key is `task.parameter`, so `other.user_id` does not reach this one."""
+    assert _policy("other_task.user_id").capture_arguments(
+        task="send_password_reset",
+        handler=send_password_reset,
+        args=(41, "t"),
+        kwargs={},
+    ) == ()
+
+
+def test_a_task_this_process_cannot_resolve_captures_nothing() -> None:
+    """Rule 1. The dead-letter path already meets a row whose handler is gone;
+    falling back to position would record whatever happened to be first."""
+    assert _policy("send_password_reset.user_id").capture_arguments(
+        task="send_password_reset", handler=None, args=(41, "t"), kwargs={}
+    ) == ()
+
+
+def test_a_call_that_does_not_bind_captures_nothing() -> None:
+    """Rule 1 again, in its other shape: a row enqueued by a release whose
+    handler took a different arity."""
+    assert _policy("send_password_reset.user_id").capture_arguments(
+        task="send_password_reset",
+        handler=send_password_reset,
+        args=(41, "t", "extra"),
+        kwargs={},
+    ) == ()
+
+
+def test_a_value_that_lands_in_varargs_is_never_named() -> None:
+    """Rule 2. `*rest` has no declared parameter to allow, so no spelling of
+    the allowlist reaches it."""
+
+    def fan_out(first, *rest, **options):
+        pass
+
+    captured = _policy(
+        "fan_out.first", "fan_out.rest", "fan_out.options", "fan_out.secret"
+    ).capture_arguments(
+        task="fan_out",
+        handler=fan_out,
+        args=(1, "in-varargs"),
+        kwargs={"secret": "in-kwargs"},
+    )
+    assert [name for name, _ in captured] == ["first"]
+    assert "in-varargs" not in repr(captured)
+    assert "in-kwargs" not in repr(captured)
+
+
+def test_a_defaulted_parameter_the_call_omitted_is_absent() -> None:
+    """Not withheld -- absent. The job did not carry it, and recording a
+    default the caller never sent would be a recording of this process."""
+
+    def report(period, verbose=True):
+        pass
+
+    captured = _policy("report.period", "report.verbose").capture_arguments(
+        task="report", handler=report, args=("day",), kwargs={}
+    )
+    assert [name for name, _ in captured] == ["period"]
+
+
+def test_nested_structure_is_captured_whole_under_the_bounds() -> None:
+    """Rule 3: the parameter is the unit of consent, and it is the whole
+    argument. There is no per-field key space, and the docstring says so."""
+
+    def ingest(payload):
+        pass
+
+    captured = _policy("ingest.payload").capture_arguments(
+        task="ingest",
+        handler=ingest,
+        args=({"a": [1, 2, {"b": None}], "c": True},),
+        kwargs={},
+    )
+    assert _json.loads(captured[0][1]) == {
+        "value": {"a": [1, 2, {"b": None}], "c": True}
+    }
+
+
+def test_an_unsupported_type_is_withheld_with_its_reason() -> None:
+    """Rule 4, and the reason is recorded rather than the value dropped: an
+    operator who allowed a parameter and finds nothing cannot otherwise tell an
+    absence from a refusal."""
+
+    def ingest(payload):
+        pass
+
+    captured = _policy("ingest.payload").capture_arguments(
+        task="ingest", handler=ingest, args=(object(),), kwargs={}
+    )
+    assert _json.loads(captured[0][1]) == {"withheld": "unsupported type object"}
+
+
+def test_bytes_are_not_a_string(tmp_path) -> None:
+    """`bytes` has a `repr`, which is exactly why it must not be captured: a
+    forensic file is not the place to discover what was in a blob."""
+
+    def ingest(payload):
+        pass
+
+    captured = _policy("ingest.payload").capture_arguments(
+        task="ingest", handler=ingest, args=(b"\x00secret",), kwargs={}
+    )
+    assert _json.loads(captured[0][1]) == {"withheld": "unsupported type bytes"}
+    assert "secret" not in captured[0][1]
+
+
+def test_a_cycle_is_withheld_rather_than_recursed() -> None:
+    def ingest(payload):
+        pass
+
+    loop: list = [1]
+    loop.append(loop)
+    captured = _policy("ingest.payload").capture_arguments(
+        task="ingest", handler=ingest, args=(loop,), kwargs={}
+    )
+    assert _json.loads(captured[0][1]) == {"withheld": "contains a cycle"}
+
+
+def test_the_same_list_twice_is_not_a_cycle() -> None:
+    """The cycle check is on the path, not on everything seen -- otherwise a
+    value that appears twice side by side is refused for no reason."""
+
+    def ingest(payload):
+        pass
+
+    shared = [1, 2]
+    captured = _policy("ingest.payload").capture_arguments(
+        task="ingest", handler=ingest, args=([shared, shared],), kwargs={}
+    )
+    assert _json.loads(captured[0][1]) == {"value": [[1, 2], [1, 2]]}
+
+
+def test_depth_past_the_limit_withholds_the_whole_argument() -> None:
+    """The *whole* argument. A truncated structure is the shape this subsystem
+    refuses everywhere else: a reader cannot tell three from the first three of
+    nine."""
+
+    def ingest(payload):
+        pass
+
+    deep = {"a": {"b": {"c": {"d": 1}}}}
+    captured = _policy("ingest.payload", max_depth=2).capture_arguments(
+        task="ingest", handler=ingest, args=(deep,), kwargs={}
+    )
+    assert _json.loads(captured[0][1]) == {"withheld": "nested deeper than the 2-level limit"}
+
+
+def test_more_fields_than_the_budget_withholds_the_whole_argument() -> None:
+    def ingest(payload):
+        pass
+
+    captured = _policy("ingest.payload", max_fields=4).capture_arguments(
+        task="ingest", handler=ingest, args=(list(range(50)),), kwargs={}
+    )
+    assert "max_fields" in _json.loads(captured[0][1])["withheld"]
+
+
+def test_a_value_over_the_byte_budget_is_withheld() -> None:
+    def ingest(payload):
+        pass
+
+    captured = _policy(
+        "ingest.payload", max_body_bytes=16, max_fields=4096
+    ).capture_arguments(
+        task="ingest", handler=ingest, args=("x" * 4000,), kwargs={}
+    )
+    assert "argument budget" in _json.loads(captured[0][1])["withheld"]
+    assert "xxxx" not in captured[0][1], "a refusal must not carry the value"
+
+
+def test_a_non_string_mapping_key_is_withheld() -> None:
+    def ingest(payload):
+        pass
+
+    captured = _policy("ingest.payload").capture_arguments(
+        task="ingest", handler=ingest, args=({1: "a"},), kwargs={}
+    )
+    assert "int" in _json.loads(captured[0][1])["withheld"]
+
+
+def test_a_non_finite_number_is_withheld_rather_than_raising() -> None:
+    """`json.dumps(allow_nan=False)` would raise from inside the serialiser,
+    past the path that records a reason -- and a recorder that can take a
+    worker down with it is worse than no recorder."""
+
+    def ingest(payload):
+        pass
+
+    captured = _policy("ingest.payload").capture_arguments(
+        task="ingest", handler=ingest, args=(float("nan"),), kwargs={}
+    )
+    assert "non-finite" in _json.loads(captured[0][1])["withheld"]
+
+
+def test_the_capture_is_immutable_against_a_handler_that_mutates_after() -> None:
+    """Normalised into new containers and serialised immediately, so a handler
+    that keeps its argument and edits it cannot change what was recorded."""
+
+    def ingest(payload):
+        pass
+
+    payload = {"a": [1]}
+    captured = _policy("ingest.payload").capture_arguments(
+        task="ingest", handler=ingest, args=(payload,), kwargs={}
+    )
+    payload["a"].append(999)
+    payload["b"] = "added later"
+    assert _json.loads(captured[0][1]) == {"value": {"a": [1]}}
+
+
+def test_an_allowlist_without_bounds_is_refused_where_it_is_written() -> None:
+    """A policy that names an argument but sets no limits would capture a value
+    of unknown shape into a file nobody can open."""
+    with pytest.raises(RecordingPolicyError, match="needs redaction limits"):
+        AttemptPolicy(argument_allowlist=frozenset({"t.p"}))
+
+
+def test_a_malformed_allowlist_key_is_refused() -> None:
+    with pytest.raises(RecordingPolicyError, match="must be 'task.parameter'"):
+        AttemptPolicy(argument_allowlist=frozenset({"no_dot"}))
+
+
+def test_a_dotted_task_name_still_names_one_parameter() -> None:
+    """Split on the last dot, so `billing.reconcile.month` is the `month`
+    parameter of `billing.reconcile` and not a path into something."""
+
+    def reconcile(month):
+        pass
+
+    captured = _policy("billing.reconcile.month").capture_arguments(
+        task="billing.reconcile", handler=reconcile, args=("2026-07",), kwargs={}
+    )
+    assert captured == (("month", '{"value":"2026-07"}'),)
+
+
+def test_a_captured_argument_round_trips_through_the_container() -> None:
+    """The record kind carries it, and a recording written before this existed
+    still decodes -- the section is appended, not folded into the header."""
+    record = _record(arguments=(("user_id", '{"value":41}'),))
+    decoded = read_attempt_recording(_written(record))
+    assert decoded.arguments == (("user_id", '{"value":41}'),)
+    assert read_attempt_recording(_written(_record())).arguments == ()
+
+
+def test_a_framework_supplied_parameter_is_never_capturable() -> None:
+    """`JobRunner` calls `handler(ctx, *job.args)`, so `ctx` occupies the first
+    parameter and is this process's object rather than anything the queue row
+    carried. It is aligned past, and an allowlist entry naming it records
+    nothing -- otherwise an operator could point the recorder at a live
+    database handle."""
+
+    def send(ctx, address, token):
+        pass
+
+    captured = _policy("send.ctx", "send.address").capture_arguments(
+        task="send",
+        handler=send,
+        args=("alex@example.com", "reset-token"),
+        kwargs={},
+        framework_parameters=1,
+    )
+    assert captured == (("address", '{"value":"alex@example.com"}'),)

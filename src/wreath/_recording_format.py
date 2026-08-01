@@ -208,6 +208,11 @@ class AttemptRecord:
     error_type: str = ""
     error_message: str = ""
     argument_count: int = 0
+    #: `(parameter_name, json_text)` for the arguments an operator allowed by
+    #: name, where the JSON is exactly one of `{"value": ...}` or
+    #: `{"withheld": "<reason>"}`. Empty unless `AttemptPolicy` names one, which
+    #: is the default; see `wreath.recording.AttemptPolicy`.
+    arguments: tuple[tuple[str, str], ...] = ()
 
     def encode(self) -> bytes:
         body = bytearray(
@@ -234,6 +239,15 @@ class AttemptRecord:
         for event in self.boundaries:
             body += _BOUNDARY_FIXED.pack(event.seam, event.coordinate)
             body += _text(event.target) + _text(event.error_type)
+        # Appended after the boundaries rather than folded into the fixed
+        # header, the same way the footer's attempt count was appended rather
+        # than widening the footer: a record written before argument capture
+        # existed simply runs out of bytes here, and the decoder below reads
+        # this section only when there are any.
+        if self.arguments:
+            body += struct.pack("<I", len(self.arguments))
+            for name, value in self.arguments:
+                body += _text(name) + _text(value)
         total = _ATTEMPT_HEADER.size + len(body)
         header = _ATTEMPT_HEADER.pack(_ATTEMPT_MAGIC, _ATTEMPT_VERSION, 0, 0, total)
         return header + bytes(body)
@@ -284,6 +298,18 @@ class AttemptRecord:
             target, offset = _read_text(payload, offset)
             failure, offset = _read_text(payload, offset)
             boundaries.append(BoundaryEvent(seam, target, coordinate, failure))
+        arguments: list[tuple[str, str]] = []
+        if offset < len(payload):
+            if offset + 4 > len(payload):
+                raise SchemaError(
+                    "attempt recording is truncated inside its argument count"
+                )
+            (argument_fields,) = struct.unpack_from("<I", payload, offset)
+            offset += 4
+            for _ in range(argument_fields):
+                name, offset = _read_text(payload, offset)
+                captured, offset = _read_text(payload, offset)
+                arguments.append((name, captured))
         return cls(
             job_id=job_id,
             queue=queue,
@@ -299,6 +325,7 @@ class AttemptRecord:
             error_type=error_type,
             error_message=message,
             argument_count=argument_count,
+            arguments=tuple(arguments),
         )
 
 

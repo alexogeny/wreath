@@ -71,42 +71,65 @@ a gap.
   clock, which is the scheduler again.
 - **The arguments.** See below.
 
-### The arguments are not captured, and that is structural
+### The arguments, and the names a positional array does not have
 
-There is no switch here to turn them on, for the same reason
-`NEVER_CAPTURE_HEADERS` has none.
+**Nothing is captured unless an operator names it, by task and parameter.** The
+default `AttemptPolicy` has an empty `argument_allowlist` and records only
+`argument_count`, so a reader can see that arguments existed.
 
-`RedactionPolicy` below is entirely **name**-keyed:
-allow/hash/mask over header names, the same three over query-parameter names,
-and `BodyCapture.STRUCTURED`, whose selected fields are selected by field name.
+The reason there is an allowlist at all, and the reason it is keyed the way it
+is: `RedactionPolicy` below is entirely **name**-keyed — allow/hash/mask over
+header names, the same three over query-parameter names, and
+`BodyCapture.STRUCTURED`, whose selected fields are selected by field name.
 Deny-by-default works because every unit it governs *has* a name an operator can
 list. `args jsonb` is a **positional array**: `enqueue("send_password_reset",
-user_id, token)` stores `[41, "e3b0c4…"]`, and there is no name in the row to
-put in an allowlist. Deny-by-default over a nameless unit degenerates to
-"capture nothing" or "capture everything", and the second is exactly the
-disclosure this subsystem exists to prevent — a job argument is derived from a
-record far more often than a URL path is.
+user_id, token)` stores `[41, "e3b0c4…"]`, and there is no name in the *row*.
+There is one in the *process*, though — the runner holds the handler, and the
+handler has a signature:
 
-Only `argument_count` reaches the file, so a reader can see that arguments
-existed. `replay_attempt` refuses to run with the wrong arity rather than
-inventing values, and the generated test says where to supply them.
+```python
+AttemptPolicy(
+    triggers=(AttemptTrigger(AttemptTriggerKind.FAILURE),),
+    argument_allowlist=frozenset({"send_password_reset.user_id"}),
+    redaction=RedactionPolicy(max_fields=32, max_depth=4, max_body_bytes=4096),
+)
+```
 
-There *is* a way through and it should be built deliberately rather than
-assumed: the runner holds `handler.signature`, so `send_password_reset.token` is
-a name that exists in the recording process, and a `task.parameter` allowlist
-would give arguments the same model headers have. Three things must be true
-first, and none is settled:
+`user_id` is recorded and `token` never is, which is the whole point. Four rules
+make that safe and every one of them fails closed:
 
-1. A task whose handler is **not registered in the recording process** has no
-   signature to key on — not hypothetical, the dead-letter path already handles
-   a row enqueued by a release whose handler no longer accepts that arity. The
-   rule must be *deny*, not fall back to positional.
-2. `*args`/`**kwargs` and defaulted parameters make position → name non-total.
-   Anything that does not map to exactly one declared parameter must be denied.
-3. An argument that is a dict carries its own field names, and
-   `max_depth`/`max_fields` govern the *shape* but not the *disposition* of a
-   nested field. Either nesting is denied outright or the key space becomes
-   `task.parameter.field…` and the allowlist becomes a path language.
+1. **No signature, no capture.** A task whose handler is not registered in this
+   process — the dead-letter path already meets one, from a release whose
+   handler no longer accepts that arity — has no names, so nothing is captured.
+   The rule is *deny*, never fall back to position.
+2. **The mapping must be total and unambiguous.** A value that lands in `*args`
+   or `**kwargs` maps to no declared parameter and is never captured, however
+   the allowlist is spelled. A parameter the call did not supply is absent
+   rather than defaulted: recording a default the caller never sent would be
+   recording this process. The leading parameters the runner itself supplies —
+   `handler(ctx, *job.args)` — are aligned past and are not nameable.
+3. **The parameter is the unit of consent, and it is the whole argument.**
+   Allowing `payload` allows everything inside it, bounded below. There is
+   deliberately no `task.parameter.field…` path language: a key space whose
+   leaves an operator has never seen is a consent nobody gave.
+4. **The value must normalise.** Strings, numbers, booleans, `None`, and
+   lists/tuples/dicts of them, within `max_depth`, `max_fields` and
+   `max_body_bytes`. Anything else — an object, `bytes`, a set, a non-string
+   mapping key, a non-finite float, a cycle, an oversize structure — is
+   **withheld with the reason recorded in its place**, so a reader can tell a
+   refusal from an absence. A breach withholds the *whole* argument rather than
+   a truncated version: a reader cannot tell a list of three from the first
+   three of nine.
+
+The recorded form is JSON and is exactly one of `{"value": …}` or
+`{"withheld": "<reason>"}`. Normalisation copies into fresh containers and
+serialises immediately, so a handler that keeps its argument and edits it
+afterwards cannot change what was recorded. A non-empty allowlist requires all
+three bounds; a policy that names an argument without them is refused where it
+is written.
+
+`replay_attempt` still refuses to run with the wrong arity rather than inventing
+values, and the generated test says where to supply them.
 
 ### Arming one
 

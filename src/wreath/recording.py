@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import time
 import zlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
 from ._flight_schema import CaptureDisposition, CaptureFieldClass
 from ._recording_format import (
@@ -686,15 +687,47 @@ class AttemptPolicy:
     """What job attempts a runner may record. Deny-by-default: no triggers, no
     recordings.
 
-    **Arguments are never captured, and that is structural rather than a
-    default.** There is no knob here to turn them on. `RedactionPolicy` is
-    entirely name-keyed -- headers, query parameters, and the field names a
-    structured body selects -- while `args jsonb` is a *positional* array, so
-    deny-by-default has no name to deny and would degenerate to "capture
-    everything". A job argument is derived from a record far more often than a
-    URL path is; see `docs/reference/recording.md` for the three rules a
-    `task.parameter` allowlist would have to settle first. Only the argument
-    *count* reaches the recording.
+    **Arguments are captured only where an operator named one, by task and
+    parameter.** `args jsonb` is a *positional* array, so the name-keyed model
+    the rest of `RedactionPolicy` uses has nothing to key on — and
+    deny-by-default over a nameless unit degenerates to "capture nothing" or
+    "capture everything", the second of which is the disclosure this subsystem
+    ranks above correctness. `argument_allowlist` supplies the missing names
+    from the *handler's signature*, which the recording process already holds:
+
+    ```python
+    AttemptPolicy(
+        triggers=(AttemptTrigger(AttemptTriggerKind.FAILURE),),
+        argument_allowlist=frozenset({"send_password_reset.user_id"}),
+        redaction=RedactionPolicy(max_fields=32, max_depth=4, max_body_bytes=4096),
+    )
+    ```
+
+    `send_password_reset(user_id, token)` then records `user_id` and never
+    `token`, which is the whole point. Four rules make that safe, and each one
+    fails **closed**:
+
+    1. **No signature, no capture.** A task whose handler is not registered in
+       this process — the dead-letter path already has one, from a release that
+       accepted a different arity — has no names, so nothing is captured. The
+       rule is *deny*, never fall back to position.
+    2. **The mapping must be total and unambiguous.** A value that lands in
+       `*args` or `**kwargs` maps to no declared parameter, so it is never
+       captured however the allowlist is spelled.
+    3. **The parameter is the unit of consent, and it is the whole argument.**
+       Allowing `payload` allows everything inside it, bounded by the limits
+       below. There is no per-field key space, because a path language whose
+       leaves an operator has never seen is a consent nobody gave.
+    4. **The value must normalise.** Strings, numbers, booleans, `None`, and
+       lists/tuples/dicts of them, within `max_depth` and `max_fields` and
+       `max_body_bytes`. Anything else — an object, `bytes`, a set, a cycle, an
+       oversize structure — is **withheld with the reason recorded in its
+       place**, so a reader can tell a refusal from an absence.
+
+    A non-empty allowlist therefore needs those three bounds set; an
+    `AttemptPolicy` that names an argument without them is refused where it is
+    written. An empty allowlist is the default and records only the argument
+    *count*, exactly as before.
 
     `max_boundaries` bounds one recording. Crossing it **refuses the recording**
     rather than truncating it: a job that walks ten thousand rows would
@@ -706,10 +739,84 @@ class AttemptPolicy:
     triggers: tuple[AttemptTrigger, ...] = ()
     redaction: RedactionPolicy = field(default_factory=RedactionPolicy.deny_by_default)
     max_boundaries: int = 512
+    #: `"task.parameter"` keys. Split on the **last** dot, so a dotted task name
+    #: still names one parameter.
+    argument_allowlist: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         _require(self.max_boundaries > 0, "max_boundaries must be > 0")
         _require(self.max_boundaries <= _MAX_FIELDS, "max_boundaries out of range")
+        allowlist = frozenset(self.argument_allowlist)
+        for key in sorted(allowlist):
+            task, dot, parameter = key.rpartition(".")
+            _require(
+                bool(dot) and bool(task) and bool(parameter),
+                f"argument allowlist entry {key!r} must be 'task.parameter'",
+            )
+        object.__setattr__(self, "argument_allowlist", allowlist)
+        if allowlist:
+            _require(
+                self.redaction.max_fields > 0
+                and self.redaction.max_depth > 0
+                and self.redaction.max_body_bytes > 0,
+                "capturing an argument needs redaction limits: set max_fields, "
+                "max_depth and max_body_bytes, because an argument is a value of "
+                "unknown shape and an unbounded one is a recording nobody can open",
+            )
+
+    def capture_arguments(
+        self,
+        *,
+        task: str,
+        handler: Any,
+        args: Sequence[Any],
+        kwargs: Mapping[str, Any],
+        framework_parameters: int = 0,
+    ) -> tuple[tuple[str, str], ...]:
+        """The allowlisted arguments of one call, normalised and bounded.
+
+        Returns `(parameter_name, json_text)` pairs, where the JSON is exactly
+        one of `{"value": ...}` or `{"withheld": "<reason>"}` — a refusal is
+        recorded rather than dropped, because an operator who allowed a
+        parameter and finds nothing cannot otherwise tell whether the job did
+        not carry it or this refused it.
+
+        Args:
+            task: The task name, the left half of an allowlist key.
+            handler: The registered callable, or `None` when this process has
+                none — which captures nothing.
+            args: Positional arguments, as the queue row carried them.
+            kwargs: Keyword arguments, likewise.
+            framework_parameters: Leading parameters the *runner* supplies
+                rather than the payload — `JobRunner` calls
+                `handler(ctx, *job.args)`, so it passes 1. They are aligned past
+                and never capturable: `ctx` is this process's object, not
+                anything the queue row carried, and an allowlist entry naming
+                one records nothing.
+
+        Returns:
+            One pair per allowed parameter the call actually supplied, in
+            signature order.
+        """
+        if not self.argument_allowlist or handler is None:
+            return ()
+        wanted = {
+            key.rpartition(".")[2]
+            for key in self.argument_allowlist
+            if key.rpartition(".")[0] == task
+        }
+        if not wanted:
+            return ()
+        bound = _bind_arguments(handler, args, kwargs, framework_parameters)
+        if bound is None:
+            return ()
+        limits = self.redaction
+        out: list[tuple[str, str]] = []
+        for name, value in bound:
+            if name not in wanted:
+                continue
+            out.append((name, _normalise_argument(value, limits)))
+        return tuple(out)
 
     def captures(
         self,
@@ -733,6 +840,148 @@ class AttemptPolicy:
             if trigger.rate > 0.0 and sample_value(task, job_id) < trigger.rate:
                 return True
         return False
+
+
+#: Values an argument may be made of. Deliberately the JSON scalars and nothing
+#: else: `args jsonb` is what the queue stored, so anything outside this set
+#: arrived by some other route and its `repr` is not a thing to write to a
+#: forensic file. `bool` is checked before `int` everywhere below, because it is
+#: a subclass of one.
+_ARGUMENT_SCALARS = (str, bool, int, float)
+
+
+#: Stands in for a leading parameter the runner supplies. Never recorded: it is
+#: dropped by name before any value is looked at.
+_FRAMEWORK_ARGUMENT = object()
+
+
+def _bind_arguments(
+    handler: Any,
+    args: Sequence[Any],
+    kwargs: Mapping[str, Any],
+    framework_parameters: int = 0,
+) -> list[tuple[str, Any]] | None:
+    """`(parameter_name, value)` for a call, or `None` when that is not knowable.
+
+    `None` -- capture nothing -- for a handler with no readable signature and
+    for a call that does not bind to it. **A value that lands in `*args` or
+    `**kwargs` is dropped rather than named**, because the name it would be
+    given is a position or a caller's spelling and neither is the declared
+    parameter an operator allowed.
+    """
+    import inspect
+
+    target = getattr(handler, "__wrapped__", handler)
+    leading = [_FRAMEWORK_ARGUMENT] * max(0, framework_parameters)
+    try:
+        signature = inspect.signature(target)
+        bound = signature.bind(*leading, *args, **kwargs)
+    except (TypeError, ValueError):
+        # A builtin with no signature, a C callable, or a row enqueued by a
+        # release whose handler took a different arity -- the dead-letter path
+        # already has the second one. Deny, never guess.
+        return None
+    named: list[tuple[str, Any]] = []
+    for name, parameter in signature.parameters.items():
+        if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+            continue
+        if name not in bound.arguments:
+            continue
+        value = bound.arguments[name]
+        if value is _FRAMEWORK_ARGUMENT:
+            continue
+        named.append((name, value))
+    return named
+
+
+def _normalise_argument(value: Any, limits: RedactionPolicy) -> str:
+    """One argument as JSON text: `{"value": ...}` or `{"withheld": "<reason>"}`.
+
+    Bounded four ways, and a breach of any of them withholds the *whole*
+    argument rather than a truncated version of it. A half-recorded structure
+    is the shape this subsystem refuses everywhere else -- a reader cannot tell
+    a list of three from the first three of nine, and a replay driven off the
+    short one reports a different failure from the one that happened.
+
+    Immutable by construction: the normalised copy is built out of new lists
+    and dicts and then serialised immediately, so a handler that mutates its
+    own argument after this returns cannot change what was recorded.
+    """
+    import json
+
+    try:
+        copied = _copy_bounded(value, limits, depth=0, seen=set(), budget=[limits.max_fields])
+    except _ArgumentRefused as refusal:
+        return json.dumps({"withheld": str(refusal)})
+    text = json.dumps({"value": copied}, separators=(",", ":"), allow_nan=False)
+    if len(text.encode("utf-8")) > limits.max_body_bytes:
+        return json.dumps(
+            {"withheld": f"over the {limits.max_body_bytes}-byte argument budget"}
+        )
+    return text
+
+
+class _ArgumentRefused(Exception):
+    """Why one argument could not be normalised. Never escapes this module."""
+
+
+def _copy_bounded(
+    value: Any, limits: RedactionPolicy, *, depth: int, seen: set[int], budget: list[int]
+) -> Any:
+    """An immutable-by-construction copy, or a refusal naming what stopped it."""
+    if value is None or isinstance(value, _ARGUMENT_SCALARS):
+        if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+            # JSON has no NaN or infinity and `allow_nan=False` would raise from
+            # inside `json.dumps`, past the refusal path that records a reason.
+            raise _ArgumentRefused("a non-finite number has no JSON form")
+        return value
+    if depth >= limits.max_depth:
+        raise _ArgumentRefused(f"nested deeper than the {limits.max_depth}-level limit")
+    if isinstance(value, list | tuple):
+        # Identity, not equality: a cycle is what this catches, and two equal
+        # sibling lists are not one. Removed on the way out so a value that
+        # appears twice side by side is not mistaken for a cycle.
+        if id(value) in seen:
+            raise _ArgumentRefused("contains a cycle")
+        seen.add(id(value))
+        try:
+            return [
+                _copy_bounded(item, limits, depth=depth + 1, seen=seen, budget=_spend(budget))
+                for item in value
+            ]
+        finally:
+            seen.discard(id(value))
+    if isinstance(value, dict):
+        if id(value) in seen:
+            raise _ArgumentRefused("contains a cycle")
+        seen.add(id(value))
+        try:
+            copied: dict[str, Any] = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise _ArgumentRefused(
+                        f"a mapping keyed by {type(key).__name__} has no JSON form"
+                    )
+                copied[key] = _copy_bounded(
+                    item, limits, depth=depth + 1, seen=seen, budget=_spend(budget)
+                )
+            return copied
+        finally:
+            seen.discard(id(value))
+    raise _ArgumentRefused(f"unsupported type {type(value).__name__}")
+
+
+def _spend(budget: list[int]) -> list[int]:
+    """Charge one field against the shared budget, or refuse.
+
+    A single mutable cell rather than a per-level count, because the limit that
+    matters is the size of the whole recorded value: a thousand one-element
+    lists is the same file as one thousand-element list.
+    """
+    budget[0] -= 1
+    if budget[0] < 0:
+        raise _ArgumentRefused("more fields than the policy's max_fields allows")
+    return budget
 
 
 class BoundaryTrace:
