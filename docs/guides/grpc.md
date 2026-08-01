@@ -41,7 +41,7 @@ class Position:
 tracker = GrpcService("camera.Tracker")
 
 
-@tracker.unary(request=PositionRequest, response=Position)
+@tracker.unary(request=PositionRequest, response=Position, action="Collar::read")
 @roles("ranger")
 async def GetPosition(request, message: PositionRequest) -> Position:
     """The collar's last known position."""
@@ -58,12 +58,20 @@ call, not a convention layered on top. The consequence is the point:
 
 - `@roles`, `@permissions` and `@authorize` mean exactly what they mean on a
   REST route, and are enforced by the same middleware tape.
+- `action=` (and its optional `resource=`) on the method decorator **is**
+  `@authorize`, spelled at the declaration the way
+  [`@mcp.tool(action=…)`](mcp.md) spells it. Write it either way; they build the
+  same requirement, and the second `@authorize` on a method merges with the
+  first exactly as two decorators do.
 - `permissions=`, `dependencies=` and `middleware=` pass through to
-  `RouteDefinition` unchanged.
+  `RouteDefinition` unchanged. Anything else the route decorator does not accept
+  is a `TypeError` at import — `roles=` and `rate_limit=` are **decorators**
+  here, not keywords.
 - `permissions_router` and `wreath mutant` read those declarations from the same
-  place they read a REST route's. **There is no second authorization model**,
-  which is the whole reason a method is a route rather than a separate dispatch
-  path.
+  place they read a REST route's, so a gRPC method's action is in the
+  [permission manifest](permissions.md#one-vocabulary-four-protocols) beside
+  every other surface's. **There is no second authorization model**, which is the
+  whole reason a method is a route rather than a separate dispatch path.
 
 gRPC routes carry `include_in_schema=False`: a gRPC method is not a REST
 operation, and describing it as one would put a path in the OpenAPI document
@@ -128,6 +136,39 @@ gRPC clients expect). The four-byte length prefix is attacker-controlled, so it
 is checked against that limit **before** anything is allocated — a lie in those
 bytes cannot make the server reserve what the peer never intends to send.
 
+## Compression
+
+`identity` and `gzip`, in both directions, with nothing to configure.
+
+- A request whose `grpc-encoding` is `gzip` is decompressed per message. An
+  encoding this server does not implement is `UNIMPLEMENTED` and names itself,
+  and the response carries `grpc-accept-encoding: identity,gzip` so a client
+  that can re-send knows what to re-send as.
+- A response is compressed when the client's `grpc-accept-encoding` lists gzip.
+  Naming a coding Wreath does not implement is *not* an error — the list is what
+  the client can read, and identity is always readable — so the reply is simply
+  uncompressed rather than refused.
+
+Two details are worth knowing because they look like bugs from the outside:
+
+**The flag is per message, and Wreath declines when compressing would grow
+one.** gzip's header and trailer cost about twenty bytes, so a short reply comes
+out larger compressed. A response may therefore carry `grpc-encoding: gzip` in
+its headers and a flag byte of `0` on a small message; every gRPC client reads
+that correctly, because the header says what the messages *may* be compressed
+with rather than what they are.
+
+**A compressed message is bounded twice.** The length prefix bounds the bytes on
+the wire and says nothing about the decoded size — a couple of kilobytes of
+zeros expand to megabytes — so `max_message_bytes` is applied again to the
+decompressed result, through `wreath.compression`'s
+`gzip_decompress(..., max_output_bytes=…)`. The two refusals read differently:
+one names the wire length, the other names decompression.
+
+zstd is not offered even though [`wreath.compression`](compression.md) has it.
+`grpc-encoding` values are a registry shared with every other implementation,
+and a coding a Go or Java client cannot name is a dialect rather than a feature.
+
 ## What is not built
 
 - **Server reflection.** It requires protobuf *descriptors*, which
@@ -136,7 +177,7 @@ bytes cannot make the server reserve what the peer never intends to send.
 - **A gRPC client.** `wreath.http_client` has no HTTP/2 at all, so calling gRPC
   means building an HTTP/2 client first — a subsystem in its own right. Wreath
   serves gRPC; it does not yet call it.
-- **Compression.** `grpc-encoding: identity` only. A compressed message is
-  refused by name rather than mis-parsed.
+- **Codings other than `identity` and `gzip`.** `deflate` and `snappy` are
+  refused by name rather than mis-parsed; see [Compression](#compression).
 - gRPC-Web, the health-checking protocol, and client-side concerns (load
   balancing, retry configuration, xDS).

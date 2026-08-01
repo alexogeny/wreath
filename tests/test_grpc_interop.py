@@ -332,3 +332,56 @@ async def test_a_client_deadline_is_honoured_by_the_server(endpoint):
         with pytest.raises(grpc.aio.AioRpcError) as caught:
             await call(Echo(text="x", count=1), timeout=0.3)
     assert caught.value.code() == grpc.StatusCode.DEADLINE_EXCEEDED
+
+
+async def test_a_real_client_sends_gzip_and_wreath_reads_it(endpoint):
+    """A compressed request, framed by grpcio rather than by wreath.
+
+    `grpc.Compression.Gzip` makes the client set the per-message flag byte and
+    send `grpc-encoding: gzip`, so this is the only place wreath's request
+    decoder meets compressed bytes it did not produce. Neuter the decoder and
+    the call comes back INTERNAL rather than echoing.
+
+    **This test does not prove the reply direction, and deliberately does not
+    claim to.** grpcio strips `grpc-encoding` from `initial_metadata()` -- it
+    consumes the header itself -- and it decodes an identity reply perfectly
+    well, so an assertion here would pass against a server that never
+    compressed anything. What proves that half is
+    `test_grpc.py::TestCompression::test_a_client_that_accepts_gzip_gets_a_compressed_reply`,
+    which reads the flag byte and decompresses the body.
+
+    The payload is large and repetitive because `encode_frame` declines to
+    compress a message gzip would grow, so a short one exercises nothing.
+    """
+    async with _channel(endpoint) as channel:
+        call = channel.unary_unary(
+            "/wreath.test.Echoer/Once",
+            request_serializer=_ser,
+            response_deserializer=_de,
+        )
+        reply = await call(
+            Echo(text="collar " * 2000, count=21),
+            compression=grpc.Compression.Gzip,
+        )
+    assert reply.text == "collar " * 2000
+    assert reply.count == 42
+
+
+async def test_a_client_asking_for_an_unimplemented_coding_is_told_so(endpoint):
+    """`deflate` is a real gRPC coding wreath does not implement.
+
+    grpcio has no deflate of its own, so the header is set by hand on the call's
+    metadata -- which is exactly what a peer in another language would send.
+    """
+    async with _channel(endpoint) as channel:
+        call = channel.unary_unary(
+            "/wreath.test.Echoer/Once",
+            request_serializer=_ser,
+            response_deserializer=_de,
+        )
+        with pytest.raises(grpc.aio.AioRpcError) as caught:
+            await call(
+                Echo(text="x", count=1), metadata=(("grpc-encoding", "deflate"),)
+            )
+    assert caught.value.code() == grpc.StatusCode.UNIMPLEMENTED
+    assert "deflate" in caught.value.details()

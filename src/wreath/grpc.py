@@ -16,11 +16,20 @@ rather than answering requests that no client can interpret. See
 `docs/guides/grpc.md`.
 
 A method is a **route**. `GrpcService.router()` returns an ordinary `Router`
-whose routes are `POST /{service}/{method}`, so `roles=`, `dependencies=`,
-`rate_limit=` and `@authorize`'s `action=` mean exactly what they mean on a REST
-route, are enforced by the same middleware tape, and are read by the same
+whose routes are `POST /{service}/{method}`, so a method's controls are a
+route's controls, enforced by the same middleware tape and read by the same
 `permissions_router` and `wreath mutant`. There is no second authorization
-model.
+model, and there are exactly two spellings because a route has two:
+
+* `action=` and `resource=` on the method decorator, which **are** `@authorize`
+  -- the same keyword `@mcp.tool(action=...)` uses, so one vocabulary spans
+  REST, gRPC and MCP.
+* `@roles`, `@permissions`, `@authorize` and `@second_factor` stacked on the
+  handler, exactly as on a route handler. These are decorators and not
+  keywords; `permissions=`, `dependencies=` and `middleware=` are the route
+  metadata that passes through, and anything the route decorator does not
+  accept is a `TypeError` at import rather than a control that silently does
+  nothing.
 
     from wreath.grpc import GrpcService
     from wreath.protobuf import message, field
@@ -31,10 +40,15 @@ model.
 
     tracker = GrpcService("camera.Tracker")
 
-    @tracker.unary(request=PositionRequest, response=Position, action="read")
+    @tracker.unary(request=PositionRequest, response=Position,
+                   action="Collar::read", resource=EntityUid("Collar", "7"))
     async def GetPosition(request, message: PositionRequest) -> Position: ...
 
     app.include_router(tracker.router())
+
+**Compression** is `identity` and `gzip`, negotiated per call and applied per
+message through `wreath.compression` -- no dependency, and no zstd, because
+`grpc-encoding` is a registry shared with every other implementation.
 
 **Not built:** server reflection, gRPC-Web, the health-checking protocol, and
 client-side concerns (load balancing, retry configuration, xDS). Reflection is
@@ -52,6 +66,9 @@ from typing import Any
 
 from . import protobuf as _protobuf
 from ._auth import requirements as _requirements
+from ._auth.decorators import authorize as _authorize
+from .compression import gzip_compress as _gzip_compress
+from .compression import gzip_decompress as _gzip_decompress
 from .exceptions import HTTPException
 from .response import StreamingResponse
 from .router import Router
@@ -75,6 +92,21 @@ _ACCEPTED_CONTENT_TYPES = frozenset({"application/grpc", "application/grpc+proto
 #: read of it is bounded against `max_message_bytes` *before* anything is
 #: allocated -- see `Unframer.feed`.
 _PREFIX_BYTES = 5
+
+#: The message codings this server implements, best first. `identity` is always
+#: last and always available: gRPC requires every peer to accept it, which is
+#: what makes an unknown entry in `grpc-accept-encoding` a non-event rather than
+#: a refusal.
+#:
+#: gzip comes from `wreath.compression`, a facade over the interpreter's own
+#: `zlib`, so this adds no dependency. zstd is deliberately absent even though
+#: that facade offers it: `grpc-encoding` values are a registry shared with
+#: every other implementation, and a coding a Go or Java client cannot name is a
+#: dialect rather than a feature.
+SUPPORTED_ENCODINGS: tuple[str, ...] = ("gzip", "identity")
+
+#: What every response advertises this server will *accept* on a later call.
+_ACCEPT_ENCODING = b"identity,gzip"
 
 #: Default ceiling on one decoded message. gRPC's own default is 4 MiB and
 #: clients expect to be refused rather than truncated past it.
@@ -179,6 +211,59 @@ def frame_message(payload: bytes, *, compressed: bool = False) -> bytes:
     return bytes((1 if compressed else 0,)) + length.to_bytes(4, "big") + payload
 
 
+def negotiated_encoding(declared: str | None) -> str:
+    """The coding a call's `grpc-encoding` names, refusing one this server lacks.
+
+    An absent header is `identity`, which is the specification's default. An
+    unknown value is `UNIMPLEMENTED` and names itself, because the client can
+    act on that -- it re-sends under a coding this server does listen for -- and
+    the response carries `grpc-accept-encoding` telling it which.
+
+    Raises:
+        GrpcError: `declared` names a coding this server does not implement.
+    """
+    encoding = (declared or "identity").strip().lower()
+    if encoding not in SUPPORTED_ENCODINGS:
+        raise GrpcError(
+            Status.UNIMPLEMENTED,
+            f"grpc-encoding {encoding!r} is not supported; this server reads "
+            f"{', '.join(SUPPORTED_ENCODINGS)}",
+        )
+    return encoding
+
+
+def reply_encoding(accept: str | None) -> str:
+    """The coding to answer in, from the client's `grpc-accept-encoding`.
+
+    A list of what the caller *can* read, so an entry this server does not
+    implement is not an error -- it simply is not chosen. `identity` is the
+    answer when nothing matches, and every gRPC peer accepts identity, so this
+    can never fail.
+    """
+    if not accept:
+        return "identity"
+    offered = {token.strip().lower() for token in accept.split(",")}
+    for encoding in SUPPORTED_ENCODINGS:
+        if encoding in offered:
+            return encoding
+    return "identity"
+
+
+def encode_frame(payload: bytes, encoding: str) -> bytes:
+    """Frame one outgoing message, compressing it only when that makes it smaller.
+
+    The flag is per *message*, so declining is a normal answer rather than a
+    contradiction of the call's `grpc-encoding` -- and gzip costs about twenty
+    bytes of header and trailer, so a short reply comes out larger compressed.
+    Sending it anyway would be spending CPU to grow the response.
+    """
+    if encoding == "gzip":
+        squeezed = _gzip_compress(payload)
+        if len(squeezed) < len(payload):
+            return frame_message(squeezed, compressed=True)
+    return frame_message(payload)
+
+
 class Unframer:
     """Incremental reader for a stream of length-prefixed gRPC messages.
 
@@ -187,11 +272,24 @@ class Unframer:
     length is checked against `max_message_bytes` **before** the buffer is
     allowed to grow to it, so a four-byte lie cannot make the server allocate
     what the peer never intends to send.
+
+    `encoding` is the call's `grpc-encoding`. It decides what a message whose
+    flag byte is set means: under `gzip` it is decompressed, under `identity`
+    the flag contradicts the header the peer itself sent and the message is
+    refused. **The same ceiling applies on both sides of the decoder**, because
+    the length prefix bounds the compressed size and says nothing about the
+    decoded one -- which is the entire mechanism of a decompression bomb.
     """
 
-    def __init__(self, *, max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES) -> None:
+    def __init__(
+        self,
+        *,
+        max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
+        encoding: str = "identity",
+    ) -> None:
         self._buffer = bytearray()
         self._max = max_message_bytes
+        self._encoding = encoding
 
     def feed(self, chunk: bytes) -> list[bytes]:
         """Add bytes; return every message that completed."""
@@ -207,17 +305,35 @@ class Unframer:
                     Status.RESOURCE_EXHAUSTED,
                     f"message of {length} bytes exceeds the {self._max}-byte limit",
                 )
-            if compressed:
-                # `grpc-encoding` negotiation is not implemented, so a peer that
-                # sets the flag is told plainly rather than handed a decode
-                # failure from the codec three layers down.
+            if compressed and self._encoding == "identity":
+                # The specification calls this "Compressed-Flag set but no
+                # grpc-encoding", and it is INTERNAL rather than UNIMPLEMENTED:
+                # the peer is not asking for something unsupported, it is
+                # contradicting its own header. Named separately from the
+                # header-level refusal so a log can tell the two apart.
                 raise GrpcError(
-                    Status.UNIMPLEMENTED, "compressed messages are not supported"
+                    Status.INTERNAL,
+                    "a message is flagged compressed but this call declared "
+                    "grpc-encoding: identity",
                 )
             if len(self._buffer) < _PREFIX_BYTES + length:
                 return out
-            out.append(bytes(self._buffer[_PREFIX_BYTES : _PREFIX_BYTES + length]))
+            payload = bytes(self._buffer[_PREFIX_BYTES : _PREFIX_BYTES + length])
             del self._buffer[: _PREFIX_BYTES + length]
+            out.append(self._decode(payload) if compressed else payload)
+
+    def _decode(self, payload: bytes) -> bytes:
+        """Decompress one message, bounded by the same ceiling the prefix has."""
+        try:
+            return _gzip_decompress(payload, max_output_bytes=self._max)
+        except ValueError as error:
+            text = str(error)
+            if "expands past" in text:
+                raise GrpcError(
+                    Status.RESOURCE_EXHAUSTED,
+                    f"a gzip message decompresses past the {self._max}-byte limit",
+                ) from error
+            raise GrpcError(Status.INTERNAL, f"undecodable gzip message: {text}") from error
 
     def finish(self) -> None:
         """Refuse a trailing partial message rather than dropping it."""
@@ -315,16 +431,21 @@ class _GrpcResponse(StreamingResponse):
         *,
         status: Status = Status.OK,
         message: str = "",
+        encoding: str = "identity",
     ) -> None:
-        super().__init__(
-            body,
-            status=200,
-            headers=[
-                (b"content-type", CONTENT_TYPE.encode("ascii")),
-                # Stated up front so a client knows this server will not compress.
-                (b"grpc-accept-encoding", b"identity"),
-            ],
-        )
+        headers = [
+            (b"content-type", CONTENT_TYPE.encode("ascii")),
+            # What this server will *read* on a later call, stated on every
+            # response including the refusals -- a client told its coding is
+            # unsupported can only act on that if it is also told which are.
+            (b"grpc-accept-encoding", _ACCEPT_ENCODING),
+        ]
+        if encoding != "identity":
+            # What *this* response's messages may be compressed with. Only
+            # "may": the flag is per message and `encode_frame` declines when
+            # compressing would grow one.
+            headers.append((b"grpc-encoding", encoding.encode("ascii")))
+        super().__init__(body, status=200, headers=headers)
         self.grpc_status = status
         self.grpc_message = message
 
@@ -409,8 +530,24 @@ class GrpcService:
                     f"{model!r} is not a @message: gRPC carries protobuf, so both "
                     "the request and response types must be declared ones"
                 )
+        # `action=`/`resource=` are lifted out of the route metadata and spent as
+        # `@authorize` on the handler, rather than forwarded: `Router.route` has
+        # no such keywords, so passing them through raised `TypeError` and the
+        # spelling this module's own docstring taught could not be written. It is
+        # `@authorize` and not a private twin of it because a gRPC method must
+        # mean *the same thing* a route means -- one vocabulary, read by
+        # `permissions_router` and `wreath typegen` off one declaration.
+        action = metadata.pop("action", None)
+        resource = metadata.pop("resource", None)
+        if action is None and resource is not None:
+            raise ValueError(
+                "a gRPC method was given a `resource=` with no `action=`. A Cedar "
+                "decision needs both, and a resource on its own gates nothing."
+            )
 
         def decorate(handler: Any) -> Any:
+            if action is not None:
+                _authorize(action=action, resource=resource)(handler)
             self._methods.append(
                 (handler.__name__, kind, request, response, handler, metadata)
             )
@@ -419,7 +556,13 @@ class GrpcService:
         return decorate
 
     def unary(self, *, request: type, response: type, **metadata: Any) -> Callable[[Any], Any]:
-        """One request message, one response message."""
+        """One request message, one response message.
+
+        `action=` (with an optional `resource=`) is `@authorize` spelled at the
+        declaration, and every other keyword is route metadata -- `roles=` and
+        the rest are still written as decorators on the method, exactly as on a
+        route handler.
+        """
         return self._register(_UNARY, request, response, metadata)
 
     def server_stream(
@@ -471,23 +614,32 @@ class GrpcService:
         max_bytes = self.max_message_bytes
 
         async def endpoint(request: Any) -> Any:
+            # Read before the try, so a refusal below still answers in the
+            # coding the client said it could read. It cannot itself fail: an
+            # unknown entry in `grpc-accept-encoding` simply is not chosen.
+            outgoing = reply_encoding(_header(request, "grpc-accept-encoding"))
             try:
-                _check_transport(request)
+                encoding = _check_transport(request)
                 deadline = _deadline_of(request)
-                incoming = _messages(request, request_model, max_bytes)
+                incoming = _messages(request, request_model, max_bytes, encoding)
                 if kind in (_UNARY, _SERVER_STREAM):
                     call = handler(request, await _exactly_one(incoming))
                 else:
                     call = handler(request, incoming)
                 if kind in (_UNARY, _CLIENT_STREAM):
                     result = await _with_deadline(call, deadline)
-                    return _GrpcResponse(_one(frame_message(_protobuf.encode(result))))
-                return _GrpcResponse(_frames(call, deadline))
+                    return _GrpcResponse(
+                        _one(encode_frame(_protobuf.encode(result), outgoing)),
+                        encoding=outgoing,
+                    )
+                return _GrpcResponse(_frames(call, deadline, outgoing), encoding=outgoing)
             except (GeneratorExit, KeyboardInterrupt, SystemExit):
                 raise
             except Exception as exc:  # noqa: BLE001 - every failure becomes a status
                 # Nothing has been sent yet, so the whole call collapses to a
-                # status-bearing response with an empty body.
+                # status-bearing response with an empty body. No `grpc-encoding`
+                # on it: there is no message to have compressed, and a coding
+                # header over an empty body is a claim about nothing.
                 status, detail = status_for(exc)
                 return _GrpcResponse(_empty(), status=status, message=detail)
 
@@ -503,8 +655,8 @@ def _header(request: Any, name: str) -> str | None:
     return request.header(name)
 
 
-def _check_transport(request: Any) -> None:
-    """Refuse a request the transport cannot actually carry, by name.
+def _check_transport(request: Any) -> str:
+    """Refuse a request the transport cannot carry, and return its coding.
 
     **ASGI offers no way to learn at startup which protocols the server will
     speak**, so this cannot be a startup check the way the plan hoped. It is the
@@ -524,11 +676,7 @@ def _check_transport(request: Any) -> None:
         raise GrpcError(
             Status.INTERNAL, f"unsupported content-type {content_type!r}"
         )
-    encoding = (_header(request, "grpc-encoding") or "identity").strip()
-    if encoding != "identity":
-        raise GrpcError(
-            Status.UNIMPLEMENTED, f"grpc-encoding {encoding!r} is not supported"
-        )
+    return negotiated_encoding(_header(request, "grpc-encoding"))
 
 
 def _deadline_of(request: Any) -> float | None:
@@ -536,9 +684,11 @@ def _deadline_of(request: Any) -> float | None:
     return None if raw is None else parse_timeout(raw.strip())
 
 
-async def _messages(request: Any, model: type, max_bytes: int) -> AsyncIterator[Any]:
+async def _messages(
+    request: Any, model: type, max_bytes: int, encoding: str
+) -> AsyncIterator[Any]:
     """Decode the request body into messages as its bytes arrive."""
-    unframer = Unframer(max_message_bytes=max_bytes)
+    unframer = Unframer(max_message_bytes=max_bytes, encoding=encoding)
     async for chunk in request.stream():
         for payload in unframer.feed(chunk):
             yield _protobuf.decode(model, payload)
@@ -576,7 +726,9 @@ async def _with_deadline(awaitable: Any, deadline: float | None) -> Any:
         raise GrpcError(Status.DEADLINE_EXCEEDED, "deadline exceeded") from exc
 
 
-async def _frames(results: Any, deadline: float | None) -> AsyncIterator[bytes]:
+async def _frames(
+    results: Any, deadline: float | None, encoding: str
+) -> AsyncIterator[bytes]:
     """Frame each yielded response message, under the call's deadline."""
     import asyncio
     import contextlib
@@ -587,6 +739,6 @@ async def _frames(results: Any, deadline: float | None) -> AsyncIterator[bytes]:
     try:
         async with limit:
             async for result in results:
-                yield frame_message(_protobuf.encode(result))
+                yield encode_frame(_protobuf.encode(result), encoding)
     except TimeoutError as exc:
         raise GrpcError(Status.DEADLINE_EXCEEDED, "deadline exceeded") from exc

@@ -23,8 +23,10 @@ from wreath.grpc import (
     Status,
     Unframer,
     frame_message,
+    negotiated_encoding,
     parse_timeout,
     percent_encode,
+    reply_encoding,
     status_for,
 )
 from wreath.protobuf import field, message
@@ -147,14 +149,21 @@ class TestFraming:
     def test_the_default_limit_is_the_four_mebibytes_clients_expect(self):
         assert DEFAULT_MAX_MESSAGE_BYTES == 4 * 1024 * 1024
 
-    def test_a_compressed_message_is_refused_by_name(self):
-        """`grpc-encoding` negotiation is not implemented, so the flag byte is
-        answered with UNIMPLEMENTED rather than a decode failure from the codec
-        three layers down."""
+    def test_a_compressed_message_on_an_identity_call_is_refused_by_name(self):
+        """The flag says compressed and the call declared no encoding.
+
+        The specification's own name for this is "Compressed-Flag set but no
+        grpc-encoding", and it is `INTERNAL` rather than `UNIMPLEMENTED`: the
+        peer is not asking for something unsupported, it is contradicting the
+        header it sent. The message names *identity* so it cannot be confused
+        with the header-level refusal of an unsupported coding, which is the
+        other place a compression complaint comes from.
+        """
         unframer = Unframer()
         with pytest.raises(GrpcError) as caught:
             unframer.feed(b"\x01\x00\x00\x00\x03abc")
-        assert caught.value.status is Status.UNIMPLEMENTED
+        assert caught.value.status is Status.INTERNAL
+        assert "identity" in caught.value.message
 
 
 class TestTimeouts:
@@ -416,9 +425,15 @@ class TestServiceDeclaration:
         trailers = dict(sent[-1]["headers"])
         assert trailers[b"grpc-status"] == str(int(Status.INTERNAL)).encode()
 
-    def test_a_compressed_request_is_refused_by_name(self):
-        """`grpc-encoding` is not negotiated, so a client that compressed is
-        told so rather than handed a codec failure from three layers down."""
+    def test_an_unsupported_request_encoding_is_refused_by_name(self):
+        """A coding this server does not implement is named, not decoded at.
+
+        `deflate` is a real gRPC coding and wreath does not implement it, so the
+        client is told exactly that rather than handed a codec failure from
+        three layers down. The refusal also carries `grpc-accept-encoding`, so a
+        client that can re-send knows what to re-send as -- which is the whole
+        reason the specification puts that header on the response.
+        """
         from wreath.grpc import frame_message
         from wreath.protobuf import encode
 
@@ -426,11 +441,12 @@ class TestServiceDeclaration:
             self._echo_app(),
             "/t.S/M",
             frame_message(encode(Ping(text="a"))),
-            extra_headers=((b"grpc-encoding", b"gzip"),),
+            extra_headers=((b"grpc-encoding", b"deflate"),),
         )
         trailers = dict(sent[-1]["headers"])
         assert trailers[b"grpc-status"] == str(int(Status.UNIMPLEMENTED)).encode()
-        assert b"gzip" in trailers[b"grpc-message"]
+        assert b"deflate" in trailers[b"grpc-message"]
+        assert (b"grpc-accept-encoding", b"identity,gzip") in sent[0]["headers"]
 
     def test_a_unary_call_carrying_no_message_is_refused(self):
         """An empty body on a unary path is not an empty message -- nothing was
@@ -452,3 +468,194 @@ class TestServiceDeclaration:
             return Pong(text="x")
 
         assert next(iter(service.router().routes)).include_in_schema is False
+
+
+class TestCompression:
+    """`grpc-encoding: gzip` in both directions.
+
+    gRPC compresses per *message*, not per body: the flag byte in each five-byte
+    prefix says whether that message is compressed with the coding the call
+    declared. So there are two independent negotiations -- what the client sent
+    (`grpc-encoding`) and what it will accept back (`grpc-accept-encoding`) --
+    and a refusal at each of the two layers a compressed message passes through.
+    """
+
+    def _gzip_frame(self, payload: bytes) -> bytes:
+        from wreath.compression import gzip_compress
+
+        return frame_message(gzip_compress(payload), compressed=True)
+
+    def test_a_gzip_message_is_decompressed_by_the_unframer(self):
+        unframer = Unframer(encoding="gzip")
+        assert unframer.feed(self._gzip_frame(b"hello" * 20)) == [b"hello" * 20]
+
+    def test_an_uncompressed_message_is_still_read_on_a_gzip_call(self):
+        """The flag is per message, so a client may compress some and not others.
+
+        A server that assumed every message on a `grpc-encoding: gzip` call was
+        compressed would fail on exactly the small ones a sensible client leaves
+        alone.
+        """
+        unframer = Unframer(encoding="gzip")
+        assert unframer.feed(frame_message(b"plain")) == [b"plain"]
+
+    def test_a_gzip_message_exceeding_the_limit_is_refused_after_decoding(self):
+        """The bomb: a wire length well inside the ceiling, a decoded one past it.
+
+        The length check on the prefix cannot catch this -- it sees a few dozen
+        bytes -- so the decoder has to carry the same bound, and the refusal has
+        to name the *decoded* limit rather than repeating the wire-length
+        complaint, or the two are indistinguishable in a log.
+        """
+        bomb = self._gzip_frame(b"\x00" * 2_000_000)
+        assert len(bomb) < 8192, "the wire length must stay inside the ceiling"
+        unframer = Unframer(max_message_bytes=8192, encoding="gzip")
+        with pytest.raises(GrpcError) as caught:
+            unframer.feed(bomb)
+        assert caught.value.status is Status.RESOURCE_EXHAUSTED
+        assert "decompress" in caught.value.message
+
+    def test_a_corrupt_gzip_message_is_a_status_not_a_zlib_error(self):
+        unframer = Unframer(encoding="gzip")
+        with pytest.raises(GrpcError) as caught:
+            unframer.feed(frame_message(b"not gzip at all", compressed=True))
+        assert caught.value.status is Status.INTERNAL
+
+    def test_the_two_compression_refusals_do_not_share_a_message(self):
+        """The trap this suite has hit before: two refusals, one message.
+
+        A test that asserted only "gzip appears in the text" would pass whichever
+        branch fired, including a fallthrough. These two are different failures
+        with different remedies -- change the coding, versus stop setting the
+        flag -- so they must read differently.
+        """
+        with pytest.raises(GrpcError) as flagged:
+            Unframer().feed(b"\x01\x00\x00\x00\x03abc")
+        with pytest.raises(GrpcError) as unsupported:
+            negotiated_encoding("deflate")
+        assert flagged.value.message != unsupported.value.message
+        assert flagged.value.status is not unsupported.value.status
+
+    # -- end to end, through the ASGI dispatch --------------------------------
+
+    def _echo_app(self):
+        from wreath import Wreath
+
+        service = GrpcService("t.S")
+
+        @service.unary(request=Ping, response=Pong)
+        async def M(request, msg):
+            """Doc."""
+            return Pong(text=msg.text)
+
+        app = Wreath()
+        app.include_router(service.router())
+        return app
+
+    def _payload(self, sent) -> bytes:
+        return b"".join(
+            m.get("body", b"") for m in sent if m["type"] == "http.response.body"
+        )
+
+    def test_a_gzip_request_body_reaches_the_handler_decoded(self):
+        from wreath.compression import gzip_compress
+        from wreath.protobuf import encode
+
+        sent = _drive(
+            self._echo_app(),
+            "/t.S/M",
+            frame_message(gzip_compress(encode(Ping(text="squeezed"))), compressed=True),
+            extra_headers=((b"grpc-encoding", b"gzip"),),
+        )
+        trailers = dict(sent[-1]["headers"])
+        assert trailers[b"grpc-status"] == b"0"
+        assert self._payload(sent) == frame_message(encode(Pong(text="squeezed")))
+
+    def test_a_client_that_accepts_gzip_gets_a_compressed_reply(self):
+        from wreath.compression import gzip_decompress
+        from wreath.protobuf import encode
+
+        big = "x" * 4096
+        sent = _drive(
+            self._echo_app(),
+            "/t.S/M",
+            frame_message(encode(Ping(text=big))),
+            extra_headers=((b"grpc-accept-encoding", b"gzip"),),
+        )
+        assert (b"grpc-encoding", b"gzip") in sent[0]["headers"]
+        body = self._payload(sent)
+        assert body[0] == 1
+        assert len(body) < len(encode(Pong(text=big)))
+        assert gzip_decompress(body[5:], max_output_bytes=1 << 20) == encode(
+            Pong(text=big)
+        )
+
+    def test_a_client_that_did_not_ask_for_gzip_gets_identity(self):
+        """The negative space. Compressing unasked is a client-side decode error."""
+        from wreath.protobuf import encode
+
+        big = "x" * 4096
+        sent = _drive(self._echo_app(), "/t.S/M", frame_message(encode(Ping(text=big))))
+        assert not any(name == b"grpc-encoding" for name, _ in sent[0]["headers"])
+        assert self._payload(sent) == frame_message(encode(Pong(text=big)))
+
+    def test_an_incompressible_reply_is_sent_uncompressed(self):
+        """Compression that makes a message larger is not compression.
+
+        gzip's header and trailer cost ~20 bytes, so a short reply comes out
+        bigger. The flag is per message precisely so a server may decline, and a
+        client reads flag 0 correctly whatever the call declared.
+        """
+        from wreath.protobuf import encode
+
+        sent = _drive(
+            self._echo_app(),
+            "/t.S/M",
+            frame_message(encode(Ping(text="a"))),
+            extra_headers=((b"grpc-accept-encoding", b"gzip"),),
+        )
+        body = self._payload(sent)
+        assert body[0] == 0
+        assert body == frame_message(encode(Pong(text="a")))
+
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [
+            (None, "identity"),
+            ("", "identity"),
+            ("identity", "identity"),
+            ("gzip", "gzip"),
+            ("deflate,gzip", "gzip"),
+            ("GZIP", "gzip"),
+            (" gzip , identity ", "gzip"),
+            ("snappy", "identity"),
+        ],
+    )
+    def test_the_reply_coding_is_read_from_what_the_client_accepts(
+        self, header, expected
+    ):
+        assert reply_encoding(header) == expected
+
+    def test_the_server_advertises_both_codings_it_accepts(self):
+        from wreath.protobuf import encode
+
+        sent = _drive(self._echo_app(), "/t.S/M", frame_message(encode(Ping(text="a"))))
+        assert (b"grpc-accept-encoding", b"identity,gzip") in sent[0]["headers"]
+
+    def test_a_coding_in_accept_that_this_server_lacks_is_simply_not_used(self):
+        """`grpc-accept-encoding` is a list of what the client *can* read.
+
+        Naming one this server does not implement is not an error -- identity is
+        always acceptable -- so the reply is uncompressed rather than refused.
+        Refusing here would break every client that lists its full repertoire.
+        """
+        from wreath.protobuf import encode
+
+        sent = _drive(
+            self._echo_app(),
+            "/t.S/M",
+            frame_message(encode(Ping(text="a" * 4096))),
+            extra_headers=((b"grpc-accept-encoding", b"snappy,deflate"),),
+        )
+        assert not any(name == b"grpc-encoding" for name, _ in sent[0]["headers"])
+        assert self._payload(sent)[0] == 0
