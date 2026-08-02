@@ -203,6 +203,7 @@ wreath mutant                                  # this project, its tests
 wreath mutant --path src/shop/policies.py      # one file
 wreath mutant --operators cedar declaration    # two families
 wreath mutant --only ':88'                     # one mutant, by id
+wreath mutant --sample 8                       # stable whole-corpus sample
 wreath mutant --changed HEAD                   # only what you just wrote
 wreath mutant --format json > mutants.json     # the whole report, machine-readable
 ```
@@ -216,7 +217,11 @@ wreath mutant --format json > mutants.json     # the whole report, machine-reada
 | `--pytest-arg ARG` | extra argument for every pytest invocation (repeatable). Spell it with an `=` when the argument itself starts with a dash — `--pytest-arg=--ignore=tests/slow.py` — or `argparse` reads it as a flag of its own. |
 | `--timeout SECONDS` | per-mutant deadline; an overrun is `undecided`. Default 60. |
 | `--max-candidates N` | decline a mutant that would run more than `N` tests. Default 4000. |
+| `--maxfail N` | stop a mutant after `N` baseline-passing tests fail. Default 1; zero collects every killer without changing the verdict. |
+| `--jobs N` | execute `N` mutant children concurrently from the same warmed, pristine parent. Default 1. |
+| `--budget SECONDS` | total mutant-execution ceiling. Remaining controls become `timeout`/undecided and the report still exits successfully. Default unlimited. |
 | `--limit N` | stop after `N` mutants **in line order** — a smoke test of the setup, not a way to reach new code. |
+| `--sample N` | choose `N` eligible ids by stable whole-corpus hash, then compile and run only those controls. Alternative to `--limit`. |
 | `--changed REF` | only mutants on lines that differ from `REF`. Untracked `.py` files count entirely. Composes with `--limit`. |
 | `--verbose` | also list what was killed, and which test caught each. |
 | `--quiet` | no per-mutant progress on stderr. |
@@ -230,6 +235,13 @@ appended, which made the only bound the tool had unable to reach the one code a
 run was usually about: a real pass reported `0 killed / 3 survived / 37
 unreached` describing a function nobody had touched. `--path` cannot address
 part of a file, so it is no help either.
+
+`--sample N` is the confidence-oriented bound. It ranks every eligible stable
+identifier by a deterministic hash, selects `N` across the whole corpus, and
+only then imports and compiles the selected controls. Repeating it on the same
+tree asks the same question; adding controls can change the sample. It composes
+with source, operator, selector, and changed-line filters, but not with
+`--limit`, because two competing bounds would make the population unclear.
 
 `--changed REF` is the answer to that workflow. It restricts candidates to lines
 that differ from a git ref — `--changed HEAD` for uncommitted work, `--changed

@@ -29,9 +29,9 @@ Two consequences shape the operators:
 from __future__ import annotations
 
 import ast
-import copy
 import gc
 import sys
+import weakref
 from dataclasses import dataclass, field
 from types import CodeType, FunctionType, MethodType, ModuleType
 from typing import Any
@@ -109,8 +109,19 @@ def find_code(root: CodeType, qualname: str) -> CodeType | None:
     return None
 
 
-def compile_module(tree: ast.Module, filename: str) -> CodeType:
-    ast.fix_missing_locations(tree)
+def compile_module(tree: ast.Module, filename: str, *, locate: bool = True) -> CodeType:
+    """Compile a module AST.
+
+    `locate=False` is for a tree from `transform_module`, which has already
+    given locations to the only nodes that could be missing them -- the ones it
+    just built. Everything else in that tree is shared with the parse, so it
+    carries the parser's own positions, and walking the whole module to
+    rediscover that costs as much again as the compile: 5.1 ms against 5.7 ms
+    on a 6,701-node module. Left on by default, because a tree assembled any
+    other way has not made that promise.
+    """
+    if locate:
+        ast.fix_missing_locations(tree)
     return compile(tree, filename, "exec", dont_inherit=True, optimize=0)
 
 
@@ -434,30 +445,166 @@ class AttributePatch:
         self._previous = _UNSET
 
 
-def transform_module(tree: ast.Module, node_id: int, mutate: Any) -> ast.Module:
-    """Deep-copy `tree` and apply `mutate` to the node tagged `node_id`.
+def clone_tree(node: Any) -> Any:
+    """Copy an AST, carrying `_mutant_id` tags, without `copy.deepcopy`.
 
-    Nodes are tagged once, before any copying, and `copy.deepcopy` carries the
-    tag along -- so the target is found by identity of intent rather than by
-    replaying a traversal order that a transform may have changed.
+    This is the single most expensive thing a mutation run does. Every mutant
+    copies the whole module before touching one node, so the copy is per-mutant
+    while the compile it feeds is the same size -- and `copy.deepcopy` was
+    running about four times the cost of that compile, i.e. ~80% of the
+    per-mutant AST work.
+
+    `deepcopy` is general: it maintains a memo table so shared and cyclic
+    references survive, and dispatches per object through the copy protocol. An
+    AST needs neither. It is a tree, its nodes are plain field containers, and
+    the only non-node values in it are immutable scalars, so a direct recursive
+    copy is correct and much cheaper.
+
+    Nodes are built with `__new__` rather than `cls()`: the generated `__init__`
+    now warns about missing required arguments (an error in 3.15), and skipping
+    it is also the faster path. Fields genuinely absent on the original -- an
+    optional the parser never set -- stay absent rather than being invented.
+
+    Measured against `copy.deepcopy`, whole-module, with identical `ast.dump`,
+    identical compiled `co_code`, and identical tag sets asserted: 20.2 ms ->
+    6.1 ms on `http_client.py` (6,701 nodes) and 52.8 ms -> 18.6 ms on `app.py`
+    (17,440 nodes), so 3.3x and 2.8x.
     """
-    clone = copy.deepcopy(tree)
-    applier = _Applier(node_id, mutate)
-    result = applier.visit(clone)
-    if not applier.hit:
-        raise PatchError(f"node {node_id} vanished before it could be mutated")
-    return result
-
-
-class _Applier(ast.NodeTransformer):
-    def __init__(self, node_id: int, mutate: Any) -> None:
-        self.node_id = node_id
-        self.mutate = mutate
-        self.hit = False
-
-    def visit(self, node: ast.AST) -> Any:
-        self.generic_visit(node)
-        if getattr(node, "_mutant_id", None) == self.node_id:
-            self.hit = True
-            return self.mutate(node)
+    if isinstance(node, list):
+        return [clone_tree(item) for item in node]
+    if not isinstance(node, ast.AST):
+        # Constants, identifiers and the like: immutable, so sharing is safe.
         return node
+    cls = node.__class__
+    new = cls.__new__(cls)
+    for name in node._fields:
+        try:
+            value = getattr(node, name)
+        except AttributeError:
+            continue
+        setattr(new, name, clone_tree(value))
+    for name in node._attributes:
+        try:
+            setattr(new, name, getattr(node, name))
+        except AttributeError:
+            pass
+    tag = getattr(node, "_mutant_id", None)
+    if tag is not None:
+        new._mutant_id = tag
+    return new
+
+
+def _shallow(node: ast.AST) -> ast.AST:
+    """One node, its fields and attributes carried by reference."""
+    cls = node.__class__
+    new = cls.__new__(cls)
+    for name in node._fields:
+        try:
+            setattr(new, name, getattr(node, name))
+        except AttributeError:
+            continue
+    for name in node._attributes:
+        try:
+            setattr(new, name, getattr(node, name))
+        except AttributeError:
+            pass
+    tag = getattr(node, "_mutant_id", None)
+    if tag is not None:
+        new._mutant_id = tag
+    return new
+
+
+#: Spine indexes, keyed weakly by the parsed tree so a module that goes out of
+#: scope takes its index with it. Keyed on the tree rather than stored on it
+#: because the tree is the caller's, and because `clone_tree` would otherwise
+#: have to know not to carry a stale index onto a copy.
+_SPINES: weakref.WeakKeyDictionary[ast.Module, tuple[dict[int, Any], dict[int, ast.AST]]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _spine_index(tree: ast.Module) -> tuple[dict[int, Any], dict[int, ast.AST]]:
+    """Where every node sits in its parent, and which node carries each tag.
+
+    Built once per module and cached on the tree, because one parse feeds every
+    candidate in that file -- the cost is amortised over hundreds of mutants
+    rather than paid by each.
+    """
+    cached = _SPINES.get(tree)
+    if cached is not None:
+        return cached
+    parents: dict[int, Any] = {}
+    tagged: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        tag = getattr(parent, "_mutant_id", None)
+        if tag is not None:
+            tagged[tag] = parent
+        for name, value in ast.iter_fields(parent):
+            if isinstance(value, list):
+                for index, item in enumerate(value):
+                    if isinstance(item, ast.AST):
+                        parents[id(item)] = (parent, name, index)
+            elif isinstance(value, ast.AST):
+                parents[id(value)] = (parent, name, None)
+    _SPINES[tree] = (parents, tagged)
+    return parents, tagged
+
+
+def transform_module(tree: ast.Module, node_id: int, mutate: Any) -> ast.Module:
+    """Apply `mutate` to the node tagged `node_id`, leaving `tree` untouched.
+
+    Only two things are copied: the target node's subtree, deeply, and the
+    ancestors between it and the module, shallowly. Every sibling subtree is
+    *shared* with the original, which is sound because the result is read once
+    -- `compile()` does not mutate an AST -- and because the original is needed
+    intact for the next mutant.
+
+    The deep copy of the target cannot be dropped as well, and that is the whole
+    reason this is not simply an in-place edit with an undo. Several transforms
+    in `operators.py` rewrite the node they are handed rather than building a
+    replacement -- `_drop_keyword` assigns `call.keywords`, `_return_true`
+    assigns `function.body` -- so `mutate` must be given something disposable.
+    What matters is that none of them reach *outside* the node they are given,
+    which is what makes copying its subtree alone sufficient.
+
+    This replaces a `copy.deepcopy` of the entire module per mutant. The target
+    subtree is usually a `Call` or a `Compare` of a few dozen nodes against a
+    module of thousands, so the copy stops scaling with file size and starts
+    scaling with the size of the thing being mutated.
+    """
+    parents, tagged = _spine_index(tree)
+    target = tagged.get(node_id)
+    if target is None:
+        raise PatchError(f"node {node_id} vanished before it could be mutated")
+
+    # Disposable, so a transform may rewrite it in place.
+    replacement: Any = mutate(clone_tree(target))
+
+    # Give positions to the nodes this just built, and only those: every other
+    # node in the result is shared with the parse and already has the parser's.
+    # `copy_location` only where one is absent, so a transform that returned an
+    # existing subtree -- `_take_branch` hands back one arm of an `IfExp` --
+    # keeps its own line rather than inheriting the branch's.
+    if isinstance(replacement, ast.AST):
+        if not hasattr(replacement, "lineno") and hasattr(target, "lineno"):
+            ast.copy_location(replacement, target)
+        ast.fix_missing_locations(replacement)
+
+    child_old: ast.AST = target
+    child_new: Any = replacement
+    while True:
+        entry = parents.get(id(child_old))
+        if entry is None:
+            break  # reached the module
+        parent, field, index = entry
+        parent_new = _shallow(parent)
+        if index is None:
+            setattr(parent_new, field, child_new)
+        else:
+            items = list(getattr(parent, field))
+            items[index] = child_new
+            setattr(parent_new, field, items)
+        child_old, child_new = parent, parent_new
+    if not isinstance(child_new, ast.Module):  # pragma: no cover - defensive
+        raise PatchError(f"node {node_id} is not inside a module")
+    return child_new

@@ -26,14 +26,16 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import hashlib
 import importlib
 import io
 import json
 import os
+import re
 import signal
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -60,7 +62,32 @@ DEFAULT_MAX_CANDIDATES = 4000
 #: real outcome, but it must not hold the run hostage.
 DEFAULT_TIMEOUT = 60.0
 
+#: Mutant children to execute at once.  The parent forks them from one warmed,
+#: pristine interpreter, so this costs neither another import graph nor a
+#: thread calling ``fork()``.  One remains the public command's conservative
+#: default; ``wreath test`` opts into a measured bounded value.
+DEFAULT_JOBS = 1
+
+#: Failures a mutant's test run collects before pytest stops it.
+#:
+#: One, because one is what the verdict reads: `KILLED` is decided by whether
+#: *anything* that passed at baseline failed, and the text report prints
+#: `killers[0]`. Every test after the first failure was being run so its result
+#: could be discarded -- on `wreath.cache_control` that was 330 test executions
+#: where 73 produced the same twenty verdicts, and the ratio grows with the
+#: candidate set, so a hot-path control selecting most of the suite wastes far
+#: more than this module does.
+#:
+#: Zero restores exhaustive collection. Raise it to gather more entries for the
+#: `killers` list in `--format json`, which is capped at twenty regardless.
+DEFAULT_MAXFAIL = 1
+
 _PYTEST_BASE = ("-q", "--no-header", "-p", "no:cacheprovider", "-p", "no:randomly")
+
+#: Tests each mutant child actually executed, appended per mutant in run order.
+#: A counter rather than a stopwatch, so it says what a change to the selection
+#: or the failure bound did even on a machine that is busy with something else.
+TESTS_RUN: list[int] = []
 
 
 @dataclass
@@ -164,14 +191,24 @@ def build_plan(
     operators: Sequence[str] = (),
     only: Sequence[str] = (),
     changed: str | None = None,
+    selected_ids: frozenset[str] | None = None,
 ) -> Plan:
     """Compile every mutation this run will attempt."""
     plan = Plan()
     seen: dict[str, int] = {}
     touched = changed_lines(repo, changed) if changed is not None else None
+    selected_paths = None
+    if selected_ids is not None:
+        selected_paths = {
+            identifier.split("@", 1)[1].rpartition(":")[0]
+            for identifier in selected_ids
+        }
     for path in discover(roots):
         name = module_name_for(path)
         if name is None or name.startswith("wreath._mutant"):
+            continue
+        relative = str(path.relative_to(repo)) if path.is_relative_to(repo) else str(path)
+        if selected_paths is not None and relative not in selected_paths:
             continue
         try:
             source = path.read_text(encoding="utf-8")
@@ -179,19 +216,12 @@ def build_plan(
         except (OSError, SyntaxError, ValueError) as error:
             plan.errors.append((str(path), f"unreadable: {error}"))
             continue
-        try:
-            importlib.import_module(name)
-        except BaseException as error:  # noqa: BLE001 - a target that cannot be
-            # imported contributes no mutants; naming it is the whole point, and
-            # an optional-dependency ImportError must not end the run.
-            plan.errors.append((name, f"not importable: {type(error).__name__}: {error}"))
-            continue
-        relative = str(path.relative_to(repo)) if path.is_relative_to(repo) else str(path)
         if touched is not None and relative not in touched:
             continue
-        plan.sources.append(relative)
+        if selected_ids is None:
+            plan.sources.append(relative)
         scopes = tag(tree)
-        baseline_code = compile_module(tree, str(path))
+        selected: list[tuple[Candidate, str]] = []
         for candidate in scan(tree, name):
             if operators and not any(candidate.operator.startswith(p) for p in operators):
                 continue
@@ -210,6 +240,22 @@ def build_plan(
                 identifier = f"{identifier}#{count}"
             if only and not any(token in identifier for token in only):
                 continue
+            if selected_ids is not None and identifier not in selected_ids:
+                continue
+            selected.append((candidate, identifier))
+        if not selected:
+            continue
+        if selected_ids is not None:
+            plan.sources.append(relative)
+        try:
+            importlib.import_module(name)
+        except BaseException as error:  # noqa: BLE001 - a target that cannot be
+            # imported contributes no mutants; naming it is the whole point, and
+            # an optional-dependency ImportError must not end the run.
+            plan.errors.append((name, f"not importable: {type(error).__name__}: {error}"))
+            continue
+        baseline_code = compile_module(tree, str(path))
+        for candidate, identifier in selected:
             mutation = _build(
                 candidate, tree, scopes, baseline_code, name, relative, str(path), identifier
             )
@@ -225,6 +271,112 @@ def build_plan(
                 lines.update(candidate.watch)
                 plan.watch[mutation.identifier] = (candidate.line, *candidate.watch)
     return plan
+
+
+def sample_identifiers(
+    roots: Sequence[Path],
+    repo: Path,
+    count: int,
+    *,
+    operators: Sequence[str] = (),
+    only: Sequence[str] = (),
+    changed: str | None = None,
+) -> tuple[str, ...]:
+    """Choose a stable whole-corpus sample without compiling every mutation.
+
+    Hash ranking gives every eligible identifier the same deterministic chance
+    of selection.  It deliberately does not use the discovery order: source
+    order is exactly why ``--limit`` spends a small budget at file heads.
+    """
+    if count < 1:
+        raise ValueError("mutation sample size must be at least 1")
+    touched = changed_lines(repo, changed) if changed is not None else None
+    seen: dict[str, int] = {}
+    identifiers: list[str] = []
+    for path in discover(roots):
+        name = module_name_for(path)
+        if name is None or name.startswith("wreath._mutant"):
+            continue
+        relative = str(path.relative_to(repo)) if path.is_relative_to(repo) else str(path)
+        if touched is not None and relative not in touched:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (OSError, SyntaxError, ValueError):
+            # The selected build pass reports errors for selected sources. A
+            # file that cannot yield identifiers cannot enter the sample.
+            continue
+        tag(tree)
+        for candidate in scan(tree, name):
+            if operators and not any(candidate.operator.startswith(p) for p in operators):
+                continue
+            if touched is not None and candidate.line not in touched[relative]:
+                continue
+            identifier = f"{candidate.operator}@{relative}:{candidate.line}"
+            duplicate = seen.get(identifier, 0)
+            seen[identifier] = duplicate + 1
+            if duplicate:
+                identifier = f"{identifier}#{duplicate}"
+            if only and not any(token in identifier for token in only):
+                continue
+            identifiers.append(identifier)
+
+    def rank(identifier: str) -> tuple[bytes, str]:
+        digest = hashlib.blake2b(identifier.encode(), digest_size=16).digest()
+        return digest, identifier
+
+    return tuple(sorted(identifiers, key=rank)[:count])
+
+
+def watch_selected_identifiers(
+    roots: Sequence[Path],
+    repo: Path,
+    selected_ids: frozenset[str],
+) -> tuple[dict[str, frozenset[int]], frozenset[str]]:
+    """Find only the lines a selected sample needs, without importing targets."""
+    seen: dict[str, int] = {}
+    watched: dict[str, set[int]] = {}
+    whole_file: set[str] = set()
+    selected_paths = {
+        identifier.split("@", 1)[1].rpartition(":")[0]
+        for identifier in selected_ids
+    }
+    for path in discover(roots):
+        name = module_name_for(path)
+        if name is None or name.startswith("wreath._mutant"):
+            continue
+        relative = str(path.relative_to(repo)) if path.is_relative_to(repo) else str(path)
+        if relative not in selected_paths:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        tag(tree)
+        for candidate in scan(tree, name):
+            identifier = f"{candidate.operator}@{relative}:{candidate.line}"
+            duplicate = seen.get(identifier, 0)
+            seen[identifier] = duplicate + 1
+            if duplicate:
+                identifier = f"{identifier}#{duplicate}"
+            if identifier not in selected_ids:
+                continue
+            filename = str(path)
+            if candidate.kind == "value":
+                whole_file.add(filename)
+                try:
+                    span = len(path.read_text(encoding="utf-8").splitlines()) + 1
+                except OSError:
+                    continue
+                watched.setdefault(filename, set()).update(range(1, span))
+            else:
+                lines = watched.setdefault(filename, set())
+                lines.add(candidate.line)
+                lines.update(candidate.watch)
+    return (
+        {path: frozenset(lines) for path, lines in watched.items()},
+        frozenset(whole_file),
+    )
 
 
 def _build(
@@ -254,7 +406,7 @@ def _build(
         return "no transform"
     try:
         mutated = transform_module(tree, candidate.node_id, candidate.mutate)
-        code = compile_module(mutated, filename)
+        code = compile_module(mutated, filename, locate=False)
     except (PatchError, SyntaxError, ValueError, TypeError) as error:
         return f"did not compile: {type(error).__name__}: {error}"
     replacement = find_code(code, candidate.scope_name)
@@ -281,6 +433,26 @@ class Baseline:
     index: dict[tuple[str, int], tuple[str, ...]]
     per_file: dict[str, tuple[str, ...]]
     seconds: float
+
+
+def read_baseline(path: Path) -> Baseline:
+    """Read coverage captured by ``wreath test``'s ordinary run."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        hits = {
+            (key.rpartition(":")[0], int(key.rpartition(":")[2])): tuple(nodes)
+            for key, nodes in payload["hits"]
+        }
+        files = {key: tuple(nodes) for key, nodes in payload["files"].items()}
+        return Baseline(
+            passed=frozenset(payload["passed"]),
+            failed=tuple(payload["failed"]),
+            index=hits,
+            per_file=files,
+            seconds=float(payload["seconds"]),
+        )
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        raise ValueError(f"invalid reused mutation baseline {path}: {error}") from error
 
 
 def _pytest_argv(targets: Sequence[str], extra: Sequence[str]) -> list[str]:
@@ -376,10 +548,72 @@ def candidates_for(
     found: set[str] = set()
     for line in plan.watch.get(mutation.identifier, (mutation.site.line,)):
         found.update(baseline.index.get((absolute, line), ()))
-    return tuple(sorted(n for n in found if n in baseline.passed))
+    # A direct ``tests/test_feature.py`` is normally the focused contract;
+    # deeper integration and corpus suites are the wider net. Pytest stops on
+    # the first objection, so put the direct contract first without excluding
+    # a single candidate. This is ordering only -- the verdict set is unchanged.
+    source_stem = site.stem.removeprefix("_")
+    return tuple(
+        sorted(
+            (n for n in found if n in baseline.passed),
+            key=lambda nodeid: (
+                source_stem not in Path(nodeid.split("::", 1)[0]).stem,
+                len(Path(nodeid.split("::", 1)[0]).parts),
+                nodeid,
+            ),
+        )
+    )
 
 
-def run_mutant(
+@dataclass(slots=True)
+class RunningMutant:
+    """A forked mutant child that the parent can reap without blocking."""
+
+    pid: int
+    target: Path
+    started: float
+    timeout: float
+
+
+_PROBE_NOISE = frozenset({
+    "always", "branch", "choice", "clause", "compound", "condition",
+    "control", "else", "fires", "from", "guarded", "into", "never",
+    "operand", "statement", "take", "than", "that", "then", "this",
+    "when", "with",
+})
+
+
+def _focused_probe(mutation: Mutation, tests: Sequence[str]) -> tuple[str, ...]:
+    """The one candidate whose name best describes the removed control.
+
+    This is only a fast first objection. A pass still runs the complete
+    candidate set with normal pytest session semantics, so a heuristic miss can
+    cost one tiny invocation but can never turn a survivor into a kill or hide
+    a candidate. A hit avoids importing dozens of unrelated candidate files.
+    """
+    if len(tests) < 2:
+        return ()
+    def words(value: str) -> set[str]:
+        separated = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", value).replace("_", " ")
+        return {
+            term for term in re.findall(r"[a-z0-9]+", separated.lower())
+            if len(term) >= 3 and term not in _PROBE_NOISE
+        }
+
+    control_terms = words(mutation.control)
+    context_terms = words(
+        f"{mutation.site.scope} {Path(mutation.site.path).stem}"
+    )
+    scored: list[tuple[int, int, str]] = []
+    for nodeid in tests:
+        node_terms = words(nodeid)
+        score = 4 * len(control_terms & node_terms) + len(context_terms & node_terms)
+        scored.append((score, -len(nodeid), nodeid))
+    score, _length, nodeid = max(scored)
+    return (nodeid,) if score >= 2 else ()
+
+
+def start_mutant(
     mutation: Mutation,
     tests: Sequence[str],
     *,
@@ -387,8 +621,14 @@ def run_mutant(
     workdir: Path,
     timeout: float,
     ordinal: int,
-) -> tuple[Outcome, tuple[str, ...], float, str]:
-    """Fork, install the mutation, run the candidate tests, report."""
+    maxfail: int = DEFAULT_MAXFAIL,
+) -> RunningMutant:
+    """Fork a child that installs one mutation and runs its candidates.
+
+    `maxfail` bounds how many failures the child collects before pytest stops.
+    Zero -- the default -- runs the whole candidate set, which is what the
+    verdict never needed: `KILLED` is decided by whether *anything* failed.
+    """
     import pytest
 
     target = workdir / f"m{ordinal}.json"
@@ -412,34 +652,75 @@ def run_mutant(
             devnull = os.open(os.devnull, os.O_WRONLY)
             os.dup2(devnull, 1)
             os.dup2(devnull, 2)
-            code = int(pytest.main(_pytest_argv(tests, extra), plugins=[recorder]))
+            child_extra = list(extra)
+            if maxfail:
+                # The mutant child only, never the baseline: the baseline's
+                # whole product is the full pass/fail set and the line index
+                # under it, and stopping it early would silently shrink the
+                # candidate sets every later mutant is selected from.
+                child_extra.append(f"--maxfail={maxfail}")
+            ran = 0
+            probe = _focused_probe(mutation, tests)
+            if probe:
+                code = int(
+                    pytest.main(_pytest_argv(probe, child_extra), plugins=[recorder])
+                )
+                ran += len(recorder.passed | recorder.failed)
+            else:
+                code = 0
+            if not recorder.failed and code in (0, 5):
+                # A focused pass proves only that one candidate did not object.
+                # Run the untouched full set to decide the verdict.
+                recorder = OutcomeRecorder()
+                code = int(
+                    pytest.main(_pytest_argv(tests, child_extra), plugins=[recorder])
+                )
+                ran += len(recorder.passed | recorder.failed)
             target.write_text(
-                json.dumps({"code": code, "failed": sorted(recorder.failed)}), encoding="utf-8"
+                json.dumps(
+                    {
+                        "code": code,
+                        "failed": sorted(recorder.failed),
+                        # How many tests actually executed. A counter rather
+                        # than a stopwatch, so it survives a loaded machine.
+                        "ran": ran,
+                    }
+                ),
+                encoding="utf-8",
             )
         finally:
             os._exit(0)
 
-    deadline = started + timeout
-    while True:
-        done, status = os.waitpid(pid, os.WNOHANG)
-        if done:
-            break
-        if time.perf_counter() > deadline:
-            os.kill(pid, signal.SIGKILL)
-            os.waitpid(pid, 0)
-            return (Outcome.TIMEOUT, (), time.perf_counter() - started,
-                    f"exceeded {timeout:g}s; undecided")
-        time.sleep(0.002)
-    elapsed = time.perf_counter() - started
-    if not target.exists():
+    return RunningMutant(pid=pid, target=target, started=started, timeout=timeout)
+
+
+def poll_mutant(
+    running: RunningMutant,
+) -> tuple[Outcome, tuple[str, ...], float, str] | None:
+    """Return a completed child's verdict, or ``None`` while it is running."""
+    done, status = os.waitpid(running.pid, os.WNOHANG)
+    if not done:
+        if time.perf_counter() <= running.started + running.timeout:
+            return None
+        os.kill(running.pid, signal.SIGKILL)
+        os.waitpid(running.pid, 0)
+        return (
+            Outcome.TIMEOUT,
+            (),
+            time.perf_counter() - running.started,
+            f"exceeded {running.timeout:g}s; undecided",
+        )
+    elapsed = time.perf_counter() - running.started
+    if not running.target.exists():
         signalled = os.WIFSIGNALED(status)
         note = "the child died before reporting"
         if signalled:
             return (Outcome.KILLED, (), elapsed,
                     f"the interpreter took signal {os.WTERMSIG(status)} with the control removed")
         return (Outcome.ERROR, (), elapsed, note)
-    payload = json.loads(target.read_text(encoding="utf-8"))
-    target.unlink(missing_ok=True)
+    payload = json.loads(running.target.read_text(encoding="utf-8"))
+    running.target.unlink(missing_ok=True)
+    TESTS_RUN.append(int(payload.get("ran", 0)))
     if "error" in payload:
         return (Outcome.ERROR, (), elapsed, payload["error"])
     failed = tuple(payload["failed"])
@@ -449,6 +730,194 @@ def run_mutant(
         return (Outcome.KILLED, (), elapsed,
                 f"pytest exited {payload['code']} with the control removed")
     return (Outcome.SURVIVED, (), elapsed, "")
+
+
+def run_mutant(
+    mutation: Mutation,
+    tests: Sequence[str],
+    *,
+    extra: Sequence[str],
+    workdir: Path,
+    timeout: float,
+    ordinal: int,
+    maxfail: int = DEFAULT_MAXFAIL,
+) -> tuple[Outcome, tuple[str, ...], float, str]:
+    """Fork one mutant and block until it reports (the compatibility helper)."""
+    running = start_mutant(
+        mutation,
+        tests,
+        extra=extra,
+        workdir=workdir,
+        timeout=timeout,
+        ordinal=ordinal,
+        maxfail=maxfail,
+    )
+    while True:
+        result = poll_mutant(running)
+        if result is not None:
+            return result
+        time.sleep(0.002)
+
+
+def _live_trace_events(
+    directory: Path, positions: dict[Path, int]
+) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for path in sorted(directory.glob("live-*.jsonl")):
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        lines = raw.splitlines()
+        if raw and not raw.endswith("\n"):
+            lines = lines[:-1]
+        start = positions.get(path, 0)
+        for line in lines[start:]:
+            value = json.loads(line)
+            if isinstance(value, dict):
+                events.append(value)
+        positions[path] = len(lines)
+    return events
+
+
+def _run_live_mutants(
+    plan: Plan,
+    repo: Path,
+    stream_dir: Path,
+    baseline_wait: Path,
+    *,
+    extra: Sequence[str],
+    workdir: Path,
+    timeout: float,
+    maxfail: int,
+    jobs: int,
+    origin: float,
+    emit: Callable[..., None],
+) -> tuple[dict[int, Verdict], int, int, int, float | None]:
+    """Try one completed green candidate while the baseline is still running.
+
+    An early failure is conclusive: that exact test has already passed without
+    the mutation and now fails with it. An early pass is deliberately only a
+    probe; the sealed baseline may name later candidates, so the ordinary final
+    scheduler runs that mutant again. This asymmetry lets gold appear early
+    without ever turning partial evidence into a survivor.
+    """
+    watched: dict[tuple[str, int], list[tuple[int, Mutation]]] = {}
+    for ordinal, mutation in enumerate(plan.mutations):
+        if isinstance(mutation.patch, ValuePatch):
+            continue
+        site = Path(mutation.site.path)
+        absolute = str(site if site.is_absolute() else (repo / site).resolve())
+        for line in plan.watch.get(mutation.identifier, (mutation.site.line,)):
+            watched.setdefault((absolute, line), []).append((ordinal, mutation))
+
+    positions: dict[Path, int] = {}
+    queued: list[tuple[int, Mutation, str]] = []
+    tried: set[int] = set()
+    active: dict[int, tuple[RunningMutant, Mutation, str]] = {}
+    killed: dict[int, Verdict] = {}
+    probes = 0
+    completed_probes = 0
+    cancelled_at_seal = 0
+    first_started: float | None = None
+
+    while not baseline_wait.exists() or active:
+        if baseline_wait.exists() and active:
+            # The complete candidate index is now available. Do not let a
+            # speculative child extend the tail; the final scheduler will run
+            # it against all sealed candidates instead.
+            for ordinal, (running, _mutation, _nodeid) in tuple(active.items()):
+                done, _status = os.waitpid(running.pid, os.WNOHANG)
+                if not done:
+                    os.kill(running.pid, signal.SIGKILL)
+                    os.waitpid(running.pid, 0)
+                running.target.unlink(missing_ok=True)
+                emit("finished", ordinal=ordinal, outcome="retry", killers=[])
+                cancelled_at_seal += 1
+            active.clear()
+            break
+
+        if not baseline_wait.exists():
+            for event in _live_trace_events(stream_dir, positions):
+                nodeid = event.get("nodeid")
+                hits = event.get("hits")
+                if not isinstance(nodeid, str) or not isinstance(hits, list):
+                    continue
+                candidates: dict[int, Mutation] = {}
+                for hit in hits:
+                    if not isinstance(hit, list) or len(hit) != 2:
+                        continue
+                    path, line = hit
+                    if not isinstance(path, str) or not isinstance(line, int):
+                        continue
+                    for ordinal, mutation in watched.get((path, line), ()):
+                        candidates[ordinal] = mutation
+                for ordinal, mutation in sorted(candidates.items()):
+                    if ordinal in tried:
+                        continue
+                    tried.add(ordinal)
+                    queued.append((ordinal, mutation, nodeid))
+
+        while queued and len(active) < jobs and not baseline_wait.exists():
+            ordinal, mutation, nodeid = queued.pop(0)
+            probes += 1
+            if first_started is None:
+                first_started = time.perf_counter() - origin
+            emit(
+                "started",
+                ordinal=ordinal,
+                phase="live",
+                tests=[nodeid.split("::", 1)[0]],
+            )
+            active[ordinal] = (
+                start_mutant(
+                    mutation,
+                    (nodeid,),
+                    extra=extra,
+                    workdir=workdir,
+                    timeout=timeout,
+                    ordinal=ordinal,
+                    maxfail=maxfail,
+                ),
+                mutation,
+                nodeid,
+            )
+
+        completed = False
+        for ordinal, (running, mutation, nodeid) in tuple(active.items()):
+            result = poll_mutant(running)
+            if result is None:
+                continue
+            completed = True
+            completed_probes += 1
+            del active[ordinal]
+            outcome, killers, seconds, note = result
+            if outcome == Outcome.KILLED:
+                killed[ordinal] = Verdict(
+                    mutation,
+                    outcome,
+                    candidates=(nodeid,),
+                    killers=killers,
+                    seconds=seconds,
+                    note=note,
+                )
+                emit(
+                    "finished",
+                    ordinal=ordinal,
+                    outcome=outcome.value,
+                    killers=list(killers),
+                )
+            else:
+                emit("finished", ordinal=ordinal, outcome="retry", killers=[])
+        if not completed:
+            time.sleep(0.01)
+    return (
+        killed,
+        probes,
+        completed_probes,
+        cancelled_at_seal,
+        first_started,
+    )
 
 
 def execute(
@@ -463,14 +932,62 @@ def execute(
     timeout: float = DEFAULT_TIMEOUT,
     max_candidates: int = DEFAULT_MAX_CANDIDATES,
     limit: int = 0,
+    sample: int = 0,
     changed: str | None = None,
     progress: bool = True,
+    maxfail: int = DEFAULT_MAXFAIL,
+    baseline: Baseline | None = None,
+    baseline_wait: Path | None = None,
+    baseline_stream: Path | None = None,
+    budget: float = 0.0,
+    jobs: int = DEFAULT_JOBS,
+    reclaim_workers: bool = False,
+    preselected: frozenset[str] | None = None,
+    activity_file: Path | None = None,
 ) -> Report:
     started = time.perf_counter()
-    plan = build_plan(roots, repo, operators=operators, only=only, changed=changed)
+    if jobs < 1:
+        raise ValueError("jobs must be at least 1")
+    selected_ids = preselected
+    if selected_ids is None and sample:
+        selected_ids = frozenset(
+            sample_identifiers(
+                roots,
+                repo,
+                sample,
+                operators=operators,
+                only=only,
+                changed=changed,
+            )
+        )
+    plan = build_plan(
+        roots,
+        repo,
+        operators=operators,
+        only=only,
+        changed=changed,
+        selected_ids=selected_ids,
+    )
     if limit:
         plan.mutations = plan.mutations[:limit]
     report = Report(sources=tuple(plan.sources))
+
+    def emit(event: str, **values: object) -> None:
+        if activity_file is None:
+            return
+        with activity_file.open("a", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps(
+                    {
+                        "event": event,
+                        "at_seconds": round(time.perf_counter() - started, 3),
+                        **values,
+                    }
+                )
+                + "\n"
+            )
+
+    emit("planned", total=len(plan.mutations))
 
     if progress:
         print(
@@ -479,54 +996,202 @@ def execute(
             file=sys.stderr,
         )
 
-    import pytest
+    reused_baseline = baseline is not None or baseline_wait is not None
+    if baseline_wait is None:
+        import pytest
 
-    # Warm the parent: collection imports every test module, and a fork
-    # inherits all of it. Its own output is noise -- the run has not started.
-    with contextlib.redirect_stdout(io.StringIO()):
-        pytest.main([*_PYTEST_BASE, "--collect-only", *extra, *tests])
+        # A known baseline narrows warmup to candidate-bearing files. The live
+        # path deliberately does not collect the whole suite before it knows a
+        # candidate: that repeated every import graph beside xdist and cost ten
+        # CPU-seconds for a three-control sample. Its forked children import the
+        # one completed green test they are actually handed instead.
+        warm_targets = tests
+        if baseline is not None:
+            nodes = baseline.passed | frozenset(baseline.failed)
+            warm_targets = tuple(
+                sorted({node.split("::", 1)[0] for node in nodes})
+            )
+        with contextlib.redirect_stdout(io.StringIO()):
+            pytest.main([*_PYTEST_BASE, "--collect-only", *extra, *warm_targets])
 
-    baseline = run_baseline(tests, plan, extra=extra, workdir=workdir)
+    live_verdicts: dict[int, Verdict] = {}
+    if (
+        baseline is None
+        and baseline_wait is not None
+        and baseline_stream is not None
+    ):
+        (
+            live_verdicts,
+            report.live_probes,
+            report.live_completed,
+            report.live_cancelled_at_seal,
+            report.live_first_started_seconds,
+        ) = _run_live_mutants(
+            plan,
+            repo,
+            baseline_stream,
+            baseline_wait,
+            extra=extra,
+            workdir=workdir,
+            timeout=timeout,
+            maxfail=maxfail,
+            jobs=jobs,
+            origin=started,
+            emit=emit,
+        )
+        report.live_kills = len(live_verdicts)
+    if baseline is None and baseline_wait is not None:
+        # ``wreath test`` starts this process beside the ordinary pytest
+        # workers.  Planning, compilation and collection happen while their
+        # tiles turn green; the atomic baseline appears only once the whole
+        # run has sealed its pass/fail and trace evidence.
+        while not baseline_wait.exists():
+            time.sleep(0.01)
+        baseline = read_baseline(baseline_wait)
+    if baseline is None:
+        baseline = run_baseline(tests, plan, extra=extra, workdir=workdir)
     report.baseline_tests = len(baseline.passed) + len(baseline.failed)
     report.baseline_failures = baseline.failed
     report.baseline_seconds = baseline.seconds
     if progress:
         print(
-            f"wreath mutant: baseline {len(baseline.passed)} passed, "
+            f"wreath mutant: baseline{' reused' if reused_baseline else ''} "
+            f"{len(baseline.passed)} passed, "
             f"{len(baseline.failed)} failed, {baseline.seconds:.1f}s.",
             file=sys.stderr,
         )
 
+    # Live probes are bounded by the ordinary suite's own window and are killed
+    # at its seal, so charging them against this deadline only suppresses free
+    # overlap. The explicit budget is the additional post-suite tail ceiling.
+    remaining_budget = budget
+    mutation_deadline = (
+        time.perf_counter() + remaining_budget if budget else None
+    )
+    verdicts: dict[int, Verdict] = dict(live_verdicts)
+    runnable: list[tuple[int, Mutation, tuple[str, ...]]] = []
     for ordinal, mutation in enumerate(plan.mutations):
+        if ordinal in verdicts:
+            continue
         selected = candidates_for(mutation, plan, baseline, repo)
         if not selected:
-            report.verdicts.append(
-                Verdict(mutation, Outcome.UNREACHED, note="no test executed this line")
+            verdicts[ordinal] = Verdict(
+                mutation, Outcome.UNREACHED, note="no test executed this line"
+            )
+            emit(
+                "finished",
+                ordinal=ordinal,
+                outcome=Outcome.UNREACHED.value,
+                killers=[],
             )
             continue
         if len(selected) > max_candidates:
-            report.verdicts.append(
-                Verdict(
-                    mutation,
-                    Outcome.ERROR,
-                    candidates=selected,
-                    note=f"{len(selected)} candidate tests exceeds --max-candidates",
-                )
+            verdicts[ordinal] = Verdict(
+                mutation,
+                Outcome.ERROR,
+                candidates=selected,
+                note=f"{len(selected)} candidate tests exceeds --max-candidates",
+            )
+            emit(
+                "finished",
+                ordinal=ordinal,
+                outcome=Outcome.ERROR.value,
+                killers=[],
             )
             continue
-        outcome, killers, seconds, note = run_mutant(
-            mutation, selected, extra=extra, workdir=workdir, timeout=timeout, ordinal=ordinal
-        )
-        report.verdicts.append(
-            Verdict(mutation, outcome, candidates=selected, killers=killers,
-                    seconds=seconds, note=note)
-        )
-        if progress:
-            print(
-                f"  [{ordinal + 1}/{len(plan.mutations)}] {outcome.value:<10} "
-                f"{mutation.identifier} ({len(selected)} test(s), {seconds:.2f}s)",
-                file=sys.stderr,
+        runnable.append((ordinal, mutation, selected))
+
+    # Under a bounded tail, finishing three small controls is strictly more
+    # informative than timing all three out behind one broad control. The
+    # original ordinal still owns the report/grid tile; only launch order moves.
+    runnable.sort(key=lambda item: (len(item[2]), item[0]))
+
+    # During the semantic suite, three nice'd children leave its six workers
+    # the machine. Once the baseline seals those workers are gone; the default
+    # `wreath test` path can reclaim their slots without adding pipeline time.
+    # An explicit --mutant-workers value does not opt in, so resource ceilings
+    # remain literal when a caller names one.
+    scheduler_jobs = jobs
+    if reclaim_workers:
+        scheduler_jobs = max(jobs, min(6, os.cpu_count() or 1))
+
+    active: dict[
+        int, tuple[RunningMutant, Mutation, tuple[str, ...]]
+    ] = {}
+    next_runnable = 0
+    while next_runnable < len(runnable) or active:
+        while next_runnable < len(runnable) and len(active) < scheduler_jobs:
+            ordinal, mutation, selected = runnable[next_runnable]
+            next_runnable += 1
+            remaining = timeout
+            if mutation_deadline is not None:
+                remaining = min(remaining, mutation_deadline - time.perf_counter())
+            if remaining <= 0:
+                verdicts[ordinal] = Verdict(
+                    mutation,
+                    Outcome.TIMEOUT,
+                    candidates=selected,
+                    note=f"total mutation budget of {budget:g}s was exhausted; undecided",
+                )
+                emit(
+                    "finished",
+                    ordinal=ordinal,
+                    outcome=Outcome.TIMEOUT.value,
+                    killers=[],
+                )
+                continue
+            emit(
+                "started",
+                ordinal=ordinal,
+                tests=sorted({nodeid.split("::", 1)[0] for nodeid in selected}),
             )
+            active[ordinal] = (
+                start_mutant(
+                    mutation,
+                    selected,
+                    extra=extra,
+                    workdir=workdir,
+                    timeout=remaining,
+                    ordinal=ordinal,
+                    maxfail=maxfail,
+                ),
+                mutation,
+                selected,
+            )
+        completed = False
+        for ordinal, (running, mutation, selected) in tuple(active.items()):
+            result = poll_mutant(running)
+            if result is None:
+                continue
+            completed = True
+            del active[ordinal]
+            outcome, killers, seconds, note = result
+            verdicts[ordinal] = Verdict(
+                mutation,
+                outcome,
+                candidates=selected,
+                killers=killers,
+                seconds=seconds,
+                note=note,
+            )
+            emit(
+                "finished",
+                ordinal=ordinal,
+                outcome=outcome.value,
+                killers=list(killers),
+            )
+            if progress:
+                print(
+                    f"  [{ordinal + 1}/{len(plan.mutations)}] {outcome.value:<10} "
+                    f"{mutation.identifier} ({len(selected)} test(s), {seconds:.2f}s)",
+                    file=sys.stderr,
+                )
+        if active and not completed:
+            time.sleep(0.002)
+
+    report.verdicts.extend(
+        verdicts[ordinal] for ordinal in range(len(plan.mutations))
+    )
 
     for identifier, reason in plan.errors:
         report.verdicts.append(

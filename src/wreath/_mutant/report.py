@@ -1,10 +1,10 @@
 """Rendering a run so the findings are the thing you read first.
 
-The score is printed last and small on purpose. A mutation score is a ratio
-over the mutations someone thought to write, and chasing it produces tests
-shaped like the operator library. What is worth reading is the list of controls
-whose removal nothing noticed, and -- separately, because it is a different
-problem with a different fix -- the list of controls no test reaches at all.
+The report ends in an action rather than a percentage. A mutation ratio is over
+the mutations someone thought to write, and chasing it produces tests shaped
+like the operator library. What is worth reading is the list of controls whose
+removal nothing noticed, and -- separately, because it is a different problem
+with a different fix -- the list of controls no test reaches at all.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 
-from .model import Outcome, Report, Verdict
+from .model import Outcome, Report, Verdict, rate_counts
 
 _HEADINGS = {
     Outcome.SURVIVED: "SURVIVED -- the control was removed and every test still passed",
@@ -77,7 +77,6 @@ def render(report: Report, *, verbose: bool = False) -> str:
         lines.append("")
 
     counts = {outcome: len(report.by_outcome(outcome)) for outcome in Outcome}
-    score = report.score
     summary = (
         f"wreath mutant: {counts[Outcome.KILLED]} killed, "
         f"{counts[Outcome.SURVIVED]} survived, "
@@ -87,17 +86,17 @@ def render(report: Report, *, verbose: bool = False) -> str:
         f"{counts[Outcome.ERROR]} declined"
     )
     lines.append(summary)
-    if score is not None:
-        lines.append(
-            f"                {score:.0%} of decided mutants were caught, over "
-            f"{report.baseline_tests} test(s) in {report.total_seconds:.0f}s."
-        )
+    rating = rate_counts({outcome.value: count for outcome, count in counts.items()})
+    lines.append(
+        f"                {rating.label}: {rating.action}; "
+        f"{report.baseline_tests} test(s) in {report.total_seconds:.0f}s."
+    )
     if report.baseline_failures:
         lines.append(
             f"                {len(report.baseline_failures)} test(s) were already failing "
             f"before any mutation; they can never kill anything and were excluded."
         )
-    if not report.by_outcome(Outcome.SURVIVED) and not report.by_outcome(Outcome.UNREACHED):
+    if rating.tone == "good":
         lines.insert(0, "Every control this run could remove was noticed by a test.\n")
     return "\n".join(lines)
 

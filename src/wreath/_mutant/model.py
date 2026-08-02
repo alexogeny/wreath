@@ -10,6 +10,7 @@ judge, and a diff of two bytecode objects is not.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
@@ -41,6 +42,60 @@ class Outcome(StrEnum):
 
 #: Outcomes that are findings about the test suite rather than about this tool.
 FINDINGS = (Outcome.SURVIVED, Outcome.UNREACHED)
+
+
+@dataclass(frozen=True)
+class ConfidenceRating:
+    """A calm, actionable interpretation of one mutation sample."""
+
+    label: str
+    tone: str
+    action: str
+
+    def to_json(self) -> dict[str, str]:
+        return {"label": self.label, "tone": self.tone, "action": self.action}
+
+
+def rate_counts(counts: Mapping[str, int]) -> ConfidenceRating:
+    """Prefer the most actionable finding without collapsing distinct outcomes."""
+    killed = counts.get(Outcome.KILLED.value, 0)
+    survived = counts.get(Outcome.SURVIVED.value, 0)
+    unreached = counts.get(Outcome.UNREACHED.value, 0)
+    timeout = counts.get(Outcome.TIMEOUT.value, 0)
+    error = counts.get(Outcome.ERROR.value, 0)
+    if survived:
+        extra = f"; {unreached} more were not reached" if unreached else ""
+        return ConfidenceRating(
+            "REVIEW ASSERTIONS",
+            "attention",
+            f"{survived} sampled control(s) ran without an objection{extra}",
+        )
+    if unreached:
+        return ConfidenceRating(
+            "ADD COVERAGE",
+            "warning",
+            f"{unreached} sampled control(s) were not exercised by this run",
+        )
+    if timeout or error:
+        if timeout:
+            action = (
+                f"{timeout} control(s) remain undecided; increase the mutation budget "
+                "when convenient"
+            )
+        else:
+            action = f"inspect {error} control(s) the mutation tool declined"
+        return ConfidenceRating("FINISH THE SAMPLE", "incomplete", action)
+    if killed:
+        return ConfidenceRating(
+            "SAMPLE WATCHED",
+            "good",
+            f"tests objected to all {killed} sampled control removal(s)",
+        )
+    return ConfidenceRating(
+        "NO RATING",
+        "neutral",
+        "this run produced no mutation decision",
+    )
 
 
 @dataclass(frozen=True)
@@ -145,6 +200,11 @@ class Report:
     baseline_seconds: float = 0.0
     total_seconds: float = 0.0
     sources: tuple[str, ...] = ()
+    live_kills: int = 0
+    live_probes: int = 0
+    live_completed: int = 0
+    live_cancelled_at_seal: int = 0
+    live_first_started_seconds: float | None = None
 
     def by_outcome(self, outcome: Outcome) -> list[Verdict]:
         return [v for v in self.verdicts if v.outcome is outcome]
@@ -176,7 +236,19 @@ class Report:
                 "seconds": round(self.baseline_seconds, 3),
             },
             "counts": counts,
-            "score": self.score,
+            "rating": rate_counts(counts).to_json(),
             "seconds": round(self.total_seconds, 3),
+            "live_kills": self.live_kills,
+            "live": {
+                "probes": self.live_probes,
+                "completed": self.live_completed,
+                "killed": self.live_kills,
+                "cancelled_at_seal": self.live_cancelled_at_seal,
+                "first_started_seconds": (
+                    round(self.live_first_started_seconds, 3)
+                    if self.live_first_started_seconds is not None
+                    else None
+                ),
+            },
             "mutants": [v.to_json() for v in self.verdicts],
         }

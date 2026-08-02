@@ -36,7 +36,7 @@ from wreath._mutant.patch import (
     same_bytecode,
     transform_module,
 )
-from wreath._mutant.runner import build_plan, module_name_for
+from wreath._mutant.runner import build_plan, module_name_for, sample_identifiers
 from wreath.mutant import OPERATORS, Outcome, Report, Verdict, render
 
 SOURCE = textwrap.dedent(
@@ -82,6 +82,10 @@ def module(tmp_path: Path) -> Path:
 #: are bounded fixture projects, so a run that genuinely hangs is still caught,
 #: while a run merely competing for the machine is not reported as a failure.
 _NESTED_TIMEOUT = 600
+
+_CRUD_GROUP = pytest.mark.xdist_group(name="mutant_crud")
+_CEDAR_GROUP = pytest.mark.xdist_group(name="mutant_cedar")
+_SAMPLE_GROUP = pytest.mark.xdist_group(name="mutant_sample")
 
 
 def _scan(path: Path) -> list[operators.Candidate]:
@@ -832,7 +836,30 @@ def test_the_report_separates_a_control_nobody_watches_from_one_nobody_reaches()
     text = render(report)
     assert "SURVIVED" in text and "UNREACHED" in text
     assert text.index("SURVIVED") < text.index("UNREACHED")
+    assert "REVIEW ASSERTIONS" in text
+    assert "%" not in text
     assert report.score == pytest.approx(0.5)
+    document = report.to_json()
+    assert document["rating"]["label"] == "REVIEW ASSERTIONS"
+    assert "score" not in document
+
+
+@pytest.mark.parametrize(
+    ("counts", "label"),
+    [
+        ({"killed": 3}, "SAMPLE WATCHED"),
+        ({"survived": 1}, "REVIEW ASSERTIONS"),
+        ({"unreached": 1}, "ADD COVERAGE"),
+        ({"timeout": 1}, "FINISH THE SAMPLE"),
+        ({}, "NO RATING"),
+    ],
+)
+def test_confidence_ratings_name_the_next_action(
+    counts: dict[str, int], label: str
+) -> None:
+    from wreath._mutant.model import rate_counts
+
+    assert rate_counts(counts).label == label
 
 
 # -- end to end -------------------------------------------------------------
@@ -1042,6 +1069,7 @@ def _crud_outcomes(run: dict, operator: str) -> dict[str, str]:
     }
 
 
+@_CRUD_GROUP
 def test_dropping_one_operations_rule_kills_and_survives_independently(
     crud_run: dict,
 ) -> None:
@@ -1056,6 +1084,7 @@ def test_dropping_one_operations_rule_kills_and_survives_independently(
     assert outcomes["list"] in ("survived", "unreached"), crud_run["mutants"]
 
 
+@_CRUD_GROUP
 def test_widening_one_rule_to_public_kills_and_survives_independently(
     crud_run: dict,
 ) -> None:
@@ -1074,6 +1103,7 @@ def test_widening_one_rule_to_public_kills_and_survives_independently(
     assert widened["list"] in ("survived", "unreached"), crud_run["mutants"]
 
 
+@_CRUD_GROUP
 def test_unprotecting_one_column_kills_and_survives_independently(
     crud_run: dict,
 ) -> None:
@@ -1083,6 +1113,7 @@ def test_unprotecting_one_column_kills_and_survives_independently(
     assert outcomes["created_at"] in ("survived", "unreached"), crud_run["mutants"]
 
 
+@_CRUD_GROUP
 def test_the_wholesale_keyword_mutant_is_the_one_that_overstates(
     crud_run: dict,
 ) -> None:
@@ -1215,6 +1246,7 @@ def _cedar_outcomes(run: dict, operator: str) -> dict[str, str]:
     }
 
 
+@_CEDAR_GROUP
 def test_flipping_a_forbid_reaches_the_engine_compiled_at_import(
     cedar_run: dict,
 ) -> None:
@@ -1233,6 +1265,7 @@ def test_flipping_a_forbid_reaches_the_engine_compiled_at_import(
     assert outcomes == ["killed"], cedar_run["mutants"]
 
 
+@_CEDAR_GROUP
 def test_a_watched_and_an_unwatched_clause_are_told_apart(cedar_run: dict) -> None:
     """The pair. Reaching the engine is worth nothing if everything now dies."""
     outcomes = _cedar_outcomes(cedar_run, "cedar.drop-condition")
@@ -1246,12 +1279,14 @@ def test_a_watched_and_an_unwatched_clause_are_told_apart(cedar_run: dict) -> No
     assert outcomes.get(unwatched) in ("survived", "unreached"), cedar_run["mutants"]
 
 
+@_CEDAR_GROUP
 def test_deleting_the_policy_a_test_watches_is_killed(cedar_run: dict) -> None:
     deleted = _cedar_outcomes(cedar_run, "cedar.delete-policy")
     ranger = next(key for key in deleted if 'Role::"ranger"' in key)
     assert deleted[ranger] == "killed", cedar_run["mutants"]
 
 
+@_CEDAR_GROUP
 def test_no_cedar_mutant_is_declined_for_failing_to_parse(cedar_run: dict) -> None:
     """A mutation nobody could have noticed is not evidence about a suite.
 
@@ -1263,6 +1298,7 @@ def test_no_cedar_mutant_is_declined_for_failing_to_parse(cedar_run: dict) -> No
     assert declined == [], declined
 
 
+@_CEDAR_GROUP
 def test_a_comment_is_never_offered_as_a_policy(cedar_run: dict) -> None:
     controls = [
         mutant["control"]
@@ -1410,6 +1446,78 @@ def test_changed_and_limit_compose(
     assert len(json.loads(completed.stdout)["mutants"]) == 2
 
 
+def test_sample_is_stable_bounded_and_drawn_across_the_corpus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "shop"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    controls = "\n\n".join(
+        f"def authorize_{index}(value):\n"
+        f"    if value == {index}:\n"
+        "        return value\n"
+        "    return None"
+        for index in range(40)
+    )
+    target = package / "checks.py"
+    target.write_text(controls + "\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(tmp_path)
+
+    first = sample_identifiers([package], tmp_path, 5)
+    second = sample_identifiers([package], tmp_path, 5)
+
+    assert first == second
+    assert len(first) == 5
+    lines = {int(identifier.rsplit(":", 1)[1].split("#", 1)[0]) for identifier in first}
+    assert max(lines) > 30
+    plan = build_plan([package], tmp_path, selected_ids=frozenset(first))
+    assert {mutation.identifier for mutation in plan.mutations} == set(first)
+
+
+def test_sample_and_limit_are_refused_as_competing_bounds(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    root = tmp_path_factory.mktemp("mutant-competing-bounds")
+    _write_project(root, CRUD_PROJECT)
+    completed = _cli(root, "--sample", "1", "--limit", "1")
+    assert completed.returncode == 2
+    assert "alternative bounds" in completed.stderr
+
+
+def test_budget_ceiling_reports_undecided_without_failing_the_pipeline(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    root = tmp_path_factory.mktemp("mutant-budget")
+    _write_project(
+        root,
+        {
+            "shop/__init__.py": "",
+            "shop/gate.py": (
+                "def authorize(value):\n"
+                "    if value != 'ok':\n"
+                "        raise PermissionError('refused')\n"
+                "    return value\n"
+            ),
+            "tests/test_gate.py": (
+                "import pytest\n"
+                "from shop.gate import authorize\n"
+                "def test_refuses():\n"
+                "    with pytest.raises(PermissionError):\n"
+                "        authorize('bad')\n"
+            ),
+        },
+    )
+
+    completed = _cli(
+        root, "--sample", "1", "--budget", "0.0001", "--format", "json"
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    document = json.loads(completed.stdout)
+    assert document["counts"]["timeout"] == 1
+    assert document["rating"]["label"] == "FINISH THE SAMPLE"
+
+
 def test_changed_outside_a_repository_says_so(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
@@ -1424,19 +1532,25 @@ def test_changed_outside_a_repository_says_so(
 @pytest.fixture(scope="module")
 def sample_run(tmp_path_factory: pytest.TempPathFactory) -> dict:
     root = tmp_path_factory.mktemp("mutant-e2e")
+    activity = root / "mutation-activity.jsonl"
     for relative, body in PROJECT.items():
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body, encoding="utf-8")
     completed = subprocess.run(
         [sys.executable, "-m", "wreath._mutant.cli", "--path", "shop",
-         "--format", "json", "--quiet"],
+         "--format", "json", "--quiet", "--jobs", "2",
+         "--activity-file", str(activity)],
         cwd=root, capture_output=True, text=True, timeout=_NESTED_TIMEOUT, check=False,
         env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(root), "HOME": str(root)},
     )
     if completed.returncode != 0:
         pytest.fail(f"wreath mutant exited {completed.returncode}\n{completed.stderr[-4000:]}")
-    return json.loads(completed.stdout)
+    document = json.loads(completed.stdout)
+    document["_activity"] = [
+        json.loads(line) for line in activity.read_text(encoding="utf-8").splitlines()
+    ]
+    return document
 
 
 def test_a_withheld_field_set_that_stops_withholding_is_a_mutation(module: Path) -> None:
@@ -1482,16 +1596,30 @@ def test_a_run_with_survivors_still_exits_zero(
         target.write_text(body, encoding="utf-8")
     environment = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(root), "HOME": str(root)}
     base = [sys.executable, "-m", "wreath._mutant.cli", "--path", "shop", "--quiet"]
-    default = subprocess.run(
+    completed = subprocess.run(
         base, cwd=root, capture_output=True, text=True, timeout=_NESTED_TIMEOUT, check=False,
         env=environment,
     )
-    assert default.returncode == 0, default.stderr[-2000:]
-    opted_in = subprocess.run(
-        [*base, "--fail-on-survivor"], cwd=root, capture_output=True, text=True,
-        timeout=_NESTED_TIMEOUT, check=False, env=environment,
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    assert "SURVIVED" in completed.stdout or "UNREACHED" in completed.stdout
+
+    # The opt-in changes only the interpretation of this completed report. It
+    # used to launch the entire mutation engine a second time to prove one
+    # boolean at the end of `execute_mutant`, adding more than a second to every
+    # suite run while testing no additional mutation behavior.
+    from wreath._mutant.cli import _exit_status
+    from wreath._mutant.model import Mutation, Site
+
+    mutation = Mutation(
+        "id",
+        "guard.remove-raise",
+        "the refusal",
+        Site("shop/api.py", 1, "gate"),
+        "shop.api",
     )
-    assert opted_in.returncode == 1, opted_in.stdout[-2000:]
+    report = Report(verdicts=[Verdict(mutation, Outcome.SURVIVED)])
+    assert _exit_status(report, fail_on_survivor=False) == 0
+    assert _exit_status(report, fail_on_survivor=True) == 1
 
 
 def test_mutant_is_not_one_of_the_gates() -> None:
@@ -1506,6 +1634,7 @@ def test_mutant_is_not_one_of_the_gates() -> None:
     assert not any("mutant" in name for name, _ in _CHECKS), _CHECKS
 
 
+@_SAMPLE_GROUP
 def test_a_run_reports_both_a_killed_and_a_surviving_control(sample_run: dict) -> None:
     """The guard on the guard.
 
@@ -1525,6 +1654,7 @@ def test_a_run_reports_both_a_killed_and_a_surviving_control(sample_run: dict) -
     assert sample_run["counts"]["survived"] + sample_run["counts"]["unreached"] >= 1
 
 
+@_SAMPLE_GROUP
 def test_the_run_names_the_test_that_caught_each_control(sample_run: dict) -> None:
     caught = [m for m in sample_run["mutants"] if m["outcome"] == "killed"]
     assert caught
@@ -1535,6 +1665,47 @@ def test_the_run_names_the_test_that_caught_each_control(sample_run: dict) -> No
     )
 
 
+@_SAMPLE_GROUP
+def test_the_activity_stream_names_live_and_verified_test_files(sample_run: dict) -> None:
+    events = sample_run["_activity"]
+    assert events[0]["event"] == "planned"
+    assert events[0]["total"] > 0
+    started = [event for event in events if event["event"] == "started"]
+    killed = [
+        event
+        for event in events
+        if event["event"] == "finished" and event["outcome"] == "killed"
+    ]
+    assert started
+    assert all(event["tests"] for event in started)
+    assert killed
+    assert all(event["killers"] for event in killed)
+
+
+@_SAMPLE_GROUP
+def test_parallel_mutants_launch_before_the_first_child_finishes(
+    sample_run: dict,
+) -> None:
+    events = sample_run["_activity"]
+    first_started = next(
+        index for index, event in enumerate(events) if event["event"] == "started"
+    )
+    first_finished = next(
+        index
+        for index, event in enumerate(events[first_started:], start=first_started)
+        if event["event"] == "finished"
+    )
+    started = [
+        event
+        for event in events[first_started:first_finished]
+        if event["event"] == "started"
+    ]
+
+    assert len(started) == 2
+    assert len({event["ordinal"] for event in started}) == 2
+
+
+@_SAMPLE_GROUP
 def test_a_mutant_only_runs_the_tests_that_reach_it(sample_run: dict) -> None:
     """Selection is the difference between a tool people run and one they mean to.
 
@@ -1546,6 +1717,7 @@ def test_a_mutant_only_runs_the_tests_that_reach_it(sample_run: dict) -> None:
     assert max(counts.values()) < 3, counts
 
 
+@_SAMPLE_GROUP
 def test_a_refusal_no_test_ever_triggers_is_reported_unreached_not_survived(
     sample_run: dict,
 ) -> None:
@@ -1652,7 +1824,22 @@ def test_resolve_scope_still_refuses_something_that_is_not_callable_at_all() -> 
         resolve_scope(this_module, "_Subject.LIMIT")
 
 
-def test_no_real_module_reports_a_scope_it_cannot_patch(module: Path) -> None:
+def _representative_control_ids(targets: list[Path], *, dotted_only: bool) -> list[str]:
+    """One mutation per callable scope, enough to exercise scope resolution."""
+    selected: list[str] = []
+    for target in targets:
+        tree = ast.parse(target.read_text(encoding="utf-8"))
+        seen: set[str] = set()
+        for candidate in operators.scan(tree, module_name_for(target)):
+            scope = candidate.scope_name
+            if scope in seen or (dotted_only and "." not in scope):
+                continue
+            seen.add(scope)
+            selected.append(f"{candidate.operator}@{target}:{candidate.line}")
+    return selected
+
+
+def test_no_real_module_reports_a_scope_it_cannot_patch() -> None:
     """The blind spot itself, stated as the absence of its error message.
 
     A unit test on `resolve_scope` proves the helper resolves each shape. This
@@ -1671,9 +1858,11 @@ def test_no_real_module_reports_a_scope_it_cannot_patch(module: Path) -> None:
         Path("src/wreath/_auth/cedar_engine.py"),
         Path("src/wreath/orm/types.py"),
         Path("src/wreath/_sparsevec.py"),
-        module,
     ]
-    plan = build_plan([p for p in targets if p.exists()], Path("."))
+    targets = [path for path in targets if path.exists()]
+    only = _representative_control_ids(targets, dotted_only=True)
+    assert only, "the real modules contain no method-held controls"
+    plan = build_plan(targets, Path("."), only=only)
     unpatchable = [pair for pair in plan.errors if "not a function" in pair[1]]
     assert unpatchable == [], unpatchable
 
@@ -1697,7 +1886,14 @@ def test_a_control_inside_a_classmethod_is_planned_not_skipped() -> None:
     }
     assert classmethods, "this module has no classmethod left; move this test"
 
-    plan = build_plan([target], Path("."))
+    candidates = operators.scan(tree, module_name_for(target))
+    only = [
+        f"{candidate.operator}@{target}:{candidate.line}"
+        for candidate in candidates
+        if candidate.scope_name in classmethods
+    ]
+    assert only, "no classmethod contains a control"
+    plan = build_plan([target], Path("."), only=only)
     planned = {m.site.scope for m in plan.mutations if m.patch is not None}
     reached = classmethods & planned
     assert reached, (

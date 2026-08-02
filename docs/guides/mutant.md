@@ -23,7 +23,25 @@ fixes.
 
 ```bash
 wreath mutant                     # this project, its tests, one report
+wreath mutant --sample 8          # stable sample across eligible controls
 ```
+
+`--sample N` is for a bounded confidence read: it selects stable identifiers
+by hash across the complete eligible corpus and compiles only those controls.
+Do not substitute `--limit N`; limit walks source order and is intentionally a
+file-head smoke test. The same sample runs automatically after `wreath test`:
+selected-line coverage from the ordinary run is reused as its baseline and
+`maxfail=1` stops each killed mutant at the first objection. Only
+baseline-passing tests can kill a mutant, so a red file does not prevent green
+files from being probed and verified; the original pytest failure still decides
+the command's exit status. Use `--mutant-samples N` to resize it or `--mutant
+off` to disable it.
+
+In the animated test grid, a purple `▣` temporarily replaces the green tile for
+each file whose tests are running against the current mutant. A gold `★` remains
+only when one of those tests kills it. That is deliberately not called
+"survived": in mutation terminology the *mutant* surviving means the assertions
+missed the removed control and is a finding, not a reward.
 
 ## What it removes
 
@@ -168,7 +186,9 @@ out of thousands.
 
 **One `fork` per mutant.** The parent imports the application and collects the
 suite once. Each mutant is a `fork()` of that warm interpreter, so it costs a
-process rather than a full import graph. This is why the tool is Linux-first.
+process rather than a full import graph. `--jobs` lets that one pristine parent
+keep several isolated children in flight without calling `fork()` from threads.
+This is why the tool is Linux-first.
 
 **No file is ever rewritten.** The mutated module is compiled in the parent and
 the one changed code object is assigned over the live function's `__code__` in
@@ -199,10 +219,12 @@ thing*, and it was found here once by hand after thirteen tests passed over a
 read that had never worked. When a survivor sits in code you are sure is
 covered, look at what the covering tests are actually holding.
 
-**Do not chase the percentage.** The score at the bottom is killed over decided.
-It can be driven to 100% by a suite that watches every control this tool knows
-how to remove and none of the ones it does not. Read the two lists; the ratio is
-a footnote.
+**The rating is an action, not a grade.** `SAMPLE WATCHED` means every sampled
+removal made a test object. `REVIEW ASSERTIONS` means a sampled control ran but
+nothing objected; `ADD COVERAGE` means the run never reached it; `FINISH THE
+SAMPLE` means the time ceiling or a tool refusal left the answer incomplete.
+The outcome counts remain beside the label, because those cases need different
+work and averaging them into a percentage makes the result easier to dismiss.
 
 ## What it cannot see
 
