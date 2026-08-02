@@ -18,6 +18,9 @@ from typing import Any
 import pytest
 
 import wreath
+from wreath.auth import BearerTokenBackend, Identity, authenticated
+from wreath.http_client import DestinationPolicy, HTTPClient
+from wreath.middleware import ProxyHeadersMiddleware
 from wreath.server import ServerConfig, TLSConfig, _select_protocol, serve
 
 
@@ -152,6 +155,203 @@ async def test_post_chunked_body() -> None:
         assert resp.endswith(b"hello world")
     finally:
         await server.close()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_proxy_request_cannot_activate_an_outbound_pivot() -> None:
+    """Reject ambiguous framing before routing a second, protected request.
+
+    The Wreath listener sees the connection as a trusted proxy and the canary is
+    a real internal HTTP server. A normal authenticated request first proves the
+    handler and outbound leg are live. The attack then sends TE+CL ambiguity
+    followed by a complete request to that handler on the same TCP stream.
+    """
+    canary_requests = 0
+
+    async def canary(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        nonlocal canary_requests
+        canary_requests += 1
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    internal = await asyncio.start_server(canary, "127.0.0.1", 0)
+    internal_port = internal.sockets[0].getsockname()[1]
+    outbound = HTTPClient(
+        "pivot-canary",
+        base_url=f"http://127.0.0.1:{internal_port}",
+        destination=DestinationPolicy(allow_loopback=True),
+    )
+    await outbound.start()
+
+    pivots = 0
+    app = wreath.Wreath()
+    app.add_middleware(
+        ProxyHeadersMiddleware(trusted=("127.0.0.0/8",)), priority=-10
+    )
+    app.configure_auth(
+        BearerTokenBackend(
+            lambda token: Identity(id="attacker") if token == "valid" else None
+        )
+    )
+
+    @app.get("/pivot")
+    @authenticated()
+    async def pivot(request: wreath.Request) -> wreath.Response:
+        nonlocal pivots
+        pivots += 1
+        response = await outbound.get("/internal")
+        return wreath.Response(response.body)
+
+    server = await _serve(app)
+    headers = (
+        b"Host: app.example\r\n"
+        b"Authorization: Bearer valid\r\n"
+        b"X-Forwarded-For: 203.0.113.9\r\n"
+    )
+    try:
+        control = await _raw_request(
+            _port(server), b"GET /pivot HTTP/1.1\r\n" + headers + b"\r\n"
+        )
+        assert b"HTTP/1.1 200" in control
+        assert pivots == canary_requests == 1
+
+        attack = (
+            b"POST /ignored HTTP/1.1\r\n"
+            + headers
+            + b"Transfer-Encoding: chunked\r\n"
+            b"Content-Length: 4\r\n\r\n"
+            b"0\r\n\r\n"
+            b"GET /pivot HTTP/1.1\r\n"
+            + headers
+            + b"Connection: close\r\n\r\n"
+        )
+        refused = await asyncio.wait_for(
+            _raw_request(_port(server), attack, read_until_close=True), timeout=2.0
+        )
+
+        assert refused.startswith(b"HTTP/1.1 400")
+        assert b"HTTP/1.1 200" not in refused
+        assert pivots == 1
+        assert canary_requests == 1
+    finally:
+        await server.close()
+        await outbound.close()
+        internal.close()
+        await internal.wait_closed()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target",
+    (
+        b"http://evil.example/pivot",
+        b"https://good.example@evil.example/pivot",
+        b"http://127.0.0.1:80/pivot",
+    ),
+)
+async def test_absolute_form_target_is_rejected_before_route_activation(
+    target: bytes,
+) -> None:
+    """An origin server must not reinterpret proxy-form targets as local paths."""
+    activated = 0
+    app = wreath.Wreath()
+
+    @app.get("/pivot")
+    async def pivot(request: wreath.Request) -> str:
+        nonlocal activated
+        activated += 1
+        return "sensitive"
+
+    server = await _serve(app)
+    try:
+        response = await _raw_request(
+            _port(server), b"GET " + target + b" HTTP/1.1\r\nHost: good.example\r\n\r\n"
+        )
+    finally:
+        await server.close()
+
+    assert response.startswith(b"HTTP/1.1 4")
+    assert b"sensitive" not in response
+    assert activated == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "header_block",
+    (
+        b"X-Test: one\r\n two\r\n",
+        b"Transfer-Encoding : chunked\r\n",
+        b"Host : app.example\r\n",
+        b"X-Test: safe\x00hidden\r\n",
+    ),
+)
+async def test_proxy_differential_header_shapes_never_reach_the_app(
+    header_block: bytes,
+) -> None:
+    """Reject obsolete folding, pre-colon whitespace, and embedded controls."""
+    activated = 0
+
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        nonlocal activated
+        activated += 1
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    server = await _serve(app)
+    try:
+        response = await _raw_request(
+            _port(server),
+            b"GET / HTTP/1.1\r\nHost: app.example\r\n" + header_block + b"\r\n",
+        )
+    finally:
+        await server.close()
+
+    assert response.startswith(b"HTTP/1.1 400")
+    assert activated == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "value"),
+    (
+        (b"x-safe\r\nx-injected", b"yes"),
+        (b"x-safe", b"ok\r\nx-injected: yes"),
+        (b"x-safe", b"ok\n\nHTTP/1.1 200 Injected"),
+    ),
+)
+async def test_response_splitting_bytes_never_reach_the_wire(
+    name: bytes, value: bytes
+) -> None:
+    """Validate at Wreath's server boundary even for a raw ASGI application."""
+
+    async def malicious(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(name, value)],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"unsafe"})
+
+    server = await _serve(malicious)
+    try:
+        response = await _raw_request(
+            _port(server), b"GET / HTTP/1.1\r\nHost: app.example\r\n\r\n",
+            read_until_close=True,
+        )
+    finally:
+        await server.close()
+
+    lowered = response.lower()
+    assert b"\r\nx-injected:" not in lowered
+    assert b"http/1.1 200 injected" not in lowered
+    assert b"unsafe" not in lowered
 
 
 @pytest.mark.asyncio

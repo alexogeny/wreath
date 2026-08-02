@@ -1785,7 +1785,17 @@ class MCP:
                 "no way to read a path that is not beneath one."
             )
         declared = await self._roots(session)
-        if declared and not beneath_any(declared, os.path.join(root, path)):
+        # An empty answer from a client that advertised `roots` means it grants
+        # access beneath no client root.  It is not the same state as a client
+        # with no roots capability, where the server's `file_root` remains the
+        # only boundary.  Treating both as the falsey tuple used to let a
+        # hostile client answer `{"roots": []}` and then read anywhere beneath
+        # the server root.
+        client_roots_apply = "roots" in session.client_capabilities
+        outside_client_roots = client_roots_apply and not beneath_any(
+            declared, os.path.join(root, path)
+        )
+        if outside_client_roots:
             # The client told us where its workspace is. A root that is not
             # consulted is a comment, so this is the point of asking at all.
             self.roots_refusals += 1
