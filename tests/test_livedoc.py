@@ -346,6 +346,22 @@ async def test_the_stream_resolves_a_tag_the_notification_could_not_state() -> N
     await events.aclose()
 
 
+async def test_an_explicit_change_tag_does_not_call_the_fallback_resolver() -> None:
+    document = _document()
+    subscription = document.subscribe("User::ada")
+    assert subscription is not None
+
+    def unexpected(_reason: str) -> str:
+        raise AssertionError("resolved a tag the notification already carried")
+
+    events = change_events(subscription, tag_for=unexpected)
+    document.notify("User::ada", "roles", etag='W/"current"')
+    event = await asyncio.wait_for(anext(events), 1)
+
+    assert json.loads(event.data or "")["etag"] == 'W/"current"'
+    await events.aclose()
+
+
 async def test_a_resolver_that_declines_leaves_the_tag_out() -> None:
     """A stale identity cannot describe the new tag, so it says nothing."""
     document = _document()

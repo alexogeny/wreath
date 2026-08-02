@@ -70,13 +70,15 @@ def test_bucket_validates_configuration(bucket_type: Any) -> None:
 def test_bucket_honours_max_entries_under_key_spraying(bucket_type: Any) -> None:
     """Distinct-key floods must not grow the table without bound."""
     bucket = bucket_type(capacity=5.0, rate=1.0, max_entries=100)
-    for index in range(20000):
+    # Four complete table turnovers prove repeated eviction without paying for
+    # 200 turnovers through the pure twin's bounded linear victim scan.
+    for index in range(400):
         bucket.acquire(f"attacker-{index}", 1000.0 + index * 0.001)
     assert bucket.tracked <= 100
 
     # Even when every bucket is still actively limited, so none can be reclaimed.
     hot = bucket_type(capacity=2.0, rate=0.001, max_entries=50)
-    for index in range(2000):
+    for index in range(200):
         for _ in range(3):
             hot.acquire(f"k{index}", 1000.0)
     assert hot.tracked <= 50

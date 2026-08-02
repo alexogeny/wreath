@@ -12,12 +12,33 @@ from typing import Any
 import pytest
 
 from wreath import Wreath
+from wreath._docs.apidoc import _signature_block
 from wreath.testing import TestClient
 
 
 @dataclass
 class DocPayload:
     name: str
+
+
+def test_signature_block_keeps_receiver_parameters_when_requested() -> None:
+    def callable_with_receivers(self: object, cls: type[object], value: int) -> None:
+        pass
+
+    rendered = _signature_block(
+        "callable_with_receivers", callable_with_receivers, skip_self=False,
+    )
+
+    assert "self: object" in rendered
+    assert "cls: type[object]" in rendered
+    assert "value: int" in rendered
+
+    without_receivers = _signature_block(
+        "callable_with_receivers", callable_with_receivers, skip_self=True,
+    )
+    assert "self: object" not in without_receivers
+    assert "cls: type[object]" not in without_receivers
+    assert "value: int" in without_receivers
 
 
 def _app(summary: str | None = None, **docs_kwargs: Any) -> Wreath:

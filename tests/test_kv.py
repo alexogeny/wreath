@@ -495,7 +495,6 @@ def test_hit_rate_is_zero_before_the_first_read() -> None:
 
 @pytest.mark.parametrize("arm", ARMS, ids=ARM_IDS)
 def test_the_table_holds_its_values_alive_and_lets_them_go(arm) -> None:
-    import gc
     import weakref
 
     class Held:
@@ -506,10 +505,8 @@ def test_the_table_holds_its_values_alive_and_lets_them_go(arm) -> None:
     reference = weakref.ref(value)
     table.set("key", value)
     del value
-    gc.collect()
     assert reference() is not None, "the table owns a reference while it holds the key"
     table.delete("key")
-    gc.collect()
     assert reference() is None, "and releases it when the key goes"
 
 

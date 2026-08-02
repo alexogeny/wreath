@@ -255,10 +255,15 @@ def test_every_collection_under_load_is_one_the_loop_chose() -> None:
 
     loop = _metal_loop()
     with _Harness(loop) as harness:
-        harness.drive(requests=50, gap=0.0005)  # warm the arrival estimator
+        # Match the xdist-safe slack established above.  At 0.5ms five busy
+        # peers can consume every nominal gap, so the test observes a saturated
+        # loop and falsely concludes that idle collection never ran.
+        harness.drive(requests=50, gap=0.001)  # warm the arrival estimator
         gc.callbacks.append(watch)
         try:
-            harness.drive(requests=400, gap=0.0005)
+            # The same 200ms observation window as 400 * 0.5ms, with enough
+            # slack in each individual turn for the loop to act on it.
+            harness.drive(requests=200, gap=0.001)
         finally:
             gc.callbacks.remove(watch)
         stats = loop.gc_stats()
@@ -299,9 +304,13 @@ class _Echo(asyncio.Protocol):
 
     def connection_made(self, transport) -> None:
         self.transport = transport
+        self.lost = asyncio.Event()
 
     def data_received(self, data: bytes) -> None:
         self.transport.write(b"pong")
+
+    def connection_lost(self, error: BaseException | None) -> None:
+        self.lost.set()
 
 
 def test_a_collection_does_not_reap_a_live_connection() -> None:
@@ -330,7 +339,6 @@ def test_a_collection_does_not_reap_a_live_connection() -> None:
         writer.write(b"ping")
         await writer.drain()
         assert await reader.read(4) == b"pong"
-        await asyncio.sleep(0.05)
 
         accepted = [o for o in gc.get_objects() if isinstance(o, _Echo)]
         assert accepted, "no accepted protocol to watch"
@@ -368,16 +376,17 @@ def test_a_closed_connection_is_given_back() -> None:
         writer.write(b"ping")
         await writer.drain()
         assert await reader.read(4) == b"pong"
-        await asyncio.sleep(0.05)
 
         accepted = [o for o in gc.get_objects() if isinstance(o, _Echo)]
         witness = weakref.ref(accepted[0])
+        lost = accepted[0].lost
         del accepted
 
         writer.close()
+        await writer.wait_closed()
         server.close()
         await server.wait_closed()
-        await asyncio.sleep(0.1)  # let connection_lost run
+        await asyncio.wait_for(lost.wait(), timeout=5.0)
         return witness
 
     witness = asyncio.run(
@@ -404,7 +413,6 @@ def test_the_poller_releases_connections_it_still_owns_at_close() -> None:
         writer.write(b"ping")
         await writer.drain()
         assert await reader.read(4) == b"pong"
-        await asyncio.sleep(0.05)
         accepted = [o for o in gc.get_objects() if isinstance(o, _Echo)]
         assert accepted
         witness = weakref.ref(accepted[0])

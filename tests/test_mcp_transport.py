@@ -321,7 +321,9 @@ async def test_an_idle_session_expires_and_frees_its_slot() -> None:
     )
     async with TestClient(app) as client:
         first, _ = await initialize(client)
-        await asyncio.sleep(0.08)
+        # Advance this session's idle age directly. Wall-clock sleeping adds no
+        # coverage when the store already records the clock value explicitly.
+        mcp._sessions._sessions[first].last_seen -= 0.08
         # The abandoned session is gone, so the ceiling it was holding is free:
         # a client that never sends DELETE cannot wedge the endpoint shut.
         second, response = await initialize(client)
@@ -340,11 +342,19 @@ async def test_an_idle_session_expires_and_frees_its_slot() -> None:
 
 async def test_traffic_keeps_a_session_alive() -> None:
     app = Wreath()
-    MCP(app, name="x", version="1.0.0", limits=MCPLimits(session_idle_seconds=0.15))
+    mcp = MCP(
+        app,
+        name="x",
+        version="1.0.0",
+        limits=MCPLimits(session_idle_seconds=0.15),
+    )
     async with TestClient(app) as client:
         session_id, _ = await initialize(client)
+        session = mcp._sessions._sessions[session_id]
         for _ in range(4):
-            await asyncio.sleep(0.05)
+            # Without each request touching `last_seen`, the accumulated 240ms
+            # crosses the 150ms idle bound on the third pass.
+            session.last_seen -= 0.06
             alive = await client.post(
                 "/mcp",
                 json={"jsonrpc": "2.0", "id": 10, "method": "ping"},

@@ -431,7 +431,12 @@ async def test_a_healthy_doorbell_does_not_reconnect(build: Any) -> None:
     supervisor = Supervisor()
     try:
         await service.start(supervisor)
-        await asyncio.sleep(0.15)  # several backoff periods, had it been retrying
+        assert await until(lambda: double.streams == 1)
+        # If the stream returns, Doorbell increments its reconnect counter in
+        # that same task turn, before waiting out any backoff.  Let the parked
+        # pump settle without paying several real backoff periods.
+        for _ in range(3):
+            await asyncio.sleep(0)
         assert service.doorbell_reconnects == 0
         assert double.streams == 1
         assert len(double.listened) == 1

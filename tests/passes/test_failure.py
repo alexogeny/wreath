@@ -305,7 +305,8 @@ async def test_a_requeued_unit_is_walked_without_rewinding_the_cursor(database, 
     # A pass that finishes and stays finished, so the only thing that could move
     # the cursor backwards is the requeue itself.
     walk = purge_pass(
-        frontier=Ceiling.at_launch(monotone="expiry stamps are assigned by now()")
+        frontier=Ceiling.at_launch(monotone="expiry stamps are assigned by now()"),
+        pace=DutyCycle(0.25),
     )
     await walk.run(database, sleep=_nap)
     assert len(world.rows) == 0
@@ -322,9 +323,15 @@ async def test_a_requeued_unit_is_walked_without_rewinding_the_cursor(database, 
     )
     assert queued is True
 
-    await walk.run(database, sleep=_nap)
+    naps: list[float] = []
+
+    async def record_rest(seconds: float) -> None:
+        naps.append(seconds)
+
+    await walk.run(database, sleep=record_rest)
 
     assert len(world.rows) == 0
+    assert naps and all(seconds > 0 for seconds in naps)
     # The cursor never moved backwards to do it.
     assert (await walk.status(database)).cursor == before
 

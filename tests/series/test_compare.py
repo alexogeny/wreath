@@ -82,6 +82,13 @@ class TestOneStatement:
         assert " OR " in agg, "the window covers both periods"
         assert "CASE WHEN" in agg and "'previous'" in agg, "each row is tagged"
 
+    async def test_ungrouped_rows_order_by_period_then_bucket(
+        self, session, database,
+    ):
+        view = series(bucket=Month).measure(n=count()).compare(previous=Year)
+        await run(view, session, database, [])
+        assert sql_of(database).endswith(" ORDER BY 2, 1")
+
 
 class TestTheShiftHappensOnTheWallClock:
     async def test_the_comparison_spine_shifts_local_bounds_before_truncating(
@@ -280,6 +287,7 @@ class TestTheEnvelope:
         assert {item.key for item in result.series} == {1, 2}
         assert {item.key for item in result.comparison.series} == {1, 2}
         assert {item.values for item in result.comparison.series} == {(8,), (2,)}
+        assert "ORDER BY 2, 1, 4, 3" in sql_of(database)
 
     async def test_a_view_that_does_not_compare_has_no_comparison(
         self, session, database

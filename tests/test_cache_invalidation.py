@@ -13,7 +13,6 @@ matter there are that it does not echo, does not storm, and cannot fail a write.
 from __future__ import annotations
 
 import asyncio
-import gc
 import sys
 from pathlib import Path
 from typing import Any
@@ -181,7 +180,6 @@ def test_a_cached_handler_takes_its_subscription_with_it() -> None:
         assert len(_orm_events._subscribers) == 1     # listening while it lives
 
     define()
-    gc.collect()
 
     assert _orm_events._subscribers == []             # and gone with it
     assert not has_subscribers()
@@ -199,7 +197,6 @@ def test_a_cached_handler_that_is_still_referenced_keeps_listening() -> None:
         return {}
 
     routes = [report]                 # what an app's router holds
-    gc.collect()
 
     assert len(_orm_events._subscribers) == 1
     assert has_subscribers()

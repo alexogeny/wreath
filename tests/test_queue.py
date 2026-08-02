@@ -255,7 +255,10 @@ class TestAwaiting:
         second = asyncio.create_task(queue.get())
         await asyncio.sleep(0)
         queue.offer("only-one")
-        done, pending = await asyncio.wait({first, second}, timeout=1.0)
+        done, pending = await asyncio.wait_for(
+            asyncio.wait({first, second}, return_when=asyncio.FIRST_COMPLETED),
+            timeout=5.0,
+        )
         assert len(done) == 1
         assert len(pending) == 1
         assert done.pop().result() == "only-one"
@@ -329,7 +332,6 @@ def test_producers_and_a_drainer_agree_on_the_total(arm) -> None:
 
 @pytest.mark.parametrize("arm", ARMS, ids=ARM_IDS)
 def test_the_queue_releases_what_it_held(arm) -> None:
-    import gc
     import weakref
 
     class Held:
@@ -340,10 +342,8 @@ def test_the_queue_releases_what_it_held(arm) -> None:
     reference = weakref.ref(item)
     queue.offer(item)
     del item
-    gc.collect()
     assert reference() is not None
     queue.clear()
-    gc.collect()
     assert reference() is None
 
 

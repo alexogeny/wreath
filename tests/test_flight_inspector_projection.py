@@ -186,6 +186,12 @@ def test_cli_renders_projection_topics(tmp_path, capsys) -> None:
 
         assert cli_main(["inspect", path, "distributions"]) == 0
         assert "route distributions" in capsys.readouterr().out
+
+        assert cli_main([
+            "inspect", path, "metadata", "--table", "components", "--json",
+        ]) == 0
+        metadata = json.loads(capsys.readouterr().out)
+        assert metadata["data"]["table"] == "components"
     finally:
         asyncio.run_coroutine_threadsafe(server.close(), loop).result(5)
         loop.call_soon_threadsafe(loop.stop)

@@ -22,9 +22,16 @@ from wreath.webhooks import (
     WebhookDispatcher,
     WebhookEnvelope,
     WebhookLimits,
+    _retention_purge_pass,
 )
 
 KEYS = {"current": b"a sufficiently long webhook test secret"}
+
+
+def test_retention_purge_requires_a_primary_key() -> None:
+    with pytest.raises(ValueError, match="at least one primary-key column"):
+        _retention_purge_pass(table="events", key=())
+    assert _retention_purge_pass(table="events", key=("event_id",)).name == "purge_events"
 
 
 def _envelope(body: bytes = b'{"value":1}') -> WebhookEnvelope:

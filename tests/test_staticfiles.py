@@ -9,7 +9,7 @@ descriptor closed while a lookup is still queued would have that lookup call
 from __future__ import annotations
 
 import os
-import time
+import threading
 
 import pytest
 
@@ -53,20 +53,36 @@ def test_close_is_idempotent(tmp_path) -> None:
     files.close()  # must not close a descriptor number somebody else now owns
 
 
-def test_close_waits_for_work_already_in_the_pool(tmp_path) -> None:
+def test_close_waits_for_work_already_in_the_pool(tmp_path, monkeypatch) -> None:
     """The wait is the precondition for closing the root fd at all."""
     files = StaticFiles(tmp_path, max_workers=1)
     finished: list[str] = []
-    # Sampled *before* the submit. The worker starts sleeping the moment it is
-    # handed the job, so a clock read after the submit begins after the sleep
-    # does -- and on a loaded machine that gap is enough to make the elapsed
-    # time come in under 0.2 while `close` waited exactly as it should.
-    started = time.monotonic()
-    files._executor.submit(lambda: (time.sleep(0.2), finished.append("done")))
-    files.close()
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    shutdown_entered = threading.Event()
+    original_shutdown = files._executor.shutdown
+
+    def work() -> None:
+        worker_started.set()
+        release_worker.wait()
+        finished.append("done")
+
+    def observed_shutdown(*args, **kwargs) -> None:
+        shutdown_entered.set()
+        original_shutdown(*args, **kwargs)
+
+    monkeypatch.setattr(files._executor, "shutdown", observed_shutdown)
+    files._executor.submit(work)
+    assert worker_started.wait(timeout=5.0)
+    closer = threading.Thread(target=files.close)
+    closer.start()
+    assert shutdown_entered.wait(timeout=5.0)
+    assert closer.is_alive(), "close returned while pool work was blocked"
+    release_worker.set()
+    closer.join(timeout=5.0)
 
     assert finished == ["done"]
-    assert time.monotonic() - started >= 0.2
+    assert not closer.is_alive(), "close stayed blocked after pool work completed"
 
 
 @pytest.mark.asyncio

@@ -152,10 +152,38 @@ def test_bench_multi_rejects_a_nonsense_core_count(
             tasks.bench(["--pin", "none", "--matrix-only", "--multi", bad])
 
 
-def test_bench_matrix_only_skips_the_database_battery(recorded: list[list[str]]) -> None:
+def test_bench_matrix_only_skips_the_database_battery(
+    recorded: list[list[str]], capsys: pytest.CaptureFixture[str],
+) -> None:
     tasks.bench(["--pin", "none", "--matrix-only", "--passes", "1"])
     assert not any("podman" in c for c in recorded)
     assert not any("benchmarks.lifecycle" in c for c in recorded)
+    assert "combined report written" not in capsys.readouterr().out
+
+
+def test_bench_combines_a_matrix_result(
+    recorded: list[list[str]], monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    results = tmp_path / "benchmark-results"
+    results.mkdir()
+    matrix = results / "2026-08-03T000000Z.json"
+
+    def run(command: list[str]) -> int:
+        if command[1:3] == ["-m", "benchmarks.run"]:
+            matrix.write_text("{}", encoding="utf-8")
+        return 0
+
+    report_args: list[str] = []
+    from wreath._devtools import bench_report
+
+    monkeypatch.setattr(tasks, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(tasks, "_run", run)
+    monkeypatch.setattr(bench_report, "main", report_args.extend)
+
+    tasks.bench(["--pin", "none", "--matrix-only", "--passes", "1"])
+
+    assert str(matrix) in report_args
+    assert report_args[-2:] == ["-o", str(results / "full-battery.html")]
 
 
 def test_bench_adds_the_native_arm_when_wreath_is_requested(recorded: list[list[str]]) -> None:

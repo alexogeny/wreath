@@ -331,6 +331,7 @@ def test_job_over_budget_raises_inside_the_query(unarmed):
 
     asyncio.run(runner._run(_claimed(runner, "greedy")))
     assert runner.query_budget_exceeded == 1
+    assert runner.nplusone_findings == 0
     # The innermost frames are the ledger's own record/raise; the one that
     # matters is the handler frame, which is where the loop is written.
     assert "greedy" in frames

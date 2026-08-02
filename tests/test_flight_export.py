@@ -284,7 +284,11 @@ class _RedirectingCollectorHandler(BaseHTTPRequestHandler):
 def test_otlp_http_exporter_posts_to_traces_and_metrics() -> None:
     _OtlpHandler.posts = []
     server = HTTPServer(("127.0.0.1", 0), _OtlpHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(
+        target=server.serve_forever,
+        kwargs={"poll_interval": 0.01},
+        daemon=True,
+    )
     thread.start()
     try:
         host, port = server.server_address
@@ -350,7 +354,11 @@ def test_otlp_redirect_refuses_a_non_http_location() -> None:
 def test_otlp_collector_can_redirect_within_its_pinned_origin() -> None:
     _RedirectingCollectorHandler.gets = []
     collector = HTTPServer(("127.0.0.1", 0), _RedirectingCollectorHandler)
-    thread = threading.Thread(target=collector.serve_forever, daemon=True)
+    thread = threading.Thread(
+        target=collector.serve_forever,
+        kwargs={"poll_interval": 0.01},
+        daemon=True,
+    )
     thread.start()
     host, port = collector.server_address
     _RedirectingCollectorHandler.location = f"http://{host}:{port}/accepted"
@@ -375,7 +383,11 @@ def test_otlp_collector_cannot_redirect_export_to_an_internal_origin() -> None:
     """
     _InternalCanaryHandler.gets = []
     internal = HTTPServer(("127.0.0.1", 0), _InternalCanaryHandler)
-    internal_thread = threading.Thread(target=internal.serve_forever, daemon=True)
+    internal_thread = threading.Thread(
+        target=internal.serve_forever,
+        kwargs={"poll_interval": 0.01},
+        daemon=True,
+    )
     internal_thread.start()
 
     internal_host, internal_port = internal.server_address
@@ -383,7 +395,11 @@ def test_otlp_collector_cannot_redirect_export_to_an_internal_origin() -> None:
         f"http://{internal_host}:{internal_port}/internal"
     )
     collector = HTTPServer(("127.0.0.1", 0), _RedirectingCollectorHandler)
-    collector_thread = threading.Thread(target=collector.serve_forever, daemon=True)
+    collector_thread = threading.Thread(
+        target=collector.serve_forever,
+        kwargs={"poll_interval": 0.01},
+        daemon=True,
+    )
     collector_thread.start()
     collector_host, collector_port = collector.server_address
 

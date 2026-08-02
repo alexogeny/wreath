@@ -27,16 +27,8 @@ import wreath
 from wreath.router import RouteDefinition
 from wreath.server import ServerConfig, _select_protocol, serve
 
-#: Long enough that a handler still running it is unambiguous, never reached.
-_FOREVER = 30.0
-
 #: How long a cancellation is given to arrive before the test calls it absent.
 _PATIENCE = 5.0
-
-#: How long a handler is watched for a cancellation that must *not* arrive.
-#: Bounded rather than generous: this window is paid by four tests.
-_GRACE = 1.0
-
 
 @pytest.fixture(params=[False, True], ids=["native", "pure"])
 def protocol(request: Any, monkeypatch: Any) -> type:
@@ -57,16 +49,32 @@ def protocol(request: Any, monkeypatch: Any) -> type:
 class _Watch:
     """What one handler run observed, so an assertion can name the outcome."""
 
-    __slots__ = ("cancelled", "completed", "started")
+    __slots__ = ("cancelled", "completed", "release", "started")
 
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.cancelled = asyncio.Event()
         self.completed = asyncio.Event()
+        self.release = asyncio.Event()
 
 
 async def _serve(app: Any, **config: Any) -> Any:
-    return await serve(app, ServerConfig(host="127.0.0.1", port=0, lifespan="off", **config))
+    server = await serve(
+        app,
+        ServerConfig(host="127.0.0.1", port=0, lifespan="off", **config),
+    )
+    disconnected = asyncio.Event()
+
+    class _ObservedProtocol(_select_protocol()):
+        def connection_lost(self, error: BaseException | None) -> None:
+            try:
+                super().connection_lost(error)
+            finally:
+                disconnected.set()
+
+    server._protocol_cls = _ObservedProtocol
+    server._test_disconnected = disconnected
+    return server
 
 
 def _port(server: Any) -> int:
@@ -92,6 +100,20 @@ async def _send_and_drop(
         except (ConnectionResetError, BrokenPipeError):
             pass
     del reader
+
+
+async def _release_after_disconnect(server: Any, watch: _Watch) -> None:
+    """Prove the handler can advance after the peer is known to be gone.
+
+    A fixed grace period only proves that cancellation did not arrive inside an
+    arbitrary window. The protocol removes itself from the server's registry
+    after it has delivered the disconnect, so wait for that positive signal,
+    release the parked handler, and require the handler to complete instead.
+    """
+    await asyncio.wait_for(server._test_disconnected.wait(), timeout=_PATIENCE)
+    watch.release.set()
+    await asyncio.wait_for(watch.completed.wait(), timeout=_PATIENCE)
+    assert not watch.cancelled.is_set()
 
 
 class _Everywhere:
@@ -136,7 +158,7 @@ def _slow_app(shape: str = "plain") -> tuple[wreath.Wreath, dict[str, _Watch]]:
     async def park(watch: _Watch) -> None:
         watch.started.set()
         try:
-            await asyncio.sleep(_FOREVER)
+            await watch.release.wait()
         except asyncio.CancelledError:
             # Recorded and re-raised. Swallowing it would leave the request
             # neither cancelled nor finished, which is worse than either.
@@ -306,8 +328,7 @@ async def test_a_disconnected_post_is_left_running(protocol: type) -> None:
     server = await _serve(app)
     try:
         await _send_and_drop(_port(server), _post("/post"), watches["post"])
-        await asyncio.sleep(_GRACE)
-        assert not watches["post"].cancelled.is_set()
+        await _release_after_disconnect(server, watches["post"])
     finally:
         await server.close()
 
@@ -336,8 +357,7 @@ async def test_a_get_can_opt_out(protocol: type) -> None:
         await _send_and_drop(
             _port(server), _get("/get-optout"), watches["get-optout"]
         )
-        await asyncio.sleep(_GRACE)
-        assert not watches["get-optout"].cancelled.is_set()
+        await _release_after_disconnect(server, watches["get-optout"])
     finally:
         await server.close()
 
@@ -369,8 +389,7 @@ async def test_a_disconnect_after_the_response_started_does_not_cancel(
             await writer.wait_closed()
         except (ConnectionResetError, BrokenPipeError):
             pass
-        await asyncio.sleep(_GRACE)
-        assert not watch.cancelled.is_set()
+        await _release_after_disconnect(server, watch)
     finally:
         await server.close()
 
@@ -407,8 +426,7 @@ async def test_the_override_is_honoured_by_every_dispatcher(
         await _send_and_drop(
             _port(server), _get("/get-optout"), watches["get-optout"]
         )
-        await asyncio.sleep(_GRACE)
-        assert not watches["get-optout"].cancelled.is_set()
+        await _release_after_disconnect(server, watches["get-optout"])
         # `=True` on a POST: the opposite direction, so a seam that armed
         # everything rather than reading the declaration is caught too.
         await _send_and_drop(

@@ -262,6 +262,10 @@ def test_capture_cli_arm_status_disarm(tmp_path, capsys) -> None:
         assert rc == 0
         assert "disarmed" in capsys.readouterr().out
 
+        rc = cli_main(["capture", sock, "--token", TOKEN, "disarm", "--arm-id", "1"])
+        assert rc == 0
+        assert "no such arm" in capsys.readouterr().out
+
         # A wrong token exits non-zero with an error, not a traceback.
         rc = cli_main(["capture", sock, "--token", "wrong-token-1234567890", "status"])
         assert rc == 1

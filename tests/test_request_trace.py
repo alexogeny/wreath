@@ -82,3 +82,8 @@ def test_check_reports_a_scenario_that_grew(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(request_trace, "_measure_scenarios", grown)
     assert request_trace._check_baseline() == 1
+
+
+def test_check_and_update_are_refused_together() -> None:
+    with pytest.raises(SystemExit, match="exclusive"):
+        request_trace.main(["--check", "--update-baseline"])

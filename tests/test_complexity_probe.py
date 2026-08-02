@@ -9,6 +9,7 @@ from wreath._devtools.complexity_probe import (
     Result,
     Todo,
     _contract,
+    _graphql_depth_rejection,
     degree_name,
     probe,
 )
@@ -71,6 +72,15 @@ def test_declared_metric_must_be_present_at_every_size() -> None:
             [1.0, 2.0, 4.0, 8.0],
             [{"visits": 1}, {}, {"visits": 4}, {"visits": 8}],
         )
+
+
+def test_graphql_depth_probe_reaches_the_bound_it_claims_to_measure() -> None:
+    """The registered probe must execute in the ordinary suite too.
+
+    Otherwise widening its declared depth bound leaves the complexity gate's
+    own control unobserved by mutation confidence.
+    """
+    assert _graphql_depth_rejection(32) >= 0.0
 
 
 def test_contract_records_the_scaled_axis_and_assumption() -> None:

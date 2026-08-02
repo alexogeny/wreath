@@ -250,6 +250,19 @@ def test_pending_overflow_evicts_oldest_and_counts_it() -> None:
     assert snap.pending == 3
 
 
+def test_pending_overflow_categorizes_an_evicted_correlation_orphan() -> None:
+    rec = FakeRecorder()
+    rec.feed(correlation(1), correlation(2))
+    proj = Projector(rec, pending=1)
+
+    proj.poll()
+    snap = proj.snapshot()
+
+    assert snap.loss.orphan_correlation == 1
+    assert snap.loss.pending_evicted == 0
+    assert snap.pending == 1
+
+
 def test_unknown_kind_cells_are_ignored() -> None:
     rec = FakeRecorder()
     control = bytearray(CELL_SIZE)

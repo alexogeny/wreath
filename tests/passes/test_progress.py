@@ -113,6 +113,30 @@ async def test_an_exact_denominator_counts_and_says_that_it_counted(database, wo
     assert world.sql_of("SELECT count(*) FROM replays")
 
 
+async def test_a_keyspace_denominator_records_the_floor_it_measures_from(
+    database, world,
+):
+    walk = purge_pass(progress=Keyspace())
+    expected = min(row["expires"] for row in world.rows)
+
+    await walk.run(database, sleep=_nap)
+    status = await walk.status(database)
+    ledger_row = world.ledger[("purge_replays", "")]
+
+    assert status.progress.denominator_kind == "keyspace"
+    assert ledger_row["keyspace_from"] == [expected.isoformat()]
+
+
+async def test_an_empty_keyspace_records_no_floor(database, world):
+    world.rows.clear()
+    walk = purge_pass(progress=Keyspace())
+
+    result = await walk.run(database, sleep=_nap)
+
+    assert result.complete is True
+    assert world.ledger[("purge_replays", "")]["keyspace_from"] is None
+
+
 async def test_a_table_that_was_never_analysed_reports_no_percentage(database, world):
     # reltuples answers -1 for a table ANALYZE has never touched. A negative
     # denominator is not a denominator, and no percentage beats a wrong one.

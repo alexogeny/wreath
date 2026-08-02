@@ -20,6 +20,7 @@ import time
 
 import pytest
 
+import wreath._auth.jwt as jwt_module
 from wreath.auth import (
     JwtVerifier,
     RsaPublicKey,
@@ -67,6 +68,43 @@ def _verifier(**overrides) -> JwtVerifier:
     )
     kwargs.update(overrides)
     return JwtVerifier(**kwargs)
+
+
+def test_the_pure_base64url_fallback_rejects_discarded_characters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stdlib silently discards ``!`` unless Wreath checks first."""
+    monkeypatch.setattr(jwt_module, "_native_b64", None)
+
+    with pytest.raises(ValueError, match="invalid base64url"):
+        jwt_module._b64url_decode("YWJj!")
+
+
+def test_the_pure_compact_fallback_enforces_the_total_size_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(jwt_module, "_native_parse", None)
+
+    with pytest.raises(ValueError, match="compact JWT exceeds maximum size"):
+        jwt_module._parse_compact("a" * (jwt_module._MAX_TOKEN_BYTES + 1))
+
+
+@pytest.mark.parametrize("value", ["soon", 1.5, True])
+def test_the_pure_claim_fallback_refuses_non_integer_times(
+    monkeypatch: pytest.MonkeyPatch, value: object,
+) -> None:
+    monkeypatch.setattr(jwt_module, "_native_claims", None)
+
+    reason = jwt_module._reason_valid(
+        {"exp": value},
+        now=int(time.time()),
+        leeway=0,
+        issuer=None,
+        audiences=(),
+        required=(),
+    )
+
+    assert reason == 7
 
 
 # ---- happy path -----------------------------------------------------------

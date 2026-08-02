@@ -6,7 +6,6 @@ cached content-length table; these tests pin the observable output.
 
 from __future__ import annotations
 
-import gc
 import os
 from typing import Any, cast
 
@@ -245,7 +244,6 @@ def test_from_descriptor_closes_the_file_when_the_response_is_never_sent(tmp_pat
     assert _fd_is_open(fd)
 
     del response
-    gc.collect()
 
     assert not _fd_is_open(fd)
 
@@ -260,7 +258,6 @@ def test_from_descriptor_close_is_explicit_and_idempotent(tmp_path) -> None:
     assert not _fd_is_open(fd)
     response.close()  # a second close must not touch a now-reused descriptor
     del response
-    gc.collect()
 
 
 @pytest.mark.asyncio
@@ -282,4 +279,3 @@ async def test_a_sent_descriptor_response_is_not_closed_twice(tmp_path) -> None:
     assert response._fd is None
     assert b"".join(m.get("body", b"") for m in sent[1:]) == b"payload"
     del response
-    gc.collect()
