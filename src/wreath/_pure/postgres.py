@@ -14,7 +14,7 @@ import secrets
 import struct
 import sys
 import uuid
-from collections import OrderedDict, deque
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Iterator, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -22,6 +22,7 @@ from typing import Any, Literal, NamedTuple, overload
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .._sparsevec import MAX_SPARSEVEC_NNZ, SparseVector
+from ..kv import KV
 
 _IMPLEMENTATION = "pure"
 _implementation = _IMPLEMENTATION
@@ -1423,9 +1424,7 @@ class Connection:
         "_notifications_dropped",
         "_notify_event",
         "_pending_closes",
-        "_plan_costs",
         "_plans",
-        "_plans_bytes",
         "_reader",
         "_reader_task",
         "_register_operations",
@@ -1465,9 +1464,19 @@ class Connection:
         # Access-ordered so the least-recently-used automatic plan is evicted
         # first; bounded by statement_cache_size to cap per-connection (and,
         # via the Close on eviction, backend) prepared-statement memory.
-        self._plans: OrderedDict[str, Plan] = OrderedDict()
-        self._plan_costs: dict[str, int] = {}
-        self._plans_bytes = 0
+        #
+        # `track_evictions=True` is the whole reason `wreath.kv` grew a way to
+        # report what it dropped. An evicted plan still exists *on the
+        # PostgreSQL backend* until a `Close ('S')` goes out for it, so a cache
+        # that evicted silently would leak one server-side prepared statement
+        # per eviction, on every connection, for the life of the process. The
+        # running byte total and the parallel `_plan_costs` dict this replaces
+        # existed only to feed the same two bounds.
+        self._plans: Any = KV(
+            max_entries=statement_cache_size,
+            max_bytes=statement_cache_bytes,
+            track_evictions=True,
+        )
         self._statement_cache_size = statement_cache_size
         self._statement_cache_bytes = statement_cache_bytes
         # Statement names retired by eviction, closed on the wire (Close 'S')
@@ -1541,9 +1550,10 @@ class Connection:
             self._writer.close()
             with contextlib.suppress(ConnectionError):
                 await self._writer.wait_closed()
+        # `clear` is a connection teardown, not an eviction: the backend is
+        # going away with the socket, so there is nothing left to Close and the
+        # eviction record would be a list of statements on a dead connection.
         self._plans.clear()
-        self._plan_costs.clear()
-        self._plans_bytes = 0
 
     async def listen(self, channel: str) -> None:
         """Subscribe this connection to asynchronous `NOTIFY` on `channel`.
@@ -1726,9 +1736,7 @@ class Connection:
             self._sequence, sql, args, mode, future, None
         )
         operation.dest = dest
-        plan = self._plans.get(sql)
-        if plan is not None:
-            self._plans.move_to_end(sql)  # most-recently-used
+        plan = self._plans.get(sql)  # a hit is also the recency update
         operation.plan = plan
         operation.cold = plan is None
         if plan is None:
@@ -2110,17 +2118,15 @@ class Connection:
                 operation.result_oids,
                 operation.result_names,
             )
-            retained = _plan_retained_bytes(operation.sql, plan)
-            self._plans[operation.sql] = plan
-            self._plan_costs[operation.sql] = retained
-            self._plans_bytes += retained
-            self._plans.move_to_end(operation.sql)
-            while (
-                len(self._plans) > self._statement_cache_size
-                or self._plans_bytes > self._statement_cache_bytes
-            ):
-                evicted_sql, evicted = self._plans.popitem(last=False)
-                self._plans_bytes -= self._plan_costs.pop(evicted_sql)
+            self._plans.set(
+                operation.sql,
+                plan,
+                cost=_plan_retained_bytes(operation.sql, plan),
+            )
+            # Whatever that displaced has to be closed on the wire. Collected
+            # after the write rather than inside it, so the table stays a table
+            # and the protocol decision stays here.
+            for _sql, evicted in self._plans.take_evicted():
                 self._pending_closes.append(evicted.statement_name)
         if self._transaction_barrier and _is_transaction_sql(operation.sql):
             self._transaction_barrier = False

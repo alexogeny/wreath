@@ -663,6 +663,19 @@ class TestSealingPersists:
         assert result.series[0].values == (2,), "two treks in the sealed day"
         assert result.state is not None and result.state.settled == (SEAL_DAY,)
 
+        # `run` names the buckets it *would* settle and stores none of them:
+        # reading a sealed view never writes, because a GET runs on a
+        # read-workload session or a replica and settling as a side effect
+        # answers "cannot execute INSERT in a read-only transaction" from
+        # inside the series machinery. `settle` is the write half, and the only
+        # one there is. These three tests asserted the older contract, where a
+        # read settled as it went, and so failed against every build after that
+        # changed.
+        written = await sealed_view().settle(
+            session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
+        )
+        assert written == (SEAL_DAY,), "settle names what it stored"
+
         stored = await _settled_rows(database)
         assert len(stored) == 1, "the sealed bucket reached the table"
         bucket, measures = stored[0]
@@ -678,7 +691,9 @@ class TestSealingPersists:
         """
         database, session = sealing
         await _add_treks(database, (1, 4.0, 9), (2, 6.0, 11))
-        await sealed_view().run(
+        # `settle`, not `run`: only the write half puts the value where the
+        # second read can find it once the source rows are gone.
+        await sealed_view().settle(
             session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
         )
 
@@ -701,7 +716,11 @@ class TestSealingPersists:
         """
         database, session = sealing
         await _add_treks(database, (1, 4.0, 9), (2, 6.0, 11))
-        await sealed_view().run(
+        # Settled *before* the late rows arrive, which is what makes the next
+        # part a correction rather than a first settlement: `reconcile` runs
+        # `settle` itself, so without this it would simply store 3 and there
+        # would be no delta to record.
+        await sealed_view().settle(
             session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
         )
 
