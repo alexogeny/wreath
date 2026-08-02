@@ -23,10 +23,21 @@ from ._auth.permissions import (
     permission_document,
     permissions_router,
 )
+from ._auth.principal import (
+    ANY_SCOPE,
+    Limits,
+    Narrowing,
+    Principal,
+    human,
+    member_of,
+    on_plan,
+    with_entitlements,
+)
 from ._auth.requirements import AuthRequirement
 from ._livedoc import LiveDocument
 
 __all__ = [
+    "ANY_SCOPE",
     "PERMISSION_CHANNEL",
     "AuthRequirement",
     "AuthorizationDecision",
@@ -37,14 +48,21 @@ __all__ = [
     "CedarParseError",
     "CedarPolicies",
     "EntityUid",
+    "Limits",
     "LiveDocument",
+    "Narrowing",
     "PrecisionLadder",
+    "Principal",
     "Regions",
     "authorize",
     "coarsen",
     "declared_actions",
+    "human",
+    "member_of",
+    "on_plan",
     "permission_document",
     "permissions",
     "permissions_router",
     "roles",
+    "with_entitlements",
 ]

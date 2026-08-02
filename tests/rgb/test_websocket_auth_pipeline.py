@@ -8,6 +8,8 @@ which is the opposite of what the decorator means on an HTTP route.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from wreath import Wreath
@@ -37,6 +39,7 @@ class _Recorder:
     """Global middleware that records whether it saw a request at all."""
 
     global_scope = True
+    websocket_scope = True
 
     def __init__(self) -> None:
         self.seen = 0
@@ -60,10 +63,11 @@ async def test_authenticated_websocket_route_refuses_an_anonymous_connection():
         await websocket.accept()
         await websocket.close()
 
-    async with TestClient(app) as client:
-        with pytest.raises(ConnectionError):
-            async with client.websocket("/ws"):
-                pass
+    async with asyncio.timeout(1):
+        async with TestClient(app) as client:
+            with pytest.raises(ConnectionError):
+                async with client.websocket("/ws"):
+                    pass
 
     assert opened == 0, "the handler ran despite an enforced auth requirement"
 
@@ -80,9 +84,10 @@ async def test_authenticated_websocket_route_admits_an_authenticated_caller():
         await websocket.send_text("hello")
         await websocket.close()
 
-    async with TestClient(app) as client:
-        async with client.websocket("/ws") as session:
-            assert await session.receive_text() == "hello"
+    async with asyncio.timeout(1):
+        async with TestClient(app) as client:
+            async with client.websocket("/ws") as session:
+                assert await session.receive_text() == "hello"
 
 
 
@@ -95,6 +100,45 @@ async def test_unenforced_websocket_route_is_unaffected():
         await websocket.send_text("hi")
         await websocket.close()
 
-    async with TestClient(app) as client:
-        async with client.websocket("/open") as session:
-            assert await session.receive_text() == "hi"
+    async with asyncio.timeout(1):
+        async with TestClient(app) as client:
+            async with client.websocket("/open") as session:
+                assert await session.receive_text() == "hi"
+
+
+async def test_websocket_middleware_alone_builds_and_receives_a_request():
+    app = Wreath()
+    recorder = _Recorder()
+    app.add_middleware(recorder)
+
+    @app.websocket("/open")
+    async def socket(websocket):
+        await websocket.accept()
+        await websocket.close()
+
+    async with asyncio.timeout(1):
+        async with TestClient(app) as client:
+            async with client.websocket("/open"):
+                pass
+
+    assert recorder.seen == 1
+
+
+async def test_plain_websocket_does_not_construct_an_unused_request(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    app = Wreath()
+
+    @app.websocket("/open")
+    async def socket(websocket):
+        await websocket.accept()
+        await websocket.close()
+
+    def unexpected_request(*args, **kwargs):
+        pytest.fail("an unguarded websocket constructed an unused Request")
+
+    monkeypatch.setattr("wreath.app.Request", unexpected_request)
+    async with asyncio.timeout(1):
+        async with TestClient(app) as client:
+            async with client.websocket("/open"):
+                pass

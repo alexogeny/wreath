@@ -27,7 +27,9 @@ from .._native import _core
 from .._pure.authz import normalize_authorization_decision as _pure_normalize_decision
 from ..request import Request
 from .cedar_engine import CedarEntity, EntityUid
+from .facts import EMPTY, SetFact
 from .models import AuthorizationDecision, Identity
+from .principal import NO_LIMITS, Limits
 from .requirements import PolicyRequirement, second_factor_age
 
 
@@ -56,14 +58,16 @@ def _default_entities(request: Request) -> object:
 
 
 #: Where one request's resolved flag set lives for the rest of that request.
-_FLAGS_SLOT = "_cedar_flags"
+#: The same slot `SetFact` derives, so the compatibility function below and the
+#: fact share one cache rather than resolving twice for one decision.
+_FLAGS_SLOT = "_cedar_fact_flags"
 
 #: The same, for the geofence region set.
-_REGIONS_SLOT = "_cedar_regions"
+_REGIONS_SLOT = "_cedar_fact_regions"
 
 #: The answer for an application with no provider. Shared rather than rebuilt,
 #: and *always supplied* -- see `request_flags` for why absence is not an option.
-_NO_FLAGS: frozenset[str] = frozenset()
+_NO_FLAGS: frozenset[str] = EMPTY
 
 
 def request_flags(
@@ -110,23 +114,32 @@ def request_flags(
     cached = state.get(_FLAGS_SLOT)
     if cached is not None:
         return cast(frozenset[str], cached)
+    resolved = _resolve_flags(request, provider, vocabulary)
+    state.__setattr__(_FLAGS_SLOT, resolved)
+    return resolved
+
+
+def _resolve_flags(
+    request: Request, provider: Any, vocabulary: frozenset[str] | None
+) -> frozenset[str]:
+    """Resolve the flag set, with no caching and no short-circuits.
+
+    The body of `request_flags`, split out so `SetFact` owns the caching rule
+    for every fact and this one is not a second copy of it. `request_flags`
+    stays as the function it was, sharing the same cache slot.
+    """
     identity = request.identity
     context: dict[str, Any] = {}
     if identity is not None:
         context["id"] = identity.id
     if vocabulary is None:
         resolve_all = getattr(provider, "all", None)
-        resolved = (
+        return (
             frozenset(name for name, on in resolve_all(context).items() if on)
             if callable(resolve_all)
             else _NO_FLAGS
         )
-    else:
-        resolved = frozenset(
-            name for name in vocabulary if provider.enabled(name, context)
-        )
-    state.__setattr__(_FLAGS_SLOT, resolved)
-    return resolved
+    return frozenset(name for name in vocabulary if provider.enabled(name, context))
 
 
 def _default_location(request: Request) -> object:
@@ -174,14 +187,132 @@ def request_regions(
     cached = state.get(_REGIONS_SLOT)
     if cached is not None:
         return cast(frozenset[str], cached)
+    resolved = _resolve_regions(request, regions, location, vocabulary)
+    state.__setattr__(_REGIONS_SLOT, resolved)
+    return resolved
+
+
+def _resolve_regions(
+    request: Request,
+    regions: Any,
+    location: Callable[[Request], object],
+    vocabulary: frozenset[str] | None,
+) -> frozenset[str]:
+    """Measure the caller's position against the named regions, uncached."""
     where = location(request)
-    resolved = (
+    return (
         _NO_FLAGS
         if where is None
         else regions.containing(where, None if vocabulary is None else vocabulary)
     )
-    state.__setattr__(_REGIONS_SLOT, resolved)
-    return resolved
+
+
+def _validate_org_roles(referenced: frozenset[str] | None, provider: Any) -> None:
+    """Refuse, at startup, a policy naming a role nobody declared.
+
+    Split from the generic `validate_names` because the name has two halves with
+    opposite natures. `"acme:admin"` carries an organisation id -- a **row**,
+    which cannot be enumerated and must not be refused -- and a role -- **
+    configuration**, which can be and must. Handing the qualified string to the
+    generic validator would compare it against a vocabulary of bare role names
+    and refuse every correct policy.
+
+    So only the role half is checked, against the same enumeration surface every
+    other fact uses. An unqualified name (the active-organisation reading) is
+    checked whole, because that is exactly a bare role.
+    """
+    if not referenced or provider is None:
+        return
+    enumerate_names = getattr(provider, "names", None)
+    if not callable(enumerate_names):
+        warnings.warn(
+            "cedar policies reference organization roles "
+            f"({', '.join(sorted(referenced))}) but the organization provider "
+            f"{type(provider).__name__} cannot enumerate its roles, so they "
+            "cannot be checked; a misspelled role will deny silently",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return
+    known = {str(name).lower() for name in enumerate_names()}
+    unknown = sorted(
+        name for name in referenced if name.rsplit(":", 1)[-1].lower() not in known
+    )
+    if unknown:
+        raise ValueError(
+            "cedar policies reference organization roles the provider does not "
+            f"declare: {', '.join(unknown)}. A role absent from the provider is "
+            "absent from context.org_roles, so the policy would deny forever."
+        )
+
+
+def _limits_of(request: Request) -> Limits:
+    """The composed principal's limits, or the shared "no restriction" value.
+
+    Absent means unrestricted, which is what every ordinary request carries, so
+    this is a single attribute read on the common path.
+    """
+    identity = request.identity
+    limits = None if identity is None else getattr(identity, "limits", None)
+    return NO_LIMITS if limits is None else limits
+
+
+def _resolve_organizations(
+    request: Request, provider: Any, vocabulary: frozenset[str] | None
+) -> frozenset[str]:
+    """The organisations this caller belongs to, bounded by any claimed limit."""
+    resolved = frozenset(
+        member.organization for member in provider.for_request(request)
+    )
+    return _limits_of(request).bound("organizations", resolved)
+
+
+def _resolve_org_roles(
+    request: Request, provider: Any, vocabulary: frozenset[str] | None
+) -> frozenset[str]:
+    """This caller's roles within their organisations, qualified and active.
+
+    Every membership contributes its **qualified** roles (`"acme:admin"`), which
+    is the spelling that cannot leak across tenants. The *active* organisation
+    additionally contributes its roles unqualified, so a policy written for a
+    single-tenant reading (`context.org_roles.contains("admin")`) means "admin
+    of the organisation this request is acting in" rather than "admin of
+    anything" -- the reading that is safe if a policy author never thinks about
+    tenancy at all.
+    """
+    from ..organizations import active_organization
+
+    memberships = provider.for_request(request)
+    active = active_organization(request)
+    names: set[str] = set()
+    for member in memberships:
+        names |= member.qualified_roles()
+        if active is not None and member.organization == active:
+            names |= member.roles
+    return _limits_of(request).bound("org_roles", frozenset(names))
+
+
+def _resolve_entitlements(
+    request: Request, provider: Any, vocabulary: frozenset[str] | None
+) -> frozenset[str]:
+    """What this caller's plan entitles them to, bounded by any claimed limit.
+
+    A claimed plan the provider disagrees with yields **nothing**, rather than
+    the claimed plan's entitlements. That is the composition law at its most
+    tempting to get wrong: `on_plan("pro")` is a restriction to the pro plan's
+    entitlements *if the provider agrees the caller is on it*, never an
+    assertion that they are.
+    """
+    identity = request.identity
+    if identity is None:
+        return EMPTY
+    limits = _limits_of(request)
+    if limits.plan is not None:
+        plan_of = getattr(provider, "plan_for", None)
+        if not callable(plan_of) or plan_of(identity) != limits.plan:
+            return EMPTY
+    resolved = frozenset(str(name) for name in provider.entitlements(identity))
+    return limits.bound("entitlements", resolved)
 
 
 def _default_context(request: Request) -> Mapping[str, object]:
@@ -204,93 +335,6 @@ def _default_context(request: Request) -> Mapping[str, object]:
     if age is not None:
         context["second_factor_age"] = age
     return context
-
-
-def _referenced_names(engine: Any, capability: str) -> frozenset[str] | None:
-    """The names `engine`'s policies test for `capability`, or None for "all".
-
-    Optional capability, probed the way `fingerprint`/`source`/`policies` are:
-    the `CedarEngine` protocol does not require it. An engine that cannot
-    introspect its own policy set answers `None` here, which costs the eager
-    resolution rather than risking a short list -- an outside evaluator whose
-    policies this walk has never seen must not have its vocabulary guessed at.
-    """
-    referenced = getattr(engine, capability, None)
-    if not callable(referenced):
-        return None
-    names = referenced()
-    return None if names is None else frozenset(names)
-
-
-def _validate_names(
-    referenced: frozenset[str] | None,
-    provider: Any,
-    *,
-    noun: str = "feature flags",
-    singular: str = "flag",
-    attribute: str = "flags",
-) -> None:
-    """Refuse, at startup, a policy naming something the provider does not hold.
-
-    A typo inside `context.flags.contains("new_iu")` is the likeliest mistake
-    here and the least visible one: the name is simply absent from the set, the
-    condition is false, and the policy denies forever with nothing to see. This
-    turns that into a boot failure naming the flag. `context.regions` gets the
-    same treatment from the same code, because a misspelled *region* fails in
-    exactly the same silent way.
-
-    Two branches, because only some providers can enumerate. One that offers
-    `names()` is checked. One that cannot -- an external service that would need
-    a network call to list its vocabulary -- gets a warning at the point the
-    authorizer is built instead, which is the same shape `second_factor_router`
-    uses for its own half-knowable condition: say what is unverifiable where it
-    is written, rather than either failing on a guess or staying silent.
-
-    A configured-but-empty provider is still a provider, so `names()` returning
-    nothing means every referenced name is unknown and the raise is correct.
-    Passing no provider at all skips validation entirely: that application has
-    decided the capability is off, every set is empty, and every test denies.
-    """
-    if referenced is not None and not referenced:
-        return  # no policy reads one; nothing to check and nothing to say
-    if provider is None:
-        return  # deliberately off: every test denies, and that is written down
-    enumerate_names = getattr(provider, "names", None)
-    if referenced is None:
-        # The policy set reads them in a shape whose names cannot be listed, so
-        # the provider has to supply all of them -- and this one cannot be
-        # enumerated either. Nothing can ever be resolved, so every test
-        # denies forever: working, fail-closed, and completely silent, which is
-        # the shape worth a warning rather than a shrug.
-        if not callable(enumerate_names):
-            warnings.warn(
-                f"cedar policies read context.{attribute} in a shape whose names "
-                "cannot be read off the source (isEmpty(), or a computed "
-                f"argument), and the {singular} provider {type(provider).__name__} "
-                f"cannot enumerate its names either, so no {singular} can be "
-                f"resolved and every {singular} test will deny",
-                RuntimeWarning,
-                stacklevel=3,
-            )
-        return  # no name list to validate against either way
-    if not callable(enumerate_names):
-        warnings.warn(
-            f"cedar policies reference {noun} "
-            f"({', '.join(sorted(referenced))}) but the {singular} provider "
-            f"{type(provider).__name__} cannot enumerate its names, so they "
-            f"cannot be checked; a misspelled {singular} will deny silently",
-            RuntimeWarning,
-            stacklevel=3,
-        )
-        return
-    known = {str(name).lower() for name in enumerate_names()}
-    unknown = sorted(name for name in referenced if name.lower() not in known)
-    if unknown:
-        raise ValueError(
-            f"cedar policies reference {noun} the provider does not "
-            f"hold: {', '.join(unknown)}. A {singular} absent from the provider "
-            f"is absent from context.{attribute}, so the policy would deny forever."
-        )
 
 
 class CedarEngine(Protocol):
@@ -375,8 +419,10 @@ class CedarAuthorizer:
     __slots__ = (
         "_action",
         "_context",
+        "_delegation_visible",
         "_engine",
         "_entities",
+        "_facts",
         "_flag_names",
         "_flags",
         "_location",
@@ -398,6 +444,8 @@ class CedarAuthorizer:
         flags: Any = None,
         regions: Any = None,
         location: Callable[[Request], object] = _default_location,
+        organizations: Any = None,
+        entitlements: Any = None,
     ) -> None:
         self._engine = engine
         self._principal = principal
@@ -408,16 +456,79 @@ class CedarAuthorizer:
         self._flags = flags
         self._regions = regions
         self._location = location
-        self._flag_names = _referenced_names(engine, "referenced_flags")
-        self._region_names = _referenced_names(engine, "referenced_regions")
-        _validate_names(self._flag_names, flags)
-        _validate_names(
-            self._region_names,
-            regions,
-            noun="geofence regions",
-            singular="region",
-            attribute="regions",
+        # Every set-valued context key, declared once. Adding a fact is adding a
+        # row here -- the caching rule, the laziness rule, the fail-closed empty
+        # and the startup validation are the `SetFact`'s, not a sixth copy of
+        # four rules that must agree.
+        self._facts: tuple[SetFact, ...] = (
+            SetFact(
+                "flags",
+                engine=engine,
+                provider=flags,
+                resolve=lambda request, vocabulary: _resolve_flags(
+                    request, flags, vocabulary
+                ),
+                noun="feature flags",
+                singular="flag",
+            ),
+            SetFact(
+                "regions",
+                engine=engine,
+                provider=regions,
+                resolve=lambda request, vocabulary: _resolve_regions(
+                    request, regions, location, vocabulary
+                ),
+                noun="geofence regions",
+                singular="region",
+            ),
+            SetFact(
+                "organizations",
+                engine=engine,
+                provider=organizations,
+                resolve=lambda request, vocabulary: _resolve_organizations(
+                    request, organizations, vocabulary
+                ),
+                noun="organizations",
+                singular="organization",
+                # An organisation id is a row, not configuration. Refusing to
+                # boot because a policy names an organisation that has not been
+                # created yet would refuse a correct application.
+                validate=False,
+            ),
+            SetFact(
+                "org_roles",
+                engine=engine,
+                provider=organizations,
+                resolve=lambda request, vocabulary: _resolve_org_roles(
+                    request, organizations, vocabulary
+                ),
+                noun="organization roles",
+                singular="role",
+                validate=False,
+            ),
+            SetFact(
+                "entitlements",
+                engine=engine,
+                provider=entitlements,
+                resolve=lambda request, vocabulary: _resolve_entitlements(
+                    request, entitlements, vocabulary
+                ),
+                noun="entitlements",
+                singular="entitlement",
+            ),
         )
+        # Kept for `flags_for`/`regions_for`, which the permission manifest
+        # calls, and because the two vocabularies are read in tests.
+        self._flag_names = self._facts[0].vocabulary
+        self._region_names = self._facts[1].vocabulary
+        # Whether any policy can tell a delegated request from a direct one. If
+        # none can, the second evaluation below is provably identical to the
+        # first and is skipped; a request with no delegation never makes it.
+        reads = getattr(engine, "reads_context", None)
+        self._delegation_visible = bool(
+            callable(reads) and (reads("delegated") or reads("actor"))
+        )
+        _validate_org_roles(self._facts[3].vocabulary, organizations)
 
     # --- policy identity, delegated from the engine -------------------------
     #
@@ -454,7 +565,7 @@ class CedarAuthorizer:
         vocabulary private to this class, and shares the per-request cache, so
         tagging a manifest costs no extra resolution.
         """
-        return request_flags(request, self._flags, self._flag_names)
+        return self._facts[0].for_request(request)
 
     def regions_for(self, request: Request) -> frozenset[str]:
         """This request's containing regions, from the resolution `authorize` uses.
@@ -464,9 +575,17 @@ class CedarAuthorizer:
         that ignored position would let a stale manifest outlive the geofence
         that produced it.
         """
-        return request_regions(
-            request, self._regions, self._location, self._region_names
-        )
+        return self._facts[1].for_request(request)
+
+    def facts_for(self, request: Request) -> dict[str, frozenset[str]]:
+        """Every declared set fact for this request, keyed by context attribute.
+
+        What the permission manifest tags with. Adding a fact must change the
+        `ETag`, or a manifest outlives the membership or entitlement that
+        produced it -- and enumerating them here rather than naming them one by
+        one is what stops the next fact from being forgotten.
+        """
+        return {fact.attribute: fact.for_request(request) for fact in self._facts}
 
     @property
     def fingerprint(self) -> object:
@@ -534,6 +653,18 @@ class CedarAuthorizer:
         identity = request.identity
         if identity is None:
             return AuthorizationDecision(False, "anonymous")
+        # Delegation, refused before the engine is consulted. Both checks are
+        # mechanical rather than policy-expressed, deliberately: a scope bound
+        # that only holds when a policy author remembered to read
+        # `context.scope` is not a bound. See `_auth.principal` for the law.
+        narrowing = getattr(identity, "narrowing", None)
+        if narrowing is not None:
+            if narrowing.expired(time.time()):
+                return AuthorizationDecision(False, "delegation expired")
+            if not narrowing.permits(requirement.action):
+                return AuthorizationDecision(
+                    False, "delegation scope does not cover this action"
+                )
         raw_resource = requirement.resource
         if callable(raw_resource):
             resolver = cast(Callable[[Request], object], raw_resource)
@@ -554,7 +685,7 @@ class CedarAuthorizer:
         # answer. (`second_factor_age` above reaches the opposite conclusion
         # for the opposite reason: it is guarded by `has`, and a *number* has
         # no value that fails closed in both shapes.)
-        context["flags"] = request_flags(request, self._flags, self._flag_names)
+        context["flags"] = self._facts[0].for_request(request)
         # Supplied unconditionally for the reason `flags` is, and verified for
         # this key rather than assumed to transfer: against a context with no
         # `regions` at all, `forbid(...) unless { context.regions.contains(x) }`
@@ -562,9 +693,57 @@ class CedarAuthorizer:
         # so an application that never configured regions, or a custom context
         # mapper that dropped the key, would silently stop geofencing. An empty
         # set denies in both the `when` and the `unless` shape.
-        context["regions"] = request_regions(
-            request, self._regions, self._location, self._region_names
+        context["regions"] = self._facts[1].for_request(request)
+        for fact in self._facts[2:]:
+            context[fact.attribute] = fact.for_request(request)
+        # Supplied as a *bool* rather than left absent, for the reason the empty
+        # sets above are supplied: `forbid(...) unless { context.delegated }`
+        # against a context with no `delegated` key skips the forbid rather than
+        # standing it, so an agent would escape a rule written to catch it. A
+        # literal `false` denies in both the `when` and the `unless` shape.
+        context["delegated"] = False
+
+        # Pass one: the delegating principal's own authority, evaluated exactly
+        # as if they had made this request themselves.
+        decision = await self._evaluate(
+            principal, action, resource, context, entities
         )
+        if narrowing is None or not decision.allowed:
+            return decision
+        if not self._delegation_visible:
+            # No policy can tell the two passes apart, so pass two would put the
+            # identical query to the engine and get the identical answer.
+            return decision
+
+        # Pass two: the same query, with the delegation visible. **The result is
+        # ANDed with pass one, never substituted for it.** That conjunction is
+        # what makes `narrow` an intersection for every policy set, including
+        # ones written later and ones that permit only delegates -- a `permit`
+        # guarded by `context.delegated` still cannot grant a delegate more than
+        # the human it acts for, because the human's own decision already had to
+        # allow it.
+        delegated_context = dict(context)
+        delegated_context["delegated"] = True
+        delegated_context["actor"] = narrowing.actor
+        delegated_context["delegation_depth"] = narrowing.depth
+        delegated = await self._evaluate(
+            principal, action, resource, delegated_context, entities
+        )
+        if delegated.allowed:
+            return delegated
+        return AuthorizationDecision(
+            False, delegated.reason or "denied to the delegated actor"
+        )
+
+    async def _evaluate(
+        self,
+        principal: object,
+        action: object,
+        resource: object,
+        context: Mapping[str, object],
+        entities: object,
+    ) -> AuthorizationDecision:
+        """One engine query, normalized. The shape both delegation passes use."""
         result = await _resolve(
             self._engine.is_authorized(
                 principal=principal,

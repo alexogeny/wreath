@@ -188,10 +188,8 @@ class BearerTokenBackend:
         if value_bytes is None:
             return None
         value = value_bytes.decode("latin-1")
-        scheme, separator, token = value.partition(" ")
-        if not separator or not token or (
-            scheme != "Bearer" and scheme.lower() != "bearer"
-        ):
+        scheme, _separator, token = value.partition(" ")
+        if not token or scheme.lower() != "bearer":
             return None
         result = self._verifier(token)
         if self._verifier_is_async:

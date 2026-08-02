@@ -73,6 +73,32 @@ async def test_authenticated_route_challenges_then_exposes_identity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bearer_scheme_is_case_insensitive_and_other_schemes_are_refused() -> None:
+    seen: list[str] = []
+
+    async def verify(token: str) -> Identity | None:
+        seen.append(token)
+        return Identity("user-1") if token == "valid" else None
+
+    app = Wreath()
+    app.configure_auth(BearerTokenBackend(verify))
+
+    @app.get("/private")
+    @authenticated()
+    async def private(request):
+        return request.identity.id
+
+    lowercase = await invoke(app, "/private", authorization=b"bearer valid")
+    foreign = await invoke(app, "/private", authorization=b"Basic valid")
+    empty = await invoke(app, "/private", authorization=b"Bearer ")
+
+    assert lowercase[0]["status"] == 200
+    assert foreign[0]["status"] == 401
+    assert empty[0]["status"] == 401
+    assert seen == ["valid"]
+
+
+@pytest.mark.asyncio
 async def test_admin_route_is_pruned_for_non_admin_and_allowed_for_admin() -> None:
     async def verify(token: str) -> Identity | None:
         if token == "admin":
@@ -492,7 +518,9 @@ async def test_the_two_enforcers_ask_the_same_question_of_a_requirement() -> Non
 
     admin = SetRequirement(frozenset({"admin"}), "all")
     assert AuthRequirement().access_level == 0
-    assert AuthRequirement(identify=True).access_level == 0   # asks nothing of the caller
+    identify = AuthRequirement(identify=True)
+    assert identify.access_level == 0  # loads the caller without requiring one
+    assert identify.needs_backend
     assert AuthRequirement(role_checks=(admin,)).access_level == 2
     for requirement in (
         AuthRequirement(authenticated=True),

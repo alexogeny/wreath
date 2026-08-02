@@ -116,6 +116,34 @@ def _literal_names(node: object) -> Iterator[str]:
             yield from _literal_names(element)
 
 
+def _reads_context(policies: Iterable[Any], attribute: str) -> bool:
+    """Whether any policy reads `context.<attribute>` at all, in any shape.
+
+    A presence test rather than a member walk, and the two are genuinely
+    different questions: `_referenced_members` answers *which names* a set key
+    is tested against, and cannot distinguish "no policy reads this" from "read
+    in an unknowable shape" without the caller decoding `frozenset()` versus
+    `None`. This answers the plain question a scalar key needs -- `context.actor`
+    and `context.delegated` are not sets and have no members to walk.
+
+    Its one caller uses it to decide whether a delegated request needs a
+    *second* evaluation. Getting it wrong in the false direction skips that
+    evaluation and would let a delegate exceed its delegator, so this walks the
+    whole tree and tests for the compiled attribute read itself rather than for
+    any particular expression shape around it.
+    """
+    target = _context_attribute(attribute)
+    stack: list[Any] = list(policies)
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, tuple | list):
+            continue
+        if isinstance(node, tuple) and target in node:
+            return True
+        stack.extend(node)
+    return False
+
+
 def _referenced_members(
     policies: Iterable[Any], attribute: str
 ) -> frozenset[str] | None:
@@ -995,6 +1023,43 @@ class CedarPolicies:
         """
         return _referenced_members(self._policies, "regions")
 
+    def referenced_organizations(self) -> frozenset[str] | None:
+        """Every organisation id this policy set tests, or None for "all".
+
+        Read for one purpose only, and it is not validation: an organisation id
+        is a **row**, not a declared vocabulary, so refusing to boot because a
+        policy names an organisation nobody has created yet would be wrong.
+        What it decides is whether membership is resolved at all -- an empty
+        answer means no policy reads `context.organizations`, so the caller skips
+        the lookup entirely and the fact costs nothing.
+        """
+        return _referenced_members(self._policies, "organizations")
+
+    def referenced_org_roles(self) -> frozenset[str] | None:
+        """Every role-within-an-organisation this policy set tests, or None.
+
+        Unlike organisation ids these *are* a declared vocabulary, so a policy
+        naming `"acme:admni"` is refused at startup. The qualified form carries
+        an organisation id that cannot be enumerated, so validation checks the
+        role half against the declared roles and lets the organisation half
+        through -- see `Memberships.names`.
+        """
+        return _referenced_members(self._policies, "org_roles")
+
+    def referenced_entitlements(self) -> frozenset[str] | None:
+        """Every entitlement this policy set tests, or None for "all"."""
+        return _referenced_members(self._policies, "entitlements")
+
+    def reads_context(self, attribute: str) -> bool:
+        """Whether any policy reads `context.<attribute>`, in any shape.
+
+        The scalar counterpart to the `referenced_*` walks. `CedarAuthorizer`
+        asks it about `delegated` and `actor` to decide whether a delegated
+        request needs a second evaluation, which is a question about presence
+        rather than about members.
+        """
+        return _reads_context(self._policies, attribute)
+
     def is_authorized(
         self,
         *,
@@ -1034,7 +1099,7 @@ class CedarPolicies:
         else:
             store = self._store
         evaluate = _pure_cedar.cedar_is_authorized
-        native = getattr(_core, "cedar_is_authorized", None) if _core is not None else None
+        native = getattr(_core, "cedar_is_authorized", None)
         if native is not None:
             evaluate = native
         allowed, reason, diagnostics = evaluate(
