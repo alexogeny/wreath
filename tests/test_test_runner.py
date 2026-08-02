@@ -80,8 +80,27 @@ def test_duration_report_names_slowest_tests_and_robust_outliers() -> None:
     assert report["durations"]["mean_seconds"] == pytest.approx(0.2008)
     assert report["durations"]["median_seconds"] == pytest.approx(0.001)
     assert report["durations"]["outliers"] == 1
+    assert report["durations"]["over_100ms"] == 1
+    assert report["durations"]["over_250ms"] == 1
+    assert report["durations"]["over_1s"] == 1
     assert report["slowest"][0]["nodeid"].endswith("test_4")
     assert len(report["slowest"]) == 2
+
+
+def test_duration_report_practical_tail_boundaries_are_inclusive() -> None:
+    activity = runner.RunActivity(workers=1)
+    nodeids = tuple(f"tests/test_tail.py::test_{index}" for index in range(3))
+    activity.collect(nodeids)
+    for nodeid, duration in zip(nodeids, (0.1, 0.25, 1.0), strict=True):
+        activity.start_test(nodeid)
+        activity.add_report(_report(nodeid, "passed", "call", duration))
+        activity.finish_test(nodeid)
+
+    durations = activity.report(slowest=0)["durations"]
+
+    assert durations["over_100ms"] == 3
+    assert durations["over_250ms"] == 2
+    assert durations["over_1s"] == 1
 
 
 def test_render_is_a_stable_file_heat_map_with_duration_statistics() -> None:
@@ -113,6 +132,7 @@ def test_render_is_a_stable_file_heat_map_with_duration_statistics() -> None:
         "▰ pass + killed mutant · ▲ skip/mixed · ✕ fail/error"
     ) in text
     assert "average 250.0ms" in text
+    assert "slow tail   1 >=100ms · 1 >=250ms · 0 >=1s · Tukey 0 >250.0ms" in text
     assert "Slowest tests" in text
 
     coloured = runner.render_activity(
@@ -181,8 +201,34 @@ def test_mutation_tiles_advance_from_active_to_verified() -> None:
     assert "Mutation   ▣ auto · 1 sampled controls · testing controls" in active
     assert "■ ▰" in verified
     assert "Mutation   auto · ■ SAMPLE WATCHED" in verified
+    assert "▰ 1 gold test file · 1 killed" in verified
     assert "live overlap · 2 started · 1 completed before seal · first at 0.24s" in verified
     assert "1 stopped at seal" in verified
+
+    plural = runner.render_activity(
+        activity,
+        width=100,
+        height=30,
+        colour=False,
+        slowest=0,
+        mutation=runner.MutationActivity(
+            mode="sample",
+            state="complete",
+            counts={"killed": 2},
+            verified_files=frozenset({"tests/test_policy.py", "tests/test_other.py"}),
+        ),
+    )
+    assert "▰ 2 gold test files · 2 killed" in plural
+
+
+def test_mutation_report_requires_a_complete_rating() -> None:
+    report = {
+        "counts": {"killed": 1},
+        "rating": {"label": "SAMPLE WATCHED", "action": "Keep it."},
+    }
+
+    with pytest.raises(ValueError, match="rating is incomplete"):
+        runner._mutation_activity_from_report("auto", report)
 
 
 def test_mutation_event_stream_moves_only_killers_to_verified(tmp_path: Path) -> None:
@@ -341,6 +387,93 @@ def test_duration_history_prioritizes_expensive_tests_for_dynamic_dispatch() -> 
     ]
 
 
+def test_historical_scheduler_refills_a_live_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xdist.scheduler.load import LoadScheduling
+
+    monkeypatch.setattr(LoadScheduling, "__init__", lambda self, config, log: None)
+    scheduler = runner.HistoricalSchedulerPlugin({}, {}).pytest_xdist_make_scheduler(
+        object(), lambda _message: None
+    )
+    class Node:
+        shutting_down = False
+
+    node = Node()
+    scheduler.pending = [1, 2]
+    scheduler.node2pending = {node: []}
+    sent: list[tuple[object, int]] = []
+    scheduler._send_tests = lambda target, count: sent.append((target, count))
+
+    scheduler.check_schedule(node)
+
+    assert sent == [(node, 2)]
+
+
+def test_an_invalid_mutation_report_is_refused_with_runner_context(tmp_path: Path) -> None:
+    class FinishedProcess:
+        def poll(self) -> int:
+            return 0
+
+        def wait(self) -> int:
+            return 0
+
+    output = tmp_path / "mutation.json"
+    output.write_text("not json", encoding="utf-8")
+    mutation = runner._MutationProcess(
+        process=FinishedProcess(),
+        output_path=output,
+        activity_path=tmp_path / "events.jsonl",
+        event_state=runner._MutationEventState(total=1),
+        baseline_reused=True,
+    )
+    namespace = SimpleNamespace(mutant="auto", mutant_fail_on_survivor=False)
+
+    with pytest.raises(ValueError, match="mutation confidence returned invalid JSON"):
+        runner._finish_mutation_process(namespace, mutation)
+
+
+def test_a_failed_mutation_process_is_refused_before_reading_its_report(
+    tmp_path: Path,
+) -> None:
+    class FailedProcess:
+        def poll(self) -> int:
+            return 2
+
+        def wait(self) -> int:
+            return 2
+
+    output = tmp_path / "mutation.json"
+    output.write_text("{}", encoding="utf-8")
+    mutation = runner._MutationProcess(
+        process=FailedProcess(),
+        output_path=output,
+        activity_path=tmp_path / "events.jsonl",
+        event_state=runner._MutationEventState(total=1),
+        baseline_reused=True,
+    )
+    namespace = SimpleNamespace(mutant="auto", mutant_fail_on_survivor=False)
+
+    with pytest.raises(ValueError, match="mutation confidence phase failed"):
+        runner._finish_mutation_process(namespace, mutation)
+
+
+def test_a_killed_event_with_a_non_list_killer_field_awards_no_gold(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        '{"event":"finished","ordinal":1,"outcome":"killed",'
+        '"killers":"tests/test_policy.py::test_denied"}\n',
+        encoding="utf-8",
+    )
+    state = runner._MutationEventState()
+
+    runner._consume_mutation_events(events, state)
+
+    assert state.verified_files == set()
+
+
 def test_mutation_sample_cache_round_trips_exact_selection_and_watch_lines(
     tmp_path: Path,
 ) -> None:
@@ -385,7 +518,8 @@ def test_test_command_forwards_unknown_pytest_arguments_in_order(
 
     assert result == 17
     assert received[0].workers == "1"
-    assert received[0].mutant_samples == 12
+    assert received[0].mutant_samples == 192
+    assert received[0].mutant_budget == 50.0
     assert received[0].pytest_args == [
         "-k",
         "auth and not slow",

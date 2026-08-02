@@ -220,6 +220,9 @@ def _duration_summary(tests: list[TestState]) -> dict[str, float | int]:
             "p99_seconds": 0.0,
             "outlier_threshold_seconds": 0.0,
             "outliers": 0,
+            "over_100ms": 0,
+            "over_250ms": 0,
+            "over_1s": 0,
         }
     q1 = _percentile(durations, 0.25)
     q3 = _percentile(durations, 0.75)
@@ -232,6 +235,9 @@ def _duration_summary(tests: list[TestState]) -> dict[str, float | int]:
         "p99_seconds": _percentile(durations, 0.99),
         "outlier_threshold_seconds": threshold,
         "outliers": sum(duration > threshold for duration in durations),
+        "over_100ms": sum(duration >= 0.1 for duration in durations),
+        "over_250ms": sum(duration >= 0.25 for duration in durations),
+        "over_1s": sum(duration >= 1.0 for duration in durations),
     }
 
 
@@ -524,10 +530,14 @@ def _mutation_lines(mutation: MutationActivity, *, colour: bool) -> list[str]:
     unreached = counts.get("unreached", 0)
     undecided = counts.get("timeout", 0) + counts.get("error", 0)
     equivalent = counts.get("equivalent", 0)
+    verified_tile = _legend_tile("verified", 4, colour=colour)
+    verified_count = len(mutation.verified_files)
+    verified_label = "file" if verified_count == 1 else "files"
     lines = [
         f"  Mutation   {mutation.mode} · {rating} · {mutation.rating_action}",
         (
-            f"  {killed} killed · {survived} survived · {unreached} unreached · "
+            f"  {verified_tile} {verified_count} gold test {verified_label} · "
+            f"{killed} killed · {survived} survived · {unreached} unreached · "
             f"{undecided} undecided/declined · {equivalent} equivalent"
         ),
     ]
@@ -631,8 +641,15 @@ def render_activity(
             f"median {_format_duration(float(durations['median_seconds']))} · "
             f"p95 {_format_duration(float(durations['p95_seconds']))} · "
             f"p99 {_format_duration(float(durations['p99_seconds']))} · "
-            f"{durations['outliers']} outliers · "
             f"test time {_format_duration(float(durations['total_seconds']))}"
+        )
+        lines.append(
+            "  slow tail   "
+            f"{durations['over_100ms']} >=100ms · "
+            f"{durations['over_250ms']} >=250ms · "
+            f"{durations['over_1s']} >=1s · "
+            f"Tukey {durations['outliers']} "
+            f">{_format_duration(float(durations['outlier_threshold_seconds']))}"
         )
         if activity.wall_seconds and activity.workers:
             utilization = float(durations["total_seconds"]) / (

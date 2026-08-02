@@ -773,6 +773,31 @@ async def test_a_job_that_reported_nothing_is_dead_lettered_at_zero():
     assert progress.reports == [("7", 0.0, "failed", "boom")]
 
 
+async def test_cancelling_reports_terminal_progress_when_configured(monkeypatch):
+    progress = _Progress(percent=42.0)
+    runner = _runner(FakeDatabase(), progress=progress)
+
+    async def cancelled_rows(*args, **kwargs):
+        return [{"id": 7}]
+
+    monkeypatch.setattr(runner, "_fetch", cancelled_rows)
+
+    assert await runner.cancel(7, reason="operator stopped it") is True
+    assert progress.reports == [("7", 42.0, "failed", "operator stopped it")]
+
+
+async def test_cancelling_without_progress_still_succeeds(monkeypatch):
+    runner = _runner(FakeDatabase())
+
+    async def cancelled_rows(*args, **kwargs):
+        return [{"id": 7}]
+
+    monkeypatch.setattr(runner, "_fetch", cancelled_rows)
+
+    assert await runner.cancel(7) is True
+    assert runner.cancelled == 1
+
+
 async def test_a_failure_with_no_handler_falls_back_to_the_rows_own_budget():
     """`_fail` is reached with `handler=None` when the task is not registered here
     -- another release's task, or one removed since the row was enqueued."""
