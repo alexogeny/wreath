@@ -272,6 +272,12 @@ class JobRunner:
         #: enqueuing without trace context that the schema could hold -- an
         #: observability gap, never a correctness one.
         self.trace_probe_errors = 0
+        #: Jobs stopped by `cancel`. Kept apart from `dead_lettered` because the
+        #: cause is opposite: a dead-lettered job ran out of attempts, and a
+        #: cancelled one was told to stop while it still had some. A queue whose
+        #: `dead` rows are mostly cancellations is healthy; one whose `dead` rows
+        #: are mostly exhaustions is not, and one counter cannot say which.
+        self.cancelled = 0
         #: Jobs that exhausted their attempts. The one outcome nothing else
         #: reports: a dead-lettered job is silent in the logs and invisible in
         #: the queue depth, because it has left the queue.
@@ -329,6 +335,7 @@ class JobRunner:
             "sweep_errors": self.sweep_errors,
             "schedule_errors": self.schedule_errors,
             "dead_lettered": self.dead_lettered,
+            "cancelled": self.cancelled,
         }
 
     @property
@@ -918,6 +925,69 @@ class JobRunner:
             "AND updated_at < now() - ($2 || ' seconds')::interval",
             self._name, f"{float(older_than):.3f}",
         )
+
+    async def cancel(
+        self, job_id: int | None = None, *, key: str | None = None, reason: str = "cancelled"
+    ) -> bool:
+        """Stop a queued or leased job. Returns whether a row moved.
+
+        Name it by `id`, or by the `key` an `enqueue`/`launch` deduplicated on
+        -- the second is what a caller has when the id belongs to whichever
+        worker enqueued first.
+
+        **The fence is bumped, and that is the whole mechanism.** There is no
+        signal to a worker in another process and this does not invent one: the
+        row goes to `dead`, its fence moves, and the running attempt's
+        completion `UPDATE` -- which is already `WHERE id=$1 AND fence=$2` --
+        matches nothing when it lands. So a cancelled job stops being retried
+        immediately, and the attempt in flight stops being able to say anything
+        about the queue. What it does *not* do is interrupt that attempt's side
+        effects, for the same reason a lease expiry does not: nothing here can
+        reach into another process's event loop, and pretending otherwise is how
+        a "cancelled" job charges a card.
+
+        A job that has already reached `done` or `dead` is left alone and
+        answers `False`; cancelling something that finished is not an error, it
+        is a race the caller lost.
+
+        Raises:
+            ValueError: neither or both of `job_id` and `key` were given.
+        """
+        if (job_id is None) == (key is None):
+            raise ValueError(
+                "cancel() takes exactly one of job_id= and key=: naming both would "
+                "leave which one selects the row undecided, and naming neither "
+                "would cancel the whole queue"
+            )
+        # Branching on `key` rather than on `job_id`, so the narrowing is real:
+        # the check above has already established that exactly one is given, and
+        # spelling it this way means `dedup_key` is handed a `str` instead of a
+        # `key or ""` fallback for a `None` that cannot arrive here.
+        if key is not None:
+            selector, value = "dedup_key=$2", dedup_key(self._name, key)
+        else:
+            selector, value = "id=$2", job_id
+        rows = await self._fetch(
+            f"UPDATE {self._table} SET state='dead', fence=fence+1, "
+            "last_error=$3, owner=NULL, lease_expiry=NULL, updated_at=now() "
+            f"WHERE queue=$1 AND {selector} AND state IN ('ready', 'leased') "
+            "RETURNING id",
+            self._name, value, reason[:2000],
+        )
+        if not rows:
+            return False
+        self.cancelled += 1
+        if self._progress is not None:
+            # Closed out here rather than through `_report_terminal`, which
+            # takes a `_Claimed` this path never had: nothing was claimed, a row
+            # was told to stop. A watching client would otherwise sit at
+            # whatever percentage the last report left, forever.
+            for row in rows:
+                self._progress.report(
+                    str(row["id"]), self._last_percent(row["id"]), reason,
+                    state="failed", error=reason,
+                )
+        return True
 
     # -- loops ---------------------------------------------------------------
 
