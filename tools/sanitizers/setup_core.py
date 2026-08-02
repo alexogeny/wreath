@@ -45,6 +45,8 @@ SOURCES = (
     "observability.c",
     "proxy.c",
     "ratelimit.c",
+    "kv.c",
+    "queue.c",
     "scheduler.c",
 )
 

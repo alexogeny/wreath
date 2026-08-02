@@ -170,6 +170,8 @@ ext_modules = [
                 "src/wreath/_native/observability.c",
                 "src/wreath/_native/proxy.c",
                 "src/wreath/_native/ratelimit.c",
+                "src/wreath/_native/kv.c",
+                "src/wreath/_native/queue.c",
                 "src/wreath/_native/scheduler.c",
             ],
             depends=[
