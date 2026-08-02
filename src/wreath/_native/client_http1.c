@@ -76,11 +76,17 @@ client_protocol_feed(WreathHttpClientProtocol *self, PyObject *chunk)
     data = PyByteArray_AS_STRING(self->buffer);
     size = PyByteArray_GET_SIZE(self->buffer);
     if (self->scan > 3) self->scan -= 3;
-    for (Py_ssize_t i = self->scan; i + 3 < size; i++) {
-        if (data[i] == '\r' && data[i + 1] == '\n' &&
-            data[i + 2] == '\r' && data[i + 3] == '\n') {
-            end = i + 4;
-            break;
+    /* The same search the server runs in `http.c`, by the same route. This was
+     * the last place either side of the wire hand-rolled the terminator scan.
+     * Measured on `feed_data` with a >=0.1% A/A floor: 7% faster on a 4-header
+     * response, 12% on 12 headers, 17% on 96 -- in both the one-chunk and the
+     * 256-byte-chunk feeds. */
+    if (size - self->scan >= 4) {
+        const uint8_t *found = wreath_memmem(
+            (const uint8_t *)data + self->scan, size - self->scan,
+            (const uint8_t *)"\r\n\r\n", 4);
+        if (found != NULL) {
+            end = (Py_ssize_t)(found - (const uint8_t *)data) + 4;
         }
     }
     if (end < 0) {
@@ -334,11 +340,22 @@ cs_take_ready(WreathClientStream *self, int kind, const char *sep,
     if (kind == CS_READ_UNTIL) {
         const char *base = self->data + self->head;
         Py_ssize_t isep = -1;
-        for (Py_ssize_t i = *scan; i + seplen <= avail; i++) {
-            if (base[i] == sep[0] &&
-                memcmp(base + i, sep, (size_t)seplen) == 0) {
-                isep = i;
-                break;
+        /* `wreath_memmem` rather than a first-byte test plus `memcmp`, which is
+         * what this was. The separators are `\r\n\r\n` for a response head and
+         * `\r\n` for chunk framing, both of which it sends to the vector scan.
+         *
+         * This is the largest win of the three in this file, because the cost
+         * here is the scan itself rather than a buffer copy around it: with a
+         * 2.4% A/A floor, 8% faster over 477 bytes, 21% over 1,257 and 39% over
+         * 3,753. The shape is the tell -- the time barely grows with the
+         * response now (1,470 ns -> 1,561 ns across that range) where it used
+         * to climb with every byte (1,542 ns -> 2,543 ns). */
+        if (avail - *scan >= seplen) {
+            const uint8_t *found = wreath_memmem(
+                (const uint8_t *)base + *scan, avail - *scan,
+                (const uint8_t *)sep, seplen);
+            if (found != NULL) {
+                isep = (Py_ssize_t)(found - (const uint8_t *)base);
             }
         }
         if (isep >= 0) {

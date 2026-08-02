@@ -4,7 +4,7 @@ import asyncio
 import socket
 import ssl
 from collections.abc import Awaitable, Callable
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -78,6 +78,95 @@ async def test_client_sends_request_and_reads_fixed_response() -> None:
     assert response.header(b"content-type") == b"application/json"
     assert received[0].startswith(b"POST /events HTTP/1.1\r\n")
     assert received[1] == b"{}"
+
+
+@pytest.mark.asyncio
+async def test_client_hands_taskless_entry_to_a_task_before_total_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model the native server's eager first step in every execution mode."""
+
+    async def handler(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server, port = await _serve(handler)
+    client = HTTPClient(
+        "taskless-entry",
+        base_url=f"http://127.0.0.1:{port}",
+        destination=_local_policy(),
+    )
+    real_current_task = asyncio.current_task
+    real_sleep = asyncio.sleep
+    handed_off = False
+
+    def task_after_handoff(
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> asyncio.Task[Any] | None:
+        if not handed_off:
+            return None
+        return real_current_task(loop)
+
+    async def handoff_sleep(delay: float, result: Any = None) -> Any:
+        nonlocal handed_off
+        value = await real_sleep(delay, result)
+        handed_off = True
+        return value
+
+    try:
+        await client.start()
+        monkeypatch.setattr(asyncio, "current_task", task_after_handoff)
+        monkeypatch.setattr(asyncio.tasks, "current_task", task_after_handoff)
+        monkeypatch.setattr(asyncio, "sleep", handoff_sleep)
+        response = await client.get("/")
+    finally:
+        await client.close()
+        server.close()
+        await server.wait_closed()
+
+    assert response.body == b"ok"
+    assert handed_off
+
+
+@pytest.mark.asyncio
+async def test_client_does_not_yield_when_the_request_already_owns_a_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The native handoff is exceptional; ordinary asyncio calls stay direct."""
+
+    async def handler(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async def unexpected_handoff(delay: float, result: Any = None) -> Any:
+        raise AssertionError(f"task-owned request yielded through sleep({delay}, {result!r})")
+
+    server, port = await _serve(handler)
+    client = HTTPClient(
+        "task-owned-entry",
+        base_url=f"http://127.0.0.1:{port}",
+        destination=_local_policy(),
+    )
+    try:
+        await client.start()
+        monkeypatch.setattr(asyncio, "sleep", unexpected_handoff)
+        response = await client.get("/")
+    finally:
+        await client.close()
+        server.close()
+        await server.wait_closed()
+
+    assert response.body == b"ok"
 
 
 @pytest.mark.asyncio
@@ -856,6 +945,8 @@ async def test_client_rejects_malformed_response_trailers(trailer: bytes) -> Non
         ("169.254.169.254", "link-local"),
         ("10.0.0.1", "private"),
         ("0.0.0.0", "special"),
+        ("::", "special"),
+        ("::1", "loopback"),
         ("224.0.0.1", "special"),
         ("100.64.0.1", "non-global"),
         ("64:ff9b::a9fe:a9fe", "link-local"),
@@ -866,6 +957,42 @@ def test_destination_policy_rejects_non_global_addresses(
 ) -> None:
     with pytest.raises(DestinationRejected, match=reason):
         DestinationPolicy().validate_address(address)
+
+
+@pytest.mark.parametrize(
+    ("address", "reason"),
+    (
+        ("::127.0.0.1", "loopback"),
+        ("::169.254.169.254", "link-local"),
+        ("::10.0.0.1", "private"),
+    ),
+)
+def test_ipv4_compatible_ipv6_cannot_hide_a_restricted_destination(
+    address: str, reason: str
+) -> None:
+    """Deprecated IPv4-compatible literals still encode an IPv4 destination.
+
+    `ipaddress` classifies these IPv6 spellings as global and does not expose
+    them through `ipv4_mapped`. A stack or translator that honours the embedded
+    address must not turn that classification mismatch into SSRF.
+    """
+    with pytest.raises(DestinationRejected, match=reason):
+        DestinationPolicy().validate_address(address)
+
+
+def test_ipv4_compatible_ipv6_preserves_a_public_destination() -> None:
+    DestinationPolicy().validate_address("::8.8.8.8")
+
+
+def test_ipv4_compatible_ipv6_keeps_policy_exceptions_independent() -> None:
+    DestinationPolicy(allow_loopback=True).validate_address("::127.0.0.1")
+    DestinationPolicy(allow_link_local=True).validate_address("::169.254.169.254")
+    DestinationPolicy(allow_private=True).validate_address("::10.0.0.1")
+
+    with pytest.raises(DestinationRejected, match="loopback"):
+        DestinationPolicy(allow_private=True).validate_address("::127.0.0.1")
+    with pytest.raises(DestinationRejected, match="link-local"):
+        DestinationPolicy(allow_private=True).validate_address("::169.254.169.254")
 
 
 def test_destination_policy_exceptions_do_not_widen_each_other() -> None:
@@ -937,6 +1064,53 @@ async def test_nat64_cannot_translate_a_public_dns_answer_to_loopback(
         await client.close()
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_one_unsafe_dns_answer_refuses_the_whole_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy Eyeballs must not race a public answer beside an internal one."""
+    connected = False
+    loop = asyncio.get_running_loop()
+
+    async def mixed_dns(
+        *_args: object, **_kwargs: object
+    ) -> list[tuple[object, ...]]:
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("8.8.8.8", 80),
+            ),
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("127.0.0.1", 80),
+            ),
+        ]
+
+    async def forbidden_connect(*_args: object, **_kwargs: object) -> None:
+        nonlocal connected
+        connected = True
+        raise AssertionError("the client connected before validating every DNS answer")
+
+    monkeypatch.setattr(loop, "getaddrinfo", mixed_dns)
+    monkeypatch.setattr("wreath.http_client._NativeClientStream", None)
+    monkeypatch.setattr(asyncio, "open_connection", forbidden_connect)
+    client = HTTPClient("mixed-dns", base_url="http://attacker.example")
+    try:
+        await client.start()
+        with pytest.raises(DestinationRejected, match="loopback"):
+            await client.get("/")
+    finally:
+        await client.close()
+
+    assert not connected
 
 
 @pytest.mark.asyncio

@@ -63,9 +63,9 @@ An `HTTPClient` is pinned to the origin in its `base_url`: request targets are
 origin-relative, cross-origin redirects are refused, and every resolved address
 is checked before a socket is opened. The default `DestinationPolicy` refuses
 private, loopback, link-local, special, and non-global addresses. It also checks
-the IPv4 destination embedded in the well-known NAT64 prefix, so translation
-cannot turn a globally classified IPv6 answer into a route to loopback or a
-cloud metadata service.
+the IPv4 destination embedded in the well-known NAT64 prefix and deprecated
+IPv4-compatible IPv6 literals, so translation cannot turn a globally classified
+IPv6 answer into a route to loopback or a cloud metadata service.
 
 If a request chooses which upstream to call, map that input to preconfigured,
 named clients. Do not construct a client directly from a caller-provided URL.

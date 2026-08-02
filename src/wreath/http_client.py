@@ -99,6 +99,14 @@ _HAPPY_EYEBALLS_DELAY = 0.25
 # `64:ff9b::7f00:1` would therefore admit a route to 127.0.0.1 on a NAT64 host.
 _NAT64_WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
 
+# RFC 4291's deprecated IPv4-compatible form also puts an IPv4 address in the
+# final 32 bits. Python 3.14 intentionally does not expose it as `ipv4_mapped`
+# and classifies spellings such as `::127.0.0.1` as global. Some stacks and
+# translators still honour the embedded destination, so apply the IPv4 policy
+# rather than allowing that classification mismatch to become an SSRF bypass.
+_IPV4_COMPATIBLE_PREFIX = ipaddress.IPv6Network("::/96")
+_IPV6_LOOPBACK = ipaddress.IPv6Address("::1")
+
 
 async def _timed(pending: Any, deadline_seconds: float) -> bytes:
     """Await a stream read under a timeout, skipping wait_for entirely when
@@ -515,8 +523,9 @@ class DestinationPolicy:
     what a hostname resolving to 127.0.0.1 or 169.254.169.254 has to pass, and
     it is why a DNS answer is validated in full rather than only the address
     that happens to win the connection race. Addresses under the well-known
-    NAT64 prefix are checked again as their translated IPv4 destination, so a
-    globally classified IPv6 answer cannot tunnel to loopback or cloud metadata.
+    NAT64 prefix and deprecated IPv4-compatible IPv6 literals are checked again
+    as their translated IPv4 destination, so a globally classified IPv6 answer
+    cannot tunnel to loopback or cloud metadata.
 
     The defaults deny every non-global address. Loopback is denied too, so a
     client aimed at `http://localhost` in a test needs
@@ -589,7 +598,16 @@ class DestinationPolicy:
         address = ipaddress.ip_address(value.split("%", 1)[0])
         if address in _NAT64_WELL_KNOWN_PREFIX:
             translated = ipaddress.IPv4Address(address.packed[-4:])
-            self.validate_address(str(translated))
+            self._validate_concrete_address(translated)
+        if address in _IPV4_COMPATIBLE_PREFIX and address != _IPV6_LOOPBACK:
+            translated = ipaddress.IPv4Address(address.packed[-4:])
+            self._validate_concrete_address(translated)
+        self._validate_concrete_address(address)
+
+    def _validate_concrete_address(
+        self, address: ipaddress.IPv4Address | ipaddress.IPv6Address
+    ) -> None:
+        """Apply policy to one address with no translation or recursion."""
         if address.is_unspecified or address.is_multicast:
             raise DestinationRejected("special destination address is not allowed")
         if address.is_loopback and not self.allow_loopback:
@@ -1068,6 +1086,13 @@ class HTTPClient:
         body: bytes | bytearray | memoryview,
         idempotency_key: str | None,
     ) -> ClientResponse:
+        # The native HTTP/1 driver eagerly steps a Wreath request before it owns
+        # an asyncio Task.  A real suspension hands the continuation to one;
+        # do that before entering asyncio.timeout(), which requires a current
+        # task and otherwise makes Wreath's own inbound and outbound stacks
+        # incompatible on the first client call from a handler.
+        if asyncio.current_task() is None:
+            await asyncio.sleep(0)
         if self._timeout.total is None:
             return await self._request_flow(
                 method,

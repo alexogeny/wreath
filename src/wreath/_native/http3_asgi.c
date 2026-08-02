@@ -980,12 +980,96 @@ recv_header_cb(nghttp3_conn *conn, int64_t stream_id, int32_t token,
     return rc < 0 ? NGHTTP3_ERR_CALLBACK_FAILURE : 0;
 }
 
+typedef struct {
+    const char *host;
+    Py_ssize_t host_len;
+    int port;
+} H3Authority;
+
+/* Parse the HTTP(S) authority shape used to compare :authority with Host.
+ * HTTP/3 control data owns routing; allowing a disagreeing Host would let an
+ * edge and application middleware enforce policy against different tenants.
+ * Keep this deliberately identical to the HTTP/2 boundary. */
+static int
+parse_h3_authority(const char *data, Py_ssize_t len, int default_port,
+                   H3Authority *out)
+{
+    Py_ssize_t host_len = len;
+    Py_ssize_t port_at = -1;
+    if (len <= 0) return -1;
+    if (data[0] == '[') {
+        Py_ssize_t close = 1;
+        while (close < len && data[close] != ']') close++;
+        if (close == len || close == 1) return -1;
+        host_len = close + 1;
+        if (host_len < len) {
+            if (data[host_len] != ':') return -1;
+            port_at = host_len + 1;
+        }
+    }
+    else {
+        for (Py_ssize_t i = 0; i < len; i++) {
+            unsigned char ch = (unsigned char)data[i];
+            if (ch == '@' || ch == '/' || ch == '?' || ch == '#' ||
+                ch == '\\' || ch == '[' || ch == ']') {
+                return -1;
+            }
+            if (ch == ':') {
+                if (port_at >= 0) return -1;
+                host_len = i;
+                port_at = i + 1;
+            }
+        }
+        if (host_len == 0) return -1;
+    }
+    int port = default_port;
+    if (port_at >= 0 && port_at < len) {
+        port = 0;
+        for (Py_ssize_t i = port_at; i < len; i++) {
+            int digit = (unsigned char)data[i] - '0';
+            if (digit < 0 || digit > 9 || port > (65535 - digit) / 10) {
+                return -1;
+            }
+            port = port * 10 + digit;
+        }
+    }
+    out->host = data;
+    out->host_len = host_len;
+    out->port = port;
+    return 0;
+}
+
+static int
+h3_authorities_equal(PyObject *authority, PyObject *host, PyObject *scheme)
+{
+    int default_port = -1;
+    if (scheme != NULL && PyBytes_GET_SIZE(scheme) == 5 &&
+        PyOS_strnicmp(PyBytes_AS_STRING(scheme), "https", 5) == 0) {
+        default_port = 443;
+    }
+    else if (scheme != NULL && PyBytes_GET_SIZE(scheme) == 4 &&
+             PyOS_strnicmp(PyBytes_AS_STRING(scheme), "http", 4) == 0) {
+        default_port = 80;
+    }
+    H3Authority left;
+    H3Authority right;
+    if (parse_h3_authority(PyBytes_AS_STRING(authority),
+                           PyBytes_GET_SIZE(authority), default_port, &left) < 0 ||
+        parse_h3_authority(PyBytes_AS_STRING(host), PyBytes_GET_SIZE(host),
+                           default_port, &right) < 0) {
+        return 0;
+    }
+    return left.host_len == right.host_len && left.port == right.port &&
+           PyOS_strnicmp(left.host, right.host, left.host_len) == 0;
+}
+
 /* Build the ASGI scope from the collected header list and spawn the app task. */
 static int
 start_request(WreathH3Stream *s)
 {
     WreathH3Conn *c = s->conn;
     PyObject *method = NULL, *path = NULL, *scheme = NULL, *authority = NULL;
+    PyObject *host = NULL;
     PyObject *traceparent = NULL;  /* borrowed; captured in the one header pass */
     PyObject *scope_headers = PyList_New(0);
     if (scope_headers == NULL) return -1;
@@ -1006,19 +1090,45 @@ start_request(WreathH3Stream *s)
         }
         /* Note host presence here rather than rescanning the scope headers
          * once the loop is done; the synthesized name is a cached constant. */
-        if (nl == 4 && memcmp(np, "host", 4) == 0) has_host = 1;
+        if (nl == 4 && memcmp(np, "host", 4) == 0) {
+            if (host != NULL) goto message_err;
+            host = value;
+            has_host = 1;
+        }
         /* Capture the recorder correlation header in this same pass, so a
          * traceparent never costs a second header walk. */
         else if (nl == 11 && memcmp(np, "traceparent", 11) == 0) traceparent = value;
         if (PyList_Append(scope_headers, pair) < 0) { Py_DECREF(scope_headers); return -1; }
     }
     if (authority != NULL) {
+        H3Authority parsed;
+        int default_port = -1;
+        if (scheme != NULL && PyBytes_GET_SIZE(scheme) == 5 &&
+            PyOS_strnicmp(PyBytes_AS_STRING(scheme), "https", 5) == 0) {
+            default_port = 443;
+        }
+        else if (scheme != NULL && PyBytes_GET_SIZE(scheme) == 4 &&
+                 PyOS_strnicmp(PyBytes_AS_STRING(scheme), "http", 4) == 0) {
+            default_port = 80;
+        }
+        if (parse_h3_authority(PyBytes_AS_STRING(authority),
+                               PyBytes_GET_SIZE(authority), default_port, &parsed) < 0 ||
+            (host != NULL && !h3_authorities_equal(authority, host, scheme))) {
+            goto message_err;
+        }
         if (!has_host) {
             PyObject *hp = PyTuple_Pack(2, k_host_name, authority);
             if (hp == NULL) { Py_DECREF(scope_headers); return -1; }
             int inserted = PyList_Insert(scope_headers, 0, hp);
             Py_DECREF(hp);
             if (inserted < 0) { Py_DECREF(scope_headers); return -1; }
+        }
+    }
+    else if (host != NULL) {
+        H3Authority parsed;
+        if (parse_h3_authority(PyBytes_AS_STRING(host), PyBytes_GET_SIZE(host),
+                               -1, &parsed) < 0) {
+            goto message_err;
         }
     }
     char *pp = (char *)"/"; Py_ssize_t pl = 1;
@@ -1107,6 +1217,11 @@ start_request(WreathH3Stream *s)
     PyObject *cb = PyObject_CallMethod(task, "add_done_callback", "O", s->done_callable);
     Py_XDECREF(cb);
     return cb == NULL ? -1 : 0;
+
+message_err:
+    Py_DECREF(scope_headers);
+    h3_reject_stream(s, NGHTTP3_H3_MESSAGE_ERROR);
+    return 1;
 }
 
 static int
@@ -1116,7 +1231,8 @@ end_headers_cb(nghttp3_conn *conn, int64_t stream_id, int fin, void *cu, void *s
     WreathH3Stream *s = (WreathH3Stream *)su;
     if (s == NULL || s->disconnected) return 0;
     if (fin) s->request_ended = 1;
-    if (start_request(s) < 0) {
+    int started = start_request(s);
+    if (started < 0) {
         return NGHTTP3_ERR_CALLBACK_FAILURE;
     }
     return 0;
