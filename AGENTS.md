@@ -162,6 +162,30 @@ while a sibling is running tests produces failures nobody can attribute.
   blamed CSRF's cost on token glue, the glue was moved to C, and nothing got
   faster. Ablate instead -- remove a piece, time the whole request. The harness
   and its rules live in `src/wreath/_devtools/measure.py`.
+- **Price a loop before rewriting it: what does one step cost, and how many
+  steps are there?** Both halves decide the answer, and getting either wrong is
+  how an optimisation lands and does nothing. Every win here has been a loop
+  with real length whose body was doing avoidable work, and the size of the win
+  tracked how expensive the deleted work was per step -- interpreter bytecode
+  per byte pays most, an out-of-line C call per element pays next, a single
+  instruction per byte pays least. Every loss has been the opposite: a body
+  already minimal, or a length that some earlier partition had already reduced
+  to one. Measured examples of both live in `docs/plans/bitset-routing.md`,
+  where four ideas died because the `(method, nseg)` split had already made the
+  loop run once.
+
+  Two consequences worth stating outright:
+
+  * **Prefer deleting work to widening it.** Replacing a per-byte Python loop
+    with one C call over the whole buffer is a different order of magnitude
+    from replacing a scalar C loop with a vector one. Reach for the second only
+    where the first does not apply and the buffer is genuinely large.
+  * **Reach for the primitive that exists.** `wreath_memmem` and the `simd.h`
+    arms are already written, already differentially tested against a scalar
+    definition, and already dispatch per call. A hand-rolled byte loop beside
+    one of them is usually an oversight rather than a decision -- but say which
+    it is in a comment, with the number, so the next reader does not re-litigate
+    it.
 - Keep `uv run wreath-native-lint` clean. It encodes complexity defects that were
   actually found here — front-deleted queues, rescans in incremental parsers,
   per-value imports, additive buffer growth. When a match is intentional, waive
@@ -241,8 +265,9 @@ uv run wreath-docs               # build the docs strictly (--serve to watch)
 uv run wreath-bench --framework wreath starlette fastapi   # installs competitors first
 
 # The individual gates, when you want one of them
-uv run pytest                 # the default marks, serially; use -n 6 for normal checks
-uv run pytest -m '' -n 6      # everything, including network/fuzz/performance
+uv run wreath test             # preferred routine suite: grid, timings, auto confidence
+uv run wreath test -m ''       # everything, including network/fuzz/performance
+uv run pytest                  # serial process for a debugger, not the routine check
 uv run ruff check .
 uv run ty check
 uv run wreath-native-lint        # C complexity patterns (see below); 0 = clean
@@ -270,9 +295,27 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
   since grown past 8,600 default-collected tests, and the trade inverted. The
   last measured curve flattened at six workers and turned back up once workers
   outnumbered the cores they shared with the extensions each one loaded, so
-  prefer `-n 6` over `-n auto` on a wide machine. `uv run wreath-check` applies
-  `min(6, cpu_count)` for you; a bare `uv run pytest` stays serial, because that
-  is the one you attach a debugger to. **The full measured curve lives in one place —
+  prefer `-n 6` over `-n auto` on a wide machine. **Prefer `uv run wreath test`
+  for routine agent runs.** It applies `min(6, cpu_count)`, keeps pytest's
+  semantics, and adds the heat map, timing history, and bounded mutation
+  confidence; a bare `uv run pytest` stays the serial process you attach a
+  debugger to. This recommendation is measured rather than aspirational: on the
+  12,002-test default-marker suite, three warm runs with mutation disabled were
+  26.404s ± 0.138s for `wreath test` against 29.055s ± 2.069s for
+  `pytest -n 6` on the same six workers (1.10x ± 0.08x). The raw commands and
+  samples live in `benchmarks/results/test_runner_2026-08-02.json`. A first run
+  after source changes also builds the mutation candidate catalog; its planning
+  and compilation overlap the ordinary workers without collecting the whole
+  suite again. Twelve sampled controls are watched by default; it is the measured
+  useful knee: three warm runs averaged 28.120s ± 0.126s, while 24 controls
+  averaged 29.189s ± 0.313s and the last run still left eight controls undecided at the
+  post-suite ceiling. Completed green
+  tests can drive up to three isolated mutant children throughout the ordinary
+  run; that live window does not spend the one-second post-suite tail budget.
+  Speculative passes are retried against the atomically sealed full baseline.
+  The versioned history caches selection and invalidates
+  it from source mtimes and sizes. `uv run wreath-check` likewise
+  applies `min(6, cpu_count)` for its pytest gate. **The full measured curve lives in one place —
   `_devtools/tasks.py::_pytest_command`'s docstring — and that is the copy to
   read and to update.** Its timings predate the current suite size; re-measure
   there, off battery power, before changing the cap.
@@ -332,6 +375,24 @@ None is discoverable by reading the code you are changing.
   is where the operator *anchors*, not where the control reads: a keyword carries
   its *value*'s line, so line numbers read off the source match nothing. A
   selector that matches nothing now exits 2 rather than reporting a vacuous pass.
+- **`uv run` does not rebuild the extension you are editing, and every tool
+  still works.** The import resolves to `src/wreath/`, whose `.so` files are
+  built in place; `uv run` builds and installs a *wheel*, which nothing then
+  imports. So a `.c` edit changes no behaviour, the tests pass, and a
+  before/after benchmark times the same binary twice and reports the difference
+  as noise. That is not hypothetical: three native changes were measured,
+  declared regressions and reverted this way, and all three turned out to be
+  8-39% wins once actually compiled. Rebuild with
+
+      uv run python setup.py build_ext --inplace
+
+  and **prove it landed** rather than assuming: `uv run wreath-build-lint`
+  reports BUILD001 for any artifact older than its sources, and the surest
+  check is a sentinel -- add a distinctive string literal, rebuild, and confirm
+  `strings` finds it in the `.so`. The lint is deliberately not in
+  `wreath-check` (`_http3` is genuinely stale and cannot be rebuilt here), so
+  nothing runs it for you. Run it yourself before believing any native
+  measurement.
 - **A new `.c` file must be registered in two places, and only the first fails
   loudly.** `setup.py` builds the extension; `tools/sanitizers/setup_core.py` has
   its own source list. Miss the second and the sanitized `_core.so` has an

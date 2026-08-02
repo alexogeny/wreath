@@ -227,6 +227,7 @@ and compares the total to a baseline checked into the repository.
 | `wreath typegen` | Generate consumer type contracts from typed routes. |
 | `wreath port` | Port an existing FastAPI app: report, or emit Wreath source. |
 | `wreath mutant` | Remove one declared control at a time and see whether the tests notice. |
+| `wreath test` | Run pytest behind an animated file heat map, duration profiling, and optional mutation confidence. |
 | `wreath audit` | Audit generated HTML and responses for accessibility and performance. |
 | `wreath doctor` | Diagnose defects a green test suite cannot see. |
 | `wreath inspect` | Query a running server's read-only telemetry inspector. |
@@ -267,9 +268,16 @@ uv run wreath-docs            # strict build; --serve to watch
 uv sync                       # dev group; builds the native extensions
 uv run wreath-check           # ruff, ty, pytest, native lints, map lint, trace baseline
 uv run wreath-check --docs    # ... and a strict docs build
+uv run wreath test            # live grid, timing outliers, 12-control confidence sample
+uv run wreath test --mutant full  # complete mutation sweep, overlapping green tests
 uv run pytest                 # the default suite, serially
 uv run pytest -m '' -n 6      # everything, including network, fuzz, and performance
 ```
+
+The test grid keeps one tile per file: green means passed, purple `▣` means its
+tests are currently probing a mutant, and solid gold `▰` means one of those tests
+caught the removed control. A surviving mutant is reported as a finding and
+never earns the gold state.
 
 > [!IMPORTANT]
 > Prefer the task entry points over a bare `uv sync --group X`. `uv sync`
