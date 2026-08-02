@@ -972,7 +972,7 @@ class MessageBus:
             message._disposition = _RETRY
         finally:
             self._inflight.discard(future)
-        if errored is None and message._disposition == _ACK:
+        if message._disposition == _ACK:
             await self._complete(message)
         elif message._disposition == _REJECT:
             await self._dead(message, errored or "rejected")
@@ -1106,5 +1106,4 @@ class MessageBus:
         with contextlib.suppress(asyncio.TimeoutError):
             async with asyncio.timeout(self._poll):
                 await wake.wait()
-
 

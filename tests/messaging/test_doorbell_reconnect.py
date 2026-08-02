@@ -21,6 +21,9 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
+
+import wreath._doorbell as doorbell_module
 from wreath.messaging import Message, MessageBus, _doorbell_delay
 
 
@@ -259,7 +262,9 @@ def test_the_reconnect_backoff_grows_and_is_bounded() -> None:
     assert len({_doorbell_delay(9) for _ in range(20)}) > 1
 
 
-async def test_a_flapping_connection_backs_off_too() -> None:
+async def test_a_flapping_connection_backs_off_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A connection accepted and killed at once must not reset the backoff.
 
     Otherwise the loop retries at the base delay forever against a database in
@@ -273,6 +278,13 @@ async def test_a_flapping_connection_backs_off_too() -> None:
     bus = _bus(database)
     bus.subscribe("order_placed")(handler)
     supervisor = RunningSupervisor()
+    attempts: list[int] = []
+
+    def short_delay(attempt: int) -> float:
+        attempts.append(attempt)
+        return 0.001
+
+    monkeypatch.setattr(doorbell_module, "delay", short_delay)
 
     original_listen = FakeListenConnection.listen
 
@@ -283,16 +295,19 @@ async def test_a_flapping_connection_backs_off_too() -> None:
     FakeListenConnection.listen = listen_then_die       # type: ignore[method-assign]
     try:
         await bus.start(supervisor)
-        await asyncio.sleep(0.4)
-        # Resetting on every reopen would be ~8 in that window; growing is ~4.
-        assert len(database.listeners) <= 6
-        assert bus.doorbell_reconnects >= 2
+        assert await _until(lambda: len(attempts) >= 4)
+        # Resetting on every reopen would report [1, 1, 1, 1].  Observe the
+        # state machine directly instead of inferring it from wall-clock retry
+        # counts after a long sleep.
+        assert attempts[:4] == [1, 2, 3, 4]
     finally:
         FakeListenConnection.listen = original_listen   # type: ignore[method-assign]
         await supervisor.stop(bus)
 
 
-async def test_a_persistent_outage_does_not_spin() -> None:
+async def test_a_persistent_outage_does_not_spin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Attempts are spaced by the backoff, not issued as fast as the loop runs."""
 
     async def handler(message: Message) -> None:
@@ -303,12 +318,25 @@ async def test_a_persistent_outage_does_not_spin() -> None:
     bus = _bus(database)
     bus.subscribe("order_placed")(handler)
     supervisor = RunningSupervisor()
+    entered_backoff = asyncio.Event()
+
+    async def hold_at_backoff(stopping: asyncio.Event, seconds: float) -> None:
+        assert seconds > 0
+        entered_backoff.set()
+        await stopping.wait()
+
+    monkeypatch.setattr(doorbell_module, "sleep_or_stop", hold_at_backoff)
     await bus.start(supervisor)
     try:
-        await asyncio.sleep(0.35)
-        # Unbounded retries would be thousands in a third of a second.
-        assert database.acquires < 20
-        assert bus.doorbell_reconnects >= 1
+        await asyncio.wait_for(entered_backoff.wait(), timeout=1.0)
+        # One failed startup open and one failed supervised open: the task is
+        # now parked at backoff.  Other bus startup work also acquires from this
+        # fake, so prove the count stays fixed across several runnable turns.
+        assert bus.doorbell_reconnects == 2
+        acquires_at_backoff = database.acquires
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert database.acquires == acquires_at_backoff
     finally:
         await supervisor.stop(bus)
 
