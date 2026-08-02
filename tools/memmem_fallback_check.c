@@ -174,11 +174,19 @@ main(void)
     }
 
     /* Worst case for the naive scan: every haystack byte matches needle[0].
-     * A linear search holds ns/byte roughly flat as the needle grows. */
+     * A linear search holds ns/byte roughly flat as the haystack grows. Measure
+     * each needle independently: lengths through WREATH_SIMD_NEEDLE_MAX use
+     * the vector path while longer needles use two-way, and those algorithms
+     * intentionally have different constant factors. */
     printf("scaling (repetitive haystack, non-matching needle):\n");
-    for (Py_ssize_t nl = 4; nl <= 64; nl *= 2) {
-        double per_byte = elapsed_ns_per_byte(1 << 20, nl, 20);
-        printf("  needle=%ld ns_per_haystack_byte=%.4f\n", (long)nl, per_byte);
+    const Py_ssize_t needles[] = {4, 32, 64};
+    for (size_t ni = 0; ni < sizeof(needles) / sizeof(needles[0]); ni++) {
+        for (Py_ssize_t hl = 1 << 16; hl <= 1 << 20; hl *= 4) {
+            int reps = (int)(20 * ((1 << 20) / hl));
+            double per_byte = elapsed_ns_per_byte(hl, needles[ni], reps);
+            printf("  needle=%ld haystack=%ld ns_per_haystack_byte=%.4f\n",
+                   (long)needles[ni], (long)hl, per_byte);
+        }
     }
     return 0;
 }
