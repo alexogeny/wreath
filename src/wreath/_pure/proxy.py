@@ -91,8 +91,6 @@ class TrustedNetworks:
         while True:
             start = data.rfind(b",", 0, end) + 1
             hop = data[start:end].strip(b" \t")
-            if not hop:
-                return None
             text = _hop_address(hop)
             if text is None:
                 return None
