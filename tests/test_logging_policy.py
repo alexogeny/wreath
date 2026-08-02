@@ -198,6 +198,44 @@ def test_debug_inside_a_failed_request_is_published() -> None:
     assert all(c.flags & fs.LOG_FLAG_PROMOTED for c in records)
 
 
+def test_begin_request_honours_an_explicit_scratch_budget() -> None:
+    scratch_token = log._SCRATCH.set(None)
+    scope_token = log._SCOPE.set(None)
+    try:
+        with log.testing_runtime(
+            level=log.INFO, capture_level=log.TRACE, scratch_budget=8,
+        ):
+            scope = log.begin_request(5, budget=1)
+            assert scope is not None
+            log.debug("first {v}", v=1)
+            log.debug("second {v}", v=2)
+            assert scope.held == 1
+            assert scope.dropped == 1
+            scope.finish(promoted=False)
+    finally:
+        log._SCOPE.reset(scope_token)
+        log._SCRATCH.reset(scratch_token)
+
+
+def test_prepared_debug_record_is_held_for_request_promotion() -> None:
+    fields = ((('message', str, log.RAW), "from stdlib"),)
+    with log.testing_runtime(level=log.INFO, capture_level=log.TRACE) as records:
+        with log.request_scope(request_id=5) as scope:
+            log._emit_prepared(log.DEBUG, "bridge: {message}", fields)
+            assert scope.held == 1
+            scope.finish(promoted=True)
+    assert len(records) == 1
+    assert records[0].request_id == 5
+
+
+def test_prepared_info_record_is_emitted_without_a_request_buffer() -> None:
+    fields = ((('message', str, log.RAW), "from stdlib"),)
+    with log.testing_runtime(level=log.INFO) as records:
+        log._emit_prepared(log.INFO, "bridge: {message}", fields)
+    assert len(records) == 1
+    assert records[0].request_id == 0
+
+
 def test_warnings_inside_a_request_are_never_buffered() -> None:
     with log.testing_runtime(level=log.INFO, capture_level=log.TRACE) as records:
         with log.request_scope(request_id=5) as scope:

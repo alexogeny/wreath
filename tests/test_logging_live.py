@@ -129,7 +129,6 @@ async def test_debug_records_stay_quiet_on_a_healthy_request() -> None:
     port = server.sockets[0].getsockname()[1]
     try:
         await _get(port, "/quiet")
-        await asyncio.sleep(0.4)
     finally:
         await server.close()
     records = [json.loads(ln) for ln in lines if ln.startswith("{")]
@@ -144,7 +143,7 @@ async def test_debug_records_are_promoted_when_the_request_fails() -> None:
     port = server.sockets[0].getsockname()[1]
     try:
         await _get(port, "/boom")
-        await asyncio.sleep(0.4)
+        await _drain(server, lines, expect=1)
     finally:
         await server.close()
     records = [json.loads(ln) for ln in lines if ln.startswith("{")]
@@ -162,7 +161,7 @@ async def test_two_requests_do_not_share_a_trace() -> None:
     port = server.sockets[0].getsockname()[1]
     try:
         await asyncio.gather(*(_get(port, "/ok") for _ in range(4)))
-        await asyncio.sleep(0.4)
+        await _drain(server, lines, expect=4)
     finally:
         await server.close()
     records = [json.loads(ln) for ln in lines if ln.startswith("{")]
@@ -180,7 +179,6 @@ async def test_logging_is_inert_when_telemetry_is_off() -> None:
     port = server.sockets[0].getsockname()[1]
     try:
         await _get(port, "/ok")
-        await asyncio.sleep(0.2)
     finally:
         await server.close()
     assert lines == []
@@ -250,7 +248,7 @@ async def test_websocket_records_are_correlated() -> None:
     port = server.sockets[0].getsockname()[1]
     try:
         await _ws(port, "/ws")
-        await asyncio.sleep(0.5)
+        await _drain(server, lines, expect=1)
     finally:
         await server.close()
     records = [json.loads(ln) for ln in lines if ln.startswith("{")]
@@ -267,7 +265,7 @@ async def test_a_websocket_session_that_raises_promotes_its_records() -> None:
     port = server.sockets[0].getsockname()[1]
     try:
         await _ws(port, "/ws-boom")
-        await asyncio.sleep(0.5)
+        await _drain(server, lines, expect=1)
     finally:
         await server.close()
     records = [json.loads(ln) for ln in lines if ln.startswith("{")]
@@ -283,7 +281,6 @@ async def test_a_healthy_websocket_session_stays_quiet() -> None:
     port = server.sockets[0].getsockname()[1]
     try:
         await _ws(port, "/ws")
-        await asyncio.sleep(0.5)
     finally:
         await server.close()
     records = [json.loads(ln) for ln in lines if ln.startswith("{")]
@@ -312,7 +309,6 @@ async def test_the_configured_level_is_honoured() -> None:
     port = server.sockets[0].getsockname()[1]
     try:
         await _get(port, "/ok")   # emits WARN, below the configured ERROR
-        await asyncio.sleep(0.3)
     finally:
         await server.close()
     records = [json.loads(ln) for ln in lines if ln.startswith("{")]

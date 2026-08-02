@@ -989,8 +989,12 @@ def _emit_kwargs(severity: Severity, template: str, values: dict[str, object]) -
         return
     buffer = _SCRATCH.get(None)
     buffered = severity < runtime.level
-    if buffered and buffer is None:
-        return
+    if buffered:
+        if buffer is None:
+            return
+        held_buffer = buffer
+    else:
+        held_buffer = None
     specs = tuple(infer_field(name, value) for name, value in values.items())
     site = runtime.registry.intern_template(template, severity, specs)
     site_id = site.site_id
@@ -1021,9 +1025,8 @@ def _emit_kwargs(severity: Severity, template: str, values: dict[str, object]) -
         flags=flags,
         dropped_siblings=0 if buffered else runtime.limiter.take_dropped(site_id),
     )
-    if buffered:
-        if buffer is not None:  # guaranteed above; narrows for the checker
-            buffer.add(cell)
+    if held_buffer is not None:
+        held_buffer.add(cell)
         return
     runtime.emit(cell)
 
@@ -1039,8 +1042,12 @@ def _emit_prepared(
         return
     buffer = _SCRATCH.get(None)
     buffered = severity < runtime.level
-    if buffered and buffer is None:
-        return
+    if buffered:
+        if buffer is None:
+            return
+        held_buffer = buffer
+    else:
+        held_buffer = None
     specs = tuple(LogField(name, type_, disp) for (name, type_, disp), _v in pairs)
     site = runtime.registry.intern_template(template, severity, specs)
     site_id = site.site_id
@@ -1071,9 +1078,8 @@ def _emit_prepared(
         flags=flags,
         dropped_siblings=0 if buffered else runtime.limiter.take_dropped(site_id),
     )
-    if buffered:
-        if buffer is not None:  # guaranteed above; narrows for the checker
-            buffer.add(cell)
+    if held_buffer is not None:
+        held_buffer.add(cell)
         return
     runtime.emit(cell)
 
