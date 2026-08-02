@@ -326,6 +326,40 @@ def test_chart_from_json_renders_svg(tmp_path) -> None:
     assert "chart-error" in (tmp_path / "site" / "index.html").read_text()
 
 
+@pytest.mark.parametrize(
+    ("sort", "expected"),
+    [
+        ("desc", ["b", "c", "a"]),
+        ("asc", ["a", "c", "b"]),
+        (None, ["a", "b", "c"]),
+    ],
+)
+def test_a_chart_orders_its_bars_the_way_the_block_asked(tmp_path, sort, expected) -> None:
+    """`sort:` decides the reading order, and nothing had ever checked it.
+
+    The chart test above passes `sort: desc` and then asserts bar *count* and
+    fill, both of which a chart in source order satisfies just as well -- so
+    either sort clause could be deleted and the suite stayed green. Order is the
+    entire content of the option: a "slowest first" chart that renders in
+    whatever order the JSON happened to be written is a wrong chart that looks
+    right, which is worse than a missing one.
+
+    The unsorted case is here so "always sort" cannot pass either.
+    """
+    from wreath._docs.charts import _render
+
+    (tmp_path / "b.json").write_text(json.dumps({"results": [
+        {"name": "a", "rps": 100}, {"name": "b", "rps": 250}, {"name": "c", "rps": 180},
+    ]}))
+    config = {"source": "b.json", "data": "results", "x": "name", "y": "rps"}
+    if sort is not None:
+        config["sort"] = sort
+
+    svg = _render(config, tmp_path)
+
+    assert re.findall(r">([abc])<", svg) == expected
+
+
 def test_robots_and_404(tmp_path) -> None:
     site = Site("D", "docs", "site", _site(tmp_path).nav, base_url="https://d.io")
     build(site, root=tmp_path)

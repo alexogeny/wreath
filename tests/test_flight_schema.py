@@ -230,6 +230,24 @@ def test_metadata_image_rejects_trailing_bytes() -> None:
         codec.decode_metadata_image(image.canonical_bytes() + b"junk")
 
 
+def test_metadata_image_rejects_something_that_is_not_one() -> None:
+    """The marker, which nothing had ever handed the wrong bytes.
+
+    Trailing junk was covered and a wrong *start* was not, and the two fail in
+    different places: without the marker check the reader skips seven bytes and
+    reads whatever follows as a version, so a truncated or foreign blob is
+    diagnosed as an unsupported version -- or, with the right four bytes at
+    offset seven, decoded as routes that were never written.
+    """
+    image = _image([_route(1, "GET", "/a")]).canonical_bytes()
+    with pytest.raises(codec.SchemaError, match="missing its marker"):
+        codec.decode_metadata_image(b"NOTMETA" + image[7:])
+    with pytest.raises(codec.SchemaError, match="missing its marker"):
+        codec.decode_metadata_image(b"")
+    # ... and the real thing still decodes, so the check is not a blanket refusal.
+    assert codec.decode_metadata_image(image).routes[0].path == "/a"
+
+
 # --- config validation ------------------------------------------------------
 
 

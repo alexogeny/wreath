@@ -200,11 +200,20 @@ def test_near_miss_boundaries_do_not_produce_spurious_parts() -> None:
 
 @native
 def test_body_without_the_boundary_is_rejected_by_both() -> None:
+    """Both parsers, and both with *this* message.
+
+    Asserting only `ValueError` let the not-found refusal be deleted from the
+    pure parser without the test noticing: parsing then ran off a `find` result
+    of -1 and failed a few lines later for an unrelated reason, which is the
+    same exception type reporting a different fact. The two parsers are
+    contracted to agree on the message as well as the type, so pinning it here
+    is the parity assertion rather than a stricter version of one.
+    """
     boundary = b"a" * 40
     body = (b"--" + b"a" * 39 + b"b\r\n") * 50  # near misses only
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="multipart boundary not found"):
         _core.multipart_parse(body, boundary)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="multipart boundary not found"):
         pure_multipart.multipart_parse(body, boundary)
 
 

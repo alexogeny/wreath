@@ -144,6 +144,61 @@ async def test_protected_resource_metadata_is_served_without_a_token() -> None:
         assert document["bearer_methods_supported"] == ["header"]
 
 
+async def test_metadata_omits_the_scope_list_when_there_is_none() -> None:
+    """An absent key and an empty list say different things to a client.
+
+    RFC 9728 lets a resource omit `scopes_supported`, which means "unspecified";
+    publishing `[]` means "this resource accepts no scopes", and a client that
+    reads it literally has nothing it can ask the authorization server for. The
+    guard that keeps the key out was never exercised -- every test built an
+    `MCPAuth` with scopes -- so serving `[]` to every unscoped deployment would
+    have passed.
+    """
+    app = Wreath()
+    MCP(app, name="camera-trap", version="1.0.0", auth=protection(scopes_supported=()))
+    async with TestClient(app) as client:
+        document = (await client.get(METADATA_PATH)).json()
+        assert "scopes_supported" not in document
+        # The unconditional keys are still there, so this is not an empty document.
+        assert document["resource"] == RESOURCE
+        assert document["bearer_methods_supported"] == ["header"]
+
+
+async def test_an_audience_claim_that_is_a_list_is_read_as_a_set() -> None:
+    """`aud` is a string *or* an array in RFC 7519, and only one was tested.
+
+    A token minted for several resources is the ordinary shape from an
+    authorization server that fronts more than one API, and it must bind here
+    exactly as a bare string does.
+    """
+    app, _ = build()
+    bearer = token(audience=[RESOURCE, "https://other.example/api"])
+    async with TestClient(app) as client:
+        accepted = await call(
+            client, await session_for(client, bearer), bearer, {"name": "greet"}
+        )
+        assert "error" not in accepted.json(), accepted.json()
+
+
+async def test_an_audience_claim_of_the_wrong_shape_matches_nothing() -> None:
+    """Not a string, not a list: an empty set, and therefore a refusal.
+
+    `frozenset(entry for entry in value ...)` is happy to iterate a mapping --
+    it would yield the *keys* -- so a claim shaped `{"aud": {"https://api...":
+    1}}` would bind the audience by its key if the shape check were dropped.
+    An integer would raise `TypeError` out of the middle of authentication.
+    """
+    from wreath._mcp.auth import _audience_of
+
+    assert _audience_of({"aud": [RESOURCE, 7, None]}) == frozenset((RESOURCE,))
+    assert _audience_of({"aud": (RESOURCE,)}) == frozenset((RESOURCE,))
+    assert _audience_of({"aud": RESOURCE}) == frozenset((RESOURCE,))
+    assert _audience_of({"aud": {RESOURCE: 1}}) == frozenset()
+    assert _audience_of({"aud": 7}) == frozenset()
+    assert _audience_of({}) == frozenset()
+    assert _audience_of(object()) == frozenset()
+
+
 async def test_the_metadata_path_follows_the_endpoint_path() -> None:
     app = Wreath()
     mcp = MCP(app, name="x", version="1.0.0", path="/tools/mcp", auth=protection())
@@ -537,3 +592,20 @@ def test_a_rate_limit_that_is_not_a_limit_is_refused() -> None:
         ToolRateLimit(0)
     with pytest.raises(ValueError, match="window"):
         ToolRateLimit(1, 0.0)
+
+
+def test_a_burst_below_one_is_refused_and_a_burst_below_the_limit_is_not() -> None:
+    """`burst` was the one bound of the three nothing had ever passed a value to.
+
+    Zero is the interesting number: `capacity` is `burst` when it is set, so a
+    burst of nought is a bucket that can never hold a token and every call to
+    the tool refuses -- a rate limit that reads as configured and is an outage.
+    `None` (unset) and a burst *smaller than the limit* both stay legal, which
+    is what stops this refusal from being a blanket one.
+    """
+    with pytest.raises(ValueError, match="burst must be at least 1"):
+        ToolRateLimit(5, 60.0, 0)
+    with pytest.raises(ValueError, match="burst must be at least 1"):
+        ToolRateLimit(5, 60.0, -1)
+    assert ToolRateLimit(5, 60.0, 1).capacity == 1.0
+    assert ToolRateLimit(5, 60.0).capacity == 5.0

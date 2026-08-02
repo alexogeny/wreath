@@ -1880,3 +1880,239 @@ async def test_confirming_after_another_session_already_enrolled_is_refused() ->
         )
     assert response.status == 409
     assert response.json() == {"error": "already_enrolled"}
+
+
+# --- DELETE /auth/2fa/{factor_id} -------------------------------------------
+#
+# The whole endpoint had never been called. A mutation sweep reported its
+# step-up guard UNREACHED, which is the worse of the two findings: not "the
+# tests would not notice", but "nothing has ever watched this refusal work" --
+# and it is the refusal standing between a stolen session and the removal of
+# the second factor that session could not have produced.
+
+
+async def _stepped_up(
+    client: Any, users: InMemoryUserStore, factors: InMemorySecondFactorStore,
+    clock: _Clock,
+) -> str:
+    """Enrol, sign back in through the second factor, and return that cookie.
+
+    Going the long way round is the point: `second_factor_at` has to be written
+    by `POST /auth/2fa/verify` rather than by the test, or the step-up guard is
+    being handed the very value it exists to check.
+    """
+    first = await _login(client)
+    secret_b32, _, cookie = await _enrol(client, clock, _cookie(first))
+    await client.post("/users/logout", headers={"cookie": cookie})
+    clock.now += 60
+    pending = _cookie(await _login(client))
+    code = totp_code(base32_to_secret(secret_b32), totp_counter(clock.now))
+    promoted = await client.post(
+        "/auth/2fa/verify", json={"code": code}, headers={"cookie": pending}
+    )
+    assert promoted.status == 200, promoted.json()
+    return _cookie(promoted) or pending
+
+
+async def _only_factor_id_or_none(client: Any, cookie: str) -> str | None:
+    listed = await client.get("/auth/2fa", headers={"cookie": cookie})
+    assert listed.status == 200, listed.json()
+    rows = listed.json()["factors"]
+    assert len(rows) <= 1
+    return None if not rows else str(rows[0]["id"])
+
+
+async def _only_factor_id(client: Any, cookie: str) -> str:
+    factor_id = await _only_factor_id_or_none(client, cookie)
+    assert factor_id is not None
+    return factor_id
+
+
+async def test_a_recently_proved_factor_may_be_removed() -> None:
+    """The permitting arm, and the one that keeps the guard from being a ban."""
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    async with TestClient(_app(users, factors, clock)) as client:
+        await _seed(users)
+        cookie = await _stepped_up(client, users, factors, clock)
+        factor_id = await _only_factor_id(client, cookie)
+
+        response = await client.delete(f"/auth/2fa/{factor_id}", headers={"cookie": cookie})
+
+        assert response.status == 200
+        assert response.json() == {"status": "removed", "id": factor_id}
+        # Gone from the store, not merely reported gone.
+        assert await _only_factor_id_or_none(client, cookie) is None
+
+
+async def test_removing_a_factor_without_a_recent_second_factor_is_refused() -> None:
+    """A session signed in by something that never proved a factor.
+
+    `/adopt` is how an application that is not `user_router` signs somebody in --
+    an OAuth2 callback, an SSO bridge -- and it writes no `second_factor_at`. A
+    session obtained that way (or stolen from a browser that had one) must not be
+    able to switch the second factor off, which is precisely what the caller who
+    stole it wants.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    async with TestClient(_app(users, factors, clock)) as client:
+        await _seed(users)
+        cookie = await _stepped_up(client, users, factors, clock)
+        factor_id = await _only_factor_id(client, cookie)
+
+        adopted = await client.post(f"/adopt/{users._by_email['ann@example.test']}")
+        response = await client.delete(
+            f"/auth/2fa/{factor_id}", headers={"cookie": _cookie(adopted)}
+        )
+
+        assert response.status == 403
+        assert response.json() == {"error": "second_factor_required"}
+        # And the factor is still there.
+        assert await _only_factor_id(client, cookie) == factor_id
+
+
+async def test_a_second_factor_proved_too_long_ago_no_longer_authorises_removal() -> None:
+    """`step_up_ttl` is what makes this *recent* rather than *ever*.
+
+    Without the age clause a session that proved a factor once at sign-in could
+    remove it a week later, which is the same standing authority the step-up was
+    introduced to replace.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    async with TestClient(_app(users, factors, clock, step_up_ttl=300.0)) as client:
+        await _seed(users)
+        cookie = await _stepped_up(client, users, factors, clock)
+        factor_id = await _only_factor_id(client, cookie)
+
+        clock.now += 301
+        response = await client.delete(
+            f"/auth/2fa/{factor_id}", headers={"cookie": cookie}
+        )
+
+        assert response.status == 403
+        assert response.json() == {"error": "second_factor_required"}
+
+
+async def test_a_boolean_second_factor_stamp_does_not_authorise_removal() -> None:
+    """`True` is an `int` in Python, and `clock() - True` is a number.
+
+    So a principal carrying `second_factor_at: True` -- from a store that
+    round-tripped the field through something JSON-ish, or an application
+    writing a flag where a time belongs -- would otherwise read as a factor
+    proved one second after the epoch, which on a test clock and on a machine
+    whose clock is anything but enormous is *recent*. The `isinstance(stamp,
+    bool)` clause is the only thing between that and a permitted removal, and
+    nothing had ever run it.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    app = _app(users, factors, clock)
+
+    @app.post("/forge/{user_id}")
+    async def forge(request: Any, user_id: str) -> dict[str, Any]:
+        request.state.session["principal"] = {
+            "sub": user_id, "type": "User", "roles": [], "second_factor_at": True,
+        }
+        return {"status": "forged"}
+
+    async with TestClient(app) as client:
+        await _seed(users)
+        cookie = await _stepped_up(client, users, factors, clock)
+        factor_id = await _only_factor_id(client, cookie)
+
+        forged = await client.post(f"/forge/{users._by_email['ann@example.test']}")
+        response = await client.delete(
+            f"/auth/2fa/{factor_id}", headers={"cookie": _cookie(forged)}
+        )
+
+        assert response.status == 403
+        assert response.json() == {"error": "second_factor_required"}
+
+
+async def test_removing_a_factor_id_that_is_not_yours_is_a_404() -> None:
+    """One answer for "no such id" and "not yours", so neither can be probed."""
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    async with TestClient(_app(users, factors, clock)) as client:
+        await _seed(users)
+        cookie = await _stepped_up(client, users, factors, clock)
+        # Somebody else's credential, present in the store under another user.
+        await factors.add(_factor(id="not-mine", user_id="somebody-else"))
+
+        response = await client.delete("/auth/2fa/not-mine", headers={"cookie": cookie})
+
+        assert response.status == 404
+        assert response.json() == {"error": "not_found"}
+        # Still there: a 404 that had actually deleted it would be worse than a 200.
+        assert [row.id for row in await factors.credentials("somebody-else")] == ["not-mine"]
+
+
+# --- the account behind a pending login can change under it ------------------
+
+
+async def _pending_cookie(
+    client: Any, users: InMemoryUserStore, factors: InMemorySecondFactorStore,
+    clock: _Clock,
+) -> tuple[str, str]:
+    """Enrol, log out, log back in, and stop at the pending marker.
+
+    Returns the pending cookie and the TOTP code that would complete it, so a
+    test can change the account in between and still submit a *correct* code --
+    otherwise a refusal proves only that the code was wrong.
+    """
+    first = await _login(client)
+    secret_b32, _, cookie = await _enrol(client, clock, _cookie(first))
+    await client.post("/users/logout", headers={"cookie": cookie})
+    clock.now += 60
+    pending = _cookie(await _login(client))
+    return pending, totp_code(base32_to_secret(secret_b32), totp_counter(clock.now))
+
+
+async def test_a_correct_code_for_an_account_that_has_gone_is_refused() -> None:
+    """`user is None` after the code verified, which is the awkward ordering.
+
+    The factor is checked against the *subject on the pending marker*, so a
+    deleted account still has credentials that verify -- the store row outlives
+    the user row, and in a real deployment so does the window between the two
+    deletes. Without this clause the endpoint would go on to read `.is_active`
+    off `None` and answer 500, or, one line further, mint a principal for an
+    account that no longer exists.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    async with TestClient(_app(users, factors, clock)) as client:
+        user = await _seed(users)
+        pending, code = await _pending_cookie(client, users, factors, clock)
+
+        users._by_id.pop(user.id)
+
+        response = await client.post(
+            "/auth/2fa/verify", json={"code": code}, headers={"cookie": pending}
+        )
+
+        assert response.status == 401
+        assert response.json() == {"error": "invalid_code"}
+        # And the half-finished login is not left open to be retried.
+        cookie = _cookie(response) or pending
+        session = (await client.get("/session", headers={"cookie": cookie})).json()
+        assert "pending_second_factor" not in session
+        assert "principal" not in session
+
+
+async def test_a_correct_code_for_a_deactivated_account_is_refused() -> None:
+    """Deactivation has to bite between the password and the code, too.
+
+    Login checks `is_active`; a pending login has already passed that check, so
+    an account deactivated during the seconds somebody spends reading their
+    phone would otherwise complete and be signed in.
+    """
+    users, factors, clock = InMemoryUserStore(), InMemorySecondFactorStore(), _Clock()
+    async with TestClient(_app(users, factors, clock)) as client:
+        user = await _seed(users)
+        pending, code = await _pending_cookie(client, users, factors, clock)
+
+        user.is_active = False
+        await users.update(user)
+
+        response = await client.post(
+            "/auth/2fa/verify", json={"code": code}, headers={"cookie": pending}
+        )
+
+        assert response.status == 401
+        assert response.json() == {"error": "invalid_code"}

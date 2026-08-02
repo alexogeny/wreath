@@ -117,6 +117,39 @@ class TestAWindowedDistanceAddsUp:
             path.between(TUESDAY, MONDAY)
 
 
+class TestATrajectoryRefusesWhatItCannotMeasure:
+    """The constructor's own guards, which `between()`'s tests cannot reach.
+
+    Same shape as the naive-bound refusal above, one step earlier: a trajectory
+    built entirely from naive timestamps sorts perfectly well and answers every
+    question, wrongly, across a DST boundary. Nothing failed when the guard was
+    deleted, because every existing test hands it aware fixes -- the refusal was
+    never the reason any of them passed.
+    """
+
+    def test_a_naive_timestamp_is_refused_when_the_trajectory_is_built(self):
+        naive = [
+            (datetime.datetime(2026, 3, 2, 0), Coordinate(lat=-29.0, lon=150.0)),
+            (datetime.datetime(2026, 3, 2, 12), Coordinate(lat=-29.0, lon=150.1)),
+        ]
+        with pytest.raises(GeospatialError, match="timestamp with no timezone"):
+            Trajectory(naive)
+
+    def test_the_refusal_names_the_offending_fix(self):
+        """Position, not just presence: one bad fix among good ones."""
+        with pytest.raises(GeospatialError, match=r"fix 1 has a timestamp"):
+            Trajectory([BASE[0], (datetime.datetime(2026, 3, 3, 0), BASE[1][1])])
+
+    def test_a_fix_that_is_not_a_pair_is_refused(self):
+        with pytest.raises(GeospatialError, match=r"fix 0 must be a \(timestamp"):
+            Trajectory([(at(MONDAY, 0),)])
+
+    def test_a_fix_whose_position_is_not_a_coordinate_is_refused(self):
+        """The message names the type it got, so a swapped pair is diagnosable."""
+        with pytest.raises(GeospatialError, match="must carry a Coordinate, got tuple"):
+            Trajectory([(at(MONDAY, 0), (-29.0, 150.0))])
+
+
 class TestDistanceIsMonotoneUnderALateFix:
     def test_a_late_fix_inside_the_path_can_only_lengthen_it(self):
         """The triangle inequality, asserted rather than assumed.

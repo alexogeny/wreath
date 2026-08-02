@@ -191,3 +191,42 @@ async def test_a_real_verification_token_is_a_200_and_says_verified() -> None:
         response = await client.post("/users/verify", json={"token": token})
         assert response.status == 200
         assert response.json()["status"] == "verified"
+
+
+async def test_the_verification_link_refuses_a_forged_token() -> None:
+    """`GET /verify/{token}` is the arm a mail client actually follows.
+
+    The POST twin above was tested and this one was not, and it is the one an
+    attacker can reach with nothing but a URL -- no JSON body, no fetch, no
+    same-origin anything. A mutation that made every check in the endpoint
+    answer True survived the whole suite, which is to say the link could have
+    marked any address verified and nothing would have gone red.
+    """
+    from wreath.app import Wreath
+    from wreath.testing import TestClient
+
+    app = Wreath()
+    app.include_router(user_router(InMemoryUserStore(), secret="s" * 32))
+    async with TestClient(app) as client:
+        response = await client.get("/users/verify/not-a-real-token")
+        assert response.status == 400
+        assert response.json()["status"] == "invalid_token"
+
+
+async def test_the_verification_link_accepts_a_real_token() -> None:
+    """The other arm, so "always 400" could not pass the test above."""
+    from wreath import _userkit
+    from wreath.app import Wreath
+    from wreath.testing import TestClient
+    from wreath.users import hash_password
+
+    store = InMemoryUserStore()
+    user = await store.create("bea@example.com", hash_password("hunter2hunter2"))
+    token = _userkit.sign_token("s" * 32, _userkit._VERIFY, user.id, ttl=3600)
+
+    app = Wreath()
+    app.include_router(user_router(store, secret="s" * 32))
+    async with TestClient(app) as client:
+        response = await client.get(f"/users/verify/{token}")
+        assert response.status == 200
+        assert response.json()["status"] == "verified"

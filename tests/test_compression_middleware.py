@@ -292,3 +292,64 @@ async def test_the_etag_suffix_lands_on_the_etag_and_not_a_neighbour() -> None:
     assert response.header("content-encoding") == "zstd"
     # Exactly one etag: a second would let a cache pick either body for one tag.
     assert sum(1 for name, _ in response.headers if name.lower() == b"etag") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_file_response_is_served_uncompressed(tmp_path) -> None:
+    """`FileResponse` is not a `Response` and not a `StreamingResponse`.
+
+    It falls to its own branch and is returned untouched, because the body only
+    exists as a file descriptor read while the response is being sent -- there
+    is nothing in memory to compress and no generator to wrap. The branch that
+    *does* wrap a generator is guarded by an `isinstance` check that nothing had
+    ever made answer False while `compress_streaming` was on, so deleting it
+    left every file served through this middleware going into
+    `_compressed_stream`.
+    """
+    from wreath.response import FileResponse
+
+    served = tmp_path / "notes.txt"
+    served.write_bytes(b"plain text worth compressing" * 100)
+
+    app = Wreath()
+    app.add_middleware(CompressionMiddleware(minimum_size=0, compress_streaming=True))
+
+    @app.get("/file")
+    async def download(request: Any) -> FileResponse:
+        return FileResponse(served)
+
+    async with TestClient(app) as client:
+        response = await client.get("/file", headers={"accept-encoding": "gzip"})
+
+    assert response.status == 200
+    assert response.header("content-encoding") is None
+    assert response.body == served.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_compress_streaming_off_leaves_a_streaming_response_alone() -> None:
+    """The option is the second half of that branch, and it was never off.
+
+    Streaming compression trades a smaller transfer for a body whose length is
+    no longer known, which is a decision a deployment makes -- behind a proxy
+    that buffers, or in front of a client that needs `content-length`, the
+    answer is no. Every test set `compress_streaming` to its default of `True`,
+    so the clause could be deleted and the option would silently stop existing.
+    """
+    async def source():
+        yield b"chunk" * 500
+
+    app = Wreath()
+    app.add_middleware(
+        CompressionMiddleware(minimum_size=0, compress_streaming=False)
+    )
+
+    @app.get("/")
+    async def index(request: Any) -> StreamingResponse:
+        return StreamingResponse(source(), headers=[(b"content-type", b"text/plain")])
+
+    async with TestClient(app) as client:
+        response = await client.get("/", headers={"accept-encoding": "gzip"})
+
+    assert response.header("content-encoding") is None
+    assert response.body == b"chunk" * 500

@@ -362,6 +362,27 @@ async def test_unknown_fields_and_roots_are_reported_as_errors(
 
 
 @pytest.mark.asyncio
+async def test_a_single_object_field_without_an_id_says_so(
+    registry: Registry, database: FakeDatabase
+) -> None:
+    """`{ user { id } }` names one row and does not say which.
+
+    Without the refusal the `id` argument is `None` and goes on to the primary
+    key's coercion, so the query fails somewhere inside the driver with a
+    message about a type rather than about the query -- and `{ user { posts {
+    ... } } }` is exactly the shape a depth-limit test writes, which is why
+    nothing had noticed. The list field takes no `id` and must keep working.
+    """
+    api = GraphQL(registry, models=[User, Post])
+
+    body = await api.run("{ user { id } }", Session(registry, "read"))
+
+    assert body["data"] is None or body["data"]["user"] is None
+    assert "needs an `id` argument" in body["errors"][0]["message"]
+    assert "user" in body["errors"][0]["message"]
+
+
+@pytest.mark.asyncio
 async def test_a_limit_breach_is_returned_as_a_coded_error(
     registry: Registry
 ) -> None:

@@ -338,3 +338,37 @@ def test_logs_and_traces_do_not_share_a_queue(runtime: log.LogRuntime) -> None:
         pipeline.on_log(_record(site))
     assert pipeline.queue.dropped == 0  # the trace queue is untouched
     assert pipeline.stats["log_dropped"] == 8
+
+
+def test_dropped_siblings_is_exported_only_when_something_was_dropped(
+    runtime: log.LogRuntime,
+) -> None:
+    """`wreath.dropped_siblings` says how many events the limiter ate.
+
+    Every record carries the counter, and it is zero on the overwhelming
+    majority -- so exporting it unconditionally puts a `0` attribute on every
+    log line in the system, which costs a field per record on the wire and
+    tells a reader nothing. The guard that keeps it off was never exercised
+    from the other side: no test built a record with a non-zero count, so the
+    attribute could have been absent *always* and the suite stayed green.
+    """
+    site = _site()
+
+    def attributes(cell_kw: dict[str, object]) -> dict[str, object]:
+        cell = fs.LogCell(
+            request_id=1,
+            site_id=site.site_id,
+            severity=fs.Severity.WARN,
+            args=(fs.LogArg.integer(17), fs.LogArg.text("orders")),
+            **cell_kw,  # type: ignore[arg-type]
+        )
+        record = ProjectedLog(cell=cell, observed_unix_nano=1_700_000_000_000_000_000)
+        built = build_logs_request([record], registry=runtime.registry)
+        entry = built["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]
+        return {a["key"]: a["value"] for a in entry["attributes"]}
+
+    quiet = attributes({})
+    assert "wreath.dropped_siblings" not in quiet
+
+    throttled = attributes({"dropped_siblings": 12})
+    assert throttled["wreath.dropped_siblings"] == {"intValue": "12"}

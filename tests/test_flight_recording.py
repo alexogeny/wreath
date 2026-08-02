@@ -224,6 +224,79 @@ def test_recording_ceiling_bounds_hashed_and_masked_arms() -> None:
     assert not ceiling.permits(bad)
 
 
+def test_hashing_and_masking_a_header_the_ceiling_drops_are_both_refused() -> None:
+    """Three clauses decide this, and only the allowlist one was ever exercised.
+
+    "The ceiling drops it" means the name appears in none of its three sets, so
+    the ceiling never observes that header at all. An arm may *reduce* what is
+    revealed about a name the ceiling reveals -- hash what it allows, mask what
+    it hashes -- but it may not introduce a name, and a hash is not a
+    non-observation: it is a stable identifier for the value, which is enough to
+    correlate one caller's requests across a recording.
+
+    Dropping the `a_hash` clause was reported as surviving the whole suite, and
+    dropping `a_mask` would have too, because every refusal above is answered by
+    the allowlist clause before either of them is reached.
+    """
+    ceiling = RecordingPolicy(
+        capture_slabs=8,
+        max_capture_bytes=1 << 20,
+        redaction=RedactionPolicy(
+            header_allowlist=frozenset({"x-trace"}),
+            header_hash=frozenset({"x-id"}),
+        ),
+    )
+
+    def arm(**redaction) -> CapturePolicy:
+        return CapturePolicy(
+            redaction=RedactionPolicy(**redaction),
+            budget=CaptureBudget(slabs=1, slab_bytes=4096),
+        )
+
+    # Hashing or masking a name the ceiling never mentions: both refused. The
+    # name is an ordinary one -- `authorization` is refused a step earlier, by
+    # the never-capturable list, which would answer for this test instead.
+    assert not ceiling.permits(arm(header_hash=frozenset({"x-secret-ish"})))
+    assert not ceiling.permits(arm(header_mask=frozenset({"x-secret-ish"})))
+    # ... and the same two dispositions over a name the ceiling *does* reveal
+    # more of are permitted, so neither refusal is a blanket one.
+    assert ceiling.permits(arm(header_hash=frozenset({"x-trace"})))
+    assert ceiling.permits(arm(header_mask=frozenset({"x-id"})))
+
+
+def test_the_query_sets_are_bounded_by_the_ceiling_as_well_as_the_headers() -> None:
+    """The second `_within_sets` call, with its own three sets.
+
+    Query parameters carry as much as headers do -- a signed URL's token lives
+    there -- and the two calls are separate code paths over separate fields, so
+    a ceiling test that only ever passes headers leaves the query half deciding
+    nothing.
+    """
+    ceiling = RecordingPolicy(
+        capture_slabs=8,
+        max_capture_bytes=1 << 20,
+        redaction=RedactionPolicy(
+            query_allowlist=frozenset({"page"}),
+            query_hash=frozenset({"user"}),
+        ),
+    )
+
+    def arm(**redaction) -> CapturePolicy:
+        return CapturePolicy(
+            redaction=RedactionPolicy(**redaction),
+            budget=CaptureBudget(slabs=1, slab_bytes=4096),
+        )
+
+    assert ceiling.permits(arm(query_allowlist=frozenset({"page"})))
+    assert ceiling.permits(arm(query_hash=frozenset({"page"})))
+    assert ceiling.permits(arm(query_mask=frozenset({"user"})))
+    assert not ceiling.permits(arm(query_allowlist=frozenset({"token"})))
+    assert not ceiling.permits(arm(query_hash=frozenset({"token"})))
+    assert not ceiling.permits(arm(query_mask=frozenset({"token"})))
+    # An allowlisted arm over a name the ceiling only hashes reveals more, too.
+    assert not ceiling.permits(arm(query_allowlist=frozenset({"user"})))
+
+
 # --- composition with the native capture core (slice 5a) --------------------
 
 _flight = pytest.importorskip("wreath._native._flight")

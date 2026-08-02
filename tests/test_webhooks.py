@@ -1391,3 +1391,31 @@ def test_a_verifier_replay_window_that_can_never_hold_is_refused() -> None:
         HMACWebhookVerifier(KEYS, max_age=0)
     with pytest.raises(ValueError, match="max_age must be positive"):
         HMACWebhookVerifier(KEYS, max_age=-1)
+
+
+def test_a_dispatcher_with_impossible_limits_is_refused() -> None:
+    """Three bounds behind one message, and only two of them had ever been read.
+
+    `retry_delay` is the one a mutation sweep found: dropping `retry_delay < 0`
+    left a dispatcher that sleeps a negative number of seconds between attempts,
+    which `asyncio.sleep` accepts and returns from immediately -- so a failing
+    destination is retried in a tight loop until `max_attempts`, at whatever
+    rate the event loop can manage. That is the shape of an accidental
+    denial-of-service aimed at somebody else's endpoint, and it configures
+    without complaint.
+
+    All three clauses are asserted here rather than only the new one, because a
+    single `or` chain behind a single message is exactly where a test that
+    checks one arm reports the other two as covered.
+    """
+    outbox = PostgresWebhookOutbox()
+    with pytest.raises(ValueError, match="limits are invalid"):
+        WebhookDispatcher(outbox, {}, worker_id="w", retry_delay=-0.5)
+    with pytest.raises(ValueError, match="limits are invalid"):
+        WebhookDispatcher(outbox, {}, worker_id="w", lease_seconds=0)
+    with pytest.raises(ValueError, match="limits are invalid"):
+        WebhookDispatcher(outbox, {}, worker_id="w", max_attempts=0)
+    with pytest.raises(ValueError, match="worker_id cannot be empty"):
+        WebhookDispatcher(outbox, {}, worker_id="")
+    # Zero delay is not negative: retrying immediately is a choice, not a typo.
+    assert WebhookDispatcher(outbox, {}, worker_id="w", retry_delay=0.0) is not None

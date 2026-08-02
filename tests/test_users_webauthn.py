@@ -379,6 +379,28 @@ async def test_an_assertion_with_no_user_presence_is_refused() -> None:
         await _assert(store, device, credential, user_present=False)
 
 
+async def test_a_registration_with_no_user_presence_is_refused() -> None:
+    """The same requirement one ceremony earlier, and nothing had ever run it.
+
+    The assertion twin above was covered and this one was not: a registration is
+    the ceremony that *creates* the credential, so an authenticator that enrolled
+    one without anybody touching it is a factor the account holder never agreed
+    to and cannot see -- and it then satisfies every later assertion honestly.
+    """
+    store = InMemorySecondFactorStore()
+    device = _Authenticator()
+    begun = begin_webauthn_registration(
+        user_id="user-1", account="ann@example.test", rp_id=RP_ID
+    )
+    minted = device.register(begun.challenge, user_present=False)
+    with pytest.raises(WebAuthnError, match="user presence"):
+        await confirm_webauthn_registration(
+            store, "user-1", challenge=begun.challenge, rp_id=RP_ID,
+            origins=(ORIGIN,), **minted,
+        )
+    assert await store.credentials("user-1") == []
+
+
 async def test_an_attestation_that_is_not_none_is_refused() -> None:
     """Verifying an attestation statement is a metadata service and a non-goal."""
     store = InMemorySecondFactorStore()
@@ -719,6 +741,32 @@ def test_stored_material_round_trips_and_refuses_a_truncated_row() -> None:
         unpack_credential(packed[:-1])
     with pytest.raises(WebAuthnError, match="not a webauthn credential"):
         unpack_credential(b"totp" + packed[4:])
+
+
+def test_packing_refuses_material_the_header_cannot_describe() -> None:
+    """Both 16-bit length fields, and the empty case each of them shares.
+
+    `pack_credential` writes the two lengths into an `H` each, so 65536 bytes
+    would wrap to 0 and `unpack_credential` would then read a credential id of
+    nothing followed by a key made of the id -- a silent corruption of stored
+    material rather than a refusal. Nothing had ever passed either bound; the
+    refusals were written and never watched.
+    """
+    with pytest.raises(WebAuthnError, match="credential id must be 1..65535"):
+        pack_credential(b"", b"key-bytes", user_verified=True)
+    with pytest.raises(WebAuthnError, match="credential id must be 1..65535"):
+        pack_credential(b"c" * 0x10000, b"key-bytes", user_verified=True)
+    with pytest.raises(WebAuthnError, match="public key must be 1..65535"):
+        pack_credential(b"cred", b"", user_verified=True)
+    with pytest.raises(WebAuthnError, match="public key must be 1..65535"):
+        pack_credential(b"cred", b"k" * 0x10000, user_verified=True)
+    # The largest material the header *can* describe still round-trips, so the
+    # bound is where it says it is rather than one byte either side.
+    largest = pack_credential(b"c" * 0xFFFF, b"k" * 0xFFFF, user_verified=False)
+    restored = unpack_credential(largest)
+    assert restored.credential_id == b"c" * 0xFFFF
+    assert restored.public_key == b"k" * 0xFFFF
+    assert restored.user_verified is False
 
 
 # --- nothing here is logged, and no invariant depends on assert -------------

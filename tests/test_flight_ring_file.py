@@ -470,3 +470,33 @@ def test_the_native_header_and_the_python_one_agree(ring_path) -> None:
     assert header.worker_id == 5
     assert header.head == 1
     assert sys.byteorder == "little" or header.ring_records == 8
+
+
+def _header(**overrides) -> RingFileHeader:
+    fields = dict(
+        ring_records=8, cell_size=CELL_SIZE, worker_id=0, epoch_mono_ns=0,
+        epoch_unix_ns=0, created_unix_nano=0, pid=0, head=0, tail=0,
+    )
+    fields.update(overrides)
+    return RingFileHeader(**fields)
+
+
+def test_a_header_declaring_no_records_is_refused() -> None:
+    """Zero is not a power of two, and `n & (n - 1)` says it is.
+
+    `0 & -1` is `0` -- falsy -- so the bit trick alone accepts an empty ring and
+    the reader then divides the cell region by nothing. The explicit `== 0` is
+    the only clause that catches it, and dropping it survived the suite: every
+    other malformed geometry in these tests is odd or non-power-of-two, which
+    the bit trick rejects on its own.
+    """
+    with pytest.raises(Exception, match="declares 0 records"):
+        RingFileHeader.decode(_header(ring_records=0).encode())
+
+
+def test_a_header_whose_record_count_is_not_a_power_of_two_is_refused() -> None:
+    """The other clause, so the test above cannot pass by rejecting everything."""
+    with pytest.raises(Exception, match="declares 6 records"):
+        RingFileHeader.decode(_header(ring_records=6).encode())
+    # ... and a legal geometry still decodes, so neither refusal is a blanket one.
+    assert RingFileHeader.decode(_header(ring_records=8).encode()).ring_records == 8

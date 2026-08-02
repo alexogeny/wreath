@@ -268,6 +268,53 @@ async def test_a_tool_s_progress_reaches_the_client_that_asked_for_it() -> None:
         assert reports[-1]["params"]["total"] == 100.0
 
 
+async def test_progress_with_no_message_carries_no_message_key() -> None:
+    """MCP's `message` is optional, and an empty one is not the same as absent.
+
+    `wreath.progress` defaults the message to `""`, so a tool reporting a bare
+    percentage would otherwise publish `"message": ""` -- which a client renders
+    as a caption that blanks whatever it last showed. Only the with-a-message
+    case was covered, so the guard that keeps the key out decided nothing.
+    """
+    app = Wreath()
+    mcp = MCP(app, name="x", version="1.0.0", progress_interval=0.01)
+
+    @mcp.tool(description="Counts, quietly.")
+    async def quiet_import(request) -> dict:
+        reporter = request.state.mcp.progress
+        reporter.update(50.0)
+        queue = mcp._sessions.get(request.state.mcp.session_id).notifications
+        for _ in range(500):
+            if any(b"50.0" in item for item in queue.snapshot()):
+                break
+            await asyncio.sleep(0.005)
+        return {"imported": 1}
+
+    async with TestClient(app) as client:
+        session = await initialize(client)
+        await call(
+            client,
+            session,
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "quiet_import", "_meta": {"progressToken": "abc"}},
+            },
+        )
+        stream = asyncio.ensure_future(
+            client.get("/mcp", headers={**STREAM, "mcp-session-id": session})
+        )
+        await asyncio.sleep(0)
+        await client.delete("/mcp", headers={"mcp-session-id": session})
+        response = await asyncio.wait_for(stream, timeout=5)
+
+        reports = [f for f in frames(response) if f["method"] == "notifications/progress"]
+        assert reports, "the progress the tool reported never reached the stream"
+        assert all("message" not in f["params"] for f in reports)
+        assert 50.0 in [f["params"]["progress"] for f in reports]
+
+
 async def test_a_tool_may_report_progress_with_nobody_listening() -> None:
     """The reporter is always there; only the relay depends on a token."""
     app = Wreath()

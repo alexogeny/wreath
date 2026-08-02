@@ -813,3 +813,68 @@ async def test_count_on_a_closed_session_is_rejected(
     await session.close()
     with pytest.raises(SessionClosedError):
         await session.count(User.select())
+
+
+# -- writes refused before they can be scheduled --------------------------------
+
+
+def _persistent_post(session: Session, pk: int = 5) -> Post:
+    """A `Post` in the state a fetch would have left it in.
+
+    Built by hand rather than fetched because the refusals under test are about
+    an object's *state*, and the fake connection's script would otherwise decide
+    how many statements each of these tests runs.
+    """
+    post = Post._orm_new()
+    post._orm_set_loaded(0, pk)
+    post._orm_set_loaded(1, 1)
+    post._orm_set_loaded(2, "t")
+    post._orm_state = PERSISTENT
+    post._orm_owner = session
+    session._identity[(session._registry.spec_for(Post), (pk,))] = post
+    return post
+
+
+async def test_adding_an_object_already_scheduled_for_deletion_is_refused(
+    session: Session,
+) -> None:
+    """`add` after `delete` is a contradiction, and it was never stated aloud.
+
+    Both halves are already scheduled, so the flush would emit an INSERT and a
+    DELETE for one row in an order the caller did not choose -- and for a
+    *persistent* object the insert is of a primary key that already exists. The
+    refusal is the only thing that turns that into a message; nothing in the
+    suite had ever run it.
+    """
+    doomed = _persistent_post(session)
+    session.delete(doomed)
+    with pytest.raises(SessionError, match="scheduled for deletion and cannot be added"):
+        session.add(doomed)
+
+
+async def test_deleting_through_a_closed_session_is_rejected(
+    registry: Registry, database: FakeDatabase
+) -> None:
+    """`delete` checks the session is usable before it touches bookkeeping.
+
+    Dropping that check survived the suite: a delete on a closed session then
+    appends to `_deleted` and answers normally, so the caller believes a row is
+    going away and no flush will ever run. The object is `DETACHED` by then, so
+    the failure surfaces later and somewhere else, if at all.
+    """
+    session = Session(registry, "write")
+    doomed = _persistent_post(session)
+    await session.close()
+    with pytest.raises(SessionClosedError):
+        session.delete(doomed)
+    assert session._deleted == []
+
+
+async def test_adding_through_a_closed_session_is_rejected(
+    registry: Registry,
+) -> None:
+    """The same guard on the other write entry point."""
+    session = Session(registry, "write")
+    await session.close()
+    with pytest.raises(SessionClosedError):
+        session.add(User(email="a@b.c", name="A"))

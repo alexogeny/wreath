@@ -174,6 +174,32 @@ def test_no_page_wrapper_when_nothing_returns_one() -> None:
     assert "message Page" not in _rendered(_llama_app())
 
 
+def test_a_bare_page_never_reaches_the_proto_target_at_all() -> None:
+    """Which is why the target's own "an untyped page" refusal reads unreached.
+
+    A mutation sweep reported that refusal as never executed, and the reason is
+    one layer up rather than in the tests: `build_api_model` refuses a bare
+    `Page` while it is still resolving annotations -- it reaches the target as
+    `Sequence[T]`, an unresolved type variable -- so the generator is never
+    handed a page with no element type. The guard is therefore defence behind a
+    defence, and this test pins the defence that actually fires; if the
+    inspector ever starts admitting a bare `Page`, this goes red and the
+    generator's own refusal becomes reachable and worth a test of its own.
+    """
+    from wreath.typegen.model import TypegenError
+
+    app = Wreath()
+
+    @app.get("/pages")
+    async def list_pages(request: Any) -> Page:
+        raise NotImplementedError
+
+    with pytest.raises(TypegenError) as caught:
+        _rendered(app)
+    assert "unsupported annotation" in str(caught.value), caught.value
+    assert "getPages" in str(caught.value), caught.value
+
+
 # --- refusals ----------------------------------------------------------------
 
 

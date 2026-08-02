@@ -388,3 +388,62 @@ def test_a_relationship_target_outside_the_registry_is_rejected() -> None:
     # String targets resolve only inside the registry that owns both models.
     with pytest.raises(DeclarationError, match="does not contain"):
         compile_models(User)
+
+
+# -- what a relationship's foreign key is allowed to point at -------------------
+
+
+def test_a_foreign_key_pointing_at_a_third_table_is_refused() -> None:
+    """`foreign_key=` and `references=` have to agree about the other side.
+
+    The relationship says "join to Owner"; the column says "this value lives in
+    Other". Without the refusal the join is built from whichever column of
+    `Owner` happens to share the referenced *name* -- or, when there is none,
+    from a `KeyError` deep inside the compiler. Nothing had ever declared the
+    two disagreeing, so the check ran on nothing.
+    """
+
+    class Other(Model, table="others"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+
+    class Owner(Model, table="owners"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+
+    class Pet(Model, table="pets"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        owner_id: Mapped[int] = column(Int64, references=Other.id)
+        owner = relationship(Owner, foreign_key=owner_id)
+
+    with pytest.raises(DeclarationError) as caught:
+        compile_models(Other, Owner, Pet)
+    message = str(caught.value)
+    # Both sides named: which declaration is wrong is the whole diagnosis.
+    assert "Pet.owner" in message and "owner_id" in message
+    assert "public.others" in message and "public.owners" in message
+
+
+def test_a_foreign_key_joins_the_column_it_references_not_the_primary_key() -> None:
+    """`references=` may name any column, and a natural key is the case.
+
+    A country code is unique and is not the primary key, so the join has to be
+    `ON countries.code = cities.country_code`. Falling back to the primary key
+    would emit `ON countries.id = cities.country_code` -- valid SQL over the
+    wrong column, silently returning the wrong country. Every other model in
+    the suite references a primary key, where the two paths agree and the
+    fallback is indistinguishable from the real answer.
+    """
+    from wreath.orm.compiler import compile_select
+
+    class Country(Model, table="countries"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        code: Mapped[str] = column(Text, unique=True)
+
+    class City(Model, table="cities"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        country_code: Mapped[str] = column(Text, references=Country.code)
+        country = relationship(Country, foreign_key=country_code)
+
+    registry = compile_models(Country, City)
+    sql = compile_select(registry, City.select().include(City.country.joined())).sql
+    assert 'ON "j1"."code" = "t0"."country_code"' in sql, sql
+    assert '"j1"."id" =' not in sql, sql

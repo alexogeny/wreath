@@ -364,3 +364,55 @@ def test_the_lazy_metadata_join_is_idempotent_under_concurrent_builders() -> Non
     image = build_metadata_image(app)
     db_ids = {n.name: n.entry_id for n in image.databases}
     assert app._databases["main"]._flight_dep_id == db_ids["main"] != 0
+
+
+def test_the_metadata_image_names_each_route_s_auth_policy() -> None:
+    """The recorder's answer to "what was guarding this route", interned once.
+
+    A policy name is built by joining the parts of the requirement, and the
+    `authenticated` part had never been asserted -- every existing image test
+    builds routes with no auth at all, so the whole naming function ran on
+    nothing. Dropping that part renames `@roles("admin")` from
+    `auth|role:all:admin` to `role:all:admin` and, worse, renames a plain
+    `@authenticated()` route to the empty string, which the caller reads as
+    *no policy*: a forensic image would then say an authenticated route was
+    open, which is the one thing an operator reads it to find out.
+
+    Interning is asserted too -- two ids for two distinct policies, and the
+    unguarded route at `ID_NONE`.
+    """
+    from typing import Any
+
+    from wreath import Wreath
+    from wreath._flight_metadata import build_metadata_image
+    from wreath.auth import BearerTokenBackend, Identity, authenticated
+    from wreath.authorization import roles
+
+    app = Wreath()
+    app.configure_auth(BearerTokenBackend({"t": Identity(id="ada", type="User")}))
+
+    @app.get("/open")
+    async def open_route(request: Any) -> str:
+        return "ok"
+
+    @app.get("/private")
+    @authenticated()
+    async def private(request: Any) -> str:
+        return "ok"
+
+    @app.get("/admin")
+    @roles("admin")
+    async def admin(request: Any) -> str:
+        return "ok"
+
+    app._compile_routes()
+    app._build_flight_route_ids()
+    image = build_metadata_image(app)
+
+    names = {entry.name: entry.entry_id for entry in image.auth_policies}
+    assert set(names) == {"auth", "auth|role:all:admin"}
+    by_path = {route.path: route.auth_policy_id for route in image.routes}
+    assert by_path["/private"] == names["auth"]
+    assert by_path["/admin"] == names["auth|role:all:admin"]
+    # A route nothing guards carries no policy id rather than a stale one.
+    assert by_path["/open"] == 0
