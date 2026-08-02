@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from typing import Any, Final
@@ -44,6 +45,7 @@ from ._otlp import (
     build_trace_request,
 )
 from ._projector import ProjectedLog, ProjectedTrace, ProjectorSnapshot
+from .http_client import DestinationRejected
 
 __all__ = [
     "TraceMetricTransport",
@@ -88,6 +90,47 @@ _ENCODINGS: dict[str, tuple[str, Any]] = {
 }
 
 
+type _Origin = tuple[str, str, int]
+
+
+def _otlp_origin(url: str) -> _Origin:
+    parsed = urllib.parse.urlsplit(url)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or parsed.hostname is None:
+        raise ValueError("OTLP endpoint must be an absolute HTTP(S) URL")
+    host = parsed.hostname.encode("idna").decode("ascii").lower()
+    port = parsed.port
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return scheme, host, port
+
+
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep collector-directed redirects on the configured OTLP origin."""
+
+    def __init__(self, origin: _Origin) -> None:
+        self._origin = origin
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        try:
+            redirected_origin = _otlp_origin(newurl)
+        except ValueError as error:
+            raise DestinationRejected(
+                "cross-origin OTLP redirect was rejected"
+            ) from error
+        if redirected_origin != self._origin:
+            raise DestinationRejected("cross-origin OTLP redirect was rejected")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class OtlpHttpExporter:
     """A minimal OTLP/HTTP exporter over `urllib` (no third-party dep).
 
@@ -107,11 +150,17 @@ class OtlpHttpExporter:
     set of builders and `_otlp_proto.py` converts -- so the two encodings cannot
     describe different telemetry.
 
+    Redirects may move within the configured collector origin. A redirect to a
+    different scheme, host, or port raises `DestinationRejected`; a collector
+    response therefore cannot turn telemetry export into a request to another
+    service.
+
     Args:
         encoding: `"protobuf"` (default) or `"json"`.
 
     Raises:
-        ValueError: `encoding` is neither.
+        ValueError: `endpoint` is not an absolute HTTP(S) URL, or `encoding` is unknown.
+        DestinationRejected: A collector response redirects to another origin.
     """
 
     __slots__ = (
@@ -119,6 +168,7 @@ class OtlpHttpExporter:
         "_headers",
         "_logs_url",
         "_metrics_url",
+        "_opener",
         "_timeout",
         "_traces_url",
     )
@@ -138,6 +188,7 @@ class OtlpHttpExporter:
             raise ValueError(
                 f"unknown OTLP encoding {encoding!r}; expected one of {known}"
             ) from None
+        origin = _otlp_origin(endpoint)
         base = endpoint.rstrip("/")
         self._traces_url = f"{base}/v1/traces"
         self._metrics_url = f"{base}/v1/metrics"
@@ -145,11 +196,14 @@ class OtlpHttpExporter:
         self._timeout = timeout
         self._encode = encode
         self._headers = {"content-type": media_type, **(headers or {})}
+        self._opener = urllib.request.build_opener(
+            _SameOriginRedirectHandler(origin)
+        )
 
     def _post(self, url: str, request: dict[str, Any], signal: str) -> None:
         body = self._encode(request, signal)
         req = urllib.request.Request(url, data=body, headers=self._headers, method="POST")  # noqa: S310 (configured OTLP endpoint)
-        with urllib.request.urlopen(req, timeout=self._timeout) as response:  # noqa: S310
+        with self._opener.open(req, timeout=self._timeout) as response:
             # Drain and discard: the OTLP response body is not needed, but leaving
             # it unread can wedge keep-alive connections.
             response.read()

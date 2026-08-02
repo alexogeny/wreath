@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
+from wreath import _export
 from wreath._export import ExportPipeline, OtlpHttpExporter
 from wreath._flight_schema import Protocol, TerminalStatus
 from wreath._projector import (
@@ -22,6 +23,7 @@ from wreath._projector import (
     ProjectorSnapshot,
     RouteMetric,
 )
+from wreath.http_client import DestinationRejected
 
 
 def _trace(request_id: int, **kw: object) -> ProjectedTrace:
@@ -244,6 +246,41 @@ class _OtlpHandler(BaseHTTPRequestHandler):
         pass
 
 
+class _InternalCanaryHandler(BaseHTTPRequestHandler):
+    gets: list[str] = []
+
+    def do_GET(self) -> None:  # http.server API
+        type(self).gets.append(self.path)
+        self.send_response(200)
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+class _RedirectingCollectorHandler(BaseHTTPRequestHandler):
+    gets: list[str] = []
+    location = ""
+
+    def do_POST(self) -> None:  # http.server API
+        length = int(self.headers.get("content-length", 0))
+        self.rfile.read(length)
+        self.send_response(302)
+        self.send_header("location", type(self).location)
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+    def do_GET(self) -> None:  # http.server API
+        type(self).gets.append(self.path)
+        self.send_response(200)
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
 def test_otlp_http_exporter_posts_to_traces_and_metrics() -> None:
     _OtlpHandler.posts = []
     server = HTTPServer(("127.0.0.1", 0), _OtlpHandler)
@@ -262,6 +299,114 @@ def test_otlp_http_exporter_posts_to_traces_and_metrics() -> None:
 
     paths = [path for path, _ in _OtlpHandler.posts]
     assert paths == ["/v1/traces", "/v1/metrics"]
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    (
+        "collector.invalid/v1/traces",
+        "ftp://collector.invalid",
+        "http:///v1/traces",
+    ),
+)
+def test_otlp_exporter_refuses_an_endpoint_without_an_http_origin(endpoint: str) -> None:
+    with pytest.raises(ValueError, match=r"absolute HTTP\(S\) URL"):
+        OtlpHttpExporter(endpoint)
+
+
+@pytest.mark.parametrize(
+    ("url", "origin"),
+    (
+        ("http://COLLECTOR.invalid/path", ("http", "collector.invalid", 80)),
+        ("https://COLLECTOR.invalid/path", ("https", "collector.invalid", 443)),
+        ("https://collector.invalid:8443/path", ("https", "collector.invalid", 8443)),
+    ),
+)
+def test_otlp_redirect_origin_normalizes_scheme_host_and_default_port(
+    url: str, origin: tuple[str, str, int]
+) -> None:
+    assert _export._otlp_origin(url) == origin
+
+
+def test_otlp_redirect_refuses_a_non_http_location() -> None:
+    handler = _export._SameOriginRedirectHandler(
+        ("https", "collector.invalid", 443)
+    )
+    request = _export.urllib.request.Request(
+        "https://collector.invalid/v1/traces", data=b"payload", method="POST"
+    )
+
+    with pytest.raises(DestinationRejected, match="cross-origin"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "file:///etc/passwd",
+        )
+
+
+def test_otlp_collector_can_redirect_within_its_pinned_origin() -> None:
+    _RedirectingCollectorHandler.gets = []
+    collector = HTTPServer(("127.0.0.1", 0), _RedirectingCollectorHandler)
+    thread = threading.Thread(target=collector.serve_forever, daemon=True)
+    thread.start()
+    host, port = collector.server_address
+    _RedirectingCollectorHandler.location = f"http://{host}:{port}/accepted"
+
+    try:
+        exporter = OtlpHttpExporter(f"http://{host}:{port}", timeout=5.0)
+        exporter.export_traces({"resourceSpans": [{"scopeSpans": []}]})
+    finally:
+        collector.shutdown()
+        thread.join(2.0)
+
+    assert _RedirectingCollectorHandler.gets == ["/accepted"]
+
+
+def test_otlp_collector_cannot_redirect_export_to_an_internal_origin() -> None:
+    """A collector response must not turn configured telemetry into SSRF.
+
+    Both peers are real loopback HTTP servers. The first is the configured
+    collector; the second is an internal canary that must remain untouched.
+    This failed against urllib's default redirect handler: it rewrote the POST
+    to a GET and fetched `/internal` from the second origin.
+    """
+    _InternalCanaryHandler.gets = []
+    internal = HTTPServer(("127.0.0.1", 0), _InternalCanaryHandler)
+    internal_thread = threading.Thread(target=internal.serve_forever, daemon=True)
+    internal_thread.start()
+
+    internal_host, internal_port = internal.server_address
+    _RedirectingCollectorHandler.location = (
+        f"http://{internal_host}:{internal_port}/internal"
+    )
+    collector = HTTPServer(("127.0.0.1", 0), _RedirectingCollectorHandler)
+    collector_thread = threading.Thread(target=collector.serve_forever, daemon=True)
+    collector_thread.start()
+    collector_host, collector_port = collector.server_address
+
+    refusal: DestinationRejected | None = None
+    try:
+        exporter = OtlpHttpExporter(
+            f"http://{collector_host}:{collector_port}", timeout=5.0
+        )
+        try:
+            exporter.export_traces({"resourceSpans": [{"scopeSpans": []}]})
+        except DestinationRejected as error:
+            refusal = error
+    finally:
+        collector.shutdown()
+        internal.shutdown()
+        collector_thread.join(2.0)
+        internal_thread.join(2.0)
+
+    assert _InternalCanaryHandler.gets == [], (
+        "the configured collector redirected OTLP export into the internal canary"
+    )
+    assert refusal is not None
+    assert "cross-origin" in str(refusal)
 
 
 def test_otlp_http_exporter_failure_propagates_for_pipeline_isolation() -> None:
