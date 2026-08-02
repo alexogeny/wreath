@@ -31,6 +31,7 @@ SOURCES = (
     "json.c",
     "simd.c",
     "msgpack.c",
+    "aesgcm.c",
     "geospatial.c",
     "protobuf.c",
     "sse.c",
