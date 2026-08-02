@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ._auth._ecverify import on_p256_curve, verify_ed25519, verify_es256
+from ._b64 import b64url_decode as _b64url_decode
 
 __all__ = [
     "AuthenticatorData",
@@ -83,10 +84,6 @@ class WebAuthnError(ValueError):
 
 # --- base64url --------------------------------------------------------------
 
-_B64URL_ALPHABET = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_="
-)
-
 
 def b64url_encode(raw: bytes) -> str:
     """Unpadded base64url, which is how WebAuthn writes bytes into JSON."""
@@ -105,10 +102,24 @@ def b64url_decode(text: str) -> bytes:
     """
     if not isinstance(text, str):
         raise WebAuthnError("expected a base64url string")
-    if not text or not _B64URL_ALPHABET.issuperset(text):
+    if not text:
         raise WebAuthnError("value is not base64url")
     try:
-        return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+        # The alphabet check that used to sit here was a Python set scan over
+        # every character of every payload; `_b64.b64url_decode` makes the same
+        # refusal inside the decode loop. Empty stays a local check because this
+        # caller rejects it and the shared decoder, like native `jose.c`,
+        # answers `b""`.
+        #
+        # `rstrip` because the set this replaced contained `=`, so a *padded*
+        # value was accepted here and the shared decoder is unpadded-only.
+        # Stripping first keeps every input that used to decode decoding, and
+        # every one that used to fail failing: `"QQ=="` still yields a byte,
+        # `"Q==="` still raises -- one character is not a base64 length either
+        # way -- and `"Q=Q"` is still refused, now for holding `=` rather than
+        # for failing to re-pad. Tightening what authentication accepts is not
+        # a side effect worth taking on the way past.
+        return _b64url_decode(text.rstrip("="))
     except ValueError as exc:  # binascii.Error is a ValueError
         raise WebAuthnError("value is not base64url") from exc
 
