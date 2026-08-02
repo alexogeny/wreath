@@ -645,12 +645,21 @@ def _predicate_operators(context: _Context) -> Iterator[Candidate]:
                     continue
                 if isinstance(node.test, ast.Compare) and _short(node.test).startswith("__name__"):
                     continue
+                # A parenthesised condition spread over several lines leaves the
+                # `if` line carrying no bytecode at all -- the first thing that
+                # executes is the first operand, one line down -- so watching
+                # `node.lineno` alone reported an exercised guard as UNREACHED.
+                # That is ADR 0024's failure mode with the tool as its subject,
+                # the same one the `def`-line rule exists for; `users.py`'s
+                # step-up check was covered by five tests and read as unwatched.
+                guard_watch = (node.test.lineno,)
                 yield Candidate(
                     operator="guard.never-fires",
                     control=f"the guarded branch `if {_short(node.test, 56)}`",
                     line=node.lineno,
                     scope=scope,
                     node_id=node_id,
+                    watch=guard_watch,
                     mutate=_replace_test(False),
                 )
                 if not node.orelse:
@@ -660,6 +669,7 @@ def _predicate_operators(context: _Context) -> Iterator[Candidate]:
                         line=node.lineno,
                         scope=scope,
                         node_id=node_id,
+                        watch=guard_watch,
                         mutate=_replace_test(True),
                     )
 

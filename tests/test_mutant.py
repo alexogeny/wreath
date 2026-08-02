@@ -161,6 +161,45 @@ def test_the_always_true_mutation_watches_the_body_not_the_def_line(module: Path
     assert found.line not in found.watch or len(found.watch) > 1
 
 
+def test_a_guard_over_several_lines_watches_where_its_condition_starts(
+    tmp_path: Path,
+) -> None:
+    """The `def`-line failure above, one construct along, and it shipped.
+
+    A parenthesised condition spread over several lines compiles no bytecode for
+    the `if` line itself -- the first thing that runs is the first operand, on
+    the next line -- so `sys.monitoring` never reports the line the candidate
+    anchors on and every test is filtered out of its candidate set. The mutant
+    is then UNREACHED however thoroughly it is covered, which reads as "write a
+    test" for a control that already has five.
+
+    Found on `wreath.users`' step-up check, whose four-line condition guards the
+    removal of a second factor. This asserts the *shape* of the selection rather
+    than a line number, and the last clause is what makes it bite: watching the
+    `if` line and nothing else is exactly the defect.
+    """
+    source = tmp_path / "guarded.py"
+    source.write_text(
+        "def check(stamp, ttl):\n"
+        "    if (\n"
+        "        isinstance(stamp, bool)\n"
+        "        or not isinstance(stamp, int)\n"
+        "        or stamp > ttl\n"
+        "    ):\n"
+        "        raise PermissionError('refused')\n"
+        "    return True\n",
+        encoding="utf-8",
+    )
+    guards = [c for c in _scan(source) if c.operator.startswith("guard.")]
+    conditions = [c for c in guards if c.operator != "guard.remove-raise"]
+    assert conditions, "the multi-line guard was not offered at all"
+    for candidate in conditions:
+        assert candidate.line == 2, "the anchor is still the `if` keyword"
+        # The line that actually executes is the first operand's, and it must be
+        # watched -- otherwise no test can ever be attributed to this mutation.
+        assert 3 in candidate.watch
+
+
 def test_cedar_policy_text_is_mutated_as_a_policy_not_as_a_string(module: Path) -> None:
     found = _scan(module)
     assert any(c.operator == "cedar.flip-effect" for c in found)
