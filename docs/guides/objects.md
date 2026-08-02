@@ -195,6 +195,138 @@ if the abort itself fails, the store's `orphaned_uploads` counter records that p
 left in the bucket. A bucket taking streamed writes still wants a lifecycle rule expiring
 incomplete multipart uploads, because a process killed outright never reaches the abort.
 
+## Resumable uploads: the third option
+
+The two paths above both lose a 4 GB upload to one dropped connection, and they lose it
+in opposite ways. A presigned URL never reaches your process, so there is nothing to
+resume and nothing to check either — the policy engine never sees the write, the quota
+is never consulted, the declared media type is never verified, and you learn the object
+exists only if the client says so. Streaming through `write_stream` checks everything
+and starts again from zero.
+
+`resumable()` is the third: the application stays in the way of the **decisions** while
+the bytes arrive in restartable pieces.
+
+```python
+from wreath.objects import ObjectUploadStore, UploadLimits, resumable
+
+uploads = resumable(
+    store,
+    uploads=ObjectUploadStore(store),        # shared across workers; see below
+    limits=UploadLimits(max_size=5 * 1024**3),
+    expire=hours(24),
+    jobs=runner,
+    on_complete="process_photo",             # a registered task, not a callback
+)
+app.include_router(uploads.router("/uploads", permissions=["uploads::write"]))
+```
+
+`permissions=` is the router's ordinary keyword, so authorization here is the same
+declaration as on any other route — which is precisely what a presigned URL gives up.
+
+### Which one to use
+
+| Use | When |
+| --- | --- |
+| `store.url(...)` — presigned | The object is opaque to you and the client is trusted. Nothing flows through your process, so nothing is checked. |
+| `write_stream` — through the app | Small uploads, where a restart costs nothing. |
+| `resumable(...)` | Size, media type, or a quota must be enforced — or the network is bad enough that starting over is not acceptable. |
+
+Bytes now flow through your process, which is bandwidth the presigned path avoided.
+That is the trade, and it is a real one; it buys admission control and resumption.
+
+### The protocol
+
+The shipped surface is [Resumable Uploads for HTTP](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-resumable-upload),
+`draft-ietf-httpbis-resumable-upload-12`. **tus 1.0.x is deliberately not served** — the
+two vocabularies overlap enough that one implementation answering both would have to
+guess which dialect a request is speaking from the headers it did *not* send.
+
+```http
+POST /uploads                     Upload-Complete: ?0        → 201 + Location
+HEAD /uploads/{id}                                           → 204 + Upload-Offset
+PATCH /uploads/{id}               Content-Type: application/partial-upload
+                                  Upload-Offset: 8388608
+                                  Upload-Complete: ?1        → 204
+DELETE /uploads/{id}                                         → 204
+```
+
+A client that dropped mid-upload sends `HEAD`, reads `Upload-Offset`, and resumes from
+there. **The client's offset is a claim, never an authority** — it is compared against
+what the server durably holds, and a mismatch is a `409` carrying the real one.
+
+### Admission happens before the first byte
+
+A declared `Upload-Length` over `max_size`, or refused by your `quota` predicate, is a
+`413` against a request that has sent nothing:
+
+```python
+async def quota(request, declared_bytes):
+    return await tenant_has_room(request.identity, declared_bytes)
+
+uploads = resumable(store, quota=quota, limits=UploadLimits(max_size=5 * 1024**3))
+```
+
+The declared length is also enforced *as bytes arrive*, because `Content-Length` is a
+claim and a chunked body has none — an upload cannot creep past its declared size one
+chunk at a time.
+
+Content type is decided on the **sniffed** leading bytes, not the client's claim. A body
+declaring `image/png` that is actually HTML is refused with `415` rather than stored and
+later served back from your origin. `sniff_content_type` recognises only unambiguous
+magic numbers; it is there to catch a lie, not to classify every format.
+
+### Completion is a job, not a callback
+
+`on_complete` names a task registered on your `JobRunner` and is enqueued with the
+upload id as its idempotency key. A callback awaited inside the request is lost by the
+next deploy — which is the failure every hand-rolled upload pipeline eventually finds.
+It is also the seam that keeps image processing out of wreath: thumbnailing,
+transcoding and scanning are your task's business, and the pixels stay yours.
+
+### Where in-progress state lives
+
+`MemoryUploadStore` is the default and holds state in **one worker's memory**, so a
+resume that lands on a sibling worker is a `404` and the client starts over. That fails
+closed rather than corrupting anything, but it is the wrong choice behind a
+non-sticky load balancer. `ObjectUploadStore(store)` keeps the record in the same bucket
+every worker already talks to — shared state with no second datastore, at one extra
+round trip per request.
+
+### The 5 MiB floor, advertised rather than hidden
+
+Every response carries `Upload-Limit`, so a client can size its chunks before it starts:
+
+```
+Upload-Limit: max-size=5368709120, min-append-size=8388608, max-age=86400
+```
+
+`min-append-size` appears when the backend has a floor. S3 assembles with its own
+multipart upload — which is why completion transfers nothing — and S3 refuses a
+non-final part under 5 MiB (`S3ObjectStore`'s own default part size is 8 MiB). The
+alternative would be staging the remainder and re-uploading it on the next call: a
+silent write amplification on exactly the slow network the protocol exists to survive.
+The append that *completes* an upload is exempt, as the last part is. Other backends
+have no floor and advertise none.
+
+Set `max_append_bytes=` to your app's `RequestLimits.max_body_bytes` so the advertised
+ceiling is one your application will actually read.
+
+### Sweeping what nobody finished
+
+An abandoned S3 multipart upload is billed for its parts until something aborts it.
+`sweep()` is part of the feature, not a follow-up:
+
+```python
+@runner.schedule("*/15 * * * *")
+async def reap_uploads() -> None:
+    await uploads.sweep()
+```
+
+`swept_uploads` counts what it reclaimed and `aborted_uploads` counts what it could not
+— a non-zero second number means storage is being billed for parts belonging to no
+object.
+
 ## Hero: stream a zip of many objects
 
 The recurring report-export problem — bundle hundreds of objects into a download — without buffering a single one. `zip_stream` emits a valid **Zip64** archive incrementally, each entry *stored* (no compression) with its CRC computed on the fly:
@@ -258,5 +390,10 @@ partially extracted prefix behind.
 - **`content_type` reaches S3 but not the disk.** The S3 backend sends and signs it on the `PUT` (or the multipart initiate), so the object is stored with that type; `LocalObjectStore` has nowhere to persist it and guesses from the key's extension on the way back out. Nothing is guessed for S3.
 - **A local write's leftovers are not objects.** A hard kill can leave `.<name>.<hex>.tmp` beside the target; `list` skips exactly that shape, so an object you genuinely named `notes.tmp` is still listed. The rename is atomic but not durable — the file is `fsync`'d, its directory is not.
 - **Credentials never leak** — `S3ObjectStore.__repr__` omits them; `AWS_SESSION_TOKEN` is honored for assumed roles.
+- **A resumable upload's `Upload-Offset` is checked, not believed.** A client claiming an offset it does not hold gets a `409` carrying the real one, and cannot reach across into another upload's parts. The advance is conditional, so two appends racing on one upload lose one rather than leaving a hole in the object.
+- **`MemoryUploadStore` is per-worker.** The default confines an upload to the worker that created it; a resume elsewhere is a `404`. Pass `ObjectUploadStore(store)` behind more than one worker.
+- **A non-S3 backend pays one extra copy at completion.** The generic assembly writes one object per append and concatenates them by streaming, so memory stays bounded but the bytes are read and written once more. S3 avoids it entirely by assembling in the bucket.
+- **`write` takes any buffer, and keeps none of it.** `bytes`, `bytearray` and `memoryview` are all accepted, and no backend holds a reference past the `await` — so a buffer you assembled an object in is yours again the moment the call returns. Assembling in a `bytearray` and handing it over directly is the intended shape; freezing it with `bytes(...)` first is a `memcpy` nothing downstream asked for (390 µs on an 8 MiB resumable append, which was about half of what the append cost). If you write your own backend, honour the same promise: copy inside `write` if you need to retain the bytes.
+- **`sweep()` is not scheduled for you.** Nothing reclaims an abandoned upload until you call it, and on S3 the parts are billed in the meantime.
 
 See also: [HTTP client](http-client.md) (the wire S3 rides on), [static files](static-files.md) (the same `openat` containment), [forms & uploads](forms.md).

@@ -48,6 +48,7 @@ import errno
 import fnmatch
 import hashlib
 import hmac
+import json as _json
 import mimetypes
 import os
 import re
@@ -56,7 +57,7 @@ import struct
 import time
 import zlib
 from collections.abc import AsyncIterable, AsyncIterator, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from xml.etree import ElementTree as _ET
@@ -65,7 +66,20 @@ if TYPE_CHECKING:
     # In any real install the module is there, and assuming so keeps `_sigv4.sign`
     # and friends precisely typed at the S3 call sites below.
     from . import _sigv4
+    from .request import Request
+    from .response import ProblemResponse, Response
 else:
+    try:
+        from .response import ProblemResponse, Response
+    except ImportError:
+        # Optional for the same reason `_sigv4` is, and load-bearing for the
+        # same test: `tests/storage/test_zip.py` execs this file by path when
+        # the extension is not built, and a by-path load has no parent package
+        # to import a sibling from. `zip_stream` and `MemoryObjectStore` are
+        # what that path uses; only the resumable-upload surface below needs
+        # the HTTP layer, and it is unreachable without a router to mount it on.
+        ProblemResponse = Response = None
+
     try:  # normal package import
         from . import _sigv4
     except ImportError:
@@ -102,6 +116,16 @@ __all__ = [
     "zip_stream",
     "unzip_stream",
     "file_chunks",
+    # Resumable uploads.
+    "PARTIAL_UPLOAD",
+    "MemoryUploadStore",
+    "ObjectUploadStore",
+    "ResumableUploads",
+    "UploadLimits",
+    "UploadState",
+    "UploadStore",
+    "resumable",
+    "sniff_content_type",
 ]
 
 
@@ -150,6 +174,20 @@ class ObjectError(Exception):
     """
 
 
+#: The characters `normalize_key` refuses inside a segment: the C0 controls
+#: (`\x00`-`\x1f`) and `DEL`. Compiled once, at import, and searched once per
+#: segment -- the predicate it replaces read `any(ord(c) < 0x20 or ord(c) ==
+#: 0x7F for c in part)`, one interpreter step per character of every key on the
+#: containment gate every backend routes through. Ablated over the whole call
+#: (15 rounds, 20k iterations, A/A floor 0.00-0.02us): 1.10 -> 0.40us on a
+#: 15-character key, 2.74 -> 0.75us on 45, 4.78 -> 1.16us on 85. The class of
+#: win is deleting work rather than widening it -- one C-level scan over the
+#: segment instead of a Python loop over its characters -- so there is nothing
+#: here for `_native/`. The set is literal code points, not a shorthand class,
+#: so it is exactly the predicate and not a Unicode-aware approximation of it.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def normalize_key(key: str) -> str:
     """Return the canonical form of `key`, or refuse it.
 
@@ -195,7 +233,7 @@ def normalize_key(key: str) -> str:
             continue
         if part == "..":
             raise ObjectError(f"object key escapes the store: {key!r}")
-        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in part):
+        if _CONTROL_CHARS.search(part):
             raise ObjectError(f"control character in object key: {key!r}")
         parts.append(part)
     if not parts:
@@ -267,9 +305,24 @@ class ObjectStore(Protocol):
         ...
 
     async def write(
-        self, key: str, data: bytes, *, content_type: str | None = None
+        self, key: str, data: bytes | bytearray | memoryview, *, content_type: str | None = None
     ) -> ObjectStat:
-        """Store `data` under `key`, replacing whatever was there."""
+        """Store `data` under `key`, replacing whatever was there.
+
+        **`data` may be any of `bytes`, `bytearray` or `memoryview`, and no
+        backend keeps a reference to it past the `await`.** A caller may reuse
+        or mutate the buffer as soon as the call returns; a backend that wanted
+        to hold on to one would have to copy it itself.
+
+        The parameter was `bytes` alone, which forced every caller assembling an
+        object in a `bytearray` to freeze it first. That copy is pure `memcpy`
+        and measured 391us on an 8 MiB append -- roughly half of what an append
+        costs -- so it was work being done for nobody: no backend needed the
+        immutability. Widening an *input* is backwards compatible, and an
+        existing implementation annotated `bytes` still satisfies this at
+        runtime; the contract it now has to honour is the no-retention sentence
+        above, which all three backends here already did.
+        """
         ...
 
     async def write_stream(
@@ -405,11 +458,15 @@ class ObjectPath:
         """
         return await self._storage.read(self._key)
 
-    async def write_bytes(self, data: bytes, *, content_type: str | None = None) -> ObjectStat:
+    async def write_bytes(
+        self, data: bytes | bytearray | memoryview, *, content_type: str | None = None
+    ) -> ObjectStat:
         """Store `data` at this key, replacing whatever was there.
 
         Args:
-            data: the object's new contents.
+            data: the object's new contents, as `bytes`, `bytearray` or
+                `memoryview`. The backend retains none of it; see
+                `ObjectStore.write`.
             content_type: the media type. What a backend does with it varies; see each.
 
         Returns:
@@ -619,26 +676,35 @@ class MemoryObjectStore:
         for chunk in _iter_chunks(data):
             yield chunk
 
-    async def write(self, key: str, data: bytes, *, content_type: str | None = None) -> ObjectStat:
+    async def write(
+        self, key: str, data: bytes | bytearray | memoryview, *, content_type: str | None = None
+    ) -> ObjectStat:
         """Store `data` under `key`, replacing whatever was there.
 
-        The bytes are copied, so a caller that reuses a `bytearray` does not
-        mutate the stored object underneath itself. `content_type` is recorded
-        and returned by `stat` -- this is the only backend that stores it
-        verbatim.
+        The bytes are copied on the way in, so this backend retains nothing of
+        the caller's buffer and a `bytearray` may be reused the moment the call
+        returns. `content_type` is recorded and returned by `stat` -- this is
+        the only backend that stores it verbatim.
         """
         key = normalize_key(key)
-        self._objects[key] = (bytes(data), content_type)
-        return ObjectStat(key, len(data), _etag(data), None, content_type)
+        stored = bytes(data)
+        self._objects[key] = (stored, content_type)
+        return ObjectStat(key, len(stored), _etag(stored), None, content_type)
 
     async def write_stream(
-        self, key: str, chunks: AsyncIterable[bytes], *, content_type: str | None = None
+        self,
+        key: str,
+        chunks: AsyncIterable[bytes | bytearray | memoryview],
+        *,
+        content_type: str | None = None,
     ) -> ObjectStat:
         """Drain `chunks` and store the result. Buffers the whole object."""
         buf = bytearray()
         async for chunk in chunks:
             buf += chunk
-        return await self.write(key, bytes(buf), content_type=content_type)
+        # `write` freezes what it stores, so handing it the `bytearray` costs
+        # one copy rather than two.
+        return await self.write(key, buf, content_type=content_type)
 
     async def stat(self, key: str) -> ObjectStat:
         """Metadata for one object, with `last_modified` always `None`.
@@ -876,15 +942,21 @@ class LocalObjectStore:
             await asyncio.to_thread(os.close, fd)
 
     # -- write --------------------------------------------------------------
-    async def write(self, key: str, data: bytes, *, content_type: str | None = None) -> ObjectStat:
-        """Store `data` at `key` atomically. See `write_stream`."""
-        async def _one() -> AsyncIterator[bytes]:
+    async def write(
+        self, key: str, data: bytes | bytearray | memoryview, *, content_type: str | None = None
+    ) -> ObjectStat:
+        """Store `data` at `key` atomically, without copying it. See `write_stream`."""
+        async def _one() -> AsyncIterator[bytes | bytearray | memoryview]:
             yield data
 
         return await self.write_stream(key, _one(), content_type=content_type)
 
     async def write_stream(
-        self, key: str, chunks: AsyncIterable[bytes], *, content_type: str | None = None
+        self,
+        key: str,
+        chunks: AsyncIterable[bytes | bytearray | memoryview],
+        *,
+        content_type: str | None = None,
     ) -> ObjectStat:
         """Stream `chunks` to `key`, atomically and without buffering.
 
@@ -907,7 +979,9 @@ class LocalObjectStore:
 
         Args:
             key: where to store the object.
-            chunks: the object's contents. Empty chunks are skipped.
+            chunks: the object's contents, as `bytes`, `bytearray` or
+                `memoryview`. Each is written straight to the file descriptor
+                and none is retained. Empty chunks are skipped.
             content_type: echoed into the returned stat, and stored nowhere.
 
         Returns:
@@ -1180,7 +1254,7 @@ class LocalObjectStore:
         return ObjectPath(self, key)
 
 
-def _write_all(fd: int, data: bytes) -> None:
+def _write_all(fd: int, data: bytes | bytearray | memoryview) -> None:
     view = memoryview(data)
     while view:
         view = view[os.write(fd, view) :]
@@ -1605,14 +1679,25 @@ class S3ObjectStore:
         path: str,
         *,
         params: _List[tuple[str, str]] | None = None,
-        body: bytes = b"",
+        body: bytes | bytearray | memoryview = b"",
         payload_hash: str | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> Any:
         params = params or []
         extra = {k.lower(): v for k, v in (extra_headers or {}).items()}
         if payload_hash is None:
-            payload_hash = _sigv4.sha256_hex(body) if body else _sigv4.EMPTY_SHA256
+            # `bytes()` on a `bytes` is the same object, so a caller that
+            # already had one pays nothing; only a signed `bytearray` body is
+            # frozen, and only for the hash. A part upload sends
+            # `UNSIGNED_PAYLOAD` and never reaches here.
+            #
+            # `wreath mutant` reports the `if body` here and the `or None`
+            # below as survivors, and both are **equivalent mutants rather
+            # than untested lines**: `EMPTY_SHA256` *is* `sha256_hex(b"")`,
+            # and `_sigv4.sign` opens with `(headers or {})`. Each branch is a
+            # fast path that skips work whose result is already known, so no
+            # test can distinguish them and none should be written to try.
+            payload_hash = _sigv4.sha256_hex(bytes(body)) if body else _sigv4.EMPTY_SHA256
         amz_date = _amz_date()
         signed = _sigv4.sign(
             method=method, host=self._host, path=path, region=self._region,
@@ -1717,7 +1802,7 @@ class S3ObjectStore:
         )
 
     async def write(
-        self, key: str, data: bytes, *, content_type: str | None = None
+        self, key: str, data: bytes | bytearray | memoryview, *, content_type: str | None = None
     ) -> ObjectStat:
         """Store `data` at `key` with one signed `PUT`.
 
@@ -1734,7 +1819,9 @@ class S3ObjectStore:
 
         Args:
             key: where to store the object.
-            data: the object's contents.
+            data: the object's contents, as `bytes`, `bytearray` or
+                `memoryview`. Nothing here retains it: the HTTP client copies
+                the body once on its way to the socket.
             content_type: the media type, sent as a header and stored by S3.
 
         Returns:
@@ -1746,7 +1833,7 @@ class S3ObjectStore:
         key = normalize_key(key)
         resp = self._ok(
             await self._send(
-                "PUT", self._obj_path(key), body=bytes(data),
+                "PUT", self._obj_path(key), body=data,
                 extra_headers={"content-type": content_type} if content_type else None,
             ), 200,
         )
@@ -1754,7 +1841,11 @@ class S3ObjectStore:
         return ObjectStat(key=key, size=len(data), etag=etag, content_type=content_type)
 
     async def write_stream(
-        self, key: str, chunks: AsyncIterable[bytes], *, content_type: str | None = None
+        self,
+        key: str,
+        chunks: AsyncIterable[bytes | bytearray | memoryview],
+        *,
+        content_type: str | None = None,
     ) -> ObjectStat:
         """Store a stream at `key`, as one `PUT` or as a multipart upload.
 
@@ -1808,13 +1899,16 @@ class S3ObjectStore:
                     if upload_id is None:
                         upload_id = await self._initiate(path, content_type)
                     num += 1
-                    part = bytes(buf[: self._part_size])
+                    # The slice is already a fresh `bytearray`; freezing it a
+                    # second time copied a whole part for nothing, and neither
+                    # `_put_part` nor the HTTP client under it retains a body.
+                    part = buf[: self._part_size]
                     parts.append((num, await self._put_part(path, upload_id, num, part)))
                     del buf[: self._part_size]
             if upload_id is None:  # small object → one PUT
-                return await self.write(key, bytes(buf), content_type=content_type)
+                return await self.write(key, buf, content_type=content_type)
             num += 1  # final (possibly < 5 MiB) part
-            parts.append((num, await self._put_part(path, upload_id, num, bytes(buf))))
+            parts.append((num, await self._put_part(path, upload_id, num, buf)))
             self._ok(await self._complete(path, upload_id, parts), 200)
         except BaseException:
             # Nothing exists to abort until the initiate returned an id, and
@@ -1840,7 +1934,9 @@ class S3ObjectStore:
                 return el.text or ""
         raise ObjectError("S3 multipart: no UploadId in initiate response")
 
-    async def _put_part(self, path: str, upload_id: str, num: int, data: bytes) -> str:
+    async def _put_part(
+        self, path: str, upload_id: str, num: int, data: bytes | bytearray | memoryview
+    ) -> str:
         resp = self._ok(
             await self._send(
                 "PUT", path,
@@ -2040,3 +2136,1118 @@ class S3ObjectStore:
     def path(self, key: str) -> ObjectPath:
         """An `ObjectPath` bound to this store and `key`."""
         return ObjectPath(self, key)
+
+
+# ---------------------------------------------------------------------------
+# Resumable uploads
+# ---------------------------------------------------------------------------
+#
+# The shipped surface is **Resumable Uploads for HTTP**,
+# `draft-ietf-httpbis-resumable-upload-12` (July 2026). tus 1.0.x is
+# deliberately *not* served: the two vocabularies overlap enough
+# (`Upload-Offset` means the same thing, `Upload-Length` does not quite, the
+# append media types differ) that one implementation answering both would have
+# to guess which dialect a request is speaking from the headers it did *not*
+# send. One protocol, named in the guide, is the honest surface.
+
+
+#: Media type a client must use on an append, per the draft. A `PATCH` with any
+#: other type is refused with 415 rather than interpreted, because the whole
+#: point of the type is that the body is a *fragment* and not a representation.
+PARTIAL_UPLOAD = "application/partial-upload"
+
+#: Interim responses (104 Upload Resumption Supported) are not emitted. The
+#: draft makes them optional and says a client learns the upload resource from
+#: `Location` on the final 2xx, which is the path taken here; wreath's server
+#: has no interim-response surface yet, and inventing one for this would be a
+#: transport change hiding inside a storage feature.
+_UPLOAD_ID_BYTES = 16
+
+
+def _sf_integer(raw: str | None) -> int | None:
+    """A Structured Fields Integer Item (RFC 9651 §3.3.1), or None.
+
+    Deliberately strict and deliberately small. The four header fields this
+    module reads are each a bare item, so the full parser is a digit check --
+    and returning None for anything else lets each caller decide whether a
+    missing field is a refusal or a default, which differs per field.
+
+    Leading `+`, a decimal point, whitespace padding and a signed value are all
+    rejected: `Upload-Offset` is defined as a *non-negative* Integer, and
+    accepting `-0` or ` 12 ` here would mean two spellings of one offset.
+    """
+    if raw is None:
+        return None
+    if not raw or not raw.isdigit() or len(raw) > 15:
+        return None
+    return int(raw)
+
+
+def _sf_boolean(raw: str | None) -> bool | None:
+    """A Structured Fields Boolean Item (RFC 9651 §3.3.6), or None.
+
+    `?1` and `?0` only. `true`/`false`/`1`/`0` are *not* accepted, because a
+    client sending those is speaking a different protocol and guessing its
+    intent is how a partial upload gets marked complete.
+    """
+    if raw == "?1":
+        return True
+    if raw == "?0":
+        return False
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class UploadLimits:
+    """What the server will accept, advertised on every upload response.
+
+    Emitted as the `Upload-Limit` Structured Fields Dictionary so a client can
+    size its chunks *before* it starts rather than discovering a refusal four
+    gigabytes in. Every field is optional and an absent field means "no limit
+    of this kind"; the header is omitted entirely when nothing is limited.
+
+    `min_append_size` is the one that surprises people, and it is not
+    arbitrary: an S3 multipart upload requires every part except the last to be
+    at least 5 MiB, so a backend assembling parts natively cannot accept a
+    smaller non-final append without staging the remainder somewhere and
+    re-uploading it on the next call. Advertising the floor costs one header;
+    hiding it costs a silent write amplification on exactly the slow network
+    the protocol exists to survive. A final append -- one carrying
+    `Upload-Complete: ?1` -- is exempt, as the last part is.
+
+    `max_append_size` interacts with `RequestLimits.max_body_bytes`, which
+    bounds every request body the application will read at all. Advertising a
+    larger append than the application will accept is a refusal waiting to
+    happen, so `ResumableUploads` clamps this to the smaller of the two when it
+    knows both.
+
+    Args:
+        max_size: largest complete upload, in bytes.
+        min_size: smallest complete upload, in bytes.
+        max_append_size: largest single append body.
+        min_append_size: smallest non-final append body.
+        max_age: seconds an idle upload survives before the sweeper reclaims it.
+    """
+
+    max_size: int | None = None
+    min_size: int | None = None
+    max_append_size: int | None = None
+    min_append_size: int | None = None
+    max_age: int | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("max_size", "min_size", "max_append_size", "min_append_size", "max_age"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer or None")
+        if (
+            self.max_size is not None
+            and self.min_size is not None
+            and self.min_size > self.max_size
+        ):
+            raise ValueError("min_size must not exceed max_size")
+
+    def to_header(self) -> bytes | None:
+        """The `Upload-Limit` value, or None when nothing is limited."""
+        pairs = [
+            (b"max-size", self.max_size),
+            (b"min-size", self.min_size),
+            (b"max-append-size", self.max_append_size),
+            (b"min-append-size", self.min_append_size),
+            (b"max-age", self.max_age),
+        ]
+        rendered = [b"%s=%d" % (name, value) for name, value in pairs if value is not None]
+        return b", ".join(rendered) if rendered else None
+
+
+@dataclass(slots=True)
+class UploadState:
+    """One upload in progress: where it is, where it is going, and how big.
+
+    `offset` is the number of bytes the server has **durably accepted**, and it
+    is the only authority on that. A client's `Upload-Offset` is a claim
+    checked against this and never a source of truth -- a client that could
+    move the offset by asserting it could overwrite a region it had already
+    sent, or read across into another upload's parts.
+
+    `length` is the declared total, once declared. The draft forbids it
+    changing, so a second declaration that disagrees is refused rather than
+    accepted as a correction.
+
+    Args:
+        id: opaque upload identifier, and the last path segment of its resource.
+        key: the object key the completed upload will be stored under.
+        offset: bytes durably accepted so far.
+        length: the declared total size, or None while it is unknown.
+        complete: whether the final append has been accepted.
+        content_type: the media type, sniffed or declared.
+        created: creation time, as a POSIX timestamp.
+        updated: last-accepted-append time, as a POSIX timestamp.
+        backend: opaque per-backend assembly state (an S3 upload id, a part count).
+    """
+
+    id: str
+    key: str
+    offset: int = 0
+    length: int | None = None
+    complete: bool = False
+    content_type: str | None = None
+    created: float = 0.0
+    updated: float = 0.0
+    backend: dict[str, Any] = field(default_factory=dict)
+
+    def copy(self) -> UploadState:
+        """An independent copy, including the backend's own dict.
+
+        `MemoryUploadStore` hands these out and takes them back, and a handler
+        mutates the one it is holding *before* asking the store to accept it.
+        Sharing the instance would make that mutation land in the store early,
+        so the conditional advance would compare the new offset against itself
+        and refuse every append -- a store that appears to work in isolation
+        and rejects everything the moment it is used the way it is meant to be.
+        """
+        return UploadState(
+            id=self.id,
+            key=self.key,
+            offset=self.offset,
+            length=self.length,
+            complete=self.complete,
+            content_type=self.content_type,
+            created=self.created,
+            updated=self.updated,
+            backend=_json.loads(_json.dumps(self.backend)),
+        )
+
+    def to_json(self) -> bytes:
+        return _json.dumps(
+            {
+                "id": self.id,
+                "key": self.key,
+                "offset": self.offset,
+                "length": self.length,
+                "complete": self.complete,
+                "content_type": self.content_type,
+                "created": self.created,
+                "updated": self.updated,
+                "backend": self.backend,
+            }
+        ).encode()
+
+    @classmethod
+    def from_json(cls, raw: bytes) -> UploadState:
+        try:
+            data = _json.loads(raw)
+        except ValueError as exc:
+            raise ObjectError(f"corrupt upload record: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ObjectError("corrupt upload record: not an object")
+        return cls(
+            id=str(data["id"]),
+            key=str(data["key"]),
+            offset=int(data["offset"]),
+            length=None if data.get("length") is None else int(data["length"]),
+            complete=bool(data.get("complete", False)),
+            content_type=data.get("content_type"),
+            created=float(data.get("created", 0.0)),
+            updated=float(data.get("updated", 0.0)),
+            backend=dict(data.get("backend") or {}),
+        )
+
+
+@runtime_checkable
+class UploadStore(Protocol):
+    """Where the *state* of an in-progress upload lives, as opposed to its bytes.
+
+    Separate from `ObjectStore` because the two have opposite lifetimes: the
+    bytes become an object that outlives the request by years, and the record
+    saying how many of them have arrived is dead the moment the upload
+    completes or expires.
+
+    `advance` is the reason this is a protocol rather than a dict. It is a
+    **conditional** advance -- it moves the offset only if the offset is still
+    what the caller read -- and it reports whether it won. Two appends racing
+    on one upload is not hypothetical (a client retrying a chunk it thinks
+    timed out is exactly this), and an unconditional write would let the loser
+    rewind the offset and hand the next append a hole in the middle of the
+    object.
+    """
+
+    async def create(self, state: UploadState) -> None:
+        """Record a new upload. Raises `ObjectError` if the id is taken."""
+        ...
+
+    async def read(self, upload_id: str) -> UploadState | None:
+        """The current state, or None when there is no such upload."""
+        ...
+
+    async def advance(self, state: UploadState, *, expected: int) -> bool:
+        """Store `state` if the stored offset is still `expected`.
+
+        Returns: whether the write won.
+        """
+        ...
+
+    async def delete(self, upload_id: str) -> None:
+        """Forget an upload. Absent is success."""
+        ...
+
+    async def expired(self, before: float) -> list[UploadState]:
+        """Every upload whose last activity predates `before`."""
+        ...
+
+
+class MemoryUploadStore:
+    """Upload state in one worker's memory.
+
+    The default, and **it confines an upload to the worker that created it**:
+    a resume that lands on a sibling worker finds no such upload and is
+    answered 404, so the client starts again. That is a wasted upload, not a
+    corrupt one -- the failure is closed -- but it makes this the wrong choice
+    behind any load balancer that is not sticky. `ObjectUploadStore` is the
+    shared one, and it needs no second datastore.
+
+    Not synchronised, for the same reason `MemoryObjectStore` is not: every
+    method's mutation is a single dict operation with no `await` inside it, so
+    there is nothing for another task to interleave at.
+    """
+
+    __slots__ = ("_states",)
+
+    def __init__(self) -> None:
+        self._states: dict[str, UploadState] = {}
+
+    async def create(self, state: UploadState) -> None:
+        if state.id in self._states:
+            raise ObjectError(f"upload already exists: {state.id!r}")
+        self._states[state.id] = state.copy()
+
+    async def read(self, upload_id: str) -> UploadState | None:
+        current = self._states.get(upload_id)
+        return current.copy() if current is not None else None
+
+    async def advance(self, state: UploadState, *, expected: int) -> bool:
+        current = self._states.get(state.id)
+        if current is None or current.offset != expected:
+            return False
+        self._states[state.id] = state.copy()
+        return True
+
+    async def delete(self, upload_id: str) -> None:
+        self._states.pop(upload_id, None)
+
+    async def expired(self, before: float) -> _List[UploadState]:
+        return [s for s in list(self._states.values()) if s.updated < before]
+
+
+class ObjectUploadStore:
+    """Upload state as a small object beside the bytes, in the same store.
+
+    The shared-state answer that adds no datastore: a worker that did not
+    create the upload can still read its record, because the record is in the
+    bucket every worker already talks to. One extra round trip per request buys
+    that, which is a fair trade against a resume that fails on a sibling worker.
+
+    **The conditional advance is enforced in-process, and across processes it
+    degrades to the offset check.** A plain object store has no
+    compare-and-swap, so `advance` re-reads the record and refuses when the
+    stored offset moved -- which closes the window for two appends *this*
+    worker is serving, and narrows but does not close it for two workers
+    serving the same upload at once. The draft already requires a client not to
+    append to one upload in parallel; this makes a violating client lose an
+    append rather than corrupt an object, because the loser's bytes were
+    written to its own part key and are simply never assembled.
+
+    Args:
+        store: where records live; ordinarily the same store as the bytes.
+        prefix: key prefix for records, kept distinct from the objects' own.
+    """
+
+    __slots__ = ("_prefix", "_store")
+
+    def __init__(self, store: ObjectStore, *, prefix: str = ".uploads/") -> None:
+        self._store = store
+        self._prefix = prefix
+
+    def _record_key(self, upload_id: str) -> str:
+        return f"{self._prefix}{upload_id}.json"
+
+    async def create(self, state: UploadState) -> None:
+        key = self._record_key(state.id)
+        if await self._store.exists(key):
+            raise ObjectError(f"upload already exists: {state.id!r}")
+        await self._store.write(key, state.to_json(), content_type="application/json")
+
+    async def read(self, upload_id: str) -> UploadState | None:
+        try:
+            raw = await self._store.read(self._record_key(upload_id))
+        except ObjectError:
+            return None
+        return UploadState.from_json(raw)
+
+    async def advance(self, state: UploadState, *, expected: int) -> bool:
+        current = await self.read(state.id)
+        if current is None or current.offset != expected:
+            return False
+        await self._store.write(
+            self._record_key(state.id), state.to_json(), content_type="application/json"
+        )
+        return True
+
+    async def delete(self, upload_id: str) -> None:
+        try:
+            await self._store.delete(self._record_key(upload_id))
+        except ObjectError:
+            return
+
+    async def expired(self, before: float) -> _List[UploadState]:
+        stale: _List[UploadState] = []
+        async for stat in self._store.list(prefix=self._prefix):
+            state = await self.read(
+                stat.key.removeprefix(self._prefix).removesuffix(".json")
+            )
+            if state is not None and state.updated < before:
+                stale.append(state)
+        return stale
+
+
+class _UploadBackend:
+    """How one backend assembles appended chunks into a finished object."""
+
+    #: Smallest non-final append this assembly strategy can accept, in bytes.
+    min_append: int = 0
+
+    async def append(
+        self, state: UploadState, data: bytes | bytearray | memoryview
+    ) -> None:
+        raise NotImplementedError
+
+    async def finish(self, state: UploadState) -> ObjectStat:
+        raise NotImplementedError
+
+    async def abort(self, state: UploadState) -> None:
+        raise NotImplementedError
+
+
+class _PartsUploadBackend(_UploadBackend):
+    """One object per append, concatenated by streaming on completion.
+
+    The strategy for every store that is not S3, including a third-party one
+    that satisfies only the `ObjectStore` protocol. It uses nothing but that
+    protocol, so it cannot be wrong about a backend's internals, and it accepts
+    an append of any size because a part here is just an object.
+
+    The cost is honest and worth stating: completion reads every part and
+    writes the object once, so a local upload pays one extra copy of itself.
+    `write_stream` is fed a generator over `read_stream`, so that copy is
+    bounded by the read window and not by the object -- a four-gigabyte upload
+    completes in constant memory, it just does not complete for free.
+    `_S3UploadBackend` avoids the copy because S3 assembles parts server-side.
+    """
+
+    def __init__(self, store: ObjectStore, prefix: str) -> None:
+        self._store = store
+        self._prefix = prefix
+
+    def _part_key(self, upload_id: str, number: int) -> str:
+        return f"{self._prefix}{upload_id}/{number:08d}.part"
+
+    async def append(
+        self, state: UploadState, data: bytes | bytearray | memoryview
+    ) -> None:
+        number = int(state.backend.get("parts", 0)) + 1
+        await self._store.write(self._part_key(state.id, number), data)
+        state.backend["parts"] = number
+
+    async def finish(self, state: UploadState) -> ObjectStat:
+        count = int(state.backend.get("parts", 0))
+        store = self._store
+        part_keys = [self._part_key(state.id, n) for n in range(1, count + 1)]
+
+        async def _chunks() -> AsyncIterator[bytes]:
+            for part_key in part_keys:
+                async for chunk in store.read_stream(part_key):
+                    yield chunk
+
+        stat = await store.write_stream(
+            state.key, _chunks(), content_type=state.content_type
+        )
+        for part_key in part_keys:
+            await store.delete(part_key)
+        return stat
+
+    async def abort(self, state: UploadState) -> None:
+        """Delete every staged part. Failures propagate; they are not noise.
+
+        Every backend's `delete` treats an absent key as success, so an
+        `ObjectError` out of one is the store saying it *could not*, not that
+        there was nothing to do. Swallowing it here would leave objects nobody
+        will ever read while the sweeper reported a clean run -- the quietly
+        degraded shape, with the signal removed. The callers each have a use
+        for it: `sweep` counts into `aborted_uploads`, and a `DELETE` reports.
+        """
+        count = int(state.backend.get("parts", 0))
+        for number in range(1, count + 1):
+            await self._store.delete(self._part_key(state.id, number))
+
+
+class _S3UploadBackend(_UploadBackend):
+    """S3's own multipart upload, one part per append.
+
+    Assembly happens in the bucket, so completion transfers nothing: the
+    `CompleteMultipartUpload` call is the whole of it. That is what buys the
+    5 MiB floor on non-final parts, which `min_append` advertises rather than
+    hides.
+    """
+
+    def __init__(self, store: Any) -> None:
+        self._store = store
+        self.min_append = store._part_size
+
+    async def _ensure(self, state: UploadState) -> str:
+        upload_id = state.backend.get("upload_id")
+        if upload_id is None:
+            path = self._store._obj_path(normalize_key(state.key))
+            upload_id = await self._store._initiate(path, state.content_type)
+            state.backend["upload_id"] = upload_id
+            state.backend["parts"] = []
+        return str(upload_id)
+
+    async def append(
+        self, state: UploadState, data: bytes | bytearray | memoryview
+    ) -> None:
+        upload_id = await self._ensure(state)
+        path = self._store._obj_path(normalize_key(state.key))
+        parts = state.backend["parts"]
+        number = len(parts) + 1
+        if number > _S3_MAX_PARTS:
+            raise ObjectError(
+                f"S3 multipart upload is limited to {_S3_MAX_PARTS} parts; "
+                "raise the append size"
+            )
+        etag = await self._store._put_part(path, upload_id, number, data)
+        parts.append([number, etag])
+
+    async def finish(self, state: UploadState) -> ObjectStat:
+        upload_id = state.backend.get("upload_id")
+        path = self._store._obj_path(normalize_key(state.key))
+        if upload_id is None:
+            # Nothing was ever appended: an upload completed at zero bytes is a
+            # legitimate empty object, and a multipart upload cannot express
+            # one (S3 refuses a completion with no parts).
+            return await self._store.write(
+                state.key, b"", content_type=state.content_type
+            )
+        parts = [(int(n), str(e)) for n, e in state.backend.get("parts", [])]
+        self._store._ok(await self._store._complete(path, str(upload_id), parts), 200)
+        try:
+            return await self._store.stat(state.key)
+        except ObjectError:
+            return ObjectStat(
+                key=normalize_key(state.key), size=state.offset, etag="",
+                content_type=state.content_type,
+            )
+
+    async def abort(self, state: UploadState) -> None:
+        upload_id = state.backend.get("upload_id")
+        if upload_id is None:
+            return
+        path = self._store._obj_path(normalize_key(state.key))
+        # `_abort` counts its own failures into `orphaned_uploads` rather than
+        # raising, which is what the sweeper needs: parts left in the bucket
+        # are billed, and a number that says how often that happened is the
+        # difference between a cleanup that worked and one that was attempted.
+        await self._store._abort(path, str(upload_id))
+
+
+#: S3 refuses a multipart upload with more parts than this.
+_S3_MAX_PARTS = 10_000
+
+#: Bytes of an append inspected to decide the stored content type. Every
+#: signature below fits, and the check is a handful of prefix comparisons
+#: against a fixed table -- one step, once per upload. There is no loop with
+#: length here to move into C, and adding a vectorised sniffer would widen the
+#: build for work the interpreter does in nanoseconds. See the guide.
+_SNIFF_BYTES = 32
+
+_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"%PDF-", "application/pdf"),
+    (b"PK\x03\x04", "application/zip"),
+    (b"\x1f\x8b", "application/gzip"),
+    (b"OggS", "application/ogg"),
+    (b"fLaC", "audio/flac"),
+    (b"\x00\x00\x01\x00", "image/x-icon"),
+)
+
+
+def sniff_content_type(prefix: bytes) -> str | None:
+    """The media type `prefix` looks like, or None.
+
+    Deliberately a short table of unambiguous magic numbers rather than a
+    general detector. The purpose is to refuse a *lie* -- a client declaring
+    `image/png` over an HTML document that a browser will then render from your
+    origin -- not to classify every format in existence, and a detector that
+    guesses at ambiguous input would turn "unknown" into a wrong answer that
+    something downstream trusts.
+
+    `RIFF`-family containers (WebP, WAV, AVI) are absent for that reason: they
+    share one signature and separating them needs the sub-chunk at offset 8,
+    which is a second decision this table does not model.
+    """
+    for signature, media_type in _SIGNATURES:
+        if prefix.startswith(signature):
+            return media_type
+    if prefix[:5].lower() in (b"<html", b"<!doc") or prefix[:6].lower() == b"<?xml ":
+        return "text/plain"
+    return None
+
+
+class _Refused(Exception):
+    """An upload request the protocol says to answer with a specific status."""
+
+    __slots__ = ("detail", "extra", "status")
+
+    def __init__(
+        self, status: int, detail: str, extra: _List[tuple[bytes, bytes]] | None = None
+    ) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+        self.extra = extra or []
+
+
+class ResumableUploads:
+    """The upload-creating resource and the upload resources beneath it.
+
+    Serves `draft-ietf-httpbis-resumable-upload-12`: `POST` to create,
+    `HEAD` to learn the current offset, `PATCH` to append, `DELETE` to cancel.
+    Mount it with `router()` and the routes are ordinary wreath routes, so
+    `permissions=` and every `AuthRequirement` the router already understands
+    apply to *creation* -- there is no second authorization vocabulary here,
+    and there is nothing to bypass, which is the whole difference from a
+    presigned URL.
+
+    **Why this exists beside `url()`.** A presigned URL sends the bytes
+    straight to S3, which scales beautifully and routes around every control
+    this framework owns: the policy engine never sees the write, the quota is
+    never consulted, the declared media type is never checked, and the
+    application learns the object exists only if the client bothers to say so.
+    This path keeps the application in the way of the *decisions* -- authorize,
+    check the quota, choose the key, sniff the type -- while the bytes stream
+    through in restartable pieces. It costs the bandwidth the presigned path
+    avoided. Both remain available and the guide says which to choose.
+
+    **Admission happens at creation, before the first byte.** A declared
+    `Upload-Length` over `limits.max_size`, or refused by `quota`, is a 413
+    against a request that has sent nothing. Enforcing it only on append would
+    mean accepting gigabytes in order to refuse them.
+
+    **The client's `Upload-Offset` is a claim, never an authority.** It is
+    compared against the stored offset and a mismatch is a 409 carrying the
+    real one, per §4.4.2. Advancing is conditional on the offset not having
+    moved underneath, so two appends racing lose one rather than punching a
+    hole in the object.
+
+    **Completion enqueues a durable job.** `on_complete` names a task
+    registered on `jobs`; it is enqueued with the upload id as its idempotency
+    key, so a retried completion does not run it twice. A callback awaited in
+    the request would be lost on the next deploy, which is the failure every
+    hand-rolled upload pipeline eventually finds. This is also the seam that
+    keeps image processing out of this module: the pixels are the
+    application's.
+
+    Args:
+        store: where finished objects and parts are written.
+        uploads: where in-progress upload state lives. Defaults to
+            `MemoryUploadStore`, which confines an upload to one worker; pass
+            `ObjectUploadStore(store)` behind more than one.
+        prefix: key prefix for finished objects.
+        staging: key prefix for parts and records; swept, never served.
+        limits: what to advertise and enforce. `min_append_size` is raised to
+            the backend's own floor when the backend has one.
+        expire: seconds an idle upload survives. Also advertised as `max-age`.
+        max_append_bytes: clamp for `max-append-size`; pass the application's
+            `RequestLimits.max_body_bytes` so the advertised ceiling is one the
+            application will actually read.
+        jobs: a `JobRunner`, required when `on_complete` is given.
+        on_complete: name of a registered task, enqueued with `(upload_id, key)`.
+        quota: awaited at creation with `(request, declared_length_or_None)`;
+            returning False refuses with 413. The seam a metering subsystem
+            fills -- storage is the most commonly metered resource and this is
+            the only moment before the bytes arrive.
+        key_for: chooses the final object key from the request and the new
+            upload id. Defaults to `prefix` plus the id.
+        sniff: refuse an append whose leading bytes contradict a declared
+            content type.
+
+    Raises:
+        ValueError: `on_complete` without `jobs`, or a non-positive `expire`.
+    """
+
+    __slots__ = (
+        "_backend_prefix", "_inflight", "_jobs", "_key_for", "_limits", "_on_complete",
+        "_prefix", "_quota", "_sniff", "_store", "_uploads", "expire",
+        "aborted_uploads", "refused_appends", "swept_uploads",
+    )
+
+    def __init__(
+        self,
+        store: ObjectStore,
+        *,
+        uploads: UploadStore | None = None,
+        prefix: str = "uploads/",
+        staging: str = ".uploads/",
+        limits: UploadLimits | None = None,
+        expire: float = 24 * 3600.0,
+        max_append_bytes: int | None = None,
+        jobs: Any = None,
+        on_complete: str | None = None,
+        quota: Any = None,
+        key_for: Any = None,
+        sniff: bool = True,
+    ) -> None:
+        if on_complete is not None and jobs is None:
+            raise ValueError(
+                "on_complete needs jobs=<JobRunner>: completion is a durable job, "
+                "not a callback, so it survives the deploy that lands mid-upload"
+            )
+        if expire <= 0:
+            raise ValueError("expire must be positive")
+        self._store = store
+        self._uploads = uploads if uploads is not None else MemoryUploadStore()
+        self._prefix = prefix
+        self._backend_prefix = staging
+        self._jobs = jobs
+        self._on_complete = on_complete
+        self._quota = quota
+        self._key_for = key_for
+        self._sniff = sniff
+        self.expire = float(expire)
+        #: Uploads whose parts were reclaimed by `sweep`.
+        self.swept_uploads = 0
+        #: Aborts the sweeper could not complete. Non-zero means storage is
+        #: being billed for parts belonging to no object; on S3 the store's own
+        #: `orphaned_uploads` counts the same event one layer down.
+        self.aborted_uploads = 0
+        #: Appends refused for any protocol reason. A rising count against a
+        #: single client is a client bug; against all of them it is usually an
+        #: advertised limit nobody read.
+        self.refused_appends = 0
+        self._inflight: set[str] = set()
+
+        backend = self._backend()
+        declared = limits if limits is not None else UploadLimits()
+        floor = max(backend.min_append, declared.min_append_size or 0)
+        ceiling = declared.max_append_size
+        if max_append_bytes is not None:
+            ceiling = max_append_bytes if ceiling is None else min(ceiling, max_append_bytes)
+        self._limits = UploadLimits(
+            max_size=declared.max_size,
+            min_size=declared.min_size,
+            max_append_size=ceiling,
+            min_append_size=floor or None,
+            max_age=int(self.expire),
+        )
+
+    @property
+    def limits(self) -> UploadLimits:
+        """What this resource advertises, after backend and body-size clamping."""
+        return self._limits
+
+    def _backend(self) -> _UploadBackend:
+        factory = getattr(self._store, "_resumable_backend", None)
+        if factory is not None:
+            return factory(self._backend_prefix)
+        if isinstance(self._store, S3ObjectStore):
+            return _S3UploadBackend(self._store)
+        return _PartsUploadBackend(self._store, self._backend_prefix)
+
+    # -- protocol handlers --------------------------------------------------
+
+    def _headers(self, state: UploadState, *, store: bool = False) -> _List[tuple[bytes, bytes]]:
+        headers = [
+            (b"upload-offset", str(state.offset).encode("ascii")),
+            (b"upload-complete", b"?1" if state.complete else b"?0"),
+        ]
+        if state.length is not None:
+            headers.append((b"upload-length", str(state.length).encode("ascii")))
+        # Unconditional: `max_age` is always set from `expire`, which the
+        # constructor refuses to leave non-positive, so `to_header()` cannot
+        # answer None *here*. It can for a bare `UploadLimits`, which is where
+        # that contract is tested. A guard that never fires is one a mutant
+        # removes without any test objecting, and it did.
+        headers.append((b"upload-limit", self._limits.to_header() or b""))
+        if store:
+            # §4.2: an offset is stale the instant it is read, so a cache that
+            # answered a resume from a stored copy would send the client to an
+            # offset the server has moved past.
+            headers.append((b"cache-control", b"no-store"))
+        return headers
+
+    async def create(self, request: Request) -> Response:
+        """`POST`: open an upload, optionally with its first bytes.
+
+        Answers 201 with `Location` naming the new upload resource, per §4.3.
+        A creation carrying `Upload-Complete: ?1` and the whole representation
+        finishes in one round trip and still goes through every check an append
+        does.
+        """
+        complete = _sf_boolean(request.header("upload-complete"))
+        if complete is None:
+            raise _Refused(400, "Upload-Complete must be ?0 or ?1")
+        declared = _sf_integer(request.header("upload-length"))
+        await self._admit(request, declared)
+
+        upload_id = _upload_id()
+        key = (
+            self._key_for(request, upload_id)
+            if self._key_for is not None
+            else f"{self._prefix}{upload_id}"
+        )
+        now = _now()
+        state = UploadState(
+            id=upload_id,
+            key=normalize_key(key),
+            length=declared,
+            content_type=request.header("content-type"),
+            created=now,
+            updated=now,
+        )
+        if state.content_type == PARTIAL_UPLOAD:
+            # The creation body is not a partial-upload fragment; the type
+            # describes the representation being built.
+            state.content_type = None
+        await self._uploads.create(state)
+        try:
+            await self._consume(request, state, complete=complete, first=True)
+        except _Refused:
+            await self._discard(state)
+            raise
+        headers = self._headers(state)
+        headers.append((b"location", f"{request.path.rstrip('/')}/{upload_id}".encode()))
+        return Response(b"", status=201, headers=headers)
+
+    async def offset(self, request: Request) -> Response:
+        """`HEAD`/`GET`: how much of this upload the server holds.
+
+        204 with `Upload-Offset`, `Upload-Complete`, the declared length when
+        there is one, the advertised limits, and `Cache-Control: no-store`.
+        """
+        state = await self._require(request)
+        return Response(b"", status=204, headers=self._headers(state, store=True))
+
+    async def append(self, request: Request) -> Response:
+        """`PATCH`: add bytes at the offset the client says it is at.
+
+        The type must be `application/partial-upload` (415 otherwise), the
+        offset must match (409 with the real one otherwise), and the result
+        must fit inside the declared length and the advertised maximum (413
+        otherwise).
+        """
+        if (request.header("content-type") or "").split(";")[0].strip() != PARTIAL_UPLOAD:
+            raise _Refused(415, f"append requires Content-Type: {PARTIAL_UPLOAD}")
+        complete = _sf_boolean(request.header("upload-complete"))
+        if complete is None:
+            raise _Refused(400, "Upload-Complete must be ?0 or ?1")
+        claimed = _sf_integer(request.header("upload-offset"))
+        if claimed is None:
+            raise _Refused(400, "Upload-Offset must be a non-negative integer")
+        state = await self._require(request)
+        if claimed != state.offset:
+            raise _Refused(
+                409,
+                f"Upload-Offset {claimed} does not match {state.offset}",
+                [(b"upload-offset", str(state.offset).encode("ascii"))],
+            )
+        declared = _sf_integer(request.header("upload-length"))
+        if declared is not None and state.length is not None and declared != state.length:
+            raise _Refused(400, "Upload-Length must not change")
+        if declared is not None:
+            # No `and state.length is None`. The refusal above has already
+            # established that a declared length either matches the stored one
+            # or there is no stored one, so the extra clause only ever guarded
+            # an assignment of a value to itself. Two mutants survived on it,
+            # one per clause, which is the signature of a condition written
+            # twice rather than a control nothing tests.
+            state.length = declared
+        await self._consume(request, state, complete=complete, first=state.offset == 0)
+        return Response(b"", status=204, headers=self._headers(state))
+
+    async def cancel(self, request: Request) -> Response:
+        """`DELETE`: give up on an upload and reclaim what it staged."""
+        state = await self._require(request)
+        await self._discard(state)
+        return Response(b"", status=204)
+
+    # -- machinery ----------------------------------------------------------
+
+    async def _require(self, request: Request) -> UploadState:
+        # No `if upload_id else None` guard: every store answers None for an
+        # empty id anyway, so the shortcut was a second spelling of the same
+        # outcome. A mutant survived on it, which is what a redundant clause
+        # looks like from the outside.
+        state = await self._uploads.read(request.path_params.get("upload_id", ""))
+        if state is None:
+            raise _Refused(404, "no such upload")
+        return state
+
+    async def _admit(self, request: Request, declared: int | None) -> None:
+        """Refuse at creation, before a byte has been read."""
+        maximum = self._limits.max_size
+        if declared is not None and maximum is not None and declared > maximum:
+            raise _Refused(413, f"declared length {declared} exceeds max-size {maximum}")
+        if self._quota is not None and not await self._quota(request, declared):
+            raise _Refused(413, "storage quota exceeded")
+
+    async def _consume(
+        self, request: Request, state: UploadState, *, complete: bool, first: bool
+    ) -> None:
+        """Read the body, hand it to the backend, and advance the offset.
+
+        Nothing is read until the upload is claimed in `_inflight`: two appends
+        this worker is serving for one upload would otherwise both read the
+        offset, both write a part, and one of them would be assembled into a
+        hole. The claim is released in every path, including a refusal.
+        """
+        if state.complete:
+            raise _Refused(
+                409,
+                "upload is already complete",
+                [(b"upload-offset", str(state.offset).encode("ascii"))],
+            )
+        if state.id in self._inflight:
+            raise _Refused(
+                409,
+                "another append is in flight for this upload",
+                [(b"upload-offset", str(state.offset).encode("ascii"))],
+            )
+        self._inflight.add(state.id)
+        try:
+            await self._consume_locked(request, state, complete=complete, first=first)
+        finally:
+            self._inflight.discard(state.id)
+
+    async def _consume_locked(
+        self, request: Request, state: UploadState, *, complete: bool, first: bool
+    ) -> None:
+        expected = state.offset
+        buffered = bytearray()
+        maximum = self._limits.max_size
+        ceiling = self._limits.max_append_size
+        async for chunk in request.stream():
+            # No `if not chunk: continue` fast path. Appending an empty chunk is
+            # a no-op and re-running three comparisons on unchanged values
+            # decides nothing differently, so the guard was two spellings of one
+            # outcome -- and a mutant survived on it, which is how that reads
+            # from outside.
+            buffered += chunk
+            written = expected + len(buffered)
+            # Checked as bytes arrive, not after joining them: `Content-Length`
+            # is a claim and a chunked body has none, so a body that overruns
+            # its declared length one chunk at a time is refused at the chunk
+            # that crosses the line rather than after it has all been read.
+            if ceiling is not None and len(buffered) > ceiling:
+                raise _Refused(413, f"append exceeds max-append-size {ceiling}")
+            if maximum is not None and written > maximum:
+                raise _Refused(413, f"upload exceeds max-size {maximum}")
+            if state.length is not None and written > state.length:
+                raise _Refused(413, f"upload exceeds declared length {state.length}")
+
+        # **The `bytes(buffered)` freeze that used to stand here is gone**, and
+        # the decision it was waiting for has been made: `ObjectStore.write`
+        # now accepts `bytes | bytearray | memoryview` and promises no backend
+        # retains the buffer. Ablated on an 8 MiB append, the freeze was 1155us
+        # against 584us without it (35us floor) when it was written, and
+        # 592.46us against 201.77us (5.22us floor) when the survey re-took it --
+        # both agreeing it was roughly half of an append, and both agreeing it
+        # was pure `memcpy` at memory bandwidth rather than slow code. Nothing
+        # downstream ever needed the immutability: `MemoryObjectStore.write`
+        # copies what it stores regardless, `LocalObjectStore` hands each chunk
+        # to `_write_all`, which takes a `memoryview`, and the S3 part goes to
+        # the HTTP client, which copies the body once on its way to the socket.
+        floor = self._limits.min_append_size
+        if not complete and floor is not None and 0 < len(buffered) < floor:
+            raise _Refused(400, f"a non-final append must be at least {floor} bytes")
+        if complete and state.length is not None and expected + len(buffered) != state.length:
+            raise _Refused(400, "a complete upload must match the declared length")
+
+        # No `buffered and` clause: `sniff_content_type(b"")` matches nothing
+        # and `_check_sniff` then returns without touching the state, so testing
+        # it here was the same decision made twice. `first` is *not* redundant --
+        # sniffing a later append would judge the representation by bytes from
+        # the middle of it. The 32-byte prefix is frozen because it is 32 bytes:
+        # the sniff table is `bytes.startswith` against literals, and copying a
+        # sniff window is not the copy that mattered.
+        if first and self._sniff:
+            self._check_sniff(state, bytes(buffered[:_SNIFF_BYTES]))
+
+        backend = self._backend()
+        if buffered:
+            await backend.append(state, buffered)
+        state.offset = expected + len(buffered)
+        state.complete = complete
+        state.updated = _now()
+        if complete:
+            # No `and state.length is None`. A declared length has already been
+            # checked to equal `expected + len(buffered)` above, so this assigns the
+            # value it already holds; the clause was a second spelling of that
+            # check and two mutants survived on it.
+            state.length = state.offset
+        if not await self._uploads.advance(state, expected=expected):
+            # Somebody else moved the offset between the read and here, so
+            # these bytes belong to no assembly. They are already written to
+            # this attempt's own part key, and the sweeper reclaims them.
+            state.offset = expected
+            raise _Refused(
+                409,
+                "the upload advanced underneath this request",
+                [(b"upload-offset", str(expected).encode("ascii"))],
+            )
+        if complete:
+            await self._finish(state, backend)
+
+    def _check_sniff(self, state: UploadState, prefix: bytes) -> None:
+        looks_like = sniff_content_type(prefix)
+        declared = (state.content_type or "").split(";")[0].strip().lower()
+        if looks_like is None:
+            return
+        if declared and declared != looks_like:
+            raise _Refused(
+                415,
+                f"content is {looks_like}, not the declared {declared}",
+            )
+        state.content_type = looks_like
+
+    async def _finish(self, state: UploadState, backend: _UploadBackend) -> None:
+        await backend.finish(state)
+        await self._uploads.delete(state.id)
+        if self._on_complete is not None:
+            # The upload id is the idempotency key: a completion retried after
+            # a lost response enqueues nothing the second time.
+            await self._jobs.enqueue(
+                self._on_complete, state.id, state.key, key=f"upload:{state.id}"
+            )
+
+    async def _discard(self, state: UploadState) -> None:
+        await self._backend().abort(state)
+        await self._uploads.delete(state.id)
+
+    async def sweep(self, *, now: float | None = None) -> int:
+        """Reclaim uploads idle for longer than `expire`. Returns how many.
+
+        **Part of the feature, not a follow-up.** An abandoned S3 multipart
+        upload is billed for its parts until something aborts it or a lifecycle
+        rule reaps it, and an abandoned parts-backend upload is objects nobody
+        will ever read. Wire this to a schedule:
+
+        ```python
+        @runner.schedule("*/15 * * * *")
+        async def reap_uploads() -> None:
+            await uploads.sweep()
+        ```
+
+        A failure to abort one upload does not stop the sweep -- the next one
+        may well succeed -- but it is counted in `aborted_uploads`, because a
+        sweeper that silently gives up leaves a bill nobody sees.
+        """
+        moment = _now() if now is None else now
+        stale = await self._uploads.expired(moment - self.expire)
+        backend = self._backend()
+        reclaimed = 0
+        for state in stale:
+            try:
+                await backend.abort(state)
+            except (ObjectError, OSError):
+                # Named rather than blanket: these are the storage layer saying
+                # no. A TypeError out of here is a bug in this file and must
+                # not be filed under "the bucket was unavailable".
+                self.aborted_uploads += 1
+                continue
+            await self._uploads.delete(state.id)
+            reclaimed += 1
+        self.swept_uploads += reclaimed
+        return reclaimed
+
+    # -- mounting -----------------------------------------------------------
+
+    def router(self, path: str = "/uploads", *, permissions: Iterable[str] = ()) -> Any:
+        """Ordinary wreath routes for the four protocol operations.
+
+        `permissions` is the router's own keyword and applies to every route,
+        so authorization here is the same declaration as on any other route --
+        which is the property a presigned URL gives up.
+        """
+        from .router import Router
+
+        router = Router(permissions=permissions)
+        base = path.rstrip("/")
+        resource = f"{base}/{{upload_id}}"
+
+        @router.post(base or "/", response_only=True, status_code=201)
+        async def create_upload(request: Request) -> Response:
+            """Create an upload resource and accept its first bytes."""
+            return await self._answer(self.create, request)
+
+        @router.route(resource, methods=("HEAD", "GET"), response_only=True, status_code=204)
+        async def upload_offset(request: Request) -> Response:
+            """Report how much of this upload the server holds."""
+            return await self._answer(self.offset, request)
+
+        @router.patch(resource, response_only=True, status_code=204)
+        async def append_upload(request: Request) -> Response:
+            """Append bytes at the client's stated offset."""
+            return await self._answer(self.append, request)
+
+        @router.delete(resource, response_only=True, status_code=204)
+        async def cancel_upload(request: Request) -> Response:
+            """Cancel an upload and reclaim what it staged."""
+            return await self._answer(self.cancel, request)
+
+        return router
+
+    async def _answer(self, handler: Any, request: Request) -> Response:
+        try:
+            return await handler(request)
+        except _Refused as refused:
+            if refused.status != 404:
+                self.refused_appends += 1
+            response = ProblemResponse(
+                status=refused.status, title="Upload refused", detail=refused.detail
+            )
+            response.headers.extend(refused.extra)
+            return response
+
+
+def _upload_id() -> str:
+    """A URL-safe opaque upload id.
+
+    Opaque on purpose: the id is the last segment of a URL the client keeps and
+    retries against, so anything derived from the key would leak the object
+    layout to whoever sees the URL, and anything sequential would let one
+    client guess another's in-progress upload. Hex rather than base64url
+    because the value ends up in a path segment and a key prefix, and one
+    spelling that needs no escaping anywhere is worth four characters.
+    """
+    return os.urandom(_UPLOAD_ID_BYTES).hex()
+
+
+def resumable(store: ObjectStore, **options: Any) -> ResumableUploads:
+    """A `ResumableUploads` over `store`. Keywords are `ResumableUploads`'.
+
+    ```python
+    uploads = objects.resumable(
+        store,
+        uploads=objects.ObjectUploadStore(store),
+        limits=objects.UploadLimits(max_size=5 * 1024**3),
+        jobs=runner,
+        on_complete="process_photo",
+    )
+    app.include_router(uploads.router("/uploads", permissions=["uploads::write"]))
+    ```
+    """
+    return ResumableUploads(store, **options)
