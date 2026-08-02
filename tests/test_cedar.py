@@ -68,18 +68,29 @@ async def test_cedar_adapter_is_final_authorization_after_coarse_route_pruning()
 
     assert allowed[0]["status"] == 200
     assert denied[0]["status"] == 403
-    # The context mapper here returns only `method`; `flags` and `regions` are
-    # the authorizer's own keys and are supplied whatever the mapper does, empty
-    # when no provider is configured. That is deliberate rather than incidental:
-    # an *absent* set makes `forbid ... unless { context.<set>.contains(...) }`
+    # The context mapper here returns only `method`; every other key below is
+    # the authorizer's own and is supplied whatever the mapper does, empty when
+    # no provider is configured. That is deliberate rather than incidental: an
+    # *absent* set makes `forbid ... unless { context.<set>.contains(...) }`
     # evaluate to allowed -- the forbid is skipped rather than standing -- so a
-    # custom mapper that omitted either key would silently disable every
-    # kill-switch written in that shape. `tests/test_cedar_flags.py` and
-    # `tests/test_cedar_geofence.py` pin that engine behaviour for each.
+    # custom mapper that omitted one would silently disable every kill-switch
+    # written in that shape. `delegated` is a literal `false` for the same
+    # reason, since `unless { context.delegated }` against an absent key skips
+    # the forbid an agent was supposed to be caught by.
+    # `tests/test_cedar_flags.py`, `tests/test_cedar_geofence.py` and
+    # `tests/test_principal_narrow.py` pin that engine behaviour for each.
+    #
+    # Asserting the whole dict rather than a subset is what makes this a
+    # *register* of the authorizer's context surface: a new fact fails here
+    # first, which is the moment to decide whether it fails closed.
     assert engine.calls[0]["context"] == {
         "method": "GET",
         "flags": frozenset(),
         "regions": frozenset(),
+        "organizations": frozenset(),
+        "org_roles": frozenset(),
+        "entitlements": frozenset(),
+        "delegated": False,
     }
 
 
