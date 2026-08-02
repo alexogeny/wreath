@@ -141,7 +141,11 @@ class StaticFiles:
             # A directory reached without its trailing slash. Serving the index
             # from here would leave every relative link in it resolving one
             # level up, so the client is sent to the canonical path instead.
-            return RedirectResponse(request.path + "/", status=308)
+            # Exactly one leading slash: `//host/path` is a network-path URL,
+            # so reflecting a doubled path from an ASGI server into Location
+            # would turn this canonicalisation into an open redirect.
+            canonical = "/" + request.path.lstrip("/") + "/"
+            return RedirectResponse(canonical, status=308)
 
         etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
         headers = [

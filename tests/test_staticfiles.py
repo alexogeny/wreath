@@ -185,6 +185,32 @@ async def test_a_directory_without_a_trailing_slash_redirects_canonically(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_a_root_static_mount_cannot_emit_a_scheme_relative_redirect(tmp_path) -> None:
+    """A doubled leading slash in Location changes the browser's destination.
+
+    Root mounts used to normalize ``/`` to ``//``.  Besides making ordinary
+    ``/docs`` miss the mount, that admitted ``//docs`` and reflected it as
+    ``Location: //docs/`` -- an authority-form redirect to host ``docs``.
+    """
+    from wreath import Wreath
+    from wreath.testing import TestClient
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "index.html").write_bytes(b"root index")
+    app = Wreath()
+    app.static("/", str(tmp_path))
+
+    async with TestClient(app) as client:
+        canonical = await client.get("/docs")
+        doubled = await client.get("//docs")
+
+    assert canonical.status == 308
+    assert canonical.header("location") == "/docs/"
+    assert doubled.status == 308
+    assert doubled.header("location") == "/docs/"
+
+
+@pytest.mark.asyncio
 async def test_a_missing_file_is_a_404(tmp_path) -> None:
     from wreath.testing import TestClient
 
