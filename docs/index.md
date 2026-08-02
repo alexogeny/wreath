@@ -92,7 +92,9 @@ of the framework with the reasoning behind it, grouped the way you meet it:
 3. **[Users, auth, and security](guides/auth.md)** — authentication and the Cedar
    authorization engine, ready-made user flows, and idempotent writes.
 4. **[Realtime and background work](guides/websockets.md)** — WebSockets, SSE,
-   task progress, and durable jobs and messaging.
+   task progress, durable jobs and messaging, and [streams that survive a
+   reconnect](guides/streams.md), where the producer runs detached from the
+   connection and a client resumes from the last chunk it saw.
 5. **[Talking to other services](guides/http-client.md)** — the outbound client,
    service-to-service calls, serving MCP tools to a model, and object storage.
 6. **[Speed and delivery](guides/caching.md)** — caching, compression, static

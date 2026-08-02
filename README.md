@@ -268,7 +268,7 @@ uv run wreath-docs            # strict build; --serve to watch
 uv sync                       # dev group; builds the native extensions
 uv run wreath-check           # ruff, ty, pytest, native lints, map lint, trace baseline
 uv run wreath-check --docs    # ... and a strict docs build
-uv run wreath test            # live grid, timing outliers, 12-control confidence sample
+uv run wreath test            # live grid, timing outliers, 192-control confidence sample
 uv run wreath test --mutant full  # complete mutation sweep, overlapping green tests
 uv run pytest                 # the default suite, serially
 uv run pytest -m '' -n 6      # everything, including network, fuzz, and performance
