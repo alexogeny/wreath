@@ -25,6 +25,8 @@ reading only if something makes it true, which is the same reason
 | Task progress reports | `progress.ProgressRegistry` | `max_tasks`, `ttl` | per-registry |
 | Login attempt counters | `users` | `max_entries`, `ttl` | per-policy |
 | Second-factor challenges | `_secondfactor.MemoryChallengeStore` | `max_entries` | 4096 |
+| Signature replay nonces | `signatures.NonceLedger` | `max_entries`, `ttl` | 16384, 300s |
+| Started and attached stream keys | `streams.Streams` | `started_capacity`, log retention | 4096, per-stream retention |
 | Parsed GraphQL documents | `graphql` | `cache_size` | per-schema |
 | Pinned permission tokens | `_auth.permissions` | `max_entries` | 64 |
 | Compiled query plans | `orm.Registry` | `query_cache_size`, `query_cache_bytes` | 512, 8 MiB |
