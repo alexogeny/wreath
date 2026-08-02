@@ -201,7 +201,8 @@ PyInit__core(void)
         wreath_register_dtbitset(module) < 0 ||
         wreath_register_webpolicy(module) < 0 || wreath_register_proxy(module) < 0 ||
         wreath_register_ratelimit(module) < 0 ||
-        wreath_register_scheduler(module) < 0) {
+        wreath_register_scheduler(module) < 0 ||
+        wreath_register_kv(module) < 0 || wreath_register_queue(module) < 0) {
         Py_DECREF(module);
         return NULL;
     }

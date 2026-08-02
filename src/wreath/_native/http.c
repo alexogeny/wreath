@@ -203,6 +203,23 @@ wreath_http_parse_request_parts(
         while (value_end > value_start &&
                (value_end[-1] == ' ' || value_end[-1] == '\t')) value_end--;
         p += 2;
+        /* Folded a byte at a time, and measured to be the right way round.
+         *
+         * A vector fold of this loop looks obviously worthwhile -- fifteen
+         * names a request, no data dependencies -- and is not. Header names are
+         * four to seventeen bytes (`host`, `accept`, `user-agent`,
+         * `content-length`, `accept-encoding`), and over that range a
+         * five-arm SIMD kernel measured *no resolved gain at all* against this
+         * loop: 0.102us vs 0.102us at four bytes, 0.107 vs 0.107 at sixteen.
+         * A win appears at seventeen bytes and is 0.006us at twenty-seven;
+         * the 1.5x only arrives at 128 bytes, which no header name is.
+         *
+         * Fifteen names at 0.006us would be 0.09us against a 2.6us head parse,
+         * most of it inside the noise floor -- so the kernel was written,
+         * cross-checked against the byte loop over all 256 values, measured,
+         * and then deleted. Recorded here rather than in a commit message
+         * because this is where the next person will think of it.
+         * (2026-08-01, 11 interleaved rounds against an A/A control.) */
         if (name_len <= 64) {
             uint8_t lowered[64];
             for (Py_ssize_t i = 0; i < name_len; i++) {
