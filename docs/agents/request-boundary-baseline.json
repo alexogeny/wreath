@@ -4,11 +4,11 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 125,
+        "c": 126,
         "python": 2
       },
       "pre_activation": {
-        "c": 39,
+        "c": 40,
         "python": 1
       },
       "phases": {
@@ -21,7 +21,7 @@
           "python": 0
         },
         "auth": {
-          "c": 5,
+          "c": 6,
           "python": 0
         },
         "handler": {
@@ -43,6 +43,7 @@
         "TracedUser._orm_set_loaded": 4,
         "str.encode": 4,
         "bytes.decode": 3,
+        "str.lower": 2,
         "bytes.lower": 2,
         "time.perf_counter": 2,
         "builtins.id": 2,
@@ -52,7 +53,6 @@
         "TrustedNetworks.forwarded_client": 1,
         "bytes.split": 1,
         "bytes.strip": 1,
-        "str.lower": 1,
         "time.monotonic": 1,
         "TokenBucket.acquire": 1,
         "time.time": 1,
