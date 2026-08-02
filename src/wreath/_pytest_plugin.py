@@ -33,6 +33,21 @@ from typing import Any
 import pytest
 
 
+def pytest_configure(config: object) -> None:
+    """Install ``wreath test`` activity hooks only for an activated run.
+
+    The import is deliberately lazy.  Installing Wreath registers this module
+    in every pytest process, while the test runner itself is an opt-in command
+    and must add no import cost to an ordinary pytest invocation.
+    """
+    if "WREATH_TEST_ACTIVITY_CONTROLLER_PID" not in os.environ:
+        return
+
+    from ._test_runner import install_activity_plugin
+
+    install_activity_plugin(config)
+
+
 def _resolve_async_fixture() -> Any:
     """`pytest_asyncio.fixture` when it is installed, else `pytest.fixture`.
 
