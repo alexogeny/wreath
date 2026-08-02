@@ -80,7 +80,7 @@ class Peer:
         deadline = loop.time() + seconds
         queue = _session_of(self.mcp, self.session).notifications
         while loop.time() < deadline:
-            if queue.qsize():
+            if len(queue):
                 payload = json.loads(await queue.get())
                 if payload.get("method") in (
                     "notifications/progress",
@@ -599,7 +599,7 @@ async def test_a_tool_that_did_not_declare_elicitation_may_not_prompt() -> None:
         assert mcp.stats()["elicitation_refusals"] == 1
         # Nothing was asked, of the client or of the person behind it.
         assert mcp.stats()["elicitations"] == 0
-        assert not _session_of(mcp, session).notifications.qsize()
+        assert not len(_session_of(mcp, session).notifications)
 
 
 async def test_elicitation_true_works_with_no_authorizer_installed() -> None:
@@ -670,7 +670,7 @@ async def test_elicitation_is_cedar_gated_per_tool() -> None:
         assert mcp.stats()["tool_errors"] == 1
         assert mcp.stats()["elicitations"] == 0
         # And the form never left the server.
-        assert not _session_of(mcp, session).notifications.qsize()
+        assert not len(_session_of(mcp, session).notifications)
 
 
 async def test_the_elicitation_gate_is_in_declared_actions() -> None:
@@ -842,7 +842,7 @@ async def test_a_resource_reader_may_not_prompt_either() -> None:
             "reading camera://ridge raised ClientRequestError"
         )
         assert mcp.stats()["elicitation_refusals"] == 1
-        assert not _session_of(mcp, session).notifications.qsize()
+        assert not len(_session_of(mcp, session).notifications)
 
 
 # -- reentrancy, timeouts and cancellation ----------------------------------
@@ -887,7 +887,7 @@ async def test_a_timed_out_request_tells_the_client_to_stop_working_on_it() -> N
     async with TestClient(app) as client:
         session = await initialize(client)
         await asyncio.wait_for(call(client, session, tool_call(2, "ask")), timeout=5)
-        queued = [json.loads(item) for item in _session_of(mcp, session).notifications._queue]
+        queued = [json.loads(item) for item in _session_of(mcp, session).notifications.snapshot()]
         methods = [item.get("method") for item in queued]
         assert "elicitation/create" in methods
         assert "notifications/cancelled" in methods
@@ -920,7 +920,8 @@ async def test_cancelling_the_outer_call_cancels_the_inner_request() -> None:
         )
         # A cancelled call sends no response at all, which is what 202 means here.
         assert (await asyncio.wait_for(parked, timeout=5)).status == 202
-        withdrawn = [json.loads(item) for item in _session_of(mcp, session).notifications._queue]
+        queued = _session_of(mcp, session).notifications.snapshot()
+        withdrawn = [json.loads(item) for item in queued]
         assert {
             "jsonrpc": "2.0",
             "method": "notifications/cancelled",

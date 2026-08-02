@@ -43,6 +43,7 @@ from types import MappingProxyType
 from typing import Any
 
 from ..progress import ProgressReporter
+from ..queue import Queue, QueueEmpty
 from .outbound import ClientChannel
 
 #: Bytes of entropy behind a session id. The identifier is a bearer credential
@@ -68,7 +69,7 @@ class Session:
     in_flight: dict[Any, asyncio.Task[Any]] = field(default_factory=dict)
     #: Framed JSON-RPC notifications waiting for this session's `GET` stream,
     #: bounded by `MCPLimits.max_pending_notifications`.
-    notifications: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
+    notifications: Queue = field(default_factory=Queue)
     #: Resource URIs this session asked to be told about.
     subscriptions: set[str] = field(default_factory=set)
     #: Whether a server-to-client stream is open. The specification allows one
@@ -111,12 +112,15 @@ class Session:
         is a tool reporting progress or a handler saying a row changed, and
         neither may be made to wait on a client that is not reading.
         """
-        try:
-            self.notifications.put_nowait(payload)
-        except asyncio.QueueFull:
-            self.dropped += 1
-            return False
-        return True
+        # `offer` *is* this policy: keep it if there is room, otherwise refuse
+        # and count. The try/except around `put_nowait` said the same thing in
+        # four more lines, and the queue counts its own drops now -- `dropped`
+        # here stays because per-session and per-server totals answer different
+        # questions, as the field's own comment says.
+        if self.notifications.offer(payload):
+            return True
+        self.dropped += 1
+        return False
 
     def close_stream(self) -> None:
         """Tell this session's stream, if any, to end.
@@ -125,16 +129,12 @@ class Session:
         which is the one place dropping the *oldest* is right: a stream that
         never learns it should close is a connection nobody closes.
         """
-        while True:
+        while not self.notifications.offer(CLOSE_STREAM):
             try:
-                self.notifications.put_nowait(CLOSE_STREAM)
+                self.notifications.get_nowait()
+            except QueueEmpty:  # pragma: no cover - full, then emptied by the reader
                 return
-            except asyncio.QueueFull:
-                try:
-                    self.notifications.get_nowait()
-                except asyncio.QueueEmpty:  # pragma: no cover - full then empty
-                    return
-                self.dropped += 1
+            self.dropped += 1
 
 
 class SessionStore:
@@ -237,7 +237,7 @@ class SessionStore:
             client_capabilities=client_capabilities or {},
             last_seen=moment,
             principal=principal,
-            notifications=asyncio.Queue(maxsize=self._max_pending),
+            notifications=Queue(capacity=self._max_pending),
         )
         session.channel = ClientChannel(
             partial(self._publish, session),

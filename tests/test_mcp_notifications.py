@@ -234,7 +234,7 @@ async def test_a_tool_s_progress_reaches_the_client_that_asked_for_it() -> None:
         reporter.update(50.0, "halfway")
         queue = mcp._sessions.get(request.state.mcp.session_id).notifications
         for _ in range(500):
-            if any(b"halfway" in item for item in queue._queue):
+            if any(b"halfway" in item for item in queue.snapshot()):
                 break
             await asyncio.sleep(0.005)
         return {"imported": 1}
@@ -298,7 +298,7 @@ async def test_a_tool_may_report_progress_with_nobody_listening() -> None:
         assert recorded[0] is not None
         assert recorded[0].percent == 10.0
         # Nothing was relayed, because nobody asked to be told.
-        assert mcp._sessions.get(session).notifications.qsize() == 0
+        assert len(mcp._sessions.get(session).notifications) == 0
 
 
 async def test_the_stream_belongs_to_the_session_that_opened_it() -> None:
