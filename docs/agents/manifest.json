@@ -376,6 +376,7 @@
         "src/wreath/auth.py",
         "src/wreath/authorization.py",
         "src/wreath/_auth/",
+        "src/wreath/_curves.py",
         "src/wreath/_pure/authz.py",
         "src/wreath/_native/authz.c",
         "src/wreath/_livedoc.py"
@@ -397,9 +398,11 @@
         "tests/test_jwt.py",
         "tests/test_livedoc.py",
         "tests/test_red_team_auth.py",
-        "tests/test_auth_wiring_red_team.py"
+        "tests/test_auth_wiring_red_team.py",
+        "tests/test_ec_p256.py",
+        "tests/test_ec_ed25519.py"
       ],
-      "policy": "Authentication (identity) and authorization (roles, permissions, Cedar) stay firmly apart. Step-up is the one thing that spans them and lives on the authentication side: `AuthRequirement.second_factor` is a *window*, not a flag, `wreath.auth.second_factor(max_age=...)` sets it, `requirements.second_factor_age` reads `Identity.claims['second_factor_at']` and returns None (a refusal, never a zero) when there is no stamp, merging takes the strictest window, and the Cedar context omits `second_factor_age` entirely rather than faking one so `when`/`has` and `unless`/`has` policies both fail closed. The Cedar engine is built in and dependency-free: policies parse at startup, evaluation is native with a pure twin, forbid overrides permit, default deny. `permissions_router(app)` answers what the caller may do from the *same* authorizer that enforces it, and `declared_actions(app)` reads the vocabulary off the routes' `@authorize` declarations -- there is no second list to drift, and an undeclared action is refused rather than evaluated (otherwise the endpoint is an oracle for probing policies). Two questions, two shapes: the manifest is resource-type level and ETagged (the tag covers principal, roles, and the policy set, so a promotion or a deploy invalidates it and nothing else does); the batch endpoint is row level, because a Cedar decision depends on the resource. Neither is enforcement -- the route is re-evaluated on the next request, so a stale answer can only draw a button that then 403s. The vocabulary reaches the generated TS client through `ApiModel.permissions`. The permission change stream (`_livedoc.LiveDocument`, transported by `_busbridge`) is **at-most-once and advisory**: a narrowing change may arrive late, which is safe only because the manifest is for chrome and enforcement is re-evaluated on the route -- a stale manifest can draw a button that then 403s and can never permit anything. A stream never emits an ETag it cannot state truthfully: on a roles change the captured identity is stale by definition, so it emits `etag: null` rather than a tag that would tell the client to skip exactly the refetch it needs, and coalescing two pending changes lets *unknown* win. Subscriptions are capped per principal and overall and **refused** (503, client falls back to If-None-Match) rather than evicted, since evicting the oldest tab invites a reconnect that evicts the next; the ORM write subscription is registered on the first subscriber and dropped on the last, so the process-global listener list is bounded by live streams. All three discovered OIDC endpoints are pinned to the issuer origin. `jwks_uri` and `token_endpoint` go through `_same_origin_path`, which reduces them to the path their origin-pinned client takes; `authorization_endpoint` is a **browser redirect target**, so it goes through `_require_same_origin` -- the same comparison, returning the URL unchanged -- inside `discover()`, and stays absolute. Reducing it to a path would send every sign-in to this application's own `/authorize`. The check is at discovery rather than at the redirect because the attribute is public and any application may build its own redirect from it; a second check at the use site could never fire and would be a check with nothing to check.",
+      "policy": "Authentication (identity) and authorization (roles, permissions, Cedar) stay firmly apart. Step-up is the one thing that spans them and lives on the authentication side: `AuthRequirement.second_factor` is a *window*, not a flag, `wreath.auth.second_factor(max_age=...)` sets it, `requirements.second_factor_age` reads `Identity.claims['second_factor_at']` and returns None (a refusal, never a zero) when there is no stamp, merging takes the strictest window, and the Cedar context omits `second_factor_age` entirely rather than faking one so `when`/`has` and `unless`/`has` policies both fail closed. The Cedar engine is built in and dependency-free: policies parse at startup, evaluation is native with a pure twin, forbid overrides permit, default deny. `permissions_router(app)` answers what the caller may do from the *same* authorizer that enforces it, and `declared_actions(app)` reads the vocabulary off the routes' `@authorize` declarations -- there is no second list to drift, and an undeclared action is refused rather than evaluated (otherwise the endpoint is an oracle for probing policies). Two questions, two shapes: the manifest is resource-type level and ETagged (the tag covers principal, roles, and the policy set, so a promotion or a deploy invalidates it and nothing else does); the batch endpoint is row level, because a Cedar decision depends on the resource. Neither is enforcement -- the route is re-evaluated on the next request, so a stale answer can only draw a button that then 403s. The vocabulary reaches the generated TS client through `ApiModel.permissions`. The permission change stream (`_livedoc.LiveDocument`, transported by `_busbridge`) is **at-most-once and advisory**: a narrowing change may arrive late, which is safe only because the manifest is for chrome and enforcement is re-evaluated on the route -- a stale manifest can draw a button that then 403s and can never permit anything. A stream never emits an ETag it cannot state truthfully: on a roles change the captured identity is stale by definition, so it emits `etag: null` rather than a tag that would tell the client to skip exactly the refetch it needs, and coalescing two pending changes lets *unknown* win. Subscriptions are capped per principal and overall and **refused** (503, client falls back to If-None-Match) rather than evicted, since evicting the oldest tab invites a reconnect that evicts the next; the ORM write subscription is registered on the first subscriber and dropped on the last, so the process-global listener list is bounded by live streams. All three discovered OIDC endpoints are pinned to the issuer origin. `jwks_uri` and `token_endpoint` go through `_same_origin_path`, which reduces them to the path their origin-pinned client takes; `authorization_endpoint` is a **browser redirect target**, so it goes through `_require_same_origin` -- the same comparison, returning the URL unchanged -- inside `discover()`, and stays absolute. Reducing it to a path would send every sign-in to this application's own `/authorize`. The check is at discovery rather than at the redirect because the attribute is public and any application may build its own redirect from it; a second check at the use site could never fire and would be a check with nothing to check. `wreath._curves` holds the edwards25519 and P-256 group arithmetic for the whole tree -- `_auth/_ecverify` verifies with it, `_dkim` and `_webpush` sign and do ECDH with it -- and the split inside it is by secrecy of the scalar, not by module: `_public` scalar multiplications are variable-time on purpose because verification consumes only published values, and `_secret` ones run a fixed number of iterations with mask-selected registers because a signing nonce or a private scalar must not steer control flow. A caller reaching for the wrong one is a vulnerability rather than a slow path. P-256 uses Jacobian coordinates and inverts twice per verification instead of once per point addition; that rewrite is held to the affine original, the RFC 6979/8032 vectors and `cryptography` by tests/test_ec_p256.py and tests/test_ec_ed25519.py, whose rejection cases outnumber their acceptances deliberately.",
       "decisions": [
         "docs/decisions/0017-cedar-is-built-in.md",
         "docs/decisions/0019-refuse-rather-than-half-wire.md"
@@ -445,8 +448,34 @@
       "policy": "Second factors, stages one and two of docs/plans/second-factors-totp-webauthn.md: a TOTP code that verified once never verifies again (verify_totp requires a counter strictly greater than the credential's stored one, and SecondFactorStore.touch is an atomic conditional advance that reports whether it won -- one statement with WHERE counter < $1 in OrmSecondFactorStore, a compare-and-set in a synchronous function in InMemorySecondFactorStore -- so a lost advance is refused as a replay and two concurrent requests carrying one code cannot both complete); skew is one step by default and never more than _secondfactor.MAX_SKEW; enrolment is two-phase, so begin_totp_enrolment writes nothing and only a verified code creates a credential, and the unconfirmed secret lives in the `enrolments` SessionStore under an opaque id when one is passed, bound to the user who began it; recovery codes are a single SHA-256 (hash_recovery_code) rather than the password hasher -- ~78 bits needs no slow KDF, passwords still get scrypt -- shown once, compared with hmac.compare_digest, and deleted when redeemed -- the deletion claimed through the same conditional advance the TOTP branch uses, since a remove() that returns nothing cannot say which of two simultaneous redemptions spent the code, with stage one's scrypt$ rows still verifying; a login awaiting a second factor writes a pending marker and never a principal, so SessionIdentityBackend yields no identity for it; verification (promotion or step-up) rotates the session and stamps second_factor_at, which AuthRequirement.second_factor / wreath.auth.second_factor and the Cedar context's second_factor_age read, absent always meaning refused rather than fresh; DELETE /auth/2fa/{id} needs a factor within step_up_ttl, is owner-scoped, refuses a recovery id, and takes the recovery codes with the last real factor; the credential material column is named secret_material because crud.SENSITIVE_FIELD matches that and not `material`. Stage three adds WebAuthn as a second factor, all Python and no new C: _webauthn.py parses CBOR/COSE/authenticator data/DER and delegates every signature to _auth/_ecverify (ES256 and Ed25519 only -- RS256 is refused by name rather than implemented), the parsers refuse indefinite-length CBOR, tags, floats, duplicate keys, trailing bytes, non-minimal DER integers and off-curve points, and only `none` attestation is accepted because verifying an attestation statement needs a metadata service; a ceremony's type, challenge, origin and RP ID hash are four separate refusals; the challenge lives in a ChallengeStore (wreath.store's Keyed primitive, MemoryChallengeStore by default and PostgresChallengeStore for a fleet) rather than in the session, and is spent by one DELETE ... WHERE handle AND user_id AND kind AND expires > clock_timestamp() RETURNING payload -- so the returned row *is* the consumption (two concurrent completions cannot both proceed) and the user binding is a WHERE clause rather than a check after the row is already gone (a mismatched attempt matches no row, deletes nothing, and costs the rightful user nothing). The candidate subject is derived from the session -- a pending login first, then the signed-in principal -- and passed to that statement as a precondition, never read back out of the record, because a record that names its own owner lets whoever holds a handle define who they are; ChallengeStore.peek is a non-consuming read used by the TOTP enrolment path (whose property is confirmed-exactly-once, not read-exactly-once: a mistyped code must not cost a fresh QR scan) and, after a consume has already refused, to choose between ceremony_expired and the binding refusal -- it applies no binding and no security decision rests on it; a signature counter that fails to increase above a stored non-zero one is refused as a clone signal while an authenticator that always reports 0 keeps working; user verification is requested (not required) and its outcome is recorded on the session as second_factor_uv; the webauthn routes mount only when second_factor_router is given rp_id. The accepted origins default to https://{rp_id} and widen for exactly one case: _webauthn.default_origins admits http:// as well when rp_id is a loopback host (localhost, ::1, 127.0.0.0/8), and _webauthn.origin_accepted lets a loopback origin carry any port, since http://localhost:8000 is a secure context and no default set can enumerate a development port -- no other host is ever admitted over http, no port is tolerated off loopback, and there is no wildcard. Building second_factor_router without enrolments= no longer warns, because it no longer degrades: ceremony state goes to a ChallengeStore whose default is real, so the single-use property holds unconditionally instead of being announced as absent. The removed UserWarning could only ever name half its condition -- a router built before any application exists cannot observe whether SessionMiddleware was given a store= -- and a warning nobody can act on with certainty is one people learn to ignore. One behaviour change comes with it, for multi-worker deployments on cookie sessions with no store named: a ceremony is now confined to the worker that began it, which fails closed (refused, begin again) and is what challenges=PostgresChallengeStore answers. The webauthn suite's authenticator is synthetic (a real key and a real signature from cryptography, a dev/test dependency), which proves agreement about the wire formats and not interoperability; interoperability is pinned by one recorded registration and one recorded assertion transcribed from the W3C WebAuthn Level 3 specification's own section 16.2 test vectors (CR Snapshot, 26 May 2026), cited in place -- do not replace those with generated bytes. The two routers are separate but not independent: second_factor_router records itself against the UserStore it was built with, so a user_router over that same store with no second_factors= of its own refuses (500 second_factor_not_wired, no session written) the login of a user who has a non-recovery factor, rather than issuing a password-only sign-in -- and the same refusal covers the other half-wiring, a user_router given a SecondFactorStore that is not the object second_factor_router writes to, which otherwise read an empty store and signed the caller in; and user_router's login and logout both clear pending_totp_enrolment and pending_webauthn from the session and delete the rows behind them, so a ceremony does not outlive the sitting it began in. Every one of those checks is a raise, never an assert. `user_router` hands its own `session_key` to `sessions.delete_for` when it is not the default, so a password reset enumerates by the key login actually wrote the principal under; the default call shape is unchanged so a store written against the one-argument signature keeps working."
     },
     {
+      "name": "organizations",
+      "capability": "Tenancy at the identity layer: organisations, memberships, roles within them, invitations that survive the invitee having no account, and the composed principal every authorization fact hangs off",
+      "replaces": [
+        "workos",
+        "scalekit",
+        "django-organizations"
+      ],
+      "guides": [
+        "docs/guides/organizations.md"
+      ],
+      "reference": [
+        "docs/reference/organizations.md"
+      ],
+      "sources": [
+        "src/wreath/organizations.py",
+        "src/wreath/_auth/principal.py",
+        "src/wreath/_auth/facts.py"
+      ],
+      "tests": [
+        "tests/test_organizations_store.py",
+        "tests/test_organizations_cedar.py",
+        "tests/test_principal_narrow.py"
+      ],
+      "policy": "Composition never grants. `Limits` and `Narrowing` can only reduce what a principal may do: a limit is intersected with what a provider resolved, and `Principal.narrow` has the delegating principal's own decision evaluated as a conjunct by `CedarAuthorizer`, so permitted(narrow(P, N)) is a subset of permitted(P) for every policy set -- including ones that permit only delegates. That is a property test over generated policy sets (tests/test_principal_narrow.py), falsified by injecting a union. Delegation scope and expiry are enforced mechanically before the engine is consulted, never as a policy-readable key, so a permissive policy set cannot widen them. Roles are namespaced '<org>:<role>' on the way into context and never stored that way; unqualified roles come only from the active organisation, so a policy written without thinking about tenancy is still tenant-safe. Every set-valued Cedar context key is one `SetFact`: resolved once per request, resolved at all only when a policy names it, empty-and-supplied when no provider is configured (an absent key skips an `unless` forbid rather than standing it), and refused at startup when a policy names something the provider does not hold -- except organisation ids, which are rows rather than configuration and must not stop the process booting. Membership resolution is synchronous by design: `Memberships` reads a snapshot loaded where identity was established, so authorization never opens a connection."
+    },
+    {
       "name": "postgres",
-      "capability": "A native PostgreSQL driver: connection pooling, prepared statements, parameter type inference, and COPY",
+      "capability": "A native PostgreSQL driver: connection pooling, prepared statements, and parameter type inference",
       "replaces": [
         "asyncpg",
         "psycopg",
@@ -666,9 +695,10 @@
         "src/wreath/workflows.py"
       ],
       "tests": [
-        "tests/test_workflows_checklist.py"
+        "tests/test_workflows_checklist.py",
+        "tests/test_workflow_step_recording.py"
       ],
-      "policy": "**A completed step never runs twice.** Each step's return value is recorded before the next one starts, so `resume` re-enters at the first step with no record and reads the *recorded* result rather than recomputing it. That is the whole difference from a loop over callables.\n\n**Compensation runs newest-first, and the step that raised is not compensated** -- it never completed, so there is nothing of its to undo, and an undo against state that was never established turns a recoverable failure into a corrupt one.\n\n**A compensation that raises is counted, not swallowed** (AGENTS.md's third tier: broad catch, counted, waived in place with a reason). The undos behind a failed one still run, or the saga is left more broken than if nothing had been undone. The count is durable on the instance and read with `Workflow.status`, because a run that compensates re-raises the step's own exception -- so the summary cannot come back as a return value, and a half-compensated saga has to be findable later by someone without the traceback.\n\n**Renaming a step of a live instance raises `WorkflowDefinitionChanged`.** Completion is keyed on the step *name*, so a rename leaves a record matching nothing and a naive resume redoes completed work and reports success. The stored step list is written at `begin` for exactly this comparison. This is the one failure here that would otherwise be invisible.\n\n`PostgresWorkflowStore` keeps its two tables in a dedicated system schema with a `tenant` column and never relies on `search_path`, which is `jobs`'s rule for the same reason. Its resume path is covered against a live server by `tests/test_workflows_checklist.py::test_postgres_store_survives_a_crash_between_steps` (marked `network`, gated on `WREATH_TEST_POSTGRES_DSN`), because the in-memory store satisfies the resume contract only within one process -- precisely not the situation sagas exist for."
+      "policy": "**A completed step never runs twice.** Each step's return value is recorded before the next one starts, so `resume` re-enters at the first step with no record and reads the *recorded* result rather than recomputing it. That is the whole difference from a loop over callables.\n\n**Compensation runs newest-first, and the step that raised is not compensated** -- it never completed, so there is nothing of its to undo, and an undo against state that was never established turns a recoverable failure into a corrupt one.\n\n**A compensation that raises is counted, not swallowed** (AGENTS.md's third tier: broad catch, counted, waived in place with a reason). The undos behind a failed one still run, or the saga is left more broken than if nothing had been undone. The count is durable on the instance and read with `Workflow.status`, because a run that compensates re-raises the step's own exception -- so the summary cannot come back as a return value, and a half-compensated saga has to be findable later by someone without the traceback.\n\n**Renaming a step of a live instance raises `WorkflowDefinitionChanged`.** Completion is keyed on the step *name*, so a rename leaves a record matching nothing and a naive resume redoes completed work and reports success. The stored step list is written at `begin` for exactly this comparison. This is the one failure here that would otherwise be invisible.\n\n`PostgresWorkflowStore` keeps its two tables in a dedicated system schema with a `tenant` column and never relies on `search_path`, which is `jobs`'s rule for the same reason. Its resume path is covered against a live server by `tests/test_workflows_checklist.py::test_postgres_store_survives_a_crash_between_steps` (marked `network`, gated on `WREATH_TEST_POSTGRES_DSN`), because the in-memory store satisfies the resume contract only within one process -- precisely not the situation sagas exist for. A step can be **recorded**: `Workflow.run(recorder=WorkflowStepRecorder(...))` writes a `WFST` record into the same `WFR1` container `ATMP` goes into -- a second record kind, never a second format. The unit genuinely differs from a job attempt, which is why it is a kind rather than a rename: identity is `(instance, step)` with a *position* and no fence, cause is the step before it rather than the request that enqueued it, and the record carries the undo chain newest-first as `(step, ran|failed|none)` -- `none` being a third answer because \"nothing to undo\" and \"the undo was never reached\" are different states. It is written **after** the compensations run, since a record written at the raise could carry none of them. Three outcomes: `completed`, `raised` (stopped and unwound cleanly, re-runnable) and `compensation_failed` (stopped and did not unwind, which no retry reaches), and the third outranks the second so a reader is not sent to the original failure. Deny-by-default with no `argument_allowlist`, because a step takes no arguments -- a `StepContext` holds application objects rather than the JSON a queue row stored -- so only the count of prior completions is recorded. Sampling is keyed on the instance, so a saga is kept or dropped whole; a per-step sample would keep step 2 and step 5 and read as a saga that skipped work. `_compensate` now returns the chain as its third value, and `_StepWitness` keeps every recording decision out of the saga: an unarmed run pays one attribute test per step."
     },
     {
       "name": "passes",
@@ -694,12 +724,14 @@
     },
     {
       "name": "objects",
-      "capability": "Object storage over S3-compatible services or local disk, with presigned uploads and downloads",
+      "capability": "Object storage over S3-compatible services or local disk, with presigned uploads and downloads, and resumable uploads admitted at the boundary",
       "replaces": [
-        "boto3",
         "aioboto3",
+        "boto3",
         "django-storages",
-        "minio"
+        "minio",
+        "tus-py-server",
+        "tusd"
       ],
       "guides": [
         "docs/guides/objects.md"
@@ -713,9 +745,12 @@
         "src/wreath/_sigv4.py"
       ],
       "tests": [
-        "tests/storage/"
+        "tests/storage/",
+        "tests/test_uploads_protocol.py",
+        "tests/test_uploads_backends.py",
+        "tests/test_uploads_controls.py"
       ],
-      "policy": "Blob/object storage: the `ObjectStore` protocol with `MemoryObjectStore` (the dev/test twin), a symlink-safe `LocalObjectStore` on the same `openat` containment as static files, and `S3ObjectStore` over `http_client` signed with zero-dependency SigV4. `normalize_key` is the single containment gate for every backend -- a key is validated there, not per backend. Named `objects` because \"store\" meant two unrelated things: this, and the small keyed tables behind rate limiting, idempotency, and sessions (`wreath.store`). `src/wreath/storage.py` is a deprecating alias that re-exports the old names (`Storage`/`S3Storage`/`StoragePath`/`StorageError`) and warns; it exists so the rename cannot break an existing import, and is removable once callers have moved."
+      "policy": "Blob/object storage: the `ObjectStore` protocol with `MemoryObjectStore` (the dev/test twin), a symlink-safe `LocalObjectStore` on the same `openat` containment as static files, and `S3ObjectStore` over `http_client` signed with zero-dependency SigV4. `normalize_key` is the single containment gate for every backend -- a key is validated there, not per backend. Named `objects` because \"store\" meant two unrelated things: this, and the small keyed tables behind rate limiting, idempotency, and sessions (`wreath.store`). `src/wreath/storage.py` is a deprecating alias that re-exports the old names (`Storage`/`S3Storage`/`StoragePath`/`StorageError`) and warns; it exists so the rename cannot break an existing import, and is removable once callers have moved. **Resumable uploads live here rather than in a module of their own**, because they are a way to write an object. The shipped surface is `draft-ietf-httpbis-resumable-upload-12` and tus 1.0.x is deliberately not served: the vocabularies overlap enough that one implementation answering both would have to guess a dialect from headers a client did not send. The trade against `url()` is the point -- a presigned URL routes around Cedar, the quota and the declared media type, and this path keeps the application in the way of those decisions while the bytes stream in restartable pieces. Upload state is a separate `UploadStore` because its lifetime is the opposite of an object's; `MemoryUploadStore` is the default and confines an upload to one worker (a resume elsewhere is a 404, which fails closed), and `ObjectUploadStore` is the shared one that needs no second datastore. `advance` is conditional and reports whether it won, so two racing appends lose one rather than punching a hole. S3 assembles with its own multipart, which is why a non-final append has a floor that `Upload-Limit: min-append-size` advertises rather than hides."
     },
     {
       "name": "grpc",
@@ -972,7 +1007,8 @@
         "tests/test_trace_cli.py",
         "tests/test_replay_execution_scope.py",
         "tests/test_attempt_recording.py",
-        "tests/test_attempt_replay.py"
+        "tests/test_attempt_replay.py",
+        "tests/test_workflow_step_recording.py"
       ],
       "policy": "Recording is deny-by-default: `wreath.recording` decides what may be captured, and capture itself ships -- the native recorder arms, triggers, redacts, and writes WFR1 (tests/test_flight_capture_live.py drives an armed forensic request end to end and reads the capture back). The projector drains the recorder's ring off the request path. `replay.generate_test` turns a WTR1 transport recording into a runnable pytest over TestClient: it parses the request out of the recorded bytes (request line + headers + Content-Length body only -- chunked or truncated is refused by name, never guessed), replays it now, and asserts what it observes. That makes it a *characterisation* test, and the generated docstring says so -- generated against a broken build it encodes the bug, generated after the fix it locks the fix in. Host/content-length/connection headers are dropped from the generated call because they are the test client's business, not the behaviour under test. Logging packs a *published* record in C (`Recorder.log`, `_flightmodule.c`) straight into a ring cell; the Python packer beside it is the pure twin of ADR 0005, checked byte for byte and by mismatch count over a corpus (tests/test_logging_native_parity.py), and it is what actually runs in three cases -- no recorder, a buffered record awaiting promotion, and a record made off the loop. The ring has exactly one writer, so an off-loop call is staged and published by the loop one interval later flagged LOG_FLAG_OFF_LOOP; before that existed such a call raced `ring_publish` and corrupted the ring. Every cost here is measured rather than asserted: benchmarks/bench_logging.py runs the six measurements and benchmarks/results/logging_2026-07-28_*.json retains before and after. The measurements found the fast tier was not fast (a pure-Python SipHash on the request path), and the parity corpus found three values that raised out of `pack_value`, which promises never to. The ring is heap memory by default and a MAP_SHARED file when `TelemetryConfig.ring_path` is set, so a process that dies badly leaves its last cells readable (`wreath.recording.read_ring_file`, `wreath flight read`). That is survival of the *process*, never durability: the pages are the kernel's, and only a clean shutdown msyncs. The ring refuses when full rather than overwriting, so a crash file's mirrored RING_FULL counter is what says whether it is the story or a sample of it; the archival EVNT stream in the WFR1 recording holds everything the projector already drained. tests/test_flight_ring_file.py forks a child and kills it with SIGSEGV and SIGKILL rather than simulating a crash, because the single claim the feature rests on is that the records are still there afterwards. A ring file and a WTR1 recording join through the *sequence of log call sites*, not an id -- a transport recording carries none: `replay.reproduce_from_ring` (and `wreath flight replay`) re-drives the recording and reports where the path parts from the one the crash file recorded, exiting 1 on divergence so it works as a check. Site ids are import order, so this is only meaningful against the build that crashed; a divergence at index 0 is the symptom of running it against a different one.",
       "decisions": [
@@ -1268,7 +1304,7 @@
         "tests/test_test_runner.py",
         "benchmarks/results/test_runner_2026-08-02.json"
       ],
-      "policy": "TestClient is async and drives the real pipeline in-process; responses expose .status.\n\n**The pytest plugin loads by entry point, in every repository that installs Wreath**, so every fixture it declares is `wreath_`-prefixed: a bare `client` or `db` would shadow a fixture of the user's own, in a file they did not write, and the collision would read as their bug. `tests/test_pytest_plugin.py::test_plugin_declares_only_prefixed_fixtures` holds that line. `wreath_app` is the one fixture meant to be overridden rather than used; its shipped default raises with the three lines to write. The async fixtures use `pytest_asyncio.fixture` when it is installed so they work under `asyncio_mode = strict` as well as `auto`, and fall back to `pytest.fixture` for anyio. The database fixtures are gated on `WREATH_TEST_POSTGRES_DSN` and their skip reason names the variable -- an invisible skip is the failure this repository already paid for once.\n\n**`wreath test` preserves pytest as the semantic engine.** Collection, fixtures, plugins, capture, tracebacks, markers, and exit status remain pytest's; Wreath owns the controller-side run model, stable file grid, phase timings, bounded history, and JSON report. The activity plugin is environment-activated only by the root controller, so an ordinary pytest run pays no runner import and a nested pytest subprocess does not grow another UI. TTY animation uses the alternate screen and must restore it before pytest's terminal summaries; redirected and CI output contains no ANSI. Tile hue is outcome and shade is duration percentile; `▣` is an active mutant probe and solid gold `▰` is a passing file whose test killed one. Mutation planning and compilation run at background priority in a fresh parent beside the ordinary workers; the live path does not collect the complete suite again. Twelve controls are sampled by default; it is the measured knee: three warm runs averaged 28.120s ± 0.126s, while 24 controls averaged 29.189s ± 0.313s and the last run still left eight controls undecided at the post-suite ceiling. Each completed green test emits selected-line evidence, so up to three forked children can import candidates and kill their mutants throughout the ordinary run; live probes stop at the baseline seal and do not spend the one-second post-suite tail budget. An early pass remains speculative and is retried only after the complete baseline seals. The report's `live` object records probe counts and first-start timing so overlap is evidence rather than a UI impression. A completed history file gives every xdist worker the same stable longest-processing-time-first collection order; exact test means win, file means are the fallback, and unknown tests keep pytest order. Timing is always-on phase duration only; deeper native work waits for a measured bottleneck rather than treating C as decoration."
+      "policy": "TestClient is async and drives the real pipeline in-process; responses expose .status.\n\n**The pytest plugin loads by entry point, in every repository that installs Wreath**, so every fixture it declares is `wreath_`-prefixed: a bare `client` or `db` would shadow a fixture of the user's own, in a file they did not write, and the collision would read as their bug. `tests/test_pytest_plugin.py::test_plugin_declares_only_prefixed_fixtures` holds that line. `wreath_app` is the one fixture meant to be overridden rather than used; its shipped default raises with the three lines to write. The async fixtures use `pytest_asyncio.fixture` when it is installed so they work under `asyncio_mode = strict` as well as `auto`, and fall back to `pytest.fixture` for anyio. The database fixtures are gated on `WREATH_TEST_POSTGRES_DSN` and their skip reason names the variable -- an invisible skip is the failure this repository already paid for once.\n\n**`wreath test` preserves pytest as the semantic engine.** Collection, fixtures, plugins, capture, tracebacks, markers, and exit status remain pytest's; Wreath owns the controller-side run model, stable file grid, phase timings, bounded history, and JSON report. The activity plugin is environment-activated only by the root controller, so an ordinary pytest run pays no runner import and a nested pytest subprocess does not grow another UI. TTY animation uses the alternate screen and must restore it before pytest's terminal summaries; redirected and CI output contains no ANSI. Tile hue is outcome and shade is duration percentile; `\u25a3` is an active mutant probe and solid gold `\u25b0` is a passing file whose test killed one. Mutation planning and compilation run at background priority in a fresh parent beside the ordinary workers; the live path does not collect the complete suite again. Twelve controls are sampled by default; it is the measured knee: three warm runs averaged 28.120s \u00b1 0.126s, while 24 controls averaged 29.189s \u00b1 0.313s and the last run still left eight controls undecided at the post-suite ceiling. Each completed green test emits selected-line evidence, so up to three forked children can import candidates and kill their mutants throughout the ordinary run; live probes stop at the baseline seal and do not spend the one-second post-suite tail budget. An early pass remains speculative and is retried only after the complete baseline seals. The report's `live` object records probe counts and first-start timing so overlap is evidence rather than a UI impression. A completed history file gives every xdist worker the same stable longest-processing-time-first collection order; exact test means win, file means are the fallback, and unknown tests keep pytest order. Timing is always-on phase duration only; deeper native work waits for a measured bottleneck rather than treating C as decoration."
     },
     {
       "name": "port",
@@ -1439,6 +1475,152 @@
         "tests/_tracking.py"
       ],
       "policy": "The second example, and deliberately the smaller one: three documentation pages, not six. It shares the camera trap's conservation universe and defers to it for routing, CRUD, paging, sessions, jobs and object storage -- a feature the camera trap already teaches is not taught again here. Nothing in src/wreath may import from example/, and neither package ships on pip install wreath. The seed is deterministic (no clock reads, one seeded Random) because docs/tracking/index.md pastes its output. One framework workaround carries a written reason at the site: tracking/wire.py MEDIA_TYPE_HEADER exists because Response(media_type=) accepts a str and emits an invalid ASGI header pair. Stage 6 ships: tracking/rpc.py serves the same accept() over a gRPC client-streaming method, which means wreath's own server and TLS -- the REST relay stays mounted for every other deployment. The sealed view's tables are claimed through app.series(database=...) and created by lifespan startup; reading a sealed Series never writes, so settling is Series.settle()."
+    },
+    {
+      "name": "signatures",
+      "capability": "RFC 9421 HTTP Message Signatures in both directions, the Web Bot Auth profile for verified agent traffic, crawler declarations derived from the route table, and a 402 challenge shape",
+      "replaces": [
+        "http-message-signatures",
+        "web-bot-auth"
+      ],
+      "guides": [
+        "docs/guides/verified-agents.md"
+      ],
+      "reference": [
+        "docs/reference/signatures.md"
+      ],
+      "sources": [
+        "src/wreath/signatures.py"
+      ],
+      "tests": [
+        "tests/test_signatures_base.py",
+        "tests/test_signatures_verify.py",
+        "tests/test_signatures_crawlers.py"
+      ],
+      "decisions": [
+        "docs/decisions/0002-no-mandatory-runtime-dependencies.md"
+      ],
+      "policy": "Verification establishes a fact and never allows or denies: the outcome goes into Cedar context as `signature_verified` (always present, always a boolean) and `signature_agent` (present only when one verified), and the policy set decides. Verified is not trusted. Key resolution never fetches on the request path -- an unknown `keyid` is unverified rather than a lookup, because fetching would let an anonymous caller aim an outbound request at a host it named; that is also why `_auth.jwks.JwksCache`, which refreshes on unknown kid, is deliberately not reused here while `_auth.jwt.key_from_jwk` and `_auth._ecverify.verify_ed25519` are. `NonceLedger` refuses when full rather than evicting (`KV` would evict, which is right for a cache and wrong when the caller controls the nonce space) and counts `refusals`. One signature base builder serves both directions, pinned byte-for-byte against RFC 9421 B.2.6; an unknown component parameter is refused rather than ignored, since `;sf` and `;bs` change what a header canonicalizes to. Every cheap refusal is ordered above `verify_ed25519`: measured at ~2459us against ~17us for parsing both headers and building the base, so a rejected request costs microseconds and moving the verify earlier is a denial-of-service regression no correctness test would catch (`test_a_bad_keyid_never_reaches_the_verify` catches it). The Web Bot Auth profile is versioned in `WEB_BOT_AUTH_2026` because the IETF work is live through 2026-27."
+    },
+    {
+      "name": "privacy",
+      "capability": "Erasure, retention and subject access derived from the foreign-key graph the ORM already declares: a plan a person reads before anything deletes anything",
+      "replaces": [
+        "dsar-automation-vendors"
+      ],
+      "guides": [
+        "docs/guides/privacy.md"
+      ],
+      "reference": [
+        "docs/reference/privacy.md"
+      ],
+      "sources": [
+        "src/wreath/privacy.py",
+        "src/wreath/_privacy/",
+        "src/wreath/_privacy_cli.py"
+      ],
+      "tests": [
+        "tests/test_privacy_plan.py",
+        "tests/test_privacy_declarations.py",
+        "tests/test_privacy_findings.py",
+        "tests/test_privacy_annotations.py",
+        "tests/test_privacy_record.py",
+        "tests/test_privacy_cli.py",
+        "tests/postgres/test_privacy_integration.py"
+      ],
+      "policy": "Declaration only, never inference: a heuristic that flags `email` and misses `contact_string` produces a plan that is confident and wrong, and a wrong plan that looks authoritative is worse than none -- the same argument `wreath.infra` makes for emitting a plan rather than applying a stack, one step sharper because an erasure cannot be undone. Planning opens no socket: the graph comes from a compiled ORM registry, so `wreath privacy plan` is safe against an application whose database is unreachable. `unmodelled_edges()` is the one method that connects, and it is a check -- a foreign key the catalog has and the registry does not is a path an erasure would not walk. Five findings, four of which block: unreachable classified data, a non-deferrable cycle, an orphaning SET NULL/SET DEFAULT edge, a NO ACTION/RESTRICT edge from a row that *survives* the erasure to one it deletes (ordering answers that only when the child rows are deleted too, so an anonymised or unclassified child makes the parent's DELETE impossible and the erasure stops half-way), and rows retained under a written exemption. `erase()` recomputes the plan and refuses when the digest moved, so 'executes a plan that was printed' is checked rather than trusted; the CLI deliberately has no erase action, because an irreversible delete belongs to the application that knows why it is being issued. Erasure is irreversible by definition here: there is no hash disposition, 'hash'/'mask'/'anonymise' are refused by name with the reason, and Pseudonymise(Declared(...)) records that the subject stays identifiable. Execution is wreath.passes -- one ChunkedPass per table, children before parents, Ceiling.at_launch() so the walk terminates; retention is Sealed(after=), the window as the frontier rather than a now()-interval predicate that would move the finish line mid-walk. Backups are out of scope and the docs say so rather than implying otherwise; the erasure record exists so a restore can replay outstanding erasures, and its own window has no default because the honest one is the operator's backup horizon. Two declaration surfaces, one registry: `Annotated[..., Subject()]`/`Personal(...)` on the column and `classified(...)` as a `wreath.orm.Facet` for the row-level facts are read into exactly the arguments `classify()` takes, and tests assert both produce identical `Classification`s and identical plan digests -- the explicit call is not a legacy path, it is the one that works for models a package you do not own declares. `erase()` records itself: one transaction reads the pass ledger, requires every declared pass to be `done`, and only then appends the record via `wreath.log.PostgresLog.append(connection=...)`, so a receipt cannot exist for an erasure that did not finish; the reverse window (finished, crashed before the record) is recovered by re-running, since the walks are resumable and the record is deduplicated on (subject, plan digest). The record holds subject, timestamp, plan digest and counts and nothing else -- a copy of erased values would make the evidence store a re-identification store -- and it lives in the `wreath` schema so no traversal of the application's graph can reach it. An erasure is deliberately not one transaction, so no receipt can share one with it; completion-gated is the strongest honest claim and the module says so rather than implying atomicity it cannot have."
+    },
+    {
+      "name": "notifications",
+      "capability": "Notifications as declared kinds over email and Web Push: DKIM signing, RFC 8058 one-click unsubscribe, a suppression list transactional mail deliberately bypasses, dependency-free VAPID and aes128gcm push, and a DNS deliverability check",
+      "replaces": [
+        "pywebpush",
+        "dkimpy",
+        "django-anymail",
+        "celery-email",
+        "py-vapid"
+      ],
+      "guides": [
+        "docs/guides/notifications.md"
+      ],
+      "reference": [
+        "docs/reference/notifications.md"
+      ],
+      "sources": [
+        "src/wreath/notifications.py",
+        "src/wreath/_webpush.py",
+        "src/wreath/_native/aesgcm.c",
+        "src/wreath/_dkim.py",
+        "src/wreath/_dns.py"
+      ],
+      "tests": [
+        "tests/test_dkim_signing.py",
+        "tests/test_webpush_crypto.py",
+        "tests/test_aesgcm_parity.py",
+        "tests/test_aesgcm_vectors.py",
+        "tests/test_aesgcm_source.py",
+        "tests/test_notifications_delivery.py",
+        "tests/test_notifications_deliverability.py"
+      ],
+      "policy": "`MailClass` has no default, and that is the whole design. The transactional/marketing boundary is a legal question with a technical encoding and both wrong answers are expensive: everything-transactional makes you a non-compliant bulk sender under rules that carry a permanent 550 since May 2026, and everything-marketing stops a suppressed address receiving its own password reset. So transactional mail reaches a suppressed address and marketing mail does not, the suppression list is consulted by the thing that sends (an ESP-side list does not stop a self-hosted SMTP path), and marketing mail with no RFC 8058 `Unsubscribe` is refused when the `Message` is built rather than when it is sent. Every DKIM signature is verified with the public exponent before it is returned, because a wrong signature is DMARC `fail` rather than `none` -- worse than unsigned. `SmtpEmailSender.build` returns the exact bytes transmitted and `_deliver` uses `sendmail` rather than `send_message`, so re-serialisation under another policy cannot refold a signed header. A push service answering 404 or 410 deletes the subscription; every other failure keeps it for the job to retry, because deleting on a transient error loses a real recipient permanently. Each push takes a fresh ephemeral P-256 key: reusing one reuses the content key and nonce together, which AES-GCM does not survive. `wreath._dns` never raises and never decides -- it reports 'could not tell' as a distinct finding from 'not configured', validates no DNSSEC, and exists only so a diagnostic can ask DNS the question the code cannot answer about itself. AES-GCM is a native/pure pair rather than a choice between them: `_native/aesgcm.c` runs the block cipher on AES-NI and GHASH on PCLMULQDQ, both dispatched by CPUID at import through `simd.h`, and the Python in `_webpush` is simultaneously the fallback for a CPU without them and the twin `tests/test_aesgcm_parity.py` holds it byte-for-byte equal to. That took the AES of a 4000-byte record from 11.58 ms to 4.03 us, 4.15 us through the facade, over 15 interleaved rounds against an A/A floor of 2-11 us. It is the AES only, and the ablation says so: a whole `encrypt()` over 3900 bytes is 10.83 ms, its two P-256 scalar multiplications alone are 10.79 ms, and its AES is 4.65 us -- so the curve is now the push to within the noise, a 10,000-subscriber fan-out loses two minutes of block cipher and keeps two minutes of elliptic curve, and the curve is the next thing to own rather than something this change quietly fixed. The native path is constant time and the pure one is not -- its S-box is a table indexed by secret state and `_gf_mul` branches on its operand -- so which you get depends on the CPU, and both files say that outright rather than letting the C arm imply the fallback was fixed too."
+    },
+    {
+      "name": "log",
+      "capability": "One append-only log on PostgreSQL, read back from a cursor that cannot skip a row a slower transaction committed late -- and the audit trail built on it, recorded by the ORM inside the transaction that made the change",
+      "replaces": [
+        "kafka-python",
+        "confluent-kafka",
+        "django-auditlog",
+        "sqlalchemy-continuum"
+      ],
+      "guides": [
+        "docs/guides/audit-log.md"
+      ],
+      "reference": [
+        "docs/reference/log.md",
+        "docs/reference/audit_log.md"
+      ],
+      "sources": [
+        "src/wreath/log.py",
+        "src/wreath/audit_log.py",
+        "src/wreath/streams.py"
+      ],
+      "tests": [
+        "tests/test_log_declaration.py",
+        "tests/test_log_cursor_live.py",
+        "tests/test_log_buffer_live.py",
+        "tests/test_audit_log_declaration.py",
+        "tests/test_audit_log_live.py",
+        "tests/test_streams_reader.py"
+      ],
+      "decisions": [
+        "docs/decisions/0027-a-log-cursor-is-a-transaction-id.md"
+      ],
+      "policy": "A cursor is (xid, seq), never a sequence number alone and never a sequence number gated on visibility -- both skip rows, silently, under concurrency. Retention is declared with no default, because a chunk buffer and an audit trail want opposite answers, and it is *executed* by `retention_pass`, a `wreath.passes` walk whose deletions are counted in the pass ledger -- never by the erasure door, because a scheduled walk holding `wreath.audit_erasure` would grant the permission to delete evidence every five minutes to a process nobody watches. An audit record is appended on the caller's own connection so it shares the fate of the write it describes; an unattributed write to an audited model is refused before it reaches the database. Appends batch: `append_many` decomposes a batch into powers-of-two multi-row INSERTs so the statement text stays one of a bounded, prepared set, and both the chunk buffer's flush and the ORM session's per-flush audit records go through it -- a thousand rows are six statements, not a thousand."
+    },
+    {
+      "name": "streams",
+      "capability": "Resumable streams over durable work: a producer runs as a durable job, its output goes to an append-only log, and a reconnecting client attaches to the log from its Last-Event-ID instead of re-invoking the producer",
+      "replaces": [
+        "resumable-stream",
+        "durable-streams",
+        "ably",
+        "pusher"
+      ],
+      "guides": [
+        "docs/guides/streams.md"
+      ],
+      "reference": [
+        "docs/reference/streams.md"
+      ],
+      "sources": [
+        "src/wreath/streams.py"
+      ],
+      "tests": [
+        "tests/test_streams_reader.py",
+        "tests/test_streams_live.py"
+      ],
+      "policy": "The producer runs detached from the connection, in a `wreath.jobs` task, and that is the property everything else depends on. Idempotency of a retried producer is the **fence** the queue already bumps on each claim: every chunk row carries it, and the reader holds the highest fence the stream has reached -- seeded from the table, under the same horizon the read uses -- so a row below it is skipped and a row above it emits `superseded` before the new content. The below case is not defensive theatre: a worker whose lease expired is often still alive and still flushing, and its rows land after the newer attempt's in commit order. A fresh attacher never receives the replaced range at all; a resuming one is told, because a client that concatenates a replaced range renders duplicated text and blames the model. `on_retry='truncate'` deletes the replaced rows instead and tells the reader exactly the same thing. **Exactly-once is a client-side property**: the wire is at-least-once and the event id is what makes de-duplication possible, so nothing here claims otherwise. `Last-Event-ID` is client-supplied and validated as an index into *one* log -- the id carries a digest of the stream key, so a cursor lifted from another stream is refused by name rather than silently skipping this stream's rows below it, which is what a bare `(xid, seq)` would do. `declaration()` refuses `retain=KEEP_FOREVER`: the chunk log is delivery, not transcript, and a buffer that cannot expire is how prompts and completions become unerasable; conversation history is application data in the ORM. Cancellation is the job's and there is no third path -- `Streams.cancel` writes the terminal row *first* (attaching to a cancelled stream must return the record, not hang) and then `JobRunner.cancel` bumps the fence so the running attempt's bookkeeping matches no row. A stream nobody attaches to still costs, so `started` is counted against `attached` and `check_stream_attachment` reads the gap as a finding. Writes batch through `wreath.log`'s `_Buffer`, and the buffer is drained before it can refuse a row, because `_Buffer.offer` counts a refusal as a drop and a dropped chunk is a hole in a stream that promises none. No LLM provider client ships: providers change monthly, `wreath.http_client` already pools and retries, and the framework-shaped part is this primitive."
     }
   ],
   "invariants": "AGENTS.md",
