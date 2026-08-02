@@ -133,7 +133,20 @@ wreath_jose_parse(PyObject *Py_UNUSED(self), PyObject *args)
         PyErr_SetString(PyExc_ValueError, "compact JWT exceeds maximum size");
         return NULL;
     }
-    /* Find exactly two '.' separators. */
+    /* Find exactly two '.' separators.
+     *
+     * One byte at a time, where three `wreath_memmem(..., ".", 1)` calls would
+     * each reach glibc's vectorised `memchr`. Left scalar deliberately, and
+     * this is the one of these scans whose length is caller-supplied: a real
+     * compact JWT is a few hundred to a couple of thousand bytes, and
+     * `JOSE_ABS_MAX_TOKEN` (1 MiB) is the absolute refusal above. Two things
+     * make the rewrite not worth it even so. The byte count is the same either
+     * way -- proving there is no *third* dot means reading to the end of the
+     * token whichever primitive does it, so there is no early exit to win --
+     * and at the realistic length the whole scan is under a microsecond
+     * against a signature verification measured in milliseconds. Revisit only
+     * if something starts handing this megabyte tokens, which the cap above
+     * says is a refusal rather than a workload. */
     Py_ssize_t d1 = -1, d2 = -1;
     for (Py_ssize_t i = 0; i < tok_len; i++) {
         if (tok[i] != '.') {

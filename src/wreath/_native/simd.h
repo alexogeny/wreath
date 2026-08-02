@@ -54,6 +54,46 @@
 #define WREATH_TARGET_AVX2
 #endif
 
+/* AES-NI and PCLMULQDQ, for the AES-128-GCM kernel in `aesgcm.c`.
+ *
+ * Detection only. The kernels themselves are not here: they answer a different
+ * shape of question from everything else in this header -- "transform this
+ * whole buffer" rather than "how many bytes may I pass over?" -- and they are
+ * one arm, not four, because the fallback is `wreath._webpush`'s pure-Python
+ * twin rather than another C arm.
+ *
+ * Both features are optional on x86-64 (Westmere, 2010, was the first part with
+ * either) and both must be tested at run time: a binary built on a machine that
+ * has them still has to run on one that does not, and the failure mode is
+ * SIGILL rather than a wrong answer. `ssse3` comes along because GHASH's byte
+ * order needs `pshufb`; `sse4.1` deliberately does not, so the kernel needs no
+ * third feature bit to check.
+ *
+ * Gated on GNU/clang for the same reason the AVX2 arm above is: MSVC has the
+ * intrinsics but not per-function target selection, so compiling them would
+ * mean compiling them for *every* function in the translation unit. There the
+ * pure twin is the whole implementation.
+ */
+#if defined(WREATH_HAVE_SSE2) && (defined(__GNUC__) || defined(__clang__))
+#include <tmmintrin.h>
+#include <wmmintrin.h>
+#define WREATH_HAVE_AESGCM 1
+#define WREATH_TARGET_AESGCM __attribute__((target("aes,pclmul,ssse3")))
+#else
+#define WREATH_TARGET_AESGCM
+#endif
+
+static inline int
+wreath_simd_has_aesgcm(void)
+{
+#if defined(WREATH_HAVE_AESGCM)
+    return __builtin_cpu_supports("aes") && __builtin_cpu_supports("pclmul") &&
+           __builtin_cpu_supports("ssse3");
+#else
+    return 0;
+#endif
+}
+
 /* NEON is part of the ARMv8 baseline, so aarch64 needs no dispatch at all:
  * the arm is either compiled in and always usable, or the target is not
  * aarch64. That makes it simpler than the x86 side, not more delicate. */

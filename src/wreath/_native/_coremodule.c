@@ -115,6 +115,16 @@ static PyMethodDef core_methods[] = {
      "json_dumps(obj) -> bytes\nSerialize to compact UTF-8 JSON."},
     {"msgpack_dumps", wreath_msgpack_dumps, METH_O,
      "msgpack_dumps(obj) -> bytes\nSerialize to MessagePack."},
+    {"aesgcm_arms", wreath_aesgcm_arms, METH_NOARGS,
+     "aesgcm_arms() -> tuple[str, ...]\n"
+     "('aesni', 'pclmul') when this CPU and build can run the hardware "
+     "AES-128-GCM path, or () when wreath._webpush must use its pure twin.\n"
+     "build sentinel: wreath-aesgcm-aesni-pclmul"},
+    {"aes128gcm_encrypt", wreath_aes128gcm_encrypt, METH_VARARGS,
+     "aes128gcm_encrypt(key, nonce, plaintext, aad) -> ciphertext || tag"},
+    {"aes128gcm_decrypt", wreath_aes128gcm_decrypt, METH_VARARGS,
+     "aes128gcm_decrypt(key, nonce, message, aad) -> plaintext, or None when "
+     "the tag does not verify."},
     {"geo_haversine", (PyCFunction)(void (*)(void))wreath_geo_haversine,
      METH_FASTCALL,
      "geo_haversine(lat1, lon1, lat2, lon2) -> float\n"

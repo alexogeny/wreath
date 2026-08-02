@@ -129,6 +129,13 @@ PyObject *wreath_json_configure(PyObject *self, PyObject *args);
 /* msgpack.c */
 PyObject *wreath_msgpack_dumps(PyObject *self, PyObject *arg);
 
+/* aesgcm.c: AES-128-GCM on AES-NI/PCLMULQDQ. `wreath_aesgcm_arms` returns an
+ * empty tuple when the CPU or the build has neither, which is what
+ * `wreath._webpush` reads to decide between this and its pure twin. */
+PyObject *wreath_aesgcm_arms(PyObject *self, PyObject *ignored);
+PyObject *wreath_aes128gcm_encrypt(PyObject *self, PyObject *args);
+PyObject *wreath_aes128gcm_decrypt(PyObject *self, PyObject *args);
+
 /* geospatial.c */
 PyObject *wreath_geo_haversine(PyObject *self, PyObject *const *args, Py_ssize_t nargs);
 
