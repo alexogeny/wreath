@@ -76,7 +76,6 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
-from functools import cache
 from pathlib import Path
 
 from .native_lint import repo_root
@@ -149,9 +148,8 @@ def _is_repo_path(text: str) -> bool:
     return not any(char in text for char in "*<> \t|")
 
 
-@cache
-def _is_ignored(root: Path, cited: str) -> bool:
-    """True when `.gitignore` excludes `cited`, so a clone would not have it.
+def _ignored_paths(root: Path, cited: list[str]) -> frozenset[str]:
+    """The cited paths excluded by `.gitignore`, in one Git process.
 
     *Ignored*, deliberately, rather than *untracked*. An untracked file is
     ordinary uncommitted work and will be in the next commit; an ignored one
@@ -164,14 +162,23 @@ def _is_ignored(root: Path, cited: str) -> bool:
     cannot tell is worse than one that stays quiet.
     """
     try:
+        values = sorted({value.rstrip("/") for value in cited})
+        if not values:
+            return frozenset()
         result = subprocess.run(
-            ("git", "-C", str(root), "check-ignore", "-q", "--", cited.rstrip("/")),
-            capture_output=True, check=False, timeout=30,
+            ("git", "-C", str(root), "check-ignore", "--stdin"),
+            input="".join(f"{value}\n" for value in values),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
+        return frozenset()
     # 0 = ignored, 1 = not ignored, 128 = not a repository or git unavailable.
-    return result.returncode == 0
+    if result.returncode not in (0, 1):
+        return frozenset()
+    return frozenset(result.stdout.splitlines())
 
 
 def _public_modules(root: Path) -> list[str]:
@@ -222,10 +229,11 @@ def check_manifest(root: Path) -> list[Finding]:
             trimmed = source.removeprefix("src/wreath/").rstrip("/")
             covered.add(trimmed.removesuffix(".py"))
 
+    ignored = _ignored_paths(root, [value for _where, value in cited])
     for where, value in cited:
         if not (root / value).exists():
             findings.append(Finding("MAP002", MANIFEST, f"{where}: no such path {value!r}"))
-        elif _is_ignored(root, value):
+        elif value.rstrip("/") in ignored:
             findings.append(
                 Finding("MAP009", MANIFEST, f"{where}: {value!r} is excluded by .gitignore;"
                         " a fresh clone would not have it")
@@ -313,14 +321,18 @@ def check_prose(root: Path, relative: str) -> list[Finding]:
     text = _FENCE.sub("", path.read_text(encoding="utf-8"))
     findings: list[Finding] = []
     seen: set[str] = set()
+    cited_paths: list[str] = []
     for match in _INLINE_CODE.finditer(text):
         cited = match.group(1)
         if not _is_repo_path(cited) or cited in seen:
             continue
         seen.add(cited)
+        cited_paths.append(cited)
+    ignored = _ignored_paths(root, cited_paths)
+    for cited in cited_paths:
         if not (root / cited.rstrip("/")).exists():
             findings.append(Finding("MAP005", relative, f"cites {cited!r}, which does not exist"))
-        elif _is_ignored(root, cited):
+        elif cited.rstrip("/") in ignored:
             findings.append(
                 Finding("MAP009", relative, f"cites {cited!r}, which .gitignore excludes;"
                         " a fresh clone would not have it")
