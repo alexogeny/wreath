@@ -271,7 +271,7 @@ SENSITIVE_FIELD = re.compile(
     r"|credential|ssn|otp|mfa|totp|cv[cv]|security[_-]?code"
     r"|(?:^|[_-])pin([_-]?(code|number))?$|(?:^|[_-])pwd?(?:[_-]|$)|bearer"
     r"|(account|routing)[_-]?number|(recovery|backup)[_-]?(code|answer)"
-    r"|security[_-]?answer",
+    r"|security[_-]?answer|(?:^|[_-])(authorization|cookie)(?:[_-]|$)",
     re.IGNORECASE,
 )
 
