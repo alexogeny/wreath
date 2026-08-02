@@ -102,13 +102,14 @@ def test_every_named_operator_is_reachable_from_the_public_surface() -> None:
     Without this, an operator that stops being emitted shrinks coverage
     silently and the run still exits 0.
     """
-    assert len(OPERATORS) == 19
+    assert len(OPERATORS) == 21
     assert set(OPERATORS) == {
         "predicate.drop-operand", "predicate.always-true", "expression.take-branch",
         "comprehension.drop-clause", "guard.remove-raise", "guard.never-fires",
         "guard.always-fires", "guard.drop-statement", "declaration.drop-keyword",
         "declaration.widen-bound", "crud.drop-operation-authorize",
-        "crud.widen-access", "crud.unprotect-column", "cedar.flip-effect",
+        "crud.widen-access", "crud.permit-refused-operation",
+        "crud.unprotect-column", "crud.expose-sensitive", "cedar.flip-effect",
         "cedar.drop-condition", "cedar.delete-policy", "value.widen-bound",
         "value.disable-pattern", "value.empty-denylist",
     }
@@ -206,7 +207,12 @@ _CRUD_FACTORY = """
 
 
     class Account:
-        __wreath_column_map__ = {}
+        # A real column map, so `crud.expose-sensitive` has a withheld set to
+        # read. `api_token` and `password_hash` match `SENSITIVE_FIELD`;
+        # `id` and `name` do not.
+        __wreath_column_map__ = {
+            "id": None, "name": None, "api_token": None, "password_hash": None,
+        }
 
 
     def build():
@@ -253,10 +259,22 @@ def test_each_crud_operation_is_verified_independently(tmp_path: Path) -> None:
 
 
 def test_a_crud_denial_can_be_turned_into_a_permit(tmp_path: Path) -> None:
-    """`Access.deny()` is a refusal somebody wrote on purpose."""
+    """`Access.deny()` is a refusal somebody wrote on purpose, and it gets its
+    own operator.
+
+    The *transform* is shared with `crud.widen-access` -- rewrite the method to
+    the permissive twin -- but the finding is not: a surviving
+    `permit-refused-operation` says nobody ever checked that the operation is
+    refused at all, where a surviving `widen-access` says nobody distinguished a
+    permitted caller from a refused one. One name for both reads as one number
+    in the report, and the first is much the worse of the two.
+    """
     found = _scan_resolved(tmp_path, _CRUD_FACTORY, "crud_deny")
-    widened = _by(found, "crud.widen-access")
-    assert any("create" in c.control for c in widened), [c.control for c in widened]
+    permitted = _by(found, "crud.permit-refused-operation")
+    assert any("create" in c.control for c in permitted), [c.control for c in permitted]
+    assert all(
+        "widen" not in c.operator for c in permitted
+    ), "a refusal must not also be offered as a widening"
 
 
 def test_each_protected_column_is_verified_independently(tmp_path: Path) -> None:
@@ -278,30 +296,70 @@ def test_each_protected_column_is_verified_independently(tmp_path: Path) -> None
     ]
 
 
-def test_widening_expose_is_out_of_static_reach(tmp_path: Path) -> None:
-    """`expose=` cannot be widened from the source alone, and pretending
-    otherwise would ship a broken mutant.
+def test_revealing_one_withheld_column_is_a_mutant_per_column(tmp_path: Path) -> None:
+    """`expose=` *can* be widened, and the name comes from the model.
 
-    `expose` is the escape hatch for columns crud withholds *by default* --
-    sensitive-looking names and retrieval columns, derived from the model's
-    column map. So the name a widening mutation would have to add is precisely
-    the one name that is **not** written at the call site. Fabricating one
-    yields a mutant that names a column the model does not have: it either
-    raises, which kills the mutant for a reason unrelated to any control, or is
-    ignored, which reports a survivor nobody can act on. Either way the score
-    moves for a reason that is not about the suite.
+    This was declined once, for a good reason that turned out to be answerable:
+    the name a widening must add is exactly the one **not** written at the call
+    site, so fabricating one produces a mutant that either raises or is ignored.
+    But it is not fabricated -- `crud_router(Account, ...)` names the model, the
+    callee resolver already walks a module global to a live object, and
+    `wreath.crud.sensitive_fields` is the *declaration* of what is withheld.
 
-    Reaching it needs the *model* resolved and its withheld set read, which is
-    a different kind of coupling from anything else in this library. Left
-    undone on purpose; `crud.unprotect-column` covers the column control that
-    the source does state.
+    `api_token` is already exposed at the call site, so revealing it would be a
+    no-op mutant; only `password_hash` is offered.
     """
     found = _scan_resolved(tmp_path, _CRUD_FACTORY, "crud_expose")
-    assert not [c for c in found if c.operator.startswith("crud.expose")]
-    # ... and the wholesale drop is still offered, so `expose=` is not unwatched.
+    exposed = _by(found, "crud.expose-sensitive")
+    assert {c.control.split("`")[1] for c in exposed} == {"password_hash"}, [
+        c.control for c in exposed
+    ]
+    # ... and the wholesale drop is still offered, so `expose=` is watched from
+    # both directions: one mutant reveals a column, another removes the
+    # exception that reveals one.
     assert any(
         "`expose=`" in c.control for c in _by(found, "declaration.drop-keyword")
     )
+
+
+def test_a_model_that_does_not_resolve_offers_no_expose_mutant(tmp_path: Path) -> None:
+    """The rule the keyword operators already follow: where the declaration
+    cannot be read, decline rather than guess. A fabricated column name is a
+    mutant that moves the score for a reason that is not about the suite."""
+    source = """
+        from wreath.crud import crud_router
+
+
+        def _open(request): ...
+
+
+        def build(model):
+            # The model is a *parameter*, so there is nothing to resolve.
+            return crud_router(model, _open, expose=("api_token",))
+    """
+    found = _scan_resolved(tmp_path, source, "crud_unresolvable_model")
+    assert _by(found, "crud.expose-sensitive") == []
+
+
+def test_a_model_with_no_sensitive_column_offers_nothing(tmp_path: Path) -> None:
+    """Nothing is withheld, so there is nothing to reveal -- and an operator
+    that fired anyway would be inventing a control."""
+    source = """
+        from wreath.crud import crud_router
+
+
+        def _open(request): ...
+
+
+        class Plain:
+            __wreath_column_map__ = {"id": None, "name": None}
+
+
+        def build():
+            return crud_router(Plain, _open, expose=())
+    """
+    found = _scan_resolved(tmp_path, source, "crud_no_secrets")
+    assert _by(found, "crud.expose-sensitive") == []
 
 
 def test_a_crud_call_through_an_unresolvable_receiver_is_still_answerable(
@@ -513,6 +571,12 @@ def test_a_graphql_fields_policy_is_mutable_where_the_endpoint_is_built(
         assert any(
             f"`policy=` on `{call}(...)`" in control for control in dropped
         ), (call, dropped)
+    # One mutant per *field*, which is the property plan 05 asked for and did
+    # not have. It needed no GraphQL-specific operator in the end: the per-field
+    # declaration is an ordinary declaring call, so `declaration.drop-keyword`
+    # reaches it once the table names the call.
+    per_field = [control for control in dropped if "`policy=` on" in control]
+    assert len(per_field) == 3, per_field
 
 
 def test_an_mcp_servers_oauth_boundary_is_a_control(tmp_path: Path) -> None:
@@ -995,9 +1059,19 @@ def test_dropping_one_operations_rule_kills_and_survives_independently(
 def test_widening_one_rule_to_public_kills_and_survives_independently(
     crud_run: dict,
 ) -> None:
-    outcomes = _crud_outcomes(crud_run, "crud.widen-access")
-    assert outcomes["delete"] == "killed", crud_run["mutants"]
-    assert outcomes["list"] in ("survived", "unreached"), crud_run["mutants"]
+    """Two operators, because they are two findings.
+
+    The fixture declares `delete: Access.deny()` -- an outright refusal, watched
+    by a test -- and `list: Access.roles("reader")` -- a narrowing, watched by
+    nothing. Under one operator name those two land in one number, and the
+    serious one (an operation nobody ever checked is refused) is averaged into
+    the mild one.
+    """
+    refused = _crud_outcomes(crud_run, "crud.permit-refused-operation")
+    widened = _crud_outcomes(crud_run, "crud.widen-access")
+    assert refused == {"delete": "killed"}, crud_run["mutants"]
+    assert list(widened) == ["list"], crud_run["mutants"]
+    assert widened["list"] in ("survived", "unreached"), crud_run["mutants"]
 
 
 def test_unprotecting_one_column_kills_and_survives_independently(

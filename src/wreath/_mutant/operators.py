@@ -730,6 +730,7 @@ def _declaration_operators(context: _Context) -> Iterator[Candidate]:
             defaults = _declared_controls(node)
         label = _short(node.func, 40)
         yield from _mapping_entry_operators(node, node_id, scope, label, defaults)
+        yield from _expose_operators(context.module, node, node_id, scope, label, defaults)
         for index, keyword in enumerate(node.keywords):
             if keyword.arg is None:
                 continue
@@ -769,10 +770,129 @@ _MAPPING_CONTROLS: frozenset[str] = frozenset({"authorize", "policies"})
 #: Keywords whose value is a sequence of column names, each one its own control.
 _SEQUENCE_CONTROLS: frozenset[str] = frozenset({"readonly", "exclude"})
 
-#: The permissive twin of a refusal, for `crud.widen-access`. `Access.deny()`
-#: answers 403 with the route present; `Access.public()` is the same declaration
-#: with the refusal taken out.
+#: The permissive twin of a refusal. `Access.deny()` answers 403 with the route
+#: present; `Access.public()` is the same declaration with the refusal taken out.
 _PERMISSIVE_ACCESS = "public"
+
+#: The method that spells an outright refusal, as opposed to a narrowing.
+#: `Access.deny()` and `Access.roles("reader")` are the same *transform* --
+#: rewrite the method to `public` -- but they are not the same *finding*, which
+#: is why they are two operators rather than one:
+#:
+#: * `crud.permit-refused-operation` removes a rule that said **nobody**. A
+#:   survivor there means no test ever checked that the operation is refused,
+#:   and the operation is now reachable by anyone.
+#: * `crud.widen-access` removes a rule that said **these roles**. A survivor
+#:   means no test distinguished a permitted caller from a refused one.
+#:
+#: One name for both read as a single number in the report, and the first is
+#: the more serious of the two by a distance. The transform is shared; only the
+#: label and the operator name differ.
+_REFUSAL_ACCESS = "deny"
+
+
+def _add_sequence_element(kw_index: int, value: str) -> Callable[[ast.AST], ast.AST]:
+    """Append one name to a tuple/list passed as a keyword."""
+
+    def mutate(node: ast.AST) -> ast.AST:
+        call = _want(node, ast.Call)
+        sequence = call.keywords[kw_index].value
+        if not isinstance(sequence, ast.Tuple | ast.List):  # pragma: no cover
+            raise TypeError(f"expected a sequence, got {type(sequence).__name__}")
+        sequence.elts = [*sequence.elts, ast.Constant(value=value)]
+        return call
+
+    return mutate
+
+
+def _add_keyword(name: str, value: str) -> Callable[[ast.AST], ast.AST]:
+    """Add a keyword the call site does not have, holding one name."""
+
+    def mutate(node: ast.AST) -> ast.AST:
+        call = _want(node, ast.Call)
+        call.keywords = [
+            *call.keywords,
+            ast.keyword(arg=name, value=ast.Tuple(elts=[ast.Constant(value=value)],
+                                                  ctx=ast.Load())),
+        ]
+        return call
+
+    return mutate
+
+
+def _expose_operators(
+    module: ModuleType | None,
+    node: ast.Call,
+    node_id: int,
+    scope: tuple[str, ...],
+    label: str,
+    defaults: frozenset[str] | None,
+) -> Iterator[Candidate]:
+    """Reveal one column `crud` withholds by default, one mutant per column.
+
+    **The name a mutation has to add is exactly the one not written at the call
+    site**, which is why this was declined as out of static reach: `expose=` is
+    the escape hatch for columns withheld *by default*, so the operator has to
+    know what the default hides. Fabricating a name either raises (killing the
+    mutant for a reason unrelated to any control) or is ignored (reporting a
+    survivor nobody can act on).
+
+    It is knowable after all, and from the same place everything else here is
+    knowable from: the **model**. `crud_router(Sighting, ...)` names it as its
+    first argument, `_resolve_callee` already walks a module global to a live
+    object, and `wreath.crud.sensitive_fields` is the declaration of what is
+    withheld -- read, not guessed. So the operator fires only where the model
+    resolves, and declines silently where it does not, which is the same rule
+    the keyword operators follow.
+
+    A column already named in `expose=` is skipped: revealing what is already
+    revealed is a no-op mutant, and a no-op mutant that survives is noise.
+
+    `retrieval_fields` is deliberately *not* included. A `Vector` embedding is
+    withheld because it is infrastructure rather than because it is a secret,
+    so exposing one is a payload-size decision and not an authorization one --
+    and this library's whole subject is controls.
+    """
+    if defaults is None or "expose" not in defaults or not node.args:
+        return
+    model = _resolve_callee(module, node.args[0])
+    # The precondition rather than a `try`: a first argument that resolves to
+    # something which is not a wreath model is the ordinary case for a call
+    # this table matched by name alone, so it is a check and not an exception.
+    if not isinstance(model, type) or not hasattr(model, "__wreath_column_map__"):
+        return
+    from ..crud import sensitive_fields
+
+    withheld = sensitive_fields(model)
+    if not withheld:
+        return
+    index = next(
+        (i for i, k in enumerate(node.keywords) if k.arg == "expose"), None
+    )
+    already: set[str] = set()
+    if index is not None:
+        value = node.keywords[index].value
+        if not isinstance(value, ast.Tuple | ast.List):
+            return
+        already = {
+            element.value
+            for element in value.elts
+            if isinstance(element, ast.Constant) and isinstance(element.value, str)
+        }
+    for column in sorted(withheld - already):
+        yield Candidate(
+            operator="crud.expose-sensitive",
+            control=f"`{column}` is withheld by `{label}(...)` "
+                    f"(exposed, so it reaches every response)",
+            line=node.lineno,
+            scope=scope,
+            node_id=node_id,
+            watch=(node.lineno, node.func.lineno),
+            mutate=(
+                _add_sequence_element(index, column) if index is not None
+                else _add_keyword("expose", column)
+            ),
+        )
 
 
 def _mapping_entry_operators(
@@ -816,11 +936,19 @@ def _mapping_entry_operators(
                 if isinstance(entry, ast.Call) and isinstance(entry.func, ast.Attribute):
                     if entry.func.attr == _PERMISSIVE_ACCESS:
                         continue
+                    refusal = entry.func.attr == _REFUSAL_ACCESS
                     yield Candidate(
-                        operator="crud.widen-access",
-                        control=f"the `{operation}` rule "
-                                f"`{_short(entry, 32)}` (widened to "
-                                f"`{_PERMISSIVE_ACCESS}`)",
+                        operator=(
+                            "crud.permit-refused-operation" if refusal
+                            else "crud.widen-access"
+                        ),
+                        control=(
+                            f"the `{operation}` refusal `{_short(entry, 32)}` "
+                            f"(turned into a `{_PERMISSIVE_ACCESS}` permit)"
+                            if refusal else
+                            f"the `{operation}` rule `{_short(entry, 32)}` "
+                            f"(widened to `{_PERMISSIVE_ACCESS}`)"
+                        ),
                         line=getattr(entry, "lineno", node.lineno),
                         scope=scope,
                         node_id=node_id,
@@ -1105,7 +1233,9 @@ OPERATORS: tuple[str, ...] = (
     "declaration.widen-bound",
     "crud.drop-operation-authorize",
     "crud.widen-access",
+    "crud.permit-refused-operation",
     "crud.unprotect-column",
+    "crud.expose-sensitive",
     "cedar.flip-effect",
     "cedar.drop-condition",
     "cedar.delete-policy",

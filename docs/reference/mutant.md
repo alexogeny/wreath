@@ -100,8 +100,10 @@ Filter with `--operators PREFIX` (repeatable; matches on the prefix, so
 | `declaration.drop-keyword` | a control keyword at a call site — `authenticated=`, `second_factor=`, `policies=`, `dependencies=`, `middleware=`, `rate_limit=`, `readonly=`, `expose=`, `audience=`, `origins=`, `algorithms=`, `require_user_verification=`, and the rest of `CONTROL_KEYWORDS` |
 | `declaration.widen-bound` | a numeric bound at a call site, widened past reach |
 | `crud.drop-operation-authorize` | one operation's entry in an `authorize={...}` mapping, so that operation alone falls back |
-| `crud.widen-access` | one operation's rule, rewritten to the permissive twin of whatever it names — `Access.deny()` becomes `Access.public()` |
+| `crud.widen-access` | one operation's `Access.roles(...)`/`Access.permissions(...)`, rewritten to `Access.public()` |
+| `crud.permit-refused-operation` | one operation's `Access.deny()`, turned into a permit — the same transform, kept apart because a surviving refusal is much the worse finding |
 | `crud.unprotect-column` | one column from `readonly=`/`exclude=`, so that column alone loses its protection |
+| `crud.expose-sensitive` | one column `crud` withholds by default, added to `expose=` so it reaches every response |
 | `cedar.flip-effect` | a Cedar `forbid`, turned into a `permit` |
 | `cedar.drop-condition` | a `when` or `unless` clause from a Cedar policy |
 | `cedar.delete-policy` | one whole policy statement |
@@ -164,13 +166,27 @@ building one from a name, so the mutant introduces no identifier the module
 might not have imported — `Access.deny()` becomes `Access.public()`, whatever
 `Access` was bound to at that call site.
 
-There is no operator for widening `expose=`. `expose` is the escape hatch for
-columns crud withholds *by default*, derived from the model's column map, so the
-name such a mutation would have to add is precisely the one name not written at
-the call site. Fabricating one names a column the model does not have: it either
-raises, killing the mutant for a reason unrelated to any control, or is ignored,
-reporting a survivor nobody can act on. The wholesale `expose=` drop is still
-offered, so the control is not unwatched.
+`crud.widen-access` and `crud.permit-refused-operation` share that transform
+and are two operators on purpose. A surviving `permit-refused-operation` says
+nobody ever checked that the operation is refused *at all*, and it is now
+reachable by anyone; a surviving `widen-access` says nobody distinguished a
+permitted caller from a refused one. One name for both averages the serious
+finding into the mild one.
+
+**Widening `expose=` needs the model, and gets it.** `expose` is the escape
+hatch for columns crud withholds *by default*, so the name a mutation must add
+is precisely the one name not written at the call site — which is why this was
+declined for a while, since fabricating one names a column the model does not
+have and moves the score for a reason that is not about the suite. It is not
+fabricated: `crud_router(Sighting, …)` names the model as its first argument,
+the same resolver that walks a callee to a module global walks it to the live
+class, and `wreath.crud.sensitive_fields` is the *declaration* of what is
+withheld. So `crud.expose-sensitive` offers one mutant per withheld column,
+skipping any the call site already exposes, and declines silently where the
+model does not resolve — the same rule the keyword operators follow. Retrieval
+columns (a `Vector`, a `TsVector`) are deliberately excluded: they are withheld
+because they are infrastructure, so exposing one is a payload-size decision
+rather than an authorization one.
 
 The `predicate.*`, `guard.*`, `expression.*` and `comprehension.*` operators are
 confined to functions whose own source names a control — `CONTROL_TOKENS` is

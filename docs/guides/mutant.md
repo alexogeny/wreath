@@ -62,6 +62,7 @@ Every operator names a control and takes it away:
 | `expression.take-branch` | the choice in a conditional expression — a limit keyed on the wrong side |
 | `comprehension.drop-clause` | the filter on a withheld-field set, so it stops withholding |
 | `declaration.*` | `roles=`, `second_factor=`, `readonly=`, `dependencies=`, `rate_limit=`, `sortable_fields=` … at the call site that declares them; or a numeric bound, widened past reach |
+| `crud.*` | one operation's rule dropped or widened; one operation's `Access.deny()` turned into a permit; one column unprotected; one withheld column exposed |
 | `cedar.*` | a `forbid` flipped to `permit`; a `when`/`unless` clause dropped; a whole policy deleted |
 | `value.*` | a module-level ceiling widened; a redaction pattern that now matches nothing; a deny-list emptied |
 
