@@ -86,6 +86,26 @@ def test_opinionated_threads_the_session_from_the_handler_down(app_tree, tmp_pat
     assert "objects" not in ported["repo.py"]
 
 
+def test_a_handler_that_already_owns_a_wreath_session_reuses_it(tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "router.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from wreath.orm import Session\n\n"
+        "router = APIRouter()\n\n\n"
+        '@router.get("/llamas")\n'
+        "async def llamas(session: Session):\n"
+        "    return await Llama.objects.all()\n",
+        encoding="utf-8",
+    )
+
+    source = _port(root, tmp_path / "out", opinionated=True)["router.py"]
+
+    assert source.count("session: Session") == 1
+    assert "await session.fetch(Llama.select())" in source
+    assert "orm.query.needs_session" not in source
+
+
 def test_every_ported_file_imports_what_it_uses(app_tree, tmp_path):
     """The Session annotation is worth nothing without the import beside it."""
     ported = _port(app_tree, tmp_path / "out", opinionated=True)

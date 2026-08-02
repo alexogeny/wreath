@@ -1369,7 +1369,14 @@ class _Emitter(ast.NodeVisitor):
         # keyword-only.
         star = "*, " if keyword_only and not (args.kwonlyargs or args.vararg) else ""
         extra = ""
-        if session == _SESSION_PARAM:
+        parameters = positional + list(args.kwonlyargs)
+        reuses_session = any(
+            arg.arg == session
+            and arg.annotation is not None
+            and self._is_orm_session(arg.annotation)
+            for arg in parameters
+        )
+        if session == _SESSION_PARAM and not reuses_session:
             self.needs_annotated = True
             self.needs.update({"Session", "FromORM"})
             extra = f"{_SESSION_PARAM}: Annotated[Session, FromORM()], "

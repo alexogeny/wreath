@@ -73,6 +73,28 @@ def test_a_field_marker_that_goes_takes_its_import_with_it() -> None:
     assert 'name: str = "anon"' in emitted
 
 
+def test_an_ordinary_callable_default_is_not_a_field_marker() -> None:
+    emitted = _emit(
+        "from pydantic import BaseModel\n\n\n"
+        "def initial_age():\n"
+        "    return 1\n\n\n"
+        "class Llama(BaseModel):\n"
+        "    age: int = initial_age()\n"
+    )
+
+    assert "age: int = initial_age()" in emitted
+
+
+def test_a_non_cors_fastapi_middleware_import_does_not_invent_cors() -> None:
+    emitted = _emit(
+        "from fastapi.middleware.gzip import GZipMiddleware\n\n\n"
+        "middleware = GZipMiddleware\n"
+    )
+
+    assert "from fastapi.middleware.gzip import GZipMiddleware" in emitted
+    assert "CORSMiddleware" not in emitted
+
+
 @pytest.mark.parametrize(
     "marker,expected",
     [
