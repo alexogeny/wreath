@@ -63,6 +63,34 @@ _SECRET_BEARING: Final = (str, bytes)
 
 _FORMATTER: Final = string.Formatter()
 
+#: Field names an application has declared personal, installed by
+#: `wreath.privacy.Privacy.classify`. Empty until something classifies a column,
+#: so a project that does not use `wreath.privacy` pays one frozenset membership
+#: test per *declared* site -- which happens once per site, at import, never on
+#: the logging path.
+#:
+#: This is the seam that makes a classification worth writing once. Declaring
+#: `Photo.owner_id` personal changes how a log field called `owner_id` is
+#: captured, with no second configuration file to keep in step with the schema
+#: -- and a second file is precisely how every hand-maintained redaction list
+#: drifts from the columns it is supposed to describe.
+#:
+#: Names rather than `(table, column)` pairs, because a keyword argument at a
+#: log call site carries a name and nothing else. That is broader than strictly
+#: correct in one direction only: an unrelated field sharing the name is
+#: fingerprinted rather than written verbatim, which is the safe way to be wrong.
+_PERSONAL_NAMES: set[str] = set()
+
+
+def declare_personal(names: frozenset[str]) -> None:
+    """Replace the set of field names treated as personal.
+
+    Replace rather than union: a registry that has dropped a classification
+    should stop claiming the name, and an accumulating set could never shrink.
+    """
+    _PERSONAL_NAMES.clear()
+    _PERSONAL_NAMES.update(names)
+
 
 class LogSiteError(ValueError):
     """A call site is malformed. Raised at registration, never at emit time."""
@@ -84,6 +112,15 @@ def declare(
 
     Scalars default to RAW because an integer is not a secret-bearing shape;
     strings and bytes default to HASHED because they are where a token ends up.
+
+    A name an application has classified as personal defaults to HASHED
+    whatever its type, because the type argument is wrong for exactly the
+    values that matter most: a subject identifier is very often an `int` or a
+    `UUID`-as-`int`, and "an integer is not a secret-bearing shape" stops being
+    true the moment the integer is which person this record is about. An
+    explicit disposition still wins -- the classification changes the *default*,
+    and a call site that says RAW on purpose has made a decision this should
+    not overrule.
     """
     if type_ not in _PACKABLE:
         raise LogSiteError(
@@ -93,7 +130,7 @@ def declare(
     if disposition is None:
         disposition = (
             CaptureDisposition.HASHED
-            if type_ in _SECRET_BEARING
+            if type_ in _SECRET_BEARING or name in _PERSONAL_NAMES
             else CaptureDisposition.RAW
         )
     return LogField(name=name, type=type_, disposition=disposition)
@@ -421,11 +458,11 @@ def pack_value(
         if not isinstance(value, str):
             return LogArg.none(), True
         return LogArg.text(value), False
-    if spec.type is bytes:
-        if not isinstance(value, bytes):
-            return LogArg.none(), True
-        return LogArg.text(value.decode("utf-8", "replace")), False
-    return LogArg.none(), True
+    # Registration admits only `_PACKABLE`; every other member returned above,
+    # so bytes is the closed final case rather than another defensive branch.
+    if not isinstance(value, bytes):
+        return LogArg.none(), True
+    return LogArg.text(value.decode("utf-8", "replace")), False
 
 
 def infer_field(name: str, value: object) -> LogField:
