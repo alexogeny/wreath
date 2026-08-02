@@ -70,6 +70,7 @@ class FakeTransport(asyncio.Transport):
         self.writeline_batches: list[tuple[Any, ...]] = []
         self.extra_info_calls: list[str] = []
         self.closed = False
+        self.closed_event = asyncio.Event()
         self.aborted = False
         self.reading_paused = False
         self._extra = extra or {
@@ -94,10 +95,12 @@ class FakeTransport(asyncio.Transport):
 
     def close(self) -> None:
         self.closed = True
+        self.closed_event.set()
 
     def abort(self) -> None:
         self.aborted = True
         self.closed = True
+        self.closed_event.set()
 
     def is_closing(self) -> bool:
         return self.closed
@@ -660,7 +663,7 @@ async def test_keep_alive_timeout(protocol_cls: type) -> None:
     transport = FakeTransport()
     protocol = protocol_cls(echo_ok, config, loop, set())
     protocol.connection_made(transport)
-    await asyncio.sleep(0.1)
+    await asyncio.wait_for(transport.closed_event.wait(), timeout=1.0)
     assert transport.closed
     assert transport.buffer == b""  # app never invoked
 
@@ -675,7 +678,7 @@ async def test_request_timeout(protocol_cls: type) -> None:
     protocol.connection_made(transport)
     # Send a partial head; the request timer starts once head bytes arrive.
     feed(protocol, b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n")
-    await asyncio.sleep(0.1)
+    await asyncio.wait_for(transport.closed_event.wait(), timeout=1.0)
     assert transport.buffer.startswith(b"HTTP/1.1 408")
 
 

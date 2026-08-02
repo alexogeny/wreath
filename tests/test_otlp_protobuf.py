@@ -231,7 +231,11 @@ class _Handler(BaseHTTPRequestHandler):
 def _serve(fn) -> list[tuple[str, str, bytes]]:
     _Handler.posts = []
     server = HTTPServer(("127.0.0.1", 0), _Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(
+        target=server.serve_forever,
+        kwargs={"poll_interval": 0.01},
+        daemon=True,
+    )
     thread.start()
     try:
         host, port = server.server_address

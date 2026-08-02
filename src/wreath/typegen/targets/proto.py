@@ -111,8 +111,8 @@ def _field_type(ref: TypeRef, where: str) -> tuple[str, str]:
     if ref.kind == "coordinate":
         return prefix, "Coordinate"
     if ref.kind == "page":
-        if not ref.arguments:
-            raise _refuse("an untyped page", where)
+        # The model builder refuses bare `Page` before a target sees it; every
+        # page reference here therefore has exactly one element argument.
         element_prefix, element = _field_type(ref.arguments[0], where)
         if element_prefix:
             raise _refuse(f"a page of {element_prefix.strip()} values", where)
