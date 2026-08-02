@@ -130,6 +130,24 @@ async def test_connection_loss_releases_native_backpressure_waiter() -> None:
 
 @requires_native
 @pytest.mark.asyncio
+async def test_connection_loss_fails_native_read_waiters_and_future_io() -> None:
+    protocol = native.BufferedProtocol()
+    protocol.connection_made(_FakeTransport())
+    pending = protocol.read_message()
+    assert not pending.done()
+
+    protocol.connection_lost(None)
+
+    with pytest.raises(ConnectionError, match="transport closed"):
+        await pending
+    with pytest.raises(ConnectionError, match="transport closed"):
+        await protocol.read_message()
+    with pytest.raises(ConnectionError, match="transport closed"):
+        protocol.write(b"query")
+
+
+@requires_native
+@pytest.mark.asyncio
 async def test_execute_control_messages_stay_on_native_path() -> None:
     protocol = native.BufferedProtocol()
     operation = _register(protocol, "execute", (23,), ("value",))

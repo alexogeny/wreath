@@ -384,6 +384,7 @@ typedef struct {
     Py_ssize_t resume_writing_calls;
     Py_ssize_t backpressure_waits;
     int write_paused;
+    int connection_closed;
 } WreathPgBufferedProtocol;
 
 static PyTypeObject *buffered_protocol_type = NULL;
@@ -1250,6 +1251,7 @@ buffered_connection_made(WreathPgBufferedProtocol *self, PyObject *transport)
     if (write == NULL) return NULL;
     Py_XSETREF(self->transport, Py_NewRef(transport));
     Py_XSETREF(self->transport_write, write);
+    self->connection_closed = 0;
     const WreathTransportCAPI *capi = transport_capi_resolve();
     self->transport_capi =
         capi != NULL && capi->check(transport) ? capi : NULL;
@@ -1262,7 +1264,28 @@ buffered_connection_lost(WreathPgBufferedProtocol *self, PyObject *error)
     PyObject *done;
     PyObject *result;
     (void)error;
+    self->connection_closed = 1;
     self->write_paused = 0;
+    if (self->read_waiter != NULL) {
+        done = PyObject_CallMethodNoArgs(self->read_waiter, str_done);
+        if (done == NULL) return NULL;
+        if (done == Py_False) {
+            PyObject *exception;
+            Py_DECREF(done);
+            exception = PyObject_CallFunction(
+                PyExc_ConnectionError, "s", "PostgreSQL transport closed"
+            );
+            if (exception == NULL) return NULL;
+            result = PyObject_CallMethod(
+                self->read_waiter, "set_exception", "O", exception
+            );
+            Py_DECREF(exception);
+            if (result == NULL) return NULL;
+            Py_DECREF(result);
+        } else {
+            Py_DECREF(done);
+        }
+    }
     done = PyObject_CallMethodNoArgs(self->done_future, str_done);
     if (done == NULL) return NULL;
     if (done == Py_False) {
@@ -1378,6 +1401,10 @@ buffered_read_message(WreathPgBufferedProtocol *self, PyObject *unused)
         Py_DECREF(done);
         Py_CLEAR(self->read_waiter);
     }
+    if (self->connection_closed) {
+        PyErr_SetString(PyExc_ConnectionError, "PostgreSQL transport closed");
+        return NULL;
+    }
     self->read_waiter = PyObject_CallNoArgs(self->create_future);
     if (self->read_waiter == NULL) return NULL;
     return Py_NewRef(self->read_waiter);
@@ -1387,6 +1414,10 @@ static PyObject *
 buffered_write(WreathPgBufferedProtocol *self, PyObject *data)
 {
     PyObject *result;
+    if (self->connection_closed) {
+        PyErr_SetString(PyExc_ConnectionError, "PostgreSQL transport closed");
+        return NULL;
+    }
     if (self->transport_write == NULL) {
         PyErr_SetString(PyExc_ConnectionError, "transport is not connected");
         return NULL;

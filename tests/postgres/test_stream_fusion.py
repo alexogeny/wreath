@@ -15,6 +15,8 @@ import importlib
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parents[1]))  # tests/ for sibling imports
 
 from postgres.test_connection import FakePostgres
@@ -57,7 +59,11 @@ def test_pg_ingress_fuses_on_metal_loop() -> None:
     loop = _metal_loop_or_skip()
 
     async def exercise():
-        server = FakePostgres()
+        # The receive-buffer unit corpus separately fragments frames at every
+        # byte. Here 20,000 complete DataRow frames are the useful load: they
+        # still cross many provided buffers and parser slabs without making
+        # the fake server schedule one drain per byte.
+        server = FakePostgres(fragment=False)
         dsn = await server.start_tcp()
         try:
             conn = await native_pg.connect(dsn)
@@ -107,26 +113,16 @@ def test_pg_fusion_survives_abrupt_connection_loss() -> None:
             for transport in list(transports):
                 transport.abort()
             await asyncio.sleep(0)
-            try:
-                await asyncio.wait_for(conn.fetchval("select 8"), 2.0)
-            except TimeoutError:
-                # Measured, not assumed: the query does not fail fast after the
-                # transport is aborted -- `wait_for` times out at 2.0s and that is
-                # what sets `failed`. Pinned to the type that actually occurs so a
-                # driver that starts erroring cleanly breaks this loudly and
-                # someone updates the assertion, rather than `except Exception`
-                # quietly accepting either. Note the docstring above claims "a
-                # clean error state instead of ... hanging"; today it hangs.
-                failed = True
-            else:
-                failed = False
+            with pytest.raises(native_pg.OperationalError, match="connection lost"):
+                await asyncio.wait_for(conn.fetchval("select 8"), 0.8)
             await conn.close()
-            return failed
+            # Let the fake server's accepted connection observe the abort and
+            # finish its owned writer before `_run_fused` closes the loop.
+            await asyncio.sleep(0)
         finally:
             await server.close()
 
-    failed, captured = _run_fused(loop, exercise(), transports)
-    assert failed
+    _, captured = _run_fused(loop, exercise(), transports)
     assert any(
         getattr(t, "_fused_stream", None) == "wreath._native._postgres"
         for t in captured

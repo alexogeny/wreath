@@ -60,6 +60,7 @@ class FakePostgres:
         self.flights: list[list[bytes]] = []
         self.password: bytes | None = None
         self.server: asyncio.AbstractServer | None = None
+        self.handlers: set[asyncio.Task[None]] = set()
         self.port = 0
         self.path: Path | None = None
         self.query_gate: asyncio.Event | None = None
@@ -84,6 +85,12 @@ class FakePostgres:
         assert self.server is not None
         self.server.close()
         await self.server.wait_closed()
+        current = asyncio.current_task()
+        handlers = tuple(task for task in self.handlers if task is not current)
+        for task in handlers:
+            task.cancel()
+        if handlers:
+            await asyncio.gather(*handlers, return_exceptions=True)
         if self.path is not None:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(self.path)
@@ -98,6 +105,9 @@ class FakePostgres:
             await writer.drain()
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self.handlers.add(task)
         try:
             startup_len = struct.unpack("!I", await reader.readexactly(4))[0]
             startup_payload = await reader.readexactly(startup_len - 4)
@@ -211,6 +221,8 @@ class FakePostgres:
         except asyncio.IncompleteReadError:
             pass
         finally:
+            if task is not None:
+                self.handlers.discard(task)
             writer.close()
             with contextlib.suppress(ConnectionError):
                 await writer.wait_closed()

@@ -1853,14 +1853,24 @@ class Connection:
             self._idle_event.clear()
             emitted += 1
         if packets:
-            if self._register_operations is not None:
-                self._register_operations(tuple(operations))
-            payload = packets[0] if len(packets) == 1 else self._join_packets(tuple(packets))
-            if self._write_with_backpressure is None:
-                self._writer.write(payload)
-                pending = self._writer.drain()
-            else:
-                pending = self._write_with_backpressure(payload)
+            try:
+                if self._register_operations is not None:
+                    self._register_operations(tuple(operations))
+                payload = (
+                    packets[0]
+                    if len(packets) == 1
+                    else self._join_packets(tuple(packets))
+                )
+                if self._write_with_backpressure is None:
+                    self._writer.write(payload)
+                    pending = self._writer.drain()
+                else:
+                    pending = self._write_with_backpressure(payload)
+            except OSError as error:
+                self._fail_connection(
+                    OperationalError("PostgreSQL connection lost"), error
+                )
+                return
             self._write_count += 1
             if pending is not None and not (
                 isinstance(pending, asyncio.Future) and pending.done()

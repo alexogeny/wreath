@@ -102,7 +102,8 @@ def test_integer_codecs_reject_overflow(backend: Any) -> None:
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_binary_codec_rejects_wrong_value_type(backend: Any) -> None:
-    with pytest.raises(TypeError):
+    message = "int4 codec requires int" if backend is pure else "integer codec requires int"
+    with pytest.raises(TypeError, match=message):
         backend._encode_binary("1", 23)
     with pytest.raises(TypeError):
         backend._encode_binary(1, 2950)
