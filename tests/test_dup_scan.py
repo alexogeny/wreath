@@ -184,10 +184,16 @@ def test_ranking_is_by_the_lines_a_collapse_would_remove(tree: Path) -> None:
     assert group.redundant_lines == 20  # the copies after the first, not all three
 
 
-def test_it_runs_on_this_repository_and_stays_a_report() -> None:
+def test_it_runs_on_this_repository_and_stays_a_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Report, not gate: it must never fail a run, however much it finds."""
     groups, scanned = dup_scan.scan(repo_root(), dup_scan.DEFAULT_ROOTS,
                                     dup_scan.DEFAULT_MIN_LINES)
     assert scanned > 100
     assert all(len(group.sites) > 1 for group in groups)
+    # `main` consumes the real result above. Re-scanning the whole repository
+    # here used to double this test from roughly three seconds to six merely to
+    # prove that findings do not turn the report into a failing gate.
+    monkeypatch.setattr(dup_scan, "scan", lambda *_args: (groups, scanned))
     assert dup_scan.main(["--top", "1"]) == 0

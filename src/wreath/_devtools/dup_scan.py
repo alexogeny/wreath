@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import copy
 import hashlib
 import json
 from collections import defaultdict
@@ -53,26 +52,58 @@ DEFAULT_MIN_LINES = 8
 DEFAULT_TOP = 25
 
 
-class _Anonymise(ast.NodeTransformer):
-    """Erase every name, attribute, argument and literal; keep the structure."""
+def _word(out: bytearray, value: str) -> None:
+    raw = value.encode()
+    out.extend(len(raw).to_bytes(2))
+    out.extend(raw)
 
-    def visit_Name(self, node: ast.Name) -> ast.AST:
-        return ast.copy_location(ast.Name(id="_", ctx=node.ctx), node)
 
-    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
-        self.generic_visit(node)
-        return ast.copy_location(ast.Attribute(value=node.value, attr="_", ctx=node.ctx), node)
+def _structure(value: object, out: bytearray) -> None:
+    """Append an unambiguous, anonymised AST shape to *out*.
 
-    def visit_arg(self, node: ast.arg) -> ast.AST:
-        return ast.copy_location(ast.arg(arg="_", annotation=None), node)
-
-    def visit_Constant(self, node: ast.Constant) -> ast.AST:
-        return ast.copy_location(ast.Constant(value=None), node)
-
-    def visit_keyword(self, node: ast.keyword) -> ast.AST:
-        self.generic_visit(node)
-        return ast.copy_location(ast.keyword(arg=None if node.arg is None else "_",
-                                             value=node.value), node)
+    The former immutable normal form allocated a nested tuple mirroring the
+    complete function and then allocated its equally large ``repr`` solely to
+    hash it.  Length-prefixed tokens preserve the same equality relation while
+    walking the source tree once and allocating one flat buffer.
+    """
+    if isinstance(value, ast.Name):
+        out.extend(b"N")
+        _structure(value.ctx, out)
+        return
+    if isinstance(value, ast.Attribute):
+        out.extend(b"R")
+        _structure(value.value, out)
+        _structure(value.ctx, out)
+        return
+    if isinstance(value, ast.arg):
+        # The former transformer constructed a fresh arg with no annotation or
+        # type comment, so neither is structural here.
+        out.extend(b"G")
+        return
+    if isinstance(value, ast.Constant):
+        out.extend(b"C")
+        return
+    if isinstance(value, ast.keyword):
+        out.extend(b"K0" if value.arg is None else b"K1")
+        _structure(value.value, out)
+        return
+    if isinstance(value, ast.AST):
+        out.extend(b"A")
+        _word(out, type(value).__name__)
+        fields = tuple(ast.iter_fields(value))
+        out.extend(len(fields).to_bytes(2))
+        for name, field in fields:
+            _word(out, name)
+            _structure(field, out)
+        return
+    if isinstance(value, list):
+        out.extend(b"L")
+        out.extend(len(value).to_bytes(4))
+        for item in value:
+            _structure(item, out)
+        return
+    out.extend(b"V")
+    _word(out, repr(value))
 
 
 @dataclass(frozen=True)
@@ -112,17 +143,15 @@ class Group:
 def _shape(body: list[ast.stmt]) -> str:
     """A structural digest of a function body.
 
-    The statements are deep-copied before normalising: `NodeTransformer`
-    rewrites in place, and this walks the same tree the caller is still
-    iterating. (An earlier form of this tool round-tripped through
-    `ast.parse(ast.unparse(...))` to get a fresh tree, which raised on any body
-    whose first statement cannot stand alone as a module -- a bare `return` --
-    and swallowed it in a blanket `except`. Those functions were silently
-    absent from every scan.)
+    The immutable tuple walk does not rewrite the parsed tree. An earlier form
+    round-tripped through ``ast.parse(ast.unparse(...))`` to get a fresh tree,
+    which raised on any body whose first statement cannot stand alone as a
+    module -- a bare ``return`` -- and swallowed it in a blanket ``except``.
+    Those functions were silently absent from every scan.
     """
-    anonymised = [_Anonymise().visit(copy.deepcopy(stmt)) for stmt in body]
-    dumped = "".join(ast.dump(stmt) for stmt in anonymised)
-    return hashlib.blake2s(dumped.encode(), digest_size=12).hexdigest()
+    shape = bytearray()
+    _structure(body, shape)
+    return hashlib.blake2s(shape, digest_size=12).hexdigest()
 
 
 def _significant_body(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.stmt]:
