@@ -404,6 +404,147 @@ def build_parser() -> argparse.ArgumentParser:
     from ._mutant.cli import add_arguments as _add_mutant_arguments
 
     _add_mutant_arguments(mutant_parser)
+    test_parser = commands.add_parser(
+        "test",
+        help="run pytest with an animated file heat map and duration profiling",
+        description=(
+            "Run a pytest-compatible suite with Wreath's activity grid and timing report. "
+            "Arguments not recognized here are forwarded to pytest in their original order."
+        ),
+    )
+    test_parser.add_argument(
+        "--grid",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="animate on a TTY, force animation, or print only the final report",
+    )
+    test_parser.add_argument(
+        "--workers",
+        default="auto",
+        metavar="N",
+        help="pytest worker processes: auto (capped at 6) or a positive integer",
+    )
+    test_parser.add_argument(
+        "--slowest",
+        type=int,
+        default=5,
+        metavar="N",
+        help="number of slowest tests in the final report (default: 5)",
+    )
+    test_parser.add_argument(
+        "--report",
+        metavar="PATH",
+        help="write the complete run, per-file, and per-test timings as JSON",
+    )
+    test_parser.add_argument(
+        "--history",
+        default=".wreath/test-history.json",
+        metavar="PATH",
+        help="bounded duration history used by future scheduling",
+    )
+    test_parser.add_argument(
+        "--no-history",
+        action="store_true",
+        help="do not read or update duration history",
+    )
+    test_parser.add_argument(
+        "--mutant",
+        choices=("auto", "off", "sample", "changed", "full"),
+        default="auto",
+        help="after the ordinary run, measure its green tests' mutation confidence: "
+             "a stable sample, "
+             "controls changed from a ref, or a complete sweep (default: auto sample)",
+    )
+    test_parser.add_argument(
+        "--mutant-samples",
+        type=int,
+        default=12,
+        metavar="N",
+        help="number of whole-corpus controls in --mutant sample (default: 12)",
+    )
+    test_parser.add_argument(
+        "--mutant-workers",
+        default="auto",
+        metavar="N|auto",
+        help="mutant children to run concurrently after preparation overlaps "
+             "the ordinary suite (default: auto, capped at 3 live and reclaiming "
+             "up to 6 worker slots after the suite seals)",
+    )
+    test_parser.add_argument(
+        "--mutant-path",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="source path included in mutation confidence (repeatable)",
+    )
+    test_parser.add_argument(
+        "--mutant-tests",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="test path used by the mutation phase (repeatable; default: tests/)",
+    )
+    test_parser.add_argument(
+        "--mutant-operator",
+        action="append",
+        default=[],
+        metavar="PREFIX",
+        help="mutation operator prefix included in confidence (repeatable)",
+    )
+    test_parser.add_argument(
+        "--mutant-only",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help="include mutation identifiers containing TEXT (repeatable)",
+    )
+    test_parser.add_argument(
+        "--mutant-pytest-arg",
+        action="append",
+        default=[],
+        metavar="ARG",
+        help="extra argument passed to mutation-phase pytest (repeatable)",
+    )
+    test_parser.add_argument(
+        "--mutant-timeout",
+        type=float,
+        default=60.0,
+        metavar="SECONDS",
+        help="deadline for each selected mutant (default: 60)",
+    )
+    test_parser.add_argument(
+        "--mutant-max-candidates",
+        type=int,
+        default=4000,
+        metavar="N",
+        help="maximum tests one mutant may select (default: 4000)",
+    )
+    test_parser.add_argument(
+        "--mutant-maxfail",
+        type=int,
+        default=1,
+        metavar="N",
+        help="stop each mutant at N failures; 0 runs every candidate (default: 1)",
+    )
+    test_parser.add_argument(
+        "--mutant-budget",
+        type=float,
+        default=1.0,
+        metavar="SECONDS",
+        help="post-suite execution ceiling for auto/sample mutants; live probes "
+             "stop at the suite seal and do not spend it (default: 1)",
+    )
+    test_parser.add_argument(
+        "--mutant-changed",
+        default="HEAD",
+        metavar="REF",
+        help="git reference used by --mutant changed (default: HEAD)",
+    )
+    test_parser.add_argument(
+        "--mutant-fail-on-survivor",
+        action="store_true",
+        help="make survived or unreached sampled controls fail the command",
+    )
     audit_parser = commands.add_parser(
         "audit",
         help="audit generated HTML + responses for accessibility (WCAG 2.1) and performance",
@@ -2378,7 +2519,6 @@ def _execute_flight_read_recording(namespace: argparse.Namespace) -> int:
     with open(namespace.path, "rb") as handle:
         data = handle.read()
     decoded = read_recording(data)
-    attempts = decoded.attempts if namespace.limit == 0 else decoded.attempts[: namespace.limit]
 
     if namespace.as_json:
         print(
@@ -2415,7 +2555,7 @@ def _execute_flight_read_recording(namespace: argparse.Namespace) -> int:
                                 for event in record.boundaries
                             ],
                         }
-                        for record in attempts
+                        for record in decoded.attempts
                     ],
                 },
                 indent=2,
@@ -2433,7 +2573,7 @@ def _execute_flight_read_recording(namespace: argparse.Namespace) -> int:
         print("  no footer -- the process died mid-write, so what is missing "
               "cannot be counted")
     print()
-    for record in attempts:
+    for record in decoded.attempts:
         print(f"  {record.task} job {record.job_id} on queue {record.queue!r}: "
               f"attempt {record.attempt} of {record.max_attempts} -> {record.outcome}")
         if record.error_type:
@@ -2451,8 +2591,6 @@ def _execute_flight_read_recording(namespace: argparse.Namespace) -> int:
             failed = f" -> {event.error_type}" if event.error_type else ""
             print(f"      boundary seam {event.seam} target {event.target!r} "
                   f"at {event.coordinate}{failed}")
-    if len(decoded.attempts) > len(attempts):
-        print(f"  ... {len(decoded.attempts) - len(attempts)} more (--limit 0 for all)")
     return 0
 
 
@@ -2708,7 +2846,17 @@ def _write_bytes(path: str, data: bytes) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    namespace = build_parser().parse_args(argv)
+    arguments = list(argv) if argv is not None else sys.argv[1:]
+    parser = build_parser()
+    if arguments[:1] == ["test"]:
+        # pytest owns a large and extensible option vocabulary.  Parsing only
+        # Wreath's few options preserves every unknown token and its ordering,
+        # so ``wreath test -k auth tests/ --maxfail=1`` needs no separator and
+        # behaves exactly like the pytest spelling.
+        namespace, pytest_args = parser.parse_known_args(arguments)
+        namespace.pytest_args = pytest_args
+    else:
+        namespace = parser.parse_args(arguments)
     try:
         if namespace.command == "typegen":
             return execute_typegen(namespace)
@@ -2775,6 +2923,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             try:
                 return execute_mutant(namespace)
+            except (OSError, ValueError) as error:
+                raise CliError(str(error), exit_code=2) from error
+        if namespace.command == "test":
+            from ._test_runner import execute as execute_tests
+
+            try:
+                return execute_tests(namespace)
             except (OSError, ValueError) as error:
                 raise CliError(str(error), exit_code=2) from error
         if namespace.command == "audit":

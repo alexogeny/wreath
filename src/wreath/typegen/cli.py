@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -96,7 +97,7 @@ def _generate(app: object, options: TypegenOptions) -> dict[str, str]:
 def _safe_target(output_dir: Path, name: str) -> Path:
     # Generated names are fixed, but validate anyway: no path can escape output.
     candidate = (output_dir / name).resolve()
-    if output_dir.resolve() not in candidate.parents and candidate != output_dir.resolve():
+    if output_dir.resolve() not in candidate.parents:
         raise TypegenCliError(f"generated path {name!r} escapes the output directory")
     return output_dir / name
 
@@ -164,9 +165,18 @@ def write(files: dict[str, str], output_dir: Path) -> None:
             target.unlink()
     for name, contents in files.items():
         target = _safe_target(output_dir, name)
-        temporary = target.with_name(target.name + ".tmp")
-        temporary.write_bytes(contents.encode("utf-8"))
-        os.replace(temporary, target)
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(contents.encode("utf-8"))
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def run(app: object, options: TypegenOptions) -> int:

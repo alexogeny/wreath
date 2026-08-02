@@ -160,6 +160,8 @@ def test_load_application_rejects_malformed_and_non_callable_targets(
 
     with pytest.raises(CliError, match="module:attribute"):
         load_application("bad:target:extra")
+    with pytest.raises(CliError, match="module:attribute"):
+        load_application(":app")
     with pytest.raises(CliError, match="not callable"):
         load_application(f"{module_name}:app")
 
