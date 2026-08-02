@@ -135,4 +135,138 @@ The async fixtures need an async pytest plugin, which is not Wreath's to install
 `pytest-asyncio` is used when present — including its own decorator, so they work
 under `asyncio_mode = strict` as well as `auto`.
 
+## See the suite while it runs
+
+Once a suite is large enough, a row of dots hides the two things you usually
+want to know: *what is still running?* and *where did the time go?* `wreath test`
+runs the same pytest collection, fixtures, plugins, capture, and tracebacks, but
+puts every collected test file on a stable heat-map tile:
+
+```bash
+wreath test
+wreath test tests/auth/ -k refresh
+wreath test --workers 1 --grid never tests/test_login.py
+```
+
+An untested file is dim, a running file is blue, passing files are green,
+skipped or mixed files are amber, and failures are red. `▣` marks a green file
+whose tests are currently running against a mutant;
+`▰` is the ceiling, awarded only when a test in that file kills one. The live
+tile is purple and the verified tile is a solid gold ingot, but the distinct
+symbols keep the states readable under `NO_COLOR`. A mutant that *survives*
+does not earn the gold state: that is a finding, not verification. Within each
+outcome the shade is the file's
+duration percentile: the more intense tile is the more expensive file. Positions
+are sorted by path and do not move while the run is in progress, so the grid
+becomes familiar rather than reshuffling itself around the latest result.
+
+The animation uses the terminal's alternate screen and restores the original
+screen before pytest prints its normal failure and skip summaries. In CI, when
+output is redirected, when `TERM=dumb`, or when `CI` is set, it prints one static
+snapshot instead. `--grid always` and `--grid never` override that choice;
+`NO_COLOR` keeps the outcome-specific symbols without ANSI colour.
+
+The final report includes wall time, summed test time, average, median, p95 and
+p99 duration, a Tukey outlier count, worker utilization, and the slowest tests.
+Setup, call, and teardown time all count: a slow fixture is part of what the test
+costs, not invisible overhead. Wreath keeps a bounded per-file history in
+`.wreath/test-history.json`; use `--no-history` for an entirely stateless run or
+`--history PATH` to put it elsewhere. The cache is local and ignored by version
+control. On later parallel runs, a controller-side longest-processing-time queue
+starts the tests with the largest historical mean first, distributes its first
+two rounds across workers, and then keeps only two tests queued per worker. That
+does not make an individual test faster; it prevents one worker from hoarding
+the slow prefix and lets whichever worker finishes refill from the shared tail.
+Tests with no history keep their pytest collection order behind known work.
+
+For a complete artifact, `--report PATH` writes versioned JSON with every test
+and file outcome and duration:
+
+```bash
+wreath test --report test-run.json -m "not network"
+```
+
+### Add mutation confidence to the same run
+
+Any run with passing tests can continue into Wreath's control-aware mutation
+tester:
+
+```bash
+wreath test                                         # 12-control auto sample
+wreath test --mutant sample                         # 12 stable controls
+wreath test --mutant sample --mutant-samples 24    # a larger confidence sample
+wreath test --mutant changed --mutant-changed main # controls changed on this branch
+wreath test --mutant full                           # the complete sweep
+```
+
+The sample is ranked by a stable hash across the whole eligible corpus. It is
+not `wreath mutant --limit`, which takes the first controls in source order and
+therefore spends a small budget at file heads. The final line gives an
+actionable, colour-coded rating -- `SAMPLE WATCHED`, `REVIEW ASSERTIONS`, `ADD
+COVERAGE`, or `FINISH THE SAMPLE` -- while keeping `killed`, `survived`,
+`unreached`, and undecided controls separate. It does not average distinct
+findings into a percentage. During this phase candidate test files turn purple
+with `▣`; a file turns gold with `▰` only after one of its tests kills the
+mutant. A JSON test report gains the complete `mutation` document, its structured
+rating, and `verified_test_files` for that same evidence.
+
+Mutation uses only tests that passed in the ordinary run as eligible killers.
+That keeps the evidence honest without throwing away the rest of a large run:
+red files stay red, while green candidate files can turn purple and then gold.
+Baseline-failing tests are excluded and named in JSON, the rating says that its
+evidence is limited to green tests, and the command still exits with pytest's
+failure status. If no test passed, Wreath prints `not measured` instead of
+manufacturing confidence. In the default `auto` mode, only the sampled mutation
+lines are traced during the ordinary run and that coverage and pass/fail set
+become the mutation baseline; the suite is not traversed a second time. A fresh
+mutation interpreter plans and compiles the sampled controls while the ordinary
+xdist workers are still busy. It does not redundantly collect the whole suite:
+each fork imports only the completed green candidate it is handed.
+As soon as a watched test completes green, one of those children may probe its
+control while unrelated ordinary tests are still running. An early kill is
+conclusive and awards the gold tile immediately. An early pass is only
+speculative: Wreath clears the purple tile and retries that mutant after the
+ordinary run atomically seals the complete green baseline. Up to three forked
+mutant children run together by default, including for any sealed-baseline work
+left at the tail. The fresh parent also avoids Python 3.14's unsafe shape of
+forking the controller after xdist has run.
+
+Use `--mutant-path`, `--mutant-tests`, `--mutant-operator`, and
+`--mutant-only` to scope it; `--mutant-timeout`, `--mutant-max-candidates`, and
+`--mutant-pytest-arg` control execution. `--mutant-workers auto` is capped at
+three; choose `1` for a constrained machine or a larger explicit value only
+after measuring that machine. `--mutant-maxfail 1` is the default:
+the first baseline-passing test that objects decides `killed`, so running more
+candidate tests would add names without changing confidence. Set zero only when
+you want every killer in JSON. Live probes may use the whole ordinary test
+window, at background priority, and are stopped rather than allowed to extend
+its tail. `--mutant-budget 1` caps only additional sealed-baseline execution
+after pytest finishes. Reaching that ceiling leaves the remaining controls
+undecided, prints `FINISH THE SAMPLE`, and does not fail a green pipeline;
+increase it when you are ready to finish the answer. The JSON `live` object
+records how many probes started and completed, how many were cancelled at the
+seal, and when the first one started relative to mutation preparation.
+`--mutant-fail-on-survivor` turns a cleared
+scope into a gate and treats both survived and unreached as findings. `--mutant
+off` disables the default sample; `changed` and `full` deliberately take their
+own instrumented baseline because their much larger watch set was explicitly
+asked for.
+
+The selected-control catalog is cached with timing history. Its key includes
+source paths, nanosecond mtimes, sizes, sample size, and filters; changing source
+invalidates it. This keeps steady-state confidence cheap without reusing a
+selection after the population changed. `--no-history` makes the catalog cold
+on purpose as part of a fully stateless run.
+
+All arguments Wreath does not recognize are forwarded to pytest in their
+original order, so markers, `-k`, `--maxfail`, plugin flags, and explicit `-n`
+continue to work. The default worker count is `min(6, cpu_count)`, matching the
+measured cap used by Wreath's own checks; `--workers 1` gives the serial process
+you want for a debugger. If you pass pytest's own `-n`, it wins.
+
+Pytest remains the execution engine deliberately. Reimplementing its fixture and
+plugin model would create a second test dialect; the native opportunities are in
+scheduling, worker transport, and rendering, and Wreath will move those only
+after measurements show that they dominate a real run.
+
 **Reference:** [`wreath.testing`](../reference/testing.md).

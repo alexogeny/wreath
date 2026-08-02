@@ -79,6 +79,11 @@ Both encodings are built from one set of request builders and converted at the
 edge, so they cannot describe different telemetry. An unknown `encoding=` is
 refused at construction rather than at the first export.
 
+The exporter pins redirects to the collector's configured scheme, host, and
+port. Same-origin redirects still work; a cross-origin redirect is refused, so
+a compromised collector response cannot turn an export into a request to an
+internal service.
+
 ## Trace context on outbound calls
 
 A trace that stops at the request boundary is a trace of one hop. When a request calls
