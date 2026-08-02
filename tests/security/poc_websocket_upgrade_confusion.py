@@ -51,7 +51,11 @@ def _exchange(
         with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
             client.sendall(request)
             response = bytearray()
-            while True:
+            # The PoC decides only from the status line. Waiting for EOF routed
+            # a safe HTTP rejection through the connection's five-second
+            # keep-alive timeout, making this regression test cost 5.2s for no
+            # additional evidence.
+            while b"\r\n" not in response:
                 part = client.recv(4096)
                 if not part:
                     break

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ast
+import pickle
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated, Any
@@ -21,8 +24,21 @@ from wreath.binding import File, Form
 from wreath.middleware.compression import CompressionMiddleware
 from wreath.middleware.security import TrustedHostMiddleware
 from wreath.middleware.sessions import SessionMiddleware
+from wreath.templates import Template, TemplateSyntaxError
 from wreath.testing import TestClient
 from wreath.users import user_router
+
+
+def _write_pickle_canary(path: str) -> None:
+    Path(path).write_text("executed", encoding="utf-8")
+
+
+class _PickleGadget:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def __reduce__(self) -> tuple[Any, tuple[str]]:
+        return _write_pickle_canary, (str(self.path),)
 
 
 class MemorySessions:
@@ -81,6 +97,76 @@ def _cookie(response: Any) -> str:
     value = response.header("set-cookie")
     assert value is not None
     return value.split(";", 1)[0]
+
+
+def test_a_validly_signed_pickle_gadget_is_never_deserialized(tmp_path: Path) -> None:
+    """Knowing the session secret must not expose a pickle-shaped RCE sink."""
+    canary = tmp_path / "pickle-rce"
+    payload = pickle.dumps(_PickleGadget(canary))
+    middleware = SessionMiddleware(secret="s" * 32, secure=False)
+    cookie = middleware._sign(payload, int(time.time()))
+
+    assert middleware._load(cookie) is None
+    assert not canary.exists()
+
+
+def test_template_source_cannot_call_or_construct_python(tmp_path: Path) -> None:
+    """Template source compiles to data lookup opcodes, never Python calls."""
+    canary = tmp_path / "template-rce"
+    sources = (
+        "{{ __import__('pathlib').Path(CANARY).write_text('executed') }}".replace(
+            "CANARY", repr(str(canary))
+        ),
+        "{{ gadget.run() }}",
+        "{{ ().__class__.__bases__ }}",
+        "{% if __import__('os') %}executed{% endif %}",
+    )
+    for source in sources:
+        with pytest.raises(TemplateSyntaxError):
+            Template.from_string(source)
+    assert not canary.exists()
+
+
+def test_runtime_modules_introduce_no_unsafe_deserializer_or_shell_sink() -> None:
+    """Trip if a server-importable module grows a generic code-loading primitive."""
+    source_root = Path(__file__).parents[2] / "src" / "wreath"
+    tooling = {"_cli.py", "_devserver.py", "_infra_cli.py"}
+    excluded_directories = {"_devtools", "_docs", "_mutant", "_port", "typegen"}
+    dangerous_imports = {"dill", "marshal", "pickle", "shelve"}
+    findings: list[str] = []
+
+    for path in source_root.rglob("*.py"):
+        relative = path.relative_to(source_root)
+        if path.name in tooling or any(part in excluded_directories for part in relative.parts):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(relative))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split(".", 1)[0] in dangerous_imports:
+                        findings.append(f"{relative}:{node.lineno}: import {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                module = (node.module or "").split(".", 1)[0]
+                if module in dangerous_imports:
+                    findings.append(f"{relative}:{node.lineno}: from {node.module} import")
+            elif isinstance(node, ast.Call):
+                function = node.func
+                if (
+                    isinstance(function, ast.Attribute)
+                    and isinstance(function.value, ast.Name)
+                    and function.value.id == "os"
+                    and function.attr in {"popen", "system"}
+                ):
+                    findings.append(f"{relative}:{node.lineno}: os.{function.attr}")
+                for keyword in node.keywords:
+                    if (
+                        keyword.arg == "shell"
+                        and isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value is True
+                    ):
+                        findings.append(f"{relative}:{node.lineno}: shell=True")
+
+    assert findings == []
 
 
 async def test_builtin_login_rotates_a_server_side_session(monkeypatch) -> None:
