@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import email.policy
 import hashlib
 import hmac
 import os
@@ -24,16 +25,25 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from ._b64 import b64url_decode
+from ._dkim import DkimSigner
 
 __all__ = [
     "CapturingEmailSender",
     "EmailSender",
+    "InMemorySuppressionList",
     "InMemoryUserStore",
     "LogEmailSender",
+    "MailClass",
+    "Message",
     "SmtpEmailSender",
+    "SuppressionList",
+    "SuppressionReason",
+    "Unsubscribe",
     "UserRecord",
     "UserStore",
     "fingerprint",
@@ -356,6 +366,10 @@ class LogEmailSender:
         """Print one `[wreath.users] reset <email>: <link>` line."""
         self._print(f"[wreath.users] reset {email}: {link}")
 
+    async def send(self, message: Message) -> None:
+        """Print one line for `message`, including its class. Nothing is sent."""
+        self._print(f"[wreath.notifications] {message.mail_class} {message.to}: {message.subject}")
+
 
 @dataclass(slots=True)
 class CapturingEmailSender:
@@ -363,6 +377,8 @@ class CapturingEmailSender:
 
     verifications: list[tuple[str, str]] = field(default_factory=list)
     resets: list[tuple[str, str]] = field(default_factory=list)
+    messages: list[Message] = field(default_factory=list)
+    suppression: SuppressionList | None = None
 
     async def send_verification(self, email: str, link: str) -> None:
         """Append `(email, link)` to `verifications`. Nothing is delivered."""
@@ -371,6 +387,164 @@ class CapturingEmailSender:
     async def send_password_reset(self, email: str, link: str) -> None:
         """Append `(email, link)` to `resets`. Nothing is delivered."""
         self.resets.append((email, link))
+
+    async def send(self, message: Message) -> None:
+        """Append `message` to `messages`, applying suppression if one is set.
+
+        The suppression check is duplicated here rather than inherited so that a
+        test using this sender exercises the same refusal a real one would --
+        a capturing double that accepts what production refuses is how a
+        suppression bug reaches production green.
+        """
+        if message.mail_class is MailClass.MARKETING and self.suppression is not None:
+            reason = await self.suppression.reason(message.to)
+            if reason is not None:
+                raise SuppressedError(f"{message.to} is suppressed ({reason})")
+        self.messages.append(message)
+
+
+# --- what kind of mail this is ----------------------------------------------
+
+
+class MailClass(StrEnum):
+    """Whether a message is operational or promotional.
+
+    **There is deliberately no default.** The distinction is a legal question
+    with a technical encoding, and both wrong answers are expensive: call
+    everything transactional and you are a non-compliant bulk sender under the
+    Google/Yahoo/Microsoft rules that carry a permanent 550 since May 2026; call
+    everything marketing and a suppressed address stops receiving its own
+    password resets, which reads to the user as a broken account.
+
+    So the caller states it, per message, and `Message` gives the field no
+    default so that "I did not think about it" cannot compile.
+    """
+
+    #: Operational mail the recipient asked for by acting: verification, a
+    #: password reset, a receipt, a security alert. Exempt from RFC 8058
+    #: one-click unsubscribe, and **delivered even to a suppressed address** --
+    #: a bounce complaint about a newsletter must not lock someone out of their
+    #: own account.
+    TRANSACTIONAL = "transactional"
+    #: Promotional or discretionary mail: newsletters, digests, re-engagement.
+    #: Requires an `Unsubscribe`, and is refused for a suppressed address.
+    MARKETING = "marketing"
+
+
+class SuppressionReason(StrEnum):
+    """Why an address is on the suppression list."""
+
+    #: The receiving server refused permanently (a 5xx at SMTP time).
+    HARD_BOUNCE = "hard_bounce"
+    #: The recipient pressed "this is spam".
+    COMPLAINT = "complaint"
+    #: The recipient used the unsubscribe link.
+    UNSUBSCRIBED = "unsubscribed"
+    #: An operator suppressed it by hand.
+    MANUAL = "manual"
+
+
+@dataclass(frozen=True, slots=True)
+class Unsubscribe:
+    """The RFC 8058 one-click unsubscribe target for one message.
+
+    `url` must be **https** and must accept a `POST` carrying
+    `List-Unsubscribe=One-Click`; the mailbox provider posts to it directly, with
+    no human in the loop and no confirmation page. A `mailto:` alternative is
+    allowed alongside it and is what older clients use.
+
+    A visible "unsubscribe" link in the body does **not** satisfy the
+    requirement. The headers are the requirement.
+    """
+
+    url: str
+    mailto: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.url.startswith("https://"):
+            raise ValueError(
+                "a one-click unsubscribe URL must be https, because the provider "
+                f"POSTs to it unattended; got {self.url!r}"
+            )
+
+    def header(self) -> str:
+        targets = [f"<{self.url}>"]
+        if self.mailto:
+            targets.insert(0, f"<{self.mailto}>")
+        return ", ".join(targets)
+
+
+@dataclass(frozen=True, slots=True)
+class Message:
+    """One outgoing message, with its class stated rather than inferred."""
+
+    to: str
+    subject: str
+    body: str
+    #: No default, on purpose. See `MailClass`.
+    mail_class: MailClass
+    unsubscribe: Unsubscribe | None = None
+    headers: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.mail_class is MailClass.MARKETING and self.unsubscribe is None:
+            raise ValueError(
+                "marketing mail requires a one-click unsubscribe target (RFC 8058); "
+                "pass Unsubscribe(url=...), or send it as MailClass.TRANSACTIONAL "
+                "if it really is operational mail"
+            )
+
+
+@runtime_checkable
+class SuppressionList(Protocol):
+    """Addresses that must not receive marketing mail.
+
+    Consulted **by the thing that sends**, on every send. A list held at an
+    email service provider does not stop a self-hosted SMTP path from mailing
+    someone who complained, and the complaint rate that results is measured
+    against the sending domain either way.
+    """
+
+    async def reason(self, email: str) -> SuppressionReason | None:
+        """Why this address is suppressed, or `None` if it is not."""
+        ...
+
+    async def suppress(self, email: str, reason: SuppressionReason) -> None:
+        """Add an address, or replace the reason it is already there for."""
+        ...
+
+    async def release(self, email: str) -> None:
+        """Remove an address, for a re-subscribe or an operator correction."""
+        ...
+
+
+@dataclass(slots=True)
+class InMemorySuppressionList:
+    """A dict-backed suppression list for development and tests.
+
+    Addresses are normalized the same way `InMemoryUserStore` normalizes them,
+    so a capital or a trailing space is the same recipient. A real deployment
+    wants this in the database, because a suppression that a restart forgets is
+    a complaint the recipient gets to make twice.
+    """
+
+    _entries: dict[str, SuppressionReason] = field(default_factory=dict)
+
+    async def reason(self, email: str) -> SuppressionReason | None:
+        """The reason this address is suppressed, or `None`."""
+        return self._entries.get(_normalize_email(email))
+
+    async def suppress(self, email: str, reason: SuppressionReason) -> None:
+        """Record `email` as suppressed for `reason`."""
+        self._entries[_normalize_email(email)] = reason
+
+    async def release(self, email: str) -> None:
+        """Forget any suppression for `email`. A no-op if there is none."""
+        self._entries.pop(_normalize_email(email), None)
+
+
+class SuppressedError(Exception):
+    """A marketing message was addressed to a suppressed recipient."""
 
 
 @dataclass(slots=True)
@@ -381,6 +555,22 @@ class SmtpEmailSender:
     `smtplib` work runs in a worker thread so the event loop is never blocked.
     Build from env with `from_env`
     (`WREATH_SMTP_HOST`/`_FROM`/`_PORT`/`_USER`/`_PASSWORD`/`_TLS`).
+
+    Three things beyond the transport, each of which a 2026 sender needs and
+    none of which an SMTP library supplies:
+
+    * **`dkim`** signs the exact bytes handed to the MTA. Pair it with SPF and a
+      DMARC policy; `wreath.doctor.check_email_deliverability` reports whether
+      the DNS actually backs the configuration up, which is the failure this
+      class would otherwise be silent about.
+    * **`suppression`** is consulted before every send. Marketing mail to a
+      suppressed address is refused; transactional mail is delivered, because a
+      newsletter complaint must not cost someone their password reset.
+    * **`Message.mail_class`** decides both of those, and has no default.
+
+    Counters (`sent`, `suppressed`, `transport_failures`) are readable at any
+    time. They exist because the failure mode here is silence: mail that
+    "sent", nothing raised, and nobody received it.
     """
 
     host: str
@@ -392,6 +582,14 @@ class SmtpEmailSender:
     timeout: float = 30.0
     verify_subject: str = "Verify your email"
     reset_subject: str = "Reset your password"
+    dkim: DkimSigner | None = None
+    suppression: SuppressionList | None = None
+    #: Delivered, refused as suppressed, and failed at the transport. Read them;
+    #: a rising `transport_failures` with a flat `sent` is the shape of an
+    #: outage that no exception reaches the application.
+    sent: int = 0
+    suppressed: int = 0
+    transport_failures: int = 0
 
     @classmethod
     def from_env(cls) -> SmtpEmailSender:
@@ -421,30 +619,110 @@ class SmtpEmailSender:
     async def send_verification(self, email: str, link: str) -> None:
         """Send a plain-text verification mail carrying `link`.
 
-        Subject is `verify_subject`. The connection is opened, used and closed
+        Subject is `verify_subject`. Transactional, so it reaches a suppressed
+        address: someone who unsubscribed from a newsletter still has to be able
+        to confirm their own account. The connection is opened, used and closed
         for this one message, on a worker thread, so the event loop is never
         blocked by `smtplib`. Anything `smtplib` raises propagates — delivery
         failure is not swallowed here.
         """
-        await self._send(email, self.verify_subject, f"Verify your email:\n\n{link}\n")
+        await self.send(
+            Message(
+                to=email,
+                subject=self.verify_subject,
+                body=f"Verify your email:\n\n{link}\n",
+                mail_class=MailClass.TRANSACTIONAL,
+            )
+        )
 
     async def send_password_reset(self, email: str, link: str) -> None:
         """Send a plain-text password-reset mail carrying `link`.
 
         Subject is `reset_subject`; otherwise identical to
-        `send_verification`, connection handling and all.
+        `send_verification`, transactional class and all.
         """
-        await self._send(email, self.reset_subject, f"Reset your password:\n\n{link}\n")
+        await self.send(
+            Message(
+                to=email,
+                subject=self.reset_subject,
+                body=f"Reset your password:\n\n{link}\n",
+                mail_class=MailClass.TRANSACTIONAL,
+            )
+        )
 
-    async def _send(self, to_addr: str, subject: str, body: str) -> None:
-        await asyncio.to_thread(self._send_blocking, to_addr, subject, body)
+    async def send(self, message: Message) -> None:
+        """Deliver one `Message`, honouring its class.
 
-    def _send_blocking(self, to_addr: str, subject: str, body: str) -> None:
-        message = EmailMessage()
-        message["From"] = self.from_addr
-        message["To"] = to_addr
-        message["Subject"] = subject
-        message.set_content(body)
+        Raises:
+            SuppressedError: `message` is marketing and its recipient is
+                suppressed. Raised rather than returned quietly, because a
+                caller that keeps sending to a suppressed list is the thing that
+                drives a domain past the 0.10% complaint threshold, and it
+                should find out.
+            OSError: the transport failed. Counted in `transport_failures`
+                first, then re-raised — see the note in `_deliver`.
+        """
+        if message.mail_class is MailClass.MARKETING and self.suppression is not None:
+            reason = await self.suppression.reason(message.to)
+            if reason is not None:
+                self.suppressed += 1
+                raise SuppressedError(
+                    f"{message.to} is suppressed ({reason}); marketing mail is refused. "
+                    "Transactional mail to this address is still delivered."
+                )
+        await asyncio.to_thread(self._deliver, message)
+        self.sent += 1
+
+    def build(self, message: Message) -> bytes:
+        """Serialise `message` to the exact bytes that go on the wire.
+
+        Public because it is what the tests sign and verify, and because a
+        caller integrating a different transport needs the same bytes: **the
+        signature covers these bytes and no others.** Re-serialising an
+        `EmailMessage` after signing it is the most common way a valid DKIM
+        signature becomes an invalid one, which is why this returns bytes and
+        the sender hands those bytes straight to `sendmail`.
+        """
+        built = EmailMessage()
+        built["From"] = self.from_addr
+        built["To"] = message.to
+        built["Subject"] = message.subject
+        # `Date` is mandatory (RFC 5322 §3.6.1) and `Message-ID` is close to it
+        # in practice: a message missing either is scored as unusual by every
+        # major filter, and neither is added by `EmailMessage` on its own. Both
+        # are in `DEFAULT_SIGNED_HEADERS`, so they are covered by the signature
+        # rather than free for a relay to rewrite.
+        built["Date"] = formatdate(localtime=False, usegmt=True)
+        built["Message-ID"] = make_msgid(domain=self._message_id_domain())
+        if message.unsubscribe is not None:
+            built["List-Unsubscribe"] = message.unsubscribe.header()
+            # RFC 8058. Both headers, or the provider renders its own
+            # "unsubscribe" affordance from neither.
+            built["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+        for name, value in message.headers:
+            built[name] = value
+        built.set_content(message.body)
+        raw = built.as_bytes(policy=email.policy.SMTP)
+        if self.dkim is None:
+            return raw
+        signature = self.dkim.sign(raw)
+        return b"DKIM-Signature: " + signature.encode("utf-8") + b"\r\n" + raw
+
+    def _message_id_domain(self) -> str:
+        """The domain a generated `Message-ID` is scoped to.
+
+        The DKIM signing domain when there is one, so the identifier aligns with
+        what DMARC checks; otherwise whatever follows the `@` in `from_addr`.
+        `make_msgid`'s own default is the sending *host's* FQDN, which on a
+        container is a name that resolves nowhere and reads as forged.
+        """
+        if self.dkim is not None:
+            return self.dkim.domain
+        _, _, domain = self.from_addr.rpartition("@")
+        return domain.strip("<>") or "localhost"
+
+    def _deliver(self, message: Message) -> None:
+        raw = self.build(message)
         context = ssl.create_default_context()
         if self.port == 465:
             smtp: smtplib.SMTP = smtplib.SMTP_SSL(
@@ -457,7 +735,19 @@ class SmtpEmailSender:
                 smtp.starttls(context=context)
             if self.username is not None and self.password is not None:
                 smtp.login(self.username, self.password)
-            smtp.send_message(message)
+            # `sendmail` rather than `send_message`, so the bytes DKIM signed are
+            # the bytes transmitted. `send_message` re-serialises from the
+            # `EmailMessage` under its own policy, which can refold a header and
+            # invalidate the signature over it.
+            smtp.sendmail(self.from_addr, [message.to], raw)
+        except (OSError, smtplib.SMTPException):
+            # Counted, then re-raised. Not swallowed: this is the exact site
+            # where "the mail sent, nothing raised, nobody got it" comes from,
+            # and the counter is what makes an outage visible to an operator
+            # whose application never sees the exception because a retrying job
+            # absorbed it.
+            self.transport_failures += 1
+            raise
         finally:
             smtp.close()
 
