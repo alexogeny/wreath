@@ -1718,6 +1718,14 @@ build_h2_scope(Http2Protocol *self, PyObject *header_list, PyObject **out_scope,
     if (path) {
         PyBytes_AsStringAndSize(path, &pptr, &plen);
     }
+    /* Finds the query separator by hand instead of calling
+     * `wreath_memmem(pptr, plen, "?", 1)`, which sends a one-byte needle
+     * straight to glibc's vectorised `memchr`. Scalar on purpose, not by
+     * oversight: an h2 `:path` is 30-80 bytes, so this is one instruction per
+     * byte over tens of bytes -- single-digit nanoseconds against a per-request
+     * budget measured in microseconds, and under any floor this repository can
+     * measure. Widening a loop this short is the weaker move; there is no work
+     * here to delete. */
     Py_ssize_t q = -1;
     for (Py_ssize_t i = 0; i < plen; i++) {
         if (pptr[i] == '?') { q = i; break; }

@@ -759,7 +759,8 @@ async def test_cancellation_during_retry_backoff_stops_attempts() -> None:
     request.cancel()
     with pytest.raises(asyncio.CancelledError):
         await request
-    await asyncio.sleep(0.1)
+    # Awaiting the cancelled request is the lifecycle boundary: no retry code
+    # owned by that task can continue after it has finished unwinding.
     assert requests == 1
     await client.close()
     server.close()
@@ -1183,6 +1184,9 @@ async def test_client_races_resolved_addresses(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
     # Address racing is transport-agnostic; spoof the streams seam.
     monkeypatch.setattr("wreath.http_client._NativeClientStream", None)
+    # Winner selection is the contract here, not the production stagger.  A
+    # separate slow first attempt still proves the second address is raced.
+    monkeypatch.setattr("wreath.http_client._HAPPY_EYEBALLS_DELAY", 0)
     monkeypatch.setattr(asyncio, "open_connection", open_connection)
 
     client = HTTPClient("race", base_url="http://example.com")

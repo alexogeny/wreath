@@ -1133,6 +1133,12 @@ start_request(WreathH3Stream *s)
     }
     char *pp = (char *)"/"; Py_ssize_t pl = 1;
     if (path) PyBytes_AsStringAndSize(path, &pp, &pl);
+    /* The query separator, scanned by hand rather than by
+     * `wreath_memmem(pp, pl, "?", 1)` and its dispatch to glibc's vectorised
+     * `memchr`. Same decision as the h2 and h1 copies of this line: an h3
+     * `:path` is 30-80 bytes, one instruction per byte, so a perfect vector
+     * version saves single-digit nanoseconds out of a request measured in
+     * microseconds. Left scalar deliberately. */
     Py_ssize_t q = -1;
     for (Py_ssize_t i = 0; i < pl; i++) { if (pp[i] == '?') { q = i; break; } }
     PyObject *path_str = PyUnicode_DecodeUTF8(pp, q >= 0 ? q : pl, "surrogateescape");

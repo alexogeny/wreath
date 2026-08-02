@@ -564,6 +564,14 @@ wreath_http_serialize_request(PyObject *Py_UNUSED(self), PyObject *args)
             PyErr_SetString(PyExc_ValueError, "invalid HTTP method");
             goto error;
         }
+        /* A per-byte table lookup rather than one of `simd.h`'s arms. No arm
+         * expresses this predicate: `wreath_value_run` and its SWAR twin test
+         * for control bytes and DEL, and token-set membership is a different
+         * question that a SWAR word cannot answer without the table anyway.
+         * The length settles it regardless -- a method is 3-7 bytes, so it
+         * never fills the eight-byte word a SWAR step needs, and
+         * `wreath_value_run` would itself fall through to its scalar loop
+         * below 16. Scalar by decision. */
         for (Py_ssize_t i = 0; i < len; i++) {
             if (!TOKEN_CHARS[data[i]]) {
                 PyErr_SetString(PyExc_ValueError, "invalid HTTP method");
@@ -578,6 +586,15 @@ wreath_http_serialize_request(PyObject *Py_UNUSED(self), PyObject *args)
             PyErr_SetString(PyExc_ValueError, "invalid request target");
             goto error;
         }
+        /* Close to `simd.h`'s `wreath_value_run_swar`, which tests
+         * `wreath_swar_lt(word, 0x20) | wreath_swar_eq(word, 0x7f)` -- but not
+         * the same predicate: this refuses SPACE (`<= 0x20`) because a space
+         * in a request target would split the request line, and the value arm
+         * permits HTAB. Reusing it would mean re-checking every stop by hand.
+         * Not worth it at this length: an outgoing request target is 30-80
+         * bytes, one instruction per byte, and `wreath_value_run` takes its
+         * own scalar path below 16 bytes. Scalar by decision, not by
+         * oversight. */
         for (Py_ssize_t i = 0; i < target.len; i++) {
             if (data[i] <= 0x20 || data[i] == 0x7f) {
                 PyErr_SetString(PyExc_ValueError, "invalid request target");
@@ -589,6 +606,15 @@ wreath_http_serialize_request(PyObject *Py_UNUSED(self), PyObject *args)
         PyErr_SetString(PyExc_ValueError, "invalid host");
         goto error;
     }
+    /* This one *is* `simd.h`'s predicate exactly: `wreath_is_value_stop` is
+     * `(c < 0x20 && c != '\t') || c == 0x7f`, so
+     * `wreath_value_run(host.buf, host.len) == host.len` would answer it. Left
+     * scalar anyway, and the reason is the length rather than the shape: a
+     * host header is 10-40 bytes, `wreath_value_run` dispatches to its own
+     * scalar loop under 16 of them, and above that the saving is single-digit
+     * nanoseconds on a scan that runs once per outgoing request. A hand-rolled
+     * loop beside a primitive is usually an oversight; this one is a decision,
+     * and this is the number behind it. */
     for (Py_ssize_t i = 0; i < host.len; i++) {
         uint8_t c = ((const uint8_t *)host.buf)[i];
         if (c != '\t' && (c < 0x20 || c == 0x7f)) {

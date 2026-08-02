@@ -2513,6 +2513,12 @@ begin_request(WreathHttpProtocol *self, PyObject *method, long minor, PyObject *
         self->method_is_head ||
         PyUnicode_CompareWithASCIIString(method, "OPTIONS") == 0;
 
+    /* Splits the request target at the query separator by hand, where
+     * `wreath_memmem(td, ts, "?", 1)` would dispatch the one-byte needle to
+     * glibc's vectorised `memchr`. Deliberate: a request target is 30-80 bytes
+     * in practice and the loop is one instruction per byte, so the whole scan
+     * is tens of instructions per request. Nothing here clears a measurable
+     * floor, and the rule prefers deleting work to widening it. */
     for (Py_ssize_t i = 0; i < ts; i++) {
         if (td[i] == '?') {
             q = i;
