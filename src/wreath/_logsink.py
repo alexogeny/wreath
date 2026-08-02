@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import threading
-from collections import deque
 from collections.abc import Callable
 from typing import Any, Final
 from typing import Protocol as _Protocol
@@ -42,6 +41,7 @@ from ._logsite import SiteRegistry
 from ._logsite import attributes as _attributes
 from ._logsite import render as _render
 from ._projector import ProjectedLog, ProjectedTrace
+from .queue import Queue
 
 #: Records held between writer ticks. Sized like the export queue: generous
 #: enough to absorb a burst, small enough that a stalled writer is bounded.
@@ -141,54 +141,18 @@ def default_renderer(*, is_tty: bool) -> Renderer:
     return TextRenderer() if is_tty else JsonRenderer()
 
 
-class BoundedLogQueue:
-    """A fixed-capacity hand-off from the projector thread to the writer.
-
-    Offering to a full queue drops the record and counts it. That is the only
-    policy compatible with the promise the ring already makes: bounded memory,
-    bounded latency, and loss that is visible rather than silent.
-    """
-
-    __slots__ = ("_dropped", "_items", "_lock", "_offered")
-
-    def __init__(self, capacity: int = DEFAULT_LOG_QUEUE_CAPACITY) -> None:
-        if capacity <= 0:
-            raise ValueError("capacity must be positive")
-        self._items: deque[ProjectedLog] = deque(maxlen=capacity)
-        self._lock = threading.Lock()
-        self._dropped = 0
-        self._offered = 0
-
-    def offer(self, record: ProjectedLog) -> bool:
-        with self._lock:
-            self._offered += 1
-            if len(self._items) == self._items.maxlen:
-                self._dropped += 1
-                return False
-            self._items.append(record)
-            return True
-
-    def drain(self, max_items: int | None = None) -> list[ProjectedLog]:
-        with self._lock:
-            if max_items is None or max_items >= len(self._items):
-                batch = list(self._items)
-                self._items.clear()
-                return batch
-            return [self._items.popleft() for _ in range(max(0, max_items))]
-
-    @property
-    def dropped(self) -> int:
-        with self._lock:
-            return self._dropped
-
-    @property
-    def offered(self) -> int:
-        with self._lock:
-            return self._offered
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._items)
+#: The hand-off from the projector thread to the writer.
+#:
+#: Was a class here, and a byte-for-byte twin of `_otlp.BoundedExportQueue`
+#: beside it: the same deque, the same lock, the same two counters, the same
+#: drop-and-count policy, differing only in the type of the thing queued. Both
+#: are now `wreath.queue.Queue`, which is that policy in C -- one call per item
+#: instead of a lock acquire, two increments, a length test and a method call.
+#: Measured at 0.17us per offer before, against a 0.02us bare `deque.append`.
+#:
+#: The name stays because it says what this queue is *for*, and because the
+#: alias keeps the import in `_export.py` and the log tests working unchanged.
+BoundedLogQueue = Queue
 
 
 class LogPipeline:
