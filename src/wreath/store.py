@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any, Final, NamedTuple
 
-from .cache import BoundedCache
+from .kv import KV
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -567,7 +567,7 @@ class PostgresStore:
         return await self.statement("purge").execute()
 
 
-class MemoryStore:
+class MemoryStore(KV):
     """The same keyed store in one worker's memory: bounded, TTL'd, synchronous.
 
     Enough on its own for a single-worker deployment or a sticky load balancer.
@@ -598,8 +598,6 @@ class MemoryStore:
     honoured for the same length of time.
     """
 
-    __slots__ = ("_cache", "_clock", "_ttl")
-
     def __init__(
         self,
         *,
@@ -607,82 +605,32 @@ class MemoryStore:
         max_entries: int = 4096,
         clock: Callable[[], float] = monotonic,
     ) -> None:
-        # Entries are `(value, deadline)`. The deadline is the store's and it is
-        # the one honoured; the cache's own TTL is a backstop that can never
-        # fall earlier, because it is recomputed on each write while the
-        # deadline is carried forward. Keeping the deadline in the value rather
-        # than in a second dictionary is what bounds it: an LRU eviction at
-        # `max_entries` drops the value and its deadline together.
-        self._cache: BoundedCache = BoundedCache(
-            max_entries=max_entries, ttl=ttl, clock=clock
+        # Its own signature rather than `KV`'s, because this one is half of a
+        # two-backend protocol: it is keyword-only and it holds more keys by
+        # default than a cache would, and `PostgresStore` beside it takes the
+        # same shape. `clock is monotonic` becomes `None` so the default keeps
+        # the table's C clock rather than paying for a Python call per read.
+        super().__init__(
+            max_entries=max_entries,
+            ttl=ttl,
+            clock=None if clock is monotonic else clock,
         )
-        self._ttl = ttl
-        self._clock = clock
 
-    def claim(self, key: str) -> bool:
+    def claim(self, key: str) -> bool:  # type: ignore[override]
         """Take ownership of `key`, or report that it is already held."""
-        if self.read(key) is not None:
-            return False
-        self._write(key, CLAIMED, deadline=None)
-        return True
+        return super().claim(key, CLAIMED)
 
     def read(self, key: str) -> Any:
         """The stored value, `CLAIMED` when claimed but unwritten, or None."""
-        entry = self._cache.get(key)
-        if entry is None:
-            return None
-        value, deadline = entry
-        if deadline is not None and self._clock() >= deadline:
-            self._cache.delete(key)
-            return None
-        return value
+        return self.get(key)
 
-    def set(self, key: str, value: Any) -> None:
+    def set(self, key: str, value: Any) -> None:  # type: ignore[override]
         """Store `value` under `key`, keeping the deadline the key already has.
 
         A key that is absent or already past its deadline starts a fresh window;
         one that is live keeps the deadline it was claimed or first written with.
         """
-        entry = self._cache.get(key)
-        deadline = None
-        if entry is not None:
-            deadline = entry[1]
-            if deadline is not None and self._clock() >= deadline:
-                deadline = None
-        self._write(key, value, deadline=deadline)
-
-    def _write(self, key: str, value: Any, *, deadline: float | None) -> None:
-        if deadline is None and self._ttl is not None:
-            deadline = self._clock() + self._ttl
-        self._cache.set(key, (value, deadline))
-
-    def delete(self, key: str) -> bool:
-        """Drop `key`; report whether it was there."""
-        return self._cache.delete(key)
-
-    def clear(self) -> None:
-        """Drop every key, live or expired.
-
-        For a test between cases. Nothing in a running application should need
-        it: a claim that is forgotten wholesale is a claim two workers can both
-        take again.
-        """
-        self._cache.clear()
-
-    def __len__(self) -> int:
-        """How many keys the store still honours.
-
-        Entries past their deadline are dropped lazily -- on read, or when
-        capacity forces an eviction -- so counting the raw cache reported keys
-        this store would refuse. That made `len()` useless as the thing it looks
-        like: a measure of how much is being held.
-        """
-        now = self._clock()
-        live = 0
-        for _value, deadline in self._cache.snapshot().values():
-            if deadline is None or now < deadline:
-                live += 1
-        return live
+        super().set(key, value, keep_deadline=True)
 
 
 __all__ = [
