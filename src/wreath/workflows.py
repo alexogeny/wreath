@@ -64,6 +64,11 @@ from typing import Any
 
 from . import _nplusone
 from . import telemetry as _telemetry
+from ._recording_format import (
+    COMPENSATION_FAILED,
+    COMPENSATION_NONE,
+    COMPENSATION_RAN,
+)
 
 #: The system schema durable workflow state lives in, matching `wreath.jobs`.
 DEFAULT_SCHEMA = "wreath_system"
@@ -543,6 +548,7 @@ class Workflow:
         key: str | None = None,
         compensate: bool = True,
         progress: Any = None,
+        recorder: Any = None,
     ) -> Outcome:
         """Start (or rejoin) an instance and execute it to completion.
 
@@ -559,6 +565,11 @@ class Workflow:
                 one that invalidates the whole saga.
             progress: A `wreath.progress.ProgressRegistry` to report step
                 completion to.
+            recorder: A `wreath.recording.WorkflowStepRecorder`, or None. It
+                arms nothing on its own -- a policy with no triggers records
+                nothing -- and it is passed per run rather than held on the
+                workflow because arming is an operator's decision about a
+                deployment, not a property of the saga's definition.
 
         Raises:
             Exception: whatever the failing step raised, re-raised after the undo
@@ -580,6 +591,7 @@ class Workflow:
             record=record,
             compensate=compensate,
             progress=progress,
+            recorder=recorder,
         )
 
     async def status(self, *, store: Any, key: str) -> Outcome | None:
@@ -605,7 +617,9 @@ class Workflow:
             compensation_errors=int(record.get("compensation_errors") or 0),
         )
 
-    async def resume(self, *, store: Any, key: str, progress: Any = None) -> Outcome:
+    async def resume(
+        self, *, store: Any, key: str, progress: Any = None, recorder: Any = None
+    ) -> Outcome:
         """Carry a started instance on from its first unrecorded step.
 
         Raises:
@@ -636,11 +650,13 @@ class Workflow:
                 completed=list(record.get("results") or {}),
             )
         return await self._execute(
-            store=store, key=key, record=record, compensate=True, progress=progress
+            store=store, key=key, record=record, compensate=True, progress=progress,
+            recorder=recorder,
         )
 
     async def _execute(
-        self, *, store: Any, key: str, record: dict[str, Any], compensate: bool, progress: Any
+        self, *, store: Any, key: str, record: dict[str, Any], compensate: bool,
+        progress: Any, recorder: Any = None,
     ) -> Outcome:
         """Bind the instance's trace, then execute under it.
 
@@ -665,12 +681,15 @@ class Workflow:
                 record=record,
                 compensate=compensate,
                 progress=progress,
+                recorder=recorder,
+                trace_context=parent or "",
             )
         finally:
             _telemetry.outbound_context.reset(token)
 
     async def _execute_bound(
-        self, *, store: Any, key: str, record: dict[str, Any], compensate: bool, progress: Any
+        self, *, store: Any, key: str, record: dict[str, Any], compensate: bool,
+        progress: Any, recorder: Any = None, trace_context: str = "",
     ) -> Outcome:
         results: dict[str, Any] = dict(record.get("results") or {})
         context = StepContext(key=key, workflow=self.name, results=results)
@@ -683,21 +702,34 @@ class Workflow:
         for index, step in enumerate(self._steps):
             if step.name in results:
                 continue
+            witness = _StepWitness(
+                self, recorder, key, step, index, completed, trace_context
+            )
             try:
-                with _nplusone.scope_for(
+                with witness.observing(), _nplusone.scope_for(
                     _nplusone.Origin(kind="step", label=step.name, identifier=key),
                     budget=step.query_budget,
                 ):
                     results[step.name] = await _call(step.run, context)
             except BaseException as error:
+                undone: list[tuple[str, str]] = []
                 if compensate:
-                    _undone, failures = await self._compensate(store, key, completed, context)
+                    _names, failures, undone = await self._compensate(
+                        store, key, completed, context
+                    )
                     await store.finish(key, "compensated", failures)
                 else:
                     await store.finish(key, "failed", 0)
+                # Written **after** the undo chain, deliberately. The record's
+                # reason to exist is that a saga failure mid-way is the least
+                # reproducible state in the framework, and "which compensations
+                # ran" is most of what makes it so; a record written at the
+                # moment of the raise could not carry any of them.
+                witness.write(error, undone)
                 if reporter is not None:
                     reporter.fail(error, f"step {step.name!r} failed")
                 raise
+            witness.write(None, ())
             await store.complete_step(key, step.name, results[step.name])
             completed.append(step)
             if reporter is not None:
@@ -716,12 +748,21 @@ class Workflow:
 
     async def _compensate(
         self, store: Any, key: str, completed: list[Step], context: StepContext
-    ) -> tuple[list[str], int]:
-        """Undo the completed steps, newest first, counting every undo that fails."""
+    ) -> tuple[list[str], int, list[tuple[str, str]]]:
+        """Undo the completed steps, newest first, counting every undo that fails.
+
+        The third return value is the chain as a recording reads it --
+        `(step, "ran" | "failed" | "none")` newest-first, including the steps
+        that declared no compensation at all. "Nothing to undo" and "the undo
+        was never reached" are different states of the world and a saga that
+        stopped mid-way is exactly where telling them apart matters.
+        """
         undone: list[str] = []
+        chain: list[tuple[str, str]] = []
         failures = 0
         for step in reversed(completed):
             if step.compensate is None:
+                chain.append((step.name, COMPENSATION_NONE))
                 await store.uncomplete_step(key, step.name)
                 continue
             try:
@@ -740,10 +781,123 @@ class Workflow:
                 # `BaseException`, so a cancellation still propagates and stops
                 # the chain -- an operator cancelling a compensation means it.
                 failures += 1
+                chain.append((step.name, COMPENSATION_FAILED))
                 continue
             undone.append(step.name)
+            chain.append((step.name, COMPENSATION_RAN))
             await store.uncomplete_step(key, step.name)
-        return undone, failures
+        return undone, failures, chain
+
+
+class _StepWitness:
+    """Watches one step for a recorder, and writes it down if the policy arms.
+
+    Kept out of `_execute_bound` because that function is the saga, and a run
+    with no recorder must read as though this did not exist -- `observing()` is
+    a null context and `write` returns immediately, so an unarmed saga pays one
+    attribute test per step and nothing else.
+
+    Nothing here can raise into the saga. The recorder's own `write` never does,
+    by contract, and the two things this adds -- deciding the outcome and
+    building the record -- are arithmetic over values the caller already holds.
+    """
+
+    __slots__ = (
+        "_completed", "_key", "_position", "_recorder", "_step", "_trace",
+        "_workflow", "trace",
+    )
+
+    def __init__(
+        self,
+        workflow: Workflow,
+        recorder: Any,
+        key: str,
+        step: Step,
+        position: int,
+        completed: list[Step],
+        trace_context: str,
+    ) -> None:
+        self._workflow = workflow
+        self._recorder = recorder
+        self._key = key
+        self._step = step
+        self._position = position
+        # The step *before this one in execution order*, which is the cause a
+        # reader follows -- not the previous declaration, because a resumed
+        # instance may have completed steps this process never ran.
+        self._completed = list(completed)
+        self._trace = trace_context
+        self.trace: Any = None
+
+    def observing(self) -> Any:
+        """Watch this step's boundaries, when something is recording it."""
+        if self._recorder is None:
+            import contextlib
+
+            return contextlib.nullcontext()
+        from ._replay_adapters import observed_boundaries
+
+        self.trace = self._recorder.trace()
+        return observed_boundaries(self._recorder.scope, self.trace)
+
+    def write(self, error: BaseException | None, chain: Sequence[tuple[str, str]]) -> None:
+        """Ask the policy about this step, and write it if the answer is yes."""
+        recorder = self._recorder
+        if recorder is None:
+            return
+        from ._recording_format import WorkflowStepRecord
+
+        outcome = self._outcome(error, chain)
+        if not recorder.captures(
+            workflow=self._workflow.name,
+            step=self._step.name,
+            outcome=outcome,
+            instance=self._key,
+        ):
+            return
+        # Never None here: `write` has already returned when there is no
+        # recorder, and `observing()` -- which `_execute_bound` always enters
+        # around the step -- makes a trace whenever there is one. The `trace is
+        # None` arm that used to be here was unreachable, and a mutation run
+        # found it by taking both of its branches with nothing to tell them
+        # apart.
+        trace = self.trace
+        recorder.write(
+            WorkflowStepRecord(
+                instance=self._key,
+                workflow=self._workflow.name,
+                step=self._step.name,
+                position=self._position,
+                after=self._completed[-1].name if self._completed else "",
+                tenant="",
+                trace_context=self._trace,
+                boundaries=trace.events,
+                outcome=str(outcome),
+                error_type="" if error is None else type(error).__name__,
+                error_message="" if error is None else str(error),
+                completed_before=len(self._completed),
+                compensations=tuple(chain),
+            ),
+            trace,
+        )
+
+    def _outcome(
+        self, error: BaseException | None, chain: Sequence[tuple[str, str]]
+    ) -> Any:
+        """Which of the three outcomes this step reached.
+
+        `compensation_failed` outranks `raised` when both are true, and that
+        ordering is the whole point of having two names: a saga whose undo chain
+        also broke is in a state a retry cannot reach, and a record that reported
+        only the original failure would send a reader to the wrong problem.
+        """
+        from ._recording_format import COMPENSATION_FAILED, WorkflowStepOutcome
+
+        if error is None:
+            return WorkflowStepOutcome.COMPLETED
+        if any(state == COMPENSATION_FAILED for _name, state in chain):
+            return WorkflowStepOutcome.COMPENSATION_FAILED
+        return WorkflowStepOutcome.RAISED
 
 
 __all__ = [
