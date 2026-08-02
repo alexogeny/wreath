@@ -549,3 +549,157 @@ def check_logging_streams(*, active: bool | None = None) -> list[str]:
             f"two streams deliberately"
         )
     return findings
+
+
+# --- email deliverability ----------------------------------------------------
+
+
+def check_email_deliverability(
+    sender: Any, *, timeout: float = 3.0, resolve: Callable[..., Any] | None = None
+) -> list[str]:
+    """Report the DNS records a configured mail sender needs and does not have.
+
+    Sending mail is the one part of an application whose correctness lives
+    somewhere the code cannot see. `SmtpEmailSender` can be configured
+    perfectly, sign every message, and still have its mail rejected outright,
+    because the sending domain's SPF, DKIM and DMARC records are in DNS and
+    nobody published them. Since May 2026 that is a permanent 550 from Google,
+    Yahoo and Microsoft rather than a spam-folder risk, and above 5,000 messages
+    a day all three records are required rather than advisable.
+
+    So this asks DNS what the code cannot: does the SPF record exist, is the
+    selector this sender signs with actually published, and is there a DMARC
+    policy. It is a diagnostic and never a gate -- an unreachable nameserver is
+    reported as "could not tell", not as a failure, because a check that turns a
+    slow resolver into a failed startup is a check people disable.
+
+    Args:
+        sender: A configured `SmtpEmailSender`.
+        timeout: Seconds to wait for each lookup.
+        resolve: The TXT resolver, for tests. Defaults to `wreath._dns.resolve_txt`.
+
+    Returns:
+        One human-readable line per finding, most serious first. Empty when SPF,
+        DKIM and DMARC are all present and the DKIM key is published for the
+        selector this sender signs with.
+    """
+    from ._dns import resolve_txt
+
+    lookup = resolve or resolve_txt
+    from_addr = getattr(sender, "from_addr", "") or ""
+    _, _, envelope_domain = from_addr.rpartition("@")
+    envelope_domain = envelope_domain.strip("<> ")
+    if not envelope_domain:
+        return [
+            "the sender has no from address, so there is no domain whose SPF, DKIM "
+            "and DMARC records could be checked"
+        ]
+
+    findings: list[str] = []
+    signer = getattr(sender, "dkim", None)
+
+    if signer is None:
+        findings.append(
+            f"{envelope_domain} sends unsigned mail: SmtpEmailSender has no dkim=, so "
+            "every message is DKIM-unauthenticated. Above 5,000 messages a day to "
+            "Gmail or Yahoo that is a permanent rejection, not a spam-folder risk; "
+            "pass dkim=DkimSigner(...)"
+        )
+    else:
+        # Alignment is checked before publication, because a published key for
+        # the wrong domain passes DKIM and still fails DMARC -- and that failure
+        # reads as "DKIM is broken" to everyone who looks at it.
+        if signer.domain.lower() != envelope_domain.lower():
+            findings.append(
+                f"DKIM signs as d={signer.domain} but mail is sent From "
+                f"{envelope_domain}: the signature will verify and DMARC will still "
+                "fail, because DMARC requires the signing domain to align with the "
+                "From domain"
+            )
+        record_name = f"{signer.selector}._domainkey.{signer.domain}"
+        answer = lookup(record_name, timeout=timeout)
+        if not answer.resolved:
+            findings.append(f"could not read {record_name}: {answer.error}")
+        else:
+            published = [text for text in answer.records if "v=DKIM1" in text or "p=" in text]
+            if not published:
+                findings.append(
+                    f"no DKIM public key is published at {record_name}, so every "
+                    f"signature this sender makes fails verification. Publish a TXT "
+                    f"record there containing the public half of the signing key"
+                )
+            elif all(_dkim_key_empty(text) for text in published):
+                findings.append(
+                    f"the DKIM record at {record_name} has an empty p=, which means "
+                    "the key is revoked; verifiers treat every signature from it as a "
+                    "failure"
+                )
+            elif signer.algorithm == "ed25519-sha256" and not any(
+                "k=ed25519" in text for text in published
+            ):
+                findings.append(
+                    f"this sender signs ed25519-sha256 but {record_name} does not say "
+                    "k=ed25519, so verifiers will try to read the key as RSA and fail"
+                )
+
+    spf = lookup(envelope_domain, timeout=timeout)
+    if not spf.resolved:
+        findings.append(f"could not read the TXT records for {envelope_domain}: {spf.error}")
+    else:
+        records = [text for text in spf.records if text.lower().startswith("v=spf1")]
+        if not records:
+            findings.append(
+                f"{envelope_domain} publishes no SPF record, so a receiver has no "
+                "authorised-sender list to check this mail against"
+            )
+        elif len(records) > 1:
+            findings.append(
+                f"{envelope_domain} publishes {len(records)} SPF records; RFC 7208 "
+                "requires exactly one, and a receiver seeing several returns permerror "
+                "rather than picking one"
+            )
+        elif records[0].rstrip().endswith("+all"):
+            findings.append(
+                f"the SPF record for {envelope_domain} ends in +all, which authorises "
+                "every host on the internet to send as this domain -- the same as "
+                "publishing nothing, but harder to notice"
+            )
+
+    dmarc_name = f"_dmarc.{envelope_domain}"
+    dmarc = lookup(dmarc_name, timeout=timeout)
+    if not dmarc.resolved:
+        findings.append(f"could not read {dmarc_name}: {dmarc.error}")
+    else:
+        policies = [text for text in dmarc.records if text.lower().startswith("v=dmarc1")]
+        if not policies:
+            findings.append(
+                f"{envelope_domain} publishes no DMARC record at {dmarc_name}; SPF and "
+                "DKIM alone do not satisfy the bulk-sender requirements, which ask for "
+                "a policy of at least p=none"
+            )
+        elif _dmarc_policy(policies[0]) == "none":
+            findings.append(
+                f"the DMARC policy for {envelope_domain} is p=none, which meets the "
+                "letter of the requirement and asks receivers to do nothing about "
+                "forgery; p=quarantine is the 2026 baseline for a domain that sends "
+                "real mail"
+            )
+    return findings
+
+
+def _dkim_key_empty(record: str) -> bool:
+    """Whether a DKIM TXT record carries a revoked (empty) `p=` tag."""
+    for tag in record.split(";"):
+        name, _, value = tag.partition("=")
+        if name.strip() == "p":
+            return not value.strip()
+    return True
+
+
+def _dmarc_policy(record: str) -> str | None:
+    """The `p=` policy word from a DMARC record, lower-cased."""
+    for tag in record.split(";"):
+        name, _, value = tag.partition("=")
+        if name.strip().lower() == "p":
+            return value.strip().lower()
+    return None
