@@ -207,6 +207,25 @@ async def test_selectin_deduplicates_keys(
     assert posts[0].author is posts[1].author
 
 
+async def test_native_fetch_collapses_repeated_identity_objects(
+    monkeypatch: pytest.MonkeyPatch, session: Session
+) -> None:
+    first = object()
+    second = object()
+
+    class NativeConnection:
+        async def _fetch_into(self, sql, args, destination):
+            return [first, first, second]
+
+    monkeypatch.setattr(Session, "_hydrate_plan", lambda *_args: object())
+
+    objects = await session._fetch_objects(
+        NativeConnection(), object(), "SELECT duplicate identities", ()
+    )
+
+    assert objects == [first, second]
+
+
 async def test_a_null_foreign_key_loads_as_none_without_a_query() -> None:
     from wreath.orm import relationship
 

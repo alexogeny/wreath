@@ -27,6 +27,7 @@ import time
 from secrets import token_urlsafe
 from typing import Any
 
+from .._b64 import b64url_decode
 from .._json import dumps as _json_dumps
 from .._json import loads as _json_loads
 from ..request import Request
@@ -238,8 +239,7 @@ class SessionMiddleware:
                 return None
             if int(stamp) + self._max_age < int(time.time()):
                 return None
-            padded = body + "=" * (-len(body) % 4)
-            payload = base64.urlsafe_b64decode(padded)
+            payload = b64url_decode(body)
             data = _json_loads(payload)
         except (ValueError, TypeError):
             return None
@@ -379,8 +379,7 @@ class SessionMiddleware:
                 return None
             if int(stamp) + self._max_age < int(time.time()):
                 return None
-            padded = body + "=" * (-len(body) % 4)
-            return base64.urlsafe_b64decode(padded).decode("ascii")
+            return b64url_decode(body).decode("ascii")
         except (ValueError, TypeError, UnicodeDecodeError):
             return None
 
