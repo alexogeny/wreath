@@ -44,6 +44,7 @@ There are two circles of readers here, and each gets its own set.
 ### Realtime and background work
 
 - [Show a live progress bar for a long task](recipes/stream-job-progress.md)
+- [Stream a model's answer so a reconnect resumes it](recipes/resumable-llm-stream.md)
 - [Broadcast to many WebSocket clients](recipes/websocket-broadcast.md)
 - [Enqueue a durable job with retries](recipes/durable-job.md)
 - [Run work after the response](recipes/background-jobs.md)
