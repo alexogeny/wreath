@@ -225,6 +225,28 @@ wreath_json_run_avx2(const char *data, ptrdiff_t len, unsigned *seen_high)
  * escaping were 10-15% *slower* than the byte loop they replaced. */
 
 #if defined(WREATH_HAVE_NEON)
+/* Forward declarations for the three SWAR tails the NEON arms fall back to.
+ *
+ * This block sits above the html, value and xor families, so without these the
+ * arms below call functions that are not declared yet. That is not a warning:
+ * an implicit declaration is assumed to return `int`, which then *conflicts*
+ * with the `static inline ptrdiff_t` definition further down, and the
+ * translation unit fails to compile.
+ *
+ * It fails only on aarch64, because everywhere else this whole block is
+ * preprocessed away -- so the extension would simply not build on Apple Silicon
+ * or an ARM server, and no amount of testing on x86 would show it. Found by the
+ * declaration-order check in `tests/test_native_simd.py`, which exists to catch
+ * exactly this class from a machine that cannot compile it.
+ *
+ * Declaring rather than moving the block: the alternative is relocating four
+ * functions into three different families, which is a larger and more delicate
+ * edit to make blind against a target that cannot be compiled here. */
+static inline ptrdiff_t wreath_html_run_swar(const char *data, ptrdiff_t len);
+static inline ptrdiff_t wreath_value_run_swar(const char *data, ptrdiff_t len);
+static inline void wreath_xor_mask_swar(uint8_t *dst, const uint8_t *src,
+                                        ptrdiff_t len, const uint8_t *key);
+
 /* Index of the first 0xFF lane in a NEON comparison result.
  *
  * NEON has no `movemask`. The idiom is to narrow each 16-bit lane down to its
@@ -1094,5 +1116,393 @@ wreath_hex_decode(const char *in, ptrdiff_t len, unsigned char *out)
 #endif
     return wreath_hex_decode_scalar(in, len, out);
 }
+
+/* ======================================================================== */
+/* Hash-table control bytes: which slots in a group could hold this key.      */
+/*                                                                           */
+/* `kv.c` keeps one byte per slot beside the entries, so a probe reads 32     */
+/* bytes of metadata instead of 32 entries: the whole group is one cache      */
+/* line's worth, and only the lanes the scan flags are dereferenced.          */
+/*                                                                           */
+/*   0x80        empty -- the probe stops here, the key is not in the table   */
+/*   0xFE        deleted -- the chain continues through it                    */
+/*   0x00..0x7F  full, holding the low seven bits of the key's hash           */
+/*                                                                           */
+/* A full byte never has its high bit set and empty/deleted always do, which  */
+/* is the invariant that lets one equality kernel answer both questions: a    */
+/* tag scan cannot collide with a free slot, and a free scan is one high-bit  */
+/* test. Both are *exact*, and that is not decoration -- an over-reported     */
+/* empty lane terminates a probe early and loses a key that is really there.  */
+/* The SWAR arm below therefore cannot use `wreath_swar_eq`, whose borrows    */
+/* over-report position (see the header's earlier warnings); measured against */
+/* the byte loop it disagreed on 358 of 200000 random groups.                 */
+/*                                                                           */
+/* The group is 32 slots rather than the more usual 16 so that every arm      */
+/* answers one identical question and AVX2 can answer it in a single compare  */
+/* where SSE2 needs two. The width is a *layout* constant: it must not depend */
+/* on which arm the runtime dispatches to, or a table built on a machine with */
+/* AVX2 would probe differently from one without.                            */
+/* ======================================================================== */
+
+#define WREATH_CTRL_GROUP 32
+#define WREATH_CTRL_EMPTY 0x80u
+#define WREATH_CTRL_DELETED 0xFEu
+
+/* Gathers one bit per byte of `high`, which must hold 0x80 in each selected
+ * lane and 0x00 elsewhere. Verified exhaustively over all 256 lane patterns:
+ * the products land in bits 56..63 in lane order and the sub-56 debris never
+ * carries into them. */
+#define WREATH_SWAR_GATHER 0x0102040810204080ULL
+
+static inline unsigned
+wreath_swar_movemask(uint64_t high)
+{
+    return (unsigned)(((high >> 7) * WREATH_SWAR_GATHER) >> 56) & 0xFFu;
+}
+
+/* Lanes of `word` that are zero, marked 0x80. Exact, unlike the borrow-based
+ * tests above: `(lane & 0x7F) + 0x7F` raises bit 7 for every lane with a set
+ * bit below it, OR-ing in `lane` covers a lane that is exactly 0x80, and the
+ * complement is therefore set only where the whole lane was zero. */
+static inline uint64_t
+wreath_swar_zero_lanes(uint64_t word)
+{
+    uint64_t nonzero = (((word & 0x7F7F7F7F7F7F7F7FULL) + 0x7F7F7F7F7F7F7F7FULL) | word)
+                       & WREATH_SWAR_HIGH;
+    return ~nonzero & WREATH_SWAR_HIGH;
+}
+
+static inline uint32_t
+wreath_ctrl_eq_scalar(const uint8_t *ctrl, uint8_t needle)
+{
+    uint32_t mask = 0;
+    for (int i = 0; i < WREATH_CTRL_GROUP; i++) {
+        if (ctrl[i] == needle) {
+            mask |= (uint32_t)1 << i;
+        }
+    }
+    return mask;
+}
+
+static inline uint32_t
+wreath_ctrl_high_scalar(const uint8_t *ctrl)
+{
+    uint32_t mask = 0;
+    for (int i = 0; i < WREATH_CTRL_GROUP; i++) {
+        if ((ctrl[i] & 0x80u) != 0) {
+            mask |= (uint32_t)1 << i;
+        }
+    }
+    return mask;
+}
+
+static inline uint32_t
+wreath_ctrl_eq_swar(const uint8_t *ctrl, uint8_t needle)
+{
+    uint64_t pattern = WREATH_SWAR_ONES * needle;
+    uint32_t mask = 0;
+    for (int i = 0; i < WREATH_CTRL_GROUP / 8; i++) {
+        uint64_t word;
+        memcpy(&word, ctrl + i * 8, 8);
+        mask |= (uint32_t)wreath_swar_movemask(wreath_swar_zero_lanes(word ^ pattern))
+                << (i * 8);
+    }
+    return mask;
+}
+
+static inline uint32_t
+wreath_ctrl_high_swar(const uint8_t *ctrl)
+{
+    uint32_t mask = 0;
+    for (int i = 0; i < WREATH_CTRL_GROUP / 8; i++) {
+        uint64_t word;
+        memcpy(&word, ctrl + i * 8, 8);
+        mask |= (uint32_t)wreath_swar_movemask(word & WREATH_SWAR_HIGH) << (i * 8);
+    }
+    return mask;
+}
+
+#if defined(WREATH_HAVE_SSE2)
+static inline uint32_t
+wreath_ctrl_eq_sse2(const uint8_t *ctrl, uint8_t needle)
+{
+    const __m128i want = _mm_set1_epi8((char)needle);
+    __m128i lo = _mm_loadu_si128((const __m128i *)(const void *)ctrl);
+    __m128i hi = _mm_loadu_si128((const __m128i *)(const void *)(ctrl + 16));
+    return (uint32_t)_mm_movemask_epi8(_mm_cmpeq_epi8(lo, want))
+           | ((uint32_t)_mm_movemask_epi8(_mm_cmpeq_epi8(hi, want)) << 16);
+}
+
+static inline uint32_t
+wreath_ctrl_high_sse2(const uint8_t *ctrl)
+{
+    __m128i lo = _mm_loadu_si128((const __m128i *)(const void *)ctrl);
+    __m128i hi = _mm_loadu_si128((const __m128i *)(const void *)(ctrl + 16));
+    return (uint32_t)_mm_movemask_epi8(lo) | ((uint32_t)_mm_movemask_epi8(hi) << 16);
+}
+#endif
+
+#if defined(WREATH_HAVE_AVX2)
+/* The whole reason the group is 32 wide: one load, one compare, one movemask
+ * for a question SSE2 needs two of each for. */
+WREATH_TARGET_AVX2 static inline uint32_t
+wreath_ctrl_eq_avx2(const uint8_t *ctrl, uint8_t needle)
+{
+    __m256i group = _mm256_loadu_si256((const __m256i *)(const void *)ctrl);
+    return (uint32_t)_mm256_movemask_epi8(
+        _mm256_cmpeq_epi8(group, _mm256_set1_epi8((char)needle)));
+}
+
+WREATH_TARGET_AVX2 static inline uint32_t
+wreath_ctrl_high_avx2(const uint8_t *ctrl)
+{
+    return (uint32_t)_mm256_movemask_epi8(
+        _mm256_loadu_si256((const __m256i *)(const void *)ctrl));
+}
+#endif
+
+#if defined(WREATH_HAVE_NEON)
+/* NEON has no movemask, and the nibble-narrowing trick used for the run
+ * scanners above yields four bits per byte rather than one. A group mask needs
+ * one bit per byte in lane order, so the halves are narrowed to a byte each and
+ * gathered with the same multiply the SWAR arm uses. */
+static inline uint32_t
+wreath_neon_movemask(uint8x16_t cmp)
+{
+    uint64_t packed = vgetq_lane_u64(vreinterpretq_u64_u8(vandq_u8(cmp, vdupq_n_u8(0x80))), 0);
+    uint64_t upper = vgetq_lane_u64(vreinterpretq_u64_u8(vandq_u8(cmp, vdupq_n_u8(0x80))), 1);
+    return (uint32_t)wreath_swar_movemask(packed)
+           | ((uint32_t)wreath_swar_movemask(upper) << 8);
+}
+
+static inline uint32_t
+wreath_ctrl_eq_neon(const uint8_t *ctrl, uint8_t needle)
+{
+    const uint8x16_t want = vdupq_n_u8(needle);
+    uint32_t lo = wreath_neon_movemask(vceqq_u8(vld1q_u8(ctrl), want));
+    uint32_t hi = wreath_neon_movemask(vceqq_u8(vld1q_u8(ctrl + 16), want));
+    return lo | (hi << 16);
+}
+
+static inline uint32_t
+wreath_ctrl_high_neon(const uint8_t *ctrl)
+{
+    const uint8x16_t top = vdupq_n_u8(0x80);
+    uint32_t lo = wreath_neon_movemask(vtstq_u8(vld1q_u8(ctrl), top));
+    uint32_t hi = wreath_neon_movemask(vtstq_u8(vld1q_u8(ctrl + 16), top));
+    return lo | (hi << 16);
+}
+#endif
+
+/* No short-input guard on either dispatcher, unlike the run scanners: a group
+ * is always exactly WREATH_CTRL_GROUP bytes, so there is no tail and no length
+ * below which the wide arm is not worth entering. */
+static inline uint32_t
+wreath_ctrl_eq(const uint8_t *ctrl, uint8_t needle)
+{
+#if defined(WREATH_HAVE_AVX2)
+    if (wreath_simd_has_avx2()) {
+        return wreath_ctrl_eq_avx2(ctrl, needle);
+    }
+#endif
+#if defined(WREATH_HAVE_NEON)
+    return wreath_ctrl_eq_neon(ctrl, needle);
+#elif defined(WREATH_HAVE_SSE2)
+    return wreath_ctrl_eq_sse2(ctrl, needle);
+#else
+    return wreath_ctrl_eq_swar(ctrl, needle);
+#endif
+}
+
+static inline uint32_t
+wreath_ctrl_high(const uint8_t *ctrl)
+{
+#if defined(WREATH_HAVE_AVX2)
+    if (wreath_simd_has_avx2()) {
+        return wreath_ctrl_high_avx2(ctrl);
+    }
+#endif
+#if defined(WREATH_HAVE_NEON)
+    return wreath_ctrl_high_neon(ctrl);
+#elif defined(WREATH_HAVE_SSE2)
+    return wreath_ctrl_high_sse2(ctrl);
+#else
+    return wreath_ctrl_high_swar(ctrl);
+#endif
+}
+
+/* ======================================================================== */
+/* Substring search: where a multipart boundary or a header terminator is.    */
+/*                                                                           */
+/* The one kernel here that is not a byte *classifier*. It answers "where     */
+/* does this needle start", which the multipart parser asks once per part     */
+/* against a body that can be megabytes, and the HTTP head parser asks once   */
+/* per request for CRLFCRLF.                                                  */
+/*                                                                           */
+/* The method is the well-known one: compare the needle's **first and last**  */
+/* bytes against two overlapping vector loads, AND the two masks, and         */
+/* full-compare only the candidate offsets that survive. Two bytes of the     */
+/* needle rather than one is what makes it work -- for a boundary like        */
+/* "\r\n--...", the leading CR is common in a body and the pair almost never  */
+/* is, so the mask is empty for whole 32-byte strides and the inner memcmp    */
+/* runs about as often as the needle really occurs.                           */
+/*                                                                           */
+/* This is deliberately *not* a replacement for `memchr`: glibc's is already  */
+/* vectorised and beating it is not on offer. `memmem` is the one that is --  */
+/* glibc implements it as a scalar two-way search, so there is real headroom, */
+/* and `wreathcore.h` records what the measurement said before it switched.   */
+/* ======================================================================== */
+
+/* The definition the others are checked against. O(n*m) in the worst case,
+ * which is fine for what it is used for here: the tail of a vector scan is
+ * under one stride plus a needle, and the differential probe wants the
+ * simplest possible statement of the answer rather than the fastest. */
+static inline const uint8_t *
+wreath_find_scalar(const uint8_t *hay, ptrdiff_t hay_len, const uint8_t *needle,
+                   ptrdiff_t needle_len)
+{
+    if (needle_len <= 0 || hay_len < needle_len) {
+        return NULL;
+    }
+    for (ptrdiff_t i = 0; i + needle_len <= hay_len; i++) {
+        if (memcmp(hay + i, needle, (size_t)needle_len) == 0) {
+            return hay + i;
+        }
+    }
+    return NULL;
+}
+
+#if defined(WREATH_HAVE_SSE2)
+static inline const uint8_t *
+wreath_find_sse2(const uint8_t *hay, ptrdiff_t hay_len, const uint8_t *needle,
+                 ptrdiff_t needle_len)
+{
+    ptrdiff_t last_off;
+    ptrdiff_t i = 0;
+    __m128i first;
+    __m128i last;
+    if (needle_len <= 1 || hay_len < needle_len) {
+        return needle_len == 1
+                   ? (const uint8_t *)memchr(hay, needle[0], (size_t)hay_len)
+                   : wreath_find_scalar(hay, hay_len, needle, needle_len);
+    }
+    last_off = needle_len - 1;
+    first = _mm_set1_epi8((char)needle[0]);
+    last = _mm_set1_epi8((char)needle[last_off]);
+    for (; i + last_off + 16 <= hay_len; i += 16) {
+        __m128i block_first = _mm_loadu_si128((const __m128i *)(const void *)(hay + i));
+        __m128i block_last =
+            _mm_loadu_si128((const __m128i *)(const void *)(hay + i + last_off));
+        unsigned mask = (unsigned)_mm_movemask_epi8(
+            _mm_and_si128(_mm_cmpeq_epi8(block_first, first),
+                          _mm_cmpeq_epi8(block_last, last)));
+        while (mask != 0) {
+            int bit = __builtin_ctz(mask);
+            /* The interior only: the first and last bytes are what the mask
+             * already established. `needle_len - 2` is zero for a two-byte
+             * needle, and memcmp of zero bytes is a defined no-op match. */
+            if (memcmp(hay + i + bit + 1, needle + 1, (size_t)(needle_len - 2)) == 0) {
+                return hay + i + bit;
+            }
+            mask &= mask - 1;
+        }
+    }
+    return wreath_find_scalar(hay + i, hay_len - i, needle, needle_len);
+}
+#endif
+
+#if defined(WREATH_HAVE_AVX2)
+WREATH_TARGET_AVX2 static inline const uint8_t *
+wreath_find_avx2(const uint8_t *hay, ptrdiff_t hay_len, const uint8_t *needle,
+                 ptrdiff_t needle_len)
+{
+    ptrdiff_t last_off;
+    ptrdiff_t i = 0;
+    __m256i first;
+    __m256i last;
+    if (needle_len <= 1 || hay_len < needle_len) {
+        return needle_len == 1
+                   ? (const uint8_t *)memchr(hay, needle[0], (size_t)hay_len)
+                   : wreath_find_scalar(hay, hay_len, needle, needle_len);
+    }
+    last_off = needle_len - 1;
+    first = _mm256_set1_epi8((char)needle[0]);
+    last = _mm256_set1_epi8((char)needle[last_off]);
+    for (; i + last_off + 32 <= hay_len; i += 32) {
+        __m256i block_first =
+            _mm256_loadu_si256((const __m256i *)(const void *)(hay + i));
+        __m256i block_last =
+            _mm256_loadu_si256((const __m256i *)(const void *)(hay + i + last_off));
+        unsigned mask = (unsigned)_mm256_movemask_epi8(
+            _mm256_and_si256(_mm256_cmpeq_epi8(block_first, first),
+                             _mm256_cmpeq_epi8(block_last, last)));
+        while (mask != 0) {
+            int bit = __builtin_ctz(mask);
+            if (memcmp(hay + i + bit + 1, needle + 1, (size_t)(needle_len - 2)) == 0) {
+                return hay + i + bit;
+            }
+            mask &= mask - 1;
+        }
+    }
+    /* The tail overlaps the last stride by `last_off`, so a match straddling
+     * the boundary is still found: the scan restarts at `i`, not at `i + 32`. */
+    return wreath_find_scalar(hay + i, hay_len - i, needle, needle_len);
+}
+#endif
+
+#if defined(WREATH_HAVE_NEON)
+static inline const uint8_t *
+wreath_find_neon(const uint8_t *hay, ptrdiff_t hay_len, const uint8_t *needle,
+                 ptrdiff_t needle_len)
+{
+    ptrdiff_t last_off;
+    ptrdiff_t i = 0;
+    uint8x16_t first;
+    uint8x16_t last;
+    if (needle_len <= 1 || hay_len < needle_len) {
+        return needle_len == 1
+                   ? (const uint8_t *)memchr(hay, needle[0], (size_t)hay_len)
+                   : wreath_find_scalar(hay, hay_len, needle, needle_len);
+    }
+    last_off = needle_len - 1;
+    first = vdupq_n_u8(needle[0]);
+    last = vdupq_n_u8(needle[last_off]);
+    for (; i + last_off + 16 <= hay_len; i += 16) {
+        uint8x16_t both = vandq_u8(vceqq_u8(vld1q_u8(hay + i), first),
+                                   vceqq_u8(vld1q_u8(hay + i + last_off), last));
+        if (vmaxvq_u8(both) != 0) {
+            uint32_t mask = wreath_neon_movemask(both);
+            while (mask != 0) {
+                int bit = __builtin_ctz(mask);
+                if (memcmp(hay + i + bit + 1, needle + 1, (size_t)(needle_len - 2))
+                    == 0) {
+                    return hay + i + bit;
+                }
+                mask &= mask - 1;
+            }
+        }
+    }
+    return wreath_find_scalar(hay + i, hay_len - i, needle, needle_len);
+}
+#endif
+
+static inline const uint8_t *
+wreath_find(const uint8_t *hay, ptrdiff_t hay_len, const uint8_t *needle,
+            ptrdiff_t needle_len)
+{
+#if defined(WREATH_HAVE_AVX2)
+    if (hay_len >= 32 && wreath_simd_has_avx2()) {
+        return wreath_find_avx2(hay, hay_len, needle, needle_len);
+    }
+#endif
+#if defined(WREATH_HAVE_NEON)
+    return wreath_find_neon(hay, hay_len, needle, needle_len);
+#elif defined(WREATH_HAVE_SSE2)
+    return wreath_find_sse2(hay, hay_len, needle, needle_len);
+#else
+    return wreath_find_scalar(hay, hay_len, needle, needle_len);
+#endif
+}
+
 
 #endif /* WREATH_SIMD_H */

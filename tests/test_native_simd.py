@@ -278,3 +278,281 @@ def test_json_run_reports_non_ascii_only_from_bytes_it_passed(
             run, seen = probe
             expected = any(b >= 0x80 for b in data[:run])
             assert bool(seen) == expected, f"json/{arm} seen_high wrong on {data[:48]!r}"
+
+
+# --- hash-table control bytes ----------------------------------------------
+#
+# The group scan behind `wreath.kv`. It answers two questions -- which lanes
+# carry this tag, and which lanes are free -- and both answers must be *exact*
+# rather than merely conservative, which is what separates it from the run
+# scanners above. An over-reported tag lane costs one wasted key comparison and
+# nothing else; an over-reported empty lane ends a probe early and loses a key
+# that is really in the table. The SWAR arm cannot use `wreath_swar_eq` for that
+# reason: its borrows over-report position, and it disagreed with the byte loop
+# on 358 of 200000 random groups when it was tried.
+
+CTRL_GROUP = 32
+
+#: The values a control byte actually takes, so a random group looks like a real
+#: one: empty, deleted, and the 0x00-0x7F tag range.
+CTRL_INTERESTING = (0x80, 0xFE, 0x00, 0x01, 0x7F, 0x7E, 0x40)
+
+
+def _ctrl_groups() -> list[bytes]:
+    rng = random.Random(4242)
+    groups = [
+        bytes([0x80]) * CTRL_GROUP,          # a wholly empty group
+        bytes([0xFE]) * CTRL_GROUP,          # a wholly tombstoned group
+        bytes(range(CTRL_GROUP)),            # every lane a distinct low tag
+        bytes([0x7F]) * CTRL_GROUP,          # every lane the same tag
+    ]
+    for _ in range(400):
+        groups.append(
+            bytes(
+                rng.choice(CTRL_INTERESTING)
+                if rng.random() < 0.7
+                else rng.randrange(256)
+                for _ in range(CTRL_GROUP)
+            )
+        )
+    return groups
+
+
+CTRL_GROUPS = _ctrl_groups()
+
+
+def test_ctrl_tag_scan_arms_agree_with_scalar(arms: tuple[str, ...]) -> None:
+    for group in CTRL_GROUPS:
+        for needle in (0x80, 0xFE, 0x00, 0x7F, 0x2A):
+            expected = _core.simd_probe("ctrl", "scalar", group, bytes([needle]))
+            for arm in arms[1:]:
+                got = _core.simd_probe("ctrl", arm, group, bytes([needle]))
+                if got is None:
+                    continue
+                assert got == expected, (
+                    f"ctrl/{arm} disagreed on needle {needle:#04x} over {group.hex()}"
+                )
+
+
+def test_ctrl_free_scan_arms_agree_with_scalar(arms: tuple[str, ...]) -> None:
+    for group in CTRL_GROUPS:
+        expected = _core.simd_probe("ctrl", "scalar", group)
+        for arm in arms[1:]:
+            got = _core.simd_probe("ctrl", arm, group)
+            if got is None:
+                continue
+            assert got == expected, f"ctrl/{arm} free scan disagreed on {group.hex()}"
+
+
+def test_ctrl_scans_are_exact_against_a_plain_byte_loop(arms: tuple[str, ...]) -> None:
+    """Stated without reference to the scalar arm, which could itself be wrong."""
+    for group in CTRL_GROUPS:
+        free = sum(1 << i for i, byte in enumerate(group) if byte & 0x80)
+        for needle in (0x80, 0xFE, 0x13):
+            tagged = sum(1 << i for i, byte in enumerate(group) if byte == needle)
+            for arm in arms:
+                match = _core.simd_probe("ctrl", arm, group, bytes([needle]))
+                if match is not None:
+                    assert match == tagged, f"ctrl/{arm} tag mask is not exact"
+                empty = _core.simd_probe("ctrl", arm, group)
+                if empty is not None:
+                    assert empty == free, f"ctrl/{arm} free mask is not exact"
+
+
+def test_a_tag_scan_can_never_match_a_free_lane(arms: tuple[str, ...]) -> None:
+    """The invariant that lets one kernel answer both questions.
+
+    A stored tag is the low seven bits of a hash, so its high bit is clear;
+    empty (0x80) and deleted (0xFE) both have it set. If that ever stopped
+    holding, a probe would confirm a key against an entry that is not there.
+    """
+    for group in CTRL_GROUPS:
+        free = _core.simd_probe("ctrl", "scalar", group)
+        for tag in (0x00, 0x01, 0x40, 0x7F):
+            for arm in arms:
+                match = _core.simd_probe("ctrl", arm, group, bytes([tag]))
+                if match is None:
+                    continue
+                assert match & free == 0, f"ctrl/{arm} matched a free lane on tag {tag:#04x}"
+
+
+def test_a_group_of_the_wrong_size_is_refused() -> None:
+    with pytest.raises(ValueError, match="32-byte group"):
+        _core.simd_probe("ctrl", "scalar", b"\x80" * 16, b"\x00")
+
+
+# --- substring search ------------------------------------------------------
+#
+# The one kernel that answers "where" rather than "which bytes". An arm that
+# reported a *later* match than the scalar one would still look like a match to
+# its caller, and would split a multipart body at the wrong offset -- so these
+# cross against `bytes.find`, which is a reference outside Wreath entirely,
+# rather than only against the scalar arm.
+
+FIND_ALPHABET = b"ab\r\n-"
+
+
+def _find_cases() -> list[tuple[bytes, bytes]]:
+    rng = random.Random(0x5EA4C)
+    cases: list[tuple[bytes, bytes]] = [
+        (b"", b"x"),                       # empty haystack
+        (b"abc", b""),                     # empty needle
+        (b"abc", b"abcd"),                 # needle longer than haystack
+        (b"abc", b"abc"),                  # exact
+        (b"\r\n\r\n", b"\r\n\r\n"),        # the HTTP head terminator, exactly
+        (b"x" * 64 + b"\r\n\r\n", b"\r\n\r\n"),
+        (b"\r\n\r\n" + b"x" * 64, b"\r\n\r\n"),
+        (b"\r" * 200, b"\r\n"),            # first byte matches everywhere, never the pair
+        (b"a" * 100, b"aa"),               # overlapping matches
+        (b"x" * 31 + b"ab" + b"x" * 31, b"ab"),   # straddles a 32-byte stride
+        (b"x" * 63 + b"ab", b"ab"),               # in the tail after the last stride
+    ]
+    for _ in range(600):
+        hay = bytes(rng.choice(FIND_ALPHABET) for _ in range(rng.randrange(0, 300)))
+        length = rng.randrange(1, 10)
+        if hay and rng.random() < 0.5 and len(hay) > length:
+            start = rng.randrange(len(hay) - length)
+            needle = hay[start : start + length]
+        else:
+            needle = bytes(rng.choice(FIND_ALPHABET) for _ in range(length))
+        cases.append((hay, needle))
+    return cases
+
+
+FIND_CASES = _find_cases()
+
+
+def test_find_arms_agree_with_the_standard_library(arms: tuple[str, ...]) -> None:
+    for hay, needle in FIND_CASES:
+        if not needle:
+            continue  # an empty needle is not a question the kernel is asked
+        expected = hay.find(needle)
+        for arm in arms:
+            got = _core.simd_probe("find", arm, hay, needle)
+            if got is None:
+                continue
+            assert got == expected, (
+                f"find/{arm} said {got}, bytes.find said {expected}, "
+                f"for {needle!r} in {hay[:64]!r}"
+            )
+
+
+def test_find_never_reports_a_later_match_than_the_first(arms: tuple[str, ...]) -> None:
+    """Stated as a property, so it holds even if `bytes.find` were wrong.
+
+    A search that finds *a* match rather than the *first* one passes every
+    round-trip test and still cuts a multipart body in the wrong place.
+    """
+    for hay, needle in FIND_CASES:
+        if not needle:
+            continue
+        for arm in arms:
+            got = _core.simd_probe("find", arm, hay, needle)
+            if got is None or got < 0:
+                continue
+            assert hay[got : got + len(needle)] == needle, f"find/{arm} matched nothing"
+            assert needle not in hay[: got + len(needle) - 1], (
+                f"find/{arm} skipped an earlier match"
+            )
+
+
+def test_a_needle_that_is_absent_is_reported_absent(arms: tuple[str, ...]) -> None:
+    for arm in arms:
+        got = _core.simd_probe("find", arm, b"a" * 200, b"ab")
+        if got is None:
+            continue
+        assert got == -1
+
+
+def test_the_dispatched_search_agrees_with_the_arms_on_both_sides_of_the_threshold(
+    arms: tuple[str, ...],
+) -> None:
+    """`wreath_memmem` routes short needles to the kernel and long ones to libc.
+
+    The threshold is a performance decision, so the two sides must be
+    indistinguishable in behaviour -- otherwise a boundary one byte longer
+    would parse differently.
+    """
+    body = (b"x" * 63 + b"\r") * 40
+    for length in (2, 4, 8, 15, 16, 17, 24, 48, 70):
+        needle = (b"\r\n--" + bytes(range(97, 123)) * 4)[:length]
+        for hay in (body + needle, body + needle + body, body):
+            assert _core.simd_probe("memmem", "scalar", hay, needle) == hay.find(needle)
+
+
+# --- declaration order, for the arms this machine cannot compile -----------
+
+
+def test_no_arm_calls_a_helper_defined_below_it() -> None:
+    """`simd.h` must compile on every target, including ones absent here.
+
+    Each architecture's arms live behind an `#if`, so a NEON-only mistake is
+    preprocessed away on x86 and an x86-only mistake is preprocessed away on
+    ARM. That is not a warning-level problem: C assumes an undeclared function
+    returns `int`, which then *conflicts* with the real `static inline
+    ptrdiff_t` definition further down, and the translation unit fails to
+    compile outright.
+
+    This found three of them -- `wreath_html_run_neon`, `wreath_value_run_neon`
+    and `wreath_xor_mask_neon` each calling their SWAR tail about 150 lines
+    before it was declared. The extension would not have built on aarch64 at
+    all, and nothing on an x86 machine would have said so.
+    """
+    import pathlib
+    import re
+
+    header = pathlib.Path(__file__).resolve().parents[1] / "src/wreath/_native/simd.h"
+    text = header.read_text(encoding="utf-8")
+
+    def line_of(offset: int) -> int:
+        return text.count("\n", 0, offset) + 1
+
+    #: A definition starts at column zero with the name, because the file puts
+    #: the return type on its own line throughout.
+    definitions = {
+        m.group(1): m.start()
+        for m in re.finditer(r"^(wreath_\w+)\s*\(", text, re.M)
+    }
+    #: A forward declaration is a whole `static inline ... ;` statement at the
+    #: start of a line. Anchoring on that is what distinguishes it from a call:
+    #: an earlier version matched any `wreath_x(...);`, which is also the shape
+    #: of every ordinary call statement, so each call registered *itself* as the
+    #: point the function became available and the check could never fail.
+    #: Verified by deleting a real declaration and watching this go red.
+    declarations: dict[str, int] = {}
+    blanked = list(text)
+    for match in re.finditer(
+        r"^static\s+inline\s+[^;{]*?\b(wreath_\w+)\s*\([^;{]*\)\s*;", text, re.M | re.S
+    ):
+        declarations.setdefault(match.group(1), match.start())
+        for index in range(match.start(), match.end()):
+            if blanked[index] != "\n":
+                blanked[index] = " "
+    source = "".join(blanked)
+
+    available = dict(definitions)
+    for name, offset in declarations.items():
+        available[name] = min(available.get(name, offset), offset)
+
+    current: str | None = None
+    current_at = -1
+    offenders: list[str] = []
+    for match in re.finditer(r"^(wreath_\w+)\s*\(|\b(wreath_\w+)\s*\(", source, re.M):
+        if match.group(1) is not None:
+            current, current_at = match.group(1), match.start()
+            continue
+        callee = match.group(2)
+        if current is None or callee == current or callee not in available:
+            continue
+        if available[callee] > match.start():
+            offenders.append(
+                f"{current} (line {line_of(current_at)}) calls {callee} at line "
+                f"{line_of(match.start())}, first available at line "
+                f"{line_of(available[callee])}"
+            )
+
+    assert not offenders, (
+        "simd.h calls a helper before it is declared, which is a compile error "
+        "on whichever target the calling arm belongs to:\n  "
+        + "\n  ".join(dict.fromkeys(offenders))
+    )
