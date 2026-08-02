@@ -26,6 +26,8 @@ from dataclasses import dataclass, field, replace
 from email.message import EmailMessage
 from typing import Protocol, runtime_checkable
 
+from ._b64 import b64url_decode
+
 __all__ = [
     "CapturingEmailSender",
     "EmailSender",
@@ -66,7 +68,8 @@ def _b64(raw: bytes) -> str:
 
 
 def _unb64(text: str) -> bytes:
-    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    """The inverse of `_b64`, which strips padding, so the input is unpadded."""
+    return b64url_decode(text)
 
 
 def hash_password(
