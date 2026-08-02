@@ -609,6 +609,7 @@ class Wreath:
         "_ws_routes",
         "debug",
         "router",
+        "signatures",
         "state",
     )
 
@@ -620,6 +621,7 @@ class Wreath:
         limits: RequestLimits = DEFAULT_LIMITS,
         background_timeout: float | None = 30.0,
         middleware: str = "python",
+        signatures: Any = None,
     ) -> None:
         self._routing = routing
         #: Where the global middleware tape runs. See `_middleware_tape`.
@@ -765,6 +767,15 @@ class Wreath:
         # Built at lifespan startup from the registered runners/buses; owns their
         # process-lifetime worker/consumer/sweeper tasks.
         self._supervisor: Any = None
+        #: RFC 9421 verification, when the application asked for it. Registered
+        #: as ordinary global middleware -- it covers misses, static files and
+        #: authorization failures, which is the whole point of verifying at
+        #: ingress -- plus a startup refresh, because key resolution during a
+        #: request would let an inbound `keyid` provoke an outbound fetch.
+        self.signatures = signatures
+        if signatures is not None:
+            self.add_global_middleware(signatures, priority=-100)
+            self.on_startup(_refresh_signatures)
 
     def schema_components(self) -> tuple[Any, ...]:
         """Every registered subsystem's claim on the wreath schema.
@@ -4000,3 +4011,17 @@ def _head_send(send: Send) -> Send:
         await send(message)
 
     return send_without_body
+
+
+async def _refresh_signatures(app: Any) -> None:
+    """Fetch signature directories once, during lifespan startup.
+
+    A module-level function rather than a closure so `App` stays picklable and
+    the hook is inspectable. A directory that will not answer leaves the
+    previous keys in place and increments `refresh_errors` -- an agent that
+    stops verifying because a refresh has been failing is a supportable
+    question only if the failure is counted somewhere.
+    """
+    signatures = app.signatures
+    if signatures is not None and signatures.refresh_on_startup:
+        await signatures.refresh()
