@@ -46,6 +46,12 @@ Findings:
   generated from that field, so a subsystem that never writes one is simply
   missing from the page that exists to show the surface is there -- silently,
   which is how the maps rotted the first time.
+* `MAP013` -- a bounded in-process table or queue is built somewhere under
+  `src/wreath` and `docs/reference/memory-budgets.md` does not mention the file
+  that builds it. That page answers "how much does a worker hold, and where do I
+  tune it?", which used to require grepping a dozen constructors whose bounds
+  were all named differently. A page like that is worth reading only if
+  something makes it true.
 * `MAP012` -- `docs/capabilities.md` is gone, or no longer carries the
   `::: capability-map` directive that renders those fields. Requiring data that
   nothing reads is how a field becomes decoration; this keeps the reader and
@@ -65,6 +71,7 @@ Run it with `uv run wreath-map-lint`; `0` means clean.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import subprocess
@@ -539,6 +546,95 @@ def repair(root: Path, adopt: list[tuple[str, str]]) -> tuple[list[str], list[st
     return changes, refusals
 
 
+#: Where the in-process budgets are written down.
+BUDGETS = "docs/reference/memory-budgets.md"
+
+#: The bounded primitives whose construction has to be accounted for. Names
+#: rather than qualified paths, because a caller imports them by name; the
+#: import check below is what stops `asyncio.Queue` from being mistaken for
+#: `wreath.queue.Queue`, which a bare name scan does confuse.
+BUDGETED = {
+    "KV", "Queue", "PriorityQueue", "RoundRobin",
+    "BoundedCache", "MemoryStore", "BoundedLogQueue", "BoundedExportQueue",
+}
+
+#: Modules those names legitimately come from.
+BUDGET_SOURCES = {"kv", "queue", "cache", "store", "_logsink", "_otlp"}
+
+#: The primitives' own modules, which build them for a living.
+BUDGET_EXEMPT = {
+    "src/wreath/kv.py", "src/wreath/queue.py",
+    "src/wreath/_pure/kv.py", "src/wreath/_pure/queue.py",
+}
+
+
+def _budget_sites(root: Path) -> list[tuple[str, int, str]]:
+    """Every construction of a bounded table or queue under `src/wreath`."""
+    sites: list[tuple[str, int, str]] = []
+    for path in sorted((root / "src" / "wreath").rglob("*.py")):
+        relative = path.relative_to(root).as_posix()
+        if relative in BUDGET_EXEMPT or "/_devtools/" in f"/{relative}":
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            # A fixture of deliberately invalid source is not a module.
+            continue
+        bound: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                if node.module.rsplit(".", 1)[-1] in BUDGET_SOURCES:
+                    for alias in node.names:
+                        name = alias.asname or alias.name
+                        if name in BUDGETED:
+                            bound.add(name)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in bound
+            ):
+                sites.append((relative, node.lineno, node.func.id))
+    return sites
+
+
+def check_memory_budgets(root: Path) -> list[Finding]:
+    """Every bounded table and queue is named in the budgets page."""
+    sites = _budget_sites(root)
+    if not sites:
+        # Nothing to account for, so nothing is owed. This is also what keeps
+        # the rule usable against the synthetic roots the map-lint tests build,
+        # which have no `src/wreath` at all.
+        return []
+    page = root / BUDGETS
+    if not page.exists():
+        return [Finding("MAP013", BUDGETS, "the in-process memory budgets page is gone")]
+    text = page.read_text(encoding="utf-8")
+    findings: list[Finding] = []
+    seen: set[str] = set()
+    for relative, line, kind in sites:
+        # Matched on the *module* rather than the exact path, because the page
+        # names a subsystem the way an operator thinks of it ("the response
+        # cache") and not a line number that would churn on every edit.
+        module = relative.removeprefix("src/wreath/").removesuffix(".py")
+        stem = module.rsplit("/", 1)[-1].lstrip("_")
+        if module in seen:
+            continue
+        if stem and (stem in text or module in text):
+            seen.add(module)
+            continue
+        findings.append(
+            Finding(
+                "MAP013",
+                f"{relative}:{line}",
+                f"builds a bounded {kind} that {BUDGETS} does not account for; add a "
+                "row naming what it holds and the knob that bounds it",
+            )
+        )
+        seen.add(module)
+    return findings
+
+
 def scan(root: Path) -> list[Finding]:
     findings = check_manifest(root)
     findings.extend(check_capability_page(root))
@@ -546,6 +642,7 @@ def scan(root: Path) -> list[Finding]:
         findings.extend(check_prose(root, relative))
     findings.extend(check_llms_txt(root))
     findings.extend(check_sanitizer_sources(root))
+    findings.extend(check_memory_budgets(root))
     return findings
 
 

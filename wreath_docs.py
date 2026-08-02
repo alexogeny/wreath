@@ -104,6 +104,7 @@ nav = Nav(
         ),
         Section(
             "Speed and delivery",
+            Page("In-process memory", "guides/memory.md"),
             Page("Caching", "guides/caching.md"),
             Page("Response caching", "guides/response-cache.md"),
             Page("Compression", "guides/compression.md"),
@@ -240,6 +241,9 @@ nav = Nav(
         Page("Protocol Buffers", "reference/protobuf.md"),
         Page("gRPC", "reference/grpc.md"),
         Page("Keyed store", "reference/store.md"),
+        Page("Key/value table", "reference/kv.md"),
+        Page("Memory budgets", "reference/memory-budgets.md"),
+        Page("Bounded queue", "reference/queue.md"),
         Page("Application cache", "reference/cache.md"),
         Page("Cache-Control policies", "reference/cache_control.md"),
         Page("Compression", "reference/compression.md"),

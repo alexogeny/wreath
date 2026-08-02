@@ -77,7 +77,7 @@ class TestProgressLifetimes:
 
     def test_the_default_ttl_outlasts_a_long_job(self):
         registry = ProgressRegistry()
-        assert registry._store._ttl is None or registry._store._ttl >= 24 * 3600
+        assert registry._store.ttl is None or registry._store.ttl >= 24 * 3600
 
     async def test_a_stream_stops_at_its_maximum_duration(self):
         registry = ProgressRegistry()

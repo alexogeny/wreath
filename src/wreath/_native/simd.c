@@ -304,6 +304,127 @@ wreath_simd_probe(PyObject *Py_UNUSED(self), PyObject *args)
         return out;
     }
 
+    /* Substring search. `data` is the haystack, `key` the needle; the answer is
+     * the offset of the first match or -1. Every arm must agree exactly --
+     * an arm that reported a *later* match than the scalar one would still look
+     * like "a match" to a caller and would silently split a multipart body in
+     * the wrong place. */
+    if (strcmp(kind, "find") == 0) {
+        const uint8_t *found;
+        Py_ssize_t offset;
+        if (key.buf == NULL) {
+            PyBuffer_Release(&data);
+            PyBuffer_Release(&key);
+            PyErr_SetString(PyExc_ValueError, "find needs a needle");
+            return NULL;
+        }
+        const uint8_t *hay = (const uint8_t *)data.buf;
+        const uint8_t *needle = (const uint8_t *)key.buf;
+        switch (code) {
+            case WREATH_ARM_SCALAR:
+            case WREATH_ARM_SWAR:
+                /* No SWAR arm: a word-at-a-time substring search is the
+                 * scalar one with extra steps, and mapping it here keeps the
+                 * probe's arm list uniform rather than inventing a gap. */
+                found = wreath_find_scalar(hay, data.len, needle, key.len);
+                break;
+#if defined(WREATH_HAVE_SSE2)
+            case WREATH_ARM_SSE2:
+                found = wreath_find_sse2(hay, data.len, needle, key.len);
+                break;
+#endif
+#if defined(WREATH_HAVE_AVX2)
+            case WREATH_ARM_AVX2:
+                found = wreath_find_avx2(hay, data.len, needle, key.len);
+                break;
+#endif
+#if defined(WREATH_HAVE_NEON)
+            case WREATH_ARM_NEON:
+                found = wreath_find_neon(hay, data.len, needle, key.len);
+                break;
+#endif
+            default:
+                PyBuffer_Release(&data);
+                PyBuffer_Release(&key);
+                Py_RETURN_NONE;
+        }
+        offset = found == NULL ? -1 : (Py_ssize_t)(found - hay);
+        PyBuffer_Release(&data);
+        PyBuffer_Release(&key);
+        return PyLong_FromSsize_t(offset);
+    }
+
+    /* The incumbent, so the two can be timed as arms of one interleaved run.
+     * `wreath_memmem` is glibc's `memmem` where there is one, and the whole
+     * question for the kernel above is whether it beats that -- a question no
+     * amount of reasoning about vector widths settles, because glibc's is a
+     * good scalar algorithm rather than a naive one. Ignores `arm`. */
+    if (strcmp(kind, "memmem") == 0) {
+        const uint8_t *hay = (const uint8_t *)data.buf;
+        const uint8_t *found =
+            key.buf == NULL
+                ? NULL
+                : wreath_memmem(hay, data.len, (const uint8_t *)key.buf, key.len);
+        Py_ssize_t offset = found == NULL ? -1 : (Py_ssize_t)(found - hay);
+        PyBuffer_Release(&data);
+        PyBuffer_Release(&key);
+        return PyLong_FromSsize_t(offset);
+    }
+
+    /* Hash-table control-byte groups. `data` is one WREATH_CTRL_GROUP-byte
+     * group; a one-byte `key` asks which lanes equal it, and no key asks which
+     * lanes are free. Both answers are a lane mask, so both cross against the
+     * scalar arm the same way. */
+    if (strcmp(kind, "ctrl") == 0) {
+        uint32_t mask;
+        int want_eq = key.buf != NULL;
+        uint8_t needle = want_eq ? *(const uint8_t *)key.buf : 0;
+        const uint8_t *group = (const uint8_t *)data.buf;
+        if (data.len != WREATH_CTRL_GROUP || (want_eq && key.len != 1)) {
+            PyBuffer_Release(&data);
+            PyBuffer_Release(&key);
+            PyErr_Format(PyExc_ValueError,
+                         "ctrl needs a %d-byte group and an optional 1-byte needle",
+                         WREATH_CTRL_GROUP);
+            return NULL;
+        }
+        switch (code) {
+            case WREATH_ARM_SCALAR:
+                mask = want_eq ? wreath_ctrl_eq_scalar(group, needle)
+                               : wreath_ctrl_high_scalar(group);
+                break;
+            case WREATH_ARM_SWAR:
+                mask = want_eq ? wreath_ctrl_eq_swar(group, needle)
+                               : wreath_ctrl_high_swar(group);
+                break;
+#if defined(WREATH_HAVE_SSE2)
+            case WREATH_ARM_SSE2:
+                mask = want_eq ? wreath_ctrl_eq_sse2(group, needle)
+                               : wreath_ctrl_high_sse2(group);
+                break;
+#endif
+#if defined(WREATH_HAVE_AVX2)
+            case WREATH_ARM_AVX2:
+                mask = want_eq ? wreath_ctrl_eq_avx2(group, needle)
+                               : wreath_ctrl_high_avx2(group);
+                break;
+#endif
+#if defined(WREATH_HAVE_NEON)
+            case WREATH_ARM_NEON:
+                mask = want_eq ? wreath_ctrl_eq_neon(group, needle)
+                               : wreath_ctrl_high_neon(group);
+                break;
+#endif
+            default:
+                PyBuffer_Release(&data);
+                PyBuffer_Release(&key);
+                Py_RETURN_NONE;
+        }
+        PyBuffer_Release(&data);
+        PyBuffer_Release(&key);
+        return PyLong_FromUnsignedLong((unsigned long)mask);
+    }
+
     unsigned seen_high = 0;
     ptrdiff_t run = run_kind(kind, code, (const char *)data.buf, data.len, &seen_high);
     Py_ssize_t length = data.len;

@@ -27,8 +27,6 @@ metric labels low-cardinality by construction.
 
 from __future__ import annotations
 
-import threading
-from collections import deque
 from collections.abc import Iterable
 from typing import Any, Final
 from typing import Protocol as _Protocol
@@ -43,6 +41,7 @@ from ._logsite import SiteRegistry
 from ._logsite import attributes as log_attributes
 from ._logsite import render as log_render
 from ._projector import ProjectedLog, ProjectedTrace, ProjectorSnapshot, RouteMetric, _mix64
+from .queue import Queue
 
 __all__ = [
     "SpanExporter",
@@ -376,57 +375,14 @@ class MetricExporter(_Protocol):
     def export(self, request: dict[str, Any]) -> None: ...
 
 
-class BoundedExportQueue:
-    """A fixed-capacity, thread-safe hand-off between the projector thread (which
-    offers finished traces) and an exporter drainer. Offering to a full queue
-    drops the item and counts it (the plan's bounded export queue with visible
-    loss), so a slow or stalled exporter can never grow memory without bound or
-    stall the drain.
-    """
-
-    __slots__ = ("_items", "_lock", "_dropped", "_offered")
-
-    def __init__(self, capacity: int = 4096) -> None:
-        if capacity <= 0:
-            raise ValueError("capacity must be positive")
-        self._items: deque[ProjectedTrace] = deque(maxlen=capacity)
-        self._lock = threading.Lock()
-        self._dropped = 0
-        self._offered = 0
-
-    def offer(self, trace: ProjectedTrace) -> bool:
-        """Enqueue a trace, returning False (and counting a drop) if full. Safe
-        to hand directly as the projector's `on_trace` hook."""
-        with self._lock:
-            self._offered += 1
-            if len(self._items) == self._items.maxlen:
-                self._dropped += 1
-                return False
-            self._items.append(trace)
-            return True
-
-    def drain(self, max_items: int | None = None) -> list[ProjectedTrace]:
-        """Remove and return up to `max_items` queued traces (all if None)."""
-        with self._lock:
-            if max_items is None or max_items >= len(self._items):
-                batch = list(self._items)
-                self._items.clear()
-                return batch
-            return [self._items.popleft() for _ in range(max(0, max_items))]
-
-    @property
-    def dropped(self) -> int:
-        with self._lock:
-            return self._dropped
-
-    @property
-    def offered(self) -> int:
-        with self._lock:
-            return self._offered
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._items)
+#: The hand-off between the projector thread and the exporter drainer.
+#:
+#: See the note on `_logsink.BoundedLogQueue`: these two were the same class
+#: written twice, and both are now `wreath.queue.Queue`. A slow or stalled
+#: exporter still cannot grow memory without bound or stall the drain, and the
+#: loss it causes is still counted rather than silent -- that policy moved into
+#: the primitive rather than being restated here.
+BoundedExportQueue = Queue
 
 
 # --- log mapping ------------------------------------------------------------

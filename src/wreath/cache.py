@@ -37,21 +37,59 @@ else:
     from ._pure.snapshot import SnapshotCache
 
 # A small bounded LRU/TTL store for hot request-path caching (response cache,
-# idempotency replay). No external backend, and deliberately still pure.
+# idempotency replay), now a shell over `wreath.kv.KV`.
 #
-# Measured (ablation, 25 interleaved rounds against an A/A control, 2026-07-26):
-# `get` on a TTL'd hit is ~0.14us, against a ~0.02us floor for the bare dict
-# lookup underneath it. Inlining the `_live` helper and hoisting the clock
-# recovers ~0.02us of that; the remaining ~0.11us is method-call overhead,
-# `OrderedDict.move_to_end`, and the `monotonic()` reading, none of which pure
-# Python can shed. So a native twin is the only way to close it -- and it is not
-# worth building: every caller here is skipping work measured in tens to
-# hundreds of microseconds (a rendered response, a replayed handler), so 0.11us
-# is three to four orders of magnitude below what the cache saves. Re-open this
-# only with an end-to-end benchmark that shows the lookup mattering, not a
-# microbenchmark of the lookup alone. A native `BoundedCache` can be selected
-# here exactly the way `SnapshotCache` is above if that day comes.
-from ._pure.bounded import BoundedCache, CacheStats
+# This comment used to say a native twin was not worth building. That reasoning
+# was sound for what it measured and wrong about what to measure: the ~0.11us it
+# priced is indeed three orders of magnitude below what a *response* cache
+# saves, but `BoundedCache` had by then become the engine under the session
+# table, the idempotency ledger, the JWKS cache, the login-attempt counter and
+# `store.MemoryStore` -- places where the lookup is not skipping a rendered
+# response, it *is* the request's work. The old note also asked for an
+# end-to-end benchmark before reopening, and the number that actually reopened
+# it was a simpler one: `_core.TokenBucket`, a native table that does strictly
+# more per call (float refill arithmetic), answered in 0.15us where this
+# answered in 0.20us and `MemoryStore.read` in 0.27us. A native table was not
+# 0.11us of theoretical headroom; it was already running next door, faster.
+#
+# What survives from that note is its discipline, so: measured 2026-08-01,
+# interleaved against an A/A control, in `docs/reference/kv.md`.
+from .kv import KV, stats
+from .kv import Stats as CacheStats
+
+
+class BoundedCache(KV):
+    """A bounded LRU cache with optional per-entry TTL.
+
+    **This is `wreath.kv.KV`**, with one convenience on top. It kept its own
+    name because that is the spelling the response cache, the idempotency layer
+    and `wreath port`'s `TTLCache`/`LRUCache` translation all already use -- but
+    it is no longer a second implementation, or a second set of semantics, or a
+    second thing to learn. Everything it does, `KV` does.
+
+    It used to be a hundred lines of forwarding: `get`, `set`, `delete`,
+    `clear`, `snapshot`, `__contains__`, `__len__`, `ttl`, `max_entries`, each
+    restating a method one line below it. All of that is inherited now, and the
+    `clock` it exists to inject is `KV`'s own parameter.
+
+    Args:
+        max_entries: hard ceiling; the least-recently-used entry is evicted once
+            a set would exceed it. Must be positive.
+        ttl: seconds an entry stays fresh, or `None` to never expire by time.
+            Expiry is lazy -- checked on read -- so nothing runs in the
+            background.
+        clock: monotonic time source, injectable for deterministic tests.
+    """
+
+    @property
+    def stats(self) -> CacheStats:
+        """A point-in-time view of this cache's activity.
+
+        The one thing `KV` does not offer under this name: it exposes the same
+        four counters individually, and `wreath.kv.stats(table)` builds the same
+        value from any table. This is the property spelling those callers use.
+        """
+        return stats(self)
 
 
 def invalidate_across_workers(bus: Any, *, channel: str = WRITE_CHANNEL) -> WriteBroadcast:

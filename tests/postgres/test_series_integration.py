@@ -671,10 +671,15 @@ class TestSealingPersists:
         assert result.state is not None and result.state.settled == (SEAL_DAY,)
         assert await _settled_rows(database) == [], "reading a sealed view wrote"
 
+        # `run` names the buckets it *would* settle and stores none of them: a
+        # GET runs on a read-workload session or a replica, and settling as a
+        # side effect answers "cannot execute INSERT in a read-only
+        # transaction" from inside the series machinery. `settle` is the write
+        # half, and the only one there is.
         written = await sealed_view().settle(
             session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
         )
-        assert written == (SEAL_DAY,)
+        assert written == (SEAL_DAY,), "settle names what it stored"
 
         stored = await _settled_rows(database)
         assert len(stored) == 1, "the sealed bucket reached the table"
@@ -691,6 +696,8 @@ class TestSealingPersists:
         """
         database, session = sealing
         await _add_treks(database, (1, 4.0, 9), (2, 6.0, 11))
+        # `settle`, not `run`: only the write half puts the value where the
+        # second read can find it once the source rows are gone.
         await sealed_view().settle(
             session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
         )
@@ -715,8 +722,9 @@ class TestSealingPersists:
         database, session = sealing
         await _add_treks(database, (1, 4.0, 9), (2, 6.0, 11))
         # Settled *before* the late card arrives, which is the whole situation:
-        # a day that was final, and then moved. Reading does not store, so this
-        # is the explicit step a scheduled job would take.
+        # a day that was final, and then moved. `reconcile` runs `settle`
+        # itself, so without this it would simply store 3 and there would be no
+        # delta to record.
         await sealed_view().settle(
             session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
         )

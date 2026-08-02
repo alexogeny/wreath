@@ -9,10 +9,10 @@ without sharing sessions, identity objects, or cached plans.
 from __future__ import annotations
 
 import threading
-from collections import OrderedDict
 from sys import getsizeof
 from typing import Any, Literal
 
+from ..kv import KV
 from ._generated import render_generation
 from ._index_predicate import render_predicate
 from .errors import DeclarationError, RegistryError
@@ -61,7 +61,6 @@ class Registry:
         "_by_name",
         "_by_table",
         "_cache",
-        "_cache_bytes",
         "_flight_model_ids",
         "_lock",
         "_model_order",
@@ -140,8 +139,15 @@ class Registry:
         self.deployment_fingerprint = b""
         # Plan cache insertion and eviction must stay correct without the GIL.
         self._lock = threading.Lock()
-        self._cache: OrderedDict[bytes, tuple[Any, int]] = OrderedDict()
-        self._cache_bytes = 0
+        # One `wreath.kv.KV`, bounded by entry count *and* by retained bytes.
+        # What used to be here -- an OrderedDict, a running byte total, a
+        # `move_to_end` on every hit and an eviction loop over both bounds --
+        # was the same fifteen lines the PostgreSQL driver's statement cache
+        # also carried, differing only in what it did with the evicted entry.
+        # This one wants nothing done with it, so it does not ask.
+        self._cache: Any = KV(
+            max_entries=query_cache_size, max_bytes=query_cache_bytes
+        )
         # Declared-query identity -> its registry-specific shape key. The plan
         # itself remains in the bounded LRU above; this small index lets a hot
         # declaration reach it without rebuilding a Select or hashing its tree.
@@ -533,11 +539,8 @@ class Registry:
 
     def cached_plan(self, shape_key: bytes) -> Any:
         with self._lock:
-            entry = self._cache.get(shape_key)
-            if entry is not None:
-                self._cache.move_to_end(shape_key)
-                return entry[0]
-            return None
+            # `get` is the recency update: reading a plan is using it.
+            return self._cache.get(shape_key)
 
     def store_plan(self, shape_key: bytes, plan: Any) -> Any:
         with self._lock:
@@ -545,17 +548,10 @@ class Registry:
             if existing is not None:
                 # Another thread compiled the same shape; keep one plan so
                 # callers cannot observe two objects for one key.
-                self._cache.move_to_end(shape_key)
-                return existing[0]
-            retained = _cache_entry_bytes(shape_key, plan)
-            self._cache[shape_key] = (plan, retained)
-            self._cache_bytes += retained
-            while (
-                len(self._cache) > self.query_cache_size
-                or self._cache_bytes > self.query_cache_bytes
-            ):
-                _, (_, evicted_bytes) = self._cache.popitem(last=False)
-                self._cache_bytes -= evicted_bytes
+                return existing
+            self._cache.set(
+                shape_key, plan, cost=_cache_entry_bytes(shape_key, plan)
+            )
             return plan
 
     def cached_prepared_plan(self, declaration: Any) -> tuple[bytes, Any] | None:
@@ -567,8 +563,7 @@ class Registry:
             entry = self._cache.get(shape_key)
             if entry is None:
                 return None
-            self._cache.move_to_end(shape_key)
-            return shape_key, entry[0]
+            return shape_key, entry
 
     def remember_prepared_shape(self, declaration: Any, shape_key: bytes) -> None:
         """Associate an explicit declaration with its registry-owned plan key."""

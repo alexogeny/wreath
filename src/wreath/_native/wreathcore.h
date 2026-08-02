@@ -8,6 +8,10 @@
 #include <stdint.h>
 #include <string.h>
 
+/* For `wreath_find`, which `wreath_memmem` below dispatches short needles to.
+ * `simd.h` is free of Python.h by design, so including it here is one-way. */
+#include "simd.h"
+
 /* authz.c */
 PyObject *wreath_build_capability_mask(PyObject *self, PyObject *args);
 PyObject *wreath_normalize_authorization_decision(PyObject *self, PyObject *args);
@@ -46,6 +50,19 @@ int wreath_register_proxy(PyObject *module);
 
 /* ratelimit.c: adds the TokenBucket type; returns -1 on failure. */
 int wreath_register_ratelimit(PyObject *module);
+/* kv.c: binds a vectorcall frame onto `slots` (pre-filled with defaults) using
+ * `names` as the positional order. Shared with queue.c so both hot primitives
+ * can be METH_FASTCALL rather than METH_VARARGS; the comment above the
+ * definition records what that convention is worth and why it is not
+ * housekeeping. Returns 0, or -1 with an exception set. */
+int wreath_bind_args(PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames,
+                     const char *const *names, PyObject **slots, Py_ssize_t count,
+                     Py_ssize_t required, const char *what);
+
+/* kv.c: adds the KV type; returns -1 on failure. */
+int wreath_register_kv(PyObject *module);
+/* queue.c: adds Queue, QueueEmpty and QueueFull; returns -1 on failure. */
+int wreath_register_queue(PyObject *module);
 int wreath_register_scheduler(PyObject *module);
 
 /* headers.c */
@@ -298,18 +315,50 @@ wreath_two_way(const uint8_t *hay, Py_ssize_t hay_len, const uint8_t *needle,
 }
 #endif /* !WREATH_MEMMEM_USES_LIBC */
 
+/* Needles at or below this length go to the vector scan; longer ones stay on
+ * the two-way search.
+ *
+ * The two are good at opposite things and the crossover is measured, not
+ * guessed. A two-way search skips by up to the needle's length on a mismatch,
+ * so it gets *faster* as the needle grows; the vector scan compares the
+ * needle's first and last bytes against 32-byte strides and so runs at a flat
+ * rate whatever the needle is. Over a 16 KiB haystack with the match at the
+ * end (2026-08-01, 11 interleaved rounds against an A/A control):
+ *
+ *     needle     glibc      avx2    winner
+ *          2   15.470us    1.310us  avx2, 11.8x
+ *          4    5.746us    1.326us  avx2, 4.3x
+ *          8    2.659us    1.314us  avx2, 2.0x
+ *         16    1.424us    1.315us  tie
+ *         24    1.011us    1.242us  glibc
+ *         64    0.611us    1.246us  glibc, 2.0x
+ *
+ * So this deliberately does **not** take the multipart delimiter, which is
+ * CRLF + "--" + a boundary of up to 70 bytes and is exactly where the
+ * two-way search is strongest -- the case that motivated writing the kernel in
+ * the first place, and the one it loses. What it does take is every short
+ * needle in the tree: `\r\n\r\n` ending a request head, and the `\r\n` the
+ * multipart header scanner runs per header line.
+ */
+#define WREATH_SIMD_NEEDLE_MAX 16
+
 static inline const uint8_t *
 wreath_memmem(const uint8_t *hay, Py_ssize_t hay_len, const uint8_t *needle, Py_ssize_t needle_len)
 {
     if (needle_len <= 0 || hay_len < needle_len) {
         return NULL;
     }
+    if (needle_len == 1) {
+        /* Never the vector scan: glibc's `memchr` is already vectorised and
+         * beating it is not on offer. */
+        return (const uint8_t *)memchr(hay, needle[0], (size_t)hay_len);
+    }
+    if (needle_len <= WREATH_SIMD_NEEDLE_MAX) {
+        return wreath_find(hay, (ptrdiff_t)hay_len, needle, (ptrdiff_t)needle_len);
+    }
 #if WREATH_MEMMEM_USES_LIBC
     return memmem(hay, (size_t)hay_len, needle, (size_t)needle_len);
 #else
-    if (needle_len == 1) {
-        return (const uint8_t *)memchr(hay, needle[0], (size_t)hay_len);
-    }
     return wreath_two_way(hay, hay_len, needle, needle_len);
 #endif
 }

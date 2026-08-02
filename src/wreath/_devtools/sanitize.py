@@ -10,6 +10,10 @@ way of getting it wrong reports success:
   sanitized it;
 * leave `detect_leaks=1` on and CPython's own interned strings and module
   state bury a real leak in a few hundred records of noise;
+* take ASan's default unwinder and a leak in Wreath's own C is reported with
+  Wreath's frame missing, so it reads as libpython's -- see the note beside
+  `fast_unwind_on_malloc` below, which is the difference between this tool
+  answering its question and only appearing to;
 * read the pytest exit code and miss that ASan reports to stderr and, with
   `-fno-sanitize-recover=all`, aborts rather than failing a test.
 
@@ -204,7 +208,27 @@ def run_target(
     environment["PYTHONPATH"] = str(lib)
     # Leak detection off by default: CPython's own allocations dominate, and a
     # summary nobody can read is a summary nobody reads.
-    environment["ASAN_OPTIONS"] = f"detect_leaks={'1' if leaks else '0'}"
+    #
+    # `fast_unwind_on_malloc=0` is what makes attribution work at all, and it is
+    # not a tuning knob. ASan's default unwinder walks frame pointers, CPython
+    # is built with `-fomit-frame-pointer`, and every allocation Wreath's C makes
+    # goes through `PyMem_Malloc` -> `_PyObject_Malloc` before reaching `malloc`.
+    # The walk therefore cannot get back past libpython into our frame: the
+    # record's stack jumps straight from `_PyObject_Malloc` to whichever
+    # interpreter function called us, with our own frame simply absent.
+    #
+    # The effect was that **every** leak in Wreath's C was attributed to
+    # libpython and this tool reported "none attributable to Wreath" for all of
+    # them. Verified by planting a 4 KiB leak in `kv_new` and running the KV
+    # suite over it: 166 passed, "19 leak record(s); none attributable", clean.
+    # With the slow unwinder the same run names
+    # `kv_new .../_native/kv.c:1148` and the attribution fires.
+    #
+    # It costs real time -- the slow unwinder walks DWARF on every allocation --
+    # which is why it is scoped to `--leaks` rather than turned on for the
+    # ordinary ASan/UBSan run that needs no allocation stacks.
+    unwind = ":fast_unwind_on_malloc=0:malloc_context_size=30" if leaks else ""
+    environment["ASAN_OPTIONS"] = f"detect_leaks={'1' if leaks else '0'}{unwind}"
     suppressions = root / "tools/sanitizers/lsan.supp"
     if leaks and suppressions.exists():
         environment["LSAN_OPTIONS"] = f"suppressions={suppressions}"

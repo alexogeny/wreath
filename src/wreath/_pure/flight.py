@@ -660,8 +660,13 @@ class PureRecorder:
     # forensic capture ---------------------------------------------------------
     def _capture_reserve(self, ctx: dict) -> int:
         # Reclaim slabs the sink returned, keeping the free stack writer-owned.
-        while self._capture_returned:
-            self._capture_free.append(self._capture_returned.pop(0))
+        # `extend` rather than a `pop(0)` loop: popping the front of a list
+        # shifts every remaining element, so draining n returns cost O(n^2) for
+        # a result that does not depend on the order at all -- the entries are
+        # placeholders and only their count is observable, as the note in
+        # `drain_captures` explains.
+        self._capture_free.extend(self._capture_returned)
+        self._capture_returned.clear()
         if not self._capture_free:
             self._losses[LossReason.CAPTURE_POOL_FULL] += 1
             return -1
