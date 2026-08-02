@@ -67,11 +67,19 @@ CONTROL_KEYWORDS: frozenset[str] = frozenset({
     "cancel_on_disconnect", "challenge", "cost",
     "csrf", "dependencies", "elicitation", "exempt", "expose", "http_only",
     "identify", "issuer", "key", "limit", "limits", "max_age", "middleware",
-    "object_authorizer", "origins", "policies", "policy", "permissions",
-    "rate_limit", "readonly", "require_user_verification", "requirement",
-    "resource", "roles", "rp_id", "same_site", "sampling", "scopes",
-    "second_factor", "secure", "sensitive", "skew", "sortable_fields",
-    "verifier", "window",
+    "object_authorizer", "origins", "personal", "policies", "policy",
+    "permissions", "rate_limit", "readonly", "require_user_verification",
+    "entitlements", "requirement", "resource", "roles", "rp_id", "same_site",
+    "sampling", "scope", "scopes", "second_factor", "secure", "sensitive",
+    "skew", "sortable_fields", "subject", "verifier", "window",
+    # The composed principal's controls (`wreath._auth.principal`). `scope=` and
+    # `organizations=`/`entitlements=` are declarations in exactly the sense this
+    # set means: dropping one is the source-level spelling of "the delegation
+    # never had a scope" or "this application never wired memberships in", and
+    # both are the mistake most likely to be made once and never noticed.
+    # `ttl=` needs no entry -- `LIMIT_TOKENS` already carries it, so a
+    # delegation's expiry is widened past reach by `declaration.widen-bound`.
+    "organizations",
 })
 
 #: Keywords and constant names that are numeric ceilings. Widening one to
@@ -774,8 +782,11 @@ def _declaration_operators(context: _Context) -> Iterator[Candidate]:
                 )
 
 
-#: Keywords whose value is a per-operation mapping of controls.
-_MAPPING_CONTROLS: frozenset[str] = frozenset({"authorize", "policies"})
+#: Keywords whose value is a per-operation mapping of controls. `personal=` on
+#: a `privacy.classify(...)` is one: each entry is a column somebody declared as
+#: the subject's data, and dropping one is exactly the erasure that reports
+#: success while leaving a column behind.
+_MAPPING_CONTROLS: frozenset[str] = frozenset({"authorize", "personal", "policies"})
 
 #: Keywords whose value is a sequence of column names, each one its own control.
 _SEQUENCE_CONTROLS: frozenset[str] = frozenset({"readonly", "exclude"})
