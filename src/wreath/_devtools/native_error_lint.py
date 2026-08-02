@@ -99,10 +99,33 @@ def _returns_pyobject(code_lines: list[str], index: int, function: str) -> bool:
     return False
 
 
+def _function_contexts(code_lines: list[str]) -> tuple[list[str], list[bool]]:
+    """Resolve enclosing function and return protocol once per source line.
+
+    ``_enclosing_function`` deliberately searches backwards, which is useful
+    for an isolated finding but quadratic when called for every line in a large
+    translation unit. A forward pass sees the same declaration transitions and
+    carries their context until the next one.
+    """
+    functions: list[str] = []
+    pyobject_results: list[bool] = []
+    current = ""
+    returns_pyobject = False
+    for index, line in enumerate(code_lines):
+        declared = _enclosing_function([line], 0)
+        if declared:
+            current = declared
+            returns_pyobject = _returns_pyobject(code_lines, index, current)
+        functions.append(current)
+        pyobject_results.append(returns_pyobject)
+    return functions, pyobject_results
+
+
 def scan_text(path: str, text: str) -> list[Finding]:
     raw_lines = text.split("\n")
     code_lines = strip_c(text)
     waived = _waivers(raw_lines, code_lines, WAIVER)
+    functions, pyobject_results = _function_contexts(code_lines)
     findings: list[Finding] = []
     previous_code = ""
 
@@ -113,7 +136,7 @@ def scan_text(path: str, text: str) -> list[Finding]:
         findings.append(Finding(path, index + 1, code, rule.summary, rule.hint))
 
     for index, line in enumerate(code_lines):
-        function = _enclosing_function(code_lines, index)
+        function = functions[index]
 
         if IGNORED_STATUS.match(line):
             add(index, "NE001")
@@ -127,9 +150,10 @@ def scan_text(path: str, text: str) -> list[Finding]:
         conversion = CONVERSION.search(line)
         if conversion:
             checked = False
-            for later in code_lines[index + 1 : index + 9]:
-                if _enclosing_function(code_lines, index + 1) != function:
+            for later_index in range(index + 1, min(len(code_lines), index + 9)):
+                if functions[later_index] != function:
                     break
+                later = code_lines[later_index]
                 if "PyErr_Occurred" in later:
                     checked = True
                     break
@@ -138,7 +162,7 @@ def scan_text(path: str, text: str) -> list[Finding]:
             if not checked:
                 add(index, "NE005")
 
-        pyobject_result = _returns_pyobject(code_lines, index, function)
+        pyobject_result = pyobject_results[index]
         if pyobject_result and NULL_RETURN.match(line) and ERROR_CLEAR.search(previous_code):
             add(index, "NE003")
         if pyobject_result and SUCCESS_RETURN.match(line) and ERROR_SET.search(previous_code):
