@@ -15,6 +15,7 @@ from benchmarks.report import (
     render,
 )
 from benchmarks.scenarios import ALL_PROTOCOLS, SCENARIOS
+from wreath._devtools.bench_report import _overview
 
 
 def test_protocol_support_is_independent_from_framework_support() -> None:
@@ -73,6 +74,38 @@ def test_reports_warn_and_avoid_ranking_for_mixed_generators() -> None:
     rows = [_row(load_generator="builtin"), _row(load_generator="h2load")]
     assert has_mixed_generators(rows)
     assert not is_rankable(rows)
+
+
+def test_overview_does_not_crown_a_winner_inside_overlapping_ranges() -> None:
+    rows = [
+        _row(
+            framework="a",
+            requests_per_second=110.0,
+            _samples={"requests_per_second": [90.0, 130.0]},
+        ),
+        _row(
+            framework="b",
+            requests_per_second=100.0,
+            _samples={"requests_per_second": [95.0, 105.0]},
+        ),
+    ]
+
+    html = _overview(rows, ["plaintext"])
+
+    assert "·&nbsp;unresolved" in html
+    assert 'class="win"' not in html
+
+
+def test_overview_does_not_rank_results_from_different_protocols() -> None:
+    rows = [
+        _row(framework="a", protocol="http/1.1", requests_per_second=110.0),
+        _row(framework="b", protocol="h2", requests_per_second=100.0),
+    ]
+
+    html = _overview(rows, ["plaintext"])
+
+    assert "·&nbsp;unresolved" in html
+    assert 'class="win"' not in html
 
 
 def test_report_renders_mixed_generator_warning(tmp_path: Path) -> None:

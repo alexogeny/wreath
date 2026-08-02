@@ -38,7 +38,13 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     from dataclasses import dataclass
 
     from wreath import Response, Wreath
-    from wreath.auth import BearerTokenBackend, Identity, authenticated
+    from wreath.auth import (
+        BearerTokenBackend,
+        Identity,
+        JwtVerifier,
+        SymmetricKey,
+        authenticated,
+    )
     from wreath.authorization import roles
     from wreath.response import StreamingResponse, TextResponse
 
@@ -47,12 +53,34 @@ if FRAMEWORK in {"wreath", "wreath-native", "wreath-metal"}:
     _ROUTING = os.environ.get("WREATH_BENCH_ROUTING")
     app = Wreath(**({"routing": _ROUTING} if _ROUTING else {}))
 
+    # The literal tokens the `auth-*` scenarios have always sent, and a real
+    # HS256 verifier behind them. The two string compares run first and
+    # short-circuit, so every previously recorded `auth-*` number is measuring
+    # exactly the work it measured before; only a token that is neither falls
+    # through to the JWT path.
+    #
+    # That path is here because it is the one native accelerator the whole
+    # scenario suite otherwise never reaches. `ws-echo` exercises the masking
+    # arm, `template` the HTML-escape arm, `json`/`json-body` the JSON scanner
+    # -- but every `auth-*` scenario compared a literal string, so `jose_parse`,
+    # `jose_verify_hs`, `jose_validate_claims` and the vectorised
+    # `jose_b64url_decode` under them were shipped unmeasured.
+    _JWT_SECRET = b"wreath-benchmark-hs256-secret-0123456789"
+
+    _jwt_verifier = JwtVerifier(
+        algorithms=("HS256",),
+        key=SymmetricKey(_JWT_SECRET),
+        issuer="https://bench.wreath.invalid",
+        audience="wreath-bench",
+        leeway=0,
+    )
+
     async def verify_benchmark_token(token: str) -> Identity | None:
         if token == "admin":
             return Identity("admin", roles=frozenset({"admin"}))
         if token == "user":
             return Identity("user", roles=frozenset({"user"}))
-        return None
+        return _jwt_verifier(token)
 
     app.configure_auth(BearerTokenBackend(verify_benchmark_token))
 

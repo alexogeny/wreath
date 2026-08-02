@@ -201,6 +201,49 @@ def _webhook_headers() -> tuple[tuple[str, str], ...]:
 
 WEBHOOK_HEADERS = _webhook_headers()
 
+#: Must equal `_JWT_SECRET` in `apps.py`. Not a secret in any sense that
+#: matters: it signs one token, for one benchmark, against an app that exists
+#: only while the benchmark runs.
+JWT_SECRET = b"wreath-benchmark-hs256-secret-0123456789"
+
+
+def _jwt_headers() -> tuple[tuple[str, str], ...]:
+    """One HS256 bearer token, minted with the stdlib.
+
+    Minted here rather than by `wreath` so the load generator stays a load
+    generator: a token the framework under test also produced would let a defect
+    in signing cancel itself out against the same defect in verifying.
+
+    Long-dated because the runner mints once at import and then drives passes
+    for as long as the battery takes; a token that expires mid-battery turns
+    every later request into a 401 and reports it as throughput.
+    """
+    import base64
+    import hmac
+    import json as _json
+    import time as _time
+
+    def seg(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    header = seg(_json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+    claims = seg(
+        _json.dumps(
+            {
+                "sub": "user",
+                "iss": "https://bench.wreath.invalid",
+                "aud": "wreath-bench",
+                "exp": int(_time.time()) + 86_400,
+            }
+        ).encode()
+    )
+    signing_input = f"{header}.{claims}".encode("ascii")
+    signature = hmac.new(JWT_SECRET, signing_input, "sha256").digest()
+    return (("Authorization", f"Bearer {header}.{claims}.{seg(signature)}"),)
+
+
+JWT_HEADERS = _jwt_headers()
+
 
 @dataclass(frozen=True, slots=True)
 class Scenario:
@@ -249,6 +292,18 @@ SCENARIOS = {
         "GET",
         "/auth/profile",
         headers=(("Authorization", "Bearer user"),),
+        frameworks=_WREATH_ONLY,
+    ),
+    "auth-jwt": Scenario(
+        # The same route and the same middleware as `auth-authenticated`, so the
+        # difference between the two rows is exactly one HS256 verify: a compact
+        # token split, two vectorised base64url segment decodes, the HMAC, and
+        # the registered-claim checks. Nothing else in the suite reaches that
+        # code, which is why a row that isolates it is worth more than a faster
+        # one that blends it into the request.
+        "GET",
+        "/auth/profile",
+        headers=JWT_HEADERS,
         frameworks=_WREATH_ONLY,
     ),
     "auth-rbac-allow": Scenario(
