@@ -2,10 +2,11 @@
 
 The claim this whole feature rests on is one sentence: *the records are still
 there after the process is gone*. That is not a claim a mock can support, so
-the tests below fork a child, let it publish into a mapped ring, and then kill
-it in the two ways that actually happen -- a `SIGSEGV` from inside its own work,
-and a `SIGKILL` from outside -- before decoding the file from the parent. No
-atexit handler runs, no `msync` happens, nothing is flushed on the way out.
+the tests below start a fresh interpreter, let it publish into a mapped ring,
+and then kill it in the two ways that actually happen -- a `SIGSEGV` from inside
+its own work, and a `SIGKILL` from outside -- before decoding the file from the
+parent. No atexit handler runs, no `msync` happens, nothing is flushed on the
+way out.
 
 The rest of the file covers the reader, which is written for the case where
 something has already gone wrong and so has to report rather than raise: a
@@ -18,6 +19,7 @@ from __future__ import annotations
 import os
 import signal
 import struct
+import subprocess
 import sys
 
 import pytest
@@ -59,31 +61,11 @@ def _serve(recorder, count: int = 1) -> None:
 
 # --- the crash cases --------------------------------------------------------
 #
-# `os.fork` rather than a subprocess: the child inherits this interpreter, so
-# the test is exercising the extension that was just built rather than whatever
-# a fresh `python -c` would import. `os._exit` on every non-crash path, so a
-# child that somehow reaches the end cannot run pytest's teardown twice.
-
-
-#: Why the forked children below catch `BaseException` and call `os._exit`.
-#:
-#: AGENTS.md's rule is to catch the specific type, and its listed exception is a
-#: process boundary where one bad case must not take the process with it. A
-#: forked child inside pytest is exactly that boundary, and it is stronger than
-#: usual: the child shares the parent's file descriptors, its captured output
-#: buffers and its collected test session. An exception that *unwinds* there
-#: runs pytest's teardown a second time, flushes the parent's buffers from the
-#: child, and reports a failure twice. `os._exit` is the only correct way out,
-#: so every path has to reach it.
-#:
-#: It swallows `KeyboardInterrupt` and `SystemExit` too, which the rule
-#: otherwise forbids, and that is deliberate here rather than an oversight: in a
-#: child whose whole purpose is to die in the next statement, unwinding *is* the
-#: harm the rule exists to prevent. The exit status 97 distinguishes "the child
-#: broke before it could crash" from a real signal death, and every test asserts
-#: on the signal rather than on a clean exit -- so a child that took this path
-#: fails its test rather than passing it quietly.
-_CHILD_MUST_NOT_UNWIND = True
+# A subprocess rather than `os.fork`: xdist's worker has live threads, and
+# CPython 3.14 correctly warns that running Python after forking such a process
+# can deadlock on a lock a vanished thread held. The child uses this exact
+# interpreter and imports this checkout, so it still exercises the extension
+# that was just built without inheriting pytest's threads or captured streams.
 
 
 def _silence_crash_reporting() -> None:
@@ -99,30 +81,53 @@ def _silence_crash_reporting() -> None:
     faulthandler.disable()
 
 
-def _child_publishes_then(path: str, die) -> int:
-    """Fork a child that publishes into a mapped ring and then dies. Returns its
-    wait status, so the caller can assert *how* it died -- a child that exited
-    cleanly would make the whole test vacuous."""
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover - the child never reports coverage
-        try:
-            _silence_crash_reporting()
-            recorder = _recorder(path)
-            _serve(recorder, 5)
-            recorder.publish_log(
-                LogCell(
-                    request_id=99,
-                    site_id=3,
-                    severity=Severity.ERROR,
-                    args=(LogArg.integer(4242),),
-                ).encode()
-            )
-            die()
-            os._exit(0)  # unreachable when `die` does its job
-        except BaseException:  # noqa: BLE001 -- see _CHILD_MUST_NOT_UNWIND
-            os._exit(97)
-    _pid, status = os.waitpid(pid, 0)
-    return status
+_CHILD_SCRIPT = (
+    "from tests.test_flight_ring_file import _crash_child; "
+    "import sys; _crash_child(sys.argv[1], sys.argv[2])"
+)
+
+
+def _crash_child(action: str, path: str) -> None:
+    """Publish the requested crash shape in a fresh, single-threaded process."""
+    _silence_crash_reporting()
+    recorder = _recorder(path)
+    if action == "in-flight":
+        _serve(recorder, 2)
+        doomed = recorder.begin(1, 1, 0)
+        doomed.route(7, 3)
+        recorder.publish_log(
+            LogCell(
+                request_id=doomed.request_id,
+                site_id=5,
+                severity=Severity.INFO,
+                args=(LogArg.text("charging card"),),
+            ).encode()
+        )
+        os.kill(os.getpid(), signal.SIGSEGV)
+        raise RuntimeError("SIGSEGV returned")
+    if action not in {"publish-segv", "publish-kill"}:
+        raise ValueError(f"unknown crash-child action {action!r}")
+    _serve(recorder, 5)
+    recorder.publish_log(
+        LogCell(
+            request_id=99,
+            site_id=3,
+            severity=Severity.ERROR,
+            args=(LogArg.integer(4242),),
+        ).encode()
+    )
+    fatal = signal.SIGSEGV if action == "publish-segv" else signal.SIGKILL
+    os.kill(os.getpid(), fatal)
+    raise RuntimeError(f"signal {fatal} returned")
+
+
+def _run_crash_child(path: str, action: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-c", _CHILD_SCRIPT, action, path],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 #: AddressSanitizer installs its own `SIGSEGV` handler, so a child told to
@@ -133,7 +138,7 @@ def _child_publishes_then(path: str, die) -> int:
 _SANITIZED = "ASAN_OPTIONS" in os.environ
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+@pytest.mark.skipif(os.name != "posix", reason="needs POSIX signals")
 @pytest.mark.skipif(_SANITIZED, reason="ASan intercepts SIGSEGV; the SIGKILL case covers it")
 def test_records_survive_a_child_that_segfaults(ring_path) -> None:
     """The load-bearing case: the process dies mid-work, the records remain.
@@ -142,9 +147,8 @@ def test_records_survive_a_child_that_segfaults(ring_path) -> None:
     exists for -- nothing is flushed, no handler runs, the process simply stops
     existing. The pages are the kernel's, so the file is intact anyway.
     """
-    status = _child_publishes_then(ring_path, lambda: os.kill(os.getpid(), signal.SIGSEGV))
-    assert os.WIFSIGNALED(status), "the child exited instead of crashing"
-    assert os.WTERMSIG(status) == signal.SIGSEGV
+    child = _run_crash_child(ring_path, "publish-segv")
+    assert child.returncode == -signal.SIGSEGV, child.stderr
 
     ring = read_ring_file(ring_path)
     assert ring.live == 6, "five completions and a log record should have survived"
@@ -161,16 +165,15 @@ def test_records_survive_a_child_that_segfaults(ring_path) -> None:
     assert logs[0].decode().args[0].number == 4242
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+@pytest.mark.skipif(os.name != "posix", reason="needs POSIX signals")
 def test_records_survive_a_child_that_is_killed(ring_path) -> None:
     """SIGKILL: no signal handler could have run even in principle."""
-    status = _child_publishes_then(ring_path, lambda: os.kill(os.getpid(), signal.SIGKILL))
-    assert os.WIFSIGNALED(status)
-    assert os.WTERMSIG(status) == signal.SIGKILL
+    child = _run_crash_child(ring_path, "publish-kill")
+    assert child.returncode == -signal.SIGKILL, child.stderr
     assert read_ring_file(ring_path).live == 6
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+@pytest.mark.skipif(os.name != "posix", reason="needs POSIX signals")
 @pytest.mark.skipif(_SANITIZED, reason="ASan intercepts SIGSEGV")
 def test_the_request_in_flight_when_it_died_is_the_one_with_no_completion(
     ring_path,
@@ -182,27 +185,8 @@ def test_the_request_in_flight_when_it_died_is_the_one_with_no_completion(
     records are on the ring and carry its id, which is what makes the gap
     legible rather than merely present.
     """
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover
-        try:
-            _silence_crash_reporting()
-            recorder = _recorder(ring_path)
-            _serve(recorder, 2)  # two healthy requests, ids 1 and 2
-            doomed = recorder.begin(1, 1, 0)
-            doomed.route(7, 3)
-            recorder.publish_log(
-                LogCell(
-                    request_id=doomed.request_id,
-                    site_id=5,
-                    severity=Severity.INFO,
-                    args=(LogArg.text("charging card"),),
-                ).encode()
-            )
-            os.kill(os.getpid(), signal.SIGSEGV)  # dies mid-request
-            os._exit(0)
-        except BaseException:  # noqa: BLE001 -- see _CHILD_MUST_NOT_UNWIND
-            os._exit(97)
-    os.waitpid(pid, 0)
+    child = _run_crash_child(ring_path, "in-flight")
+    assert child.returncode == -signal.SIGSEGV, child.stderr
 
     ring = read_ring_file(ring_path)
     completed = {

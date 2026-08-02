@@ -1134,6 +1134,70 @@ async def test_a_client_root_confines_a_file_read(tmp_path) -> None:
         assert mcp.stats()["roots_refusals"] == 1
 
 
+@pytest.mark.parametrize(
+    "declared_roots",
+    (
+        [],
+        [{"uri": "https://attacker.invalid/not-a-file-root"}],
+    ),
+)
+async def test_a_client_declaring_no_roots_cannot_read_the_server_root(
+    tmp_path, declared_roots: list[dict[str, str]]
+) -> None:
+    """An explicit empty root set is a boundary, not permission to read all.
+
+    A hostile client controls the ``roots/list`` answer.  Collapsing ``[]``
+    with "this client did not advertise roots" lets it remove the client-side
+    confinement while retaining access to every file beneath ``file_root``.
+    """
+    (tmp_path / "private.txt").write_text("server secret")
+    app, mcp = build(file_root=tmp_path)
+
+    @mcp.tool(description="Reads a file the client's roots allow.")
+    async def read(request, path: str) -> dict:
+        try:
+            return {"text": (await request.state.mcp.read_file(path)).decode()}
+        except PermissionError as error:
+            raise ToolError(str(error)) from error
+
+    async with TestClient(app) as client:
+        session = await initialize(client)
+        peer = Peer(client, session, mcp)
+        parked = asyncio.ensure_future(
+            call(client, session, tool_call(2, "read", {"path": "private.txt"}))
+        )
+        asked = await peer.next_request()
+        assert asked["method"] == "roots/list"
+        await peer.answer(asked["id"], {"roots": declared_roots})
+        refused = await asyncio.wait_for(parked, timeout=5)
+
+    result = refused.json()["result"]
+    assert result["isError"] is True
+    assert "outside every root this client declared" in result["content"][0]["text"]
+    assert mcp.stats()["roots_refusals"] == 1
+
+
+async def test_a_client_without_the_roots_capability_uses_only_the_server_root(
+    tmp_path,
+) -> None:
+    """No roots capability is distinct from an explicitly empty roots grant."""
+    (tmp_path / "public.txt").write_text("server-owned")
+    app, mcp = build(file_root=tmp_path)
+
+    @mcp.tool(description="Reads a file owned by this server.")
+    async def read(request) -> dict:
+        return {"text": (await request.state.mcp.read_file("public.txt")).decode()}
+
+    async with TestClient(app) as client:
+        session = await initialize(client, capabilities={})
+        answered = await call(client, session, tool_call(2, "read"))
+
+    result = answered.json()["result"]
+    assert result["isError"] is False
+    assert result["content"][0]["text"] == '{"text":"server-owned"}'
+    assert mcp.stats()["roots_refusals"] == 0
+
+
 async def test_a_read_cannot_escape_the_server_s_root(tmp_path) -> None:
     """`_fsguard`'s walk, reached through the MCP surface rather than reimplemented."""
     (tmp_path / "root").mkdir()

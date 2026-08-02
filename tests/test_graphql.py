@@ -26,12 +26,14 @@ from wreath._graphql.parser import (
     parse,
 )
 from wreath._graphql.schema import policy_resource
+from wreath.app import Wreath
 from wreath.auth import Identity
 from wreath.authorization import CedarAuthorizer, CedarPolicies, EntityUid
 from wreath.graphql import GraphQL, ResolverError
 from wreath.orm.registry import Registry
 from wreath.orm.session import Session
 from wreath.request import Request
+from wreath.testing import TestClient
 
 # --- parser: syntax ----------------------------------------------------------
 
@@ -1001,6 +1003,19 @@ async def test_a_custom_root_field_needs_no_backing_table(
 
 
 @pytest.mark.asyncio
+async def test_a_list_root_resolver_may_return_none(registry: Registry) -> None:
+    api = GraphQL(registry, models=[User])
+
+    @api.query("search", returns="User", is_list=True)
+    async def search(info):
+        return None
+
+    body = await api.run("{ search { id } }", Session(registry, "read"))
+
+    assert body == {"data": {"search": []}}
+
+
+@pytest.mark.asyncio
 async def test_mutations_run_and_are_namespaced_separately(
     registry: Registry, database: FakeDatabase
 ) -> None:
@@ -1161,6 +1176,22 @@ def test_the_sdl_shows_resolvers_custom_roots_and_mutations(
     assert "search: [User!]!" in sdl
     assert "type Mutation {" in sdl
     assert "createUser: User" in sdl
+
+
+@pytest.mark.asyncio
+async def test_the_http_endpoint_refuses_a_non_object_json_body(
+    registry: Registry,
+) -> None:
+    app = Wreath()
+    app.include_router(GraphQL(registry, models=[User]).router())
+
+    async with TestClient(app) as client:
+        response = await client.post("/graphql", json=[])
+
+    assert response.status == 400
+    assert response.json() == {
+        "errors": [{"message": "expected a JSON object with a `query` string"}]
+    }
 
 
 # --- the session the endpoint opens ------------------------------------------

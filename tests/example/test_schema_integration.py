@@ -19,6 +19,7 @@ of it, so a regression is a failing test rather than a rediscovered workaround.
 from __future__ import annotations
 
 import os
+from inspect import signature
 
 import pytest
 from _camera_trap import build_schema, drop_schema, statements
@@ -236,8 +237,13 @@ async def test_seeding_twice_leaves_the_same_rows(seeded) -> None:
 
 def test_the_generator_matches_the_walkthrough_counts() -> None:
     """The numbers ``walkthrough.md`` prints. No database needed."""
-    rows = build_rows()
-    assert len(rows["sightings"]) == 140_000
+    # Building all 140,000 sightings merely to count them made this assertion
+    # spend about 1.3 seconds allocating rows whose contents it never read.
+    # The default is the walkthrough contract; a one-row generation proves the
+    # parameter still controls the emitted collection.
+    assert signature(build_rows).parameters["sightings"].default == 140_000
+    rows = build_rows(sightings=1)
+    assert len(rows["sightings"]) == 1
     assert len(rows["deployments"]) == 576
     assert len(rows["cameras"]) == 61
     assert len(rows["stations"]) == 48

@@ -509,17 +509,22 @@ def test_portable_memmem_fallback_is_correct_and_linear(tmp_path) -> None:
     assert run.returncode == 0, f"fallback check failed:\n{run.stdout}\n{run.stderr}"
     assert "0 failures" in run.stdout, run.stdout
 
-    # Cost per haystack byte must not grow with the needle: that is the
-    # difference between the linear two-way search and the naive scan it
-    # replaced, whose per-byte cost rises with needle length on this input.
-    rates = [
-        float(token.split("=", 1)[1])
-        for line in run.stdout.splitlines()
-        for token in line.split()
-        if token.startswith("ns_per_haystack_byte=")
-    ]
-    assert len(rates) >= 4, run.stdout
-    assert max(rates) < 3 * min(rates), f"fallback scaling is not flat: {rates}"
+    # Cost per haystack byte must stay flat as the attacker-controlled haystack
+    # grows. Compare each needle independently: short needles use the SIMD path
+    # and long needles use two-way, so their constant factors need not match.
+    rates: dict[int, list[float]] = {}
+    for line in run.stdout.splitlines():
+        fields = dict(token.split("=", 1) for token in line.split() if "=" in token)
+        if "needle" in fields and "ns_per_haystack_byte" in fields:
+            rates.setdefault(int(fields["needle"]), []).append(
+                float(fields["ns_per_haystack_byte"])
+            )
+    assert set(rates) == {4, 32, 64}, run.stdout
+    assert all(len(samples) == 3 for samples in rates.values()), run.stdout
+    for needle, samples in rates.items():
+        assert max(samples) < 3 * min(samples), (
+            f"fallback scaling is not flat for needle {needle}: {samples}"
+        )
 
 
 @native

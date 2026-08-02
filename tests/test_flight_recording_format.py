@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import time
+import zlib
 
 import pytest
 
@@ -145,6 +146,22 @@ def test_wfr1_rejects_bad_versions_and_hash() -> None:
     bad_hash[8] ^= 0xFF  # corrupt the header image_hash -> mismatch vs META
     with pytest.raises(fs.SchemaError):
         read_recording(bytes(bad_hash))
+
+
+def test_wfr1_rejects_an_event_cell_from_an_unsupported_schema() -> None:
+    from wreath._recording_format import _CHUNK
+
+    cell = bytes((fs.SCHEMA_VERSION,)) + bytes(fs.CELL_SIZE - 1)
+    blob = bytearray(_write(_image(), [], cell))
+    chunk = blob.index(b"EVNT")
+    _tag, length, _crc = _CHUNK.unpack_from(blob, chunk)
+    payload = chunk + _CHUNK.size
+    blob[payload] = fs.SCHEMA_VERSION + 1
+    crc = zlib.crc32(blob[payload : payload + length]) & 0xFFFFFFFF
+    _CHUNK.pack_into(blob, chunk, b"EVNT", length, crc)
+
+    with pytest.raises(fs.SchemaError, match="event cell.*schema version"):
+        read_recording(bytes(blob))
 
 
 def test_wfr1_requires_a_metadata_chunk() -> None:

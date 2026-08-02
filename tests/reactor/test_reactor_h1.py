@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import threading
+import time
 
 from .support import echo_app, reactor_serve, run, sync_ok_app
 
@@ -117,11 +118,11 @@ def test_h1_slow_header_hits_request_deadline(loop):
 
     config = ServerConfig(protocols=("http/1.1",), request_timeout=0.2, keep_alive_timeout=0.2)
 
-    async def main():
-        h = await reactor_serve(loop, sync_ok_app(), protocols=("http/1.1",), config=config)
-        s = socket.create_connection((h.host, h.port), timeout=5)
+    def slow_client(host, port):
+        s = socket.create_connection((host, port), timeout=5)
         s.sendall(b"GET / HTTP/1.1\r\n")  # never finishes the head
         closed_at = None
+        started = time.perf_counter()
         s.settimeout(2.0)
         try:
             # server should drop the connection once the deadline fires
@@ -132,7 +133,14 @@ def test_h1_slow_header_hits_request_deadline(loop):
         except OSError:
             closed_at = "reset"
         s.close()
-        await h.aclose()
-        return closed_at
+        return closed_at, time.perf_counter() - started
 
-    assert run(loop, main()) in ("eof", "reset")
+    async def main():
+        h = await reactor_serve(loop, sync_ok_app(), protocols=("http/1.1",), config=config)
+        closed_at, elapsed = await asyncio.to_thread(slow_client, h.host, h.port)
+        await h.aclose()
+        return closed_at, elapsed
+
+    closed_at, elapsed = run(loop, main())
+    assert closed_at in ("eof", "reset")
+    assert elapsed < 0.8

@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import subprocess
+import sys
 
 import pytest
 
@@ -171,7 +173,43 @@ def test_several_in_flight_requests_ask_rather_than_pick() -> None:
         _reproduce(_app((CHARGE,)), _Several(7, (CHARGE.site_id,)))
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+def _real_crash_child(ring_path: str) -> None:
+    """Create the real crash file from a fresh, single-threaded interpreter."""
+    import faulthandler
+
+    faulthandler.disable()
+    recorder = _flight.Recorder(
+        _flight.MODE_PULSE,
+        ring_records=64,
+        active_requests=8,
+        ring_path=ring_path,
+    )
+    healthy = recorder.begin(1, 1, 0)
+    healthy.route(7, 3)
+    healthy.finish(1_000, 200, 0, 0, 0, 12)
+
+    runtime = log.LogRuntime(
+        log.recorder_sink(recorder),
+        level=log.INFO,
+        native=log.recorder_emitter(recorder),
+    )
+    log.install(runtime)
+    doomed = recorder.begin(1, 1, 0)
+    doomed.route(7, 3)
+    log.begin_request(doomed.request_id)
+    CHARGE(42)
+    SETTLE(42)
+    os.kill(os.getpid(), signal.SIGSEGV)
+    raise RuntimeError("SIGSEGV returned")
+
+
+_CRASH_SCRIPT = (
+    "from tests.test_flight_reproduce import _real_crash_child; "
+    "import sys; _real_crash_child(sys.argv[1])"
+)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs POSIX signals")
 @pytest.mark.skipif("ASAN_OPTIONS" in os.environ, reason="ASan intercepts SIGSEGV")
 def test_a_real_crash_file_drives_a_real_reproduction(tmp_path) -> None:
     """The whole story, with nothing stood in for.
@@ -186,37 +224,13 @@ def test_a_real_crash_file_drives_a_real_reproduction(tmp_path) -> None:
     does that.
     """
     ring_path = str(tmp_path / "flight.wfrr")
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover - the child never reports coverage
-        try:
-            import faulthandler
-
-            faulthandler.disable()
-            recorder = _flight.Recorder(
-                _flight.MODE_PULSE, ring_records=64, active_requests=8,
-                ring_path=ring_path,
-            )
-            healthy = recorder.begin(1, 1, 0)
-            healthy.route(7, 3)
-            healthy.finish(1_000, 200, 0, 0, 0, 12)
-
-            runtime = log.LogRuntime(
-                log.recorder_sink(recorder),
-                level=log.INFO,
-                native=log.recorder_emitter(recorder),
-            )
-            log.install(runtime)
-            doomed = recorder.begin(1, 1, 0)
-            doomed.route(7, 3)
-            log.begin_request(doomed.request_id)
-            CHARGE(42)
-            SETTLE(42)
-            os.kill(os.getpid(), signal.SIGSEGV)
-            os._exit(0)
-        except BaseException:  # noqa: BLE001 -- a forked child must never unwind
-            os._exit(97)
-    _pid, status = os.waitpid(pid, 0)
-    assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGSEGV
+    child = subprocess.run(
+        [sys.executable, "-c", _CRASH_SCRIPT, ring_path],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert child.returncode == -signal.SIGSEGV, child.stderr
 
     ring = read_ring_file(ring_path)
     assert ring.in_flight() == (2,), "the doomed request is the one with no completion"

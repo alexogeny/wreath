@@ -353,10 +353,26 @@ async def _run_bus_doorbell(schedule: FaultSchedule) -> Observation:
     supervisor = Supervisor()
     try:
         await bus.start(supervisor)
+        started_disconnected = bus._listen_conn is None
         # The owned recovery is *retrying*, so the observation is the retry, not
         # a single blip. Waiting for two says the supervisor did not stop after
         # the first -- which is the historical bug in one assertion.
-        await until(lambda: bus.doorbell_reconnects >= 2 or double.streams >= 2)
+        if schedule.adapter_faults:
+            if started_disconnected:
+                recovered = await until(
+                    lambda: bus.doorbell_reconnects >= 1 and double.streams >= 1
+                )
+            else:
+                recovered = await until(
+                    lambda: bus.doorbell_reconnects >= 2 or double.streams >= 2
+                )
+            if not recovered:
+                raise AssertionError("message-bus doorbell did not retry the injected fault")
+        else:
+            # `start()` already opened the healthy control connection. Waiting
+            # for two reconnects here measured an outage the control does not
+            # contain and charged every comparison a full polling deadline.
+            await asyncio.sleep(0)
     finally:
         await supervisor.stop(bus)
     return Observation(
@@ -390,7 +406,20 @@ async def _run_jobs_doorbell(schedule: FaultSchedule) -> Observation:
     supervisor = Supervisor()
     try:
         await runner.start(supervisor)
-        await until(lambda: runner.doorbell_reconnects >= 2 or double.streams >= 2)
+        started_disconnected = runner._listen_conn is None
+        if schedule.adapter_faults:
+            if started_disconnected:
+                recovered = await until(
+                    lambda: runner.doorbell_reconnects >= 1 and double.streams >= 1
+                )
+            else:
+                recovered = await until(
+                    lambda: runner.doorbell_reconnects >= 2 or double.streams >= 2
+                )
+            if not recovered:
+                raise AssertionError("job-runner doorbell did not retry the injected fault")
+        else:
+            await asyncio.sleep(0)
     finally:
         await supervisor.stop(runner)
     return Observation(

@@ -275,6 +275,21 @@ def test_the_emitter_reports_what_the_limiter_dropped() -> None:
     assert records[1].dropped_siblings == 2
 
 
+def test_a_registered_event_takes_dropped_siblings_from_the_site_limiter() -> None:
+    policy = LogSamplingPolicy(first=1, thereafter=3)
+    with log.testing_runtime(level=log.INFO, sampling=policy) as records:
+        event = log.event(
+            "sampled.value",
+            "sampled {value}",
+            fields=(log.field("value", int),),
+        )
+        for value in range(4):
+            event(value)
+
+    assert len(records) == 2
+    assert records[1].dropped_siblings == 2
+
+
 def test_the_emitter_never_samples_a_warning() -> None:
     policy = LogSamplingPolicy(first=1, thereafter=1000)
     with log.testing_runtime(level=log.INFO, sampling=policy) as records:

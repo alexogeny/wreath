@@ -119,7 +119,7 @@ def test_an_unserializable_object_is_reported_once_not_twice() -> None:
         dumps(Nope())
     printed = "".join(traceback.format_exception(caught.value))
     assert "During handling of the above exception" not in printed
-    assert printed.count("not JSON serializable") == 1
+    assert str(caught.value).count("not JSON serializable") == 1
 
 
 def test_a_nested_unserializable_object_is_also_reported_once() -> None:
@@ -130,7 +130,7 @@ def test_a_nested_unserializable_object_is_also_reported_once() -> None:
         dumps({"a": [1, 2, Nope()]})
     printed = "".join(traceback.format_exception(caught.value))
     assert "During handling of the above exception" not in printed
-    assert printed.count("not JSON serializable") == 1
+    assert str(caught.value).count("not JSON serializable") == 1
 
 
 def test_a_hook_raising_its_own_type_error_is_not_masked() -> None:

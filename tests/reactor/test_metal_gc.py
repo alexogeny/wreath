@@ -37,6 +37,15 @@ def _stock_metal_loop():
     return reactor.metal_event_loop(diagnostics=True, gc_mode="stock")
 
 
+def test_a_gc_mode_other_than_stock_or_idle_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WREATH_METAL_GC", "eventually")
+
+    with pytest.raises(ValueError, match="WREATH_METAL_GC must be 'stock' or 'idle'"):
+        reactor.metal_event_loop()
+
+
 class _Harness:
     """A real metal server, driven from a thread so the loop can actually idle.
 
@@ -204,11 +213,13 @@ def test_freeze_collects_before_it_freezes() -> None:
 def test_a_loop_with_slack_collects_in_it() -> None:
     loop = _metal_loop()
     with _Harness(loop) as harness:
-        harness.drive(requests=200, gap=0.003)
+        # 0.5ms passed alone but was not enough slack beside five xdist peers;
+        # 1ms stays below the slow-test tail and keeps this a load-stable proof.
+        harness.drive(requests=200, gap=0.001)
         stats = loop.gc_stats()
     collections = (stats["idle_young_collections"]
                    + stats["idle_full_collections"])
-    assert collections > 0, "a loop with 3ms of slack per request never collected"
+    assert collections > 0, "a loop with 1ms of slack per request never collected"
     assert stats["idle_collect_nanoseconds"] > 0
 
 
@@ -244,10 +255,10 @@ def test_every_collection_under_load_is_one_the_loop_chose() -> None:
 
     loop = _metal_loop()
     with _Harness(loop) as harness:
-        harness.drive(requests=50, gap=0.003)  # warm the arrival estimator
+        harness.drive(requests=50, gap=0.0005)  # warm the arrival estimator
         gc.callbacks.append(watch)
         try:
-            harness.drive(requests=400, gap=0.003)
+            harness.drive(requests=400, gap=0.0005)
         finally:
             gc.callbacks.remove(watch)
         stats = loop.gc_stats()

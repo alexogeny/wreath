@@ -63,3 +63,25 @@ os.environ["CAMERA_TRAP_MEDIA_ROOT"] = str(_MEDIA)
 #: a secret in any sense that matters: nothing outside this process ever sees a
 #: URL it signs.
 os.environ["CAMERA_TRAP_MEDIA_SECRET"] = "camera-trap-test-presign-secret-0123456789"
+
+#: A DSN that is never dialled, for the tests here that need the *application
+#: object* and no database at all -- typegen reads the route table and the
+#: annotations on it. `camera_trap.app` builds `app` at module import on
+#: purpose, so an unset DSN fails there naming the variable rather than deep
+#: inside a driver; that is right for the tooling and it means importing the
+#: module is impossible without one. `tests/test_infra_docs_example.py` supplies
+#: a placeholder for the same reason.
+#:
+#: Set here rather than in a test module for the same reason as
+#: ``CAMERA_TRAP_SCHEMA`` above: ``camera_trap.config`` binds ``SETTINGS`` at
+#: *its* import, so anything written after the first module imports it is not
+#: read. Setting it inside the helper that builds the app looks like it works --
+#: it does, run alone -- and fails once a sibling module is collected first.
+#:
+#: Guarded rather than ``setdefault`` because ``CAMERA_TRAP_DSN`` wins over
+#: ``WREATH_TEST_POSTGRES_DSN`` in ``Settings.from_env``: writing it
+#: unconditionally would point a real database-backed run at this dead address.
+if not os.environ.get("CAMERA_TRAP_DSN") and not os.environ.get(
+    "WREATH_TEST_POSTGRES_DSN"
+):
+    os.environ["CAMERA_TRAP_DSN"] = "postgresql://camera-trap@127.0.0.1:1/unused"

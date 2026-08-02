@@ -1060,7 +1060,9 @@ def _validation_bomb(depth: int) -> tuple[Any, Any]:
     return annotation, value
 
 
-def test_a_validation_bomb_stops_at_the_step_budget() -> None:
+def test_a_validation_bomb_stops_at_the_step_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The 2M-visit ceiling had no test of any kind.
 
     `_VALIDATE_MAX_STEPS` is a denial-of-service bound: the module comment says a
@@ -1077,7 +1079,16 @@ def test_a_validation_bomb_stops_at_the_step_budget() -> None:
     is the shape of the answer — exactly one error, at the root, typed
     `too_complex`, with nothing constructed from the truncated result.
     """
-    annotation, value = _validation_bomb(23)
+    import wreath.binding as binding
+
+    # Pin the production boundary separately, then exercise the same mechanism
+    # at a smaller budget. Spending two million recursive visits on every suite
+    # run proved elapsed time, not a stronger invariant; a mutant that widens
+    # the real constant still dies on this assertion, while one that removes a
+    # budget check dies in the bounded bomb below.
+    assert binding._VALIDATE_MAX_STEPS == 2_000_000
+    monkeypatch.setattr(binding, "_VALIDATE_MAX_STEPS", 4_096)
+    annotation, value = _validation_bomb(14)
     with pytest.raises(ValidationError) as caught:
         validate(annotation, value)
     assert [e["type"] for e in caught.value.errors] == ["too_complex"]

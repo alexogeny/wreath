@@ -417,6 +417,19 @@ async def test_a_caller_can_narrow_the_actions_it_cares_about() -> None:
 
 
 @pytest.mark.asyncio
+async def test_every_requested_action_must_be_a_string() -> None:
+    async with TestClient(_app()) as client:
+        response = await client.post(
+            "/permissions",
+            json={"type": "Llama", "ids": ["7"], "actions": ["Llama::read", 7]},
+            headers={"authorization": "Bearer root:admin"},
+        )
+
+    assert response.status == 400
+    assert response.json()["detail"] == "`actions` must be a list of strings"
+
+
+@pytest.mark.asyncio
 async def test_an_action_outside_the_declared_set_is_refused() -> None:
     """Otherwise the endpoint is an oracle for probing arbitrary policies."""
     async with TestClient(_app()) as client:

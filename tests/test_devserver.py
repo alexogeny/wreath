@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -129,6 +130,21 @@ def test_worker_argv_round_trips_server_configuration(tmp_path: Path) -> None:
     assert parsed.response_high_water_segments == options.response_high_water_segments
     assert parsed.response_low_water_segments == options.response_low_water_segments
     assert "--reload-dir" not in argv
+
+
+@pytest.mark.parametrize(("tls_key", "expected"), [(None, ""), ("private.pem", "private.pem")])
+def test_worker_argv_serializes_the_tls_key(
+    tls_key: str | None, expected: str
+) -> None:
+    options = options_from_namespace(
+        build_parser().parse_args(["dev", "example:app"])
+    )
+    options = replace(options, tls_cert="certificate.pem", tls_key=tls_key)
+
+    argv = worker_argv(options)
+
+    key = argv.index("--tls-key")
+    assert argv[key + 1] == expected
 
 def test_supervisor_gracefully_replaces_one_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
