@@ -652,7 +652,14 @@ class TestSealingPersists:
     """
 
     async def test_a_sealed_bucket_is_stored(self, sealing):
-        """The write the whole persistence half of sealing depends on."""
+        """The write the whole persistence half of sealing depends on.
+
+        `settle()` is that write, and reading is deliberately not: a chart is a
+        `GET`, and a read that stored as a side effect could only run on a
+        write-workload session. The read still *answers* correctly before
+        anything is stored -- asserted first, below -- which is what makes the
+        settling job an optimisation rather than a prerequisite.
+        """
         database, session = sealing
         await _add_treks(database, (1, 4.0, 9), (2, 6.0, 11))
 
@@ -662,6 +669,12 @@ class TestSealingPersists:
 
         assert result.series[0].values == (2,), "two treks in the sealed day"
         assert result.state is not None and result.state.settled == (SEAL_DAY,)
+        assert await _settled_rows(database) == [], "reading a sealed view wrote"
+
+        written = await sealed_view().settle(
+            session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
+        )
+        assert written == (SEAL_DAY,)
 
         stored = await _settled_rows(database)
         assert len(stored) == 1, "the sealed bucket reached the table"
@@ -678,7 +691,7 @@ class TestSealingPersists:
         """
         database, session = sealing
         await _add_treks(database, (1, 4.0, 9), (2, 6.0, 11))
-        await sealed_view().run(
+        await sealed_view().settle(
             session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
         )
 
@@ -701,7 +714,10 @@ class TestSealingPersists:
         """
         database, session = sealing
         await _add_treks(database, (1, 4.0, 9), (2, 6.0, 11))
-        await sealed_view().run(
+        # Settled *before* the late card arrives, which is the whole situation:
+        # a day that was final, and then moved. Reading does not store, so this
+        # is the explicit step a scheduled job would take.
+        await sealed_view().settle(
             session, range=SEAL_RANGE, now=WELL_AFTER, grade=WORKER
         )
 

@@ -889,3 +889,52 @@ def test_a_framework_supplied_parameter_is_never_capturable() -> None:
         framework_parameters=1,
     )
     assert captured == (("address", '{"value":"alex@example.com"}'),)
+
+
+def test_a_cycle_through_a_mapping_is_withheld_too() -> None:
+    """The list case has its own test above; a dict closes the loop just as
+    easily, and the two are separate branches."""
+
+    def ingest(payload):
+        pass
+
+    loop: dict = {"a": 1}
+    loop["self"] = loop
+    captured = _policy("ingest.payload").capture_arguments(
+        task="ingest", handler=ingest, args=(loop,), kwargs={}
+    )
+    assert _json.loads(captured[0][1]) == {"withheld": "contains a cycle"}
+
+
+def test_an_infinite_number_is_withheld_like_a_nan() -> None:
+    """`allow_nan=False` refuses both, and both must be caught before the
+    serialiser sees them -- a raise from inside `json.dumps` escapes past the
+    path that records a reason."""
+
+    def ingest(payload):
+        pass
+
+    for value in (float("inf"), float("-inf")):
+        captured = _policy("ingest.payload").capture_arguments(
+            task="ingest", handler=ingest, args=(value,), kwargs={}
+        )
+        assert "non-finite" in _json.loads(captured[0][1])["withheld"], value
+
+
+@pytest.mark.parametrize("missing", ["max_fields", "max_depth", "max_body_bytes"])
+def test_each_bound_is_required_on_its_own(missing: str) -> None:
+    """One refusal, three conditions -- so three tests.
+
+    A single test that leaves all three unset passes whichever clause fired,
+    which is the shape `AGENTS.md` names: a refusal test that proves only that
+    *something* refused. Each of these sets the other two and leaves one at
+    zero.
+    """
+    from wreath.recording import RedactionPolicy
+
+    bounds = {"max_fields": 32, "max_depth": 4, "max_body_bytes": 4096}
+    bounds[missing] = 0
+    with pytest.raises(RecordingPolicyError, match="needs redaction limits"):
+        AttemptPolicy(
+            argument_allowlist=frozenset({"t.p"}), redaction=RedactionPolicy(**bounds)
+        )

@@ -309,3 +309,169 @@ async def test_the_backend_is_idle_not_idle_in_transaction(
     finally:
         await server.close()
     assert state == "idle", f"expected a clean idle backend, saw {state!r}"
+
+
+# --- the same chain, reached by a gRPC deadline instead of a disconnect -------
+#
+# `wreath.grpc`'s plan left this unchecked, and honestly: "the deadline cancels
+# the handler" was proved, and whether that cancellation reached an in-flight
+# ORM query was recorded as *unknown* rather than claimed. It is the same chain
+# as the one above -- the driver cancels a backend whenever the awaiting task is
+# cancelled, whatever cancelled it -- but "the same chain" is an argument, and
+# the plan's own rule is that an argument is not a test.
+#
+# So this is the composition, driven the way gRPC actually reaches it:
+# `grpc-timeout` on the wire, an HTTP/2 stream, and the verdict read from a
+# third connection.
+
+
+def _grpc_scanning_app(database: Any, scan: _Scan) -> Any:
+    """One gRPC unary method that runs a long query on a pooled connection."""
+    from wreath.grpc import GrpcService
+    from wreath.protobuf import field, message
+
+    @message
+    class Ask:
+        nothing: int = field(1, kind="uint32")
+
+    service = GrpcService("wreath.test.Scanner")
+
+    @service.unary(request=Ask, response=Ask)
+    async def Scan(request: Any, msg: Any) -> Any:
+        connection = await database.acquire("read")
+        try:
+            if not scan.pid.done():
+                scan.pid.set_result(await connection.fetchval("SELECT pg_backend_pid()"))
+            try:
+                await connection.fetchval(f"SELECT pg_sleep({_SLEEP_SECONDS})")
+            except asyncio.CancelledError:
+                scan.cancelled.set()
+                raise
+            scan.completed.set()
+        finally:
+            await database.release("read", connection)
+        return msg
+
+    app = wreath.Wreath()
+    app.include_router(service.router())
+    return app, Ask
+
+
+async def test_a_grpc_deadline_stops_the_postgresql_backend(observer, database) -> None:
+    """`grpc-timeout: 300m` with a 30-second query behind it.
+
+    The evidence is `pg_stat_activity` on a third connection, for the reason
+    this file's docstring gives: asserting the handler saw `CancelledError`
+    proves asyncio works, and asserting our own await raised proves less.
+
+    This closes the gRPC plan's highest-value follow-up. The guide said
+    plainly that `grpc-timeout` bounds the response and is not a guarantee the
+    server stopped working; it now is one, for a query on a wreath connection.
+    """
+    from http2 import support
+    from http2.conftest import H2Driver, Http2Protocol
+
+    from wreath.grpc import frame_message
+    from wreath.protobuf import encode
+
+    if Http2Protocol is None:
+        pytest.skip("native Http2Protocol not built")
+
+    scan = _Scan()
+    app, Ask = _grpc_scanning_app(database, scan)
+    driver = H2Driver(app)
+    try:
+        await driver.preface()
+        await driver.feed_and_settle(
+            support.build_headers_frame(
+                1,
+                support.request_headers(
+                    path=b"/wreath.test.Scanner/Scan",
+                    method=b"POST",
+                    extra=[
+                        (b"content-type", b"application/grpc+proto"),
+                        (b"te", b"trailers"),
+                        # 300 milliseconds: long enough that the query is
+                        # genuinely in flight, short enough that the test is not
+                        # a sleep.
+                        (b"grpc-timeout", b"300m"),
+                    ],
+                ),
+                end_stream=False,
+            )
+        )
+        await driver.feed_and_settle(
+            support.encode_frame(
+                support.DATA, 0x1, 1, frame_message(encode(Ask(nothing=0)))
+            )
+        )
+
+        pid = await asyncio.wait_for(scan.pid, timeout=_PATIENCE)
+        assert await _settle(observer, pid, want="active") == "active", (
+            "the query never reached the server; this would prove nothing"
+        )
+
+        await asyncio.wait_for(scan.cancelled.wait(), timeout=_PATIENCE)
+        state = await _settle(observer, pid, want="idle")
+        assert state in ("idle", None), (
+            f"the backend was still {state!r} after the deadline expired: the "
+            "cancellation stopped the handler and not the query it was waiting on"
+        )
+        assert not scan.completed.is_set(), "the 30-second query ran to completion"
+    finally:
+        driver.close()
+
+
+async def test_the_connection_is_usable_after_a_deadline_cancel(
+    observer, database
+) -> None:
+    """A cancelled query must return its connection to the pool *usable*.
+
+    The failure this guards is worse than a leak: a connection returned with
+    the cancelled query's state half-consumed answers the next borrower's
+    request with the previous one's rows.
+    """
+    from http2 import support
+    from http2.conftest import H2Driver, Http2Protocol
+
+    from wreath.grpc import frame_message
+    from wreath.protobuf import encode
+
+    if Http2Protocol is None:
+        pytest.skip("native Http2Protocol not built")
+
+    scan = _Scan()
+    app, Ask = _grpc_scanning_app(database, scan)
+    driver = H2Driver(app)
+    try:
+        await driver.preface()
+        await driver.feed_and_settle(
+            support.build_headers_frame(
+                1,
+                support.request_headers(
+                    path=b"/wreath.test.Scanner/Scan",
+                    method=b"POST",
+                    extra=[
+                        (b"content-type", b"application/grpc+proto"),
+                        (b"te", b"trailers"),
+                        (b"grpc-timeout", b"300m"),
+                    ],
+                ),
+                end_stream=False,
+            )
+        )
+        await driver.feed_and_settle(
+            support.encode_frame(
+                support.DATA, 0x1, 1, frame_message(encode(Ask(nothing=0)))
+            )
+        )
+        await asyncio.wait_for(scan.cancelled.wait(), timeout=_PATIENCE)
+    finally:
+        driver.close()
+
+    # The pool has exactly one connection, so this is necessarily the same one.
+    connection = await database.acquire("read")
+    try:
+        assert await connection.fetchval("SELECT 41 + 1") == 42
+    finally:
+        await database.release("read", connection)
