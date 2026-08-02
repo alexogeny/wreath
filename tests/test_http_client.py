@@ -850,9 +850,93 @@ async def test_client_rejects_malformed_response_trailers(trailer: bytes) -> Non
         await server.wait_closed()
 
 
-def test_destination_policy_rejects_non_global_shared_addresses() -> None:
-    with pytest.raises(DestinationRejected, match="non-global"):
-        DestinationPolicy().validate_address("100.64.0.1")
+@pytest.mark.parametrize(
+    ("address", "reason"),
+    (
+        ("169.254.169.254", "link-local"),
+        ("10.0.0.1", "private"),
+        ("0.0.0.0", "special"),
+        ("224.0.0.1", "special"),
+        ("100.64.0.1", "non-global"),
+        ("64:ff9b::a9fe:a9fe", "link-local"),
+    ),
+)
+def test_destination_policy_rejects_non_global_addresses(
+    address: str, reason: str
+) -> None:
+    with pytest.raises(DestinationRejected, match=reason):
+        DestinationPolicy().validate_address(address)
+
+
+def test_destination_policy_exceptions_do_not_widen_each_other() -> None:
+    DestinationPolicy().validate_address("2001:4860:4860::8888")
+    DestinationPolicy(allow_loopback=True).validate_address("127.0.0.1")
+    DestinationPolicy(allow_link_local=True).validate_address("169.254.169.254")
+    DestinationPolicy(allow_private=True).validate_address("10.0.0.1")
+
+    with pytest.raises(DestinationRejected, match="loopback"):
+        DestinationPolicy(allow_private=True).validate_address("127.0.0.1")
+    with pytest.raises(DestinationRejected, match="link-local"):
+        DestinationPolicy(allow_private=True).validate_address("169.254.169.254")
+
+
+@pytest.mark.asyncio
+async def test_nat64_cannot_translate_a_public_dns_answer_to_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model the network translation that made the default policy bypassable.
+
+    The listener is real.  Only the NAT64 hop is replaced: before the guard,
+    the client sent its request to this loopback service after accepting the
+    attacker's globally classified AAAA answer.
+    """
+    reached = asyncio.Event()
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        reached.set()
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\nsecret")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server, internal_port = await _serve(handler)
+    loop = asyncio.get_running_loop()
+    open_connection = asyncio.open_connection
+
+    async def malicious_dns(
+        *_args: object, **_kwargs: object
+    ) -> list[tuple[object, ...]]:
+        return [
+            (
+                socket.AF_INET6,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("64:ff9b::7f00:1", 80, 0, 0),
+            )
+        ]
+
+    async def nat64_connect(
+        _address: str, _port: int, **kwargs: object
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        kwargs.pop("family", None)
+        kwargs.pop("flags", None)
+        return await open_connection("127.0.0.1", internal_port, **kwargs)
+
+    monkeypatch.setattr(loop, "getaddrinfo", malicious_dns)
+    monkeypatch.setattr("wreath.http_client._NativeClientStream", None)
+    monkeypatch.setattr(asyncio, "open_connection", nat64_connect)
+    client = HTTPClient("nat64", base_url="http://attacker.example")
+    try:
+        await client.start()
+        with pytest.raises(DestinationRejected, match="loopback"):
+            await client.get("/latest/meta-data")
+        assert not reached.is_set()
+    finally:
+        await client.close()
+        server.close()
+        await server.wait_closed()
 
 
 @pytest.mark.asyncio

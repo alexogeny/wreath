@@ -57,6 +57,35 @@ between requests. Outside an application, construct
 `HTTPClient("payments", base_url=...)` directly and manage its lifecycle
 yourself.
 
+## Keep inbound URLs out of outbound origins
+
+An `HTTPClient` is pinned to the origin in its `base_url`: request targets are
+origin-relative, cross-origin redirects are refused, and every resolved address
+is checked before a socket is opened. The default `DestinationPolicy` refuses
+private, loopback, link-local, special, and non-global addresses. It also checks
+the IPv4 destination embedded in the well-known NAT64 prefix, so translation
+cannot turn a globally classified IPv6 answer into a route to loopback or a
+cloud metadata service.
+
+If a request chooses which upstream to call, map that input to preconfigured,
+named clients. Do not construct a client directly from a caller-provided URL.
+An internal service can opt into only the address class it needs without also
+opening loopback or link-local destinations:
+
+```python
+from wreath.http_client import DestinationPolicy
+
+billing = app.http_client(
+    "billing",
+    base_url="https://billing.internal",
+    destination=DestinationPolicy(
+        hosts=("billing.internal",),
+        ports=frozenset({443}),
+        allow_private=True,
+    ),
+)
+```
+
 ## Rate limiting and retries
 
 An outbound client can throttle itself and retry transient failures without a

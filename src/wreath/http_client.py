@@ -93,6 +93,12 @@ type _AddressInfo = tuple[int, int, int, str, tuple[object, ...]]
 
 _HAPPY_EYEBALLS_DELAY = 0.25
 
+# RFC 6052's well-known NAT64 prefix is globally routed, so `ipaddress` quite
+# correctly classifies an address inside it as global without interpreting the
+# final 32 bits.  A translator does interpret those bits, however: accepting
+# `64:ff9b::7f00:1` would therefore admit a route to 127.0.0.1 on a NAT64 host.
+_NAT64_WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
+
 
 async def _timed(pending: Any, deadline_seconds: float) -> bytes:
     """Await a stream read under a timeout, skipping wait_for entirely when
@@ -508,7 +514,9 @@ class DestinationPolicy:
     address DNS returned, before a connection is attempted. That second check is
     what a hostname resolving to 127.0.0.1 or 169.254.169.254 has to pass, and
     it is why a DNS answer is validated in full rather than only the address
-    that happens to win the connection race.
+    that happens to win the connection race. Addresses under the well-known
+    NAT64 prefix are checked again as their translated IPv4 destination, so a
+    globally classified IPv6 answer cannot tunnel to loopback or cloud metadata.
 
     The defaults deny every non-global address. Loopback is denied too, so a
     client aimed at `http://localhost` in a test needs
@@ -579,14 +587,22 @@ class DestinationPolicy:
             ValueError: `value` is not a valid IP address.
         """
         address = ipaddress.ip_address(value.split("%", 1)[0])
+        if address in _NAT64_WELL_KNOWN_PREFIX:
+            translated = ipaddress.IPv4Address(address.packed[-4:])
+            self.validate_address(str(translated))
+        if address.is_unspecified or address.is_multicast:
+            raise DestinationRejected("special destination address is not allowed")
         if address.is_loopback and not self.allow_loopback:
             raise DestinationRejected("loopback destination address is not allowed")
         if address.is_link_local and not self.allow_link_local:
             raise DestinationRejected("link-local destination address is not allowed")
-        if address.is_private and not address.is_loopback and not self.allow_private:
+        if (
+            address.is_private
+            and not address.is_loopback
+            and not address.is_link_local
+            and not self.allow_private
+        ):
             raise DestinationRejected("private destination address is not allowed")
-        if address.is_unspecified or address.is_multicast:
-            raise DestinationRejected("special destination address is not allowed")
         if not address.is_global and not (
             (address.is_loopback and self.allow_loopback)
             or (address.is_link_local and self.allow_link_local)
