@@ -86,6 +86,25 @@ def test_session_infrastructure_is_never_a_freeze_target() -> None:
         )
 
 
+def test_only_scopes_with_a_freeze_control_are_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app_slice = tmp_path / "user.slice" / "app.slice"
+    eligible = app_slice / "app-browser.scope"
+    ineligible = app_slice / "app-editor.scope"
+    eligible.mkdir(parents=True)
+    ineligible.mkdir()
+    (eligible / "cgroup.freeze").write_text("0", encoding="utf-8")
+    monkeypatch.setattr(quiet, "_CGROUP_ROOT", tmp_path)
+    monkeypatch.setattr(
+        quiet,
+        "session_ancestry",
+        lambda _pid=None: ("/user.slice/app.slice", "/user.slice", "/"),
+    )
+
+    assert quiet.freezable_targets() == (eligible,)
+
+
 def test_the_implementation_still_covers_everything_the_test_requires() -> None:
     """The two lists may diverge only in the safe direction.
 
