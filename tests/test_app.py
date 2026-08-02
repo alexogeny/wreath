@@ -267,6 +267,24 @@ async def test_wrong_method_on_a_matching_path_is_405_with_allow() -> None:
 
 
 @pytest.mark.asyncio
+async def test_allow_does_not_repeat_an_explicit_head_route() -> None:
+    app = Wreath()
+
+    @app.get("/items")
+    async def read(request):
+        return "read"
+
+    @app.route("/items", methods=("HEAD",))
+    async def inspect_headers(request):
+        return ""
+
+    sent = await invoke(app, "/items", method="POST")
+
+    assert sent[0]["status"] == 405
+    assert dict(sent[0]["headers"])[b"allow"] == b"GET, HEAD"
+
+
+@pytest.mark.asyncio
 async def test_an_unmatched_path_is_still_404() -> None:
     app = Wreath()
 

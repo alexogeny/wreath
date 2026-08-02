@@ -1822,7 +1822,8 @@ class Wreath:
         """
         from .staticfiles import StaticFiles
 
-        normalized = "/" + prefix.strip("/") + "/"
+        mount_root = prefix.strip("/")
+        normalized = f"/{mount_root}/" if mount_root else "/"
         handler = StaticFiles(
             directory, html_index=html_index, cache_control=cache_control
         )
