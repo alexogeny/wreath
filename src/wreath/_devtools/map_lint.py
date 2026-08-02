@@ -437,7 +437,7 @@ def check_sanitizer_sources(root: Path) -> list[Finding]:
     findings: list[Finding] = []
     setup = root / "setup.py"
     sanitizers = root / "tools/sanitizers"
-    if not setup.exists() or not sanitizers.is_dir():
+    if not setup.exists():
         return findings
 
     real = _extension_sources(setup.read_text(encoding="utf-8"))

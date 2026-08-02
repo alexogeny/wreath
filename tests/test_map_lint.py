@@ -186,6 +186,12 @@ def _write_builds(root: Path, sanitizer_sources: str) -> None:
     (sanitizers / "setup_core.py").write_text(sanitizer_sources)
 
 
+def test_sanitizer_check_without_the_real_setup_is_empty(fake_repo: Path) -> None:
+    (fake_repo / "tools" / "sanitizers").mkdir(parents=True)
+
+    assert map_lint.check_sanitizer_sources(fake_repo) == []
+
+
 def test_sanitizer_build_matching_the_extension_is_clean(fake_repo: Path) -> None:
     _write_builds(
         fake_repo,
@@ -279,6 +285,41 @@ def test_fix_is_idempotent(fake_repo: Path) -> None:
     # Byte-identical: a no-op fix must not reformat the file, or every run of it
     # shows up as a diff and the tool becomes something you avoid.
     assert (fake_repo / map_lint.MANIFEST).read_text() == before
+
+
+def test_fix_reports_when_the_manifest_is_already_complete(
+    fake_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(map_lint, "repo_root", lambda: fake_repo)
+
+    assert map_lint.main(["--fix"]) == 0
+
+    output = capsys.readouterr().out
+    assert "nothing to fix: every source's conventional tests are already listed." in output
+
+
+@pytest.mark.parametrize(
+    ("repair_result", "returncode"),
+    [(["attached conventional test"], 0), (["REFUSED manual adoption"], 1)],
+)
+def test_fix_does_not_report_a_noop_when_it_changed_or_refused_something(
+    fake_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    repair_result: list[str],
+    returncode: int,
+) -> None:
+    monkeypatch.setattr(map_lint, "repo_root", lambda: fake_repo)
+    changes = repair_result if returncode == 0 else []
+    refusals = repair_result if returncode == 1 else []
+    monkeypatch.setattr(map_lint, "repair", lambda *_args: (changes, refusals))
+
+    assert map_lint.main(["--fix"]) == returncode
+
+    output = capsys.readouterr().out
+    assert "nothing to fix" not in output
 
 
 def test_fix_does_not_invent_a_test_that_is_not_on_disk(fake_repo: Path) -> None:
