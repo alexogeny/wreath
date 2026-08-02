@@ -622,3 +622,70 @@ def test_the_typescript_target_emits_no_undeclared_page_type() -> None:
     source = "\n".join(render_typescript(build_api_model(_paged_app())).values())
     assert "items: readonly Herd[]" in source, source
     assert "Page<" not in source, "named a type the generated module never declares"
+
+
+# --- an opaque response is a declaration, not a missing one ------------------
+
+
+class NotAModel:
+    """Module scope, because a class defined inside a test never resolves: this
+    file has `from __future__ import annotations`, so a return annotation is a
+    string and `typing.get_type_hints` cannot find a local name -- which makes
+    the annotation unknown for a reason that is not the one under test."""
+
+
+def test_a_handler_returning_response_is_generated_rather_than_refused() -> None:
+    """One fatal diagnostic refuses the *whole* application, and this was one.
+
+    Found by pointing the generator at the camera-trap example, where fourteen
+    routes -- every `crud_router` route, the media `PUT`, the progress stream --
+    are annotated `-> Response`. `build_api_model` raised `TypegenError` and the
+    example generated nothing at all. `-> Response` says "I am producing the
+    bytes myself", which is an opaque body and not an absent declaration.
+    """
+    # `request: Any`, not `request: Request`. This file has
+    # `from __future__ import annotations`, so every annotation is a string and
+    # `typing.get_type_hints` resolves it against the *module's* globals -- a
+    # `Request` imported inside the test body is not there, the resolution
+    # fails, and every annotation silently becomes `unknown`. Which is what
+    # this test asserts, so it would have passed for entirely the wrong reason.
+    from wreath.response import FileResponse, Response, StreamingResponse
+
+    app = Wreath()
+
+    @app.get("/raw")
+    async def raw(request: Any) -> Response:
+        """An opaque body."""
+        return Response(b"x")
+
+    @app.get("/stream")
+    async def stream(request: Any) -> StreamingResponse:
+        """Also opaque, and not a subclass of the one above."""
+        raise NotImplementedError  # pragma: no cover - never called
+
+    @app.get("/file")
+    async def download(request: Any) -> FileResponse:
+        """Nor is this one."""
+        raise NotImplementedError  # pragma: no cover - never called
+
+    api = build_api_model(app)
+    assert {operation.path for operation in api.operations} == {
+        "/raw", "/stream", "/file"
+    }
+    assert {operation.response_body.kind for operation in api.operations} == {"unknown"}
+
+
+def test_a_genuinely_unsupported_annotation_is_still_fatal() -> None:
+    """The other half. Widening the closed set into "anything we cannot name is
+    unknown" would silence the diagnostic this exists to give."""
+    from wreath.typegen.model import TypegenError
+
+    app = Wreath()
+
+    @app.get("/odd")
+    async def odd(request: Any) -> NotAModel:
+        """Not a dataclass, not a response, not a scalar."""
+        raise NotImplementedError  # pragma: no cover - never called
+
+    with pytest.raises(TypegenError, match="unsupported annotation"):
+        build_api_model(app)

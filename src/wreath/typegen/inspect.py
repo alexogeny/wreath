@@ -22,13 +22,6 @@ from ..geospatial import Coordinate
 from ..pagination import Page
 from ..response import FileResponse, PreparedResponse, Response, StreamingResponse
 from ..temporal import Instant
-
-#: The four classes `app.py`'s return-value coercion accepts directly. A handler
-#: annotated with one of them has declared an **opaque** response rather than
-#: failed to declare a schema, so typegen reports `unknown` and not a
-#: diagnostic. Kept as a tuple because they share no base class -- the closed
-#: `isinstance` check in `app.py` is the definition of the set.
-_Response = (Response, StreamingResponse, FileResponse, PreparedResponse)
 from .model import (
     BOOLEAN,
     DATE,
@@ -50,6 +43,13 @@ from .model import (
     TypegenError,
     TypeRef,
 )
+
+#: The four classes `app.py`'s return-value coercion accepts directly. A handler
+#: annotated with one of them has declared an **opaque** response rather than
+#: failed to declare a schema, so typegen reports `unknown` and not a
+#: diagnostic. Kept as a tuple because they share no base class -- the closed
+#: `isinstance` check in `app.py` is the definition of the set.
+_RESPONSE_CLASSES = (Response, StreamingResponse, FileResponse, PreparedResponse)
 
 _NONE_TYPE = type(None)
 #: `datetime`/`date` map alongside `Instant` because ported handlers annotate
@@ -255,7 +255,7 @@ class _Builder:
             return TypeRef("record", arguments=(UNKNOWN,))
         if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
             return self._enum_ref(annotation)
-        if isinstance(annotation, type) and issubclass(annotation, _Response):
+        if isinstance(annotation, type) and issubclass(annotation, _RESPONSE_CLASSES):
             # `-> Response` is a *declaration*, not an omission: the handler has
             # said it is producing the bytes itself, which is exactly what a
             # file download, an SSE stream and every `crud_router` route do.
