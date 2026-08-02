@@ -3,8 +3,12 @@
 The `WFR1` container is the on-disk forensic recording: a fixed header (magic,
 versions, the application metadata hash, a recording UUID, clock calibration, and
 a build id), a metadata chunk that gives the numeric ids meaning, and a stream of
-checksummed chunks -- capture slabs (`CAPT`) and optional completion cells
-(`EVNT`) -- terminated by a footer (`FOOT`) on a clean close. A reader rejects
+checksummed chunks -- capture slabs (`CAPT`), optional completion cells
+(`EVNT`), job attempts (`ATMP`) and workflow steps (`WFST`) -- terminated by a
+footer (`FOOT`) on a clean close. **Record kinds are added, never containers**:
+one decoder, one reader, one set of forensics tooling, and a footer that grows
+by appending counts so a reader predating a kind still reads every count it
+knows about. A reader rejects
 an unsupported major version or a metadata-hash mismatch outright, but recovers
 every complete, checksummed chunk from a file whose tail was torn off by an abrupt
 termination (it reports whether the footer was present, i.e. whether the close was
@@ -52,6 +56,9 @@ __all__ = [
     "BoundaryEvent",
     "AttemptRecord",
     "read_attempt_recording",
+    "WorkflowStepOutcome",
+    "WorkflowStepRecord",
+    "read_step_recording",
 ]
 
 #: Container magic. The trailing digit is the container (not schema) version.
@@ -76,10 +83,16 @@ _FOOTER = struct.Struct("<QQQ")  # chunk_count, capture_slabs, event_cells
 #: the length check and silently report zero slabs and zero cells.
 _FOOTER_ATTEMPTS = struct.Struct("<Q")  # attempt records
 
+#: Appended after `_FOOTER_ATTEMPTS` for the same reason that was appended after
+#: `_FOOTER`: a reader that predates the workflow-step record kind stops where it
+#: has always stopped and still gets every count it knows about.
+_FOOTER_STEPS = struct.Struct("<Q")  # workflow-step records
+
 _TAG_META: Final = b"META"
 _TAG_CAPTURE: Final = b"CAPT"
 _TAG_EVENT: Final = b"EVNT"
 _TAG_ATTEMPT: Final = b"ATMP"
+_TAG_STEP: Final = b"WFST"
 _TAG_FOOTER: Final = b"FOOT"
 
 
@@ -329,6 +342,223 @@ class AttemptRecord:
         )
 
 
+# --- the workflow-step record kind -------------------------------------------
+#
+# A **second record kind inside `WFR1`, beside `ATMP`** -- one container, one
+# decoder, one set of forensics tooling. It is a distinct kind rather than an
+# `AttemptRecord` with different field names because the unit genuinely differs
+# in all three of the things a recording is for:
+#
+# * **identity** is `(workflow instance, step)`, not `(job, attempt)`. There is
+#   no fence, because nothing claims a step under a lease; there is a
+#   *position*, because a saga is ordered and "step 4" is meaningless without it.
+# * **cause** is the step before it, not the request that enqueued it. A saga
+#   step's inputs are the previous step's outputs, so `after` is the join a
+#   reader actually follows.
+# * **compensations have already run, or have not.** That is the fact a
+#   mid-saga failure is impossible to reconstruct without, and the reason the
+#   roadmap called this the highest-value unbuilt record kind: the money left
+#   the account, the courier was not booked, and whether the refund ran is the
+#   whole question.
+#
+# What it does *not* hold, on the same argument the attempt record gives: the
+# step's arguments and its return value. A step's result is threaded through
+# `StepContext.results` and is arbitrary application data; a recording that kept
+# it would be a copy of the saga's payload on disk with no name-keyed policy
+# able to deny any of it.
+
+_STEP_MAGIC: Final = b"WFS1"
+_STEP_VERSION: Final = 1
+#: This chunk holds only part of one step record. Refused, never joined.
+_STEP_FLAG_CONTINUED: Final = 0x01
+#: magic 4s | version u8 | flags u8 | reserved u16 | total_bytes u32
+_STEP_HEADER = struct.Struct("<4sBBHI")
+#: position i32 | boundary_count u32 | compensation_count u32 | completed_before u32
+_STEP_FIXED = struct.Struct("<iIII")
+
+
+class WorkflowStepOutcome(StrEnum):
+    """How one execution of one step of one workflow instance ended.
+
+    Three, and the third is the one worth having. `raised` is a saga that
+    stopped and unwound cleanly -- bad, and recoverable by re-running it.
+    `compensation_failed` is a saga that stopped and *did not* unwind: the card
+    was charged, the refund did not run, and no retry reaches that state from
+    where it now is. Folding the second into the first would send every reader
+    to the original failure and past the one that needs a person.
+    """
+
+    COMPLETED = "completed"
+    RAISED = "raised"
+    COMPENSATION_FAILED = "compensation_failed"
+
+
+#: How one earlier step's undo went, as recorded on the failing step's record.
+#: `none` is a step that declared no compensation at all, which is a different
+#: fact from an undo that was never reached.
+COMPENSATION_RAN: Final = "ran"
+COMPENSATION_FAILED: Final = "failed"
+COMPENSATION_NONE: Final = "none"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowStepRecord:
+    """One step of one workflow instance, and what the saga had already undone.
+
+    Attributes:
+        instance: the workflow instance key -- the durable identity `resume`
+            takes, so a recording joins to the row it describes.
+        workflow: the workflow's name.
+        step: this step's name, which is what the store keys completion on.
+        position: this step's index in declaration order. Declaration order *is*
+            execution order and the undo chain is its reverse, so the number is
+            what makes "mid-way" a place rather than an adjective.
+        after: the step that ran before this one, or `""` for the first. The
+            cause, in the sense the request's `traceparent` is a job attempt's.
+        completed_before: how many steps were recorded complete when this one
+            started. On a resumed instance that is work this process never did.
+        compensations: `(step, outcome)` newest-first, where outcome is
+            `ran`, `failed` or `none`. Empty on a step that completed.
+    """
+
+    instance: str
+    workflow: str
+    step: str
+    position: int
+    after: str
+    tenant: str
+    trace_context: str
+    boundaries: tuple[BoundaryEvent, ...]
+    outcome: str
+    error_type: str = ""
+    error_message: str = ""
+    completed_before: int = 0
+    compensations: tuple[tuple[str, str], ...] = ()
+
+    def encode(self) -> bytes:
+        body = bytearray(
+            _STEP_FIXED.pack(
+                self.position,
+                len(self.boundaries),
+                len(self.compensations),
+                self.completed_before,
+            )
+        )
+        for text in (
+            self.instance,
+            self.workflow,
+            self.step,
+            self.after,
+            self.tenant,
+            self.trace_context,
+            str(self.outcome),
+            self.error_type,
+            self.error_message[:MAX_ERROR_MESSAGE],
+        ):
+            body += _text(text)
+        for event in self.boundaries:
+            body += _BOUNDARY_FIXED.pack(event.seam, event.coordinate)
+            body += _text(event.target) + _text(event.error_type)
+        for name, state in self.compensations:
+            body += _text(name) + _text(state)
+        total = _STEP_HEADER.size + len(body)
+        return _STEP_HEADER.pack(_STEP_MAGIC, _STEP_VERSION, 0, 0, total) + bytes(body)
+
+    @classmethod
+    def decode(cls, payload: bytes) -> WorkflowStepRecord:
+        """Parse one step record, refusing anything partial by name.
+
+        Stricter than a capture slab and for the same reason `AttemptRecord` is:
+        a torn step record does not leave a smaller step, it leaves one whose
+        compensation list is missing entries nobody can enumerate -- and *those*
+        are the entries the record exists for.
+        """
+        if len(payload) < _STEP_HEADER.size:
+            raise SchemaError(
+                f"workflow-step recording is truncated: {len(payload)} bytes is "
+                f"shorter than its {_STEP_HEADER.size}-byte header"
+            )
+        magic, version, flags, _reserved, total = _STEP_HEADER.unpack_from(payload, 0)
+        if magic != _STEP_MAGIC:
+            raise SchemaError(f"not a workflow-step recording: bad record magic {magic!r}")
+        if version != _STEP_VERSION:
+            raise SchemaError(f"unsupported workflow-step record version {version}")
+        if flags & _STEP_FLAG_CONTINUED:
+            raise SchemaError(
+                "workflow-step recording is chunked across records; it is refused "
+                "rather than joined, because a partially assembled step reports "
+                "fewer compensations than the saga ran and reads as complete"
+            )
+        if total != len(payload):
+            raise SchemaError(
+                f"workflow-step recording is truncated: it declares {total} bytes "
+                f"and holds {len(payload)}"
+            )
+        offset = _STEP_HEADER.size
+        position, boundary_count, compensation_count, completed_before = (
+            _STEP_FIXED.unpack_from(payload, offset)
+        )
+        offset += _STEP_FIXED.size
+        texts: list[str] = []
+        for _ in range(9):
+            text, offset = _read_text(payload, offset)
+            texts.append(text)
+        instance, workflow, step, after, tenant, trace, outcome, kind, message = texts
+        boundaries: list[BoundaryEvent] = []
+        for _ in range(boundary_count):
+            seam, coordinate = _BOUNDARY_FIXED.unpack_from(payload, offset)
+            offset += _BOUNDARY_FIXED.size
+            target, offset = _read_text(payload, offset)
+            failure, offset = _read_text(payload, offset)
+            boundaries.append(BoundaryEvent(seam, target, coordinate, failure))
+        compensations: list[tuple[str, str]] = []
+        for _ in range(compensation_count):
+            name, offset = _read_text(payload, offset)
+            state, offset = _read_text(payload, offset)
+            compensations.append((name, state))
+        return cls(
+            instance=instance,
+            workflow=workflow,
+            step=step,
+            position=position,
+            after=after,
+            tenant=tenant,
+            trace_context=trace,
+            boundaries=tuple(boundaries),
+            outcome=outcome,
+            error_type=kind,
+            error_message=message,
+            completed_before=completed_before,
+            compensations=tuple(compensations),
+        )
+
+
+def read_step_recording(data: bytes) -> WorkflowStepRecord:
+    """The one workflow-step recording in a `WFR1` file, or a refusal saying why not.
+
+    `read_attempt_recording`'s twin, in the same order for the same reason: the
+    tear is diagnosed first, because a cut landing inside the `WFST` chunk
+    leaves a file with no step in it and "this file holds no step recording"
+    would send a reader looking for another file rather than at the truncation.
+    """
+    decoded = read_recording(data)
+    if not decoded.clean:
+        raise SchemaError(
+            "workflow-step recording is truncated: the file has no footer, so the "
+            "process died while writing it and the compensations it had not "
+            "written yet cannot be counted"
+        )
+    if not decoded.steps:
+        raise SchemaError("this recording holds no workflow-step recording")
+    if len(decoded.steps) > 1:
+        raise SchemaError(
+            f"this recording holds {len(decoded.steps)} workflow-step recordings; "
+            "one file is one step, because step 3 of an instance is a different "
+            "execution from step 4 and a reader can only characterise one"
+        )
+    return decoded.steps[0]
+
+
 def _text(value: str) -> bytes:
     raw = value.encode("utf-8")
     if len(raw) > 0xFFFFFFFF:  # pragma: no cover - a 4 GiB field is not reachable
@@ -395,7 +625,8 @@ class WFR1Writer:
     """
 
     __slots__ = (
-        "_file", "_chunk_count", "_capture_slabs", "_event_cells", "_attempts", "_closed",
+        "_file", "_chunk_count", "_capture_slabs", "_event_cells", "_attempts",
+        "_steps", "_closed",
     )
 
     def __init__(self, file: Any, image: MetadataImage) -> None:
@@ -404,6 +635,7 @@ class WFR1Writer:
         self._capture_slabs = 0
         self._event_cells = 0
         self._attempts = 0
+        self._steps = 0
         self._closed = False
         now_unix = time.time_ns()
         header = _HEADER.pack(
@@ -451,14 +683,21 @@ class WFR1Writer:
         self._write_chunk(_TAG_ATTEMPT, record.encode())
         self._attempts += 1
 
+    def write_step(self, record: WorkflowStepRecord) -> None:
+        """Append one `WFST` chunk holding a whole workflow-step record."""
+        self._write_chunk(_TAG_STEP, record.encode())
+        self._steps += 1
+
     def close(self) -> None:
         """Write the footer (proving a clean close) and flush. Idempotent."""
         if self._closed:
             return
         self._closed = True
-        footer = _FOOTER.pack(
-            self._chunk_count + 1, self._capture_slabs, self._event_cells
-        ) + _FOOTER_ATTEMPTS.pack(self._attempts)
+        footer = (
+            _FOOTER.pack(self._chunk_count + 1, self._capture_slabs, self._event_cells)
+            + _FOOTER_ATTEMPTS.pack(self._attempts)
+            + _FOOTER_STEPS.pack(self._steps)
+        )
         self._file.write(_chunk(_TAG_FOOTER, footer))
         flush = getattr(self._file, "flush", None)
         if callable(flush):
@@ -485,6 +724,9 @@ class DecodedRecording:
     #: Job-attempt records, in the order they were written.
     attempts: tuple[AttemptRecord, ...] = ()
     footer_attempts: int = 0
+    #: Workflow-step records, in the order they were written.
+    steps: tuple[WorkflowStepRecord, ...] = ()
+    footer_steps: int = 0
 
 
 def read_recording(data: bytes) -> DecodedRecording:
@@ -522,10 +764,12 @@ def read_recording(data: bytes) -> DecodedRecording:
     slabs: list[CaptureSlab] = []
     events: list[bytes] = []
     attempts: list[AttemptRecord] = []
+    steps: list[WorkflowStepRecord] = []
     clean = False
     footer_captures = 0
     footer_events = 0
     footer_attempts = 0
+    footer_steps = 0
 
     while offset + _CHUNK.size <= len(data):
         tag, length, crc = _CHUNK.unpack_from(data, offset)
@@ -555,11 +799,19 @@ def read_recording(data: bytes) -> DecodedRecording:
             # Refused rather than skipped: an `ATMP` chunk this reader cannot
             # decode is the whole recording, not one slab out of many.
             attempts.append(AttemptRecord.decode(payload))
+        elif tag == _TAG_STEP:
+            # Refused rather than skipped, exactly as `ATMP` is: a `WFST` chunk
+            # this reader cannot decode is the whole recording.
+            steps.append(WorkflowStepRecord.decode(payload))
         elif tag == _TAG_FOOTER:
             if len(payload) >= _FOOTER.size:
                 _count, footer_captures, footer_events = _FOOTER.unpack_from(payload, 0)
             if len(payload) >= _FOOTER.size + _FOOTER_ATTEMPTS.size:
                 (footer_attempts,) = _FOOTER_ATTEMPTS.unpack_from(payload, _FOOTER.size)
+            if len(payload) >= _FOOTER.size + _FOOTER_ATTEMPTS.size + _FOOTER_STEPS.size:
+                (footer_steps,) = _FOOTER_STEPS.unpack_from(
+                    payload, _FOOTER.size + _FOOTER_ATTEMPTS.size
+                )
             clean = True
             break
         # Unknown tags are skipped (forward compatibility within a major version).
@@ -580,6 +832,8 @@ def read_recording(data: bytes) -> DecodedRecording:
         footer_event_cells=footer_events,
         attempts=tuple(attempts),
         footer_attempts=footer_attempts,
+        steps=tuple(steps),
+        footer_steps=footer_steps,
     )
 
 

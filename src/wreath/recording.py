@@ -28,7 +28,10 @@ from ._recording_format import (
     AttemptOutcome,
     AttemptRecord,
     BoundaryEvent,
+    WorkflowStepOutcome,
+    WorkflowStepRecord,
     read_attempt_recording,
+    read_step_recording,
 )
 from ._ring_file import DecodedRing, RingRecord, read_ring_file
 
@@ -58,6 +61,14 @@ __all__ = [
     "BoundaryEvent",
     "BoundaryTrace",
     "read_attempt_recording",
+    "WorkflowStepOutcome",
+    "WorkflowStepRecord",
+    "WorkflowStepTriggerKind",
+    "WorkflowStepTrigger",
+    "WorkflowStepPolicy",
+    "WorkflowStepRecorder",
+    "instance_sample_value",
+    "read_step_recording",
 ]
 
 #: Header/field classes that are never captured, regardless of policy. This set
@@ -1145,6 +1156,267 @@ class AttemptRecorder:
             return None
         self.written += 1
         return path
+
+
+# --- durable work: arming a workflow step ------------------------------------
+#
+# The third arming vocabulary, and the reason it is a third rather than a reuse
+# of `AttemptPolicy`: a step is not an attempt. It has no fence and no retry
+# budget, so `final_failure` has no meaning; it has a *position* and a
+# predecessor, so "the step that stopped the saga" is a question worth asking;
+# and its compensations either ran or did not, which is the fact a mid-saga
+# failure cannot be reconstructed without.
+#
+# The posture is the attempt policy's, unchanged: no triggers, no recordings,
+# and no "surely a failure is always worth keeping" exception.
+
+
+class WorkflowStepTriggerKind(StrEnum):
+    """When a step of a saga is worth keeping."""
+
+    #: The step that raised -- where the saga stopped. The case worth most of
+    #: this feature, because the state after it is the least reproducible state
+    #: in the framework: some side effects have happened, some undos have run,
+    #: and nothing outside the recording says which.
+    FAILURE = "failure"
+    #: A step whose own compensation raised. Distinct from `FAILURE` because it
+    #: is a *worse* state and a different actor's problem: the saga is now
+    #: partly undone, and no retry fixes that.
+    COMPENSATION_FAILURE = "compensation_failure"
+    #: Every outcome of one named step, optionally sampled. For a step under
+    #: investigation, where the successes are as informative as the failures.
+    STEP = "step"
+    #: Every outcome of every step of one named workflow, optionally sampled.
+    #: The whole-saga view, which is what a reader wants when the question is
+    #: "what happened to order 4471" rather than "why does this step fail".
+    WORKFLOW = "workflow"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowStepTrigger:
+    """One arming predicate for a workflow step.
+
+    `workflow` narrows any kind to one workflow and `step` to one step; `STEP`
+    requires the second and `WORKFLOW` the first, because either without its
+    name means "record every step of everything" and this subsystem has no
+    spelling for that.
+
+    `rate` samples deterministically from the **instance key**, never from an
+    RNG: every step of one saga must reach the same answer, or a recording would
+    hold step 2 and step 5 of an instance and nothing in between, which is worse
+    than holding none of it.
+    """
+
+    kind: WorkflowStepTriggerKind
+    workflow: str = ""
+    step: str = ""
+    rate: float = 1.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", WorkflowStepTriggerKind(self.kind))
+        _require(0.0 <= self.rate <= 1.0, "trigger rate must be in [0, 1]")
+        if self.kind is WorkflowStepTriggerKind.STEP and not self.step:
+            raise RecordingPolicyError(
+                "a step trigger names the step under investigation; an unnamed one "
+                "is 'record every step', which is the opposite of this subsystem's "
+                "posture"
+            )
+        if self.kind is WorkflowStepTriggerKind.WORKFLOW and not self.workflow:
+            raise RecordingPolicyError(
+                "a workflow trigger names the workflow under investigation; an "
+                "unnamed one is 'record every saga', which is the opposite of this "
+                "subsystem's posture"
+            )
+
+    def selects(self, *, workflow: str, step: str, outcome: WorkflowStepOutcome) -> bool:
+        """Whether this trigger's *kind* matches, before sampling."""
+        if self.workflow and self.workflow != workflow:
+            return False
+        if self.step and self.step != step:
+            return False
+        if self.kind in (WorkflowStepTriggerKind.STEP, WorkflowStepTriggerKind.WORKFLOW):
+            return True
+        if self.kind is WorkflowStepTriggerKind.COMPENSATION_FAILURE:
+            return outcome is WorkflowStepOutcome.COMPENSATION_FAILED
+        return outcome is not WorkflowStepOutcome.COMPLETED
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowStepPolicy:
+    """What workflow steps a run may record. Deny-by-default.
+
+    There is no `argument_allowlist` here, and its absence is the design rather
+    than a gap. A step takes no arguments: it is handed a `StepContext` whose
+    `results` are the *previous steps' return values*, which are arbitrary
+    application objects rather than the JSON the queue stored. There is nothing
+    name-keyed to consent to, so nothing is captured -- the record holds how
+    many steps had completed, never what any of them produced.
+
+    `max_boundaries` bounds one recording and **refuses** it rather than
+    truncating, for the reason `AttemptPolicy` gives.
+    """
+
+    triggers: tuple[WorkflowStepTrigger, ...] = ()
+    redaction: RedactionPolicy = field(default_factory=RedactionPolicy.deny_by_default)
+    max_boundaries: int = 512
+
+    def __post_init__(self) -> None:
+        _require(self.max_boundaries > 0, "max_boundaries must be > 0")
+        _require(self.max_boundaries <= _MAX_FIELDS, "max_boundaries out of range")
+
+    def captures(
+        self, *, workflow: str, step: str, outcome: WorkflowStepOutcome, instance: str
+    ) -> bool:
+        """Whether this step is one an operator asked to keep."""
+        if not isinstance(outcome, WorkflowStepOutcome):
+            outcome = WorkflowStepOutcome(outcome)
+        for trigger in self.triggers:
+            if not trigger.selects(workflow=workflow, step=step, outcome=outcome):
+                continue
+            if trigger.rate >= 1.0:
+                return True
+            if trigger.rate > 0.0 and instance_sample_value(workflow, instance) < trigger.rate:
+                return True
+        return False
+
+
+class WorkflowStepRecorder:
+    """Decides which workflow steps are kept, and writes the ones that are.
+
+    Hand one to `wreath.workflows.Workflow.run(recorder=...)`. It arms nothing on
+    its own: a `WorkflowStepPolicy` with no triggers is the default.
+
+    Recordings land in `directory` as `<workflow>-<instance>-<position>-<step>.wfr1`,
+    owner-only, one step per file -- because step 3 of an instance is a different
+    execution from step 4, and a reader that had to pick between them would be
+    choosing which half of a saga to reproduce. The instance key is slugged on
+    the way into the name: it is an application-supplied string and a path is not
+    a place to find out that it contained a separator.
+    """
+
+    __slots__ = ("_directory", "_image", "_policy", "errors", "refused_oversize",
+                 "scope", "written")
+
+    def __init__(
+        self,
+        policy: WorkflowStepPolicy,
+        *,
+        directory: str,
+        scope: object | None = None,
+        image: object | None = None,
+    ) -> None:
+        self._policy = policy
+        self._directory = directory
+        self._image = image
+        #: The application whose boundaries a step is watched through, or None to
+        #: watch nothing. A `Workflow` holds no database of its own -- its steps
+        #: reach for whatever the application gave them -- so unlike a job runner
+        #: there is no slot to observe and an unscoped recorder records an empty
+        #: boundary trace. That is the truth rather than a gap, exactly as it is
+        #: for a lease expiry nobody was present for.
+        self.scope = scope
+        #: Recordings written to disk.
+        self.written = 0
+        #: Steps an operator armed and this refused because the boundary trace
+        #: crossed `max_boundaries`.
+        self.refused_oversize = 0
+        #: Recordings that could not be written. The saga is untouched; only the
+        #: evidence is.
+        self.errors = 0
+
+    @property
+    def policy(self) -> WorkflowStepPolicy:
+        return self._policy
+
+    def trace(self) -> BoundaryTrace:
+        """A boundary trace bounded by this recorder's policy."""
+        return BoundaryTrace(self._policy.max_boundaries)
+
+    def captures(
+        self, *, workflow: str, step: str, outcome: WorkflowStepOutcome | str, instance: str
+    ) -> bool:
+        """Whether the policy arms for this step."""
+        return self._policy.captures(
+            workflow=workflow,
+            step=step,
+            outcome=WorkflowStepOutcome(outcome),
+            instance=instance,
+        )
+
+    def write(
+        self, record: WorkflowStepRecord, trace: BoundaryTrace | None = None
+    ) -> str | None:
+        """Write one step recording, or refuse it and say why in a counter.
+
+        Never raises, for the reason `AttemptRecorder.write` does not: a recorder
+        that can take a saga down with it is worse than no recorder, and the step
+        it describes has already happened -- in the middle of an undo chain,
+        where an exception is at its most expensive.
+        """
+        import os
+
+        from ._flight_schema import SCHEMA_VERSION, MetadataImage
+        from ._recording_format import WFR1Writer
+
+        if trace is not None and trace.overflowed:
+            self.refused_oversize += 1
+            return None
+        image = self._image
+        if image is None:
+            image = MetadataImage(SCHEMA_VERSION, *([()] * 11))
+        name = (
+            f"{_slug(record.workflow)}-{_slug(record.instance)}"
+            f"-{record.position}-{_slug(record.step)}.wfr1"
+        )
+        path = os.path.join(self._directory, name)
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                writer = WFR1Writer(handle, image)  # ty: ignore[invalid-argument-type]
+                writer.write_step(record)
+                writer.close()
+        except OSError:
+            self.errors += 1
+            return None
+        self.written += 1
+        return path
+
+
+#: Longest slug one component of a recording's filename may reach. An instance
+#: key is application-supplied and a saga's key is often a composite; the digest
+#: below is what keeps two long keys sharing a prefix from sharing a file.
+_SLUG_LIMIT = 48
+
+
+def _slug(value: str) -> str:
+    """A filename-safe form of `value` that two distinct values cannot share.
+
+    Substitution alone is not enough: `a/b` and `a:b` both become `a_b`, and two
+    instances of one saga would then overwrite each other's evidence. So a long
+    or altered value carries a checksum of the original, which is what makes the
+    mapping injective in practice.
+    """
+    safe = "".join(
+        character if character.isascii() and (character.isalnum() or character in "-_")
+        else "_"
+        for character in value
+    )
+    if safe == value and len(safe) <= _SLUG_LIMIT:
+        return safe or "_"
+    digest = zlib.crc32(value.encode("utf-8")) & 0xFFFFFFFF
+    return f"{safe[:_SLUG_LIMIT]}.{digest:08x}"
+
+
+def instance_sample_value(workflow: str, instance: str) -> float:
+    """A stable value in [0, 1) for one workflow instance.
+
+    Keyed on the instance rather than the step, so sampling keeps or drops a
+    whole saga. A per-step sample would produce recordings holding step 2 and
+    step 5 of one instance with nothing between them, which reads as a saga that
+    skipped work.
+    """
+    digest = zlib.crc32(f"{workflow}:{instance}".encode()) & 0xFFFFFFFF
+    return digest / 0x100000000
 
 
 def sample_value(task: str, job_id: int) -> float:

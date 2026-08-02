@@ -186,4 +186,61 @@ it leaves one missing the part nobody can enumerate. A file that is **truncated*
 record carrying the continuation flag), holds **more than one** attempt, or
 holds **none**, is refused by name.
 
+## Recording a workflow step
+
+A saga failure mid-way is the least reproducible state in the framework. The
+stock is held, the card is charged, the courier call failed — and whether the
+refund ran is the whole question, with nothing outside a recording able to
+answer it. `Outcome.compensation_errors` gives a count, which says *whether* the
+unwind held and never *what happened*.
+
+So a workflow step is the second record kind inside `WFR1`, beside `ATMP`, and
+it is a distinct kind rather than a job attempt with different field names
+because all three of the things a recording is for genuinely differ:
+
+- **identity** is `(workflow instance, step)`. There is no fence, because
+  nothing claims a step under a lease; there is a **position**, because a saga
+  is ordered and "step 4" means nothing without it;
+- **cause** is the step before it, not the request that enqueued it. A step's
+  inputs are the previous step's outputs, so `after` is the join a reader
+  follows;
+- **compensations have already run, or have not.** The record carries the undo
+  chain newest-first as `(step, "ran" | "failed" | "none")`, and `none` — a step
+  that declared no compensation — is deliberately a third answer, because
+  "nothing to undo" and "the undo was never reached" are different states of the
+  world.
+
+The record is written **after** the undo chain, for that last reason: one
+written at the moment of the raise could carry none of it.
+
+Three outcomes rather than two. `raised` is a saga that stopped and unwound
+cleanly, which is bad and re-runnable; `compensation_failed` is one that stopped
+and did **not** unwind, which no retry reaches from where it now is. Folding the
+second into the first would send every reader to the original failure and past
+the one that needs a person.
+
+```python
+from wreath.recording import (
+    WorkflowStepPolicy, WorkflowStepRecorder,
+    WorkflowStepTrigger, WorkflowStepTriggerKind,
+)
+
+recorder = WorkflowStepRecorder(
+    WorkflowStepPolicy(
+        triggers=(WorkflowStepTrigger(WorkflowStepTriggerKind.FAILURE),),
+    ),
+    directory="/var/lib/wreath/recordings",
+)
+
+await checkout.run(store=store, key=f"checkout:{order_id}", recorder=recorder)
+```
+
+Deny-by-default, as everywhere else here: no triggers, no recordings. A step
+carries no arguments to allowlist — it is handed a `StepContext` whose results
+are arbitrary application objects rather than the JSON a queue row stored — so
+the record holds how many steps had completed and never what any of them
+produced. Sampling is keyed on the **instance**, not the step, because a
+per-step sample would keep step 2 and step 5 of one saga and nothing between,
+which reads as a saga that skipped work.
+
 ::: wreath.recording
