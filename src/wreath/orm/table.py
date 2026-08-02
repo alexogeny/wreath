@@ -21,6 +21,62 @@ from __future__ import annotations
 from .errors import DeclarationError
 
 
+class Facet:
+    """A declaration another subsystem attaches to a model, found by type.
+
+    Columns are the ORM's. What an *audit trail* wants to redact, what a
+    *privacy* traversal considers personal, what a *sync* shape keys on -- those
+    are facts about a model that the ORM does not own and must not have to know
+    about. A facet is how a subsystem outside the ORM declares one on the model
+    itself, next to the columns it talks about, rather than in a registry that
+    drifts from the schema on the next migration.
+
+    ```python
+    class Photo(Model, table="photos"):
+        owner_id: Mapped[UUID] = column(Uuid)
+        exif_gps: Mapped[str | None] = column(Text, null=True)
+
+        _audit = audited(redact={"exif_gps"})
+    ```
+
+    Subclass it, give it a `namespace`, and list in `columns` every column
+    name the facet mentions. The metaclass does two things with that, and both
+    are the things a subsystem would otherwise get wrong on its own:
+
+    * it **validates the column names** when the class is created, so a facet
+      naming a column the model does not declare is a `DeclarationError`
+      pointing at the class body, not a `KeyError` on the first write;
+    * it **refuses two facets sharing a namespace** on one model, so
+      "which of the two audit declarations wins" is never a question.
+
+    One mechanism rather than one per subsystem: `audited(...)` and a privacy
+    classification are the same shape with different payloads, and the class
+    kwarg each would otherwise need (`Model(audited=True, redact=...)`) does not
+    compose -- two subsystems eventually want the same keyword, and the metaclass
+    grows a parameter per feature.
+
+    Attribute names are documentation, exactly as for `unique` and
+    `index`: the metaclass collects by type.
+    """
+
+    __slots__ = ("columns",)
+
+    #: The subsystem this facet belongs to. Two facets sharing one on a model
+    #: are a declaration error, so a subclass must set it.
+    namespace: str = ""
+
+    def __init__(self, columns: tuple[str, ...] = ()) -> None:
+        if not self.namespace:
+            raise DeclarationError(
+                f"{type(self).__name__} must set a class-level namespace; it is "
+                "what keeps two subsystems' declarations apart on one model"
+            )
+        self.columns = columns
+
+    def __repr__(self) -> str:
+        return f"<{self.namespace} facet {', '.join(self.columns) or 'model-wide'}>"
+
+
 class Unique:
     """A composite `UNIQUE` constraint over two or more columns."""
 
@@ -142,6 +198,16 @@ def unique(*columns: str) -> Unique:
     return Unique(columns)
 
 
+def facet(model: object, namespace: str) -> Facet | None:
+    """The declaration `namespace` attached to `model`, or `None`.
+
+    The read side of `Facet`. `None` rather than a raise, because "this
+    model is not audited" is the ordinary answer for most models and making
+    every caller guard would put a `try` around every read.
+    """
+    return getattr(model, "__wreath_facets__", {}).get(namespace)
+
+
 def _check_predicate_column(column: object, where: str) -> str:
     if not isinstance(column, str) or not column:
         raise DeclarationError(
@@ -224,12 +290,14 @@ def index(*columns: str, unique: bool = False, where: object = None) -> Index:
 __all__ = [
     "AllOf",
     "Eq",
+    "Facet",
     "Index",
     "IsNull",
     "InValues",
     "Unique",
     "all_of",
     "eq",
+    "facet",
     "index",
     "is_not_null",
     "is_null",

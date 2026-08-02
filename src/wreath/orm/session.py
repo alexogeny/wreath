@@ -335,6 +335,8 @@ class Session:
     """
 
     __slots__ = (
+        "_audit",
+        "_audit_pending",
         "_broken",
         "_closed",
         "_connection",
@@ -363,6 +365,7 @@ class Session:
         tenant: TenantContext | None = None,
         statement_timeout: float | None = None,
         identity_map_warn_at: int | None = None,
+        audit: Any = None,
     ) -> None:
         isolated = getattr(getattr(registry, "schema_mode", None), "kind", None) == "isolated"
         if isolated and tenant is None:
@@ -386,6 +389,16 @@ class Session:
             raise SessionError("statement_timeout must be positive")
         self._statement_timeout = statement_timeout
         self._tenant = tenant
+        # A `wreath.audit_log.AuditTrail`, or None. Typed loosely on purpose:
+        # the ORM must not import the audit trail, which imports the log, which
+        # imports the store -- the dependency runs the other way, and
+        # `wreath.orm` is the layer everything else is allowed to depend on.
+        self._audit = audit
+        # Changes this flush has recorded but not yet appended. One list per
+        # session rather than per flush, because a session that audits nothing
+        # should allocate nothing: it stays empty and `_flush_inner` reads its
+        # length.
+        self._audit_pending: list[Any] = []
         self._registry = registry
         self._workload = workload
         self._connection: Any = None
@@ -1167,23 +1180,108 @@ class Session:
             else frozenset()
         )
         ordinals = self._new_ordinals
-        for instance in sorted(
-            self._new, key=lambda item: (self._order(type(item)), ordinals[id(item)])
-        ):
-            await self._insert(instance)
-        updates = sorted(
-            dirty,
-            key=lambda item: (self._order(type(item)), _sort_key(item)),
-        )
-        for instance in updates:
-            await self._update(instance)
-        for instance in sorted(
-            self._deleted,
-            key=lambda item: (-self._order(type(item)), _sort_key(item)),
-        ):
-            await self._delete(instance)
+        try:
+            for instance in sorted(
+                self._new, key=lambda item: (self._order(type(item)), ordinals[id(item)])
+            ):
+                await self._insert(instance)
+            updates = sorted(
+                dirty,
+                key=lambda item: (self._order(type(item)), _sort_key(item)),
+            )
+            for instance in updates:
+                await self._update(instance)
+            for instance in sorted(
+                self._deleted,
+                key=lambda item: (-self._order(type(item)), _sort_key(item)),
+            ):
+                await self._delete(instance)
+            if self._audit_pending:
+                await self._drain_audit()
+        except BaseException:
+            # A flush that raises is a transaction that rolls back -- `flush`
+            # opens one when the caller has not -- so every write these records
+            # describe is about to be undone. Dropping them here is what stops
+            # the *next* flush appending an audit trail for work that never
+            # happened. Cancellation included, for the same reason.
+            self._audit_pending = []
+            raise
         self._clear_pending()
         return written
+
+    def _audit_facet(self, instance: Any) -> Any:
+        """The `audit` facet on this instance's model, or None.
+
+        One dict lookup on a class attribute when a trail is installed, and a
+        single `None` check when one is not -- so an application that does not
+        audit pays one attribute read per flush rather than per row.
+        """
+        if self._audit is None:
+            return None
+        return getattr(type(instance), "__wreath_facets__", {}).get("audit")
+
+    def _audit_write(
+        self, instance: Any, spec: Any, operation: str, mask: int | None
+    ) -> None:
+        """Hold the record for a write that has just happened.
+
+        Called *after* the statement, because an insert's primary key is only
+        known once `RETURNING` has answered, and because the values it reads --
+        the dirty mask for an update, the row about to be detached for a delete
+        -- are only correct at this moment. So the `Change` is *built* here and
+        appended at the end of the flush, in one batch.
+
+        Deferring the append and not its construction is what keeps the batch
+        free: `_flush_inner` runs inside a transaction on every path (`flush`
+        opens one when the caller has not), so a batch appended before it
+        returns is in the same transaction as every write it describes and
+        rolls back with them. What batching removes is a round trip per audited
+        instance, which is all it removes.
+
+        The attribution check runs *before* the statement; see the call sites.
+        """
+        from ..audit_log import Change, changed_fields
+
+        facet = self._audit_facet(instance)
+        if facet is None:
+            return
+        key = instance._orm_primary_key()
+        self._audit_pending.append(
+            Change(
+                table=spec.qualified_name,
+                key="" if key is None else ":".join(str(part) for part in key),
+                operation=operation,
+                actor=self._audit.attribute(),
+                fields=changed_fields(instance, spec, facet, mask=mask),
+            )
+        )
+
+    async def _drain_audit(self) -> None:
+        """Append this flush's audit records, in one batch, before it returns.
+
+        On the session's own connection, so the records share the fate of the
+        rows. Taking a second connection here would put them in their own
+        transaction, and a rolled-back write would leave a record saying it
+        happened.
+
+        Cleared before the append rather than after: a failed append must not
+        leave the records queued for the *next* flush, where they would describe
+        a transaction that has already rolled back.
+        """
+        pending = self._audit_pending
+        self._audit_pending = []
+        await self._audit.record_many(pending, connection=await self._acquire())
+
+    def _audit_attribute(self, instance: Any) -> None:
+        """Refuse an unattributed write before it reaches the database.
+
+        Deliberately separate from recording it. A write that has already
+        happened cannot be undone by a failed append, so the check that can
+        refuse has to run first; the record that needs the row's key has to run
+        second.
+        """
+        if self._audit_facet(instance) is not None:
+            self._audit.attribute()
 
     async def _insert(self, instance: Any) -> None:
         spec = self._registry.spec_for(type(instance))
@@ -1193,6 +1291,7 @@ class Session:
         plan = compile_insert(self._registry, spec, _insert_mask(spec.columns, instance))
         returning = plan.returning
         values = [_wire_value(instance, item) for item in plan.columns]
+        self._audit_attribute(instance)
         connection = await self._acquire()
         if returning:
             row = await connection.fetchrow(plan.sql, *values)
@@ -1214,6 +1313,7 @@ class Session:
                 "the key column so RETURNING can fill it"
             )
         self._identity[(spec, key)] = instance
+        self._audit_write(instance, spec, "insert", None)
 
     async def _update(self, instance: Any) -> None:
         spec = self._registry.spec_for(type(instance))
@@ -1226,18 +1326,27 @@ class Session:
         plan = compile_update(self._registry, spec, mask)
         values = [_wire_value(instance, item) for item in plan.columns]
         values += [_wire_value(instance, item) for item in plan.key_columns]
+        self._audit_attribute(instance)
         connection = await self._acquire()
         status = await connection.execute(plan.sql, *values)
         _check_affected(status, spec, "UPDATE")
+        # Recorded before the dirty mask is cleared: the mask *is* the record of
+        # which fields this write set, and clearing it first would leave the
+        # audit row saying "something changed" without saying what.
+        self._audit_write(instance, spec, "update", mask)
         instance._orm_clear_dirty()
 
     async def _delete(self, instance: Any) -> None:
         spec = self._registry.spec_for(type(instance))
         plan = compile_delete(self._registry, spec)
         values = [_wire_value(instance, item) for item in plan.key_columns]
+        self._audit_attribute(instance)
         connection = await self._acquire()
         status = await connection.execute(plan.sql, *values)
         _check_affected(status, spec, "DELETE")
+        # Before the identity map drops it and the instance is detached: the
+        # record needs the primary key, and detaching takes it away.
+        self._audit_write(instance, spec, "delete", None)
         key = instance._orm_primary_key()
         if key is not None:
             self._identity.pop((spec, key), None)

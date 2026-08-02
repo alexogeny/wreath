@@ -40,7 +40,7 @@ from .fields import MISSING, Column, resolve_default
 from .query import Select
 from .relations import Relationship
 from .schema import SchemaRef
-from .table import Index, Unique
+from .table import Facet, Index, Unique
 
 
 def _load_native() -> Any:
@@ -126,6 +126,7 @@ class ModelMeta(_MetaBase):
         inherited_rules: list[Rule] = []
         inherited_uniques: list[Unique] = []
         inherited_indexes: list[Index] = []
+        inherited_facets: list[Facet] = []
         for base in bases:
             if getattr(base, "__wreath_table__", None) is not None:
                 raise DeclarationError(
@@ -138,6 +139,7 @@ class ModelMeta(_MetaBase):
             inherited_rules.extend(getattr(base, "__wreath_proto_rules__", ()))
             inherited_uniques.extend(getattr(base, "__wreath_proto_uniques__", ()))
             inherited_indexes.extend(getattr(base, "__wreath_proto_indexes__", ()))
+            inherited_facets.extend(getattr(base, "__wreath_proto_facets__", ()))
 
         own_columns = [
             (key, value)
@@ -178,6 +180,17 @@ class ModelMeta(_MetaBase):
             *inherited_indexes,
             *(value for value in namespace.values() if isinstance(value, Index)),
         ]
+        # A subclass's facet *replaces* the one it inherits for that namespace,
+        # rather than adding a second: a base declaring `audited(redact=...)` is
+        # a default, and a subclass restating it means it. Constraints tighten;
+        # a facet is a description, and two descriptions of one thing is a
+        # question nobody should have to answer at read time.
+        facets: dict[str, Facet] = {}
+        for item in (
+            *inherited_facets,
+            *(value for value in namespace.values() if isinstance(value, Facet)),
+        ):
+            facets[item.namespace] = item
 
         namespace["__wreath_proto_columns__"] = tuple(columns)
         namespace["__wreath_proto_relations__"] = tuple(relations)
@@ -185,6 +198,8 @@ class ModelMeta(_MetaBase):
         namespace["__wreath_proto_rules__"] = tuple(rules)
         namespace["__wreath_proto_uniques__"] = tuple(uniques)
         namespace["__wreath_proto_indexes__"] = tuple(indexes)
+        namespace["__wreath_proto_facets__"] = tuple(facets.values())
+        namespace["__wreath_facets__"] = facets
         namespace["__wreath_table__"] = table
         namespace["__wreath_schema__"] = schema
         namespace.setdefault("__slots__", ())
@@ -241,6 +256,24 @@ class ModelMeta(_MetaBase):
                     f"not declare; it has {', '.join(sorted(column_map)) or 'none'}"
                 )
             target._narrow(item.checks)
+        # Facets are validated here, once, rather than by each subsystem that
+        # reads one. A privacy classification naming a column that was renamed
+        # two migrations ago is a declaration error at import, not a redaction
+        # that quietly stops covering anything.
+        for facet in facets.values():
+            for column_name in facet.columns:
+                if column_name not in column_map:
+                    # No `or "none"` fallback on the column list: this loop only
+                    # runs for a mapped model, and a mapped model without a
+                    # primary key was already refused above -- so `column_map` is
+                    # never empty here. A mutation run found the fallback
+                    # unreachable, and an unreachable branch in an error message
+                    # is a claim nobody can check.
+                    raise DeclarationError(
+                        f"{name}: {facet.namespace} facet names a column "
+                        f"{column_name!r} that {name} does not declare; it has "
+                        f"{', '.join(sorted(column_map))}"
+                    )
         for item in bound_columns:
             item._compile(name)
 
@@ -416,6 +449,11 @@ class Model(metaclass=ModelMeta):
     __wreath_proto_rules__: ClassVar[tuple[Rule, ...]]
     __wreath_proto_uniques__: ClassVar[tuple[Unique, ...]]
     __wreath_proto_indexes__: ClassVar[tuple[Index, ...]]
+    __wreath_proto_facets__: ClassVar[tuple[Facet, ...]]
+    #: Declarations subsystems outside the ORM attached to this model, by
+    #: namespace. Read it with `wreath.orm.facet`, which answers `None`
+    #: for a model that declared none rather than making every caller guard.
+    __wreath_facets__: ClassVar[dict[str, Facet]]
     __wreath_rules__: ClassVar[tuple[Rule, ...]]
     __wreath_compiled_rules__: ClassVar[tuple[Any, ...]]
 
