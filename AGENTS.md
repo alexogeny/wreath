@@ -339,6 +339,36 @@ None is discoverable by reading the code you are changing.
   "0 passed … clean" — the exact false success its own docstring warns about.
   Two sessions hit this; `wreath-map-lint`'s MAP008 catches the omission from the
   other direction.
+- **`wreath-sanitize --leaks` used to report every leak in Wreath's own C as
+  libpython's.** ASan's default unwinder walks frame pointers; CPython is built
+  with `-fomit-frame-pointer`; and essentially all of Wreath's C allocates
+  through `PyMem_Malloc` -> `_PyObject_Malloc` before reaching `malloc`. The
+  walk could not get back past libpython into our frame, so the leak record's
+  stack jumped straight from `_PyObject_Malloc` to whichever interpreter
+  function called us and the attribution -- which matches on the module path --
+  found nothing of ours in it. The tool then printed "none attributable to
+  Wreath" and "clean", for leaks that were entirely ours.
+
+  Found by planting a 4 KiB leak in `kv_new` and running the KV suite over it:
+  166 passed, 19 leak records, none attributable, clean. `sanitize.py` now sets
+  `fast_unwind_on_malloc=0` under `--leaks`, and the same run names
+  `kv_new .../kv.c:1148`. **A leak check you have not falsified is not a leak
+  check** -- point the tool at a deliberate leak and confirm it goes red before
+  believing a green one.
+- **A per-architecture `#if` block is invisible to every other architecture.**
+  `simd.h`'s NEON arms called their SWAR tails ~150 lines before those were
+  declared. In C that is not a warning: the implicit declaration is assumed to
+  return `int`, which *conflicts* with the real `static inline ptrdiff_t`
+  definition below, and the translation unit fails to compile. It failed only on
+  aarch64, so `wreath._native._core` would not have built on Apple Silicon or an
+  ARM server, and nothing on an x86 machine said a word.
+
+  Neither the compiler nor the test suite can find this from the wrong machine,
+  so `tests/test_native_simd.py` reads the header as text and checks declaration
+  order for every arm, reachable or not. Anything else behind an `#if
+  defined(...)` deserves the same treatment: **if only one architecture compiles
+  a block, only a source-level check will ever read it.**
+
 - **`uv run` does not reliably rebuild after a `.c` edit.** A stale `.so` has
   produced two confident, wrong diagnoses. `uv sync --reinstall-package wreath`
   is the rebuild that works.
