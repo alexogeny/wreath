@@ -89,6 +89,26 @@ that no HTTP client can call.
 Streaming is expressed as async iterators in both directions, which is what
 `Request.stream()`, `SSEResponse` and the WebSocket API already look like.
 
+### A slow consumer, and a client that gives up
+
+**A server-streaming response to a peer that stops reading does not buffer.**
+HTTP/2 flow control is the mechanism and the native server implements it, so
+`send` suspends at the first frame that will not fit and the *generator* is what
+stops — the handler does not run ahead producing messages nobody has room for.
+A client that gives up entirely sends `RST_STREAM`, which finalises the
+generator so its `finally` runs; a generator left suspended forever would be one
+leaked task per abandoned call, which is the shape that takes a process down
+during the incident everyone is already watching.
+
+Neither of those is an argument here.
+`tests/http2/test_grpc_streaming_pressure.py` drives the native HTTP/2 protocol
+with a client that grants **zero window** and resets at a chosen moment: a
+handler that would yield ten thousand messages produces at most two, granting 64
+bytes of credit releases exactly that much and no more, and an unrelated stream
+on the same connection is answered throughout. That last one is the property
+that makes the bound worth having — a design that bounded memory by stalling the
+*connection* would satisfy every other assertion and be useless.
+
 ## Statuses
 
 Raise `GrpcError(Status.PERMISSION_DENIED, "…")` when the refusal is the answer.
@@ -123,11 +143,23 @@ A client's `grpc-timeout` is honoured. A malformed value is refused with
 deadline" would let a call outlive the caller waiting on it, which is the one
 outcome the header exists to prevent.
 
-**What a deadline does not yet do is stop in-flight database work.** The handler
-is cancelled at the deadline, and whether that cancellation reaches a running
-ORM query is an open question for Wreath generally, not one this module settles.
-Treat `grpc-timeout` as a bound on the *response*, not a guarantee that the
-server stopped working.
+**A deadline stops in-flight database work too.** The handler is cancelled at
+the deadline, and the driver cancels a PostgreSQL backend whenever the task
+awaiting it is cancelled — whatever did the cancelling — by sending a wire-level
+`CancelRequest` on a second connection. So an expired `grpc-timeout` is a bound
+on the *work*, not only on the response.
+
+That is asserted rather than reasoned, because "the same chain" is an argument:
+`tests/test_disconnect_cancels_query.py::test_a_grpc_deadline_stops_the_postgresql_backend`
+drives a real `grpc-timeout` over HTTP/2 at a handler running a 30-second
+`pg_sleep`, and reads the verdict out of `pg_stat_activity` on a **third**
+connection. A companion asserts the pooled connection is usable afterwards,
+because a cancelled query returned with its state half-consumed would answer the
+next borrower with the previous one's rows.
+
+The bound is on a query awaited through a wreath connection. Work that is not
+awaiting anything — a tight CPU loop — is not interruptible, here or anywhere
+else in the framework.
 
 ## Message size
 
