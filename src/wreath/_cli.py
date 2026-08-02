@@ -337,8 +337,10 @@ def build_parser() -> argparse.ArgumentParser:
     migration_down.add_argument("--json", action="store_true")
 
     from ._infra_cli import add_infra_parser
+    from ._privacy_cli import add_privacy_parser
 
     add_infra_parser(commands)
+    add_privacy_parser(commands)
     docs_parser = commands.add_parser(
         "docs", help="build a documentation site from markdown (no third-party toolchain)"
     )
@@ -458,9 +460,9 @@ def build_parser() -> argparse.ArgumentParser:
     test_parser.add_argument(
         "--mutant-samples",
         type=int,
-        default=12,
+        default=192,
         metavar="N",
-        help="number of whole-corpus controls in --mutant sample (default: 12)",
+        help="number of whole-corpus controls in --mutant sample (default: 192)",
     )
     test_parser.add_argument(
         "--mutant-workers",
@@ -529,10 +531,10 @@ def build_parser() -> argparse.ArgumentParser:
     test_parser.add_argument(
         "--mutant-budget",
         type=float,
-        default=1.0,
+        default=50.0,
         metavar="SECONDS",
         help="post-suite execution ceiling for auto/sample mutants; live probes "
-             "stop at the suite seal and do not spend it (default: 1)",
+             "stop at the suite seal and do not spend it (default: 50)",
     )
     test_parser.add_argument(
         "--mutant-changed",
@@ -2905,6 +2907,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             try:
                 return execute_infra(namespace, load_application)
+            except (OSError, TypeError, ValueError) as error:
+                raise CliError(str(error), exit_code=2) from error
+        if namespace.command == "privacy":
+            from ._privacy_cli import execute as execute_privacy
+
+            try:
+                return execute_privacy(namespace)
             except (OSError, TypeError, ValueError) as error:
                 raise CliError(str(error), exit_code=2) from error
         if namespace.command == "docs":

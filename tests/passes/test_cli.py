@@ -145,6 +145,21 @@ def test_status_prints_a_row_per_pass(cli, capsys):
     assert "duty cycle 0.25" in out
 
 
+def test_status_distinguishes_unpublished_guards_from_no_guard(cli, capsys):
+    world, _, _ = cli
+    _seed(world, guards="photos.location")
+
+    execute_passes(_namespace())
+
+    guarded = capsys.readouterr().out
+    assert "guards photos.location, not yet published" in guarded
+
+    world.ledger.clear()
+    _seed(world, guards=None)
+    execute_passes(_namespace())
+    assert "not yet published" not in capsys.readouterr().out
+
+
 def test_status_says_so_when_nothing_has_run_yet(cli, capsys):
     assert execute_passes(_namespace()) == 0
 

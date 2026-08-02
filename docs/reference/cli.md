@@ -8,13 +8,15 @@ replays recordings through the owned pipeline (`wreath replay`). Use
 [`ServerConfig`](server.md).
 
 `wreath test` runs an unchanged pytest suite behind an animated per-file heat
-map, then reports duration percentiles, outliers, worker utilization, and the
-slowest tests. A twelve-control `--mutant auto` sample runs whenever the ordinary
+map, then reports duration percentiles, practical 100 ms/250 ms/1 s tail counts,
+the Tukey outlier threshold and count, worker utilization, and the
+slowest tests. A 192-control `--mutant auto` sample runs whenever the ordinary
 run has passing tests, reusing their selected-line coverage and stopping each
 killed mutant at its first failure. Baseline failures remain red, are excluded
 as killers, and still determine the command's exit status. Purple `▣` tiles are currently under
 mutation and solid gold `▰` tiles contain a test that killed one, the grid's highest
-state. `--mutant off|sample|changed|full` and the
+state; the final confidence summary also names how many test files earned gold.
+`--mutant off|sample|changed|full` and the
 remaining `--mutant-*` flags configure source, tests, operators, sample size,
 per-mutant deadlines, up to three concurrent mutant workers, the non-failing
 post-suite tail ceiling, maxfail, and gating. Live probes may use the whole

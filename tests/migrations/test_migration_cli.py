@@ -51,6 +51,15 @@ def test_migration_detect_parser_names_the_app_and_registry() -> None:
     assert namespace.json is True
 
 
+@pytest.mark.asyncio
+async def test_detect_names_none_when_the_application_has_no_registries() -> None:
+    namespace = argparse.Namespace(database="main")
+    application = SimpleNamespace(_orm_registries={})
+
+    with pytest.raises(ValueError, match="configured: none"):
+        await _migrations_cli._detect(namespace, application)
+
+
 def test_migration_check_parser_is_literal() -> None:
     namespace = build_parser().parse_args(
         ["migrations", "check", "example:app", "--database", "billing"]
@@ -127,6 +136,28 @@ async def test_apply_never_falls_back_to_request_pool_credentials(monkeypatch) -
 
     with pytest.raises(ValueError, match="never falls back to request-pool credentials"):
         await _migrations_cli._apply(namespace, application)
+
+
+@pytest.mark.asyncio
+async def test_status_never_falls_back_to_request_pool_credentials(
+    monkeypatch, tmp_path,
+) -> None:
+    monkeypatch.delenv("MISSING_MIGRATION_DSN", raising=False)
+    artifact = tmp_path / "migration.bin"
+    artifact.write_bytes(artifact_bytes())
+    application = SimpleNamespace(
+        _orm_registries={
+            "main": SimpleNamespace(specs=[SimpleNamespace(schema="public")]),
+        },
+    )
+    namespace = argparse.Namespace(
+        database="main",
+        dsn_env="MISSING_MIGRATION_DSN",
+        artifacts=[str(artifact)],
+    )
+
+    with pytest.raises(ValueError, match="status never falls back"):
+        await _migrations_cli._status(namespace, application)
 
 
 def test_migration_show_parser_is_literal() -> None:
