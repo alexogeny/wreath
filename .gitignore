@@ -77,6 +77,9 @@ flamegraph*.svg
 # Agent and local tool state
 .pi/
 .cache/
+# Bounded local timing history written by `wreath test`. Reports requested with
+# `--report` are not ignored: naming an artifact is an explicit choice to keep it.
+.wreath/
 # Local Claude Code state stays out of the repo entirely. Shareable, tracked
 # skills live in ./skills/ (tool-agnostic), not under .claude/.
 .claude/
