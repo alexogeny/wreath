@@ -167,7 +167,11 @@ snapshot instead. `--grid always` and `--grid never` override that choice;
 `NO_COLOR` keeps the outcome-specific symbols without ANSI colour.
 
 The final report includes wall time, summed test time, average, median, p95 and
-p99 duration, a Tukey outlier count, worker utilization, and the slowest tests.
+p99 duration, practical tail counts at 100 ms, 250 ms, and one second, a Tukey
+outlier count with its threshold, worker utilization, and the slowest tests.
+The threshold matters: a large fast suite can have many statistical outliers
+above a fence of only a few milliseconds; those are not all "slow tests". Read
+the practical tail, p95, p99, threshold, and named slowest tests together.
 Setup, call, and teardown time all count: a slow fixture is part of what the test
 costs, not invisible overhead. Wreath keeps a bounded per-file history in
 `.wreath/test-history.json`; use `--no-history` for an entirely stateless run or
@@ -192,9 +196,9 @@ Any run with passing tests can continue into Wreath's control-aware mutation
 tester:
 
 ```bash
-wreath test                                         # 12-control auto sample
-wreath test --mutant sample                         # 12 stable controls
-wreath test --mutant sample --mutant-samples 24    # a larger confidence sample
+wreath test                                         # 192-control auto sample
+wreath test --mutant sample                         # 192 stable controls
+wreath test --mutant sample --mutant-samples 384   # a larger confidence sample
 wreath test --mutant changed --mutant-changed main # controls changed on this branch
 wreath test --mutant full                           # the complete sweep
 ```
@@ -240,7 +244,7 @@ the first baseline-passing test that objects decides `killed`, so running more
 candidate tests would add names without changing confidence. Set zero only when
 you want every killer in JSON. Live probes may use the whole ordinary test
 window, at background priority, and are stopped rather than allowed to extend
-its tail. `--mutant-budget 1` caps only additional sealed-baseline execution
+its tail. `--mutant-budget 50` caps only additional sealed-baseline execution
 after pytest finishes. Reaching that ceiling leaves the remaining controls
 undecided, prints `FINISH THE SAMPLE`, and does not fail a green pipeline;
 increase it when you are ready to finish the answer. The JSON `live` object

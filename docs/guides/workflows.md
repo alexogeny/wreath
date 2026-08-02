@@ -164,4 +164,46 @@ where it stopped. Use it when the failure invalidates the attempt but not the
 saga — a timeout, a rate limit — and leave the default when the whole thing has to
 come apart.
 
+## Writing down the half-finished ones
+
+There is one state a saga can be in that nothing else in Wreath can describe
+after the fact: stopped in the middle. The stock is held, the card is charged,
+the courier call failed, the refund either ran or it did not — and by the time
+somebody is looking at a stuck order, the traceback is gone and
+`compensation_errors` is a number that says *whether* the unwind held rather
+than what happened.
+
+So a step can be recorded, into the same `WFR1` file a job attempt goes into:
+
+```python
+from wreath.recording import (
+    WorkflowStepPolicy, WorkflowStepRecorder,
+    WorkflowStepTrigger, WorkflowStepTriggerKind,
+)
+
+recorder = WorkflowStepRecorder(
+    WorkflowStepPolicy(
+        triggers=(
+            WorkflowStepTrigger(WorkflowStepTriggerKind.COMPENSATION_FAILURE),
+        ),
+    ),
+    directory="/var/lib/wreath/recordings",
+)
+
+await checkout.run(store=store, key=f"checkout:{order_id}", recorder=recorder)
+```
+
+The trigger above is the one worth arming first. It fires only when a saga
+stopped *and did not unwind* — the state that no retry reaches from where it
+now is, and the one that needs a person rather than a redeploy.
+
+The recording is written after the undo chain, so it carries which
+compensations ran, which failed, and which steps had none to run at all. It
+names the step's position and the step before it, because a saga's cause is the
+step before it rather than a request. It records no step's return value, and
+nothing arms by default.
+
+See [recording a workflow step](../reference/recording.md#recording-a-workflow-step)
+for the whole shape.
+
 **Reference:** [`wreath.workflows`](../reference/workflows.md).
