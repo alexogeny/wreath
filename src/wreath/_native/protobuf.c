@@ -542,43 +542,67 @@ pb_encode_repeated(PbWriter *w, uint64_t number, int kind, int flags,
     if (count == 0) {
         return 0;
     }
+    /* One sequence-protocol call for the whole field, then a contiguous array.
+     * `PySequence_GetItem` per element is an out-of-line call through `sq_item`
+     * carrying a negative-index fixup and a bounds check; a repeated field is
+     * already a list, whose elements are a C array behind that call.
+     *
+     * `PySequence_Size` above is kept, and runs first, so an input with no
+     * length is still refused rather than silently materialised here.
+     *
+     * The strong reference per item is also kept. Every branch below can
+     * re-enter Python -- a nested message reads attributes, a scalar may run
+     * `__index__` -- and a callback that cleared the list would otherwise free
+     * an item mid-encode. The length is re-read each step for the same reason:
+     * a list that shrinks under us must stop the loop rather than read off the
+     * end, which is the guarantee `PySequence_GetItem` was providing. */
+    PyObject *fast = PySequence_Fast(items, "repeated field must be a sequence");
+    if (fast == NULL) {
+        return -1;
+    }
+    int rc = -1;
+#define PB_ITEM()                                                             \
+    (i < PySequence_Fast_GET_SIZE(fast)                                       \
+         ? Py_NewRef(PySequence_Fast_GET_ITEM(fast, i))                       \
+         : NULL)
+
     if (kind == PB_KIND_MESSAGE) {
         for (Py_ssize_t i = 0; i < count; i++) {
-            PyObject *item = PySequence_GetItem(items, i);
+            PyObject *item = PB_ITEM();
             if (item == NULL) {
-                return -1;
+                break;
             }
             int failed = pb_put_tag(w, number, PB_WIRE_LEN) < 0
                          || pb_encode_delimited(w, subplan, item, depth) < 0;
             Py_DECREF(item);
             if (failed) {
-                return -1;
+                goto done;
             }
         }
-        return 0;
+        rc = 0;
+        goto done;
     }
     if ((flags & PB_FLAG_PACKED) && kind != PB_KIND_STRING
         && kind != PB_KIND_BYTES) {
         PbWriter body;
         if (pb_writer_init(&body) < 0) {
-            return -1;
+            goto done;
         }
         for (Py_ssize_t i = 0; i < count; i++) {
-            PyObject *item = PySequence_GetItem(items, i);
+            PyObject *item = PB_ITEM();
             if (item == NULL) {
-                Py_XDECREF(body.bytes);
-                return -1;
+                break;
             }
             int failed = pb_put_scalar(&body, kind, item) < 0;
             Py_DECREF(item);
             if (failed) {
                 Py_XDECREF(body.bytes);
-                return -1;
+                goto done;
             }
         }
         PyObject *encoded = pb_writer_finish(&body);
         if (encoded == NULL) {
-            return -1;
+            goto done;
         }
         int failed = pb_put_tag(w, number, PB_WIRE_LEN) < 0
                      || pb_put_varint(w, (uint64_t)PyBytes_GET_SIZE(encoded)) < 0
@@ -586,20 +610,25 @@ pb_encode_repeated(PbWriter *w, uint64_t number, int kind, int flags,
                                  PyBytes_GET_SIZE(encoded))
                             < 0;
         Py_DECREF(encoded);
-        return failed ? -1 : 0;
+        rc = failed ? -1 : 0;
+        goto done;
     }
     for (Py_ssize_t i = 0; i < count; i++) {
-        PyObject *item = PySequence_GetItem(items, i);
+        PyObject *item = PB_ITEM();
         if (item == NULL) {
-            return -1;
+            break;
         }
         int failed = pb_encode_single(w, number, kind, item) < 0;
         Py_DECREF(item);
         if (failed) {
-            return -1;
+            goto done;
         }
     }
-    return 0;
+    rc = 0;
+done:
+    Py_DECREF(fast);
+    return rc;
+#undef PB_ITEM
 }
 
 /* A map field is repeated messages of {1: key, 2: value}; encoding it in that
