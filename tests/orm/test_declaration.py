@@ -447,3 +447,28 @@ def test_a_foreign_key_joins_the_column_it_references_not_the_primary_key() -> N
     sql = compile_select(registry, City.select().include(City.country.joined())).sql
     assert 'ON "j1"."code" = "t0"."country_code"' in sql, sql
     assert '"j1"."id" =' not in sql, sql
+
+
+def test_a_foreign_key_with_no_reference_falls_back_to_the_primary_key() -> None:
+    """The other arm: an undeclared `references=` is not an error.
+
+    `relationship(Owner, foreign_key=owner_id)` over a plain column is the
+    shortest legal spelling, and the join columns then come from `Owner`'s
+    primary key. Nothing asserted the SQL for that shape, so returning an empty
+    join -- which is what taking the collected-references branch unconditionally
+    produces -- went unnoticed: the reference list is empty here precisely
+    because there is nothing to collect.
+    """
+    from wreath.orm.compiler import compile_select
+
+    class Owner(Model, table="owners"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+
+    class Pet(Model, table="pets"):
+        id: Mapped[int] = column(Int64, primary_key=True)
+        owner_id: Mapped[int] = column(Int64)  # deliberately no references=
+        owner = relationship(Owner, foreign_key=owner_id)
+
+    registry = compile_models(Owner, Pet)
+    sql = compile_select(registry, Pet.select().include(Pet.owner.joined())).sql
+    assert 'ON "j1"."id" = "t0"."owner_id"' in sql, sql
