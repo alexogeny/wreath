@@ -4,7 +4,7 @@
     "realistic": {
       "status": 200,
       "totals": {
-        "c": 126,
+        "c": 125,
         "python": 2
       },
       "pre_activation": {
@@ -25,7 +25,7 @@
           "python": 0
         },
         "handler": {
-          "c": 59,
+          "c": 58,
           "python": 1
         },
         "egress": {
@@ -66,8 +66,7 @@
         "frozenset.issubset": 1,
         "wreath._native._core.orm_shape": 1,
         "lock.__enter__": 1,
-        "OrderedDict.get": 1,
-        "OrderedDict.move_to_end": 1,
+        "KV.get": 1,
         "lock.__exit__": 1,
         "str.rpartition": 1,
         "builtins.hasattr": 1,
