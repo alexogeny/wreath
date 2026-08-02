@@ -1,12 +1,57 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 
+from wreath._pure import postgres as pure_postgres
+
 from .test_connection import POSTGRES_BACKENDS, FakePostgres
+
+
+@pytest.mark.asyncio
+async def test_a_multi_operation_flush_writes_the_complete_batch() -> None:
+    class Writer:
+        def __init__(self) -> None:
+            self.writes: list[bytes] = []
+
+        def write(self, payload: bytes) -> None:
+            self.writes.append(payload)
+
+        def drain(self) -> None:
+            return None
+
+    loop = asyncio.get_running_loop()
+    connection = pure_postgres.Connection.__new__(pure_postgres.Connection)
+    operations = [
+        pure_postgres.Operation(index, "", (), "execute", loop.create_future(), None)
+        for index in range(2)
+    ]
+    operations[0].packet = b"first"
+    operations[1].packet = b"second"
+    writer = Writer()
+
+    connection._closed = False
+    connection._write_blocked = False
+    connection._waiting = deque(operations)
+    connection._waiting_live = 2
+    connection._emitted = deque()
+    connection._flush_handle = None
+    connection._writer = writer
+    connection._register_operations = None
+    connection._write_with_backpressure = None
+    connection._loop = loop
+    connection._idle_event = asyncio.Event()
+    connection._write_count = 0
+    connection._reader_task = object()
+
+    connection._flush()
+
+    assert writer.writes == [b"firstsecond"]
+    assert list(connection._emitted) == operations
 
 
 @pytest.fixture(params=POSTGRES_BACKENDS, ids=lambda backend: backend._implementation)
