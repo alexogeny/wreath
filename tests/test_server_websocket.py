@@ -967,3 +967,60 @@ async def test_a_rejected_fragmented_message_releases_its_accumulator(
         assert protocol._ws_frag_parts == []
         assert protocol._ws_frag_size == 0
         assert protocol._ws_frag_opcode is None
+
+
+# --- close-code validation, and the default path_params -------------------------------
+
+
+def test_a_socket_without_path_params_gets_an_empty_mapping() -> None:
+    # `path_params or {}`: a route with no captures passes None, and every
+    # reader expects a mapping rather than having to guard for one.
+    from wreath.websocket import WebSocket
+
+    ws = WebSocket({"type": "websocket"}, None, None, path_params=None)
+    assert ws.path_params == {}
+
+
+@pytest.mark.parametrize("code", [1004, 1005, 1006, 1015, 999, 2999, 5000])
+def test_a_close_code_an_endpoint_may_not_send_is_refused(code: int) -> None:
+    """RFC 6455 7.4.1 reserves several codes for the protocol itself.
+
+    Sending one is a protocol error the peer is entitled to fail the connection
+    over, so it is refused here rather than put on the wire.
+    """
+    import asyncio
+
+    from wreath.websocket import WebSocket
+
+    ws = WebSocket({"type": "websocket"}, None, None, path_params={})
+    with pytest.raises(ValueError, match="invalid WebSocket close code"):
+        asyncio.run(ws.close(code=code))
+
+
+@pytest.mark.parametrize("code", [1000, 1001, 1011, 3000, 4999])
+def test_a_sendable_close_code_is_accepted(code: int) -> None:
+    from wreath.websocket import _valid_close_code
+
+    assert _valid_close_code(code) is True
+
+
+async def test_a_sendable_close_code_reaches_the_transport() -> None:
+    """The refusal must not fire for a code an endpoint may send.
+
+    Asserting only that an invalid code raises leaves "always raise" a passing
+    implementation, which is what `wreath mutant` reported.
+    """
+    from wreath.websocket import WebSocket
+
+    sent: list[dict] = []
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    async def receive() -> dict:
+        return {"type": "websocket.connect"}
+
+    ws = WebSocket({"type": "websocket"}, receive, send, path_params={})
+    await ws.close(code=1000)
+    assert sent and sent[-1]["type"] == "websocket.close"
+    assert sent[-1]["code"] == 1000

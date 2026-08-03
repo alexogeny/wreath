@@ -19,9 +19,26 @@ Iteration ends when the peer disconnects. Explicit `receive_text()` /
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+from collections.abc import Awaitable, Callable
 from typing import Any
 
+from ._correlation import Pending
 from ._headers import find_header
+from ._json import dumps as _json_dumps
+from ._json import loads as _json_loads
+from .temporal import Duration
+
+
+def _json_text(payload: Any) -> str | bytes:
+    """The default outgoing codec: JSON text, which is what most peers speak."""
+    return _json_dumps(payload)
+
+
+def _json_value(frame: str | bytes) -> Any:
+    """The default incoming codec, the inverse of `_json_text`."""
+    return _json_loads(frame)
 
 Message = dict[str, Any]
 
@@ -302,4 +319,172 @@ class WebSocket:
         return message["bytes"]
 
 
-__all__ = ["WebSocket", "WebSocketDisconnect"]
+class Calls:
+    """Request/response over one socket, correlated by an identifier.
+
+    A WebSocket is a frame pipe: frames arrive in order and nothing pairs a
+    reply with the request that caused it. Every protocol that puts a
+    request/response contract on top of one -- and most do -- grows the same
+    three things by hand: an identifier on the way out, a map of what is
+    outstanding, and a deadline so a peer that never answers does not pin a
+    caller forever.
+
+    `Calls` owns the read loop and demultiplexes. Both directions are declared
+    once, as functions over decoded messages, so the protocol lives in one place
+    instead of being spread through the handler:
+
+    ```python
+    calls = Calls(
+        ws,
+        reply_to=lambda message: message.get("reply_to"),
+        label=lambda identifier, payload: {"id": identifier, **payload},
+    )
+
+    @calls.on_request
+    async def handle(message: dict) -> dict | None:
+        return {"reply_to": message["id"], "ok": True}
+
+    async with calls:
+        answer = await calls.call({"op": "read"}, timeout=seconds(30))
+    ```
+
+    `reply_to` returns the identifier a frame is answering, or `None` when the
+    frame is a peer-initiated request; `label` stamps an outgoing request with
+    the identifier a reply will carry back. Those two are the whole protocol
+    seam, and neither has a default: a guessed correlation field is a protocol
+    this class does not know it is implementing.
+
+    **One reader.** `WebSocket` documents that it holds no lock and assumes one
+    reader; this *is* that reader, so a handler using `Calls` must not also
+    iterate the socket. Sends are serialised by a lock, because a request and a
+    reply genuinely do race.
+
+    On close, every outstanding question fails with `CallsClosed` rather than
+    waiting out its own deadline -- an answer that provably cannot arrive should
+    not cost a caller its timeout.
+    """
+
+    __slots__ = ("_decode", "_encode", "_label", "_lock", "_on_request", "_pending",
+                 "_reply_to", "_task", "_timeout", "_ws")
+
+    def __init__(
+        self,
+        ws: WebSocket,
+        *,
+        reply_to: Callable[[Any], str | None],
+        label: Callable[[str, Any], Any],
+        encode: Callable[[Any], str | bytes] = _json_text,
+        decode: Callable[[str | bytes], Any] = _json_value,
+        timeout: Any = 30.0,
+        max_pending: int = 256,
+    ) -> None:
+        self._ws = ws
+        self._reply_to = reply_to
+        self._label = label
+        self._encode = encode
+        self._pending = Pending(limit=max_pending)
+        self._timeout = Duration.of(timeout).total_seconds()
+        self._on_request: Callable[[Any], Awaitable[Any]] | None = None
+        self._lock = asyncio.Lock()
+        self._task: asyncio.Task[None] | None = None
+        self._decode = decode
+
+    @property
+    def refusals(self) -> int:
+        """Calls refused because too many were already outstanding."""
+        return self._pending.refusals
+
+    @property
+    def outstanding(self) -> int:
+        """Calls awaiting an answer right now."""
+        return len(self._pending)
+
+    def on_request(
+        self, handler: Callable[[Any], Awaitable[Any]]
+    ) -> Callable[[Any], Awaitable[Any]]:
+        """Register the handler for peer-initiated frames.
+
+        Returning a value sends it; returning `None` sends nothing, which is
+        what a notification -- a request with no response -- means.
+        """
+        if self._on_request is not None:
+            raise ValueError("this Calls already has a request handler")
+        self._on_request = handler
+        return handler
+
+    async def __aenter__(self) -> Calls:
+        self._task = asyncio.create_task(self._read())
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self.close()
+
+    async def close(self) -> None:
+        """Stop reading and fail every outstanding call."""
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._pending.fail_all(CallsClosed("the socket closed with calls outstanding"))
+
+    async def send(self, payload: Any) -> None:
+        """Send one frame, serialised against every other sender."""
+        async with self._lock:
+            await self._ws.send(self._encode(payload))
+
+    async def call(
+        self,
+        payload: Any,
+        *,
+        # ASYNC109 wants the caller to wrap this in `asyncio.timeout`. For a
+        # request/response the deadline is part of the protocol -- it is what
+        # frees the correlation slot -- and a caller who forgot to wrap would
+        # hold one until the socket closed.
+        timeout: Any = None,  # noqa: ASYNC109
+    ) -> Any:
+        """Send `payload` as a request and wait for the reply that names it.
+
+        Raises `TimeoutError` when the deadline passes and `CallsClosed` when
+        the socket goes away first.
+        """
+        deadline = self._timeout if timeout is None else Duration.of(timeout).total_seconds()
+        async with self._pending.slot() as (identifier, waiter):
+            await self.send(self._label(identifier, payload))
+            async with asyncio.timeout(deadline):
+                return await waiter
+
+    async def _read(self) -> None:
+        try:
+            async for frame in self._ws:
+                try:
+                    message = self._decode(frame)
+                except Exception:  # noqa: BLE001 - a peer's bad frame is not ours
+                    # A malformed frame must not end the loop: the socket is
+                    # still live and the calls outstanding on it are still
+                    # answerable. A protocol that wants to close on garbage can
+                    # do it from `on_request`.
+                    continue
+                identifier = self._reply_to(message)
+                if identifier is not None:
+                    # False here is the ordinary case, not an error: a reply to
+                    # a call that already timed out has nobody waiting.
+                    self._pending.settle(identifier, message)
+                    continue
+                if self._on_request is not None:
+                    reply = await self._on_request(message)
+                    if reply is not None:
+                        await self.send(reply)
+        except asyncio.CancelledError:
+            raise
+        except WebSocketDisconnect:
+            pass
+        finally:
+            self._pending.fail_all(CallsClosed("the socket closed with calls outstanding"))
+
+
+class CallsClosed(Exception):
+    """The socket went away while a call was outstanding."""
+
+
+__all__ = ["Calls", "CallsClosed", "WebSocket", "WebSocketDisconnect"]
