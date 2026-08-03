@@ -63,7 +63,7 @@ class StatsDBridge:
 
     __slots__ = (
         "_source", "_addr", "_prefix", "_dogstatsd", "_tags", "_route_labels",
-        "_sock", "_deltas",
+        "_sock", "_deltas", "_app",
     )
 
     def __init__(
@@ -76,9 +76,13 @@ class StatsDBridge:
         dogstatsd: bool = False,
         tags: dict[str, str] | None = None,
         route_labels: RouteLabels = None,
+        app: Any = None,
     ) -> None:
         if not hasattr(source, "snapshot"):
             raise TypeError("statsd source must expose snapshot()")
+        #: Asked for subsystem counters on every flush. Optional, as on the
+        #: Prometheus bridge and for the same reason.
+        self._app = app
         self._source = source
         self._addr = (host, port)
         self._prefix = prefix.rstrip(".")
@@ -142,6 +146,26 @@ class StatsDBridge:
         return out
 
     # -- sending -------------------------------------------------------------
+    def _counter_lines(self, out: list[str]) -> None:
+        """Every registered subsystem's counters, as gauges.
+
+        Gauges rather than counters, and deliberately *not* delta-tracked like
+        the route aggregates above: this bridge cannot tell a monotonic counter
+        from a value that moves both ways, and sending a decrease as an
+        increment would make a falling gauge read as a negative rate. A gauge is
+        the reading that is true either way.
+        """
+        if self._app is None:
+            return
+        from .metrics import collect
+
+        for reading in collect(self._app):
+            for name, value in reading.values.items():
+                self._emit(
+                    out, f"{reading.subsystem}.{name}", int(value), "g",
+                    {"instance": str(reading.instance)},
+                )
+
     def flush(self) -> int:
         """Read one snapshot, send its metrics; returns the line count."""
         snapshot = self._source.snapshot()
@@ -150,6 +174,7 @@ class StatsDBridge:
         if callable(getter):
             recorder_loss = getter()
         lines = self._lines(snapshot, recorder_loss)
+        self._counter_lines(lines)
         self._send(lines)
         return len(lines)
 
