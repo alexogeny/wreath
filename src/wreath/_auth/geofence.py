@@ -24,6 +24,7 @@ import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
+from .._reqcache import resolve_once_async
 from ..geospatial import BoundingBox, Coordinate, distance
 from .requirements import PolicyRequirement
 
@@ -365,27 +366,21 @@ async def resolve_precision(
     resolution as well as the verdict.
     """
     slot = f"_precision_{id(ladder):x}_{resource!r}"
-    state = request.state
-    cached = state.get(slot)
-    if cached is not None:
-        return cast_precision(cached)
-    answer: float | None | _Withheld = WITHHELD
-    for action, metres in ladder:
-        decision = await authorizer.authorize(
-            request, PolicyRequirement(action=action, resource=resource)
-        )
-        if getattr(decision, "allowed", False):
-            answer = metres
-            break
-    # Boxed, because `None` is a legitimate answer (exact) and `state.get`
-    # cannot tell it from a miss.
-    state.__setattr__(slot, (answer,))
-    return answer
 
+    async def ask() -> float | None | _Withheld:
+        for action, metres in ladder:
+            decision = await authorizer.authorize(
+                request, PolicyRequirement(action=action, resource=resource)
+            )
+            if getattr(decision, "allowed", False):
+                return metres
+        return WITHHELD
 
-def cast_precision(boxed: Any) -> float | None | _Withheld:
-    """Unbox a cached precision answer. See `resolve_precision` for why."""
-    return boxed[0]
+    # `resolve_once_async` reads with a sentinel, so the answer no longer needs
+    # boxing to keep `None` (exact) distinguishable from a cache miss -- which
+    # is the one confusion here that would publish a precise coordinate to a
+    # caller entitled to none.
+    return await resolve_once_async(request, slot, ask)
 
 
 def _as_rung(position: int, rung: Any) -> tuple[str, float | None]:

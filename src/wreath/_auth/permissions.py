@@ -47,6 +47,7 @@ from secrets import token_bytes
 from typing import Any, cast
 from weakref import WeakKeyDictionary
 
+from .._conditional import etag_matches as _etag_matches
 from .._livedoc import DEFAULT_KEEPALIVE, LiveDocument, change_stream
 from ..cache import BoundedCache
 from ..request import Request
@@ -248,24 +249,6 @@ def _private_stream(response: SSEResponse) -> SSEResponse:
     ]
     response.headers.append((b"cache-control", b"private, no-cache, no-store"))
     return response
-
-
-def _etag_matches(header: str | None, tag: str) -> bool:
-    """Whether `If-None-Match` covers `tag` (RFC 9110 §13.1.2).
-
-    A list, `*`, and the weak `W/` prefix are all legal, and comparing the whole
-    header to one tag with `==` meant a client that sent two -- or a proxy that
-    added one -- refetched the manifest every time, which is the cost this
-    endpoint's ETag exists to avoid.
-    """
-    if not header:
-        return False
-    if header.strip() == "*":
-        return True
-    target = tag.removeprefix("W/")
-    return any(
-        candidate.strip().removeprefix("W/") == target for candidate in header.split(",")
-    )
 
 
 def _distinct_identifiers(identifiers: list[Any]) -> list[str]:

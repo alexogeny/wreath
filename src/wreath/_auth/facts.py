@@ -23,7 +23,10 @@ get subtly wrong:
   which is the difference between the fact being free and being the most
   expensive thing in the request.
 * **Fail-closed.** The empty set is *always supplied*, even with no provider —
-  see `always_supplied` below for why absence is not a neutral default.
+  see `always_supplied` below for why absence is not a neutral default. The
+  empty set only fails *closed* for a fact a policy reads to **permit**; for one
+  read to **forbid** the same empty set fails open, so those declare
+  `refusal=True` and refuse to boot without a provider — see `require_provider`.
 * **Refused at startup** when a policy names something the provider does not
   hold, so a typo fails where it is written rather than denying forever with
   nothing to see.
@@ -36,7 +39,9 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
+
+from .._reqcache import resolve_once
 
 #: The answer for a fact nobody provides, and for one no policy reads. Shared
 #: rather than rebuilt, and *always supplied* -- an absent set key is not a
@@ -64,6 +69,76 @@ def referenced_names(engine: Any, capability: str) -> frozenset[str] | None:
         return None
     names = referenced()
     return None if names is None else frozenset(names)
+
+
+def references_key(
+    engine: Any, attribute: str, vocabulary: frozenset[str] | None
+) -> bool | None:
+    """Whether any policy reads `context.<attribute>` at all. None for unknowable.
+
+    A *presence* question, not a member walk, so `reads_context` answers it when
+    the engine offers one -- that is the primitive written for exactly this
+    ("does the policy set mention the key", as `delegated` and `actor` ask it).
+
+    Falling back to the vocabulary is not the same question read twice: an empty
+    `frozenset` means no policy names the key, and both `None` (a read whose
+    names are not statically knowable) and a non-empty set mean one does. The
+    fallback only works when the engine *has* the walk, though -- `referenced_*`
+    missing entirely also answers `None`, and that is the third answer here:
+    an engine that cannot introspect at all has not said the key is unread, so
+    a caller must not read a `False` into its silence.
+    """
+    reads = getattr(engine, "reads_context", None)
+    if callable(reads):
+        return bool(reads(attribute))
+    if not callable(getattr(engine, f"referenced_{attribute}", None)):
+        return None
+    return vocabulary is None or bool(vocabulary)
+
+
+def require_provider(
+    referenced: bool | None,
+    provider: Any,
+    *,
+    noun: str,
+    singular: str,
+    attribute: str,
+) -> None:
+    """Refuse, at startup, a refusal-shaped fact switched off while policies read it.
+
+    The polarity argument in one place. For a **grant** -- a flag, a region, a
+    role, an entitlement -- a policy reads the fact inside a `permit` condition,
+    so an absent provider empties the set, the condition is false, the permit
+    does not fire, and the request is denied. Switching such a fact off is safe
+    by construction, and `validate_names` returns early on `provider is None`
+    for that reason.
+
+    A **refusal** inverts every step of that. A policy reads it inside a
+    `forbid`, so the empty set makes the condition false, the forbid never
+    fires, and the request is *allowed*. An application whose policy set depends
+    on those refusals but that forgot to configure a provider would boot clean,
+    pass its permit tests, and enforce nothing -- the one failure this whole
+    module exists to make impossible. So a refusal-shaped fact cannot be
+    switched off while a policy still names it: that is a boot failure.
+
+    Nothing happens when no policy reads the key, which is the common case and
+    must stay free -- an application that never writes a quota policy needs no
+    quota provider. Nor when the engine cannot answer the question at all
+    (`referenced` is `None`): an outside evaluator that offers neither
+    `reads_context` nor the member walk has not said the key is unread, but it
+    has not said it is read either, and refusing on that silence would refuse
+    every correct application built on such an engine.
+    """
+    if provider is not None or referenced is not True:
+        return
+    raise ValueError(
+        f"cedar policies read context.{attribute} but no provider for {noun} is "
+        f"configured. Unlike a grant, a {singular} is read to forbid, so an "
+        f"absent provider leaves context.{attribute} empty, the forbid never "
+        f"fires, and the request is allowed -- switching {noun} off while "
+        f"policies still name them grants access instead of denying it. Pass a "
+        f"provider, or drop the context.{attribute} tests from the policy set."
+    )
 
 
 def validate_names(
@@ -151,7 +226,8 @@ class SetFact:
         engine: the `CedarEngine`, probed for the vocabulary walk
         provider: whatever answers the fact, or `None` for "this application
             switched the capability off". `None` never resolves and never
-            validates: every test against the key denies, deliberately.
+            validates: every test against the key denies, deliberately. A
+            `refusal=True` fact cannot be switched off while a policy reads it.
         resolve: `(request, vocabulary) -> frozenset[str]`. Called at most once
             per request, and **not at all** when no policy names the key.
             `vocabulary` is `None` when the names are not statically knowable
@@ -163,6 +239,12 @@ class SetFact:
             application data rather than configuration -- an organisation id in
             a policy is a row, and refusing to boot because a row does not exist
             yet would be wrong.
+        refusal: the fact's *polarity*. False -- the default, and every fact but
+            `quota` -- means a policy reads it to permit, so an absent provider
+            empties the set and denies. True means a policy reads it to forbid,
+            where that same empty set allows; such a fact refuses to boot when a
+            policy names it and no provider is configured. See
+            `require_provider`.
     """
 
     __slots__ = ("_provider", "_resolve", "_slot", "attribute", "vocabulary")
@@ -177,12 +259,21 @@ class SetFact:
         noun: str,
         singular: str,
         validate: bool = True,
+        refusal: bool = False,
     ) -> None:
         self.attribute = attribute
         self._slot = f"_cedar_fact_{attribute}"
         self._provider = provider
         self._resolve = resolve
         self.vocabulary = referenced_names(engine, f"referenced_{attribute}")
+        if refusal:
+            require_provider(
+                references_key(engine, attribute, self.vocabulary),
+                provider,
+                noun=noun,
+                singular=singular,
+                attribute=attribute,
+            )
         if validate:
             validate_names(
                 self.vocabulary,
@@ -199,6 +290,9 @@ class SetFact:
         the common request free: no provider (the capability is off), no policy
         naming the key (nothing to resolve), and an answer already cached from
         an earlier policy in this same decision.
+
+        A `refusal=True` fact reaches the first of those only when no policy
+        reads the key, because `require_provider` refused the other case at boot.
         """
         if self._provider is None:
             return EMPTY
@@ -208,10 +302,6 @@ class SetFact:
             # Returning here is what keeps a store-backed fact off the request
             # path entirely for the applications that do not use it.
             return EMPTY
-        state = request.state
-        cached = state.get(self._slot)
-        if cached is not None:
-            return cast(frozenset[str], cached)
-        resolved = self._resolve(request, vocabulary)
-        state.__setattr__(self._slot, resolved)
-        return resolved
+        return resolve_once(
+            request, self._slot, lambda: self._resolve(request, vocabulary)
+        )
