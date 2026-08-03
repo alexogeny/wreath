@@ -476,6 +476,7 @@ def test_every_declared_fact_shares_one_implementation() -> None:
         "organizations",
         "org_roles",
         "entitlements",
+        "quota",
     }
     assert all(isinstance(fact, SetFact) for fact in facts)
 
@@ -511,6 +512,7 @@ async def test_facts_for_enumerates_what_a_manifest_must_tag() -> None:
         "organizations",
         "org_roles",
         "entitlements",
+        "quota",
     }
     assert facts["organizations"] == frozenset({"acme"})
 

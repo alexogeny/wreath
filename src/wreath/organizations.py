@@ -55,6 +55,26 @@ established, resolve synchronously where policy is evaluated.
 directly, or a snapshot an authentication backend loaded. `load_into` is the
 helper for the second, and `wreath.organizations` never opens a connection on
 the authorization path.
+
+## SCIM provisions into this, and adds nothing to it
+
+`scim_router` is the RFC 7643/7644 adapter, and it is an adapter in the strict
+sense: it has no user table, no group table and no membership table of its own.
+
+    app.include_router(scim_router(app, users=users, organizations=store,
+                                   organization="acme"))
+
+A SCIM `User` is a `wreath.users` record, a SCIM `Group` is a **role** in this
+store's declared vocabulary, and a SCIM group membership is this module's
+`Membership`. That is what makes a directory de-provisioning take effect: the
+row a directory removes is the row `context.org_roles` reads. It is also why a
+group cannot be created over SCIM — the role vocabulary is configuration a Cedar
+policy names by string, not data — and why every SCIM route is authorized by the
+application's own Cedar policies rather than by anything SCIM decides.
+
+Listing an organisation's members is the one question the authorization path
+never asks, so it is a separate seam: `MemberDirectory`, which
+`InMemoryOrganizationStore` implements and `scim_router` requires.
 """
 
 from __future__ import annotations
@@ -65,15 +85,19 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from ._scim import scim_router
+
 __all__ = [
     "Invitation",
     "InMemoryOrganizationStore",
     "Membership",
+    "MemberDirectory",
     "Memberships",
     "Organization",
     "OrganizationStore",
     "active_organization",
     "load_into",
+    "scim_router",
 ]
 
 #: Where a loaded membership snapshot lives for the rest of a request.
@@ -190,6 +214,26 @@ class OrganizationStore(Protocol):
         ...
 
 
+@runtime_checkable
+class MemberDirectory(Protocol):
+    """The other direction: who is *in* an organisation.
+
+    Deliberately separate from `OrganizationStore`, because the two questions
+    have opposite cost profiles and opposite callers. Authorization asks "what
+    does this user hold", once per session, and never needs a list. A directory
+    -- SCIM's `GET /Users`, an admin screen's member table -- asks "who is in
+    this tenant", and cannot be answered by the first question at all.
+
+    A store that only ever backs authorization does not have to implement this,
+    and `scim_router` refuses at build time rather than discovering it missing
+    on the first request.
+    """
+
+    async def members(self, org_id: str) -> tuple[Membership, ...]:
+        """Every membership in `org_id`."""
+        ...
+
+
 class InMemoryOrganizationStore:
     """The reference `OrganizationStore`, and what the tests run against.
 
@@ -255,6 +299,22 @@ class InMemoryOrganizationStore:
         return tuple(
             Membership(organization=org, user_id=user_id, roles=roles)
             for org, roles in sorted(self._memberships.get(user_id, {}).items())
+        )
+
+    async def members(self, org_id: str) -> tuple[Membership, ...]:
+        """Every membership in `org_id`, in user id order -- the `MemberDirectory` half.
+
+        Scans the membership table rather than keeping a reverse index. The
+        table is `user -> org -> roles` because that is the shape the
+        authorization path reads, and a second index maintained beside it is
+        one more thing that can disagree with the first; a store this size can
+        afford the scan, and a database-backed one answers with a `WHERE`
+        clause instead of either.
+        """
+        return tuple(
+            Membership(organization=org_id, user_id=user_id, roles=held[org_id])
+            for user_id, held in sorted(self._memberships.items())
+            if org_id in held
         )
 
     async def add_member(

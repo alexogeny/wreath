@@ -179,5 +179,13 @@ model *freshness* — the same optimistic-chrome property recorded for
 and the route can then answer 403. Draw chrome from it; never make a decision
 behind it.
 
+## When the directory writes instead of a person
+
+Past a certain size a customer stops creating accounts by hand and points their
+identity provider at you. [SCIM provisioning](scim.md) is that adapter, and it
+writes into exactly the stores on this page — a SCIM group *is* one of the roles
+you declared above — so a de-provisioning removes the row `context.org_roles`
+reads rather than a row in a table of its own.
+
 Reference: [`wreath.organizations`](../reference/organizations.md),
 [`wreath.authorization`](../reference/authorization.md)
