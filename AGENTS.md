@@ -293,17 +293,20 @@ See [`repo-map.md`](repo-map.md) for a subsystem-oriented source, test, benchmar
   default marks, and it did not used to.** The suite was ~3.5s, where an xdist
   worker's re-import of the native extensions cost more than it saved; it has
   since grown past 8,600 default-collected tests, and the trade inverted. The
-  last measured curve flattened at six workers and turned back up once workers
-  outnumbered the cores they shared with the extensions each one loaded, so
-  prefer `-n 6` over `-n auto` on a wide machine. **Prefer `uv run wreath test`
-  for routine agent runs.** It applies `min(6, cpu_count)`, keeps pytest's
+  old measured curve flattened at six workers, but the grown 13,297-test tree
+  moved the knee: three warm mutation-disabled runs averaged 27.727s ± 0.349s
+  at six workers and 25.860s ± 0.282s at eight. Ten workers were unstable and
+  no faster in the clean samples, so prefer `-n 8` over `-n auto` on a wide
+  machine. **Prefer `uv run wreath test` for routine agent runs.** It applies
+  `min(8, cpu_count)`, keeps pytest's
   semantics, and adds the heat map, timing history, and bounded mutation
   confidence; a bare `uv run pytest` stays the serial process you attach a
   debugger to. This recommendation is measured rather than aspirational: on the
   12,002-test default-marker suite, three warm runs with mutation disabled were
   26.404s ± 0.138s for `wreath test` against 29.055s ± 2.069s for
   `pytest -n 6` on the same six workers (1.10x ± 0.08x). The raw commands and
-  samples live in `benchmarks/results/test_runner_2026-08-02.json`. A first run
+  samples live in `benchmarks/results/test_runner_2026-08-02.json`; the updated
+  worker curve lives in `benchmarks/results/test_runner_2026-08-03.json`. A first run
   after source changes also builds the mutation candidate catalog; its planning
   and compilation overlap the ordinary workers without collecting the whole
   suite again. One hundred ninety-two sampled controls are watched by default. After the
