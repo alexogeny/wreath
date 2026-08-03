@@ -24,6 +24,7 @@ def insert_settled(connection, table, values):
     statement = _build(table, prepared)
     result = connection.execute(statement)
     _record(result, table)
+    _audit(result)
     return result.rowcount
 
 
@@ -35,6 +36,7 @@ def replace_settled(session, relation, rows):
     query = _build(relation, ready)
     outcome = session.execute(query)
     _record(outcome, relation)
+    _audit(outcome)
     return outcome.rowcount
 '''
 
@@ -47,6 +49,7 @@ def counts(items):
     seen = len(items)
     average = total / seen
     _log(average)
+    _emit(average)
     return average
 
 
@@ -57,6 +60,7 @@ def gather(source):
     if not out:
         raise ValueError("empty")
     _log(out)
+    _emit(out)
     return out
 '''
 
@@ -173,6 +177,165 @@ def test_an_unparseable_file_does_not_stop_the_scan(tree: Path) -> None:
     groups, _ = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
 
     assert len(groups) == 1
+
+
+def test_a_documented_protocol_stub_is_not_a_finding(tree: Path) -> None:
+    """The bug that made the two largest groups in the report meaningless.
+
+    The span was measured over the whole function, so a `Protocol` method whose
+    entire body is `...` measured as however many lines its docstring ran to,
+    cleared `--min-lines`, and then hashed identically to every other stub in
+    the tree. That produced a 27-copy group and a 29-copy group -- 551 claimed
+    redundant lines -- out of Protocol methods and `@property` accessors that
+    share no code whatsoever.
+    """
+    _write(tree, "protocol.py", '''
+from typing import Protocol
+
+
+class Store(Protocol):
+    async def read(self, key):
+        """Read one row.
+
+        Several paragraphs of prose about what a store owes its caller, easily
+        long enough to clear the minimum on its own, which is exactly how this
+        went unnoticed: the body is one token and the function is twelve lines.
+        """
+        ...
+
+    async def write(self, key, value):
+        """Write one row.
+
+        A different several paragraphs, equally long, saying something entirely
+        different about a completely different operation, and sharing not one
+        line of implementation with the method above it.
+        """
+        ...
+''')
+
+    groups, scanned = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+
+    assert (groups, scanned) == ([], 0)
+
+
+def test_a_documented_one_line_property_is_not_a_finding(tree: Path) -> None:
+    """The other half of the same bug: `return self._x` under a long docstring."""
+    _write(tree, "accessors.py", '''
+class Bus:
+    @property
+    def dropped(self):
+        """Messages dropped since start.
+
+        Counted rather than logged, because a rate is what an operator reads and
+        a log line is what they miss. Prose long enough to clear the minimum.
+        """
+        return self._dropped
+
+    @property
+    def buffered(self):
+        """Messages buffered right now.
+
+        A different counter with a different meaning and a different operational
+        story, also documented at length, also a single-line body.
+        """
+        return self._buffered
+''')
+
+    groups, scanned = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+
+    assert (groups, scanned) == ([], 0)
+
+
+def test_a_multi_statement_body_under_a_long_docstring_is_still_scanned(
+    tree: Path,
+) -> None:
+    """The filter must key on the body, not on the presence of a docstring.
+
+    The fix would be worthless if it also hid real duplication that happens to
+    be well documented -- which, in this repository, is most of it.
+    """
+    _write(tree, "real.py", '''
+def register(subs, table, name):
+    """Declare this process's groups.
+
+    A long docstring, because everything here has one, and the point of this
+    test is that prose neither creates a finding nor suppresses one.
+    """
+    pairs = sorted(subs)
+    if not pairs:
+        return None
+    statement = _insert(table)
+    connection = _acquire()
+    _run(connection, statement, pairs, name)
+    _release(connection)
+    return None
+
+
+def deregister(members, relation, bus):
+    """Remove this process's groups.
+
+    Also long, also prose, and the body below is the same shape under different
+    names -- which is precisely the finding this tool exists to make.
+    """
+    items = sorted(members)
+    if not items:
+        return None
+    query = _delete(relation)
+    handle = _acquire()
+    _run(handle, query, items, bus)
+    _release(handle)
+    return None
+''')
+
+    groups, scanned = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+
+    assert scanned == 2
+    assert len(groups) == 1
+    assert [site.name for site in groups[0].sites] == ["register", "deregister"]
+
+
+def test_reported_lines_are_body_lines_not_function_lines(tree: Path) -> None:
+    """The weight has to match the claim: a collapse removes bodies, not prose.
+
+    The surviving copy still needs its docstring, so counting docstrings into
+    "lines a collapse would remove" overstated every group in the report.
+    """
+    _write(tree, "weighted.py", '''
+def one(a, b, c):
+    """A docstring that is deliberately five lines long.
+
+    Second paragraph.
+    Third line.
+    """
+    first = _step(a)
+    second = _step(b)
+    third = _step(c)
+    joined = _merge(first, second)
+    result = _merge(joined, third)
+    _record(result)
+    _audit(result)
+    return result
+
+
+def two(x, y, z):
+    """A one-line docstring."""
+    alpha = _step(x)
+    beta = _step(y)
+    gamma = _step(z)
+    pair = _merge(alpha, beta)
+    answer = _merge(pair, gamma)
+    _record(answer)
+    _audit(answer)
+    return answer
+''')
+
+    groups, _ = dup_scan.scan(tree, ("src/wreath",), dup_scan.DEFAULT_MIN_LINES)
+
+    assert len(groups) == 1
+    # Both bodies are eight lines. The docstrings differ by four, and neither
+    # length may reach the count.
+    assert {site.lines for site in groups[0].sites} == {8}
+    assert groups[0].redundant_lines == 8
 
 
 def test_ranking_is_by_the_lines_a_collapse_would_remove(tree: Path) -> None:

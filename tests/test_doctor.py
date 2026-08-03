@@ -82,7 +82,7 @@ def test_a_repeated_model_query_is_a_finding() -> None:
 def test_a_finding_describes_itself_in_one_line() -> None:
     (finding,) = find_n_plus_one([_herd_trace(50)], threshold=10,
                                  routes=ROUTES, models=MODELS)
-    described = finding.describe()
+    described = finding.explain()
     assert "GET /llamas" in described
     assert "51" in described                     # statements issued
     assert "50" in described                     # of them for one model
@@ -443,7 +443,7 @@ async def test_the_doctor_diagnoses_a_running_server() -> None:
     client = StubInspector([_herd_trace(50), _herd_trace(2, request_id=2)])
     findings = await diagnose_n_plus_one(client, threshold=10)
 
-    assert [f.describe() for f in findings] == [
+    assert [f.explain() for f in findings] == [
         "GET /llamas issued 51 statements; 50 of them hydrated Trek"
     ]
     assert client.asked == ["timeline:256", "metadata:routes", "metadata:models"]
@@ -591,4 +591,4 @@ def test_an_unambiguous_name_keeps_its_short_form() -> None:
     finding = ledger.finding()
     assert finding is not None
     assert finding.worst.model == "Trek"
-    assert "myapp" not in finding.describe()
+    assert "myapp" not in finding.explain()
