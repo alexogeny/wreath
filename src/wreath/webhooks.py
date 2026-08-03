@@ -53,6 +53,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from ._jobcore import compute_backoff
 from ._json import dumps, loads
 from .binding import _body_validator
 from .http_client import ClientError
@@ -2087,7 +2088,10 @@ class WebhookDispatcher:
         worker_id: Identifies this worker on a lease. Cannot be empty.
         lease_seconds: Claim length; the lease is renewed at a third of this while sending.
         max_attempts: Attempts before a retryable failure settles as failed.
-        retry_delay: Base backoff in seconds, doubled per attempt already made.
+        retry_delay: Base backoff in seconds, doubled per attempt already made,
+            capped at `retry_cap` and jittered ±20% by `wreath._jobcore.compute_backoff`
+            -- the same calculation the job runner and the message bus retry on.
+        retry_cap: Longest a retry may be deferred, however many attempts precede it.
         retry_statuses: Response statuses treated as retryable.
 
     Raises:
@@ -2102,6 +2106,7 @@ class WebhookDispatcher:
         "_managed",
         "_max_attempts",
         "_outbox",
+        "_retry_cap",
         "_retry_delay",
         "_retry_statuses",
         "_running",
@@ -2119,6 +2124,7 @@ class WebhookDispatcher:
         lease_seconds: float = 30.0,
         max_attempts: int = 6,
         retry_delay: float = 1.0,
+        retry_cap: float = 3600.0,
         retry_statuses: frozenset[int] = frozenset(
             {408, 425, 429, 500, 502, 503, 504}
         ),
@@ -2127,12 +2133,18 @@ class WebhookDispatcher:
             raise ValueError("webhook dispatcher worker_id cannot be empty")
         if lease_seconds <= 0 or max_attempts <= 0 or retry_delay < 0:
             raise ValueError("webhook dispatcher limits are invalid")
+        if retry_cap < retry_delay:
+            raise ValueError(
+                "webhook dispatcher retry_cap cannot be below retry_delay; a cap "
+                "under the base would make the first retry shorter than asked for"
+            )
         self._outbox = outbox
         self._destinations = dict(destinations)
         self._worker_id = worker_id
         self._lease_seconds = lease_seconds
         self._max_attempts = max_attempts
         self._retry_delay = retry_delay
+        self._retry_cap = retry_cap
         self._retry_statuses = retry_statuses
         self._running = False
         self._in_flight = 0
@@ -2364,7 +2376,18 @@ class WebhookDispatcher:
             await self._outbox.mark_retry(
                 session,
                 delivery,
-                delay=self._retry_delay * (2 ** (delivery.attempts - 1)),
+                delay=compute_backoff(
+                    delivery.attempts,
+                    kind="exp",
+                    base=self._retry_delay,
+                    # Bounded and jittered, where this was neither. An outage
+                    # fails every pending delivery at once, so a lockstep retry
+                    # is the thundering herd `compute_backoff` exists to break;
+                    # the cap is what stops attempt 6 of a raised max_attempts
+                    # scheduling a delivery days out.
+                    cap=self._retry_cap,
+                    jitter=0.2,
+                ),
                 status=result.status,
                 failure=result.failure,
             )

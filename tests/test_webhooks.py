@@ -1041,7 +1041,11 @@ async def test_dispatcher_schedules_retry_for_retryable_status() -> None:
 
     assert result is not None and result.outcome == "failed"
     assert "state='retry_wait'" in session.calls[2][0]
-    assert session.calls[2][1][2] == 4
+    # attempt 2 of base 2 doubles to 4, then `compute_backoff` jitters it by
+    # +/-20% -- so the assertion is the band, not the point. An exact 4 here
+    # would mean every pending delivery retried in lockstep, which is what the
+    # jitter exists to prevent when an outage fails them all at once.
+    assert 3.2 <= session.calls[2][1][2] <= 4.8
     assert session.calls[2][1][3] == 503
 
 
