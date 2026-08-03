@@ -36,6 +36,9 @@ def fake_repo(tmp_path: Path) -> Path:
     (tmp_path / "tests" / "test_widgets.py").write_text("")
     (tmp_path / "docs" / "guides").mkdir(parents=True)
     (tmp_path / "docs" / "guides" / "widgets.md").write_text("")
+    (tmp_path / map_lint.REFERENCE_DIR).mkdir(parents=True)
+    (tmp_path / map_lint.REFERENCE_DIR / "widgets.md").write_text(
+        "# `wreath.widgets`\n\n::: wreath.widgets\n")
     (tmp_path / "docs" / "llms.txt").write_text("- [Widgets](guides/widgets.md)\n")
     (tmp_path / map_lint.CAPABILITY_PAGE).write_text(
         "# What you don't have to install\n\n::: capability-map\n")
@@ -61,6 +64,12 @@ def _clean_manifest() -> dict:
             }
         ],
     }
+
+
+def _reference_page(root: Path, module: str) -> None:
+    """A reference page that actually renders `wreath.<module>`."""
+    (root / map_lint.REFERENCE_DIR / f"{module}.md").write_text(
+        f"# `wreath.{module}`\n\n::: wreath.{module}\n")
 
 
 def _write_manifest(root: Path, manifest: dict) -> None:
@@ -116,6 +125,82 @@ def test_package_counts_as_a_public_surface(fake_repo: Path) -> None:
     (package / "__init__.py").write_text("")
 
     assert "MAP003" in _codes(map_lint.scan(fake_repo))
+
+
+def test_public_module_with_no_reference_page_is_caught(fake_repo: Path) -> None:
+    """Being named in the manifest is not being documented.
+
+    `wreath.response_cache` was listed in the `cache` subsystem's `sources`, so
+    MAP003 passed, while no page anywhere rendered it -- the whole `@cached`
+    surface was ungenerated and nothing said so.
+    """
+    (fake_repo / "src" / "wreath" / "gadgets.py").write_text("")
+    manifest = _clean_manifest()
+    manifest["subsystems"][0]["sources"].append("src/wreath/gadgets.py")
+    _write_manifest(fake_repo, manifest)
+
+    findings = map_lint.scan(fake_repo)
+    assert _codes(findings) == {"MAP014"}
+    assert any("wreath.gadgets" in finding.message for finding in findings)
+
+
+def test_public_module_with_a_reference_page_is_not_caught(fake_repo: Path) -> None:
+    (fake_repo / "src" / "wreath" / "gadgets.py").write_text("")
+    _reference_page(fake_repo, "gadgets")
+    manifest = _clean_manifest()
+    manifest["subsystems"][0]["sources"].append("src/wreath/gadgets.py")
+    _write_manifest(fake_repo, manifest)
+
+    assert map_lint.scan(fake_repo) == []
+
+
+def test_reference_page_without_the_directive_does_not_count(fake_repo: Path) -> None:
+    """A file named after the module is not a rendering of it.
+
+    The `:::` directive is what generates the API; prose about the module beside
+    a heading that names it leaves the surface just as ungenerated.
+    """
+    (fake_repo / "src" / "wreath" / "gadgets.py").write_text("")
+    (fake_repo / map_lint.REFERENCE_DIR / "gadgets.md").write_text(
+        "# `wreath.gadgets`\n\nGadgets, described by hand and generated nowhere.\n")
+
+    assert "MAP014" in _codes(map_lint.scan(fake_repo))
+
+
+def test_a_submodule_directive_documents_its_parent(fake_repo: Path) -> None:
+    """`docs/reference/orm.md` renders `::: wreath.orm.session` and fourteen more.
+
+    `_public_modules` lists the package as `orm`, so the reduction to a top-level
+    name is what keeps the two rules talking about the same thing.
+    """
+    package = fake_repo / "src" / "wreath" / "gizmos"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (fake_repo / map_lint.REFERENCE_DIR / "gizmos.md").write_text(
+        "# `wreath.gizmos`\n\n::: wreath.gizmos.levers\n")
+
+    assert "MAP014" not in _codes(map_lint.scan(fake_repo))
+
+
+def test_exempt_module_needs_no_reference_page(fake_repo: Path) -> None:
+    """`wreath.storage` is a deprecated alias; a page for it would document the
+    vocabulary being retired, in parallel with the one that replaced it."""
+    (fake_repo / "src" / "wreath" / "storage.py").write_text("")
+    manifest = _clean_manifest()
+    manifest["subsystems"][0]["sources"].append("src/wreath/storage.py")
+    _write_manifest(fake_repo, manifest)
+
+    assert map_lint.scan(fake_repo) == []
+
+
+def test_missing_reference_section_is_one_finding_not_eighty(fake_repo: Path) -> None:
+    """A report with a line per module buries the fact that the section is gone."""
+    (fake_repo / map_lint.REFERENCE_DIR / "widgets.md").unlink()
+    (fake_repo / map_lint.REFERENCE_DIR).rmdir()
+
+    findings = [f for f in map_lint.scan(fake_repo) if f.code == "MAP014"]
+    assert len(findings) == 1
+    assert "reference section is gone" in findings[0].message
 
 
 def test_subsystem_missing_a_required_field_is_caught(fake_repo: Path) -> None:
@@ -346,6 +431,7 @@ def test_fix_does_not_sweep_up_a_prefix_match(fake_repo: Path) -> None:
 def test_adopt_adds_the_source_and_brings_its_tests(fake_repo: Path) -> None:
     (fake_repo / "src" / "wreath" / "gadgets.py").write_text("")
     (fake_repo / "tests" / "test_gadgets.py").write_text("")
+    _reference_page(fake_repo, "gadgets")
     assert "MAP003" in _codes(map_lint.scan(fake_repo))
 
     changes, refusals = map_lint.repair(fake_repo, [("widgets", "src/wreath/gadgets.py")])
@@ -383,6 +469,7 @@ def test_repair_never_resolves_a_finding_that_needs_judgment(fake_repo: Path) ->
     lies, which is the exact failure the lint exists to prevent.
     """
     (fake_repo / "src" / "wreath" / "gadgets.py").write_text("")   # MAP003
+    _reference_page(fake_repo, "gadgets")
     manifest = _clean_manifest()
     manifest["subsystems"][0]["reference"] = ["docs/reference/moved.md"]  # MAP002
     _write_manifest(fake_repo, manifest)
