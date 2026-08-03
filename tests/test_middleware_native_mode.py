@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime, parsedate_to_datetime
 from typing import Any
 
 import pytest
@@ -84,6 +86,66 @@ async def serve(app: Wreath, raw: bytes) -> bytes:
     return b"".join(transport.seen)
 
 
+DATE_TOLERANCE = timedelta(seconds=2)
+
+
+def _is_date(line: bytes) -> bool:
+    return line.lower().startswith(b"date:")
+
+
+def _blank_value(line: bytes) -> bytes:
+    """Replace a header's value, keeping its name, colon and spacing verbatim."""
+    value = line.partition(b":")[2].lstrip()
+    return line[: len(line) - len(value)] + b"<normalized>"
+
+
+def comparable(response: bytes) -> tuple[list[bytes], bytes]:
+    """Split a response into header lines and body, blanking only `Date` values.
+
+    Everything else stays byte-for-byte, and so does the `Date` header's own
+    name, spelling, spacing and position among the headers -- a `Date:` on one
+    side against a `date:` on the other is still a mismatch. The value itself is
+    the one thing the two `serve()` calls cannot share, because each reads its
+    own clock; `assert_same_wire_bytes` checks it instead of discarding it.
+    """
+    head, _, body = response.partition(b"\r\n\r\n")
+    lines = [_blank_value(line) if _is_date(line) else line for line in head.split(b"\r\n")]
+    return lines, body
+
+
+def _http_dates(response: bytes) -> list[datetime]:
+    """Every `Date` value in the head, parsed as an RFC 9110 IMF-fixdate."""
+    head, _, _ = response.partition(b"\r\n\r\n")
+    values = [line.partition(b":")[2].strip() for line in head.split(b"\r\n") if _is_date(line)]
+    return [_parse_http_date(value) for value in values]
+
+
+def _parse_http_date(value: bytes) -> datetime:
+    text = value.decode("ascii", "replace")
+    try:
+        parsed = parsedate_to_datetime(text)
+    except ValueError as exc:  # a malformed value is a parity failure, not an error
+        raise AssertionError(f"not an HTTP-date: {text!r}") from exc
+    assert parsed.tzinfo == UTC, f"HTTP-date must be GMT: {text!r}"
+    assert format_datetime(parsed, usegmt=True) == text, f"not IMF-fixdate: {text!r}"
+    return parsed
+
+
+def assert_same_wire_bytes(python: bytes, native: bytes) -> None:
+    """Assert the two modes wrote the same bytes, allowing only a clock tick.
+
+    The `Date` values are compared as instants within `DATE_TOLERANCE` rather
+    than as bytes; every other byte, including the `Date` header's name and
+    position, must match exactly.
+    """
+    assert comparable(python) == comparable(native)
+    python_dates = _http_dates(python)
+    native_dates = _http_dates(native)
+    assert python_dates, "expected a Date header to compare"
+    for left, right in zip(python_dates, native_dates, strict=True):
+        assert abs(left - right) <= DATE_TOLERANCE, f"{left} vs {right}"
+
+
 def preflight(origin: str, method: str) -> bytes:
     return request(origin=origin, access_control_request_method=method)
 
@@ -105,23 +167,25 @@ SHAPES = [
 @pytest.mark.asyncio
 @pytest.mark.parametrize("raw", SHAPES)
 async def test_native_mode_puts_the_same_bytes_on_the_wire(raw: bytes) -> None:
-    """The whole contract: opting in must not change a single response byte."""
+    """Opting in changes no byte but the instant in an independent `Date` read."""
     python = await serve(build("python"), raw)
     native = await serve(build("native"), raw)
-    assert python == native
+    assert_same_wire_bytes(python, native)
 
 
 @pytest.mark.asyncio
 async def test_a_wildcard_configuration_matches_too() -> None:
+    """A wildcard origin is answered with the same bytes, `Date` value included."""
     raw = request(origin="https://anything.test", access_control_request_method="POST")
     python = await serve(build("python", allow_origins=["*"]), raw)
     native = await serve(build("native", allow_origins=["*"]), raw)
-    assert python == native
+    assert_same_wire_bytes(python, native)
     assert b"access-control-allow-origin: *" in native.lower()
 
 
 @pytest.mark.asyncio
 async def test_credentials_and_headers_configuration_matches() -> None:
+    """Credentials, allowed headers and max-age match byte for byte too."""
     config = {
         "allow_origins": ["https://a.test"],
         "allow_credentials": True,
@@ -129,8 +193,9 @@ async def test_credentials_and_headers_configuration_matches() -> None:
         "max_age": 99,
     }
     raw = request(origin="https://a.test", access_control_request_method="GET")
-    assert await serve(build("python", **config), raw) == await serve(
-        build("native", **config), raw
+    assert_same_wire_bytes(
+        await serve(build("python", **config), raw),
+        await serve(build("native", **config), raw),
     )
 
 

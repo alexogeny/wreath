@@ -420,8 +420,8 @@ class RateLimitMiddleware:
 
     global_scope = True
     __slots__ = (
-        "_cost", "_exempt", "_key", "_policy_headers", "_store", "_try_acquire",
-        "before", "before_sync", "throttled",
+        "_cost", "_exempt", "_key", "_policy_headers", "_quota", "_store",
+        "_try_acquire", "before", "before_sync", "throttled",
     )
 
     def __init__(
@@ -434,6 +434,7 @@ class RateLimitMiddleware:
         store: RateLimitStore | None = None,
         key: Callable[[Request], str | None] | None = None,
         exempt: Callable[[Request], bool] | None = None,
+        quota: Any = None,
         _route_scoped: bool = False,
     ) -> None:
         if limit <= 0:
@@ -462,6 +463,19 @@ class RateLimitMiddleware:
                 "TieredRateLimitMiddleware (route middleware) for per-principal "
                 "limits, and keep this one keyed on the address for ingress"
             )
+        if quota is not None and not _route_scoped:
+            # Same reasoning as `principal_key` above, and the same failure: a
+            # quota is metered per principal, so at ingress there is nobody to
+            # meter. `QuotaMeter.key` would answer None for every request and
+            # the quota would count nothing at all while appearing configured --
+            # which is worse than refusing, because the allowance looks enforced
+            # right up until the invoice.
+            raise ValueError(
+                "RateLimitMiddleware is a global hook and runs before "
+                "authentication, so it has no principal to meter a quota "
+                "against; use TieredRateLimitMiddleware (route middleware) for "
+                "quotas"
+            )
         selected = store if store is not None else MemoryRateLimitStore()
         selected.configure(capacity, limit / window)
         # Attached to a *refusal* only. Advertising the policy on every response
@@ -487,17 +501,27 @@ class RateLimitMiddleware:
         #: with nothing to do.
         self.throttled = 0
         self._exempt = exempt
+        #: The quota metered in this same hook, or None. One hook rather than a
+        #: second middleware, because two independent limiters on one request is
+        #: how a 429 comes back contradicting a 402: whichever refuses, exactly
+        #: one refusal is built and it is built here.
+        self._quota = quota
         # Resolved once rather than branching and re-looking-up per request. A
         # synchronous store also skips a coroutine on the hot path; the memory
         # store is exactly that, so it exposes before_sync (fused, no await)
-        # while a remote store keeps the awaiting before hook.
+        # while a remote store keeps the awaiting before hook. A quota whose
+        # store awaits forces the awaiting hook even behind a local bucket --
+        # the pair is one decision and cannot be half-synchronous.
         self._try_acquire: Any = getattr(selected, "try_acquire", None)
-        if self._try_acquire is not None:
-            self.before = None
-            self.before_sync = self._before_local_sync
-        else:
+        awaiting = self._try_acquire is None or (
+            quota is not None and quota.awaits
+        )
+        if awaiting:
             self.before = self._before_remote
             self.before_sync = None
+        else:
+            self.before = None
+            self.before_sync = self._before_local_sync
 
     #: The bucket a request lands in when the key function cannot name one.
     #: Shared by every such request on purpose: a limiter that *skips* the
@@ -521,8 +545,15 @@ class RateLimitMiddleware:
         The default in-process store is returned too and contributes nothing --
         it has no `component()`, and the walk asks rather than assumes, so
         filtering here would be a second copy of that test.
+
+        A metered quota's store is included for the same reason the limiter's
+        is: a `PostgresQuotaStore` puts a `wreath_quota` table in a database, and
+        a table emitted by `wreath schema sql` and created by nothing is exactly
+        the defect this property was added to fix.
         """
-        return (self._store,)
+        if self._quota is None:
+            return (self._store,)
+        return (self._store, self._quota.store)
 
     def describe(self) -> Any:
         """The 429 this limiter can answer, and the headers it puts on it.
@@ -603,19 +634,48 @@ class RateLimitMiddleware:
         self.throttled += 1
         return response
 
+    # The rate limit is decided *before* the quota, deliberately. A throttled
+    # request did no work, so charging its cost against a monthly allowance
+    # would bill a caller for requests the server refused -- and the meter is the
+    # one signal that has to reconcile with an invoice. The consequence, stated
+    # so nobody reads it as a bug: a caller who is both throttled and out of
+    # quota is told to slow down first, and learns about the quota on the retry.
+    # One answer either way, which is the coherence the pairing exists for.
+
     def _before_local_sync(self, request: Request) -> Any | None:
         key = self._identify(request)
         if key is None:
             return None
         retry_after = self._try_acquire(key, self._cost, monotonic())
-        return None if retry_after <= 0.0 else self._limited(retry_after)
+        if retry_after > 0.0:
+            return self._limited(retry_after)
+        quota = self._quota
+        return None if quota is None else quota.spend_sync(request)
 
     async def _before_remote(self, request: Request) -> Any | None:
         key = self._identify(request)
         if key is None:
             return None
+        # `acquire` unconditionally, even for a local store that also offers the
+        # synchronous `try_acquire`. This hook is only chosen when something on
+        # it awaits, and `MemoryRateLimitStore.acquire` is `try_acquire` behind
+        # the protocol -- so branching here would save one coroutine on a path
+        # that is already making a database round trip for the quota. A branch
+        # whose saving is noise beside the work beside it is a survivor waiting
+        # to happen, not an optimisation.
         retry_after = await self._store.acquire(key, self._cost, monotonic())
-        return None if retry_after <= 0.0 else self._limited(retry_after)
+        if retry_after > 0.0:
+            return self._limited(retry_after)
+        quota = self._quota
+        if quota is None:
+            return None
+        # `spend` unconditionally, for the reason `acquire` is unconditional
+        # above: it is correct for a local store too -- `MemoryQuotaStore.spend`
+        # is `try_spend` behind the protocol -- and branching would save one
+        # coroutine on a hook that is only reached because something else on it
+        # awaits. `QuotaMeter.awaits` decides which *hook* runs, once, at
+        # construction; it has no second job here.
+        return await quota.spend(request)
 
 
 class TieredRateLimitMiddleware:
@@ -666,6 +726,11 @@ class TieredRateLimitMiddleware:
         cost: Tokens one request spends, in every tier. Default 1.0.
         exempt: A request it answers True for is not limited at all.
         store_factory: Builds one store per tier. Default `MemoryRateLimitStore`.
+        quota: A `wreath.quota.QuotaMeter` charged in the same hook, after the
+            rate limit is satisfied. One meter across every tier, not one per
+            tier: the tier decides how fast a caller may go, the quota decides
+            how much they get, and giving each tier its own counter would hand a
+            caller a fresh monthly allowance for changing plan.
 
     Raises:
         ValueError: `tiers` is empty.
@@ -684,6 +749,7 @@ class TieredRateLimitMiddleware:
         cost: float = 1.0,
         exempt: Callable[[Request], bool] | None = None,
         store_factory: Callable[[], RateLimitStore] | None = None,
+        quota: Any = None,
     ) -> None:
         if not tiers:
             raise ValueError("at least one tier is required")
@@ -711,7 +777,7 @@ class TieredRateLimitMiddleware:
             # global form refuses it because a global hook runs at ingress.
             child = RateLimitMiddleware(
                 limit=limit, window=window, cost=cost, exempt=exempt, store=build(),
-                key=key, _route_scoped=True,
+                key=key, quota=quota, _route_scoped=True,
             )
             hook = child.before
             self._dispatch[name] = (
