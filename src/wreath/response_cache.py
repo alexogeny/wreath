@@ -54,6 +54,7 @@ from ._codecs import parse_qs as _parse_qs
 from ._orm_events import subscribe_writes
 from .cache import BoundedCache
 from .response import Response
+from .temporal import Duration
 
 __all__ = [
     "CDNPurge",
@@ -436,7 +437,7 @@ def _revive(entry: tuple[str, Any]) -> Any:
 def cached(
     fn: Callable[..., Any] | None = None,
     *,
-    ttl: float | None = None,
+    ttl: Any = None,
     max_entries: int = 1024,
     key: Callable[[Any], str] = default_cache_key,
     methods: tuple[str, ...] = ("GET",),
@@ -492,8 +493,9 @@ def cached(
     # key cannot be used for an identified caller; see the wrapper below.
     public_key = key is default_cache_key or getattr(key, "_wreath_public", False)
 
+    window = None if ttl is None else Duration.of(ttl).total_seconds()
     the_store: BoundedCache = store if store is not None else BoundedCache(
-        max_entries=max_entries, ttl=ttl)
+        max_entries=max_entries, ttl=window)
 
     def decorate(handler: Callable[..., Any]) -> Callable[..., Any]:
         # One in-flight computation per key. Without it, every request that
