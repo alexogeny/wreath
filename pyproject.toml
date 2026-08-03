@@ -262,6 +262,13 @@ extend-immutable-calls = ["wreath.binding.Depends", "Depends"]
 # -- wrapping the 50 entries to fit would cost the property the file exists for.
 # Scoped deliberately: E501 only, and only here.
 "src/wreath/_port/rules.py" = ["E501"]
+# The admin's pages are HTML templates held as string literals, and a template's
+# line breaks are part of its output. Wrapping an element whose attributes carry
+# `{% if %}` clauses either inserts whitespace where the markup is significant
+# (inside `<textarea>`) or splits an attribute across lines, so the wrap would be
+# changing the rendered document to satisfy a rule about Python source. Scoped
+# deliberately: E501 only, and only here.
+"src/wreath/_admin/pages.py" = ["E501"]
 "benchmarks/apps.py" = ["E402"]
 "benchmarks/lifecycle_apps.py" = ["E402"]
 "benchmarks/lifecycle.py" = ["ASYNC220", "ASYNC240"]
