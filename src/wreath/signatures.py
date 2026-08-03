@@ -95,6 +95,7 @@ from ._auth.jwt import JwtError, OkpPublicKey, key_from_jwk
 from ._reqcache import resolve_once
 from .exceptions import HTTPException
 from .kv import KV
+from .temporal import Duration
 
 __all__ = [
     "WEB_BOT_AUTH_2026",
@@ -523,7 +524,8 @@ class NonceLedger:
 
     __slots__ = ("_table", "refusals", "replays")
 
-    def __init__(self, *, max_entries: int = 16384, ttl: float = 300.0) -> None:
+    def __init__(self, *, max_entries: int = 16384, ttl: Any = 300.0) -> None:
+        ttl = Duration.of(ttl).total_seconds()
         if max_entries < 1:
             raise ValueError("nonce ledger max_entries must be positive")
         if ttl <= 0:
@@ -727,7 +729,7 @@ class Signatures:
         self,
         *,
         directories: Iterable[str] = (),
-        max_age: float = 60.0,
+        max_age: Any = 60.0,
         profile: str = WEB_BOT_AUTH_2026,
         required: Sequence[str] = _REQUIRED_COMPONENTS,
         nonces: NonceLedger | None = None,
