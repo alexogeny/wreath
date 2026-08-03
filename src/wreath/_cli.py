@@ -424,7 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--workers",
         default="auto",
         metavar="N",
-        help="pytest worker processes: auto (capped at 6) or a positive integer",
+        help="pytest worker processes: auto (capped at 8) or a positive integer",
     )
     test_parser.add_argument(
         "--slowest",
@@ -2174,7 +2174,7 @@ def execute_doctor_n_plus_one(namespace: argparse.Namespace) -> int:
                     "route": f.route,
                     "request_id": f.request_id,
                     "queries": f.queries,
-                    "summary": f.describe(),
+                    "summary": f.explain(),
                     "repetitions": [
                         {"model": r.model, "count": r.count, "total_us": r.total_us}
                         for r in f.repetitions
@@ -2219,7 +2219,7 @@ def _print_n_plus_one(findings: list, threshold: int) -> None:
         noun = known.get(kind, f"{kind}(s)")
         print(f"{len(group)} {noun} queried one model {threshold}+ times:\n")
         for finding in group:
-            print(f"  {finding.describe()}")
+            print(f"  {finding.explain()}")
             for repetition in finding.repetitions:
                 millis = repetition.total_us / 1000
                 print(
