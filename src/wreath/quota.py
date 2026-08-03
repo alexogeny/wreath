@@ -58,6 +58,7 @@ from typing import Any, Protocol
 
 from .response import ProblemResponse
 from .store import ALIAS, Column, Keyed, PostgresStore, Sql
+from .temporal import Duration
 
 __all__ = [
     "MemoryQuotaStore",
@@ -563,7 +564,7 @@ class Quotas:
         self._meters: dict[str, QuotaMeter] = {}
 
     def declare(
-        self, name: str, *, limit: float, period: float, cost: float = 1.0
+        self, name: str, *, limit: float, period: Any, cost: float = 1.0
     ) -> QuotaMeter:
         """Declare a quota and build its meter.
 
@@ -573,7 +574,11 @@ class Quotas:
         """
         if name in self._meters:
             raise ValueError(f"quota {name!r} is already declared")
-        quota = Quota(name=name, limit=limit, period=period, cost=cost)
+        # Seconds, or any spelling `Duration` reads -- `days(30)` says what
+        # `30 * 86400.0` meant, in the vocabulary every other window uses.
+        quota = Quota(
+            name=name, limit=limit, period=Duration.of(period).total_seconds(), cost=cost
+        )
         store = self._store_factory()
         store.configure(quota)
         meter = QuotaMeter(quota, store, self)
