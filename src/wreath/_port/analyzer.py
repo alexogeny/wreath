@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
 
+from .._conditional import STATUS_WITHOUT_BODY as _STATUS_WITHOUT_BODY
 from .ir import Finding, Report, SkippedFile
 from .rules import RULES
 
@@ -346,8 +347,6 @@ _RESPONSE_CLASSES = frozenset({
 # `status_code=` in front of it was dead before the port.
 _EXTRA_RESPONSE_CLASSES = frozenset({"Response", "TextResponse", "SSEResponse"})
 
-# Statuses that must not carry a body (wreath.response._STATUS_WITHOUT_BODY).
-_STATUS_WITHOUT_BODY = frozenset({204, 304})
 
 #: HTTP status literal -> the `wreath.exceptions` class a `HTTPException(...)`
 #: with that status becomes. Shared with the emitter so the report cannot call a
