@@ -962,6 +962,23 @@ class HTTPClient:
                 except (ConnectionError, OSError):
                     pass
 
+    def counters(self) -> Any:
+        """This client's pool counters, for `wreath.metrics.collect`."""
+        from .metrics import Counters
+
+        reading = self.snapshot()
+        return Counters(
+            subsystem="http_client",
+            instance=self._name,
+            values={
+                "active": reading.active,
+                "idle": reading.idle,
+                "waiters": reading.waiters,
+                "requests": reading.requests,
+                "reused": reading.reused,
+            },
+        )
+
     def snapshot(self) -> ClientSnapshot:
         """A `ClientSnapshot` of the pool right now. Synchronous, never blocks."""
         return ClientSnapshot(
