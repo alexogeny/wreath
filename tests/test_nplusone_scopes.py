@@ -165,7 +165,7 @@ def test_request_findings_still_describe_a_route():
     finding = ledger.finding()
     assert finding.route == "GET /llamas"
     assert finding.origin.kind == "request"
-    assert "GET /llamas" in finding.describe()
+    assert "GET /llamas" in finding.explain()
 
 
 def test_a_trace_scan_threshold_below_one_is_refused():
@@ -180,8 +180,8 @@ def test_a_trace_scan_threshold_below_one_is_refused():
 def test_a_scope_with_no_identifier_describes_without_a_hash():
     """A pass shift has a name and no id -- `shift recode_species#` would be
     a dangling reference to nothing."""
-    assert Origin(kind="shift", label="recode_species").describe() == "shift recode_species"
-    assert Origin(kind="job", label="ingest", identifier="41").describe() == "job ingest#41"
+    assert Origin(kind="shift", label="recode_species").explain() == "shift recode_species"
+    assert Origin(kind="job", label="ingest", identifier="41").explain() == "job ingest#41"
 
 
 def test_a_finding_says_how_many_other_models_it_found():
@@ -190,7 +190,7 @@ def test_a_finding_says_how_many_other_models_it_found():
         ledger.record("app.Sighting")
     for _ in range(2):
         ledger.record("app.Station")
-    described = ledger.finding().describe()
+    described = ledger.finding().explain()
     assert "Sighting" in described
     assert "(and 1 more)" in described
 
@@ -201,7 +201,7 @@ def test_a_finding_built_without_an_origin_still_names_its_route():
     from wreath._nplusone import Finding, Repetition
 
     finding = Finding(route="GET /llamas", repetitions=(Repetition("Trek", 12),), queries=13)
-    assert "GET /llamas" in finding.describe()
+    assert "GET /llamas" in finding.explain()
 
 
 def test_trace_scan_output_is_unchanged_and_gains_an_origin():
@@ -227,7 +227,7 @@ def test_trace_scan_output_is_unchanged_and_gains_an_origin():
     assert finding.route == "GET /llamas"
     assert finding.request_id == 7
     assert finding.worst.count == 12
-    assert "GET /llamas" in finding.describe()
+    assert "GET /llamas" in finding.explain()
     assert finding.origin.kind == "request"
 
 
@@ -235,7 +235,7 @@ def test_job_finding_describes_the_task_not_a_route():
     ledger = QueryLedger(limit=2, origin=Origin(kind="job", label="ingest_card", identifier="41"))
     ledger.record(MODEL)
     ledger.record(MODEL)
-    described = ledger.finding().describe()
+    described = ledger.finding().explain()
     assert "ingest_card" in described
     assert "job" in described
 

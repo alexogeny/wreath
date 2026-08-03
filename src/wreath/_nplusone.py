@@ -104,7 +104,7 @@ class Origin:
     label: str = ""
     identifier: str = ""
 
-    def describe(self) -> str:
+    def explain(self) -> str:
         """`GET /llamas` for a request; `job ingest_card#41` for an attempt."""
         if self.kind == "request":
             return self.label
@@ -135,13 +135,13 @@ class Finding:
         """The repetition to fix first."""
         return self.repetitions[0]
 
-    def describe(self) -> str:
+    def explain(self) -> str:
         """One line that contains the diagnosis and implies the fix."""
         worst = self.worst
         others = (
             f" (and {len(self.repetitions) - 1} more)" if len(self.repetitions) > 1 else ""
         )
-        where = self.origin.describe() or self.route
+        where = self.origin.explain() or self.route
         return (
             f"{where} issued {self.queries} statements; "
             f"{worst.count} of them hydrated {worst.model}{others}"
@@ -159,7 +159,7 @@ class NPlusOneDetected(RuntimeError):
     __slots__ = ("finding",)
 
     def __init__(self, finding: Finding) -> None:
-        super().__init__(finding.describe())
+        super().__init__(finding.explain())
         self.finding = finding
 
 
@@ -252,7 +252,7 @@ class QueryLedger:
         )
 
     def __repr__(self) -> str:
-        return f"<QueryLedger origin={self.origin.describe()!r} limit={self.limit} {self.counts}>"
+        return f"<QueryLedger origin={self.origin.explain()!r} limit={self.limit} {self.counts}>"
 
 
 @contextmanager
