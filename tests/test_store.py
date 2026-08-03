@@ -415,3 +415,247 @@ def test_the_settled_path_does_not_take_the_lock() -> None:
 
     store._prepare_lock = None  # any acquire from here would raise
     assert store.statement("purge") is first
+
+
+# --- the command tag ------------------------------------------------------------------
+
+
+class TestRowsAffected:
+    """One parser for a PostgreSQL command tag, where there were four.
+
+    Two of the four took the *second* whitespace field, which is right for
+    `DELETE 5` and wrong for `INSERT 0 5` -- where the first number is a legacy
+    OID and the count is the last field. Those two returned `None` for every
+    insert, which at the call site is indistinguishable from "this backend does
+    not report a count".
+    """
+
+    @pytest.mark.parametrize(
+        ("tag", "expected"),
+        [
+            ("DELETE 5", 5),
+            ("UPDATE 3", 3),
+            ("SELECT 12", 12),
+            ("INSERT 0 5", 5),      # the one the old split got wrong
+            ("INSERT 0 0", 0),
+            ("DELETE 0", 0),
+        ],
+    )
+    def test_the_count_is_the_last_field(self, tag: str, expected: int) -> None:
+        from wreath.store import rows_affected
+
+        assert rows_affected(tag) == expected
+
+    @pytest.mark.parametrize("given", [None, 5, b"DELETE 5", "", "DELETE", "DELETE x"])
+    def test_an_unreadable_tag_is_none_rather_than_zero(self, given: object) -> None:
+        # "no rows matched" and "this backend does not say" are different facts,
+        # and a caller recording the first when it meant the second is reporting
+        # a clean sweep that never happened.
+        from wreath.store import rows_affected
+
+        assert rows_affected(given) is None
+
+
+# --- the guards that keep generated SQL safe ------------------------------------------
+#
+# Table and column names are interpolated into statement text -- they cannot be
+# bound -- so `sql_identifier` and `_expression` are the whole of the policy.
+# `wreath mutant` reported every one of these controls as removable with no test
+# objecting, which for an injection guard is the finding that matters most.
+
+
+class TestIdentifierGuard:
+    @pytest.mark.parametrize(
+        "given",
+        ["a b", "a-b", "a;b", 'a"b', "a'b", "", "1abc", "a.b", "drop table x", "a\nb"],
+    )
+    def test_anything_that_is_not_a_bare_identifier_is_refused(self, given: str) -> None:
+        from wreath.store import sql_identifier
+
+        with pytest.raises(ValueError, match="plain SQL identifier"):
+            sql_identifier(given)
+
+    @pytest.mark.parametrize("given", ["sessions", "wreath_entity", "_x", "a1", "A_1"])
+    def test_a_bare_identifier_is_returned_unchanged(self, given: str) -> None:
+        from wreath.store import sql_identifier
+
+        assert sql_identifier(given) == given
+
+    @pytest.mark.parametrize("word", ["select", "table", "user", "order", "default"])
+    def test_a_reserved_word_is_refused(self, word: str) -> None:
+        # It would reach the generated DDL unquoted and fail there, a long way
+        # from the declaration that caused it.
+        from wreath.store import sql_identifier
+
+        with pytest.raises(ValueError, match="reserved SQL word"):
+            sql_identifier(word)
+
+    @pytest.mark.parametrize("word", ["SELECT", "Table", "UsEr"])
+    def test_the_reserved_check_is_case_insensitive(self, word: str) -> None:
+        from wreath.store import sql_identifier
+
+        with pytest.raises(ValueError, match="reserved SQL word"):
+            sql_identifier(word)
+
+    def test_the_refusal_names_what_was_being_declared(self) -> None:
+        from wreath.store import sql_identifier
+
+        with pytest.raises(ValueError, match="^column must be"):
+            sql_identifier("a b", what="column")
+
+
+class TestExpressionGuard:
+    @pytest.mark.parametrize("given", ["$1", "$12", "$1::text", "$2::float8", " $1 "])
+    def test_a_bind_placeholder_is_accepted(self, given: str) -> None:
+        from wreath.store import _expression
+
+        assert _expression(given, what="a value") == given
+
+    @pytest.mark.parametrize(
+        "given",
+        ["now()", "1", "'x'", "$1; DROP TABLE t", "$", "$a", "x$1", "$1::text; --"],
+    )
+    def test_anything_else_is_refused(self, given: str) -> None:
+        # Refused rather than quoted: the caller who genuinely means a fragment
+        # says so with `Sql(...)`, and that is the whole audit surface.
+        from wreath.store import _expression
+
+        with pytest.raises(TypeError, match="bind placeholder"):
+            _expression(given, what="a value")
+
+    def test_an_explicitly_marked_fragment_is_accepted(self) -> None:
+        from wreath.store import Sql, _expression
+
+        assert _expression(Sql("clock_timestamp()"), what="a value") == "clock_timestamp()"
+
+    @pytest.mark.parametrize("given", [None, 1, 1.5, b"$1", ["$1"]])
+    def test_a_non_string_is_refused(self, given: object) -> None:
+        from wreath.store import _expression
+
+        with pytest.raises(TypeError, match="bind placeholder"):
+            _expression(given, what="a value")
+
+
+class TestPreparedStatementNames:
+    def test_an_over_long_statement_name_is_refused(self) -> None:
+        """PostgreSQL *truncates* rather than refusing, which is the danger.
+
+        Two stores agreeing in their first 63 bytes would quietly share one
+        prepared statement -- the exact collision `prefix` exists to prevent,
+        and invisible until the wrong SQL runs.
+        """
+        from wreath.store import Keyed, PostgresStore
+
+        # At *construction*, because the store defines its own statements there
+        # -- so an unusable prefix is a declaration-time error rather than a
+        # surprise at the first query.
+        with pytest.raises(ValueError, match="PostgreSQL truncates"):
+            PostgresStore(None, Keyed(table="t" * 40, prefix="p" * 40))
+
+    def test_a_name_within_the_limit_is_accepted(self) -> None:
+        from wreath.store import Keyed, PostgresStore
+
+        store = PostgresStore(None, Keyed(table="sessions"))
+        store.define("read_one", "SELECT 1")
+        assert store.sql("read_one") == "SELECT 1"
+
+
+class TestDeclarationRendering:
+    def test_a_not_null_column_renders_the_constraint(self) -> None:
+        from wreath.store import Column, Keyed
+
+        ddl = " ".join(Keyed(table="t", columns=(Column("a", "text", null=False),)).statements())
+        assert "a text NOT NULL" in ddl
+
+    def test_a_nullable_column_does_not(self) -> None:
+        from wreath.store import Column, Keyed
+
+        ddl = " ".join(Keyed(table="t", columns=(Column("a", "text", null=True),)).statements())
+        assert "a text NOT NULL" not in ddl
+        assert "a text" in ddl
+
+    def test_the_stamp_index_is_declared_only_when_asked(self) -> None:
+        from wreath.store import Keyed
+
+        with_index = " ".join(Keyed(table="t", index_stamp=True).statements())
+        without = " ".join(Keyed(table="t", index_stamp=False).statements())
+        assert "CREATE INDEX" in with_index
+        assert "CREATE INDEX" not in without
+
+
+class TestStatementShape:
+    """Which statements a declaration produces, and what they carry."""
+
+    def test_a_store_with_no_payload_columns_defines_no_read(self) -> None:
+        # There is nothing to select: the key is the whole row, and `SELECT
+        # FROM` is not a statement.
+        from wreath.store import Keyed, PostgresStore
+
+        store = PostgresStore(None, Keyed(table="t"))
+        with pytest.raises(ValueError, match="no SQL named"):
+            store.sql("read")
+
+    def test_a_store_with_payload_columns_defines_both_reads(self) -> None:
+        from wreath.store import Column, Keyed, PostgresStore
+
+        store = PostgresStore(None, Keyed(table="t", columns=(Column("a", "text"),)))
+        assert "SELECT a FROM" in store.sql("read")
+        assert store.sql("read_live") != store.sql("read")
+
+    def test_read_live_adds_the_deadline_predicate(self) -> None:
+        from wreath.store import Column, Keyed, PostgresStore
+
+        store = PostgresStore(None, Keyed(table="t", columns=(Column("a", "text"),)))
+        assert "clock_timestamp()" in store.sql("read_live")
+
+    def test_a_last_touched_store_defines_no_deadline_purge(self) -> None:
+        # Its stamp is arithmetic for whoever reads it, not a deadline, so
+        # there is no expired-row predicate to purge on.
+        from wreath.store import Keyed, PostgresStore
+
+        store = PostgresStore(None, Keyed(table="t", deadline=False))
+        with pytest.raises(ValueError, match="no SQL named"):
+            store.sql("purge")
+
+    def test_a_deadline_store_defines_one(self) -> None:
+        from wreath.store import Keyed, PostgresStore
+
+        store = PostgresStore(None, Keyed(table="t", deadline=True))
+        assert "DELETE FROM" in store.sql("purge")
+
+    def test_upsert_omits_the_returning_clause_unless_asked(self) -> None:
+        from wreath.store import Keyed, PostgresStore
+
+        store = PostgresStore(None, Keyed(table="t"))
+        without = store.upsert(values={"key": "$1"}, update={"key": "$1"})
+        with_it = store.upsert(values={"key": "$1"}, update={"key": "$1"}, returning="key")
+        assert "RETURNING" not in without
+        assert with_it.endswith("RETURNING key")
+
+
+@pytest.mark.asyncio
+async def test_read_live_is_chosen_only_when_asked() -> None:
+    """`read(live=True)` must reach the deadline-checked statement.
+
+    Asserted on the *dispatch* rather than the SQL: both statements exist and
+    both are correct, so a test that only checked their text cannot tell which
+    one a read actually used.
+    """
+    from wreath.store import Column, Keyed, PostgresStore
+
+    class Recording(PostgresStore):
+        # A subclass gets a __dict__, which the slotted base deliberately does not.
+        def statement(self, name: str):  # type: ignore[override]
+            self.asked = name
+
+            class _Stub:
+                async def fetchrow(self, *_args):
+                    return None
+
+            return _Stub()
+
+    store = Recording(None, Keyed(table="t", columns=(Column("a", "text"),)))
+    await store.read("k")
+    assert store.asked == "read"
+    await store.read("k", live=True)
+    assert store.asked == "read_live"

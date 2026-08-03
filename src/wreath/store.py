@@ -37,6 +37,7 @@ rows are claimed at all. Each caller keeps those.
 
 from __future__ import annotations
 
+import datetime
 import re
 import threading
 from collections.abc import Callable, Mapping
@@ -253,9 +254,42 @@ class Keyed:
 MAX_IDENTIFIER_BYTES: Final = 63
 
 
-def _interval(seconds: float | str) -> Sql:
+def rows_affected(status: Any) -> int | None:
+    """The row count in a PostgreSQL command tag, or None when unreadable.
+
+    A tag is `DELETE 5`, `UPDATE 3`, or -- the one that catches people --
+    `INSERT 0 5`, where the first number is a legacy OID and the *second* is the
+    count. So the count is the **last** field, never the second, and four
+    separate readers in this tree disagreed about that: two took the second
+    field and returned `None` for every `INSERT`, which is indistinguishable
+    from "the driver reported nothing" at the call site.
+
+    `None` rather than `0` when it cannot be read, because "no rows matched" and
+    "this backend does not say" are different facts and a caller recording the
+    first when it meant the second is reporting a clean sweep that never
+    happened. A test double or a backend that reports nothing is a supported
+    caller, not a broken one.
+    """
+    if not isinstance(status, str):
+        return None
+    _, _, count = status.rpartition(" ")
+    try:
+        return int(count)
+    except ValueError:
+        return None
+
+
+def _interval(seconds: float | str | datetime.timedelta) -> Sql:
     # A float is rendered as a literal (the store owns the lifetime); a string is
     # a placeholder, for when the caller supplies it per write.
+    #
+    # A `timedelta` -- which is what `wreath.temporal.Duration` is -- is read
+    # first and reduced to seconds. It deliberately does *not* go through
+    # `Duration.of`, because a `str` here is a bind placeholder rather than an
+    # ISO-8601 duration, and reading one as the other would compile a
+    # placeholder name into a literal interval.
+    if isinstance(seconds, datetime.timedelta):
+        seconds = seconds.total_seconds()
     if isinstance(seconds, str):
         return Sql(f"make_interval(secs => {_expression(seconds, what='an interval')}::float8)")
     value = float(seconds)
@@ -377,7 +411,7 @@ class PostgresStore:
         """
         return Sql(f"{ALIAS}.{self._declaration.stamp} >= clock_timestamp()")
 
-    def window(self, seconds: float | str | None = None) -> Sql:
+    def window(self, seconds: float | str | datetime.timedelta | None = None) -> Sql:
         """A deadline `seconds` from the database's clock, not the caller's.
 
         A string lifetime must be a bind placeholder; see `Sql`.
@@ -538,14 +572,7 @@ class PostgresStore:
         scheduled job that runs this something it can actually record: "the
         purge ran" and "the purge removed 40 000 rows" are different facts.
         """
-        status = await self.purge(idle_seconds)
-        if not isinstance(status, str) or not status.startswith("DELETE"):
-            return None
-        _, _, count = status.partition(" ")
-        try:
-            return int(count.strip())
-        except ValueError:
-            return None
+        return rows_affected(await self.purge(idle_seconds))
 
     async def purge(self, idle_seconds: float | None = None) -> str:
         """Drop rows the store no longer honours.
@@ -641,5 +668,6 @@ __all__ = [
     "Keyed",
     "MemoryStore",
     "PostgresStore",
+    "rows_affected",
     "sql_identifier",
 ]

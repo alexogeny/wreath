@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from .store import Column, Keyed, PostgresStore, Sql
+from .store import Column, Keyed, PostgresStore, Sql, rows_affected
 
 __all__ = ["PostgresSessionStore", "SessionStore"]
 
@@ -224,13 +224,10 @@ class PostgresSessionStore:
         """
         key = self._session_key if session_key is None else session_key
         status = await self._store.statement("delete_for").execute(subject, key)
-        if not isinstance(status, str) or not status.startswith("DELETE"):
-            return 0
-        _, _, count = status.partition(" ")
-        try:
-            return int(count.strip())
-        except ValueError:
-            return 0
+        # `or 0` keeps this method's `int` contract: `rows_affected` reports an
+        # unreadable tag as None, which is the honest answer, and this caller
+        # documented 0 for it long before that distinction existed.
+        return rows_affected(status) or 0
 
     def purge_pass(self, *, chunk: int = 1000, **options: Any) -> Any:
         """A recurring pass that deletes expired sessions, chunk by chunk.
