@@ -176,6 +176,7 @@ def render_exposition(
     route_labels: RouteLabels = None,
     namespace: str = "wreath",
     openmetrics: bool = False,
+    counters: Sequence[Any] = (),
 ) -> str:
     """Render a projector snapshot as Prometheus text exposition (format 0.0.4).
 
@@ -262,6 +263,28 @@ def render_exposition(
         for reason, count in recorder_loss.items():
             w.sample(rec_loss, {"reason": _loss_reason_name(reason)}, int(count))
 
+    # --- subsystem counters --------------------------------------------------
+    #
+    # Grouped by family before emitting, because the exposition format requires
+    # every sample of a family to be contiguous and a scraper rejects the text
+    # outright when they are not -- two queues would otherwise interleave into
+    # two HELP blocks for one name.
+    families: dict[str, list[tuple[str, int]]] = {}
+    for reading in counters:
+        subsystem = _sanitize_metric_name(str(reading.subsystem))
+        for name, value in reading.values.items():
+            family = f"{ns}_{subsystem}_{_sanitize_metric_name(str(name))}"
+            families.setdefault(family, []).append((str(reading.instance), int(value)))
+    for family, samples in families.items():
+        # `gauge`, not `counter`: a reading may be either -- `jobs.run_errors`
+        # only rises, `pool.borrowed` moves both ways -- and this module cannot
+        # tell them apart. Declaring a falling series a counter makes a scraper
+        # read every decrease as a process restart and invent a rate spike;
+        # declaring a rising one a gauge costs `rate()` and nothing else.
+        w.family(family, "gauge", "Reported by the subsystem that owns it.")
+        for instance, value in samples:
+            w.sample(family, {"instance": instance}, value)
+
     text = w.text()
     return text + "# EOF\n" if openmetrics else text
 
@@ -277,7 +300,7 @@ class PrometheusBridge:
     request path.
     """
 
-    __slots__ = ("_source", "_namespace", "_route_labels", "_openmetrics")
+    __slots__ = ("_app", "_source", "_namespace", "_route_labels", "_openmetrics")
 
     def __init__(
         self,
@@ -286,9 +309,15 @@ class PrometheusBridge:
         namespace: str = "wreath",
         route_labels: RouteLabels = None,
         openmetrics: bool = False,
+        app: Any = None,
     ) -> None:
         if not hasattr(source, "snapshot"):
             raise TypeError("prometheus source must expose snapshot()")
+        #: The application whose registered subsystems are asked for counters on
+        #: every render. Optional and defaulted absent: the projector half works
+        #: without one, and a bridge built for a test double should not have to
+        #: invent an app to satisfy this.
+        self._app = app
         self._source = source
         self._namespace = namespace
         self._route_labels = route_labels
@@ -301,6 +330,11 @@ class PrometheusBridge:
     def render(self) -> str:
         """A fresh exposition text for the current snapshot."""
         snapshot = self._source.snapshot()
+        readings: tuple[Any, ...] = ()
+        if self._app is not None:
+            from .metrics import collect
+
+            readings = collect(self._app)
         recorder_loss = None
         getter = getattr(self._source, "recorder_loss", None)
         if callable(getter):
@@ -311,6 +345,7 @@ class PrometheusBridge:
             route_labels=self._route_labels,
             namespace=self._namespace,
             openmetrics=self._openmetrics,
+            counters=readings,
         )
 
     def handler(self) -> Callable[[Any], Any]:
