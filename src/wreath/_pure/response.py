@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
+from .._conditional import STATUS_WITHOUT_BODY as _STATUS_WITHOUT_BODY
 from .json import json_dumps as _json_dumps
 
 Send = Callable[[dict[str, Any]], Awaitable[None]]
@@ -19,7 +20,6 @@ Send = Callable[[dict[str, Any]], Awaitable[None]]
 _CONTENT_TYPE = b"content-type"
 _CONTENT_LENGTH = b"content-length"
 # 204/304 carry no body and, per RFC 9110, no Content-Length either.
-_STATUS_WITHOUT_BODY = frozenset({204, 304})
 
 
 def _headers_for(

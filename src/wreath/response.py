@@ -24,6 +24,7 @@ from http import HTTPStatus
 from typing import Any, Final, cast
 from urllib.parse import quote, urlsplit
 
+from ._conditional import STATUS_WITHOUT_BODY as _STATUS_WITHOUT_BODY
 from ._json import dumps as _json_dumps
 from ._native import _core
 
@@ -36,7 +37,6 @@ from .cache_control import CacheControl
 
 Send = Callable[[dict[str, Any]], Awaitable[None]]
 
-_STATUS_WITHOUT_BODY = frozenset({204, 304})
 _CONTENT_TYPE = b"content-type"
 _CONTENT_LENGTH = b"content-length"
 # Small content-length values are overwhelmingly common; formatting them once
