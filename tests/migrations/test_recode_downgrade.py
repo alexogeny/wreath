@@ -211,7 +211,7 @@ async def test_a_finished_recode_is_still_a_hazard() -> None:
     hazards = await migrations._recoded_column_hazards(connection, reverse)
     assert len(hazards) == 1
     assert hazards[0].finished is True
-    assert "has finished" in hazards[0].describe()
+    assert "has finished" in hazards[0].explain()
 
 
 @pytest.mark.asyncio
@@ -228,7 +228,7 @@ async def test_a_running_recode_is_a_hazard_too() -> None:
     hazards = await migrations._recoded_column_hazards(connection, reverse)
     assert len(hazards) == 1
     assert hazards[0].finished is False
-    assert "mixture" in hazards[0].describe()
+    assert "mixture" in hazards[0].explain()
 
 
 @pytest.mark.asyncio
@@ -257,7 +257,7 @@ async def test_a_recode_whose_ledger_row_was_purged_is_still_a_hazard() -> None:
     hazards = await migrations._recoded_column_hazards(connection, reverse)
     assert len(hazards) == 1
     assert hazards[0].ledger_row_present is False
-    described = hazards[0].describe()
+    described = hazards[0].explain()
     assert "ledger row is gone" in described
     assert "values were still changed" in described
     # And it must not claim a phase it cannot read.

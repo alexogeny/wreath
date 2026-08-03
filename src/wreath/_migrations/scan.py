@@ -105,7 +105,7 @@ class TransitionalHazard:
     def waived(self) -> bool:
         return self.waiver is not None
 
-    def describe(self) -> str:
+    def explain(self) -> str:
         head = f"{self.site}: {self.operation} on {self.column}"
         if self.waived:
             return f"{head} -- waived: {self.waiver}"
@@ -137,7 +137,7 @@ class ScanReport:
     def waived(self) -> tuple[TransitionalHazard, ...]:
         return tuple(item for item in self.hazards if item.waived)
 
-    def describe(self) -> str:
+    def explain(self) -> str:
         if self.shape == "retype":
             return (
                 f"{self.column}: a retype has no re-encode window -- both columns "

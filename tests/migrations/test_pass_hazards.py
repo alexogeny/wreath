@@ -225,7 +225,7 @@ def test_a_retype_is_described_as_a_retype_not_a_drop() -> None:
         schema="app", table="treks", column="grade", action="alter",
         pass_name="p", tenant="", phase="walking", holes_open=0,
     )
-    assert "changes the type of" in hazard.describe()
+    assert "changes the type of" in hazard.explain()
 
 
 # --- through apply_single_artifact -------------------------------------------

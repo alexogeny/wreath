@@ -224,7 +224,7 @@ def test_a_report_that_scanned_nothing_says_so_rather_than_clean() -> None:
     report = scan(User.name, MAPPING)
     assert report.scanned_nothing
     assert report.blocking == ()
-    assert "not the same as safe" in report.describe()
+    assert "not the same as safe" in report.explain()
 
 
 # -- waivers ------------------------------------------------------------------
@@ -292,6 +292,6 @@ def test_a_waived_hazard_is_counted_separately_and_stops_blocking() -> None:
         assert report.blocking == ()
         assert len(report.waived) == 1
         assert "admin console" in report.waived[0].waiver
-        assert "waived" in report.describe()
+        assert "waived" in report.explain()
     finally:
         clear_waivers()

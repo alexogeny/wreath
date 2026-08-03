@@ -487,7 +487,7 @@ class DowngradeHazard:
     kind: str
     reason: str
 
-    def describe(self) -> str:
+    def explain(self) -> str:
         target = ".".join(part for part in (self.table, self.name) if part)
         verb = "would drop" if self.reason == "removed" else "would change the type of"
         return f"{verb} {self.kind} {self.schema}.{target}, still mapped by the ORM"
@@ -499,7 +499,7 @@ class DowngradeWouldStrandCode(RuntimeError):
     def __init__(self, schema: str, hazards: tuple[DowngradeHazard, ...]) -> None:
         self.schema = schema
         self.hazards = hazards
-        listing = "\n".join(f"  - {hazard.describe()}" for hazard in hazards)
+        listing = "\n".join(f"  - {hazard.explain()}" for hazard in hazards)
         super().__init__(
             f"refusing to downgrade schema {schema!r}: the running ORM still maps "
             f"{len(hazards)} object(s) this downgrade removes or retypes, so the "
@@ -523,7 +523,7 @@ class PendingPassHazard:
     phase: str
     holes_open: int
 
-    def describe(self) -> str:
+    def explain(self) -> str:
         verb = "drops" if self.action == "drop" else "changes the type of"
         where = f"{self.schema}.{self.table}.{self.column}"
         who = self.pass_name if not self.tenant else f"{self.pass_name}[{self.tenant}]"
@@ -539,7 +539,7 @@ class MigrationBlockedByPass(RuntimeError):
     def __init__(self, schema: str, hazards: tuple[PendingPassHazard, ...]) -> None:
         self.schema = schema
         self.hazards = hazards
-        listing = "\n".join(f"  - {hazard.describe()}" for hazard in hazards)
+        listing = "\n".join(f"  - {hazard.explain()}" for hazard in hazards)
         blocked = tuple(h for h in hazards if h.holes_open)
         remedy = (
             "Let the pass finish -- `wreath passes status` shows where it is -- and "
@@ -578,7 +578,7 @@ class RecodedColumnHazard:
     #: `wreath._passes.ledger.RewrittenColumn`.
     ledger_row_present: bool = True
 
-    def describe(self) -> str:
+    def explain(self) -> str:
         where = f"{self.schema}.{self.table}.{self.column}"
         who = self.pass_name if not self.tenant else f"{self.pass_name}[{self.tenant}]"
         if not self.ledger_row_present:
@@ -613,7 +613,7 @@ class DowngradeWouldStrandRecodedData(RuntimeError):
     def __init__(self, schema: str, hazards: tuple[RecodedColumnHazard, ...]) -> None:
         self.schema = schema
         self.hazards = hazards
-        listing = "\n".join(f"  - {hazard.describe()}" for hazard in hazards)
+        listing = "\n".join(f"  - {hazard.explain()}" for hazard in hazards)
         super().__init__(
             f"refusing to downgrade schema {schema!r}: it reverts the definition of "
             f"{len(hazards)} column(s) whose values a deferred migration has already "
@@ -645,7 +645,7 @@ class TransitionalContractUnproven(RuntimeError):
     def __init__(self, report: Any) -> None:
         self.report = report
         blocking = report.blocking
-        listing = "\n".join(f"  - {item.describe()}" for item in blocking)
+        listing = "\n".join(f"  - {item.explain()}" for item in blocking)
         if report.scanned_nothing:
             super().__init__(
                 f"refusing to start the deferred migration for {report.column}: "

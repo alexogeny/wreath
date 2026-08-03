@@ -110,7 +110,7 @@ def _transitional_findings(registry: Any) -> list[dict[str, Any]]:
             "shape": report.shape,
             "examined": report.examined,
             "scanned_nothing": report.scanned_nothing,
-            "summary": report.describe(),
+            "summary": report.explain(),
             "unsafe": [
                 {
                     "site": item.site,

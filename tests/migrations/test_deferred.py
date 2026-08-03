@@ -137,7 +137,7 @@ def test_a_retype_needs_an_expression() -> None:
 def test_a_retype_has_nothing_to_scan_and_says_why() -> None:
     report = Retype(User.name, into="name_next", using="upper(name)").scan()
     assert report.shape == "retype"
-    assert "no re-encode window" in report.describe()
+    assert "no re-encode window" in report.explain()
 
 
 # -- shared -------------------------------------------------------------------
