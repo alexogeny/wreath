@@ -29,16 +29,21 @@ order that matters.
 
 5. **Announce it.** One broadcast per batch onto the live map's room.
 
-## The framework edge this path works around
+## Why this handler still reads the body itself
 
-`wreath.protobuf` is a codec, and it is *only* a codec: nothing maps
-`application/x-protobuf` to it the way `application/json` is mapped to the JSON
-serializer, and no annotation binds a request body into a `@message` class the
-way one binds a dataclass. So this handler reads `await request.body()` and
-calls `decode` itself, which is exactly what
-`docs/cookbook/recipes/accept-a-protobuf-body.md` prescribes -- the recipe is
-the sanctioned shape, not a workaround for a gap. It is worth knowing before you
-look for a `Body(...)` spelling that is not there.
+An annotation *does* bind a protobuf body now: `async def h(request, body: Ping)`
+decodes `application/x-protobuf` into a `@message` through the ordinary binding
+layer, and a route annotated `-> Ping` negotiates protobuf on the way out. This
+paragraph used to say the opposite, and was simply stale -- worth knowing,
+because it is the kind of note a reader trusts instead of checking.
+
+What this handler needs that the annotation does not give it is **partial
+acceptance**: a batch of forty positions where one collar reports a latitude of
+320 degrees must land the other thirty-nine and count the refusal, and a binding
+layer that validates the whole body either accepts all of it or rejects all of
+it. So `accept()` reads `await request.body()`, decodes once, and refuses per
+position. That is a property of this endpoint rather than a gap in the
+framework.
 """
 
 from __future__ import annotations
