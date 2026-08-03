@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from email.utils import formatdate
 from typing import TYPE_CHECKING
 
+from ._conditional import etag_matches as _etag_matches
 from ._fsguard import ContainmentError, open_beneath, open_root
 from .cache_control import CacheControl
 from .exceptions import NotFound
@@ -37,25 +38,6 @@ from .response import (
     Response,
     parse_range,
 )
-
-
-def _etag_matches(header: str | None, etag: str) -> bool:
-    """Whether `If-None-Match` covers `etag` (RFC 9110 §13.1.2).
-
-    The header is a *list*, may be `*`, and its entries may carry the weak
-    `W/` prefix -- which the weak comparison this needs ignores. Comparing the
-    whole header to one tag with `==` meant a client that sent two tags, or a
-    proxy that added one, re-downloaded the body every time.
-    """
-    if not header:
-        return False
-    if header.strip() == "*":
-        return True
-    target = etag.removeprefix("W/")
-    for candidate in header.split(","):
-        if candidate.strip().removeprefix("W/") == target:
-            return True
-    return False
 
 if TYPE_CHECKING:
     from .request import Request
