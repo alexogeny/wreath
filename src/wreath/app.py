@@ -56,6 +56,7 @@ from .binding import (
     ValidationError,
     _return_annotation,
     compile_binder,
+    compile_message_negotiation,
     compile_response_validator,
     inspect_handler,
 )
@@ -596,6 +597,7 @@ class Wreath:
         "_route_methods",
         "_routes",
         "_routing",
+        "_entity_registries",
         "_series_stores",
         "_shutdown_handlers",
         "_startup_handlers",
@@ -763,6 +765,7 @@ class Wreath:
         #: declaration the application never holds, so this is how its tables
         #: get an owner that `schema_components` can ask.
         self._series_stores: dict[str, Any] = {}
+        self._entity_registries: dict[str, Any] = {}
         self._object_stores: dict[str, Any] = {}
         # Built at lifespan startup from the registered runners/buses; owns their
         # process-lifetime worker/consumer/sweeper tasks.
@@ -808,6 +811,7 @@ class Wreath:
             *self._message_buses.values(),
             *self._webhook_hubs.values(),
             *self._series_stores.values(),
+            *self._entity_registries.values(),
             # The middleware registries hold `(priority, order, middleware)`.
             # Walking the tuples asked a tuple for `component()`, so every
             # middleware-owned table was silently never collected.
@@ -944,6 +948,7 @@ class Wreath:
             *self._message_buses.values(),
             *self._webhook_hubs.values(),
             *self._series_stores.values(),
+            *self._entity_registries.values(),
             # See `schema_components`: these registries hold tuples, and the
             # middleware is the third element.
             *(item[2] for item in self._global_middleware),
@@ -1134,8 +1139,8 @@ class Wreath:
         database: str,
         workload: str = "write",
         concurrency: int = 8,
-        lease: float = 30.0,
-        poll_interval: float = 5.0,
+        lease: Any = 30.0,
+        poll_interval: Any = 5.0,
         schema: str = "wreath",
         batch: int = 1,
         progress: Any = None,
@@ -1214,6 +1219,46 @@ class Wreath:
         self._dirty = True
         return store
 
+
+    def entities(
+        self,
+        name: str = "default",
+        *,
+        database: str,
+        bus: str,
+        table: str = "wreath_entity",
+        lease: Any = 30.0,
+        channel: str = "wreath_entity",
+        max_pending: int = 1024,
+    ) -> Any:
+        """Configure leased ownership of names, and a question that reaches the
+        holder. See `wreath.entity`.
+
+        Registered rather than merely constructed, so `schema_components` finds
+        its `component()` and the table is applied at startup like every other
+        wreath-owned one. An `EntityRegistry` built by hand is a table nothing
+        creates -- which is the defect `schema_components` exists to prevent.
+        """
+        from .entity import EntityRegistry
+
+        if name in self._entity_registries:
+            raise ValueError(f"duplicate entity registry: {name}")
+        if database not in self._databases:
+            known = ", ".join(sorted(self._databases)) or "none"
+            raise KeyError(f"unknown database {database!r}; configured: {known}")
+        if bus not in self._message_buses:
+            known = ", ".join(sorted(self._message_buses)) or "none"
+            raise KeyError(f"unknown message bus {bus!r}; configured: {known}")
+        registry = EntityRegistry(
+            self._databases[database], self._message_buses[bus],
+            channel=channel, table=table, lease=lease, max_pending=max_pending,
+        )
+        self._entity_registries[name] = registry
+        self._declared_databases[id(registry)] = (registry, self._databases[database])
+        self.state.__setattr__(f"entities_{name}", registry)
+        self._dirty = True
+        return registry
+
     def messaging(
         self,
         name: str,
@@ -1221,8 +1266,8 @@ class Wreath:
         database: str,
         workload: str = "write",
         schema: str = "wreath",
-        poll_interval: float = 5.0,
-        lease: float = 30.0,
+        poll_interval: Any = 5.0,
+        lease: Any = 30.0,
     ) -> Any:
         """Configure a pub/sub + durable message bus on an `app.postgres()`
         database. Consumers run for the process lifetime. See `wreath.messaging`."""
@@ -3156,6 +3201,10 @@ class Wreath:
                 if binding_spec is not None
                 else _return_annotation(definition.endpoint)
             )
+            # Before the validator: it projects onto JSON primitives, and the
+            # protobuf encoder needs the message. Returns the endpoint
+            # unchanged unless the return annotation is a `@message`.
+            endpoint = compile_message_negotiation(endpoint, returns)
             endpoint = compile_response_validator(endpoint, returns)
             chain = app_middleware + definition.middleware
             if definition.status_code != 200 and not definition.response_only:
@@ -3833,7 +3882,11 @@ class Wreath:
                     # Supervised jobs/messaging start after their dependencies
                     # (databases, clients) and before user startup handlers, so a
                     # startup handler may enqueue onto a running runner.
-                    if self._job_runners or self._message_buses:
+                    if (
+                        self._job_runners
+                        or self._message_buses
+                        or self._entity_registries
+                    ):
                         from .services import Supervisor
 
                         supervisor = Supervisor()
@@ -3841,6 +3894,12 @@ class Wreath:
                             supervisor.add(runner)
                         for bus in self._message_buses.values():
                             supervisor.add(bus)
+                        # After the buses it asks over, so a registry never
+                        # renews against a bus that has not started; drained
+                        # first, in reverse, so held names are released before
+                        # the transport they were reachable on goes away.
+                        for registry in self._entity_registries.values():
+                            supervisor.add(registry)
                         await supervisor.start()
                         self._supervisor = supervisor
                     for handler in self._startup_handlers:
