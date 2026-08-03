@@ -41,6 +41,7 @@ from ._doorbell import delay as _doorbell_delay  # noqa: F401
 from ._doorbell import sleep_or_stop as _sleep_or_stop
 from ._jobcore import CronSchedule, compute_backoff, dedup_key, validate_identifier
 from ._nplusone import NPlusOneDetected as _NPlusOneDetected
+from ._pgcatalog import column_exists
 from .postgres import PostgresError
 
 JobHandler = Callable[..., Awaitable[None]]
@@ -1739,19 +1740,8 @@ async def _has_trace_column(connection: Any, *, schema: str) -> bool:
     a CLI's one read against a database it has just connected to, so there is no
     steady state to keep a catalog lookup out of.
     """
-    return bool(
-        await connection.fetchval(
-            "SELECT true FROM pg_attribute a "
-            "JOIN pg_class k ON k.oid = a.attrelid "
-            "JOIN pg_namespace n ON n.oid = k.relnamespace "
-            # `::text` because `nspname` is `name`: without the cast PostgreSQL
-            # infers the parameter as `name` too, which the driver cannot
-            # encode. `wreath-sql-lint` SQL002.
-            "WHERE n.nspname = $1::text AND k.relname = 'jobs' "
-            "AND a.attname = 'trace_context' "
-            "AND a.attnum > 0 AND NOT a.attisdropped",
-            schema,
-        )
+    return await column_exists(
+        connection, schema=schema, table="jobs", column="trace_context"
     )
 
 
