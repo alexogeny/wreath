@@ -54,13 +54,132 @@ manifest is chrome, and a decision behind one is a misuse of it whatever the
 fact.
 
 One organisation-shaped surface *is* genuinely unbuilt, and is listed above by
-absence rather than by a row: there is no SCIM 2.0 endpoint and no SAML
-assertion consumer. Both are adapters onto `wreath.organizations` rather than
-second membership models, and SAML in particular has a packaging question to
-settle before any code — there is no stdlib XML-DSig, and `src/wreath` takes no
-mandatory runtime dependency, so it is a candidate for an optional component on
-the same terms as the HTTP/3 build.
-<!-- absent: wreath.organizations.scim_router -->
+absence rather than by a row: there is no SAML assertion consumer. Like
+`scim_router`, which has now shipped, it is an adapter onto
+`wreath.organizations` rather than a second membership model — but SAML has a
+packaging question to settle before any code, because there is no stdlib
+XML-DSig and `src/wreath` takes no mandatory runtime dependency, so it is a
+candidate for an optional component on the same terms as the HTTP/3 build.
+<!-- absent: wreath.organizations.saml_router -->
+
+SCIM shipped without three optional parts of RFC 7644, and
+`ServiceProviderConfig` reports each of them as unsupported rather than leaving
+a client to discover it: **sorting** (`sortBy` is answered 501 instead of in an
+arbitrary order), **bulk operations**, and **`ETag` resource versions** — the
+last because a resource's version would have to be computed from a modification
+time neither store is required to keep, and a version that changes when nothing
+did is worse than none. `/Me` is likewise absent: it is an alias for a resource
+the caller can already address, and the identity behind a provisioning token is
+the directory rather than a user.
+
+`externalId` and the rest of RFC 7643 §4.1's optional user attributes —
+`name.*`, `displayName`, `phoneNumbers`, `addresses` — are **not stored**, and
+that is a model disagreement rather than a missing feature:
+`wreath.users.UserRecord` has nowhere to put them, and giving SCIM a table of
+its own would be precisely the second user store the adapter exists to avoid.
+They are absent from the published `/Schemas`, and a *filter* naming one is
+refused with 400 `invalidFilter` rather than answered with an empty page.
+Closing this needs a decision about `wreath.users` — either a metadata column on
+`UserRecord` or a store-level extension seam — and it belongs to that subsystem,
+not to SCIM.
+
+Two more SCIM limits are worth stating rather than discovering. A provisioning
+request that touches both stores is **not one transaction**: `scim_router` orders
+its writes so that every refusal it can raise happens before the organisation is
+touched, but a user store that fails *after* a membership was written leaves the
+two disagreeing, and neither seam offers a transaction to join. Making that
+atomic means a unit of work spanning `UserStore` and `OrganizationStore`, which
+is a change to those protocols rather than to SCIM. And a **filtered** list reads
+one account per member of the organisation, because `wreath.users` has no batch
+read; the ceiling (`scim_router(max_filter_scan=...)`) bounds that fan-out rather
+than removing it, and removing it means a `get_many` on the user store, again in
+that subsystem.
+
+## Cross-site request forgery for HTML form posts
+
+`wreath.middleware.CSRFMiddleware` reads the resubmitted token from a request
+**header**, which suits a script client that sets one and cannot work for a plain
+HTML form — a form post carries no header. Mounting the middleware in front of a
+server-rendered form does not defend it, it refuses it.
+
+That gap is why [`wreath.admin`](admin.md) *requires* a `csrf=` verifier before it
+will generate any write route, rather than shipping an unprotected escalation
+path or growing a second CSRF implementation beside the one that exists. What is
+missing is small and well-shaped: a configured form-field name that the
+middleware reads when the request carries a form content type, alongside the
+header it reads today. When that lands, the admin's `csrf=` becomes a one-line
+pointer at it and this row leaves the page.
+
+## Bulk actions in the admin
+
+The generated admin deletes one row at a time, behind a confirmation page. A
+"delete selected" affordance is the feature every generated admin eventually
+grows, and the reason it is not here yet is that the invariant it has to satisfy
+is the interesting part: a bulk action must be audited as **one attributable
+event**, not N row events, and `wreath.audit_log` records per row from the ORM's
+own write path. Reconciling those two is a design question about the audit trail
+rather than a screen to draw, so it waits for someone to answer it deliberately.
+<!-- absent: wreath.admin.bulk_action -->
+
+## `series` charts in the admin
+
+The generated admin renders lists, detail pages and forms, and draws no charts.
+An application that already declares a [`wreath.series`](series.md) query has
+nowhere to put its result inside the admin, and reads it from a route of its own
+instead. Nothing here is blocked on a decision; it is simply unbuilt.
+<!-- absent: wreath.admin.chart -->
+
+## OAuth issuance
+
+Wreath *verifies* OAuth bearer tokens — `MCPAuth` publishes protected-resource
+metadata, answers with the RFC 6750 challenge naming it, and refuses a token
+minted for another audience — and it mints none. There is no authorization
+server: no authorization-code or client-credentials endpoint, no token or
+introspection endpoint, and no client registry. That is the same division the
+MCP row states for dynamic client registration: issuance belongs to the
+deployment's identity provider, and taking it on is a decision nobody has made
+rather than a gap in an existing surface.
+<!-- absent: wreath.oauth -->
+
+## Quota usage as a recorded event
+
+[`wreath.quota`](quota.md) meters and refuses, and reports what it did through
+its headers and its store. It writes nothing to [`wreath.log`](log.md), so there
+is no ordered, `(xid, seq)`-addressable record of what a tenant consumed — the
+shape a billing or usage export wants. Closing this makes `wreath.quota` a
+caller of the log rather than a second recorder, which is why it is written down
+here instead of being solved twice.
+<!-- absent: wreath.quota.UsageEvent -->
+
+## Named template fragments
+
+`wreath.templates` compiles and renders whole templates. Rendering a **named
+fragment** with its own `ETag` and `Vary` is what attribute-driven partial
+updates (htmx and its neighbours) need, and it was expected to be the admin's one
+genuine addition. It turned out not to be needed: full-page server-rendered forms
+need no fragment, and shipping no JavaScript is what lets the admin send
+`default-src 'none'` rather than the permissive policy an inline-script page would
+require. The capability is still worth having for applications that do want
+partial updates; it simply has no caller inside wreath yet, and `_livedoc`'s
+discipline says to wait for one.
+
+A second surface is unbuilt in the same by-absence way, and it belongs to
+[query subscriptions](sync.md). A reconnecting client is sent a fresh
+`snapshot` rather than resuming from where it left off. That is *correct* — the
+snapshot's key set is authoritative, so applying it drops every row the client
+has since lost, which is the tombstone rule applied wholesale for the price of
+one bounded query. What it is not is cheap for a client on a slow link that
+reconnects often.
+
+Resuming instead needs a **row-grained change feed appended inside the writing
+transaction**: a feed appended after commit can be lost by a crash in the gap,
+and a feed appended before it describes writes that rolled back. The only place
+that append can go is the ORM session's write path, which is exactly where
+[the audit trail](audit_log.md) already sits — so this is one hook growing a
+second caller rather than a second hook, and `wreath.log`'s `(xid, seq)` cursor
+is already the right resume token. Until it lands, a shape's `limit` bounds what
+a reconnect costs, which is the reason the bound is mandatory.
+<!-- absent: wreath.sync.resume -->
 
 When one of these ships, its row leaves this page and its reference page tells
 the full story.
