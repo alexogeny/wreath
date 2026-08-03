@@ -56,7 +56,7 @@ def _actions(plan: ErasurePlan, lines: list[str]) -> None:
             f"  {action.order + 1:>3}. {action.schema}.{action.table}"
             f"  [{action.disposal}]{match}"
         )
-        lines.append(f"       reached: {action.reach.describe()}")
+        lines.append(f"       reached: {action.reach.explain()}")
         if action.reason:
             lines.append(f"       why:     {action.reason}")
         for column in action.columns:
@@ -74,7 +74,7 @@ def _retained(plan: ErasurePlan, lines: list[str]) -> None:
     for item in plan.retained:
         lines.append(f"  {item.schema}.{item.table}")
         lines.append(f"       reason:  {item.reason}")
-        lines.append(f"       reached: {item.reach.describe()}")
+        lines.append(f"       reached: {item.reach.explain()}")
 
 
 def _findings(plan: ErasurePlan, lines: list[str]) -> None:
@@ -98,7 +98,7 @@ def _findings(plan: ErasurePlan, lines: list[str]) -> None:
     if not plan.orphan_risks:
         lines.append("  none: no SET NULL or SET DEFAULT edge points at a deleted row.")
     for risk in plan.orphan_risks:
-        lines.append(f"  {risk.edge.describe()}  ON DELETE {_action(risk.edge.on_delete)}")
+        lines.append(f"  {risk.edge.explain()}  ON DELETE {_action(risk.edge.on_delete)}")
         lines.append(f"       {risk.detail}")
 
     _rule(lines, f"Surviving references ({len(plan.surviving_references)})")
@@ -106,7 +106,7 @@ def _findings(plan: ErasurePlan, lines: list[str]) -> None:
         lines.append("  none: nothing this erasure keeps still points at what it deletes.")
     for reference in plan.surviving_references:
         lines.append(
-            f"  {reference.edge.describe()}  ON DELETE "
+            f"  {reference.edge.explain()}  ON DELETE "
             f"{_action(reference.edge.on_delete)}"
         )
         lines.append(f"       {reference.detail}")
@@ -161,7 +161,7 @@ def render_export_text(plan: ExportPlan) -> str:
     for action in plan.tables:
         if action.disposal == Disposal.CASCADE.value and not action.columns:
             continue
-        lines.append(f"  {action.schema}.{action.table}  ({action.reach.describe()})")
+        lines.append(f"  {action.schema}.{action.table}  ({action.reach.explain()})")
     _rule(lines, f"Withheld ({len(plan.withheld)})")
     if not plan.withheld:
         lines.append("  none.")

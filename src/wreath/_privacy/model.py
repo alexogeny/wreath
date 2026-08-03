@@ -126,7 +126,7 @@ class Edge:
     on_delete: str
     deferrable: bool = False
 
-    def describe(self) -> str:
+    def explain(self) -> str:
         return f"{self.from_table}.{self.from_column} -> {self.to_table}.{self.to_column}"
 
 
@@ -145,10 +145,10 @@ class Reach:
     def depth(self) -> int:
         return len(self.path)
 
-    def describe(self) -> str:
+    def explain(self) -> str:
         if not self.path:
             return "declares the subject column"
-        return " via ".join(edge.describe() for edge in self.path)
+        return " via ".join(edge.explain() for edge in self.path)
 
 
 @dataclass(frozen=True, slots=True)

@@ -254,7 +254,7 @@ def _reason(disposal: Disposal, item: Any, reach: Reach) -> str:
         return "the row exists only as the subject's data"
     if item is not None and not item.personal:
         return "reached, with no personal columns declared"
-    return f"reached {reach.describe()}"
+    return f"reached {reach.explain()}"
 
 
 def _cycle_findings(graph: Graph, groups: list[tuple[type, ...]]) -> list[CycleFinding]:

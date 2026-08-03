@@ -145,7 +145,7 @@ def test_a_deeper_table_records_the_path_it_was_reached_by(privacy: Privacy) -> 
     plan = privacy.plan("4711")
     comment = next(item for item in plan.tables if item.table == "comments")
     assert comment.reach.depth == 2
-    described = comment.reach.describe()
+    described = comment.reach.explain()
     assert "public.photos.owner_id -> public.people.id" in described
     assert "public.comments.photo_id -> public.photos.id" in described
 
