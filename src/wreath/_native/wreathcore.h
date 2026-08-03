@@ -12,6 +12,125 @@
  * `simd.h` is free of Python.h by design, so including it here is one-way. */
 #include "simd.h"
 
+/* Fixed-width integer load/store with the byte order named in the call.
+ *
+ * Seven files in this tree assembled these by hand, and both orders are live:
+ * protobuf is little-endian on the wire, while WebSocket frame lengths, HTTP/2
+ * frame headers and msgpack are network byte order. Spelling the order into the
+ * name is what keeps those apart -- a single order-agnostic helper would let a
+ * migration flip a wire format with nothing to catch it.
+ *
+ * The shifts *establish* the order rather than assume the host's, so there is no
+ * #if on host endianness, no memcpy of the host representation, and no htonl.
+ * The compiler recognises each pattern and folds it back to one unaligned load
+ * or store, plus a bswap where the orders differ.
+ *
+ * Written out rather than looped on purpose: gcc -O2 emits a loop over
+ * `v >> (8 * i)` literally, a byte per iteration, and does not collapse it --
+ * the looped form in protobuf.c measured 10-15x slower per call than this one.
+ */
+static inline uint16_t
+wreath_load_u16_le(const uint8_t *p)
+{
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static inline uint16_t
+wreath_load_u16_be(const uint8_t *p)
+{
+    return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
+}
+
+static inline uint32_t
+wreath_load_u32_le(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static inline uint32_t
+wreath_load_u32_be(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static inline uint64_t
+wreath_load_u64_le(const uint8_t *p)
+{
+    return (uint64_t)p[0] | ((uint64_t)p[1] << 8) | ((uint64_t)p[2] << 16) |
+           ((uint64_t)p[3] << 24) | ((uint64_t)p[4] << 32) |
+           ((uint64_t)p[5] << 40) | ((uint64_t)p[6] << 48) |
+           ((uint64_t)p[7] << 56);
+}
+
+static inline uint64_t
+wreath_load_u64_be(const uint8_t *p)
+{
+    return ((uint64_t)p[0] << 56) | ((uint64_t)p[1] << 48) |
+           ((uint64_t)p[2] << 40) | ((uint64_t)p[3] << 32) |
+           ((uint64_t)p[4] << 24) | ((uint64_t)p[5] << 16) |
+           ((uint64_t)p[6] << 8) | (uint64_t)p[7];
+}
+
+static inline void
+wreath_store_u16_le(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+static inline void
+wreath_store_u16_be(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)(v >> 8);
+    p[1] = (uint8_t)v;
+}
+
+static inline void
+wreath_store_u32_le(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+static inline void
+wreath_store_u32_be(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
+}
+
+static inline void
+wreath_store_u64_le(uint8_t *p, uint64_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+    p[4] = (uint8_t)(v >> 32);
+    p[5] = (uint8_t)(v >> 40);
+    p[6] = (uint8_t)(v >> 48);
+    p[7] = (uint8_t)(v >> 56);
+}
+
+static inline void
+wreath_store_u64_be(uint8_t *p, uint64_t v)
+{
+    p[0] = (uint8_t)(v >> 56);
+    p[1] = (uint8_t)(v >> 48);
+    p[2] = (uint8_t)(v >> 40);
+    p[3] = (uint8_t)(v >> 32);
+    p[4] = (uint8_t)(v >> 24);
+    p[5] = (uint8_t)(v >> 16);
+    p[6] = (uint8_t)(v >> 8);
+    p[7] = (uint8_t)v;
+}
+
 /* authz.c */
 PyObject *wreath_build_capability_mask(PyObject *self, PyObject *args);
 PyObject *wreath_normalize_authorization_decision(PyObject *self, PyObject *args);
@@ -146,6 +265,13 @@ PyObject *wreath_protobuf_decode(PyObject *self, PyObject *args);
 
 /* sse.c */
 PyObject *wreath_sse_frame(PyObject *self, PyObject *args);
+
+/* xml.c: the strict XML profile behind wreath.xml. `wreath_xml_configure`
+ * hands over the XMLRefusal type so C raises the same class the pure twin
+ * does; without it every refusal is a RuntimeError instead. */
+PyObject *wreath_xml_configure(PyObject *self, PyObject *arg);
+PyObject *wreath_xml_parse(PyObject *self, PyObject *args);
+PyObject *wreath_xml_c14n(PyObject *self, PyObject *args);
 
 /* templates.c */
 PyObject *wreath_template_render(PyObject *self, PyObject *args);

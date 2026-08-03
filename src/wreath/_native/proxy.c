@@ -122,8 +122,8 @@ parse_ipv6(const char *s, Py_ssize_t len, uint8_t out[16])
         if (filled > 14) {
             return 0;
         }
-        buf[filled++] = (uint8_t)(value >> 8);
-        buf[filled++] = (uint8_t)(value & 0xFF);
+        wreath_store_u16_be(buf + filled, (uint16_t)value);
+        filled += 2;
         if (i == len) {
             break;
         }
@@ -202,7 +202,7 @@ render_ip(const uint8_t *ip, int size)
         return PyUnicode_DecodeASCII(buf, n, "strict");
     }
     for (int i = 0; i < 8; i++) {
-        groups[i] = (uint16_t)((ip[2 * i] << 8) | ip[2 * i + 1]);
+        groups[i] = wreath_load_u16_be(ip + 2 * i);
     }
     for (int i = 0; i < 8; i++) {
         if (groups[i] != 0) {

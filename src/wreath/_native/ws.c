@@ -24,17 +24,14 @@ wreath_ws_parse_header_raw(const uint8_t *buf, Py_ssize_t len, WreathWsFrameHead
         if (len < pos + 2) {
             return 1;
         }
-        payload_len = ((uint64_t)buf[pos] << 8) | buf[pos + 1];
+        payload_len = wreath_load_u16_be(buf + pos);
         pos += 2;
     }
     else if (payload_len == 127) {
         if (len < pos + 8) {
             return 1;
         }
-        payload_len = 0;
-        for (int i = 0; i < 8; i++) {
-            payload_len = (payload_len << 8) | buf[pos + i];
-        }
+        payload_len = wreath_load_u64_be(buf + pos);
         if (payload_len > (uint64_t)PY_SSIZE_T_MAX) {
             return -1;
         }
@@ -128,16 +125,12 @@ wreath_ws_build_frame(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwarg
         }
         else if (payload.len < 65536) {
             header[1] = (uint8_t)(mask_bit | 126);
-            header[2] = (uint8_t)(payload.len >> 8);
-            header[3] = (uint8_t)payload.len;
+            wreath_store_u16_be(header + 2, (uint16_t)payload.len);
             header_len = 4;
         }
         else {
-            uint64_t length = (uint64_t)payload.len;
             header[1] = (uint8_t)(mask_bit | 127);
-            for (int i = 0; i < 8; i++) {
-                header[2 + i] = (uint8_t)(length >> (56 - 8 * i));
-            }
+            wreath_store_u64_be(header + 2, (uint64_t)payload.len);
             header_len = 10;
         }
     }

@@ -48,7 +48,7 @@ b64url_32(const unsigned char *in, char *out)
      * padding '=' that base64 would add is stripped, exactly as the Python
      * `_b64encode` helper does. */
     {
-        unsigned int rest = ((unsigned int)in[30] << 8) | in[31];
+        unsigned int rest = wreath_load_u16_be((const uint8_t *)(in + 30));
         out[o++] = B64URL[(rest >> 10) & 0x3F];
         out[o++] = B64URL[(rest >> 4) & 0x3F];
         out[o++] = B64URL[(rest << 2) & 0x3F];

@@ -137,6 +137,14 @@ static PyMethodDef core_methods[] = {
     {"protobuf_decode", wreath_protobuf_decode, METH_VARARGS,
      "protobuf_decode(plan, data) -> (values, unknown)\n"
      "Decode protobuf wire bytes against a compiled plan."},
+    {"xml_configure", wreath_xml_configure, METH_O,
+     "xml_configure(refusal_type) -> None"},
+    {"xml_parse", wreath_xml_parse, METH_VARARGS,
+     "xml_parse(data, max_bytes, max_depth, max_elements, max_attributes, "
+     "max_attribute_bytes) -> node\nStrict XML, with a byte span per element."},
+    {"xml_c14n", wreath_xml_c14n, METH_VARARGS,
+     "xml_c14n(data, start, end, inherited, inclusive, *limits) -> bytes\n"
+     "Exclusive XML Canonicalization 1.0 of one subtree's source bytes."},
     {"sse_frame", wreath_sse_frame, METH_VARARGS,
      "sse_frame(comment, name, ident, retry, data) -> bytes\nFrame one SSE event."},
     {"json_configure", wreath_json_configure, METH_VARARGS,

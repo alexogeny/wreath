@@ -98,8 +98,8 @@ mp_tag_u16(MpWriter *w, unsigned char tag, uint16_t value)
         return -1;
     }
     w->buf[w->len++] = (char)tag;
-    w->buf[w->len++] = (char)(value >> 8);
-    w->buf[w->len++] = (char)(value & 0xFF);
+    wreath_store_u16_be((uint8_t *)w->buf + w->len, value);
+    w->len += 2;
     return 0;
 }
 
@@ -110,10 +110,8 @@ mp_tag_u32(MpWriter *w, unsigned char tag, uint32_t value)
         return -1;
     }
     w->buf[w->len++] = (char)tag;
-    w->buf[w->len++] = (char)(value >> 24);
-    w->buf[w->len++] = (char)((value >> 16) & 0xFF);
-    w->buf[w->len++] = (char)((value >> 8) & 0xFF);
-    w->buf[w->len++] = (char)(value & 0xFF);
+    wreath_store_u32_be((uint8_t *)w->buf + w->len, value);
+    w->len += 4;
     return 0;
 }
 
@@ -124,9 +122,8 @@ mp_tag_u64(MpWriter *w, unsigned char tag, uint64_t value)
         return -1;
     }
     w->buf[w->len++] = (char)tag;
-    for (int shift = 56; shift >= 0; shift -= 8) {
-        w->buf[w->len++] = (char)((value >> shift) & 0xFF);
-    }
+    wreath_store_u64_be((uint8_t *)w->buf + w->len, value);
+    w->len += 8;
     return 0;
 }
 
