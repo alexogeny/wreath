@@ -16,6 +16,8 @@ import hashlib
 from collections.abc import Callable
 from typing import Final
 
+from .temporal import Recurrence
+
 # --- job/message lifecycle state machine -----------------------------------
 #
 # `ready` -> `leased` (a worker claims it) -> `done` | `failed` (retry,
@@ -181,78 +183,16 @@ def check_notify_payload(payload: bytes) -> None:
 # or special strings — enough for scheduled jobs without a cron dependency.
 
 
-class CronSchedule:
-    """A parsed 5-field cron expression with a `next_after` computation."""
+def CronSchedule(expression: str) -> Recurrence:
+    """The old spelling of `Recurrence.cron`, kept so existing callers still run.
 
-    __slots__ = ("_expr", "_minute", "_hour", "_dom", "_month", "_dow")
+    The cron parser used to live here, and `wreath.temporal.Recurrence` now owns
+    it -- along with the zone this spelling could never carry. Everything a
+    caller of this got before, it still gets: the returned object answers
+    `matches(minute=..., hour=...)` identically, and a bad expression still
+    raises a `ValueError` (`RecurrenceError` is one).
 
-    _BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))
-
-    def __init__(self, expression: str) -> None:
-        fields = expression.split()
-        if len(fields) != 5:
-            raise ValueError(
-                f"cron expression must have 5 fields, got {len(fields)}: {expression!r}"
-            )
-        self._expr = expression
-        sets = [
-            _parse_cron_field(field, low, high, wrap=index == 4)
-            for index, (field, (low, high)) in enumerate(
-                zip(fields, self._BOUNDS, strict=True)
-            )
-        ]
-        self._minute, self._hour, self._dom, self._month, self._dow = sets
-
-    @property
-    def expression(self) -> str:
-        return self._expr
-
-    def matches(self, *, minute: int, hour: int, day: int, month: int, weekday: int) -> bool:
-        """Whether a wall-clock instant matches (weekday: Monday=0..Sunday=6 -> cron Sun=0)."""
-        cron_dow = (weekday + 1) % 7  # Python Mon=0 -> cron Sun=0
-        if minute not in self._minute or hour not in self._hour or month not in self._month:
-            return False
-        # Vixie-cron semantics: when both day-of-month and day-of-week are
-        # restricted, either matching is sufficient; otherwise both must match.
-        dom_restricted = len(self._dom) != 31
-        dow_restricted = len(self._dow) != 7
-        dom_ok = day in self._dom
-        dow_ok = cron_dow in self._dow
-        if dom_restricted and dow_restricted:
-            return dom_ok or dow_ok
-        return dom_ok and dow_ok
-
-
-def _parse_cron_field(
-    field: str, low: int, high: int, *, wrap: bool = False
-) -> frozenset[int]:
-    """Parse one cron field into the set of values it matches.
-
-    `wrap` is the day-of-week field, where every crontab accepts **7** as a
-    second spelling of Sunday (`0`). Refusing it made `0 0 * * 7` -- a form
-    people copy straight out of a crontab -- a startup error.
+    What it gets *now* is UTC, because that is what it always meant. Reach for
+    `Recurrence.cron(expression, tz=...)` to say otherwise.
     """
-    if wrap:
-        high = 7
-    values: set[int] = set()
-    for part in field.split(","):
-        step = 1
-        body = part
-        if "/" in part:
-            body, _, step_text = part.partition("/")
-            step = int(step_text)
-            if step < 1:
-                raise ValueError(f"cron step must be >= 1: {part!r}")
-        if body == "*":
-            start, end = low, high
-        elif "-" in body:
-            start_text, _, end_text = body.partition("-")
-            start, end = int(start_text), int(end_text)
-        else:
-            start = end = int(body)
-        if start < low or end > high or start > end:
-            raise ValueError(f"cron field out of range [{low},{high}]: {part!r}")
-        values.update(range(start, end + 1, step))
-    if wrap:
-        values = {0 if value == 7 else value for value in values}
-    return frozenset(values)
+    return Recurrence.cron(expression)
