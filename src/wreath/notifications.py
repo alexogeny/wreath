@@ -63,6 +63,7 @@ from ._webpush import (
     encrypt,
     vapid_headers,
 )
+from .temporal import Duration
 
 __all__ = [
     "Channel",
@@ -221,7 +222,7 @@ class Notifications:
         self,
         name: str,
         *,
-        digest: float = 0.0,
+        digest: Any = 0.0,
         mail_class: MailClass = MailClass.TRANSACTIONAL,
         unsubscribe: Callable[[Recipient], Unsubscribe] | None = None,
         only: Iterable[str] = (),
@@ -242,7 +243,10 @@ class Notifications:
                 "Unsubscribe for a recipient; RFC 8058 one-click unsubscribe is not "
                 "optional for promotional mail"
             )
-        spec = KindSpec(name, digest, mail_class, unsubscribe, tuple(only))
+        # `hours(1)` -- the spelling this module's own docstring reached for
+        # before `Duration` existed to define it. A bare number is seconds.
+        window = Duration.of(digest).total_seconds()
+        spec = KindSpec(name, window, mail_class, unsubscribe, tuple(only))
 
         def declare(cls: type) -> type:
             self._kinds[cls] = spec
