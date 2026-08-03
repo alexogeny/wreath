@@ -198,6 +198,28 @@ class Pool:
         """
         return len(self._borrowed)
 
+    def counters(self) -> Any:
+        """This pool's counters, for `wreath.metrics.collect`.
+
+        `queue_high_water` is the one worth scraping: it is the only field that
+        is not instantaneous, so it answers "did anything ever wait?" — which a
+        sampler polling `waiters` will usually miss entirely.
+        """
+        from .metrics import Counters
+
+        reading = self.snapshot()
+        return Counters(
+            subsystem="pool",
+            instance=getattr(self, "_name", "") or "default",
+            values={
+                "borrowed": reading.borrowed,
+                "available": reading.available,
+                "waiters": reading.waiters,
+                "max_size": reading.max_size,
+                "queue_high_water": reading.queue_high_water,
+            },
+        )
+
     def snapshot(self) -> PoolSnapshot:
         """Mirrors `HTTPClient.snapshot()`, so both pools read the same way."""
         return PoolSnapshot(
@@ -723,6 +745,35 @@ class Database:
             remaining = max(0.0, deadline - asyncio.get_running_loop().time())
             await pool.stop(remaining)
         self.started = False
+
+    def counters(self) -> Any:
+        """This database's pools, summed, for `wreath.metrics.collect`.
+
+        One reading per database rather than per workload pool: the instance
+        label is the database, and a caller who wants the split reads
+        `pool(workload).snapshot()`. Summing is right for the four fields that
+        are counts of connections; `queue_high_water` is a maximum, so it is
+        taken as one rather than added.
+
+        Only pools that exist are read. Asking for one that has not been built
+        would *create* it, and a metrics scrape must not open connections.
+        """
+        from .metrics import Counters
+
+        totals = {"borrowed": 0, "available": 0, "waiters": 0, "max_size": 0}
+        high_water = 0
+        for pool in self._pools.values():
+            reading = pool.snapshot()
+            totals["borrowed"] += reading.borrowed
+            totals["available"] += reading.available
+            totals["waiters"] += reading.waiters
+            totals["max_size"] += reading.max_size
+            high_water = max(high_water, reading.queue_high_water)
+        return Counters(
+            subsystem="pool",
+            instance=self._name,
+            values={**totals, "queue_high_water": high_water},
+        )
 
     def pool(self, workload: Workload) -> Pool:
         """The pool serving `workload`.
