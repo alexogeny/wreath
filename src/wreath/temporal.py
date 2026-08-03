@@ -52,27 +52,36 @@ __all__ = [
     "BUCKETS",
     "Bucket",
     "Day",
+    "Duration",
     "Hour",
     "Instant",
     "Minute",
     "Month",
     "Quarter",
+    "Recurrence",
+    "RecurrenceError",
     "TemporalError",
     "Timestamp",
     "Week",
     "Year",
     "bucket",
+    "days",
     "format_duration",
     "format_iso",
     "from_timestamp",
     "from_wall_clock",
+    "hours",
     "jsonable",
+    "milliseconds",
+    "minutes",
     "now",
     "parse",
     "parse_duration",
     "relative",
+    "seconds",
     "to_timestamp",
     "wall_clock",
+    "weeks",
     "zone",
 ]
 
@@ -538,6 +547,538 @@ def _seconds_text(secs: int, micro: int) -> str:
     if not micro:
         return str(secs)
     return f"{secs}.{micro:06d}".rstrip("0")
+
+
+# --- durations as a declared type ----------------------------------------------------
+
+
+class Duration(datetime.timedelta):
+    """A span of time, declared once and read wherever a length is configured.
+
+    This module already refuses a naive `datetime`, because a moment without an
+    offset has no single meaning. A *length* had no type at all: every span in
+    the framework was a bare `float` of seconds — a job lease, a quota period, a
+    notification digest window, a store window, a rate-limit span — so five
+    subsystems each documented "seconds" and a caller learned "how long" five
+    times. `Duration` is the one spelling, and `of` is what every one of those
+    parameters now accepts.
+
+    A `datetime.timedelta` subclass, so it compares, sorts, and adds to an
+    `Instant` exactly like one, and `total_seconds()` is inherited — which is
+    what a call site that genuinely needs a float asks for.
+
+    **Arithmetic returns a plain `timedelta`, not a `Duration`.** CPython
+    preserves the subclass for `datetime` but not for `timedelta`
+    (`timedelta.__add__` constructs the base type directly). That is not worked
+    around: `Duration` is a type for the *declaration* boundary, and a value
+    that has been through arithmetic has left it. `Duration.of` takes it back
+    when a boundary needs one.
+
+    Note `.seconds` is `timedelta`'s own field — the seconds *component*, 0 to
+    86399 — and deliberately not shadowed. `total_seconds()` is the whole span.
+    """
+
+    __slots__ = ()
+
+    @classmethod
+    def of(cls, value: Any) -> Duration:
+        """Adopt a length however it was written.
+
+        Accepts a `Duration`, a `timedelta`, a number of seconds, or an
+        ISO-8601 duration string such as `"PT3H"`. A bool is refused: `True`
+        is an `int` in Python and one second is never what it meant.
+
+        Numbers are seconds because that is what every parameter this replaces
+        already meant, so an existing call site keeps working unchanged.
+        """
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, datetime.timedelta):
+            return cls(seconds=value.total_seconds())
+        if isinstance(value, bool):
+            raise TemporalError("a bool is not a duration; say seconds(1) if you meant one")
+        if isinstance(value, (int, float)):
+            return cls(seconds=value)
+        if isinstance(value, str):
+            return cls(seconds=parse_duration(value).total_seconds())
+        raise TemporalError(
+            f"expected a Duration, timedelta, seconds, or an ISO-8601 duration "
+            f"string, got {type(value).__name__}"
+        )
+
+    def iso(self) -> str:
+        """The ISO-8601 form — `PT3H`. The spelling `of` reads back."""
+        return format_duration(self)
+
+    def __repr__(self) -> str:
+        return f"Duration({self.iso()})"
+
+
+def milliseconds(value: float) -> Duration:
+    """`value` milliseconds."""
+    return Duration(milliseconds=value)
+
+
+def seconds(value: float) -> Duration:
+    """`value` seconds."""
+    return Duration(seconds=value)
+
+
+def minutes(value: float) -> Duration:
+    """`value` minutes."""
+    return Duration(minutes=value)
+
+
+def hours(value: float) -> Duration:
+    """`value` hours."""
+    return Duration(hours=value)
+
+
+def days(value: float) -> Duration:
+    """`value` days.
+
+    A fixed 24 hours, which is what a `timedelta` can hold honestly. The two
+    days a year that are 23 or 25 hours long are a *calendar* question, and the
+    answer to those is `Bucket` and `Recurrence`, both of which read a zone.
+    """
+    return Duration(days=value)
+
+
+def weeks(value: float) -> Duration:
+    """`value` weeks, as a fixed seven `days`."""
+    return Duration(weeks=value)
+
+
+# --- recurrence ----------------------------------------------------------------------
+
+
+class RecurrenceError(TemporalError):
+    """A recurrence could not be understood, or names something not supported.
+
+    A subclass of `TemporalError`, so a caller that already catches the one this
+    module raises does not have to learn a second name.
+    """
+
+
+#: The bound on how far `next_after` will search before giving up. Four years,
+#: so a February 29th recurrence is always reachable and a genuinely
+#: unsatisfiable one (April 31st) refuses in bounded time rather than spinning.
+_SEARCH_DAYS = 1462
+
+_FIELD_BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))
+
+#: Calendar weekday names, in cron's day-of-week numbering (Sunday = 0).
+_CALENDAR_DAYS = {"SU": 0, "MO": 1, "TU": 2, "WE": 3, "TH": 4, "FR": 5, "SA": 6}
+
+
+@dataclass(frozen=True, slots=True)
+class Recurrence:
+    """A repeating schedule that knows the zone its wall clock is read on.
+
+    `wreath.series` goes out of its way to bucket on the local wall clock,
+    because stepping naive timestamps advances a calendar day while stepping
+    `timestamptz` advances exactly 24 hours — the DST bug, twice a year, in one
+    bucket. Scheduling had the same problem and no answer: a cron expression is
+    read in UTC, so *"rebalance at 03:00 depot-local"* is an hour wrong for half
+    the year, in whichever half the reader does not test in.
+
+    A `Recurrence` carries its zone, so that is one declaration rather than a
+    conversion the caller has to remember to redo when the offset changes:
+
+    ```python
+    Recurrence.cron("0 3 * * *", tz="Australia/Sydney")
+    Recurrence.rrule("FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=3", tz="Europe/London")
+    ```
+
+    **Both spellings compile to the same five sets**, which is why the calendar
+    form is here
+    rather than in a translator beside it: the calendar UIs people actually
+    mount emit it, and every application that has one grows a lossy translator to
+    cron that is wrong across a DST boundary. The supported subset is named in
+    `calendar`, and everything outside it is refused by name rather than
+    approximated.
+
+    **The two DST days, stated rather than discovered.** A local time that does
+    not exist (spring forward) never occurs as a wall-clock reading, so it does
+    not match and does not fire — the same answer cron gives. A local time that
+    occurs twice (fall back) matches on both passes, but `bucket_key` names the
+    *local* minute, so a scheduler keyed on it fires once. Both are pinned by
+    tests rather than left to the reader.
+    """
+
+    minute: frozenset[int]
+    hour: frozenset[int]
+    day: frozenset[int]
+    month: frozenset[int]
+    weekday: frozenset[int]
+    tz: datetime.tzinfo
+    text: str
+
+    # -- construction --------------------------------------------------------
+
+    @classmethod
+    def cron(cls, expression: str, *, tz: str | datetime.tzinfo = UTC) -> Recurrence:
+        """A five-field cron expression, read on `tz`'s wall clock.
+
+        `tz` defaults to UTC, so an existing expression means exactly what it
+        meant before this type existed.
+        """
+        if not isinstance(expression, str):
+            raise RecurrenceError(
+                f"expected a cron expression, got {type(expression).__name__}"
+            )
+        fields = expression.split()
+        if len(fields) != 5:
+            raise RecurrenceError(
+                f"cron expression must have 5 fields, got {len(fields)}: {expression!r}"
+            )
+        minute, hour, day, month, weekday = (
+            _parse_cron_field(field, low, high, wrap=index == 4)
+            for index, (field, (low, high)) in enumerate(
+                zip(fields, _FIELD_BOUNDS, strict=True)
+            )
+        )
+        return cls(
+            minute=minute, hour=hour, day=day, month=month, weekday=weekday,
+            tz=_tzinfo(tz), text=expression,
+        )
+
+    @classmethod
+    def calendar(cls, text: str, *, tz: str | datetime.tzinfo = UTC) -> Recurrence:
+        """The calendar spelling — `FREQ=WEEKLY;BYDAY=MO,TU` — on `tz`'s wall clock.
+
+        This is the syntax a calendar client emits and RFC 5545 defines, named
+        once here so a caller knows what they can paste in. A leading `RRULE:`
+        is accepted for the same reason.
+
+        Supported: `FREQ` of `MINUTELY`, `HOURLY`, `DAILY`, `WEEKLY` or
+        `MONTHLY`; `INTERVAL` where it divides its parent unit evenly;
+        `BYMINUTE`, `BYHOUR`, `BYDAY` (without an ordinal prefix), `BYMONTHDAY`
+        and `BYMONTH`.
+
+        Everything else is **refused by name**: `COUNT` and `UNTIL` because a
+        recurrence that stops is a different contract from one that repeats and
+        a scheduler holding this has nowhere to record exhaustion; `BYSETPOS`,
+        `BYWEEKNO`, `BYYEARDAY` and an ordinal `BYDAY` (`2MO`) because they
+        select from a generated set rather than constrain a field, which these
+        five sets cannot express. Approximating any of them would put a job on
+        the wrong day quietly, which is the failure this type exists to remove.
+        """
+        if not isinstance(text, str):
+            raise RecurrenceError(
+                f"expected a calendar recurrence string, got {type(text).__name__}"
+            )
+        body = text.strip()
+        if body.upper().startswith("RRULE:"):
+            body = body[6:]
+        parts: dict[str, str] = {}
+        for chunk in body.split(";"):
+            if not chunk:
+                continue
+            name, sep, value = chunk.partition("=")
+            if not sep:
+                raise RecurrenceError(f"recurrence part is not NAME=VALUE: {chunk!r}")
+            parts[name.strip().upper()] = value.strip()
+        minute, hour, day, month, weekday = _calendar_fields(parts)
+        return cls(
+            minute=minute, hour=hour, day=day, month=month, weekday=weekday,
+            tz=_tzinfo(tz), text=text,
+        )
+
+    # -- reading -------------------------------------------------------------
+
+    def matches_at(self, moment: datetime.datetime) -> bool:
+        """Whether `moment`, read on this recurrence's zone, is a firing time.
+
+        The one a scheduler asks. `matches` is the same question in already-split
+        wall-clock components, for a caller that has them.
+        """
+        local = wall_clock(moment, self.tz)
+        return self.matches(
+            minute=local.minute,
+            hour=local.hour,
+            day=local.day,
+            month=local.month,
+            weekday=local.weekday(),
+        )
+
+    def matches(
+        self, *, minute: int, hour: int, day: int, month: int, weekday: int
+    ) -> bool:
+        """Whether a wall-clock reading is a firing time. `weekday` is Monday=0.
+
+        Vixie-cron semantics for the day fields: when both day-of-month and
+        day-of-week are restricted, either matching is sufficient; otherwise
+        both must match. Every crontab implements that rule and a rewrite that
+        does not gets one job a month wrong.
+
+        This takes components rather than an instant, so it cannot apply the
+        zone itself — which is exactly why `matches_at` exists and is the one to
+        reach for. A caller holding a UTC reading and calling this directly gets
+        UTC semantics, and that is the bug this type was built to remove.
+        """
+        if minute not in self.minute or hour not in self.hour or month not in self.month:
+            return False
+        return self._day_matches(day, weekday)
+
+    def bucket_key(self, moment: datetime.datetime) -> str:
+        """The local minute `moment` falls in, as a stable string.
+
+        This is what a scheduler deduplicates on, and it is *local* rather than
+        UTC on purpose. The hour that repeats on a fall-back day is two distinct
+        instants but one wall-clock minute, so a schedule declared at that time
+        fires once rather than twice — which is what "03:30 every day" means to
+        the person who wrote it.
+        """
+        return wall_clock(moment, self.tz).strftime("%Y%m%d%H%M")
+
+    def next_after(self, moment: datetime.datetime) -> Instant:
+        """The first firing time strictly after `moment`.
+
+        Searches forward at most four years and then raises, so an unsatisfiable
+        recurrence (`0 0 31 2 *` — February 31st) reports itself instead of
+        looping. A local time that does not exist on the search day is skipped,
+        which is what keeps this and `matches_at` answering the same question.
+        """
+        start = wall_clock(moment, self.tz).replace(second=0, microsecond=0)
+        hours = sorted(self.hour)
+        minutes_ = sorted(self.minute)
+        for offset in range(_SEARCH_DAYS):
+            date = (start + datetime.timedelta(days=offset)).date()
+            if date.month not in self.month:
+                continue
+            if not self._day_matches(date.day, date.weekday()):
+                continue
+            for hour in hours:
+                for minute in minutes_:
+                    local = datetime.datetime(
+                        date.year, date.month, date.day, hour, minute
+                    )
+                    if local <= start:
+                        continue
+                    candidate = from_wall_clock(local, self.tz)
+                    # A local time inside a spring-forward gap never occurs as a
+                    # wall-clock reading, so `matches_at` would not fire for it.
+                    # Reading the candidate back is what keeps the two agreeing.
+                    #
+                    # **Through UTC, and that is load-bearing.** `from_wall_clock`
+                    # returns a datetime already carrying `tz`, and `astimezone`
+                    # onto the zone a value already has is a no-op that preserves
+                    # the displayed fields rather than renormalising them -- so a
+                    # nonexistent 02:30 reads back as 02:30 and the check passes
+                    # while the instant it names is really 03:30. Normalising to
+                    # UTC first forces the conversion that catches it.
+                    if wall_clock(candidate.astimezone(datetime.UTC), self.tz) != local:
+                        continue
+                    return Instant.of(candidate)
+        raise RecurrenceError(
+            f"{self.text!r} has no occurrence within {_SEARCH_DAYS} days of "
+            f"{moment.isoformat()}; it may name a date that never happens"
+        )
+
+    def _day_matches(self, day: int, python_weekday: int) -> bool:
+        cron_dow = (python_weekday + 1) % 7  # Python Mon=0 -> cron Sun=0
+        dom_restricted = len(self.day) != 31
+        dow_restricted = len(self.weekday) != 7
+        dom_ok = day in self.day
+        dow_ok = cron_dow in self.weekday
+        if dom_restricted and dow_restricted:
+            return dom_ok or dow_ok
+        return dom_ok and dow_ok
+
+    def __str__(self) -> str:
+        return f"{self.text} [{self.tz}]"
+
+
+def _parse_cron_field(
+    field: str, low: int, high: int, *, wrap: bool = False
+) -> frozenset[int]:
+    """Parse one cron field into the set of values it matches.
+
+    `wrap` is the day-of-week field, where every crontab accepts **7** as a
+    second spelling of Sunday (`0`). Refusing it made `0 0 * * 7` -- a form
+    people copy straight out of a crontab -- a startup error.
+    """
+    if wrap:
+        high = 7
+    values: set[int] = set()
+    for part in field.split(","):
+        step = 1
+        body = part
+        try:
+            if "/" in part:
+                body, _, step_text = part.partition("/")
+                step = int(step_text)
+                if step < 1:
+                    raise RecurrenceError(f"cron step must be >= 1: {part!r}")
+            if body == "*":
+                start, end = low, high
+            elif "-" in body:
+                start_text, _, end_text = body.partition("-")
+                start, end = int(start_text), int(end_text)
+            else:
+                start = end = int(body)
+        except ValueError as error:
+            raise RecurrenceError(f"cron field is not a number: {part!r}") from error
+        if start < low or end > high or start > end:
+            raise RecurrenceError(f"cron field out of range [{low},{high}]: {part!r}")
+        values.update(range(start, end + 1, step))
+    if wrap:
+        values = {0 if value == 7 else value for value in values}
+    return frozenset(values)
+
+
+#: Calendar recurrence parts this maps onto the five fields. Anything outside it is refused,
+#: with `_CALENDAR_SELECTORS` named separately because those fail for a *reason*
+#: rather than merely being unimplemented.
+_CALENDAR_KNOWN = frozenset(
+    {"FREQ", "INTERVAL", "BYMINUTE", "BYHOUR", "BYDAY", "BYMONTHDAY", "BYMONTH", "WKST"}
+)
+_CALENDAR_SELECTORS = frozenset({"BYSETPOS", "BYWEEKNO", "BYYEARDAY", "BYEASTER"})
+
+
+def _calendar_numbers(value: str, low: int, high: int, name: str) -> frozenset[int]:
+    # The empty check comes *first* and is not a formality. `"".split(",")` is
+    # `[""]`, not `[]`, so a trailing `BYHOUR=` would otherwise reach `int("")`
+    # and be reported as "not a number" -- true, but it sends the reader looking
+    # for a typo in a value that is not there. `wreath mutant` found the
+    # unreachable branch this replaces.
+    if not value.strip():
+        raise RecurrenceError(f"{name} is empty")
+    out: set[int] = set()
+    for item in value.split(","):
+        try:
+            number = int(item)
+        except ValueError as error:
+            raise RecurrenceError(f"{name} is not a number: {item!r}") from error
+        if not low <= number <= high:
+            raise RecurrenceError(f"{name} out of range [{low},{high}]: {number}")
+        out.add(number)
+    return frozenset(out)
+
+
+def _calendar_step(unit: str, span: int, interval: int) -> frozenset[int]:
+    """Every `interval`th value of a unit, refusing an interval that does not fit.
+
+    `FREQ=HOURLY;INTERVAL=6` is four times a day forever, because 6 divides 24.
+    `INTERVAL=7` is not: it would drift by an hour every day, and there is no
+    set of hours that means it. Refusing says so; approximating would put the
+    job an hour out and never mention it.
+    """
+    if interval < 1:
+        raise RecurrenceError(f"INTERVAL must be >= 1, got {interval}")
+    if span % interval:
+        raise RecurrenceError(
+            f"INTERVAL={interval} does not divide {span} {unit}s evenly, so it "
+            f"names a schedule that drifts rather than one that repeats; express it "
+            f"as an explicit BY{unit.upper()} list, or drive it from a durable job"
+        )
+    return frozenset(range(0, span, interval))
+
+
+def _calendar_fields(
+    parts: dict[str, str],
+) -> tuple[frozenset[int], frozenset[int], frozenset[int], frozenset[int], frozenset[int]]:
+    """The five cron sets a calendar recurrence names, or a refusal naming what stopped it."""
+    for name in ("COUNT", "UNTIL"):
+        if name in parts:
+            raise RecurrenceError(
+                f"{name} bounds a recurrence, and a Recurrence repeats without "
+                f"end — a schedule that stops needs somewhere to record that it has, "
+                f"which this type does not have. Drive a bounded series from a job."
+            )
+    for name in sorted(parts.keys() & _CALENDAR_SELECTORS):
+        raise RecurrenceError(
+            f"{name} selects from a generated set rather than constraining a "
+            f"field, which is not expressible here; it is refused rather than "
+            f"approximated onto the wrong day"
+        )
+    unknown = sorted(parts.keys() - _CALENDAR_KNOWN)
+    if unknown:
+        raise RecurrenceError(f"recurrence part not supported: {', '.join(unknown)}")
+    if parts.get("WKST", "MO").upper() != "MO":
+        raise RecurrenceError("WKST is only supported as MO")
+
+    freq = parts.get("FREQ", "").upper()
+    if not freq:
+        raise RecurrenceError("a calendar recurrence needs a FREQ")
+    interval = int(parts.get("INTERVAL", "1") or "1")
+
+    minute = (
+        _calendar_numbers(parts["BYMINUTE"], 0, 59, "BYMINUTE")
+        if "BYMINUTE" in parts
+        else None
+    )
+    hour = _calendar_numbers(parts["BYHOUR"], 0, 23, "BYHOUR") if "BYHOUR" in parts else None
+    monthday = (
+        _calendar_numbers(parts["BYMONTHDAY"], 1, 31, "BYMONTHDAY")
+        if "BYMONTHDAY" in parts
+        else None
+    )
+    month = _calendar_numbers(parts["BYMONTH"], 1, 12, "BYMONTH") if "BYMONTH" in parts else None
+
+    weekday: frozenset[int] | None = None
+    if "BYDAY" in parts:
+        # Before the per-token walk, for the reason `_calendar_numbers` states:
+        # `"".split(",")` yields `[""]`, so `BYDAY=` would otherwise be reported
+        # as an ordinal-weekday problem, which it is not.
+        if not parts["BYDAY"].strip():
+            raise RecurrenceError("BYDAY is empty")
+        found: set[int] = set()
+        for item in parts["BYDAY"].split(","):
+            token = item.strip().upper()
+            if token not in _CALENDAR_DAYS:
+                raise RecurrenceError(
+                    f"BYDAY {item!r} is not a plain weekday; an ordinal such as "
+                    f"'2MO' selects the nth occurrence in a period, which is not "
+                    f"expressible as a day-of-week set"
+                )
+            found.add(_CALENDAR_DAYS[token])
+        weekday = frozenset(found)
+
+    every_hour = frozenset(range(24))
+    every_day = frozenset(range(1, 32))
+    every_month = frozenset(range(1, 13))
+    every_weekday = frozenset(range(7))
+
+    if freq == "MINUTELY":
+        minute = minute or _calendar_step("minute", 60, interval)
+    elif freq == "HOURLY":
+        minute = minute or frozenset({0})
+        hour = hour or _calendar_step("hour", 24, interval)
+    elif freq in ("DAILY", "WEEKLY", "MONTHLY"):
+        if interval != 1:
+            raise RecurrenceError(
+                f"INTERVAL={interval} with FREQ={freq} names every {interval}th "
+                f"period counted from a start date, which a field set cannot hold; "
+                f"only INTERVAL=1 is supported for {freq}"
+            )
+        minute = minute or frozenset({0})
+        hour = hour or frozenset({0})
+        if freq == "WEEKLY" and weekday is None:
+            raise RecurrenceError("FREQ=WEEKLY needs BYDAY to say which days")
+        if freq == "MONTHLY" and monthday is None and weekday is None:
+            raise RecurrenceError(
+                "FREQ=MONTHLY needs BYMONTHDAY or BYDAY to say which days"
+            )
+    else:
+        raise RecurrenceError(
+            f"FREQ={freq} is not supported; use MINUTELY, HOURLY, DAILY, "
+            f"WEEKLY or MONTHLY"
+        )
+
+    # `minute` has no `every_minute` fallback because every branch above assigns
+    # it -- MINUTELY from the interval, the rest from `or frozenset({0})` -- so a
+    # fallback here is unreachable. `wreath mutant` proved that by dropping it
+    # and finding no test could tell. The other four keep theirs: `hour` really
+    # is None for MINUTELY, and the three date fields for most frequencies.
+    return (
+        minute,
+        hour if hour is not None else every_hour,
+        monthday if monthday is not None else every_day,
+        month if month is not None else every_month,
+        weekday if weekday is not None else every_weekday,
+    )
 
 
 # --- the relative formatter ----------------------------------------------------------
