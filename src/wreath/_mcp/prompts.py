@@ -97,7 +97,7 @@ class Prompt:
     requirement: AuthRequirement = NO_REQUIREMENT
     completions: Mapping[str, tuple[str, ...]] = MappingProxyType({})
 
-    def describe(self) -> dict[str, Any]:
+    def manifest(self) -> dict[str, Any]:
         """The `prompts/list` entry for this prompt."""
         entry: dict[str, Any] = {"name": self.name, "description": self.description}
         if self.title is not None:

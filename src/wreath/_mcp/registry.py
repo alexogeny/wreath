@@ -170,7 +170,7 @@ class Tool:
     sampling_requirement: AuthRequirement | None = None
     elicitation_requirement: AuthRequirement | None = None
 
-    def describe(self) -> dict[str, Any]:
+    def manifest(self) -> dict[str, Any]:
         """The `tools/list` entry for this tool."""
         entry: dict[str, Any] = {
             "name": self.name,

@@ -67,7 +67,7 @@ class Resource:
     mime_type: str | None = None
     requirement: AuthRequirement = NO_REQUIREMENT
 
-    def describe(self) -> dict[str, Any]:
+    def manifest(self) -> dict[str, Any]:
         """The `resources/list` entry for this resource."""
         entry: dict[str, Any] = {
             "uri": self.uri,

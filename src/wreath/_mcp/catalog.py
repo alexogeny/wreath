@@ -86,7 +86,7 @@ class Catalog:
         cached = self._listing
         if cached is None:
             cached = self._listing = _json_dumps(
-                {self.listing_key: [entry.describe() for entry in self.sorted_entries()]}
+                {self.listing_key: [entry.manifest() for entry in self.sorted_entries()]}
             )
         return cached
 
