@@ -1,13 +1,13 @@
 """The native reactor — an asyncio-compatible event loop with a fused fast path.
 
-This is the loop behind Wreath's experimental **metal** tier (``--loop metal``):
-alongside ``pure`` (Python) and ``native`` (C on the stock asyncio loop), metal
-runs the native server on this reactor — an ``asyncio``-compatible loop that
-inline-drives non-suspending request coroutines and, when ``timers="wheel"``,
-backs every ``call_later`` deadline with the native hashed timing wheel from
-``wreath._native._reactor`` instead of asyncio's timer heap ("bare metal").
+This is the loop behind Wreath's experimental **metal** tier (`--loop metal`):
+alongside `pure` (Python) and `native` (C on the stock asyncio loop), metal
+runs the native server on this reactor — an `asyncio`-compatible loop that
+inline-drives non-suspending request coroutines and, when `timers="wheel"`,
+backs every `call_later` deadline with the native hashed timing wheel from
+`wreath._native._reactor` instead of asyncio's timer heap ("bare metal").
 
-The loop stays a strict ``asyncio`` loop, so ``await`` of anything works. The
+The loop stays a strict `asyncio` loop, so `await` of anything works. The
 wheel path trades sub-millisecond timer precision for O(1) deadline churn, which
 is the right trade for keep-alive/request timeouts; it is opt-in and off in the
 default loop so general asyncio-timer semantics are preserved. The full story and
@@ -17,18 +17,18 @@ docs/explorations/the-timer-that-wouldnt-settle.md.
 
 Stage 0 lands the loop core and the headline novel technique: **inline-drive**.
 A request coroutine that completes without ever suspending is driven straight to
-completion at ``create_task`` time — no ``Task`` scheduled onto the ready queue,
-no ``call_soon`` round trip, no done-callback hop. Only a coroutine that
+completion at `create_task` time — no `Task` scheduled onto the ready queue,
+no `call_soon` round trip, no done-callback hop. Only a coroutine that
 actually suspends is promoted to the normal (scheduled) driver.
 
 This is the async analogue of a leaf-call optimization: neither stock asyncio
 nor uvloop does it, because you cannot hand an already-stepped coroutine to
-``asyncio.Task`` (it would ``send(None)`` twice). We sidestep that by driving the
+`asyncio.Task` (it would `send(None)` twice). We sidestep that by driving the
 coroutine ourselves from the first step, using the C task-state helpers with an
 explicit leave/enter around the inline step so it composes even when a running
 task creates another task.
 
-The loop is a ``SelectorEventLoop`` subclass so that every third-party ``await``
+The loop is a `SelectorEventLoop` subclass so that every third-party `await`
 (sleep, gather, locks, executors, DNS, TLS, transports) works unchanged from day
 one; the C poller, timing wheel, and protocol→coroutine fusion replace internals
 in later stages behind the same observable contract (see tests/reactor/).
@@ -225,8 +225,8 @@ def _stats_template() -> dict[str, int]:
 class WreathTask(asyncio.Future):
     """A Task that drives its coroutine itself, inlining non-suspending work.
 
-    Behaves like ``asyncio.Task`` for every scheduled (suspending) path; the only
-    departure is that the *first* step runs synchronously inside ``create_task``
+    Behaves like `asyncio.Task` for every scheduled (suspending) path; the only
+    departure is that the *first* step runs synchronously inside `create_task`
     when the loop is already running, so a coroutine that finishes without
     awaiting anything never touches the ready queue.
     """
@@ -442,10 +442,10 @@ else:
 class EventLoop(_LoopBase):
     """SelectorEventLoop augmented with the reactor's fast path and telemetry.
 
-    ``timers="wheel"`` routes every ``call_later``/``call_at`` deadline through
+    `timers="wheel"` routes every `call_later`/`call_at` deadline through
     the native hashed timing wheel instead of asyncio's heap. A single bridge
     tick (one heap timer, re-armed only while the wheel is non-empty) drives
-    expiry, so no ``_run_once`` reimplementation is needed. Timer precision is
+    expiry, so no `_run_once` reimplementation is needed. Timer precision is
     the wheel resolution (1 ms) -- ample for server deadlines, which is why it is
     opt-in rather than the default.
     """
@@ -594,7 +594,7 @@ class EventLoop(_LoopBase):
         Called once by the server when startup is complete, which is the point
         at which "everything reachable" and "everything long-lived" coincide.
         Returns the number of objects in the permanent generation, or 0 when
-        this loop does not own its collector (``gc_mode="stock"``).
+        this loop does not own its collector (`gc_mode="stock"`).
         """
         if self._collector is None:
             return 0
@@ -893,7 +893,7 @@ async def serve(
 ) -> _ServerHandle:
     """Serve an ASGI app on the reactor. Stage 0: plaintext HTTP/1.1.
 
-    Reuses the framework's own :class:`wreath.server.Server`, so the reactor
+    Reuses the framework's own `wreath.server.Server`, so the reactor
     hosts the real protocol stack over its own sockets and timers. TLS (h2) and
     QUIC (h3) integration land in a later stage.
     """
