@@ -53,13 +53,18 @@ regions, memberships and entitlements**, which is worth saying plainly: the
 manifest is chrome, and a decision behind one is a misuse of it whatever the
 fact.
 
-One organisation-shaped surface *is* genuinely unbuilt, and is listed above by
-absence rather than by a row: there is no SAML assertion consumer. Like
-`scim_router`, which has now shipped, it is an adapter onto
-`wreath.organizations` rather than a second membership model — but SAML has a
-packaging question to settle before any code, because there is no stdlib
-XML-DSig and `src/wreath` takes no mandatory runtime dependency, so it is a
-candidate for an optional component on the same terms as the HTTP/3 build.
+The packaging question that used to block SAML is settled: `wreath.xml` owns a
+strict profile and Exclusive XML Canonicalization 1.0, so there is no
+third-party XML-DSig dependency to take. [`wreath.saml`](saml.md) verifies an
+assertion on top of it and hands back a `VerifiedAssertion` whose `facts()` is a
+Cedar context mapping — it **decides nothing**, exactly as `wreath.signatures`
+establishes for a signed request.
+
+What is still absent is the *routing* half, and it is one row rather than a
+paragraph: there is no assertion-consumer endpoint, no service-provider
+metadata, no redirect/POST binding, and no `EncryptedAssertion` support. Like
+`scim_router`, that half is an adapter onto `wreath.organizations` rather than a
+second membership model.
 <!-- absent: wreath.organizations.saml_router -->
 
 SCIM shipped without three optional parts of RFC 7644, and
