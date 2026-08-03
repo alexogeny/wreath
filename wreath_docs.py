@@ -77,6 +77,7 @@ nav = Nav(
             Page("Generating CRUD", "guides/crud.md"),
             Page("The admin", "guides/admin.md"),
             Page("Distributed locks", "guides/distributed-locks.md"),
+            Page("Entities and addressing", "guides/entities.md"),
             Page("FastAPI and Alembic migration", "guides/migrations.md"),
         ),
         Section(
@@ -286,6 +287,9 @@ nav = Nav(
         Page("Workflows", "reference/workflows.md"),
         Page("Chunked passes", "reference/passes.md"),
         Page("Messaging", "reference/messaging.md"),
+        Page("Entities", "reference/entity.md"),
+        Page("SAML", "reference/saml.md"),
+        Page("Metrics", "reference/metrics.md"),
         Page("Supervised services", "reference/services.md"),
         Page("User management", "reference/users.md"),
         Page("Notifications", "reference/notifications.md"),
