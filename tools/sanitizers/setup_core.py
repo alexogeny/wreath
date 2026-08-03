@@ -35,6 +35,7 @@ SOURCES = (
     "geospatial.c",
     "protobuf.c",
     "sse.c",
+    "xml.c",
     "templates.c",
     "http.c",
     "router.c",

@@ -160,6 +160,7 @@ ext_modules = [
                 "src/wreath/_native/geospatial.c",
                 "src/wreath/_native/protobuf.c",
                 "src/wreath/_native/sse.c",
+                "src/wreath/_native/xml.c",
                 "src/wreath/_native/templates.c",
                 "src/wreath/_native/http.c",
                 "src/wreath/_native/router.c",
