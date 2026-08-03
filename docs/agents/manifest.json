@@ -111,23 +111,24 @@
         "docs/reference/protobuf.md"
       ],
       "sources": [
-        "src/wreath/request.py",
-        "src/wreath/response.py",
-        "src/wreath/negotiation.py",
-        "src/wreath/background.py",
-        "src/wreath/_http.py",
-        "src/wreath/_headers.py",
         "src/wreath/_codecs.py",
+        "src/wreath/_correlation.py",
+        "src/wreath/_headers.py",
+        "src/wreath/_http.py",
         "src/wreath/_json.py",
         "src/wreath/_multipart.py",
-        "src/wreath/_pure/msgpack.py",
         "src/wreath/_native/msgpack.c",
-        "src/wreath/_native/sse.c",
-        "src/wreath/protobuf.py",
-        "src/wreath/_pure/protobuf.py",
         "src/wreath/_native/protobuf.c",
+        "src/wreath/_native/simd.c",
         "src/wreath/_native/simd.h",
-        "src/wreath/_native/simd.c"
+        "src/wreath/_native/sse.c",
+        "src/wreath/_pure/msgpack.py",
+        "src/wreath/_pure/protobuf.py",
+        "src/wreath/background.py",
+        "src/wreath/negotiation.py",
+        "src/wreath/protobuf.py",
+        "src/wreath/request.py",
+        "src/wreath/response.py"
       ],
       "tests": [
         "tests/test_request.py",
@@ -154,7 +155,7 @@
         "docs/decisions/0009-rfc-9457-problem-json.md",
         "docs/decisions/0010-one-shot-response-extension.md"
       ],
-      "policy": "Request.stream is one-shot and enforces max_body_bytes as chunks arrive; body() buffers through that same stream and may be replayed, while consuming stream() first makes later body/json/form reads raise StreamConsumed. Multipart form parsing is incremental and spools a file at the threshold without retaining a whole-request body."
+      "policy": "Request.stream is one-shot and enforces max_body_bytes as chunks arrive; body() buffers through that same stream and may be replayed, while consuming stream() first makes later body/json/form reads raise StreamConsumed. Multipart form parsing is incremental and spools a file at the threshold without retaining a whole-request body. PROTOBUF stays out of DEFAULT_SERIALIZERS -- JSON and MessagePack encode whatever a handler returns, protobuf can only encode a declared @message, and a handler returning a dict is the common case -- but a route whose *return annotation* is a @message has said at startup that its body is encodable, so `binding.compile_message_negotiation` makes the offer for that route and no other. It is compiled before compile_response_validator, because the validator projects onto JSON primitives and the encoder needs the message; a Response already passes that validator untouched, which is how the negotiated result reaches the wire without a second path. JSON stays what a missing Accept and */* resolve to, because adding an offer must not change what an existing client receives, and only an explicit protobuf win is intercepted -- an unsatisfiable Accept is left to the ordinary path rather than becoming a new 406. The generated OpenAPI advertises both media types on the request body and the response for such a route, spelled from negotiation.PROTOBUF so the document and the wire cannot name different types. `websocket.Calls` puts request/response on a frame pipe: `reply_to` and `label` are the protocol seam and neither has a default, because a guessed correlation field is a protocol the class does not know it is implementing. It is the single reader `WebSocket` documents, so a handler using it must not also iterate the socket; sends take a lock because a request and a reply genuinely race. A reply nobody awaits is ordinary, a second reply cannot settle a done future, a malformed frame does not end the loop (the calls outstanding on that socket are still answerable), and close fails outstanding calls rather than letting each wait out a deadline for an answer that provably cannot arrive. The bounded map is `_correlation.Pending`, shared with wreath.entity rather than written twice."
     },
     {
       "name": "http-client",
@@ -355,7 +356,7 @@
         "docs/decisions/0002-no-mandatory-runtime-dependencies.md",
         "docs/decisions/0019-refuse-rather-than-half-wire.md"
       ],
-      "policy": "Hooks are fused into a linear tape; global middleware (`global_scope = True`) runs around routing and every response, including misses and error responses, so its `after` still runs when a handler raises. Idempotency is *response replay*, not the effect-once guarantee: `IdempotencyMiddleware`'s claim must be atomic (`MemoryIdempotencyStore` is sync between read and write; `PostgresIdempotencyStore` is one INSERT ... ON CONFLICT ... RETURNING, where a returned row *is* the claim -- no owner column). The default store is per-worker, so the durable guarantee has to come from a unique index on the key (`jobs.enqueue(key=...)`, a unique column); design so that losing the store costs work, never correctness. `docs/cookbook/recipes/exactly-once.md` and `tests/test_exactly_once.py` hold that composition. Rate limiting has two shapes for one reason: `request.identity` is set during route authorization, so a limiter keyed on the principal cannot be a global hook. `RateLimitMiddleware` stays global and keyed on the address (ingress: 404 floods, login floods) and *raises at construction* if handed `principal_key`, because degrading silently to one shared bucket is a production incident. `TieredRateLimitMiddleware` is route middleware (`global_scope = False`), keyed on the principal, with one store per tier so a promotion gets a full allowance; the tier comes from the caller's roles -- the same roles Cedar authorizes with -- and the most generous match wins. The claim, the lazy statement preparation, the `clock_timestamp()` clock and the offered-not-applied schema live once, in `wreath.store`; a returned row *is* the claim, and `live`/`expired` are exact complements so a purge can never drop a row a read would still honour. `MemoryRateLimitStore` stays outside it deliberately: a token bucket is arithmetic every read advances, not a stored payload. `PostgresSessionStore.delete_for` is the only method that reads inside a session payload, so it is the only one that has to know which key holds the principal: `session_key=` at construction, overridable per call, bound as `$2::text` rather than interpolated so one prepared statement serves every key and an application string never reaches SQL. It was hardcoded to `principal`, so a deployment on `user_router(session_key=...)` got a password reset that matched no row, ended no sessions, and reported success. A **quota** is not a second limiter: `wreath.quota` declares an allowance and `RateLimitMiddleware(quota=...)` charges it inside the hook that already decides the rate, because two independent limiters on one request is how a 429 comes back contradicting a 402. The rate limit is checked *first* -- a throttled request did no work, so charging it would put rejected requests on an invoice, and the meter is the one signal that cannot be sampled. Metering needs a principal, so the global form raises at construction when handed a quota, for the same reason it refuses `principal_key`. The period index is part of the counter key and lives in exactly one place (`QuotaMeter.key`), so a rollover needs no sweep and neither store re-derives it; `MemoryQuotaStore` is per-worker and says so, `PostgresQuotaStore` makes check-and-count one `INSERT ... ON CONFLICT DO UPDATE` whose row lock serializes workers. Exhaustion refuses in the tape; *degradation* is a declared state resolved into `context.quota` on the `SetFact` machinery -- and it is the one set fact **never** bounded by a delegation's `Limits`, because it is read to forbid and subtracting a forbid would let composition grant."
+      "policy": "Hooks are fused into a linear tape; global middleware (`global_scope = True`) runs around routing and every response, including misses and error responses, so its `after` still runs when a handler raises. Idempotency is *response replay*, not the effect-once guarantee: `IdempotencyMiddleware`'s claim must be atomic (`MemoryIdempotencyStore` is sync between read and write; `PostgresIdempotencyStore` is one INSERT ... ON CONFLICT ... RETURNING, where a returned row *is* the claim -- no owner column). The default store is per-worker, so the durable guarantee has to come from a unique index on the key (`jobs.enqueue(key=...)`, a unique column); design so that losing the store costs work, never correctness. `docs/cookbook/recipes/exactly-once.md` and `tests/test_exactly_once.py` hold that composition. Rate limiting has two shapes for one reason: `request.identity` is set during route authorization, so a limiter keyed on the principal cannot be a global hook. `RateLimitMiddleware` stays global and keyed on the address (ingress: 404 floods, login floods) and *raises at construction* if handed `principal_key`, because degrading silently to one shared bucket is a production incident. `TieredRateLimitMiddleware` is route middleware (`global_scope = False`), keyed on the principal, with one store per tier so a promotion gets a full allowance; the tier comes from the caller's roles -- the same roles Cedar authorizes with -- and the most generous match wins. The claim, the lazy statement preparation, the `clock_timestamp()` clock and the offered-not-applied schema live once, in `wreath.store`; a returned row *is* the claim, and `live`/`expired` are exact complements so a purge can never drop a row a read would still honour. `MemoryRateLimitStore` stays outside it deliberately: a token bucket is arithmetic every read advances, not a stored payload. `PostgresSessionStore.delete_for` is the only method that reads inside a session payload, so it is the only one that has to know which key holds the principal: `session_key=` at construction, overridable per call, bound as `$2::text` rather than interpolated so one prepared statement serves every key and an application string never reaches SQL. It was hardcoded to `principal`, so a deployment on `user_router(session_key=...)` got a password reset that matched no row, ended no sessions, and reported success. A **quota** is not a second limiter: `wreath.quota` declares an allowance and `RateLimitMiddleware(quota=...)` charges it inside the hook that already decides the rate, because two independent limiters on one request is how a 429 comes back contradicting a 402. The rate limit is checked *first* -- a throttled request did no work, so charging it would put rejected requests on an invoice, and the meter is the one signal that cannot be sampled. Metering needs a principal, so the global form raises at construction when handed a quota, for the same reason it refuses `principal_key`. The period index is part of the counter key and lives in exactly one place (`QuotaMeter.key`), so a rollover needs no sweep and neither store re-derives it; `MemoryQuotaStore` is per-worker and says so, `PostgresQuotaStore` makes check-and-count one `INSERT ... ON CONFLICT DO UPDATE` whose row lock serializes workers. Exhaustion refuses in the tape; *degradation* is a declared state resolved into `context.quota` on the `SetFact` machinery -- and it is the one set fact **never** bounded by a delegation's `Limits`, because it is read to forbid and subtracting a forbid would let composition grant. `rows_affected` is the one reader of a PostgreSQL command tag, where there were four. The count is the **last** whitespace field, never the second: `INSERT 0 5` puts a legacy OID first, and the two readers that took the second field returned None for every insert -- indistinguishable at the call site from 'this backend does not report a count'. None rather than 0 when unreadable, because 'no rows matched' and 'this backend does not say' are different facts and recording the first when it meant the second reports a clean sweep that never happened. `wreath.log` builds on it and *raises* instead, because on a batched append 'the batch landed' must be a fact the server reported."
     },
     {
       "name": "auth",
@@ -686,7 +687,7 @@
         "tests/test_live_progress.py",
         "tests/test_rooms.py"
       ],
-      "policy": "PostgreSQL is the queue; there is no broker to operate. The service supervisor starts after databases and before user startup handlers, and stops in reverse: stop fetching, drain bounded in-flight work, then cancel. Watchable work: `JobRunner(progress=ProgressRegistry(...))` makes the job id the task id -- one identifier, no correlation -- and `launch()` seeds it `queued` so a client polling before a worker claims it does not get a 404. The runner owns the terminal states because only it can tell a retry from a dead-letter: success reports `done`, dead-letter reports `failed` with the error, and a retry leaves the task `running`. A handler never reports terminal state itself. `ProgressRegistry(bus)` carries reports to every worker on one channel with the rooms.py origin guard (apply locally, publish once, never relay what arrived); at-most-once, and a bus failure cannot fail the work being reported on. Cross-worker transport discipline is one primitive: `_busbridge.BusBridge` owns the channel, the origin tag that drops a worker's own NOTIFY echo, and the deferred publish, and there is deliberately **no path from its receive to a publish** -- never-relaying is structural, not a flag. `rooms.py`, `progress.py`, and `_orm_events.WriteBroadcast` each keep only their payload shape and local apply. The one real difference is preserved: rooms publishes inline and unsuppressed (its caller is awaiting the fan-out), the other two are fire-and-forget and swallow (the row already committed; a percentage is commentary). Durable subscriber groups are discovered fleet-wide from a `message_groups` table, **unioned** with local registrations so a missing table degrades to the old behaviour and shipping before the DDL cannot regress; the snapshot is refreshed on a timer (`group_refresh`, 30s) rather than read per publish, because a query inside the caller's `tx` would abort *their* transaction if the table were absent. Registry failures are counted (`group_registry_errors`), never raised. A publish routed to nobody stays a no-op but increments `unrouted_publishes`; `require_group=True` raises `NoSubscriberGroup` instead. The doorbell's held LISTEN connection is supervised: it reconnects with jittered exponential backoff (50 ms to 5 s, no reset for a connection that flaps), counts losses and failed opens in `doorbell_reconnects`, and counts ephemeral handler exceptions separately in `handler_errors` so a bug in user code cannot read as a dropped connection. A handler is cancelled at `deadline_for(task)` -- `task(timeout=...)`, defaulting to `DEADLINE_FRACTION` (0.8) of the lease, and refused at registration if it is not shorter than the lease. There is no heartbeat, so a handler still running when its lease expires is reclaimed and run again by another worker: the fence stops the loser's bookkeeping landing, never the duplicate side effect. `drive()` passes a pass's own `shift` as its deadline rather than taking the default, because that bound is already declared and already checked. A cancelled handler charges an attempt and retries (a deadline miss is usually a slow dependency) and counts in `run_timeouts`, apart from `run_errors`: nothing failed, work was stopped."
+      "policy": "PostgreSQL is the queue; there is no broker to operate. The service supervisor starts after databases and before user startup handlers, and stops in reverse: stop fetching, drain bounded in-flight work, then cancel. Watchable work: `JobRunner(progress=ProgressRegistry(...))` makes the job id the task id -- one identifier, no correlation -- and `launch()` seeds it `queued` so a client polling before a worker claims it does not get a 404. The runner owns the terminal states because only it can tell a retry from a dead-letter: success reports `done`, dead-letter reports `failed` with the error, and a retry leaves the task `running`. A handler never reports terminal state itself. `ProgressRegistry(bus)` carries reports to every worker on one channel with the rooms.py origin guard (apply locally, publish once, never relay what arrived); at-most-once, and a bus failure cannot fail the work being reported on. Cross-worker transport discipline is one primitive: `_busbridge.BusBridge` owns the channel, the origin tag that drops a worker's own NOTIFY echo, and the deferred publish, and there is deliberately **no path from its receive to a publish** -- never-relaying is structural, not a flag. `rooms.py`, `progress.py`, and `_orm_events.WriteBroadcast` each keep only their payload shape and local apply. The one real difference is preserved: rooms publishes inline and unsuppressed (its caller is awaiting the fan-out), the other two are fire-and-forget and swallow (the row already committed; a percentage is commentary). Durable subscriber groups are discovered fleet-wide from a `message_groups` table, **unioned** with local registrations so a missing table degrades to the old behaviour and shipping before the DDL cannot regress; the snapshot is refreshed on a timer (`group_refresh`, 30s) rather than read per publish, because a query inside the caller's `tx` would abort *their* transaction if the table were absent. Registry failures are counted (`group_registry_errors`), never raised. A publish routed to nobody stays a no-op but increments `unrouted_publishes`; `require_group=True` raises `NoSubscriberGroup` instead. The doorbell's held LISTEN connection is supervised: it reconnects with jittered exponential backoff (50 ms to 5 s, no reset for a connection that flaps), counts losses and failed opens in `doorbell_reconnects`, and counts ephemeral handler exceptions separately in `handler_errors` so a bug in user code cannot read as a dropped connection. A handler is cancelled at `deadline_for(task)` -- `task(timeout=...)`, defaulting to `DEADLINE_FRACTION` (0.8) of the lease, and refused at registration if it is not shorter than the lease. There is no heartbeat, so a handler still running when its lease expires is reclaimed and run again by another worker: the fence stops the loser's bookkeeping landing, never the duplicate side effect. `drive()` passes a pass's own `shift` as its deadline rather than taking the default, because that bound is already declared and already checked. A cancelled handler charges an attempt and retries (a deadline miss is usually a slow dependency) and counts in `run_timeouts`, apart from `run_errors`: nothing failed, work was stopped. Claim order is `priority DESC, run_at` and the partial index leads with it -- replaced rather than added beside the old `(queue, run_at)` one, which could not serve the new ordering. `priority` is defaulted rather than nullable because ORDER BY DESC sorts NULL first, so an older build's rows would outrank everything the moment the step landed. It is a lane and not a promise: a strict priority queue starves its low lane by definition and sizing for that stays the caller's. `enqueue(coalesce=True)` merges onto a repeated key instead of dropping -- newest args, earliest run_at via LEAST, highest priority via GREATEST, all in the one statement because a read-then-write lets two callers interleave and lose an update -- and only `WHERE state = 'ready'`, since rewriting a leased job's arguments would hand its worker inputs it never read. It refuses without a key: there is nothing to coalesce onto, and a silent no-op would read as a merge. `owner` on a claimed row is a per-process identity (`{queue}:{12 hex}`), not the queue name it used to be -- every worker on a queue shared one, so the column answered a question the `queue` column already answers and nothing read it back. Correctness never depended on it and still does not (the fence is what stops a superseded worker's bookkeeping landing); what it buys is naming the process that holds a job during an incident. Generated rather than derived from a host name or pid, both of which repeat across containers and restarts."
     },
     {
       "name": "workflows",
@@ -945,83 +946,86 @@
         "docs/guides/logging.md"
       ],
       "reference": [
-        "docs/reference/telemetry.md",
+        "docs/reference/inspector.md",
         "docs/reference/logging.md",
+        "docs/reference/metrics.md",
         "docs/reference/recording.md",
         "docs/reference/replay.md",
-        "docs/reference/inspector.md"
+        "docs/reference/telemetry.md"
       ],
       "sources": [
-        "src/wreath/telemetry.py",
-        "src/wreath/logging.py",
-        "src/wreath/recording.py",
-        "src/wreath/replay.py",
-        "src/wreath/inspector.py",
-        "src/wreath/_logsite.py",
-        "src/wreath/_logsink.py",
-        "src/wreath/_logscratch.py",
+        "src/wreath/_cloudwatch_emf.py",
+        "src/wreath/_export.py",
         "src/wreath/_flight_markers.py",
         "src/wreath/_flight_metadata.py",
         "src/wreath/_flight_schema.py",
+        "src/wreath/_logscratch.py",
+        "src/wreath/_logsink.py",
+        "src/wreath/_logsite.py",
+        "src/wreath/_metricdelta.py",
+        "src/wreath/_otlp.py",
+        "src/wreath/_otlp_proto.py",
         "src/wreath/_projector.py",
-        "src/wreath/_export.py",
+        "src/wreath/_prometheus.py",
         "src/wreath/_recording_format.py",
         "src/wreath/_replay_adapters.py",
         "src/wreath/_replay_plan.py",
-        "src/wreath/_otlp.py",
-        "src/wreath/_otlp_proto.py",
-        "src/wreath/_prometheus.py",
-        "src/wreath/_statsd.py",
-        "src/wreath/_cloudwatch_emf.py",
-        "src/wreath/_metricdelta.py",
         "src/wreath/_ring_file.py",
-        "src/wreath/doctor.py"
+        "src/wreath/_statsd.py",
+        "src/wreath/doctor.py",
+        "src/wreath/inspector.py",
+        "src/wreath/logging.py",
+        "src/wreath/metrics.py",
+        "src/wreath/recording.py",
+        "src/wreath/replay.py",
+        "src/wreath/telemetry.py"
       ],
       "tests": [
-        "tests/test_flight_schema.py",
-        "tests/test_logging_schema.py",
-        "tests/test_logging_sites.py",
-        "tests/test_logging_sink.py",
-        "tests/test_logging_policy.py",
-        "tests/test_logging_canonical.py",
-        "tests/test_logging_export.py",
+        "tests/http2/test_logging.py",
+        "tests/test_attempt_recording.py",
+        "tests/test_attempt_replay.py",
+        "tests/test_cloudwatch_emf.py",
+        "tests/test_flight_archive.py",
         "tests/test_flight_capture.py",
-        "tests/test_flight_projector.py",
         "tests/test_flight_inspector.py",
         "tests/test_flight_otlp.py",
-        "tests/test_otlp_protobuf.py",
+        "tests/test_flight_projector.py",
         "tests/test_flight_recording.py",
-        "tests/test_replay.py",
-        "tests/test_replay_faults.py",
-        "tests/test_replay_to_test.py",
-        "tests/test_replay_adversarial.py",
-        "tests/test_replay_fault_corpus.py",
-        "tests/test_replay_robustness.py",
-        "tests/test_replay_stage7.py",
-        "tests/test_replay_corpus_properties.py",
-        "tests/test_replay_owned_recovery.py",
-        "tests/test_replay_container_format.py",
-        "tests/test_replay_live_faults.py",
-        "tests/test_prometheus.py",
-        "tests/test_statsd.py",
-        "tests/test_cloudwatch_emf.py",
+        "tests/test_flight_reproduce.py",
+        "tests/test_flight_ring_file.py",
+        "tests/test_flight_schema.py",
+        "tests/test_logging_canonical.py",
+        "tests/test_logging_export.py",
         "tests/test_logging_live.py",
         "tests/test_logging_native_parity.py",
         "tests/test_logging_off_loop.py",
-        "tests/http2/test_logging.py",
-        "tests/test_flight_ring_file.py",
-        "tests/test_flight_archive.py",
-        "tests/test_flight_reproduce.py",
+        "tests/test_logging_policy.py",
+        "tests/test_logging_schema.py",
+        "tests/test_logging_sink.py",
+        "tests/test_logging_sites.py",
+        "tests/test_metrics.py",
+        "tests/test_otlp_protobuf.py",
+        "tests/test_prometheus.py",
+        "tests/test_replay.py",
+        "tests/test_replay_adversarial.py",
+        "tests/test_replay_container_format.py",
+        "tests/test_replay_corpus_properties.py",
+        "tests/test_replay_execution_scope.py",
+        "tests/test_replay_fault_corpus.py",
+        "tests/test_replay_faults.py",
+        "tests/test_replay_live_faults.py",
+        "tests/test_replay_owned_recovery.py",
+        "tests/test_replay_robustness.py",
+        "tests/test_replay_stage7.py",
+        "tests/test_replay_to_test.py",
+        "tests/test_statsd.py",
+        "tests/test_trace_cli.py",
         "tests/test_trace_propagation.py",
         "tests/test_trace_queue.py",
         "tests/test_trace_saga.py",
-        "tests/test_trace_cli.py",
-        "tests/test_replay_execution_scope.py",
-        "tests/test_attempt_recording.py",
-        "tests/test_attempt_replay.py",
         "tests/test_workflow_step_recording.py"
       ],
-      "policy": "Recording is deny-by-default: `wreath.recording` decides what may be captured, and capture itself ships -- the native recorder arms, triggers, redacts, and writes WFR1 (tests/test_flight_capture_live.py drives an armed forensic request end to end and reads the capture back). The projector drains the recorder's ring off the request path. `replay.generate_test` turns a WTR1 transport recording into a runnable pytest over TestClient: it parses the request out of the recorded bytes (request line + headers + Content-Length body only -- chunked or truncated is refused by name, never guessed), replays it now, and asserts what it observes. That makes it a *characterisation* test, and the generated docstring says so -- generated against a broken build it encodes the bug, generated after the fix it locks the fix in. Host/content-length/connection headers are dropped from the generated call because they are the test client's business, not the behaviour under test. Logging packs a *published* record in C (`Recorder.log`, `_flightmodule.c`) straight into a ring cell; the Python packer beside it is the pure twin of ADR 0005, checked byte for byte and by mismatch count over a corpus (tests/test_logging_native_parity.py), and it is what actually runs in three cases -- no recorder, a buffered record awaiting promotion, and a record made off the loop. The ring has exactly one writer, so an off-loop call is staged and published by the loop one interval later flagged LOG_FLAG_OFF_LOOP; before that existed such a call raced `ring_publish` and corrupted the ring. Every cost here is measured rather than asserted: benchmarks/bench_logging.py runs the six measurements and benchmarks/results/logging_2026-07-28_*.json retains before and after. The measurements found the fast tier was not fast (a pure-Python SipHash on the request path), and the parity corpus found three values that raised out of `pack_value`, which promises never to. The ring is heap memory by default and a MAP_SHARED file when `TelemetryConfig.ring_path` is set, so a process that dies badly leaves its last cells readable (`wreath.recording.read_ring_file`, `wreath flight read`). That is survival of the *process*, never durability: the pages are the kernel's, and only a clean shutdown msyncs. The ring refuses when full rather than overwriting, so a crash file's mirrored RING_FULL counter is what says whether it is the story or a sample of it; the archival EVNT stream in the WFR1 recording holds everything the projector already drained. tests/test_flight_ring_file.py forks a child and kills it with SIGSEGV and SIGKILL rather than simulating a crash, because the single claim the feature rests on is that the records are still there afterwards. A ring file and a WTR1 recording join through the *sequence of log call sites*, not an id -- a transport recording carries none: `replay.reproduce_from_ring` (and `wreath flight replay`) re-drives the recording and reports where the path parts from the one the crash file recorded, exiting 1 on divergence so it works as a check. Site ids are import order, so this is only meaningful against the build that crashed; a divergence at index 0 is the symptom of running it against a different one.",
+      "policy": "Recording is deny-by-default: `wreath.recording` decides what may be captured, and capture itself ships -- the native recorder arms, triggers, redacts, and writes WFR1 (tests/test_flight_capture_live.py drives an armed forensic request end to end and reads the capture back). The projector drains the recorder's ring off the request path. `replay.generate_test` turns a WTR1 transport recording into a runnable pytest over TestClient: it parses the request out of the recorded bytes (request line + headers + Content-Length body only -- chunked or truncated is refused by name, never guessed), replays it now, and asserts what it observes. That makes it a *characterisation* test, and the generated docstring says so -- generated against a broken build it encodes the bug, generated after the fix it locks the fix in. Host/content-length/connection headers are dropped from the generated call because they are the test client's business, not the behaviour under test. Logging packs a *published* record in C (`Recorder.log`, `_flightmodule.c`) straight into a ring cell; the Python packer beside it is the pure twin of ADR 0005, checked byte for byte and by mismatch count over a corpus (tests/test_logging_native_parity.py), and it is what actually runs in three cases -- no recorder, a buffered record awaiting promotion, and a record made off the loop. The ring has exactly one writer, so an off-loop call is staged and published by the loop one interval later flagged LOG_FLAG_OFF_LOOP; before that existed such a call raced `ring_publish` and corrupted the ring. Every cost here is measured rather than asserted: benchmarks/bench_logging.py runs the six measurements and benchmarks/results/logging_2026-07-28_*.json retains before and after. The measurements found the fast tier was not fast (a pure-Python SipHash on the request path), and the parity corpus found three values that raised out of `pack_value`, which promises never to. The ring is heap memory by default and a MAP_SHARED file when `TelemetryConfig.ring_path` is set, so a process that dies badly leaves its last cells readable (`wreath.recording.read_ring_file`, `wreath flight read`). That is survival of the *process*, never durability: the pages are the kernel's, and only a clean shutdown msyncs. The ring refuses when full rather than overwriting, so a crash file's mirrored RING_FULL counter is what says whether it is the story or a sample of it; the archival EVNT stream in the WFR1 recording holds everything the projector already drained. tests/test_flight_ring_file.py forks a child and kills it with SIGSEGV and SIGKILL rather than simulating a crash, because the single claim the feature rests on is that the records are still there afterwards. A ring file and a WTR1 recording join through the *sequence of log call sites*, not an id -- a transport recording carries none: `replay.reproduce_from_ring` (and `wreath flight replay`) re-drives the recording and reports where the path parts from the one the crash file recorded, exiting 1 on divergence so it works as a check. Site ids are import order, so this is only meaningful against the build that crashed; a divergence at index 0 is the symptom of running it against a different one. `wreath.metrics` is the second half of the export story: the bridges render the flight projector's route aggregates, and two dozen subsystem counters reached no dashboard at all -- MessageBus.stats() made the argument for its own six and it was never generalised. `collect(app)` gathers by *asking* anything the app holds that offers `counters()`, the same walk schema_components uses, so a new subsystem is not a new place to forget. A reading carries `instance` because a deployment runs several queues and a number that cannot say which one is one nobody can act on; `flatten` sums them and says so, since that is all a dimensionless sink can honestly do. A holder that raises is skipped rather than failing the scrape -- a metrics read must not take down what it measures, and one bug must not blank every other subsystem. Rendered as **gauges**, not counters: a reading may be monotonic or may move both ways and this layer cannot tell, and declaring a falling series a counter makes a scraper read each decrease as a restart and invent a rate spike. Prometheus families are grouped before emitting because an exposition whose samples are not contiguous is rejected outright.",
       "decisions": [
         "docs/decisions/0005-c-first-with-a-pure-twin.md",
         "docs/decisions/0022-complexity-is-a-contract.md",
@@ -1211,7 +1215,7 @@
     },
     {
       "name": "temporal",
-      "capability": "Timezone-correct dates, times, and durations across the request boundary and the database",
+      "capability": "Timezone-correct dates, times, durations and recurrences across the request boundary and the database",
       "replaces": [
         "pendulum",
         "arrow",
@@ -1230,9 +1234,10 @@
       "tests": [
         "tests/test_temporal.py",
         "tests/test_temporal_surfaces.py",
-        "tests/test_temporal_protobuf.py"
+        "tests/test_temporal_protobuf.py",
+        "tests/test_temporal_recurrence.py"
       ],
-      "policy": "An `Instant` is always aware; a naive value is refused, never assumed UTC -- that assumption is the bug the module exists to prevent. Dependency-free over stdlib datetime/zoneinfo, because the core cannot take arrow and those are the applications being ported. One declaration settles every surface: ORM column, binding coercion, REST JSON, OpenAPI format, typegen alias, GraphQL scalar -- they used to be five places that drifted. Temporal JSON encoding is a *retry* in the `_json` facade (encode as-is; only a TypeError triggers rewrite-and-retry), never a pre-pass, so a payload with no timestamps pays one un-raised try and the ordinary response path is untouched. Body validation is deliberately NOT wired: it has a byte-for-byte C twin in `_native/validate.c`, and a silent divergence there is worse than the gap. The relative formatter is the single locale-keyed seam, so i18n is a table entry rather than a migration. ISO durations reject years/months: neither is a fixed number of seconds and a timedelta cannot hold one honestly."
+      "policy": "An `Instant` is always aware; a naive value is refused, never assumed UTC -- that assumption is the bug the module exists to prevent. Dependency-free over stdlib datetime/zoneinfo, because the core cannot take arrow and those are the applications being ported. One declaration settles every surface: ORM column, binding coercion, REST JSON, OpenAPI format, typegen alias, GraphQL scalar -- they used to be five places that drifted. Temporal JSON encoding is a *retry* in the `_json` facade (encode as-is; only a TypeError triggers rewrite-and-retry), never a pre-pass, so a payload with no timestamps pays one un-raised try and the ordinary response path is untouched. Body validation is deliberately NOT wired: it has a byte-for-byte C twin in `_native/validate.c`, and a silent divergence there is worse than the gap. The relative formatter is the single locale-keyed seam, so i18n is a table entry rather than a migration. ISO durations reject years/months: neither is a fixed number of seconds and a timedelta cannot hold one honestly. A length is a declared type, not a bare float: `Duration` is the one spelling every span parameter accepts (`Duration.of` reads a Duration, a timedelta, a number of seconds, or an ISO-8601 string), so a job lease, a quota period, a notification digest and a store window stop documenting \"seconds\" four times. Arithmetic returns a plain timedelta because CPython does not preserve the subclass there, and that is documented rather than worked around -- Duration is a declaration-boundary type. `.seconds` stays timedelta's own component and is never shadowed. `Recurrence` carries its zone, because a cron expression read in UTC is quietly wrong for \"03:00\" in a way it is not for \"every fifteen minutes\"; cron and the calendar spelling compile to the same five field sets, and everything outside the supported subset is refused by name rather than approximated onto the wrong day. The two DST days are settled rather than emergent: a local time that does not exist does not fire (as cron answers), and one that happens twice fires once because `bucket_key` names the local minute. `next_after` normalises a candidate through UTC before reading it back, since astimezone onto the zone a value already carries is a no-op that would let a nonexistent local time pass its own check. Adoption reaches the fa\u00e7ade: `app.jobs`, `app.messaging` and `app.entities` take spans as `Duration` (a bare number is still seconds), as do MessageBus, NonceLedger, ProgressRegistry and the response cache. A `None` ttl means never expire and survives the coercion rather than becoming zero."
     },
     {
       "name": "geospatial",
@@ -1317,7 +1322,7 @@
         "tests/test_test_runner.py",
         "benchmarks/results/test_runner_2026-08-02.json"
       ],
-      "policy": "TestClient is async and drives the real pipeline in-process; responses expose .status.\n\n**The pytest plugin loads by entry point, in every repository that installs Wreath**, so every fixture it declares is `wreath_`-prefixed: a bare `client` or `db` would shadow a fixture of the user's own, in a file they did not write, and the collision would read as their bug. `tests/test_pytest_plugin.py::test_plugin_declares_only_prefixed_fixtures` holds that line. `wreath_app` is the one fixture meant to be overridden rather than used; its shipped default raises with the three lines to write. The async fixtures use `pytest_asyncio.fixture` when it is installed so they work under `asyncio_mode = strict` as well as `auto`, and fall back to `pytest.fixture` for anyio. The database fixtures are gated on `WREATH_TEST_POSTGRES_DSN` and their skip reason names the variable -- an invisible skip is the failure this repository already paid for once.\n\n**`wreath test` preserves pytest as the semantic engine.** Collection, fixtures, plugins, capture, tracebacks, markers, and exit status remain pytest's; Wreath owns the controller-side run model, stable file grid, phase timings, bounded history, and JSON report. The activity plugin is environment-activated only by the root controller, so an ordinary pytest run pays no runner import and a nested pytest subprocess does not grow another UI. TTY animation uses the alternate screen and must restore it before pytest's terminal summaries; redirected and CI output contains no ANSI. Tile hue is outcome and shade is duration percentile; `▣` is an active mutant probe and solid gold `▰` is a passing file whose test killed one. Mutation planning and compilation run at background priority in a fresh parent beside the ordinary workers; the live path does not collect the complete suite again. Twelve controls are sampled by default; it is the measured knee: three warm runs averaged 28.120s ± 0.126s, while 24 controls averaged 29.189s ± 0.313s and the last run still left eight controls undecided at the post-suite ceiling. Each completed green test emits selected-line evidence, so up to three forked children can import candidates and kill their mutants throughout the ordinary run; live probes stop at the baseline seal and do not spend the one-second post-suite tail budget. An early pass remains speculative and is retried only after the complete baseline seals. The report's `live` object records probe counts and first-start timing so overlap is evidence rather than a UI impression. A completed history file gives every xdist worker the same stable longest-processing-time-first collection order; exact test means win, file means are the fallback, and unknown tests keep pytest order. Timing is always-on phase duration only; deeper native work waits for a measured bottleneck rather than treating C as decoration."
+      "policy": "TestClient is async and drives the real pipeline in-process; responses expose .status.\n\n**The pytest plugin loads by entry point, in every repository that installs Wreath**, so every fixture it declares is `wreath_`-prefixed: a bare `client` or `db` would shadow a fixture of the user's own, in a file they did not write, and the collision would read as their bug. `tests/test_pytest_plugin.py::test_plugin_declares_only_prefixed_fixtures` holds that line. `wreath_app` is the one fixture meant to be overridden rather than used; its shipped default raises with the three lines to write. The async fixtures use `pytest_asyncio.fixture` when it is installed so they work under `asyncio_mode = strict` as well as `auto`, and fall back to `pytest.fixture` for anyio. The database fixtures are gated on `WREATH_TEST_POSTGRES_DSN` and their skip reason names the variable -- an invisible skip is the failure this repository already paid for once.\n\n**`wreath test` preserves pytest as the semantic engine.** Collection, fixtures, plugins, capture, tracebacks, markers, and exit status remain pytest's; Wreath owns the controller-side run model, stable file grid, phase timings, bounded history, and JSON report. The activity plugin is environment-activated only by the root controller, so an ordinary pytest run pays no runner import and a nested pytest subprocess does not grow another UI. TTY animation uses the alternate screen and must restore it before pytest's terminal summaries; redirected and CI output contains no ANSI. Tile hue is outcome and shade is duration percentile; `\u25a3` is an active mutant probe and solid gold `\u25b0` is a passing file whose test killed one. Mutation planning and compilation run at background priority in a fresh parent beside the ordinary workers; the live path does not collect the complete suite again. Twelve controls are sampled by default; it is the measured knee: three warm runs averaged 28.120s \u00b1 0.126s, while 24 controls averaged 29.189s \u00b1 0.313s and the last run still left eight controls undecided at the post-suite ceiling. Each completed green test emits selected-line evidence, so up to three forked children can import candidates and kill their mutants throughout the ordinary run; live probes stop at the baseline seal and do not spend the one-second post-suite tail budget. An early pass remains speculative and is retried only after the complete baseline seals. The report's `live` object records probe counts and first-start timing so overlap is evidence rather than a UI impression. A completed history file gives every xdist worker the same stable longest-processing-time-first collection order; exact test means win, file means are the fallback, and unknown tests keep pytest order. Timing is always-on phase duration only; deeper native work waits for a measured bottleneck rather than treating C as decoration."
     },
     {
       "name": "port",
@@ -1683,7 +1688,7 @@
     },
     {
       "name": "xml",
-      "capability": "A strict XML profile and Exclusive XML Canonicalization 1.0 for documents that carry a signature -- the prerequisite for SAML, owned here because defusedxml and xmlsec are third-party runtime dependencies and the stdlib has C14N 2.0 rather than the exclusive algorithm XML Signature requires",
+      "capability": "A strict XML profile and Exclusive XML Canonicalization 1.0 for documents that carry a signature -- the prerequisite for SAML, owned here because defusedxml and xmlsec are third-party runtime dependencies and the stdlib has C14N 2.0 rather than the exclusive algorithm XML Signature requires, and the SAML 2.0 assertion verification built on it",
       "replaces": [
         "defusedxml",
         "xmlsec",
@@ -1694,12 +1699,14 @@
         "docs/guides/signed-xml.md"
       ],
       "reference": [
+        "docs/reference/saml.md",
         "docs/reference/xml.md"
       ],
       "sources": [
-        "src/wreath/xml.py",
+        "src/wreath/_native/xml.c",
         "src/wreath/_pure/xml.py",
-        "src/wreath/_native/xml.c"
+        "src/wreath/saml.py",
+        "src/wreath/xml.py"
       ],
       "tests": [
         "tests/test_xml_refusals.py",
@@ -1709,7 +1716,32 @@
         "tests/test_xml_parity.py",
         "tests/test_xml_fuzz.py"
       ],
-      "policy": "The refusals are the feature, and widening the profile is a security change rather than a convenience one. No DTD in any form -- that is the only entity declaration site, so refusing it removes XXE, billion laughs and quadratic blowup as a class instead of as three checks. No comments and no CDATA: both give one value two readings, which is how a signed <NameID> gets truncated into a different identity. UTF-8 only, no BOM, no overlong or surrogate sequences -- one byte sequence, one meaning. Every element records the byte range it was parsed from, and canonicalization RE-READS THOSE BYTES rather than re-serializing the tree; that, plus find_id refusing a repeated identifier instead of resolving it by document order, is what makes XML Signature Wrapping unexpressible rather than merely checked for. Do not add an API that resolves an element a second way. The C parser and the pure twin must agree on the tree, the spans, the canonical bytes and the reason AND message of every refusal (tests/test_xml_parity.py) -- two parsers that disagree is the same wrapping bug one layer down. max_depth is capped at MAX_DEPTH_CEILING because the C parser is recursive descent and an unbounded depth would be a caller-selectable stack overflow; keep _pure/xml.py and XML_MAX_DEPTH_CEILING in _native/xml.c in step. This module verifies no signatures and knows nothing about SAML."
+      "policy": "The refusals are the feature, and widening the profile is a security change rather than a convenience one. No DTD in any form -- that is the only entity declaration site, so refusing it removes XXE, billion laughs and quadratic blowup as a class instead of as three checks. No comments and no CDATA: both give one value two readings, which is how a signed <NameID> gets truncated into a different identity. UTF-8 only, no BOM, no overlong or surrogate sequences -- one byte sequence, one meaning. Every element records the byte range it was parsed from, and canonicalization RE-READS THOSE BYTES rather than re-serializing the tree; that, plus find_id refusing a repeated identifier instead of resolving it by document order, is what makes XML Signature Wrapping unexpressible rather than merely checked for. Do not add an API that resolves an element a second way. The C parser and the pure twin must agree on the tree, the spans, the canonical bytes and the reason AND message of every refusal (tests/test_xml_parity.py) -- two parsers that disagree is the same wrapping bug one layer down. max_depth is capped at MAX_DEPTH_CEILING because the C parser is recursive descent and an unbounded depth would be a caller-selectable stack overflow; keep _pure/xml.py and XML_MAX_DEPTH_CEILING in _native/xml.c in step. This module verifies no signatures and knows nothing about SAML. `wreath.saml` is the service-provider *receiving* half only and decides nothing: a VerifiedAssertion's facts() is a Cedar context mapping, so 'verified' means the identity provider said this rather than that it is trusted -- the same split wreath.signatures makes. It sits on wreath.xml because that is what removes the XML-DSig dependency: verification canonicalizes by re-reading the source bytes an element was parsed from, so signature wrapping is unexpressible rather than checked for, and the transform list is an allow-list of exactly two because a transform the verifier ignores is one that changed what the digest covers. **It ships with no test module of its own** -- tests/_saml_fixtures.py is fixtures, not tests -- which is tracked as a gap rather than an omission."
+    },
+    {
+      "name": "entity",
+      "capability": "Leased, fenced ownership of a name, and a question that reaches whoever holds one -- the addressing a stateful gateway needs behind a stateless load balancer",
+      "replaces": [
+        "dapr",
+        "orleans",
+        "pykka",
+        "ray",
+        "thespian"
+      ],
+      "guides": [
+        "docs/guides/entities.md"
+      ],
+      "reference": [
+        "docs/reference/entity.md"
+      ],
+      "sources": [
+        "src/wreath/_correlation.py",
+        "src/wreath/entity.py"
+      ],
+      "tests": [
+        "tests/test_entity.py"
+      ],
+      "policy": "One name, one owner, one mailbox. `hold` is a single INSERT ... ON CONFLICT DO UPDATE ... WHERE, so a returned row *is* the claim -- there is no read-then-write window in which two workers both conclude they were first, which is the argument wreath.store already makes for keyed state applied to names. The fence moves on a handover and never on a renewal, following wreath.jobs: a fence that moved on renewal would invalidate the holder's own in-flight work. `release` is scoped to the owner in the WHERE, so a lapsed holder tidying up on shutdown cannot delete its successor's row. This deliberately does NOT replace SingletonRunner: an advisory lock releases the instant its connection drops, which is a better failure detector than a lease and costs a held connection per name -- right for one-name, wrong for a hundred thousand. Two mechanisms for two shapes. `ask` decides NotHeld from the ownership table *before* publishing, because an ephemeral publish to nobody is a silent no-op and waiting a full deadline to learn that is a bad diagnosis; NotHeld and Unanswered stay separate exceptions because a missing device and a wedged worker want different operator responses. The transport is ephemeral fan-out, so a timeout is an ordinary outcome rather than an error. One channel per registry, never one per name -- a channel per entity is a LISTEN per entity and the case this exists for is a hundred thousand of them -- so every worker sees every message and the filtering is load-bearing rather than decorative. A holder re-checks ownership before answering, because the name can move between the asker's check and the message arriving. The pending map is bounded and refusals counted: it is memory a remote caller would otherwise control. The renewal tick is **one statement however many names a worker holds** (`WHERE owner = $1`), because a statement per name per tick is a round trip per entity per tick, which is the cost that stops this scaling; the RETURNING set is also the only way to learn a name was taken, since there is no heartbeat. A lost name is dropped locally so a later release cannot delete the new holder's row, and counted -- non-zero `lost` is what distinguishes shedding ownership from clients reconnecting. `grace=` defers a release onto the same tick rather than a timer per name, so a reconnect renews instead of handing the name over and taking it back. Drain releases everything in one statement: a lease is sized for crash detection, where waiting is the only option, and a clean shutdown has better information than that."
     }
   ],
   "invariants": "AGENTS.md",
