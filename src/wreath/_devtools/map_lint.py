@@ -23,6 +23,13 @@ Findings:
 * `MAP002` -- the manifest cites a path that does not exist.
 * `MAP003` -- a public module under `src/wreath` appears in no subsystem's
   `sources`. A subsystem nobody mapped is a subsystem an agent finds by grep.
+* `MAP014` -- a public module under `src/wreath` is rendered by no page in
+  `docs/reference/`. `MAP003` asks only whether the map *mentions* the module,
+  and being mentioned is not being documented: `wreath.response_cache` sat in
+  the `cache` subsystem's `sources` -- so `MAP003` passed -- with no reference
+  page at all, and its entire `@cached` surface went ungenerated without anyone
+  noticing. The two rules share `_public_modules` deliberately, so the question
+  "is this module public?" has one answer rather than two that drift.
 * `MAP004` -- a subsystem is missing a required field.
 * `MAP005` -- a prose map cites a repo path that does not exist.
 * `MAP006` -- a `docs/llms.txt` link points at a page that does not exist.
@@ -117,6 +124,27 @@ PRIVATE_PREFIX = "_"
 
 #: Modules that are public but deliberately not a subsystem of their own.
 NOT_A_SUBSYSTEM = frozenset({"__init__", "__main__"})
+
+#: Where a public module's generated API reference lives, and the directive that
+#: generates it. `wreath docs` is the renderer; `_docs/apidoc.py` owns the
+#: spelling and this mirrors its `_DIRECTIVE` -- a page's `::: wreath.thing`
+#: line is what turns the module into reference prose, so it, and not the mere
+#: existence of a file named after the module, is what "documented" means.
+REFERENCE_DIR = "docs/reference"
+REFERENCE_DIRECTIVE = re.compile(r"^:::\s+([\w.]+)\s*$")
+
+#: The package whose modules those directives name.
+PACKAGE = "wreath"
+
+#: Public modules that deliberately have no reference page of their own. An
+#: explicit list with a reason each, never a pattern: a rule with a silent skip
+#: in it is the shape this whole file exists to prevent.
+#:
+#: * `storage` -- a deprecated alias for `wreath.objects`, re-exporting the same
+#:   classes under their former names. Rendering it would generate a second copy
+#:   of `docs/reference/objects.md` written in the vocabulary being retired,
+#:   which is the opposite of what the deprecation is for.
+NOT_A_REFERENCE_PAGE = frozenset({"storage"})
 
 #: A repo path cited in prose starts with one of these.
 REPO_ROOTS = ("src/", "tests/", "docs/", "benchmarks/", "tools/")
@@ -311,6 +339,47 @@ def check_capability_page(root: Path) -> list[Finding]:
                         " the table it generates is the only reader the manifest's"
                         " 'capability' and 'replaces' fields have")]
     return []
+
+
+def _rendered_modules(root: Path) -> set[str]:
+    """Every top-level `wreath.<module>` some reference page pulls in with `:::`.
+
+    A submodule counts for its parent -- `docs/reference/orm.md` renders
+    `::: wreath.orm.session` among fifteen others, and the module `MAP003`
+    knows about is `orm`. The two rules agree on their subject only if this
+    reduction matches `_public_modules`, which lists packages by their top
+    name.
+    """
+    rendered: set[str] = set()
+    for page in sorted((root / REFERENCE_DIR).rglob("*.md")):
+        for line in page.read_text(encoding="utf-8").splitlines():
+            match = REFERENCE_DIRECTIVE.match(line)
+            if match is None:
+                continue
+            parts = match.group(1).split(".")
+            if len(parts) > 1 and parts[0] == PACKAGE:
+                rendered.add(parts[1])
+    return rendered
+
+
+def check_reference_pages(root: Path) -> list[Finding]:
+    """Every public module has a reference page that actually renders it."""
+    modules = [m for m in _public_modules(root) if m not in NOT_A_REFERENCE_PAGE]
+    if not modules:
+        # Nothing public, so nothing is owed -- and this is what keeps the rule
+        # usable against a synthetic root with no `src/wreath` at all.
+        return []
+    if not (root / REFERENCE_DIR).is_dir():
+        return [Finding("MAP014", REFERENCE_DIR, "the reference section is gone; no public"
+                        " module's API is rendered anywhere")]
+    rendered = _rendered_modules(root)
+    return [
+        Finding("MAP014", REFERENCE_DIR, f"no page renders `{PACKAGE}.{module}`; give it one"
+                f" carrying `::: {PACKAGE}.{module}`, or its public API ships with no"
+                " reference at all -- being named in the manifest is not being documented")
+        for module in modules
+        if module not in rendered
+    ]
 
 
 def check_prose(root: Path, relative: str) -> list[Finding]:
@@ -649,6 +718,7 @@ def check_memory_budgets(root: Path) -> list[Finding]:
 
 def scan(root: Path) -> list[Finding]:
     findings = check_manifest(root)
+    findings.extend(check_reference_pages(root))
     findings.extend(check_capability_page(root))
     for relative in PROSE_MAPS:
         findings.extend(check_prose(root, relative))

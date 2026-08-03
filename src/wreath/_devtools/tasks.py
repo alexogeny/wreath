@@ -501,9 +501,12 @@ def _pytest_command() -> list[str]:
     flattens at six and turns back up once workers outnumber the cores they
     have to share with the extensions they each load.
 
-    The default selection now collects more than 8,600 tests. Treat the timings
-    above as historical until the full curve is remeasured off battery power;
-    do not infer a new cap from a single run.
+    The default selection now collects 13,297 tests. The separate `wreath test`
+    controller was remeasured on that tree: three warm, mutation-disabled runs
+    averaged 27.727s at six workers and 25.860s at eight, so that command now
+    caps itself at eight. Those numbers do not move this raw-pytest check cap:
+    its scheduling and reporting path differs, and its own full curve remains
+    to be remeasured off battery power.
 
     Capped rather than `-n auto` for that last reason: `auto` is the core
     count, which is past the flat part on any machine this wide. A bare

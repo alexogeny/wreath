@@ -177,6 +177,84 @@ def test_partial_coverage_prose_is_out_of_scope(tmp_path: Path) -> None:
     assert roadmap_lint.scan(root) == []
 
 
+def _module(tmp_path: Path, dotted: str, source: str) -> Path:
+    """A source tree the prose rule can read, since it never imports anything."""
+    parts = dotted.split(".")
+    directory = tmp_path / "src"
+    for part in parts[:-1]:
+        directory = directory / part
+        directory.mkdir(exist_ok=True, parents=True)
+        (directory / "__init__.py").touch()
+    (directory / f"{parts[-1]}.py").write_text(source, encoding="utf-8")
+    return tmp_path
+
+
+def test_a_prose_marker_whose_surface_now_exists_is_reported(tmp_path: Path) -> None:
+    """The exact shape that shipped: `scim_router` landed, the paragraph did not."""
+    root = _roadmap(
+        tmp_path,
+        "\nOne surface is unbuilt, and is listed by absence rather than by a row.\n"
+        "<!-- absent: wreath.organizations.scim_router -->\n",
+    )
+    _module(root, "wreath.organizations", "def scim_router(app):\n    return app\n")
+
+    findings = roadmap_lint.scan(root)
+    assert [f.code for f in findings] == ["ROAD002"]
+    assert "resolves" in findings[0].message
+    assert "wreath.organizations.scim_router" in findings[0].message
+
+
+def test_a_prose_marker_for_a_surface_still_absent_is_clean(tmp_path: Path) -> None:
+    root = _roadmap(tmp_path, "\nA reconnect is a fresh snapshot.\n<!-- absent: wreath.sync.resume -->\n")
+    _module(root, "wreath.sync", "def subscribe(shape):\n    return shape\n")
+
+    assert roadmap_lint.scan(root) == []
+
+
+def test_a_prose_marker_naming_a_whole_absent_module_is_clean(tmp_path: Path) -> None:
+    """`wreath.oauth` is the honest marker for a module nobody has written."""
+    root = _roadmap(tmp_path, "\nIssuance is not built.\n<!-- absent: wreath.oauth -->\n")
+    _module(root, "wreath.sync", "")
+
+    assert roadmap_lint.scan(root) == []
+
+
+def test_a_prose_marker_naming_a_module_that_ships_is_reported(tmp_path: Path) -> None:
+    root = _roadmap(tmp_path, "\nIssuance is not built.\n<!-- absent: wreath.oauth -->\n")
+    _module(root, "wreath.oauth", "def issue(request):\n    return request\n")
+
+    assert [f.code for f in roadmap_lint.scan(root)] == ["ROAD002"]
+
+
+def test_a_prose_marker_anchored_on_no_module_is_reported(tmp_path: Path) -> None:
+    """Guard the guard: a typo would otherwise verify nothing, forever."""
+    root = _roadmap(tmp_path, "\nTypo.\n<!-- absent: wreath.migrationz.apply_fleet -->\n")
+    _module(root, "wreath.migrations", "def apply(plan):\n    return plan\n")
+
+    findings = roadmap_lint.scan(root)
+    assert [f.code for f in findings] == ["ROAD003"]
+    assert "verifies nothing" in findings[0].message
+
+
+def test_a_conditionally_imported_re_export_still_counts_as_shipped(tmp_path: Path) -> None:
+    """A facade binds its name inside `try:`; that is an export, not a local."""
+    root = _roadmap(tmp_path, "\nAbsent.\n<!-- absent: wreath.organizations.scim_router -->\n")
+    _module(
+        tmp_path,
+        "wreath.organizations",
+        "try:\n    from ._scim import scim_router\nexcept ImportError:\n    scim_router = None\n",
+    )
+
+    assert [f.code for f in roadmap_lint.scan(root)] == ["ROAD002"]
+
+
+def test_a_name_local_to_a_function_is_not_a_surface(tmp_path: Path) -> None:
+    root = _roadmap(tmp_path, "\nAbsent.\n<!-- absent: wreath.organizations.scim_router -->\n")
+    _module(tmp_path, "wreath.organizations", "def build():\n    scim_router = 1\n    return scim_router\n")
+
+    assert roadmap_lint.scan(root) == []
+
+
 def test_prose_beneath_the_table_is_not_a_row(tmp_path: Path) -> None:
     root = _roadmap(
         tmp_path,

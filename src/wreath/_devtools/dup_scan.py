@@ -45,7 +45,9 @@ from .native_lint import repo_root
 DEFAULT_ROOTS: tuple[str, ...] = ("src/wreath",)
 
 #: Bodies shorter than this are trivia. Two four-line functions that both unpack
-#: a tuple and return are not a duplication finding, they are Python.
+#: a tuple and return are not a duplication finding, they are Python. Counted
+#: over the *significant* body -- see `_body_lines` for why the function's own
+#: span is the wrong ruler in a codebase that documents this heavily.
 DEFAULT_MIN_LINES = 8
 
 #: How many groups the text report prints before it stops being read.
@@ -163,6 +165,54 @@ def _significant_body(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.
     return body
 
 
+def _body_lines(body: list[ast.stmt]) -> int:
+    """How many source lines the *significant* body spans.
+
+    Deliberately not the function's own span. Measuring `node.end_lineno -
+    node.lineno` counts the signature and the docstring, and this repository
+    documents heavily: a `Protocol` stub whose entire body is `...` under twelve
+    lines of prose measured as a twelve-line function, cleared `--min-lines`,
+    and then hashed identically to every other stub in the tree. That produced
+    the two largest groups in the report -- 27 copies and 29 copies, 551
+    "redundant" lines between them -- made up entirely of Protocol methods and
+    one-line `@property` accessors that share no code at all.
+
+    It was also the wrong number for the ranking. The report ranks by "lines a
+    collapse would remove", and collapsing two functions removes their bodies;
+    it never removes their docstrings, because the surviving one still needs
+    prose. So this is both the honest filter and the honest weight.
+    """
+    if not body:
+        return 0
+    first, last = body[0], body[-1]
+    return (last.end_lineno or last.lineno) - first.lineno + 1
+
+
+def _is_stub(body: list[ast.stmt]) -> bool:
+    """Whether the body is a placeholder rather than an implementation.
+
+    `...` for a `Protocol` method or a `@typing.overload`, `pass` for an empty
+    hook, and a bare `raise NotImplementedError` for an abstract base. All three
+    are *declarations*, and a hundred of them agreeing on shape is the type
+    system working rather than a duplication finding. They survive the
+    `_body_lines` filter only when somebody writes a multi-statement stub, which
+    is rare enough to be worth naming explicitly rather than relying on length.
+    """
+    if len(body) != 1:
+        return False
+    only = body[0]
+    if isinstance(only, ast.Pass):
+        return True
+    if isinstance(only, ast.Expr) and isinstance(only.value, ast.Constant):
+        return only.value.value is Ellipsis
+    if isinstance(only, ast.Raise):
+        exc = only.exc
+        if isinstance(exc, ast.Call):
+            exc = exc.func
+        return isinstance(exc, ast.Name) and exc.id == "NotImplementedError"
+    return False
+
+
 def scan(root: Path, relatives: tuple[str, ...], min_lines: int) -> tuple[list[Group], int]:
     """Group every function body by shape. Returns (groups, functions scanned)."""
     groups: dict[str, list[Site]] = defaultdict(list)
@@ -188,9 +238,9 @@ def scan(root: Path, relatives: tuple[str, ...], min_lines: int) -> tuple[list[G
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
             body = _significant_body(node)
-            if not body:
+            if not body or _is_stub(body):
                 continue
-            span = (node.end_lineno or node.lineno) - node.lineno + 1
+            span = _body_lines(body)
             if span < min_lines:
                 continue
             scanned += 1

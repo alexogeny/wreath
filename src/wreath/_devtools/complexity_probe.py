@@ -112,7 +112,7 @@ class Todo:
         if not self.reason.strip() or not self.owner.strip():
             raise ValueError("a fix-later mark needs both a reason and an owner")
 
-    def describe(self) -> str:
+    def explain(self) -> str:
         return (
             f"FIX LATER: {degree_name(self.degree)} today (n^{self.degree:g}), "
             f"target {degree_name(self.target)} (n^{self.target:g}) -- "
@@ -297,7 +297,7 @@ def _print_result(r: Result) -> None:
              else f"at most {_classify(p.expect)}")
     print(f"\n== {p.name} — {bound}, {fitted} [{r.status}]")
     if p.todo is not None:
-        print(f"   {p.todo.describe()}")
+        print(f"   {p.todo.explain()}")
     print(f"   axis: {p.axis}; stage: {p.stage}; assumption: {p.assumption}")
     if r.status == "STALE" and p.todo is not None:
         print(f"   STALE MARK: measured {degree_name(max(r.exponent, r.tail_exponent))} "

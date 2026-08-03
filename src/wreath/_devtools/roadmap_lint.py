@@ -41,12 +41,31 @@ Markers are HTML comments, so they carry no weight in the rendered page:
 
     | Tenant-fleet DDL execution | Not shipped. ... <!-- absent: wreath.migrations.apply_fleet --> |
 
+**Not every absence on that page is a table row.** Several are prose -- a
+paragraph explaining why a surface is unbuilt, ending in the same marker on a
+line of its own. Those markers went unchecked by anything until one of them went
+stale in place: `wreath.organizations.scim_router` shipped while the paragraph
+naming it still said it had not. So a marker is checked wherever it appears, and
+the table is merely where most of them happen to live.
+
+A prose marker is resolved from the **source tree** rather than by importing it.
+That is not a convenience: a prose absence is routinely a *whole module* that
+does not exist (`wreath.oauth`), and `importlib` cannot tell that apart from a
+typo -- it raises `ImportError` for both. Reading `src/` can: the module holding
+the named symbol either is a file or is not, and the difference is exactly the
+one `ROAD003` needs to make. It also keeps a linter from importing the framework
+it lints. Consequently a marker names either a module (`package.module`, whose
+*package* must exist) or a symbol bound at a module's top level
+(`package.module.symbol`, whose *module* must exist); anything else is `ROAD003`,
+because nothing anchors it.
+
 Run it with `uv run wreath-roadmap-lint`; `0` means clean.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib
 import re
 from dataclasses import dataclass
@@ -116,12 +135,125 @@ def _resolves(dotted: str) -> tuple[bool, bool]:
     return True, hasattr(module, attribute)
 
 
+def _module_source(root: Path, parts: list[str]) -> Path | None:
+    """The file backing a dotted module path under `src/`, if there is one."""
+    base = root / "src"
+    for part in parts:
+        base = base / part
+    package = base / "__init__.py"
+    if package.is_file():
+        return package
+    module = base.with_name(f"{base.name}.py")
+    return module if module.is_file() else None
+
+
+def _bound_names(body: list[ast.stmt], names: set[str]) -> None:
+    """Every name a module body binds at import time, without executing it.
+
+    Conditional bodies are descended into -- a facade that imports behind
+    `if TYPE_CHECKING` or `try`/`except ImportError` still exports the name --
+    while function and class bodies are not, because a local is not an export.
+    """
+    for node in body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, ast.Import | ast.ImportFrom):
+            names.update(a.asname or a.name.partition(".")[0] for a in node.names)
+        elif isinstance(node, ast.If):
+            _bound_names(node.body, names)
+            _bound_names(node.orelse, names)
+        elif isinstance(node, ast.Try):
+            _bound_names(node.body, names)
+            for handler in node.handlers:
+                _bound_names(handler.body, names)
+            _bound_names(node.orelse, names)
+            _bound_names(node.finalbody, names)
+
+
+def _top_level_names(path: Path) -> frozenset[str]:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return frozenset()
+    names: set[str] = set()
+    _bound_names(tree.body, names)
+    return frozenset(names)
+
+
+def _source_resolves(root: Path, dotted: str) -> tuple[bool, bool]:
+    """`(checkable, exists)` for a dotted path, read out of `src/`.
+
+    A path that names a module answers on the module's own existence. Otherwise
+    the last component is a symbol and everything before it must be a real
+    module -- if it is not, nothing anchors the marker and it could never fail.
+    """
+    parts = dotted.split(".")
+    if _module_source(root, parts) is not None:
+        return True, True
+    holder = _module_source(root, parts[:-1])
+    if holder is None:
+        return False, False
+    return True, parts[-1] in _top_level_names(holder)
+
+
+def _prose_findings(root: Path, text: str) -> list[Finding]:
+    """The same check, for markers that live in the page's prose.
+
+    Table rows are skipped here because `_rows` already owns them, so a marker
+    is reported once whichever half of the page carries it.
+    """
+    findings: list[Finding] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            continue
+        where = f"{ROADMAP}:{number}"
+        for marker in _MARKER.finditer(line):
+            named = [part.strip() for part in marker.group(1).split(",") if part.strip()]
+            if not named:
+                findings.append(
+                    Finding("ROAD001", where, "an `absent:` marker names no surface; name a"
+                            " symbol that would exist if it shipped, or drop the marker")
+                )
+                continue
+            findings.extend(_marker_findings(root, where, named))
+    return findings
+
+
+def _marker_findings(root: Path, where: str, named: list[str]) -> list[Finding]:
+    findings: list[Finding] = []
+    for dotted in named:
+        if not _DOTTED.match(dotted):
+            findings.append(
+                Finding("ROAD003", where, f"prose names {dotted!r}, which is not a dotted"
+                        " symbol path and can never be checked")
+            )
+            continue
+        checkable, exists = _source_resolves(root, dotted)
+        if not checkable:
+            findings.append(
+                Finding("ROAD003", where, f"prose names {dotted!r}, whose module is not in the"
+                        " source tree; the marker verifies nothing and would pass forever")
+            )
+        elif exists:
+            findings.append(
+                Finding("ROAD002", where, f"prose claims {dotted} is absent, but it resolves in"
+                        " the source tree; the feature ships and this page understates it")
+            )
+    return findings
+
+
 def scan(root: Path) -> list[Finding]:
     path = root / ROADMAP
     if not path.exists():
         return [Finding("ROAD001", ROADMAP, "the roadmap page is missing")]
+    text = path.read_text(encoding="utf-8")
     findings: list[Finding] = []
-    for row in _rows(path.read_text(encoding="utf-8")):
+    for row in _rows(text):
         where = f"{ROADMAP}:{row.line}"
         if not _ABSOLUTE.match(row.status):
             continue
@@ -156,6 +288,7 @@ def scan(root: Path) -> list[Finding]:
                     Finding("ROAD002", where, f"{row.surface!r} is claimed absent, but"
                             f" {dotted} resolves; the feature ships and this page understates it")
                 )
+    findings.extend(_prose_findings(root, text))
     return findings
 
 
