@@ -53,11 +53,22 @@ def test_retry_delay_exponential_without_jitter() -> None:
     assert client._retry_delay(10, None) == pytest.approx(1.0)  # capped
 
 
-def test_retry_delay_jitter_within_half_to_full() -> None:
+def test_retry_delay_jitter_is_symmetric_about_the_computed_delay() -> None:
+    """The band is `compute_backoff`'s, shared with jobs, messaging and webhooks.
+
+    It used to be multiplicative within `[0.5x, 1.0x]` -- a *different*
+    distribution from the one every other retry in the tree used, and biased
+    below the delay it had just computed. It is now symmetric +/-25%, so the
+    mean delay is the delay.
+    """
     client = _client(retry=RetryPolicy(jitter=True, backoff_base=0.05, backoff_cap=1.0))
-    for _ in range(50):
-        d = client._retry_delay(0, None)
-        assert 0.025 <= d <= 0.05
+    seen = [client._retry_delay(0, None) for _ in range(50)]
+    for d in seen:
+        assert 0.0375 <= d <= 0.0625
+    # Both sides of the computed delay are reachable, which is what distinguishes
+    # a symmetric jitter from the old one-sided reduction.
+    assert any(d > 0.05 for d in seen)
+    assert any(d < 0.05 for d in seen)
 
 
 def test_retry_after_honoured_and_clamped() -> None:

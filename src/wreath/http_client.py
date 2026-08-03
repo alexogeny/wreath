@@ -37,7 +37,6 @@ from __future__ import annotations  # noqa: I001 -- Ruff misorders the local cod
 import asyncio
 import ipaddress
 import os
-import random
 import socket
 import ssl
 from dataclasses import dataclass
@@ -47,6 +46,7 @@ from urllib.parse import SplitResult, urljoin, urlsplit
 
 from . import _client_codec
 from . import telemetry as _telemetry
+from ._jobcore import compute_backoff
 from ._native import _client as _native_client
 from time import monotonic as _monotonic
 from time import monotonic_ns as _monotonic_ns
@@ -1222,10 +1222,20 @@ class HTTPClient:
             if after is not None:
                 # Clamp an absurd server value so one bad header can't hang us.
                 return min(after, policy.backoff_cap * 16)
-        delay = min(policy.backoff_base * (2**attempt), policy.backoff_cap)
-        if policy.jitter:
-            delay *= 0.5 + random.random() * 0.5  # jitter within [0.5x, 1.0x]
-        return delay
+        # `compute_backoff` rather than the arithmetic inline: it is the same
+        # exponential the job runner, the message bus and the webhook dispatcher
+        # retry on, and it was forked here with a *different* jitter
+        # distribution -- multiplicative within [0.5x, 1.0x] against its own
+        # symmetric +/- fraction. One distribution, so "wreath jitters its
+        # retries" is one statement. `attempt` is 0-based here and 1-based
+        # there, hence the +1.
+        return compute_backoff(
+            attempt + 1,
+            kind="exp",
+            base=policy.backoff_base,
+            cap=policy.backoff_cap,
+            jitter=0.25 if policy.jitter else 0.0,
+        )
 
     async def _send_with_retries(
         self,
