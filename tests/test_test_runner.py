@@ -547,6 +547,14 @@ def test_explicit_mutation_worker_limit_remains_literal_after_seal() -> None:
     assert "--reclaim-workers" not in arguments
 
 
+def test_auto_test_workers_use_the_measured_eight_worker_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner.os, "cpu_count", lambda: 12)
+
+    assert runner._resolve_workers("auto") == 8
+
+
 @pytest.mark.parametrize(
     "argument,message",
     [

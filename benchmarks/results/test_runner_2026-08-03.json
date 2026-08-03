@@ -1,0 +1,56 @@
+{
+  "kind": "wreath-test-worker-curve",
+  "date": "2026-08-03",
+  "platform": "Linux 6.12.38+deb13-amd64 x86_64",
+  "cpu": "AMD Ryzen 5 8600G, 6 cores / 12 threads",
+  "governor": "powersave",
+  "python": "CPython 3.14.6",
+  "tool": "hyperfine",
+  "warmup_runs": 1,
+  "suite": "13,297 default-collected tests, mutation disabled",
+  "note": "The history-on and history-off pairs agree on the direction and place the current knee at eight workers. The ten-worker series contains a 39.326s external-load outlier; its two clean samples were 24.533s and 25.079s, both slower than every eight-worker history-off sample.",
+  "comparisons": [
+    {
+      "history": true,
+      "runs": 3,
+      "commands": [
+        {
+          "workers": 6,
+          "mean_seconds": 27.726751958159998,
+          "stddev_seconds": 0.3494606862858127,
+          "times_seconds": [27.769788130160002, 27.35776633816, 28.05270140616]
+        },
+        {
+          "workers": 8,
+          "mean_seconds": 25.860278992740003,
+          "stddev_seconds": 0.2815084646908708,
+          "times_seconds": [25.84545344874, 25.586476245740002, 26.14890728374]
+        }
+      ]
+    },
+    {
+      "history": false,
+      "runs": 3,
+      "commands": [
+        {
+          "workers": 6,
+          "mean_seconds": 25.31443023572667,
+          "stddev_seconds": 0.654776947384151,
+          "times_seconds": [26.05753947006, 25.06359989206, 24.82215134506]
+        },
+        {
+          "workers": 8,
+          "mean_seconds": 23.39602275816,
+          "stddev_seconds": 0.31893830445146615,
+          "times_seconds": [23.056840314160002, 23.441363852160002, 23.689864108160002]
+        },
+        {
+          "workers": 10,
+          "mean_seconds": 29.646061587546665,
+          "stddev_seconds": 8.387449427440119,
+          "times_seconds": [39.32591002388, 24.532808656879997, 25.07946608188]
+        }
+      ]
+    }
+  ]
+}
