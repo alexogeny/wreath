@@ -77,7 +77,7 @@ app.add_middleware(NPlusOneGuard(limit=25, on_detect=log.warning))
 ```
 
 `on_detect` receives a [`Finding`](../reference/doctor.md) and the request
-carries on. `Finding.describe()` is the one-liner above; `finding.repetitions`
+carries on. `Finding.explain()` is the one-liner above; `finding.repetitions`
 has the per-model counts if you want to emit them as metrics.
 
 !!! note "Development and staging, not production"
