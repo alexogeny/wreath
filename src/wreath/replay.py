@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
 
-from ._recording_format import AttemptRecord
+from ._recording_format import AttemptRecord, _build_id
 from ._replay_adapters import (
     AdapterFault,
     DatabaseDouble,
@@ -218,18 +218,6 @@ def _chunk_map(
     return seen
 
 
-def _build_id() -> int:
-    """A coarse 64-bit fingerprint of the producing build (not a security control)."""
-    import platform
-    import sys
-    from importlib.metadata import PackageNotFoundError, version
-
-    try:
-        wreath_version = version("wreath")
-    except PackageNotFoundError:
-        wreath_version = "0"
-    identity = f"{wreath_version}|{sys.version}|{platform.platform()}".encode()
-    return zlib.crc32(identity) & 0xFFFFFFFF
 
 
 def _encode_addr(addr: tuple[str, int]) -> bytes:
